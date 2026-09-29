@@ -317,6 +317,20 @@ public final class ReachCenter: ObservableObject {
         onGrantsChanged?()
     }
 
+    // MARK: - Channel member card (ADR-0060 section 3)
+
+    /// Seal this account's member card: the card is signed by the account
+    /// identity seed, which stays inside this type. `nil` while no account is
+    /// active (a reader drops an unbound card, so none is uploaded).
+    func sealOwnMemberCard(
+        seed: Data, epochId: UInt32, channelId: Data, subscriberPk: Data, profile: Data
+    ) throws -> Data? {
+        guard let accountSeed else { return nil }
+        return try sealMemberCard(
+            seed: seed, epochId: epochId, channelId: channelId, subscriberPk: subscriberPk,
+            accountIdentitySeed: accountSeed, profile: profile)
+    }
+
     // MARK: - Grants handed out
 
     private func grant(_ reachClass: FfiReachClass, scope: Data) -> FfiReachGrant? {
@@ -653,30 +667,61 @@ public final class ReachCenter: ObservableObject {
 
     // MARK: - Everyone (ADR-0060 section 5)
 
-    /// The name terms this device last published in Everyone, to republish on
-    /// a name change.
-    private var publishedTermsFor: String?
+    /// What this device last published in Everyone (name, username and
+    /// certificate), to republish when any of them changes. In memory only, so
+    /// every session start republishes once.
+    private var publishedEveryoneFor: String?
 
-    /// Enter or leave Everyone in discovery to match the setting: on entering
-    /// (and on a name change while in it) the OPRF hash of every
-    /// `nameSearchTerms` term; on leaving `public: false`. Best effort; retried
-    /// on the next sync.
+    /// Enter or leave Everyone in discovery to match the setting (ADR-0060
+    /// section 5): on entering (and on a name, username or certificate change
+    /// while in it) the lookup key of every `nameSearchTerms` term and the
+    /// public record sealed under the OPRF outputs of those terms and the
+    /// username; on leaving `public: false`. Best effort; retried on the next
+    /// sync.
     public func applyEveryone(discovery: DiscoveryClient? = nil) async {
         guard isActive, let token = sessionTokenProvider() else { return }
         let wantPublic = setting.mode == .everyone
-        let name = ownNameProvider().displayName ?? ""
-        if record.publishedEveryone == wantPublic, !wantPublic || publishedTermsFor == name { return }
+        let own = ownNameProvider()
+        let name = own.displayName ?? ""
+        let cert = own.username == nil ? nil : ownUsernameCertificate
+        let publishKey = "\(name)|\(own.username ?? "")|\(cert?.base64EncodedString() ?? "")"
+        if record.publishedEveryone == wantPublic, !wantPublic || publishedEveryoneFor == publishKey {
+            return
+        }
         let client = discovery ?? DiscoveryClient(sessionToken: token)
         do {
-            var hashes: [Data] = []
+            var nameTermLookupKeys: [Data] = []
+            var publicRecord: Data?
             if wantPublic {
-                for term in nameSearchTerms(displayName: name) {
-                    hashes.append(try await client.nameTermOprfHash(term))
+                // The lookup keys go to discovery; the outputs seal the record
+                // and never leave the device.
+                var recordTermOutputs: [Data] = []
+                let username = cert == nil ? nil : own.username
+                if let username {
+                    recordTermOutputs.append(try await client.usernameOprf(username).output)
                 }
+                for term in nameSearchTerms(displayName: name) {
+                    let oprf = try await client.nameTermOprf(term)
+                    nameTermLookupKeys.append(oprf.lookupKey)
+                    recordTermOutputs.append(oprf.output)
+                }
+                guard let identityPk = ownAccountKey,
+                      let accountId = own.accountId, accountId.count == 16,
+                      !recordTermOutputs.isEmpty else {
+                    NSLog("ADR-0060: Everyone not published: no identity, account id or search term")
+                    return
+                }
+                let payload = FfiIntroductionPayload(
+                    identityPk: identityPk, accountId: accountId,
+                    displayName: name.isEmpty ? nil : name,
+                    username: username, usernameCertificate: username == nil ? nil : cert, fof: nil)
+                publicRecord = try composePublicRecord(
+                    payload: payload, termOprfs: recordTermOutputs, issuedAtMs: Self.nowMs())
             }
-            try await client.putVisibility(public: wantPublic, nameTermHashes: hashes)
+            try await client.putVisibility(
+                public: wantPublic, nameTermLookupKeys: nameTermLookupKeys, publicRecord: publicRecord)
             record.publishedEveryone = wantPublic
-            publishedTermsFor = wantPublic ? name : nil
+            publishedEveryoneFor = wantPublic ? publishKey : nil
             persist()
         } catch {
             NSLog("ADR-0060: Everyone publish failed: \(error)")
@@ -701,22 +746,24 @@ public final class ReachCenter: ObservableObject {
         }
         let cert = own.username == nil ? nil : ownUsernameCertificate
         let username = cert == nil ? nil : own.username
-        var oprfs: [Data] = []
+        // The record is sealed under the OPRF outputs; they never leave the
+        // device (ADR-0060 section 5).
+        var termOutputs: [Data] = []
         do {
-            if let username { oprfs.append(try await discovery.usernameOprfHash(username)) }
+            if let username { termOutputs.append(try await discovery.usernameOprf(username).output) }
             for term in nameSearchTerms(displayName: own.displayName ?? "") {
-                oprfs.append(try await discovery.nameTermOprfHash(term))
+                termOutputs.append(try await discovery.nameTermOprf(term).output)
             }
         } catch {
             NSLog("ADR-0060: introduction terms not evaluated: \(error)")
             return nil
         }
-        guard !oprfs.isEmpty else { return nil }
+        guard !termOutputs.isEmpty else { return nil }
         let payload = FfiIntroductionPayload(
             identityPk: identityPk, accountId: accountId, displayName: own.displayName,
             username: username, usernameCertificate: username == nil ? nil : cert, fof: fof)
         guard let record = try? composeIntroduction(
-            payload: payload, termOprfs: oprfs, issuedAtMs: Self.nowMs()) else { return nil }
+            payload: payload, termOprfs: termOutputs, issuedAtMs: Self.nowMs()) else { return nil }
         self.record.ownOfferB64 = record.base64EncodedString()
         self.record.ownOfferFofVersion = fof.version
         self.record.ownOfferCacheKey = [cacheKey]

@@ -71,18 +71,37 @@
 //! [`MAX_INTRODUCTION_TERMS`] is 65 (64 name terms plus the username):
 //! chosen, not measured.
 //!
-//! ## Payload wire (v1)
+//! ## Payload wire (v2)
 //!
 //! ```text
-//! payload = version(1)=0x01 || identity_pk(32) || account_id(16)
+//! payload = version(1)=0x02 || identity_pk(32) || account_id(16)
 //!           || name_len(1) || name || username_len(1) || username
-//!           || cert_len(1: 0 | 153) || cert || fof_grant(37)
+//!           || cert_len(1: 0 | 153) || cert
+//!           || fof_len(1: 0 | 37) || fof_grant
 //! ```
 //!
 //! Field rules are the profile's ([`crate::profile`]): the display-name
 //! rule, the canonical-username rule, the certificate length and "a
-//! certificate needs a username"; the grant must be of class
-//! [`ReachClass::Fof`].
+//! certificate needs a username"; a grant, when present, must be of class
+//! [`ReachClass::Fof`]. Version 1 (grant always present) is refused: a flag
+//! day, nothing is deployed.
+//!
+//! ## Two uses of one record: contacts of contacts, and Everyone
+//!
+//! The same record shape serves two uses, and the grant is what tells them
+//! apart. The rule is enforced on both sides of each use, never left to the
+//! caller:
+//!
+//! | Use | Compose | Open | Grant |
+//! |---|---|---|---|
+//! | Contacts of contacts (section 4) | [`compose_introduction`] | [`open_introduction`] | required |
+//! | Everyone's public record (section 5) | [`compose_public_record`] | [`open_public_record`] | refused |
+//!
+//! A public record carries no `fof` grant: the mailbox of a person in
+//! Everyone is open, so none is needed, and a grant handed to the world
+//! would outlive leaving Everyone. A contacts-of-contacts record without a
+//! grant is useless to its reader (the mailbox is closed to them), so both
+//! the composer and the opener refuse one.
 //!
 //! ## Bundles and padding
 //!
@@ -138,8 +157,8 @@ pub const WRAPPED_KEY_LEN: usize = NONCE_LEN + CONTENT_KEY_LEN + TAG_LEN;
 /// Length of an identity public key in a payload.
 pub const IDENTITY_PK_LEN: usize = 32;
 
-/// Payload schema version.
-pub const INTRODUCTION_PAYLOAD_VERSION_V1: u8 = 0x01;
+/// Payload schema version (v2: the `fof` grant became optional).
+pub const INTRODUCTION_PAYLOAD_VERSION_V2: u8 = 0x02;
 
 /// Record schema version.
 pub const INTRODUCTION_RECORD_VERSION_V1: u8 = 0x01;
@@ -148,15 +167,17 @@ pub const INTRODUCTION_RECORD_VERSION_V1: u8 = 0x01;
 /// username. Chosen, not measured.
 pub const MAX_INTRODUCTION_TERMS: usize = 65;
 
-/// Shortest payload: no name, no username, no certificate.
+/// Shortest payload: no name, no username, no certificate, no grant (a
+/// public record's shape).
 pub const INTRODUCTION_PAYLOAD_MIN_LEN: usize =
-    1 + IDENTITY_PK_LEN + ACCOUNT_ID_LEN + 1 + 1 + 1 + REACH_GRANT_LEN;
+    1 + IDENTITY_PK_LEN + ACCOUNT_ID_LEN + 1 + 1 + 1 + 1;
 
-/// Longest payload: a maximal name, username and a certificate.
+/// Longest payload: a maximal name, username, a certificate and a grant.
 pub const INTRODUCTION_PAYLOAD_MAX_LEN: usize = INTRODUCTION_PAYLOAD_MIN_LEN
     + crate::profile::DISPLAY_NAME_MAX_BYTES
     + crate::username::USERNAME_MAX_LEN
-    + USERNAME_CERT_LEN;
+    + USERNAME_CERT_LEN
+    + REACH_GRANT_LEN;
 
 /// Shortest sealed payload: nonce, AEAD tag, the shortest payload.
 pub const SEALED_PAYLOAD_MIN_LEN: usize = NONCE_LEN + TAG_LEN + INTRODUCTION_PAYLOAD_MIN_LEN;
@@ -215,8 +236,10 @@ pub struct IntroductionPayload {
     /// The discovery-signed username certificate, exactly
     /// [`USERNAME_CERT_LEN`] bytes, opaque here. Requires `username`.
     pub username_certificate: Option<Vec<u8>>,
-    /// The `fof` reach grant. Class must be [`ReachClass::Fof`].
-    pub fof: ReachGrant,
+    /// The `fof` reach grant, class [`ReachClass::Fof`]. Required in a
+    /// contacts-of-contacts record, refused in a public record (module
+    /// docs, "Two uses of one record").
+    pub fof: Option<ReachGrant>,
 }
 
 impl IntroductionPayload {
@@ -241,8 +264,10 @@ impl IntroductionPayload {
                 return Err(IntroductionError::CertificateWithoutUsername);
             }
         }
-        if self.fof.class != ReachClass::Fof {
-            return Err(IntroductionError::NotFofGrant(self.fof.class.to_byte()));
+        if let Some(fof) = &self.fof {
+            if fof.class != ReachClass::Fof {
+                return Err(IntroductionError::NotFofGrant(fof.class.to_byte()));
+            }
         }
         Ok(())
     }
@@ -257,10 +282,8 @@ impl IntroductionPayload {
         let name = self.display_name.as_deref().unwrap_or("").as_bytes();
         let username = self.username.as_deref().unwrap_or("").as_bytes();
         let cert = self.username_certificate.as_deref().unwrap_or(&[]);
-        let mut out = Vec::with_capacity(
-            INTRODUCTION_PAYLOAD_MIN_LEN + name.len() + username.len() + cert.len(),
-        );
-        out.push(INTRODUCTION_PAYLOAD_VERSION_V1);
+        let mut out = Vec::with_capacity(INTRODUCTION_PAYLOAD_MAX_LEN);
+        out.push(INTRODUCTION_PAYLOAD_VERSION_V2);
         out.extend_from_slice(&self.identity_pk);
         out.extend_from_slice(&self.account_id);
         push_len_u8(&mut out, name.len())?;
@@ -269,7 +292,13 @@ impl IntroductionPayload {
         out.extend_from_slice(username);
         push_len_u8(&mut out, cert.len())?;
         out.extend_from_slice(cert);
-        out.extend_from_slice(&self.fof.encode());
+        match &self.fof {
+            Some(fof) => {
+                push_len_u8(&mut out, REACH_GRANT_LEN)?;
+                out.extend_from_slice(&fof.encode());
+            },
+            None => out.push(0),
+        }
         Ok(out)
     }
 
@@ -283,7 +312,7 @@ impl IntroductionPayload {
     pub fn decode(bytes: &[u8]) -> CoreResult<Self, IntroductionError> {
         let mut cur = bytes;
         let version = take_u8(&mut cur)?;
-        if version != INTRODUCTION_PAYLOAD_VERSION_V1 {
+        if version != INTRODUCTION_PAYLOAD_VERSION_V2 {
             return Err(IntroductionError::UnknownVersion(version));
         }
         let identity_pk = take_array::<IDENTITY_PK_LEN>(&mut cur)?;
@@ -298,8 +327,14 @@ impl IntroductionPayload {
             USERNAME_CERT_LEN => Some(take(&mut cur, USERNAME_CERT_LEN)?.to_vec()),
             got => return Err(IntroductionError::CertificateLength { got }),
         };
-        let fof = ReachGrant::decode(take(&mut cur, REACH_GRANT_LEN)?)
-            .map_err(IntroductionError::Grant)?;
+        let fof = match usize::from(take_u8(&mut cur)?) {
+            0 => None,
+            REACH_GRANT_LEN => Some(
+                ReachGrant::decode(take(&mut cur, REACH_GRANT_LEN)?)
+                    .map_err(IntroductionError::Grant)?,
+            ),
+            got => return Err(IntroductionError::GrantLength { got }),
+        };
         if !cur.is_empty() {
             return Err(IntroductionError::TrailingBytes { count: cur.len() });
         }
@@ -515,7 +550,8 @@ fn open_sealed(
         .map_err(|_| IntroductionError::Open)
 }
 
-/// Build an introduction record findable by each search term supplied.
+/// Build a contacts-of-contacts introduction record findable by each search
+/// term supplied. The payload must carry its `fof` grant.
 ///
 /// `term_oprfs` is the username's OPRF output (if the owner has one) plus
 /// one per name search term, computed by `lakko-discovery-client`. The order
@@ -523,6 +559,7 @@ fn open_sealed(
 ///
 /// # Errors
 ///
+/// * [`IntroductionError::MissingFofGrant`] — the payload carries no grant.
 /// * [`IntroductionError::NoTerms`] — the list is empty.
 /// * [`IntroductionError::TooManyTerms`] — more than
 ///   [`MAX_INTRODUCTION_TERMS`].
@@ -532,6 +569,37 @@ fn open_sealed(
 /// * Every error of [`IntroductionPayload::encode`].
 /// * [`IntroductionError::Seal`] — the AEAD refused (not expected).
 pub fn compose_introduction(
+    payload: &IntroductionPayload,
+    term_oprfs: &[[u8; OPRF_OUTPUT_LEN]],
+    issued_at_ms: u64,
+) -> CoreResult<Vec<u8>, IntroductionError> {
+    if payload.fof.is_none() {
+        return Err(IntroductionError::MissingFofGrant);
+    }
+    compose_record(payload, term_oprfs, issued_at_ms)
+}
+
+/// Build the public record a person in Everyone publishes in discovery
+/// (ADR-0060 section 5), findable by each search term supplied: the
+/// username's OPRF output plus one per name search term. The payload must
+/// carry NO `fof` grant.
+///
+/// # Errors
+///
+/// * [`IntroductionError::UnexpectedFofGrant`] — the payload carries a grant.
+/// * Every other error of [`compose_introduction`].
+pub fn compose_public_record(
+    payload: &IntroductionPayload,
+    term_oprfs: &[[u8; OPRF_OUTPUT_LEN]],
+    issued_at_ms: u64,
+) -> CoreResult<Vec<u8>, IntroductionError> {
+    if payload.fof.is_some() {
+        return Err(IntroductionError::UnexpectedFofGrant);
+    }
+    compose_record(payload, term_oprfs, issued_at_ms)
+}
+
+fn compose_record(
     payload: &IntroductionPayload,
     term_oprfs: &[[u8; OPRF_OUTPUT_LEN]],
     issued_at_ms: u64,
@@ -578,17 +646,44 @@ pub fn introduction_tags(record: &[u8]) -> CoreResult<Vec<[u8; FOF_TAG_LEN]>, In
     Ok(IntroductionRecord::decode(record)?.tags())
 }
 
-/// Open a record wire with one OPRF output. See [`IntroductionRecord::open`].
+/// Open a contacts-of-contacts record wire with one OPRF output. See
+/// [`IntroductionRecord::open`]; a matched payload always carries its `fof`
+/// grant.
 ///
 /// # Errors
 ///
-/// Every error of [`IntroductionRecord::decode`] and
-/// [`IntroductionRecord::open`].
+/// * [`IntroductionError::MissingFofGrant`] — the record opened but carries
+///   no grant (a public record relayed as an introduction).
+/// * Every error of [`IntroductionRecord::decode`] and
+///   [`IntroductionRecord::open`].
 pub fn open_introduction(
     record: &[u8],
     oprf_output: &[u8; OPRF_OUTPUT_LEN],
 ) -> CoreResult<Option<IntroductionPayload>, IntroductionError> {
-    IntroductionRecord::decode(record)?.open(oprf_output)
+    match IntroductionRecord::decode(record)?.open(oprf_output)? {
+        Some(payload) if payload.fof.is_none() => Err(IntroductionError::MissingFofGrant),
+        other => Ok(other),
+    }
+}
+
+/// Open a public record (served by discovery beside an account id) with the
+/// OPRF output of the searched term. See [`IntroductionRecord::open`]; a
+/// matched payload never carries a grant.
+///
+/// # Errors
+///
+/// * [`IntroductionError::UnexpectedFofGrant`] — the record opened but
+///   carries a grant.
+/// * Every error of [`IntroductionRecord::decode`] and
+///   [`IntroductionRecord::open`].
+pub fn open_public_record(
+    record: &[u8],
+    oprf_output: &[u8; OPRF_OUTPUT_LEN],
+) -> CoreResult<Option<IntroductionPayload>, IntroductionError> {
+    match IntroductionRecord::decode(record)?.open(oprf_output)? {
+        Some(payload) if payload.fof.is_some() => Err(IntroductionError::UnexpectedFofGrant),
+        other => Ok(other),
+    }
 }
 
 // =============================================================================
@@ -946,6 +1041,18 @@ pub enum IntroductionError {
     /// The grant is not of class `fof` (the class byte).
     #[error("introduction grant is of class {0:#04x}, expected fof")]
     NotFofGrant(u8),
+    /// The grant length byte is neither 0 nor the grant length.
+    #[error("introduction grant is {got} bytes")]
+    GrantLength {
+        /// The length as read.
+        got: usize,
+    },
+    /// A contacts-of-contacts record without its `fof` grant.
+    #[error("a contacts-of-contacts introduction must carry its fof grant")]
+    MissingFofGrant,
+    /// A public record carrying a `fof` grant.
+    #[error("a public record must not carry a fof grant")]
+    UnexpectedFofGrant,
     /// The grant failed to decode.
     #[error("invalid reach grant: {0}")]
     Grant(ReachError),
@@ -980,6 +1087,9 @@ impl IntroductionError {
             Self::CertificateLength { .. } => "certificate.length".to_string(),
             Self::CertificateWithoutUsername => "certificate.withoutUsername".to_string(),
             Self::NotFofGrant(_) => "grant.notFof".to_string(),
+            Self::GrantLength { .. } => "grant.length".to_string(),
+            Self::MissingFofGrant => "grant.missing".to_string(),
+            Self::UnexpectedFofGrant => "grant.unexpected".to_string(),
             Self::Grant(e) => format!("grant.{}", e.code()),
             Self::Seal => "seal".to_string(),
             Self::Open => "open".to_string(),
@@ -1115,7 +1225,15 @@ mod tests {
             display_name: Some("Anna Weber".to_string()),
             username: Some("anna".to_string()),
             username_certificate: Some(vec![0xC3; USERNAME_CERT_LEN]),
-            fof: fof(0xD4),
+            fof: Some(fof(0xD4)),
+        }
+    }
+
+    /// The Everyone shape: the same fields, no grant.
+    fn public_payload() -> IntroductionPayload {
+        IntroductionPayload {
+            fof: None,
+            ..payload()
         }
     }
 
@@ -1126,7 +1244,7 @@ mod tests {
             display_name: None,
             username: None,
             username_certificate: None,
-            fof: fof(3),
+            fof: None,
         }
     }
 
@@ -1141,9 +1259,14 @@ mod tests {
 
     #[test]
     fn payload_round_trips_and_its_bounds_are_the_documented_construction() {
-        assert_eq!(INTRODUCTION_PAYLOAD_MIN_LEN, 89);
-        assert_eq!(INTRODUCTION_PAYLOAD_MAX_LEN, 89 + 255 + 32 + 153);
-        for p in [payload(), minimal_payload(), maximal_payload()] {
+        assert_eq!(INTRODUCTION_PAYLOAD_MIN_LEN, 53);
+        assert_eq!(INTRODUCTION_PAYLOAD_MAX_LEN, 53 + 255 + 32 + 153 + 37);
+        for p in [
+            payload(),
+            public_payload(),
+            minimal_payload(),
+            maximal_payload(),
+        ] {
             let wire = p.encode().unwrap();
             assert_eq!(IntroductionPayload::decode(&wire).unwrap(), p);
         }
@@ -1166,7 +1289,9 @@ mod tests {
         let mut no_username = payload();
         no_username.username = None;
         let mut not_fof = payload();
-        not_fof.fof.class = ReachClass::Contact;
+        if let Some(grant) = not_fof.fof.as_mut() {
+            grant.class = ReachClass::Contact;
+        }
         let mut short_cert = payload();
         short_cert.username_certificate = Some(vec![0; 10]);
         for (p, why) in [
@@ -1193,7 +1318,7 @@ mod tests {
         let name = p.display_name.as_deref().unwrap_or("").as_bytes();
         let username = p.username.as_deref().unwrap_or("").as_bytes();
         let cert = p.username_certificate.as_deref().unwrap_or(&[]);
-        let mut out = vec![INTRODUCTION_PAYLOAD_VERSION_V1];
+        let mut out = vec![INTRODUCTION_PAYLOAD_VERSION_V2];
         out.extend_from_slice(&p.identity_pk);
         out.extend_from_slice(&p.account_id);
         out.push(u8::try_from(name.len()).unwrap());
@@ -1202,7 +1327,13 @@ mod tests {
         out.extend_from_slice(username);
         out.push(u8::try_from(cert.len()).unwrap());
         out.extend_from_slice(cert);
-        out.extend_from_slice(&p.fof.encode());
+        match &p.fof {
+            Some(grant) => {
+                out.push(u8::try_from(REACH_GRANT_LEN).unwrap());
+                out.extend_from_slice(&grant.encode());
+            },
+            None => out.push(0),
+        }
         out
     }
 
@@ -1222,12 +1353,55 @@ mod tests {
             IntroductionPayload::decode(&long),
             Err(IntroductionError::TrailingBytes { count: 1 })
         );
-        let mut v2 = wire;
-        v2[0] = 2;
+        let mut v1 = wire.clone();
+        v1[0] = 1;
         assert_eq!(
-            IntroductionPayload::decode(&v2),
-            Err(IntroductionError::UnknownVersion(2))
+            IntroductionPayload::decode(&v1),
+            Err(IntroductionError::UnknownVersion(1)),
+            "v1 (grant always present) is refused: a flag day"
         );
+        // The grant length byte is 0 or the grant length, nothing else.
+        let grant_len_at = wire.len() - REACH_GRANT_LEN - 1;
+        let mut odd = wire;
+        odd[grant_len_at] = 36;
+        assert_eq!(
+            IntroductionPayload::decode(&odd),
+            Err(IntroductionError::GrantLength { got: 36 })
+        );
+    }
+
+    #[test]
+    fn each_use_requires_or_refuses_the_grant_on_compose_and_open() {
+        // Contacts of contacts: required on compose ...
+        assert_eq!(
+            compose_introduction(&public_payload(), &[U_OPRF], 1),
+            Err(IntroductionError::MissingFofGrant)
+        );
+        // ... and Everyone: refused on compose.
+        assert_eq!(
+            compose_public_record(&payload(), &[U_OPRF], 1),
+            Err(IntroductionError::UnexpectedFofGrant)
+        );
+        let public = compose_public_record(&public_payload(), &[U_OPRF, N_OPRF], 5).unwrap();
+        assert_eq!(
+            open_public_record(&public, &N_OPRF).unwrap(),
+            Some(public_payload())
+        );
+        assert_eq!(open_public_record(&public, &OTHER_OPRF).unwrap(), None);
+        // A public record relayed as an introduction opens to an error, never
+        // to a payload the reader could not reach.
+        assert_eq!(
+            open_introduction(&public, &U_OPRF),
+            Err(IntroductionError::MissingFofGrant)
+        );
+        let fof_record = compose_introduction(&payload(), &[U_OPRF], 5).unwrap();
+        assert_eq!(
+            open_public_record(&fof_record, &U_OPRF),
+            Err(IntroductionError::UnexpectedFofGrant)
+        );
+        // A miss is a miss under either opener, whatever the record's use.
+        assert_eq!(open_introduction(&public, &OTHER_OPRF).unwrap(), None);
+        assert_eq!(open_public_record(&fof_record, &OTHER_OPRF).unwrap(), None);
     }
 
     // --- record --------------------------------------------------------------
@@ -1278,13 +1452,13 @@ mod tests {
     #[test]
     fn record_length_bounds_are_the_documented_construction() {
         assert_eq!(WRAPPED_KEY_LEN, 60);
-        assert_eq!(SEALED_PAYLOAD_MIN_LEN, 12 + 16 + 89);
-        assert_eq!(INTRODUCTION_RECORD_MIN_LEN, 10 + 92 + 2 + 117);
+        assert_eq!(SEALED_PAYLOAD_MIN_LEN, 12 + 16 + 53);
+        assert_eq!(INTRODUCTION_RECORD_MIN_LEN, 10 + 92 + 2 + 81);
         assert_eq!(
             INTRODUCTION_RECORD_MAX_LEN,
-            10 + 65 * 92 + 2 + 12 + 16 + 529
+            10 + 65 * 92 + 2 + 12 + 16 + 530
         );
-        let min = compose_introduction(&minimal_payload(), &[U_OPRF], 1).unwrap();
+        let min = compose_public_record(&minimal_payload(), &[U_OPRF], 1).unwrap();
         assert_eq!(min.len(), INTRODUCTION_RECORD_MIN_LEN);
         let terms: Vec<_> = (0..MAX_INTRODUCTION_TERMS).map(term).collect();
         let max = compose_introduction(&maximal_payload(), &terms, 1).unwrap();

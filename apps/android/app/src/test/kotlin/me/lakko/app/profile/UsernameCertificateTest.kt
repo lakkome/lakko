@@ -11,7 +11,7 @@ import org.junit.Test
 
 /**
  * ADR-0060 section 5 — a claimed username is shown only once its certificate
- * verifies for the OPRF of the username and the claimed account, AND that
+ * verifies for the discovery lookup key of the username and the claimed account, AND that
  * account's published key is the sender's (a copied certificate fails).
  */
 class UsernameCertificateTest {
@@ -34,7 +34,7 @@ class UsernameCertificateTest {
         certificateHex = certificateHex,
         accountIdHex = accountIdHex,
         senderKeyB64 = senderB64,
-        oprf = { if (oprfFails) throw IllegalStateException("offline") else ByteArray(64) },
+        lookupKey = { if (oprfFails) throw IllegalStateException("offline") else ByteArray(64) },
         verifyBinding = if (haveKey) {
             { _, _, _ -> binds }
         } else {

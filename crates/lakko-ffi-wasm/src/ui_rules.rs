@@ -778,6 +778,10 @@ mod tests {
             channel_info_sections(ChannelInfoCapabilities::new(false, true, false))
                 .contains(&"unsubscribe".to_string())
         );
+        assert!(
+            channel_info_sections(ChannelInfoCapabilities::new(false, true, false))
+                .contains(&"channel-members".to_string())
+        );
         assert_eq!(info_target(ConversationKind::Group), InfoTarget::Group);
     }
 

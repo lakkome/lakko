@@ -39,7 +39,10 @@ public struct OprfRequest: Codable, Equatable {
 
 /// Response body of `POST /discovery/oprf`.
 public struct OprfResponse: Codable, Equatable {
-    /// base64(EvaluationElement). Feed to `blinder.finalize(evaluated:)`.
+    /// base64(EvaluationElement). Feed to `blinder.finalize(evaluatedB64:)`,
+    /// which returns an `OprfResult`: its `lookupKey` is the only half that
+    /// goes back to discovery; its `output` never leaves the device (ADR-0060
+    /// section 5).
     public let evaluated: String
 
     public init(evaluated: String) {
@@ -55,8 +58,11 @@ public struct OprfResponse: Codable, Equatable {
 public struct RegisterRequest: Codable, Equatable {
     /// base64(account_id) — raw 16 bytes.
     public let accountId: String
-    /// base64(VOPRF output) — exactly 64 bytes, the OPRF hash the
-    /// client just computed via `blinder.finalize(evaluated:)`.
+    /// base64 of the 64-byte lookup key (`OprfResult.lookupKey` from
+    /// `blinder.finalize(evaluatedB64:)`), NEVER the OPRF output: public and
+    /// introduction records are sealed under keys derived from the output, so
+    /// discovery must not hold it (ADR-0060 section 5). The wire name stays
+    /// `oprf_hash` and the width stays 64 bytes.
     public let oprfHash: String
 
     public init(accountId: String, oprfHash: String) {
@@ -106,13 +112,19 @@ public struct LookupRequest: Codable, Equatable {
 /// the 200-OK path.
 public struct LookupResponse: Codable, Equatable {
     public let accountId: String
+    /// base64 of the account's public record (ADR-0060 section 5), opened
+    /// with the OPRF **output** of the looked-up username (`openPublicRecord`).
+    /// Optional on the wire so an older server still decodes.
+    public let publicRecord: String?
 
-    public init(accountId: String) {
+    public init(accountId: String, publicRecord: String? = nil) {
         self.accountId = accountId
+        self.publicRecord = publicRecord
     }
 
     enum CodingKeys: String, CodingKey {
         case accountId = "account_id"
+        case publicRecord = "public_record_b64"
     }
 }
 
@@ -537,7 +549,8 @@ public struct InviteOwnerListResponse: Codable, Equatable {
 /// first-served via a UNIQUE on `oprf_hash`; a repeat of the same hash
 /// with a different channel id is 409 Conflict.
 public struct ChannelRegisterRequest: Codable, Equatable {
-    /// base64(VOPRF output) — exactly 64 bytes, from `blinder.finalize`.
+    /// base64 of the 64-byte lookup key (`OprfResult.lookupKey`), never the
+    /// OPRF output — same rule as ``RegisterRequest/oprfHash``.
     public let oprfHash: String
     /// base64(channel_id) — raw 16 bytes (ADR-0010 §"Wire surfaces").
     public let channelId: String

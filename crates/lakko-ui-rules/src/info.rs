@@ -97,6 +97,12 @@ pub enum InfoSection {
     ManageChannel,
     /// Stop following a channel.
     Unsubscribe,
+    /// The channel's member list, shown to its members like a group's
+    /// roster (ADR-0060 section 3, `docs/ux/who-can-find-me.md` section
+    /// 6.3). Its own block rather than [`Self::MemberList`], which is
+    /// group-only: a channel roster has no roles and no add. Appended last so
+    /// the uniffi ordinals of every earlier block stay put.
+    ChannelMembers,
 }
 
 impl InfoSection {
@@ -155,6 +161,7 @@ impl InfoSection {
             Self::SubscriberCount => "subscriber-count",
             Self::ManageChannel => "manage-channel",
             Self::Unsubscribe => "unsubscribe",
+            Self::ChannelMembers => "channel-members",
         }
     }
 }
@@ -329,6 +336,12 @@ pub fn channel_info_sections(caps: ChannelInfoCapabilities) -> Vec<InfoSection> 
     let mut sections = vec![InfoSection::ChannelHandle, InfoSection::ChannelDescription];
     if caps.subscriber_count_known {
         sections.push(InfoSection::SubscriberCount);
+    }
+    // A channel lists its members to its members (UX 6.3): whoever reads it,
+    // as a publisher or a subscriber, holds the epoch seed the member cards
+    // are sealed under. A viewer who reads neither cannot open a card.
+    if caps.is_publisher || caps.is_subscriber {
+        sections.push(InfoSection::ChannelMembers);
     }
     if caps.is_publisher {
         sections.push(InfoSection::ManageChannel);
@@ -541,6 +554,7 @@ mod tests {
             subscriber_count_known: false,
         });
         assert!(subscriber.contains(&InfoSection::Unsubscribe));
+        assert!(subscriber.contains(&InfoSection::ChannelMembers));
         assert!(!subscriber.contains(&InfoSection::ManageChannel));
         assert!(!subscriber.contains(&InfoSection::SubscriberCount));
 
@@ -550,8 +564,46 @@ mod tests {
             subscriber_count_known: true,
         });
         assert!(!publisher.contains(&InfoSection::Unsubscribe));
+        assert!(publisher.contains(&InfoSection::ChannelMembers));
         assert!(publisher.contains(&InfoSection::ManageChannel));
         assert!(publisher.contains(&InfoSection::SubscriberCount));
+    }
+
+    /// A channel lists its members to its members and to nobody else (UX
+    /// 6.3), under every combination; the block sits after what the channel
+    /// is and before the reader's own action.
+    #[test]
+    fn a_channel_shows_its_members_to_its_readers_only() {
+        for &is_publisher in &[false, true] {
+            for &is_subscriber in &[false, true] {
+                for &count in &[false, true] {
+                    let sections = channel_info_sections(ChannelInfoCapabilities {
+                        is_publisher,
+                        is_subscriber,
+                        subscriber_count_known: count,
+                    });
+                    let reads = is_publisher || is_subscriber;
+                    assert_eq!(
+                        sections.contains(&InfoSection::ChannelMembers),
+                        reads,
+                        "publisher={is_publisher} subscriber={is_subscriber}"
+                    );
+                    if let Some(at) = sections
+                        .iter()
+                        .position(|s| *s == InfoSection::ChannelMembers)
+                    {
+                        let description = sections
+                            .iter()
+                            .position(|s| *s == InfoSection::ChannelDescription)
+                            .unwrap();
+                        assert!(at > description);
+                        assert_eq!(at, sections.len() - 2, "{sections:?}");
+                    }
+                }
+            }
+        }
+        assert!(!InfoSection::ChannelMembers.group_only());
+        assert_eq!(InfoSection::ChannelMembers.name(), "channel-members");
     }
 
     /// A channel that is neither: found by handle, not yet subscribed to.
@@ -647,6 +699,7 @@ mod tests {
             InfoSection::SubscriberCount,
             InfoSection::ManageChannel,
             InfoSection::Unsubscribe,
+            InfoSection::ChannelMembers,
         ];
         let mut names: Vec<&str> = all.iter().map(|s| s.name()).collect();
         names.sort_unstable();

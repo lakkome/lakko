@@ -4027,7 +4027,7 @@ public class ChatRepository(
 
     /**
      * ADR-0060 §5 — enter or leave Everyone on discovery: in Everyone, the
-     * OPRF hash of every `nameSearchTerms(displayName)` term (one lookup token
+     * discovery lookup key of every `nameSearchTerms(displayName)` term (one lookup token
      * each), republished on every name change; outside it, `public: false`
      * and no terms. Idempotent, and skipped when the server already holds it.
      */
@@ -4049,12 +4049,14 @@ public class ChatRepository(
                 }
                 keyPackageDiscoveryFactory().use { client ->
                     client.setSessionToken(token)
-                    val hashes = if (everyone && name != null) {
-                        uniffi.lakko_ffi_uniffi.nameSearchTerms(name).map { term -> client.oprfNameTerm(term) }
+                    // ADR-0060 §5: the server gets each term's lookup key,
+                    // never its OPRF output.
+                    val lookupKeys = if (everyone && name != null) {
+                        uniffi.lakko_ffi_uniffi.nameSearchTerms(name).map { term -> client.oprfNameTerm(term).lookupKey }
                     } else {
                         emptyList()
                     }
-                    client.putVisibility(public = everyone, nameTermHashes = hashes)
+                    client.putVisibility(public = everyone, nameTermLookupKeys = lookupKeys)
                 }
                 reach.notePublishedEveryone(everyone, if (everyone) name else null)
             } catch (cause: kotlinx.coroutines.CancellationException) {

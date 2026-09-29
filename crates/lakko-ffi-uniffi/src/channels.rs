@@ -90,8 +90,9 @@ use lakko_channels::{
     open_member_card as inner_open_member_card, open_seed,
     post::ChannelPost as InnerPost,
     seal_member_card as inner_seal_member_card, seal_seed, sign_member_card_request,
-    verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, EXPORTER_LABEL_V1,
-    MAX_MEMBER_CARD_PROFILE_LEN, MEMBER_CARD_SIG_HEADER, SEED_ENVELOPE_LEN, SUBSCRIBER_PK_LEN,
+    sign_unsubscribe_request, verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN,
+    EXPORTER_LABEL_V1, MAX_MEMBER_CARD_PROFILE_LEN, MEMBER_CARD_SIG_HEADER, SEED_ENVELOPE_LEN,
+    SUBSCRIBER_PK_LEN, UNSUBSCRIBE_SIG_HEADER,
 };
 use lakko_crypto::signing::SigningKey;
 
@@ -506,6 +507,38 @@ impl ChannelSubscriberKeypair {
         let key = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(URL_SAFE_NO_PAD.encode(sign_member_card_request(&key, &channel, &card)))
     }
+
+    /// The [`unsubscribe_sig_header_name`] header value for leaving
+    /// `channel_id` (`DELETE /v1/channels/<id>/subscribers/<public hex>`,
+    /// ADR-0060): `<issued_at_ms>.<signature base64url>`, the Ed25519
+    /// signature over `lakko_channels::unsubscribe_signed_bytes` stamped
+    /// `issued_at_ms` (the caller's clock, UNIX ms). The server accepts it
+    /// within `lakko_channels::UNSUBSCRIBE_WINDOW_MS` of its own clock.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Channels`] on a wrong-length `channel_id`.
+    #[uniffi::method]
+    pub fn unsubscribe_request_header(
+        &self,
+        channel_id: Vec<u8>,
+        issued_at_ms: u64,
+    ) -> Result<String, FfiError> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let channel = channel_id_from_vec(channel_id)?;
+        let key = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let sig = sign_unsubscribe_request(&key, &channel, issued_at_ms);
+        Ok(format!("{issued_at_ms}.{}", URL_SAFE_NO_PAD.encode(sig)))
+    }
+}
+
+/// The request header an unsubscribe carries its signature in
+/// (`x-lakko-unsubscribe-sig`).
+#[uniffi::export]
+#[must_use]
+pub fn unsubscribe_sig_header_name() -> String {
+    UNSUBSCRIBE_SIG_HEADER.to_string()
 }
 
 /// The request header a member-card upload or delete carries
@@ -754,29 +787,49 @@ fn subscriber_pk_from_vec(pk: &[u8]) -> Result<[u8; SUBSCRIBER_PK_LEN], FfiError
 }
 
 /// Seal `profile` (a profile envelope, ADR-0048 v3) into a member card for
-/// `subscriber_pk` in `channel_id` under the 32-byte seed of `epoch_id`.
+/// `subscriber_pk` in `channel_id` under the 32-byte seed of `epoch_id`,
+/// bound to the account whose 32-byte Ed25519 identity seed is
+/// `account_identity_seed` (ADR-0060: the card names the account, signed).
 ///
 /// # Errors
 ///
-/// [`FfiError::Channels`] for a wrong-length seed, channel id or subscriber
-/// key, or a profile over [`max_member_card_profile_len`] bytes.
+/// [`FfiError::Channels`] for a wrong-length seed, channel id, subscriber
+/// key or identity seed, or a profile over [`max_member_card_profile_len`]
+/// bytes.
 #[uniffi::export]
 pub fn seal_member_card(
     seed: Vec<u8>,
     epoch_id: u32,
     channel_id: Vec<u8>,
     subscriber_pk: Vec<u8>,
+    account_identity_seed: Vec<u8>,
     profile: Vec<u8>,
 ) -> Result<Vec<u8>, FfiError> {
     let channel = channel_id_from_vec(channel_id)?;
     let pk = subscriber_pk_from_vec(&subscriber_pk)?;
+    let identity: [u8; 32] = account_identity_seed
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Channels("account identity seed must be exactly 32 bytes".into()))?;
     Ok(inner_seal_member_card(
         &content_seed(&seed)?,
         EpochId::new(epoch_id),
         &channel,
         &pk,
+        &identity,
         &profile,
     )?)
+}
+
+/// A member card opened and its account binding verified.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct OpenedMemberCard {
+    /// The 32-byte account identity public key that signed the card: file
+    /// the profile and any grant under this account, never under the
+    /// subscriber key.
+    pub identity_pk: Vec<u8>,
+    /// The profile envelope; decode it with `decodeProfileEnvelope`.
+    pub profile: Vec<u8>,
 }
 
 /// The clear epoch of a member card, to pick the matching seed before
@@ -791,29 +844,30 @@ pub fn member_card_epoch(card: Vec<u8>) -> Result<u32, FfiError> {
 }
 
 /// Open a member card served for `subscriber_pk` in `channel_id` with the
-/// 32-byte seed of the epoch it names; returns the profile envelope, which
-/// the caller decodes with `decodeProfileEnvelope`. Fail-closed: a card
-/// sealed for another subscriber, channel or epoch does not open.
+/// 32-byte seed of the epoch it names and verify its account binding;
+/// returns the account identity key and the profile envelope, which the
+/// caller decodes with `decodeProfileEnvelope`. Fail-closed: a card sealed
+/// for another subscriber, channel or epoch, or naming an account that did
+/// not sign it, does not open.
 ///
 /// # Errors
 ///
-/// [`FfiError::Channels`] for a malformed card, a wrong-length argument, or
-/// a card the authenticator refuses.
+/// [`FfiError::Channels`] for a malformed card, a wrong-length argument, a
+/// card the authenticator refuses, or a binding that does not verify.
 #[uniffi::export]
 pub fn open_member_card(
     seed: Vec<u8>,
     card: Vec<u8>,
     channel_id: Vec<u8>,
     subscriber_pk: Vec<u8>,
-) -> Result<Vec<u8>, FfiError> {
+) -> Result<OpenedMemberCard, FfiError> {
     let channel = channel_id_from_vec(channel_id)?;
     let pk = subscriber_pk_from_vec(&subscriber_pk)?;
-    Ok(inner_open_member_card(
-        &content_seed(&seed)?,
-        &card,
-        &channel,
-        &pk,
-    )?)
+    let opened = inner_open_member_card(&content_seed(&seed)?, &card, &channel, &pk)?;
+    Ok(OpenedMemberCard {
+        identity_pk: opened.identity_pk.to_vec(),
+        profile: opened.profile,
+    })
 }
 
 /// Longest profile a member card seals, in bytes.
@@ -845,19 +899,38 @@ mod tests {
         let seed = vec![0x33; 32];
         let channel = vec![0x44; 16];
         let pk = vec![0x55; 32];
+        let account = vec![0x66; 32];
         let card = super::seal_member_card(
             seed.clone(),
             7,
             channel.clone(),
             pk.clone(),
+            account.clone(),
             b"profile".to_vec(),
         )
         .unwrap();
         assert_eq!(super::member_card_epoch(card.clone()).unwrap(), 7);
+        let opened =
+            super::open_member_card(seed.clone(), card.clone(), channel.clone(), pk).unwrap();
+        assert_eq!(opened.profile, b"profile".to_vec());
         assert_eq!(
-            super::open_member_card(seed.clone(), card.clone(), channel.clone(), pk).unwrap(),
-            b"profile".to_vec()
+            opened.identity_pk,
+            lakko_crypto::signing::SigningKey::from_seed(&[0x66; 32])
+                .verifying_key()
+                .to_bytes()
+                .to_vec()
         );
+        assert!(matches!(
+            super::seal_member_card(
+                seed.clone(),
+                7,
+                channel.clone(),
+                vec![0x55; 32],
+                vec![0x66; 31],
+                b"p".to_vec()
+            ),
+            Err(crate::FfiError::Channels(_))
+        ));
         // Served under another subscriber key, the card does not open.
         assert!(matches!(
             super::open_member_card(seed.clone(), card, channel.clone(), vec![0x56; 32]),
@@ -869,6 +942,7 @@ mod tests {
                 7,
                 channel,
                 vec![0x55; 32],
+                account,
                 vec![0; super::max_member_card_profile_len() as usize + 1],
             ),
             Err(crate::FfiError::Channels(_))
@@ -1076,6 +1150,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(member_card_sig_header_name(), "x-lakko-member-card-sig");
+
+        // The unsubscribe header verifies with the core verifier.
+        let header = kp
+            .unsubscribe_request_header(channel.clone(), 1_000)
+            .unwrap();
+        let (stamp, sig) = header.split_once('.').unwrap();
+        assert_eq!(stamp, "1000");
+        lakko_channels::verify_unsubscribe_request(
+            &channel.clone().try_into().unwrap(),
+            &pk,
+            1_000,
+            &URL_SAFE_NO_PAD.decode(sig).unwrap(),
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(unsubscribe_sig_header_name(), "x-lakko-unsubscribe-sig");
         // A small-order key is refused at seal.
         let mut identity = vec![0u8; 32];
         identity[0] = 1;

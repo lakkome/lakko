@@ -2639,6 +2639,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
  "lakko-contacts",
+ "lakko-crypto",
  "rand 0.8.6",
  "thiserror 1.0.69",
  "unicode-normalization",

@@ -52,13 +52,14 @@ use lakko_contacts::introduction::{
     bundle_is_newer as rust_bundle_is_newer, compose_bundle as rust_compose_bundle,
     compose_introduction as rust_compose_introduction,
     compose_introduction_offer as rust_compose_introduction_offer,
+    compose_public_record as rust_compose_public_record,
     decode_introduction_offer as rust_decode_introduction_offer,
     decode_introductions as rust_decode_introductions, fof_tag as rust_fof_tag,
     introduction_tags as rust_introduction_tags, open_introduction as rust_open_introduction,
-    IntroductionError, IntroductionPayload as RustIntroductionPayload,
-    IntroductionRecord as RustIntroductionRecord, IntroductionsBundle as RustIntroductionsBundle,
-    BUNDLE_SIZE_BUCKETS, FOF_TAG_LEN, IDENTITY_PK_LEN, MAX_BUNDLE_RECORDS, MAX_INTRODUCTION_TERMS,
-    OPRF_OUTPUT_LEN,
+    open_public_record as rust_open_public_record, IntroductionError,
+    IntroductionPayload as RustIntroductionPayload, IntroductionRecord as RustIntroductionRecord,
+    IntroductionsBundle as RustIntroductionsBundle, BUNDLE_SIZE_BUCKETS, FOF_TAG_LEN,
+    IDENTITY_PK_LEN, MAX_BUNDLE_RECORDS, MAX_INTRODUCTION_TERMS, OPRF_OUTPUT_LEN,
 };
 use lakko_contacts::profile::ACCOUNT_ID_LEN;
 use lakko_contacts::reach::{
@@ -357,8 +358,11 @@ pub struct FfiIntroductionPayload {
     pub username: Option<String>,
     /// The 153-byte discovery-signed username certificate, or `None`.
     pub username_certificate: Option<Vec<u8>>,
-    /// Their `Fof` reach grant (secret).
-    pub fof: FfiReachGrant,
+    /// Their `Fof` reach grant (secret). Required in a contacts-of-contacts
+    /// record ([`compose_introduction`] / [`open_introduction`]), absent in
+    /// an Everyone public record ([`compose_public_record`] /
+    /// [`open_public_record`]).
+    pub fof: Option<FfiReachGrant>,
 }
 
 impl From<RustIntroductionPayload> for FfiIntroductionPayload {
@@ -369,7 +373,7 @@ impl From<RustIntroductionPayload> for FfiIntroductionPayload {
             display_name: p.display_name,
             username: p.username,
             username_certificate: p.username_certificate,
-            fof: p.fof.into(),
+            fof: p.fof.map(Into::into),
         }
     }
 }
@@ -398,7 +402,7 @@ impl TryFrom<FfiIntroductionPayload> for RustIntroductionPayload {
             display_name: p.display_name,
             username: p.username,
             username_certificate: p.username_certificate,
-            fof: p.fof.try_into()?,
+            fof: p.fof.map(TryInto::try_into).transpose()?,
         })
     }
 }
@@ -422,7 +426,8 @@ fn oprf64(bytes: &[u8]) -> Result<[u8; OPRF_OUTPUT_LEN], FfiError> {
 /// * [`FfiError::Introduction`] `oprfLength` / `identityPkLength` /
 ///   `accountIdLength` — an argument of the wrong length.
 /// * [`FfiError::Introduction`] `noTerms` / `tooManyTerms` / `duplicateTag` /
-///   `certificate.length` / `certificate.withoutUsername` / `grant.notFof`.
+///   `certificate.length` / `certificate.withoutUsername` / `grant.notFof` /
+///   `grant.missing` (a contacts-of-contacts record needs its `fof` grant).
 /// * The typed `DisplayName*` / `Username*` variants for the payload fields.
 #[uniffi::export]
 pub fn compose_introduction(
@@ -463,12 +468,15 @@ pub fn fof_tag(oprf_output: Vec<u8>) -> Result<Vec<u8>, FfiError> {
 }
 
 /// Open a record wire with one 64-byte OPRF output. `None` when no entry
-/// matches (not this person, or a padding dummy).
+/// matches (not this person, or a padding dummy). A payload returned always
+/// carries its `fof` grant.
 ///
 /// # Errors
 ///
 /// * [`FfiError::Introduction`] `open` — a tag matched but the record failed
 ///   to authenticate: a forged or corrupted record, never a miss.
+/// * [`FfiError::Introduction`] `grant.missing` — the record opened but
+///   carries no grant (a public record relayed as an introduction).
 /// * [`FfiError::Introduction`] for a malformed record or payload.
 #[uniffi::export]
 pub fn open_introduction(
@@ -476,6 +484,48 @@ pub fn open_introduction(
     oprf_output: Vec<u8>,
 ) -> Result<Option<FfiIntroductionPayload>, FfiError> {
     Ok(rust_open_introduction(&record, &oprf64(&oprf_output)?)?.map(Into::into))
+}
+
+/// Build the public record a person in Everyone publishes with
+/// `PUT /discovery/visibility` (ADR-0060 section 5): the same record shape
+/// as [`compose_introduction`], findable by the username's OPRF output and
+/// every `nameSearchTerms` output, and carrying NO `fof` grant (`payload.fof`
+/// must be `None`).
+///
+/// # Errors
+///
+/// * [`FfiError::Introduction`] `grant.unexpected` — `payload.fof` is set.
+/// * Every other error of [`compose_introduction`].
+#[uniffi::export]
+pub fn compose_public_record(
+    payload: FfiIntroductionPayload,
+    term_oprfs: Vec<Vec<u8>>,
+    issued_at_ms: u64,
+) -> Result<Vec<u8>, FfiError> {
+    let payload = RustIntroductionPayload::try_from(payload)?;
+    let terms = term_oprfs
+        .iter()
+        .map(|t| oprf64(t))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rust_compose_public_record(&payload, &terms, issued_at_ms)?)
+}
+
+/// Open a public record served by `/discovery/lookup` or
+/// `/discovery/name/lookup` with the 64-byte OPRF output of the searched
+/// username or name term. `None` when no entry matches. A payload returned
+/// never carries a grant: the person's mailbox is open.
+///
+/// # Errors
+///
+/// * [`FfiError::Introduction`] `grant.unexpected` — the record opened but
+///   carries a grant.
+/// * Every other error of [`open_introduction`].
+#[uniffi::export]
+pub fn open_public_record(
+    record: Vec<u8>,
+    oprf_output: Vec<u8>,
+) -> Result<Option<FfiIntroductionPayload>, FfiError> {
+    Ok(rust_open_public_record(&record, &oprf64(&oprf_output)?)?.map(Into::into))
 }
 
 /// Wrap one record as an introduction offer (owner to a contact, sent in
@@ -950,7 +1000,8 @@ pub fn max_reach_state_entries() -> u32 {
 /// The authenticated claims of a verified username certificate.
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct FfiUsernameCertificate {
-    /// The certified 64-byte OPRF output of the username.
+    /// The certified 64-byte lookup key of the username (the
+    /// `discoveryLookupKey` of its OPRF output).
     pub oprf_hash: Vec<u8>,
     /// The 16-byte account the username is registered to.
     pub account_id: Vec<u8>,
@@ -974,8 +1025,9 @@ fn cert_arg(code: &str, what: &str, want: usize, got: usize) -> FfiError {
 }
 
 /// Verify a claimed username: the certificate's signature under the pinned
-/// discovery key, its binding to `expected_oprf_hash` (the OPRF output the
-/// viewer computed over the CLAIMED username) and to `expected_account_id`
+/// discovery key, its binding to `expected_oprf_hash` (the lookup key of the
+/// OPRF output the viewer computed over the CLAIMED username, i.e.
+/// `OprfResult.lookup_key`, never the output) and to `expected_account_id`
 /// (the account the profile arrived from). No freshness check — usernames are
 /// immutable. Show the username only on success (invariant #4).
 ///
@@ -1453,8 +1505,51 @@ mod tests {
             display_name: Some("Anna Weber".to_string()),
             username: Some("anna".to_string()),
             username_certificate: None,
-            fof: derive_reach_grant(ACCOUNT_SEED.to_vec(), FfiReachClass::Fof, vec![], 1).unwrap(),
+            fof: Some(
+                derive_reach_grant(ACCOUNT_SEED.to_vec(), FfiReachClass::Fof, vec![], 1).unwrap(),
+            ),
         }
+    }
+
+    #[test]
+    fn a_public_record_carries_no_grant_and_opens_under_its_terms() {
+        let public = FfiIntroductionPayload {
+            fof: None,
+            ..payload()
+        };
+        let terms = vec![vec![5u8; 64], vec![6u8; 64]];
+        let record = compose_public_record(public.clone(), terms.clone(), 10).unwrap();
+        assert_eq!(
+            open_public_record(record.clone(), terms[1].clone()).unwrap(),
+            Some(public.clone())
+        );
+        assert_eq!(
+            open_public_record(record.clone(), vec![7u8; 64]).unwrap(),
+            None
+        );
+        assert_eq!(
+            code_of(&open_introduction(record, terms[0].clone()).unwrap_err()),
+            "grant.missing"
+        );
+        assert_eq!(
+            code_of(&compose_public_record(payload(), terms.clone(), 1).unwrap_err()),
+            "grant.unexpected"
+        );
+        assert_eq!(
+            code_of(&compose_introduction(public, terms, 1).unwrap_err()),
+            "grant.missing"
+        );
+    }
+
+    /// The DeviceGroup carrier (ADR-0060 section 7) must admit the longest
+    /// Visibility and ReachState envelopes `lakko-contacts` composes.
+    /// `lakko-mls` does not depend on `lakko-contacts`, so the pin lives here.
+    #[test]
+    fn the_device_group_carrier_admits_the_longest_setting_envelopes() {
+        let max = crate::device_group_service_envelope_max_len() as usize;
+        assert_eq!(max, lakko_mls::MAX_SERVICE_ENVELOPE_LEN);
+        assert!(max >= lakko_contacts::MAX_VISIBILITY_ENVELOPE_LEN);
+        assert!(max >= lakko_contacts::MAX_REACH_STATE_ENVELOPE_LEN);
     }
 
     #[test]
@@ -1498,7 +1593,7 @@ mod tests {
         let e = compose_introduction(payload(), vec![vec![5; 63]], 1).unwrap_err();
         assert_eq!(code_of(&e), "oprfLength");
         let mut bad = payload();
-        bad.fof.class = FfiReachClass::Contact;
+        bad.fof.as_mut().unwrap().class = FfiReachClass::Contact;
         assert_eq!(
             code_of(&compose_introduction(bad, vec![vec![5; 64]], 1).unwrap_err()),
             "grant.notFof"

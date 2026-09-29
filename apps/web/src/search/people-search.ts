@@ -16,6 +16,10 @@
  * then, with the OPRF outputs of the username and the term, the kept
  * **introductions** (contacts of contacts).
  *
+ * Every OPRF round yields two values (`discovery/oprf-pair.ts`): the
+ * `lookupKey` is what discovery is asked with and what a username certificate
+ * binds; the `output` opens records and never leaves the device.
+ *
  * Everything is filtered by the WHOLE query (the network matched one term),
  * a username is shown only when verified, and a result found through a
  * grant is shown only after the DS reach check says the grant still opens
@@ -31,6 +35,7 @@
  * Every dependency is an argument, so the whole decision is testable.
  */
 import { base64Decode } from "../auth/account-id";
+import type { OprfPair } from "../discovery/oprf-pair";
 import { fingerprintLabel } from "../profile/resolver";
 import type { IntroductionProbe, OpenedIntroduction } from "./introductions";
 import {
@@ -62,14 +67,15 @@ export interface PeopleSearchDeps {
   nameMatches(displayName: string, query: string): boolean;
   /** The channel namespace; `null` when not a channel. Omitted: not asked. */
   lookupChannel?(handle: string): Promise<string | null>;
-  /** OPRF of a username (one anonymous token). */
-  usernameHash(username: string): Promise<Uint8Array>;
-  /** `/discovery/lookup` by OPRF hash: the account id, or `null`. */
-  accountOfUsernameHash(hash: Uint8Array): Promise<Uint8Array | null>;
-  /** OPRF of a name term (one anonymous token). */
-  nameTermHash(term: string): Promise<Uint8Array>;
-  /** `/discovery/name/lookup`: account ids in Everyone carrying the term. */
-  accountsOfNameTermHash(hash: Uint8Array): Promise<Uint8Array[]>;
+  /** One OPRF round over a username (one anonymous token). */
+  usernameOprf(username: string): Promise<OprfPair>;
+  /** `/discovery/lookup` by the username's LOOKUP KEY: the account id, or `null`. */
+  accountOfUsernameLookupKey(lookupKey: Uint8Array): Promise<Uint8Array | null>;
+  /** One OPRF round over a name term (one anonymous token). */
+  nameTermOprf(term: string): Promise<OprfPair>;
+  /** `/discovery/name/lookup` by the term's LOOKUP KEY: account ids in
+   *  Everyone carrying the term. */
+  accountsOfNameTermLookupKey(lookupKey: Uint8Array): Promise<Uint8Array[]>;
   /** The account key the identity bundle publishes, `null` for none. */
   identityKeyOf(accountId: Uint8Array): Promise<Uint8Array | null>;
   /** What this device knows about a person. */
@@ -77,8 +83,9 @@ export interface PeopleSearchDeps {
   /** Open the kept introduction records with these probes. */
   openIntroductions(probes: readonly IntroductionProbe[]): Promise<OpenedIntroduction[]>;
   /** `verifyUsernameBinding` against the pinned / fetched key: `true` only
-   *  when the certificate binds `oprfHash` to `accountId`. Never throws. */
-  verifyUsername(certificate: Uint8Array, oprfHash: Uint8Array, accountId: Uint8Array): Promise<boolean>;
+   *  when the certificate binds the username's `lookupKey` (never its OPRF
+   *  output) to `accountId`. Never throws. */
+  verifyUsername(certificate: Uint8Array, usernameLookupKey: Uint8Array, accountId: Uint8Array): Promise<boolean>;
   /** The DS reach check of the person's account mailbox with a grant. */
   reachCheck(identityPk: Uint8Array, grantWireB64: string): Promise<boolean>;
   /** Standard base64 of a grant wire. */
@@ -145,14 +152,14 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
 
   // ---- the username ---------------------------------------------------
   // Written by the username question, read after all questions settled.
-  const hashes: { username: Uint8Array | null } = { username: null };
+  const rounds: { username: OprfPair | null } = { username: null };
   const usernameLeg = (async (): Promise<PersonResult[]> => {
     if (username === null) return [];
     try {
-      const hash = await deps.usernameHash(username);
-      hashes.username = hash;
-      probes.push({ oprf: hash, via: "username" });
-      const account = await deps.accountOfUsernameHash(hash);
+      const round = await deps.usernameOprf(username);
+      rounds.username = round;
+      probes.push({ oprfOutput: round.output, via: "username" });
+      const account = await deps.accountOfUsernameLookupKey(round.lookupKey);
       if (account === null) {
         legs.push("answered");
         return [];
@@ -178,9 +185,9 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
   const nameLeg = (async (): Promise<PersonResult[]> => {
     if (term === null) return [];
     try {
-      const hash = await deps.nameTermHash(term);
-      probes.push({ oprf: hash, via: "term" });
-      const accounts = await deps.accountsOfNameTermHash(hash);
+      const round = await deps.nameTermOprf(term);
+      probes.push({ oprfOutput: round.output, via: "term" });
+      const accounts = await deps.accountsOfNameTermLookupKey(round.lookupKey);
       const out: PersonResult[] = [];
       for (const account of accounts) {
         const accountIdHex = toHex(account);
@@ -234,18 +241,21 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
       if (!bound) continue;
       let verified: string | null = null;
       if (intro.username !== null && intro.usernameCertificate !== null) {
-        let hash: Uint8Array | null = null;
-        if (intro.username === username && hashes.username !== null) {
-          hash = hashes.username;
+        let lookupKey: Uint8Array | null = null;
+        if (intro.username === username && rounds.username !== null) {
+          lookupKey = rounds.username.lookupKey;
         } else if (extraChecks < MAX_EXTRA_USERNAME_CHECKS) {
           extraChecks += 1;
           try {
-            hash = await deps.usernameHash(intro.username);
+            lookupKey = (await deps.usernameOprf(intro.username)).lookupKey;
           } catch {
-            hash = null;
+            lookupKey = null;
           }
         }
-        if (hash !== null && (await deps.verifyUsername(intro.usernameCertificate, hash, intro.accountId))) {
+        if (
+          lookupKey !== null &&
+          (await deps.verifyUsername(intro.usernameCertificate, lookupKey, intro.accountId))
+        ) {
           verified = intro.username;
         }
       }

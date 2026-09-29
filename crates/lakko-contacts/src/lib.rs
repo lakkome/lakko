@@ -159,13 +159,13 @@ pub use group_name::{
 pub use incoming_envelope::{dispatch_incoming_envelope, DispatchError, IncomingEnvelope};
 pub use introduction::{
     bundle_is_newer, compose_bundle, compose_introduction, compose_introduction_offer,
-    decode_introduction_offer, decode_introductions, fof_tag, introduction_tags, open_introduction,
-    try_unwrap_introduction_offer, try_unwrap_introductions, IntroductionEntry, IntroductionError,
-    IntroductionPayload, IntroductionRecord, IntroductionsBundle, BUNDLE_SIZE_BUCKETS,
-    FOF_KEY_DOMAIN, FOF_TAG_DOMAIN, FOF_TAG_LEN, INTRODUCTIONS_ENVELOPE_DOMAIN_V1,
-    INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1, INTRODUCTION_RECORD_MAX_LEN,
-    INTRODUCTION_RECORD_MIN_LEN, MAX_BUNDLE_RECORDS, MAX_INTRODUCTION_TERMS, OPRF_OUTPUT_LEN,
-    WRAPPED_KEY_LEN,
+    compose_public_record, decode_introduction_offer, decode_introductions, fof_tag,
+    introduction_tags, open_introduction, open_public_record, try_unwrap_introduction_offer,
+    try_unwrap_introductions, IntroductionEntry, IntroductionError, IntroductionPayload,
+    IntroductionRecord, IntroductionsBundle, BUNDLE_SIZE_BUCKETS, FOF_KEY_DOMAIN, FOF_TAG_DOMAIN,
+    FOF_TAG_LEN, INTRODUCTIONS_ENVELOPE_DOMAIN_V1, INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1,
+    INTRODUCTION_RECORD_MAX_LEN, INTRODUCTION_RECORD_MIN_LEN, MAX_BUNDLE_RECORDS,
+    MAX_INTRODUCTION_TERMS, OPRF_OUTPUT_LEN, WRAPPED_KEY_LEN,
 };
 pub use invite::{
     compute_joiner_tag, generate_blob_id, generate_link_id, owner_list_canonical_bytes,
@@ -228,8 +228,9 @@ pub use visibility::{
     compose_reach_state, compose_visibility, decode_reach_state, decode_visibility,
     reach_state_is_newer, try_unwrap_reach_state, try_unwrap_visibility, visibility_is_newer,
     GroupsForm, ReachState, ReachStateEntry, ScopeId, ScopeKind, VisibilityError, VisibilityMode,
-    VisibilitySetting, MAX_CHOSEN_SCOPES, MAX_REACH_STATE_ENTRIES, MAX_SCOPE_ID_LEN,
-    REACH_STATE_ENVELOPE_DOMAIN_V1, VISIBILITY_ENVELOPE_DOMAIN_V1,
+    VisibilitySetting, MAX_CHOSEN_SCOPES, MAX_REACH_STATE_ENTRIES, MAX_REACH_STATE_ENVELOPE_LEN,
+    MAX_SCOPE_ID_LEN, MAX_VISIBILITY_ENVELOPE_LEN, REACH_STATE_ENVELOPE_DOMAIN_V1,
+    VISIBILITY_ENVELOPE_DOMAIN_V1,
 };
 
 /// Entry points for the fuzz harnesses in `crates/lakko-contacts/fuzz`.

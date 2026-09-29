@@ -193,7 +193,10 @@ mod tests {
             display_name: maximal.then(|| format!("{}\u{20AC}", "\u{1F600}".repeat(63))),
             username: maximal.then(|| "a".repeat(32)),
             username_certificate: maximal.then(|| vec![9; 153]),
-            fof: ReachGrant::derive(&[3; 32], ReachClass::Fof, b"", 1).unwrap(),
+            // The shortest record a decoder accepts is grant-less (the
+            // Everyone shape): a relayed offer or bundle is only ever parsed
+            // structurally, so the pre-filter's range must admit it.
+            fof: maximal.then(|| ReachGrant::derive(&[3; 32], ReachClass::Fof, b"", 1).unwrap()),
         }
     }
 
@@ -203,7 +206,12 @@ mod tests {
         } else {
             vec![[5; 64]]
         };
-        compose_introduction(&payload(maximal), &terms, 1).unwrap()
+        if maximal {
+            compose_introduction(&payload(maximal), &terms, 1).unwrap()
+        } else {
+            lakko_contacts::introduction::compose_public_record(&payload(maximal), &terms, 1)
+                .unwrap()
+        }
     }
 
     fn visibility(maximal: bool) -> Vec<u8> {

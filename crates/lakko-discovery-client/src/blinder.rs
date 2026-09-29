@@ -23,8 +23,23 @@
 //!
 //!   2. [`OprfBlinder::finalize`] — consume the server's
 //!      `EvaluationElement`, run `OprfClient::finalize`, and
-//!      return the 64-byte OPRF output that goes into
-//!      `/discovery/{register, lookup}` as `oprf_hash`.
+//!      return an [`OprfFinalized`]: the 64-byte OPRF output, which
+//!      stays on the client, and the 64-byte lookup key derived from
+//!      it ([`discovery_lookup_key`]), which is the only value that
+//!      goes to `/discovery/{register, lookup}` as `oprf_hash`.
+//!
+//! ## Why the server never sees the OPRF output
+//!
+//! A public record ([ADR-0060] section 5) is sealed under keys derived
+//! from the OPRF output of each of its search terms. If the server stored
+//! the output itself, anyone reading its tables (a stolen backup, a
+//! compromised database) could open every public record and read every
+//! name in it. The server stores the one-way lookup key instead, so a
+//! table leak yields nothing that opens a record. What this does not
+//! protect against is the operator: it holds the OPRF key and can
+//! evaluate any guessed name itself.
+//!
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 //!
 //! [`OprfBlinder`] holds the normalised username internally so
 //! callers cannot accidentally hand a different string to
@@ -33,6 +48,7 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+use lakko_crypto::hash::{blake3_derive_key, blake3_keyed_xof};
 use rand::rngs::OsRng;
 use voprf::{EvaluationElement, OprfClient};
 
@@ -45,6 +61,63 @@ use crate::LakkoOprfCs;
 /// SHA-512 digest). Pinned here as a `const` so callers (and the
 /// server side, which uses the same constant) stay in lock-step.
 pub const OPRF_HASH_LEN: usize = 64;
+
+/// Domain of the key the lookup key is derived under ([ADR-0060] section 5).
+///
+/// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+pub const DISCOVERY_LOOKUP_DOMAIN: &str = "lakko/discovery/lookup/v1";
+
+/// The value discovery stores and looks up for an OPRF output:
+/// `BLAKE3-keyed-XOF(BLAKE3-derive-key(DISCOVERY_LOOKUP_DOMAIN), output)`,
+/// 64 bytes so the server's columns and the username certificate keep their
+/// width. One-way: nothing that opens a record keyed by `output` can be
+/// computed from it.
+#[must_use]
+pub fn discovery_lookup_key(output: &[u8; OPRF_HASH_LEN]) -> [u8; OPRF_HASH_LEN] {
+    let key = blake3_derive_key(DISCOVERY_LOOKUP_DOMAIN);
+    let derived = blake3_keyed_xof(&key, output, OPRF_HASH_LEN);
+    let mut out = [0u8; OPRF_HASH_LEN];
+    out.copy_from_slice(&derived);
+    out
+}
+
+/// What one OPRF round yields: the output, which stays on the client
+/// (records are sealed under keys derived from it), and the lookup key the
+/// server stores. The two are separate types of value on purpose, so a call
+/// site has to name which one it sends.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OprfFinalized {
+    output: [u8; OPRF_HASH_LEN],
+    lookup_key: [u8; OPRF_HASH_LEN],
+}
+
+impl OprfFinalized {
+    /// Build from an OPRF output, deriving its lookup key.
+    #[must_use]
+    pub fn from_output(output: [u8; OPRF_HASH_LEN]) -> Self {
+        let lookup_key = discovery_lookup_key(&output);
+        Self { output, lookup_key }
+    }
+
+    /// The OPRF output. Never send it to the server: it is the key
+    /// material records are sealed under.
+    #[must_use]
+    pub const fn output(&self) -> &[u8; OPRF_HASH_LEN] {
+        &self.output
+    }
+
+    /// The lookup key, the `oprf_hash` of every discovery request.
+    #[must_use]
+    pub const fn lookup_key(&self) -> &[u8; OPRF_HASH_LEN] {
+        &self.lookup_key
+    }
+}
+
+impl core::fmt::Debug for OprfFinalized {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OprfFinalized").finish_non_exhaustive()
+    }
+}
 
 /// Domain-separation prefix for the `@channel` OPRF namespace
 /// (lakko-security channels review, Finding 2).
@@ -267,10 +340,7 @@ impl OprfBlinder {
     ///   element that doesn't satisfy the OPRF math; in
     ///   non-verifiable OPRF mode the only reachable case is
     ///   wire corruption between encode and decode).
-    pub fn finalize(
-        self,
-        evaluated_b64: &str,
-    ) -> Result<[u8; OPRF_HASH_LEN], DiscoveryClientError> {
+    pub fn finalize(self, evaluated_b64: &str) -> Result<OprfFinalized, DiscoveryClientError> {
         let evaluated_bytes = B64
             .decode(evaluated_b64)
             .map_err(DiscoveryClientError::base64)?;
@@ -289,7 +359,7 @@ impl OprfBlinder {
         debug_assert_eq!(slice.len(), OPRF_HASH_LEN);
         let mut out = [0u8; OPRF_HASH_LEN];
         out.copy_from_slice(slice);
-        Ok(out)
+        Ok(OprfFinalized::from_output(out))
     }
 }
 
@@ -321,8 +391,13 @@ mod tests {
         let evaluated_b64 = B64.encode(evaluated.serialize());
 
         // Client: finalize.
-        let hash = blinder.finalize(&evaluated_b64).expect("finalize");
-        assert_eq!(hash.len(), OPRF_HASH_LEN);
+        let done = blinder.finalize(&evaluated_b64).expect("finalize");
+        // The output is exactly what the server's own evaluation of the
+        // same input gives, and the lookup key is its derivation.
+        let direct = server.evaluate(b"alice").expect("evaluate");
+        assert_eq!(done.output().as_slice(), direct.as_slice());
+        assert_eq!(done.lookup_key(), &discovery_lookup_key(done.output()));
+        assert_ne!(done.lookup_key(), done.output());
     }
 
     /// Determinism: two clients looking up the SAME normalised
@@ -474,7 +549,7 @@ mod tests {
             BlindedElement::<LakkoOprfCs>::deserialize(&blinded_bytes).expect("deserialize");
         let evaluated = server.blind_evaluate(&blinded_elem);
         let evaluated_b64 = B64.encode(evaluated.serialize());
-        blinder.finalize(&evaluated_b64).expect("finalize")
+        *blinder.finalize(&evaluated_b64).expect("finalize").output()
     }
 
     /// Helper: full client + server round-trip in the
@@ -486,7 +561,7 @@ mod tests {
             BlindedElement::<LakkoOprfCs>::deserialize(&blinded_bytes).expect("deserialize");
         let evaluated = server.blind_evaluate(&blinded_elem);
         let evaluated_b64 = B64.encode(evaluated.serialize());
-        blinder.finalize(&evaluated_b64).expect("finalize")
+        *blinder.finalize(&evaluated_b64).expect("finalize").output()
     }
 
     /// Finding 2 (lakko-security channels review): the `@channel`
@@ -561,7 +636,7 @@ mod tests {
             BlindedElement::<LakkoOprfCs>::deserialize(&blinded_bytes).expect("deserialize");
         let evaluated = server.blind_evaluate(&blinded_elem);
         let evaluated_b64 = B64.encode(evaluated.serialize());
-        blinder.finalize(&evaluated_b64).expect("finalize")
+        *blinder.finalize(&evaluated_b64).expect("finalize").output()
     }
 
     /// ADR-0060 section 5: the same string as a username, a channel handle
@@ -636,7 +711,7 @@ mod tests {
                         )
                         .expect("deserialize");
                         let evaluated = B64.encode(server.blind_evaluate(&blinded).serialize());
-                        b.finalize(&evaluated).expect("finalize")
+                        *b.finalize(&evaluated).expect("finalize").output()
                     };
                     assert_eq!(hash(t), oneshot_name(&server, t), "{t:?}");
                 }
@@ -690,4 +765,46 @@ mod tests {
         // `0xFF` domain prefix lives only in the OPRF input.
         assert_eq!(blinder.normalised_username(), "alice");
     }
+
+    /// The lookup key is pinned: the server and every client store and ask
+    /// for this exact derivation, so a change here makes every registered
+    /// name unfindable.
+    #[test]
+    fn golden_pins_the_lookup_key() {
+        let got = discovery_lookup_key(&[0x42; OPRF_HASH_LEN]);
+        assert_eq!(hex(&got), GOLDEN_LOOKUP_KEY);
+    }
+
+    /// The lookup key is not the output and not the introduction tag, so a
+    /// row the server holds is not a tag it could match against a record.
+    #[test]
+    fn lookup_key_is_apart_from_the_output_and_the_record_tag() {
+        let output = [0x17; OPRF_HASH_LEN];
+        let key = discovery_lookup_key(&output);
+        assert_ne!(key, output);
+        let tag = lakko_contacts::introduction::fof_tag(&output);
+        assert_ne!(&key[..tag.len()], tag.as_slice());
+        assert_ne!(discovery_lookup_key(&[0x18; OPRF_HASH_LEN]), key);
+    }
+
+    /// `Debug` shows neither value.
+    #[test]
+    fn debug_hides_both_values() {
+        let done = OprfFinalized::from_output([0xAB; OPRF_HASH_LEN]);
+        let text = format!("{done:?}");
+        assert!(
+            !text.contains("171") && !text.to_lowercase().contains("ab, "),
+            "{text}"
+        );
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        use core::fmt::Write as _;
+        bytes.iter().fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+    }
+
+    const GOLDEN_LOOKUP_KEY: &str = "8094566dab9909c8581a005c199c2bc168317bd4dda58dc05b8066973328480810f09b4cbfe1b17ef48202d670dbb654106303bc414fcdf2a8d5e74a998ea030";
 }

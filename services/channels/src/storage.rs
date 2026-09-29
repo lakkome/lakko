@@ -516,6 +516,20 @@ pub trait ChannelStore: Send + Sync {
         after: Option<SubscriberId>,
         limit: usize,
     ) -> Result<Vec<(SubscriberId, Vec<u8>)>, StorageError>;
+
+    /// Remove `(channel, subscriber)` (ADR-0060 unsubscribe): the subscriber
+    /// row, every retained seed envelope, the member card and any staged
+    /// envelope for it, in one step. Idempotent: an absent subscriber is not
+    /// an error.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`].
+    async fn unsubscribe(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<(), StorageError>;
 }
 
 /// In-memory state container. Cheap to clone — the inner
@@ -1236,6 +1250,30 @@ impl ChannelStore for InMemoryChannelStore {
         }
         if let Some(cards) = guard.member_cards.get_mut(&channel) {
             cards.remove(&subscriber);
+        }
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        if let Some(set) = guard.subscribers.get_mut(&channel) {
+            set.remove(&subscriber);
+        }
+        guard.envelopes.remove(&(channel, subscriber));
+        if let Some(cards) = guard.member_cards.get_mut(&channel) {
+            cards.remove(&subscriber);
+        }
+        for ((staged_channel, _), staged) in &mut guard.staged_envelopes {
+            if *staged_channel == channel {
+                staged.remove(&subscriber);
+            }
         }
         Ok(())
     }

@@ -554,6 +554,13 @@ public class DeviceGroupSyncRepository(
                     )
                 }
             }
+            is DeviceGroupBody.ServiceEnvelope -> {
+                // ADR-0060 section 7 carrier for the Visibility setting and
+                // the ReachState counters. Not consumed on Android yet: the
+                // setting and reach-key versions stay per device here, so
+                // the envelope is dropped, which is what happened to it
+                // before the variant existed.
+            }
         }
     }
 

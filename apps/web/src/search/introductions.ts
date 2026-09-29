@@ -47,7 +47,8 @@ export interface KeptIntroductions {
 export type ProbeVia = "term" | "username";
 
 export interface IntroductionProbe {
-  readonly oprf: Uint8Array;
+  /** The OPRF OUTPUT (never the lookup key) of the username or term. */
+  readonly oprfOutput: Uint8Array;
   readonly via: ProbeVia;
 }
 
@@ -125,7 +126,7 @@ export function openMatchingIntroductions(
   const probeTags: { tag: Uint8Array; probe: IntroductionProbe }[] = [];
   for (const probe of probes) {
     try {
-      probeTags.push({ tag: core.fofTag(probe.oprf), probe });
+      probeTags.push({ tag: core.fofTag(probe.oprfOutput), probe });
     } catch {
       /* a malformed OPRF output opens nothing */
     }
@@ -142,7 +143,7 @@ export function openMatchingIntroductions(
     if (hit === undefined) continue;
     let payload: IntroductionPayload | undefined;
     try {
-      payload = core.openIntroduction(record, hit.probe.oprf);
+      payload = core.openIntroduction(record, hit.probe.oprfOutput);
     } catch {
       // A tag matched and the record did not authenticate: a forgery.
       continue;
@@ -150,6 +151,9 @@ export function openMatchingIntroductions(
     if (payload === undefined) continue;
     try {
       const grant = payload.fof;
+      // `openIntroduction` refuses a record without its grant; a public
+      // record (no grant) is never an introduction.
+      if (grant === undefined) continue;
       let fofWire: Uint8Array;
       try {
         fofWire = core.encodeReachGrant(grant);

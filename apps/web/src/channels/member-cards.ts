@@ -156,7 +156,14 @@ async function uploadOwnCard(input: OwnCardInput): Promise<OwnCardOutcome> {
       content.username === null ? undefined : (input.usernameCertificate ?? undefined),
       grant === null ? undefined : [grant],
     );
-    const card = wasm.sealMemberCard(input.seed, input.epoch, idBytes, input.keys.public, profile);
+    // The card is bound to the account (ADR-0060 section 3): without a reach
+    // session there is no account seed to sign with, and a reader drops an
+    // unbound card.
+    if (session === null) {
+      profile.fill(0);
+      return "failed";
+    }
+    const card = session.sealMemberCard(input.seed, input.epoch, idBytes, input.keys.public, profile);
     profile.fill(0);
     const kp = new wasm.ChannelSubscriberKeypair(input.keys.secret);
     let signature: string;
@@ -331,6 +338,7 @@ export async function loadChannelMembers(input: LoadMembersInput): Promise<Chann
     for (const m of res.members) {
       const pkHex = bytesToHex(m.subscriberPk);
       let profile: Wasm["Profile"]["prototype"] | null = null;
+      let identityPk: Uint8Array;
       try {
         const epoch = wasm.memberCardEpoch(m.card);
         const seed = input.seedForEpoch(epoch);
@@ -338,9 +346,15 @@ export async function loadChannelMembers(input: LoadMembersInput): Promise<Chann
           unreadable += 1;
           continue;
         }
-        profile = wasm.decodeProfileEnvelope(
-          wasm.openMemberCard(seed, m.card, idBytes, m.subscriberPk),
-        );
+        // Opening verifies the card's account binding; a card that does not
+        // verify throws and is dropped.
+        const opened = wasm.openMemberCard(seed, m.card, idBytes, m.subscriberPk);
+        try {
+          identityPk = opened.identityPk;
+          profile = wasm.decodeProfileEnvelope(opened.profile);
+        } finally {
+          opened.free();
+        }
       } catch {
         unreadable += 1;
         profile?.free();
@@ -356,8 +370,13 @@ export async function loadChannelMembers(input: LoadMembersInput): Promise<Chann
           pkHex,
           ownSubscriberPkHex: input.ownSubscriberPkHex,
           ownAccountKeyHex,
+          identityPkHex: journalHex(identityPk),
           profile,
         });
+        if (row === null) {
+          unreadable += 1;
+          continue;
+        }
         if (seen.has(row.key)) continue;
         seen.add(row.key);
         rows.push(row);
@@ -387,13 +406,21 @@ async function readCard(args: {
   readonly pkHex: string;
   readonly ownSubscriberPkHex: string | null;
   readonly ownAccountKeyHex: string | null;
+  /** The account key the card's binding verified under (hex). */
+  readonly identityPkHex: string;
   readonly profile: Wasm["Profile"]["prototype"];
-}): Promise<ChannelMemberRow> {
+}): Promise<ChannelMemberRow | null> {
   const { wasm, session, profile } = args;
   const isOwnCard = args.ownSubscriberPkHex !== null && args.pkHex === args.ownSubscriberPkHex;
+  // The card is filed under the account key its binding verified under, never
+  // under the account id the profile claims. A claimed account id discovery
+  // publishes a different key for is a card naming someone else: dropped.
   const accountId = profile.accountId;
-  const senderHex =
-    isOwnCard || accountId === undefined ? null : await resolveAccountKeyHex(args.discovery, accountId);
+  if (!isOwnCard && accountId !== undefined) {
+    const published = await resolveAccountKeyHex(args.discovery, accountId);
+    if (published !== null && published !== args.identityPkHex) return null;
+  }
+  const senderHex = isOwnCard ? null : args.identityPkHex;
   const isSelf =
     isOwnCard || (senderHex !== null && args.ownAccountKeyHex !== null && senderHex === args.ownAccountKeyHex);
 

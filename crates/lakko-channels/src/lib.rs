@@ -104,14 +104,17 @@ pub mod post;
 pub mod rotation_policy;
 pub mod seed;
 pub mod subscribe;
+pub mod unsubscribe;
 
 pub use epoch::{EpochId, EPOCH_ID_LEN};
 pub use error::{ChannelError, Result};
 pub use member_card::{
-    member_card_epoch, member_card_signed_bytes, open_member_card, seal_member_card,
-    sign_member_card_request, verify_member_card_request, MAX_MEMBER_CARD_PROFILE_LEN,
-    MEMBER_CARD_KEY_INFO_V1, MEMBER_CARD_MAX_LEN, MEMBER_CARD_MIN_LEN, MEMBER_CARD_SIG_DOMAIN_V1,
-    MEMBER_CARD_SIG_HEADER, MEMBER_CARD_SIG_LEN, MEMBER_CARD_VERSION_V1, SUBSCRIBER_PK_LEN,
+    member_card_binding_bytes, member_card_epoch, member_card_signed_bytes, open_member_card,
+    seal_member_card, sign_member_card_request, verify_member_card_request, OpenedMemberCard,
+    MAX_MEMBER_CARD_PROFILE_LEN, MEMBER_CARD_BINDING_DOMAIN_V1, MEMBER_CARD_BINDING_LEN,
+    MEMBER_CARD_IDENTITY_PK_LEN, MEMBER_CARD_KEY_INFO_V1, MEMBER_CARD_MAX_LEN, MEMBER_CARD_MIN_LEN,
+    MEMBER_CARD_SIG_DOMAIN_V1, MEMBER_CARD_SIG_HEADER, MEMBER_CARD_SIG_LEN, MEMBER_CARD_VERSION_V2,
+    SUBSCRIBER_PK_LEN,
 };
 pub use meta::{
     channel_meta_is_newer, classify_post_plaintext, compose_channel_meta, decode_channel_meta,
@@ -127,7 +130,27 @@ pub use seed::{ContentKeySeed, CONTENT_KEY_SEED_LEN, EXPORTER_LABEL_V1};
 pub use subscribe::{
     open_seed, seal_seed, subscriber_public_key, EPH_PUB_LEN, SEED_ENVELOPE_LEN, TAG_LEN,
 };
+pub use unsubscribe::{
+    sign_unsubscribe_request, unsubscribe_signed_bytes, verify_unsubscribe_request,
+    UNSUBSCRIBE_DOMAIN_V1, UNSUBSCRIBE_SIG_HEADER, UNSUBSCRIBE_SIG_LEN, UNSUBSCRIBE_WINDOW_MS,
+};
 
 /// Channel identifier length — 16 bytes (the pseudonym chosen at
 /// channel creation, per ADR-0010 § "Server can correlate" mitigation).
 pub const CHANNEL_ID_LEN: usize = 16;
+
+/// Entry points for the fuzz harnesses in `crates/lakko-channels/fuzz`. Not
+/// part of the supported API.
+#[doc(hidden)]
+pub mod fuzz_api {
+    /// Run the member-card binding parser (ADR-0060 section 3) on an
+    /// arbitrary card plaintext under a fixed channel and subscriber key:
+    /// `Some(profile length)` when the binding verifies. The AEAD keeps a
+    /// fuzzer from reaching this parser through `open_member_card`.
+    #[must_use]
+    pub fn member_card_binding(plaintext: &[u8]) -> Option<usize> {
+        crate::member_card::verify_binding(plaintext, &[0x0C; crate::CHANNEL_ID_LEN], &[0x5B; 32])
+            .ok()
+            .map(|opened| opened.profile.len())
+    }
+}

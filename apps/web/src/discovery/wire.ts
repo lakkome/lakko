@@ -33,7 +33,8 @@ export interface OprfRequest {
 /** Response body of `POST /discovery/oprf`. */
 export interface OprfResponse {
   /** base64(EvaluationElement<Ristretto255-SHA512>). Feed to
-   *  `blinder.finalize(evaluated)` to recover the OPRF hash. */
+   *  `blinder.finalize(evaluated)`; send its `lookupKey` to discovery and
+   *  keep its `output` on the device (ADR-0060 section 5). */
   evaluated: string;
 }
 
@@ -46,8 +47,8 @@ export interface RegisterRequest {
   /** base64(account_id) — raw 16 bytes, same shape as
    *  `auth/wire.ts`. */
   account_id: string;
-  /** base64(VOPRF output) — exactly 64 bytes, the OPRF hash the
-   *  client just computed via `blinder.finalize`. */
+  /** base64(lookup key) — exactly 64 bytes, `blinder.finalize(..).lookupKey`.
+   *  Never the raw OPRF output, which keys sealed records (ADR-0060 §5). */
   oprf_hash: string;
 }
 
@@ -72,6 +73,9 @@ export interface LookupRequest {
  *  client surfaces that as a `null` rather than an error class. */
 export interface LookupResponse {
   account_id: string;
+  /** base64 of the account's public record (ADR-0060 section 5); opened with
+   *  the username's OPRF `output`, never sent anywhere. */
+  public_record_b64?: string;
 }
 
 // ----------------------------------------------------------------------------
@@ -347,8 +351,8 @@ export interface InviteOwnerListResponse {
  *  via a UNIQUE on `oprf_hash`; a repeat of the same hash with a
  *  different channel id is 409 Conflict. */
 export interface ChannelRegisterRequest {
-  /** base64(VOPRF output) — exactly 64 bytes, from
-   *  `blinder.finalize`. */
+  /** base64(lookup key) — exactly 64 bytes,
+   *  `blinder.finalize(..).lookupKey` (ADR-0060 section 5). */
   oprf_hash: string;
   /** base64(channel_id) — raw 16 bytes (ADR-0010 §"Wire
    *  surfaces"). */

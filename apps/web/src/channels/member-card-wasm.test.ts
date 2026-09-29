@@ -40,10 +40,16 @@ describe("member cards through the core", () => {
     const other = ChannelSubscriberKeypair.generate();
     try {
       const profile = composeProfileEnvelope("Ada", undefined, 5n, new Uint8Array(16).fill(1));
-      const card = sealMemberCard(seed, 3, channelId, me.public(), profile);
+      const accountSeed = new Uint8Array(32).fill(0x07);
+      const card = sealMemberCard(seed, 3, channelId, me.public(), accountSeed, profile);
       expect(memberCardEpoch(card)).toBe(3);
-      const opened = decodeProfileEnvelope(openMemberCard(seed, card, channelId, me.public()));
+      const openedCard = openMemberCard(seed, card, channelId, me.public());
+      const identityPk = openedCard.identityPk;
+      const opened = decodeProfileEnvelope(openedCard.profile);
+      openedCard.free();
       try {
+        // The binding names the account whose seed sealed the card.
+        expect(identityPk).toHaveLength(32);
         expect(opened.displayName).toBe("Ada");
         expect(opened.username).toBeUndefined();
         expect(opened.grants).toHaveLength(0);

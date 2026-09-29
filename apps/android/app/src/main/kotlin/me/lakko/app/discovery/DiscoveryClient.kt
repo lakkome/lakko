@@ -560,13 +560,14 @@ public class DiscoveryClient(
 
             val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
-            val oprfHashBytes = blinder.finalize(oprfResp.evaluated)
-            val oprfHashB64 = base64Encode(oprfHashBytes)
+            // ADR-0060 §5: discovery receives the lookup key derived
+            // from the OPRF output, never the output itself.
+            val lookupKeyB64 = base64Encode(blinder.finalize(oprfResp.evaluated).lookupKey)
 
             val resp = register(
                 RegisterRequest(
                     account_id = base64Encode(accountId),
-                    oprf_hash = oprfHashB64,
+                    oprf_hash = lookupKeyB64,
                 ),
             )
             if (!resp.ok) {
@@ -594,10 +595,9 @@ public class DiscoveryClient(
 
             val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
-            val oprfHashBytes = blinder.finalize(oprfResp.evaluated)
-            val oprfHashB64 = base64Encode(oprfHashBytes)
+            val lookupKeyB64 = base64Encode(blinder.finalize(oprfResp.evaluated).lookupKey)
 
-            val resp = lookupRaw(LookupRequest(oprf_hash = oprfHashB64))
+            val resp = lookupRaw(LookupRequest(oprf_hash = lookupKeyB64))
             if (resp == null) {
                 LookupResult(normalisedUsername = normalisedUsername, account = null)
             } else {
@@ -638,10 +638,11 @@ public class DiscoveryClient(
 
     /**
      * `PUT /discovery/visibility` (session-gated): enter Everyone with the
-     * OPRF hash of every name search term ([nameTermHashes], 64 bytes each),
-     * or leave it ([public] `false`, no terms). Idempotent.
+     * discovery lookup key of every name search term ([nameTermLookupKeys],
+     * 64 bytes each, `OprfResult.lookupKey` — never the OPRF output), or leave
+     * it ([public] `false`, no terms). Idempotent.
      */
-    public suspend fun putVisibility(public: Boolean, nameTermHashes: List<ByteArray>) {
+    public suspend fun putVisibility(public: Boolean, nameTermLookupKeys: List<ByteArray>) {
         val endpoint = "/discovery/visibility"
         val authHeader = sessionToken?.let { "Bearer $it" }
         val response: HttpResponse = try {
@@ -651,7 +652,7 @@ public class DiscoveryClient(
                 setBody(
                     VisibilityRequest(
                         public = public,
-                        name_terms_b64 = if (public) nameTermHashes.map(::base64Encode) else emptyList(),
+                        name_terms_b64 = if (public) nameTermLookupKeys.map(::base64Encode) else emptyList(),
                     ),
                 )
             }
@@ -665,27 +666,36 @@ public class DiscoveryClient(
         }
     }
 
-    /** The 64-byte OPRF output of one name search term (one `discovery-lookup`
-     *  token), the input of a name lookup and an introduction tag. */
-    public suspend fun oprfNameTerm(term: String): ByteArray =
+    /**
+     * OPRF one name search term (one `discovery-lookup` token). ADR-0060 §5:
+     * [uniffi.lakko_ffi_uniffi.OprfResult.lookupKey] is what a name lookup and
+     * the Everyone registration send; [uniffi.lakko_ffi_uniffi.OprfResult.output]
+     * stays on the device (public-record and introduction key material).
+     */
+    public suspend fun oprfNameTerm(term: String): uniffi.lakko_ffi_uniffi.OprfResult =
         uniffi.lakko_ffi_uniffi.OprfBlinder.blindNameTerm(term).use { blinder ->
             val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
             blinder.finalize(oprfResp.evaluated)
         }
 
-    /** The 64-byte OPRF output of a username (one `discovery-lookup` token). */
-    public suspend fun oprfUsername(username: String): ByteArray =
+    /**
+     * OPRF a username (one `discovery-lookup` token). The certificate binds
+     * [uniffi.lakko_ffi_uniffi.OprfResult.lookupKey]; the output never leaves
+     * the device.
+     */
+    public suspend fun oprfUsername(username: String): uniffi.lakko_ffi_uniffi.OprfResult =
         uniffi.lakko_ffi_uniffi.OprfBlinder.blind(username).use { blinder ->
             val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
             blinder.finalize(oprfResp.evaluated)
         }
 
     /** `POST /discovery/name/lookup` (anonymous): the accounts in Everyone
-     *  that published the name term hashing to [oprfHash] (at most 20). */
-    public suspend fun nameLookup(oprfHash: ByteArray): List<ByteArray> {
+     *  that published the name term whose discovery lookup key is [lookupKey]
+     *  (`OprfResult.lookupKey`, never the OPRF output; at most 20). */
+    public suspend fun nameLookup(lookupKey: ByteArray): List<ByteArray> {
         val resp = doPostNullableOn404<NameLookupResponse>("/discovery/name/lookup", anonymous = true) {
             contentType(ContentType.Application.Json)
-            setBody(NameLookupRequest(oprf_hash_b64 = base64Encode(oprfHash)))
+            setBody(NameLookupRequest(oprf_hash_b64 = base64Encode(lookupKey)))
         } ?: return emptyList()
         return resp.account_ids_b64.mapNotNull {
             try {
@@ -736,11 +746,11 @@ public class DiscoveryClient(
         return OprfBlinder.blindChannel(handle).use { blinder ->
             val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
-            val oprfHashB64 = base64Encode(blinder.finalize(oprfResp.evaluated))
+            val lookupKeyB64 = base64Encode(blinder.finalize(oprfResp.evaluated).lookupKey)
 
             val resp = channelRegister(
                 ChannelRegisterRequest(
-                    oprf_hash = oprfHashB64,
+                    oprf_hash = lookupKeyB64,
                     channel_id = base64Encode(channelId),
                 ),
             )
@@ -768,10 +778,10 @@ public class DiscoveryClient(
         return OprfBlinder.blindChannel(handle).use { blinder ->
             val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
-            val oprfHashB64 = base64Encode(blinder.finalize(oprfResp.evaluated))
+            val lookupKeyB64 = base64Encode(blinder.finalize(oprfResp.evaluated).lookupKey)
 
             val resp = channelLookupRaw(
-                ChannelLookupRequest(oprf_hash = oprfHashB64),
+                ChannelLookupRequest(oprf_hash = lookupKeyB64),
             ) ?: return@use null
             bytesToHexLower(base64Decode(resp.channel_id))
         }

@@ -617,7 +617,7 @@ mod tests {
             display_name: Some("Anna".to_string()),
             username: None,
             username_certificate: None,
-            fof: ReachGrant::derive(&[9; 32], ReachClass::Fof, b"", 1).unwrap(),
+            fof: Some(ReachGrant::derive(&[9; 32], ReachClass::Fof, b"", 1).unwrap()),
         };
         let record = compose_introduction(&payload, &[[5; 64]], 1).unwrap();
         let parsed = IntroductionRecord::decode(&record).unwrap();

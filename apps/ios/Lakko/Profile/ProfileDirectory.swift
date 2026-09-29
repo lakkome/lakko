@@ -274,7 +274,7 @@ public final class ProfileDirectory: ObservableObject {
 
     /// Verify the username a stored profile claims against the certificate it
     /// carried: the certificate's signature under the discovery key, bound to
-    /// the OPRF output of the claimed username (one evaluation) and to the
+    /// the lookup key of the claimed username (one evaluation) and to the
     /// account id the profile arrived with. No certificate, or no account id,
     /// is a refusal: the username is never shown (invariant #4).
     func verifyCertificate(signatureKeyB64: String, username: String) async throws -> Bool {
@@ -284,10 +284,12 @@ public final class ProfileDirectory: ObservableObject {
               let accountId = claim.accountId else { return false }
         guard case .valid(let canonical) = checkUsername(username) else { return false }
         let key = try await usernameCertKey()
-        let hash = try await DiscoveryClient().usernameOprfHash(canonical)
+        // The certificate binds the LOOKUP KEY of the username (ADR-0060
+        // section 5), never the OPRF output.
+        let lookupKey = try await DiscoveryClient().usernameOprf(canonical).lookupKey
         do {
             _ = try verifyUsernameBinding(
-                certificate: cert, verifyingKey: key, expectedOprfHash: hash,
+                certificate: cert, verifyingKey: key, expectedOprfHash: lookupKey,
                 expectedAccountId: accountId)
             return true
         } catch {
@@ -295,12 +297,13 @@ public final class ProfileDirectory: ObservableObject {
         }
     }
 
-    /// Verify one username certificate for an already-computed OPRF output
-    /// and account id (a search result). `false` on any failure.
-    func verifyCertificate(certificate: Data, oprfHash: Data, accountId: Data) async -> Bool {
+    /// Verify one username certificate for an already-computed lookup key
+    /// (`OprfResult.lookupKey`, never the output) and account id (a search
+    /// result). `false` on any failure.
+    func verifyCertificate(certificate: Data, lookupKey: Data, accountId: Data) async -> Bool {
         guard let key = try? await usernameCertKey() else { return false }
         return (try? verifyUsernameBinding(
-            certificate: certificate, verifyingKey: key, expectedOprfHash: oprfHash,
+            certificate: certificate, verifyingKey: key, expectedOprfHash: lookupKey,
             expectedAccountId: accountId)) != nil
     }
 

@@ -4447,7 +4447,7 @@ mod tests {
             display_name: Some("Anna".to_string()),
             username: None,
             username_certificate: None,
-            fof: derive_reach_grant(vec![3; 32], FfiReachClass::Fof, vec![], 1).unwrap(),
+            fof: Some(derive_reach_grant(vec![3; 32], FfiReachClass::Fof, vec![], 1).unwrap()),
         };
         let record = compose_introduction(payload, vec![vec![5; 64]], 1).unwrap();
 

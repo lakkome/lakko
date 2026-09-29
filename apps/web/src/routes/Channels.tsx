@@ -225,8 +225,10 @@ function ChannelInfoBody(props: {
         </Show>
       </header>
 
-      {/* UX 6.3 — a channel lists its members to its members. */}
-      <Show when={props.members !== undefined}>
+      {/* UX 6.3 — a channel lists its members to its members. The core
+          decides the block; `members` is what this device needs to open the
+          cards (without it the block has nothing to show). */}
+      <Show when={sections().includes("channel-members") && props.members !== undefined}>
         <section class="lk-card">
           <div class="lk-card-row">
             <span class="lk-card-row-icon">

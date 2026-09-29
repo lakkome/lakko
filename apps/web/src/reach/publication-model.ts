@@ -5,9 +5,10 @@
  * ADR-0060 sections 4 and 5 - the pure decisions behind what this account
  * publishes for others to find it by:
  *
- * - the **Everyone** publication at discovery (the username's `public` flag
- *   and the name's search terms as OPRF outputs), sent on entering Everyone
- *   and on every name change, withdrawn on leaving;
+ * - the **Everyone** publication at discovery (the username's `public` flag,
+ *   the lookup key of each name search term, and the public record sealed
+ *   under the terms' OPRF outputs), sent on entering Everyone and whenever the
+ *   name, the username or its certificate changed, withdrawn on leaving;
  * - the **introduction record** (contacts of contacts), rebuilt when 2.1 is
  *   on and the `fof` key version, the name or the username changed, and
  *   offered to every contact who has not been sent this version yet;
@@ -21,10 +22,13 @@
 
 /** What this device last published, persisted per account. */
 export interface PublicationState {
-  /** The Everyone publication in effect: `null` = never published. */
-  readonly everyone: { readonly public: boolean; readonly name: string | null } | null;
-  /** The OPRF output of each term already evaluated (term -> base64). */
-  readonly termHashes: Readonly<Record<string, string>>;
+  /** The Everyone publication in effect (`key` = `everyoneKey` of the inputs
+   *  it was built from): `null` = never published. */
+  readonly everyone: { readonly public: boolean; readonly key: string | null } | null;
+  /** The OPRF OUTPUT of each term already evaluated (term -> base64). Never
+   *  sent anywhere: the lookup key discovery gets is derived from it with
+   *  `discoveryLookupKey`, and records are sealed under it (ADR-0060 §5). */
+  readonly termOutputs: Readonly<Record<string, string>>;
   /** The current introduction record and the inputs it was built from. */
   readonly offer: { readonly key: string; readonly recordB64: string } | null;
   /** Conversation (group id base64) -> the offer key last sent there. */
@@ -35,7 +39,7 @@ export interface PublicationState {
 
 export const EMPTY_PUBLICATION: PublicationState = {
   everyone: null,
-  termHashes: {},
+  termOutputs: {},
   offer: null,
   offerSentTo: {},
   bundleSentTo: {},
@@ -44,17 +48,27 @@ export const EMPTY_PUBLICATION: PublicationState = {
 /** The Everyone step: what to send to discovery, if anything. */
 export type EveryoneAction =
   | { readonly kind: "none" }
-  | { readonly kind: "publish"; readonly name: string | null }
+  | { readonly kind: "publish" }
   | { readonly kind: "withdraw" };
+
+/** The inputs the Everyone publication (name terms + public record) is
+ *  built from, as one key. */
+export function everyoneKey(
+  name: string | null,
+  username: string | null,
+  usernameCertificateB64: string | null,
+): string {
+  return JSON.stringify([name ?? "", username ?? "", usernameCertificateB64 ?? ""]);
+}
 
 export function everyoneAction(
   held: PublicationState["everyone"],
   everyone: boolean,
-  name: string | null,
+  key: string,
 ): EveryoneAction {
   if (everyone) {
-    if (held !== null && held.public && held.name === name) return { kind: "none" };
-    return { kind: "publish", name };
+    if (held !== null && held.public && held.key === key) return { kind: "none" };
+    return { kind: "publish" };
   }
   // Leaving Everyone (or never in it): withdraw only what was published.
   if (held !== null && held.public) return { kind: "withdraw" };
@@ -102,21 +116,27 @@ export function bundleTargets(
 
 /** The terms still to evaluate (not in the cache). */
 export function termsToEvaluate(state: PublicationState, terms: readonly string[]): string[] {
-  return [...new Set(terms)].filter((t) => !(t in state.termHashes));
+  return [...new Set(terms)].filter((t) => !(t in state.termOutputs));
 }
 
+/** Version of the persisted row. 2: `termOutputs` and the Everyone `key`
+ *  (ADR-0060 section 5: discovery holds lookup keys, never OPRF outputs). A
+ *  row of any other version reads as empty, so a device that published under
+ *  version 1 publishes again. */
+const PUBLICATION_VERSION = 2;
+
 export function encodePublication(state: PublicationState): string {
-  return JSON.stringify({ v: 1, ...state });
+  return JSON.stringify({ v: PUBLICATION_VERSION, ...state });
 }
 
 export function decodePublication(json: string | null): PublicationState {
   if (json === null) return EMPTY_PUBLICATION;
   try {
     const raw = JSON.parse(json) as Partial<PublicationState> & { v?: number };
-    if (raw.v !== 1) return EMPTY_PUBLICATION;
+    if (raw.v !== PUBLICATION_VERSION) return EMPTY_PUBLICATION;
     return {
       everyone: raw.everyone ?? null,
-      termHashes: raw.termHashes ?? {},
+      termOutputs: raw.termOutputs ?? {},
       offer: raw.offer ?? null,
       offerSentTo: raw.offerSentTo ?? {},
       bundleSentTo: raw.bundleSentTo ?? {},

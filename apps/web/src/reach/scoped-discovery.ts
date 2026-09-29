@@ -7,22 +7,34 @@
  * username or a name term.
  *
  * - `GET /discovery/username-certificate` (session): this account's
- *   discovery-signed `(OPRF(username), account_id)` certificate, carried in
+ *   discovery-signed `(lookup key of OPRF(username), account_id)` certificate, carried in
  *   profile v3 so a viewer can verify a username with no lookup;
  * - `GET /.well-known/lakko-username-cert-key`: the verifying key, pinned at
  *   build time when `VITE_LAKKO_USERNAME_CERT_KEY` is set (then never
  *   fetched);
- * - `PUT /discovery/visibility {public, name_terms_b64}` (session): enter or
- *   leave Everyone;
- * - `POST /discovery/name/lookup {oprf_hash_b64}`: up to 20 account ids of
- *   people in Everyone whose name carries the term.
+ * - `PUT /discovery/visibility {public, name_terms_b64, public_record_b64}`
+ *   (session): enter or leave Everyone;
+ * - `POST /discovery/name/lookup {oprf_hash_b64}`: up to 20 people in
+ *   Everyone whose name carries the term, with their public records.
+ *
+ * Every value sent to discovery is an OPRF `lookupKey`; the `output` stays on
+ * the device (`discovery/oprf-pair.ts`).
  *
  * The OPRF evaluation itself spends one `discovery-lookup` anonymous token
  * through `DiscoveryClient.oprfEvaluate`.
  */
 import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import { DiscoveryClient, DiscoveryHttpError, DiscoveryNetworkError } from "../discovery/client";
+import { finalizeOprf, type OprfPair } from "../discovery/oprf-pair";
 import { loadWasm } from "../wasm";
+
+/** One person in Everyone a name lookup returned. */
+export interface NameLookupHit {
+  readonly accountId: Uint8Array;
+  /** Their public record, opened with the term's OPRF output; `null` when
+   *  the server sent none. */
+  readonly publicRecord: Uint8Array | null;
+}
 
 const BASE = "/api/discovery";
 
@@ -98,18 +110,30 @@ export class ScopedDiscoveryClient {
       : base64Decode(json.username_certificate_b64);
   }
 
-  /** Enter (with the name's term hashes) or leave Everyone. */
-  async putVisibility(isPublic: boolean, nameTermHashes: readonly Uint8Array[]): Promise<void> {
+  /**
+   * Enter or leave Everyone. Entering sends the lookup key of every name term
+   * and the public record (composed over the terms' OPRF outputs, which never
+   * leave the device); leaving sends neither. ADR-0060 section 5.
+   */
+  async putVisibility(
+    publication:
+      | { readonly public: true; readonly nameTermLookupKeys: readonly Uint8Array[]; readonly publicRecord: Uint8Array }
+      | { readonly public: false },
+  ): Promise<void> {
     const endpoint = "/discovery/visibility";
+    const body = publication.public
+      ? {
+          public: true,
+          name_terms_b64: publication.nameTermLookupKeys.map((k) => base64Encode(k)),
+          public_record_b64: base64Encode(publication.publicRecord),
+        }
+      : { public: false, name_terms_b64: [] };
     let response: Response;
     try {
       response = await fetch(`${BASE}${endpoint}`, {
         method: "PUT",
         headers: { "content-type": "application/json", ...this.authHeaders() },
-        body: JSON.stringify({
-          public: isPublic,
-          name_terms_b64: isPublic ? nameTermHashes.map((h) => base64Encode(h)) : [],
-        }),
+        body: JSON.stringify(body),
       });
     } catch (err) {
       throw new DiscoveryNetworkError(endpoint, err);
@@ -117,31 +141,43 @@ export class ScopedDiscoveryClient {
     if (!response.ok) throw new DiscoveryHttpError(response.status, endpoint, "");
   }
 
-  /** Account ids (16 bytes each) of people in Everyone carrying a term. */
-  async nameLookup(termHash: Uint8Array): Promise<Uint8Array[]> {
+  /** People in Everyone carrying a name term, by the term's LOOKUP KEY (never
+   *  its OPRF output): account id (16 bytes) and public record each. */
+  async nameLookup(termLookupKey: Uint8Array): Promise<NameLookupHit[]> {
     const endpoint = "/discovery/name/lookup";
     let response: Response;
     try {
       response = await fetch(`${BASE}${endpoint}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ oprf_hash_b64: base64Encode(termHash) }),
+        body: JSON.stringify({ oprf_hash_b64: base64Encode(termLookupKey) }),
       });
     } catch (err) {
       throw new DiscoveryNetworkError(endpoint, err);
     }
     if (!response.ok) throw new DiscoveryHttpError(response.status, endpoint, "");
-    const json = (await response.json()) as { account_ids_b64?: string[] };
-    return (json.account_ids_b64 ?? []).map((b) => base64Decode(b));
+    const json = (await response.json()) as {
+      results?: { account_id_b64?: string; public_record_b64?: string }[];
+    };
+    const hits: NameLookupHit[] = [];
+    for (const r of json.results ?? []) {
+      if (r.account_id_b64 === undefined) continue;
+      hits.push({
+        accountId: base64Decode(r.account_id_b64),
+        publicRecord: r.public_record_b64 === undefined ? null : base64Decode(r.public_record_b64),
+      });
+    }
+    return hits;
   }
 
-  /** The 64-byte OPRF output of a name term (one anonymous token). */
-  async nameTermHash(term: string): Promise<Uint8Array> {
+  /** One OPRF round over a name term (one anonymous token): the lookup key
+   *  for discovery and the output for records. */
+  async nameTermOprf(term: string): Promise<OprfPair> {
     const wasm = await loadWasm();
     const blinder = wasm.OprfBlinder.blindNameTerm(term);
     try {
       const resp = await this.discovery.oprfEvaluate({ blinded: blinder.blindedB64 });
-      return blinder.finalize(resp.evaluated);
+      return finalizeOprf(blinder, resp.evaluated);
     } finally {
       try {
         blinder.free();
@@ -151,13 +187,14 @@ export class ScopedDiscoveryClient {
     }
   }
 
-  /** The 64-byte OPRF output of a username (one anonymous token). */
-  async usernameHash(username: string): Promise<Uint8Array> {
+  /** One OPRF round over a username (one anonymous token): the lookup key
+   *  for discovery and certificates, the output for records. */
+  async usernameOprf(username: string): Promise<OprfPair> {
     const wasm = await loadWasm();
     const blinder = wasm.OprfBlinder.blind(username);
     try {
       const resp = await this.discovery.oprfEvaluate({ blinded: blinder.blindedB64 });
-      return blinder.finalize(resp.evaluated);
+      return finalizeOprf(blinder, resp.evaluated);
     } finally {
       try {
         blinder.free();

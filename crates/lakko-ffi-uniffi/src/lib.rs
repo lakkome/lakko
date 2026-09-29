@@ -1243,6 +1243,25 @@ pub enum DeviceGroupBody {
         /// Conversation group_ids in display order, top-to-bottom.
         group_ids: Vec<Vec<u8>>,
     },
+    /// An opaque `lakko-contacts` envelope the owner's devices exchange
+    /// (ADR-0060 section 7: the Visibility setting and the ReachState
+    /// counters), 1 to [`device_group_service_envelope_max_len`] bytes.
+    /// The core never interprets it: hand the bytes to
+    /// `dispatchIncomingEnvelope` and keep only Visibility / ReachState.
+    /// Appended last so the existing variants keep their positions.
+    ServiceEnvelope {
+        /// The envelope bytes, domain separator included.
+        envelope: Vec<u8>,
+    },
+}
+
+/// Longest envelope a DeviceGroup [`DeviceGroupBody::ServiceEnvelope`]
+/// carries (ADR-0060 section 7). Compose refuses a longer or empty one;
+/// parse refuses the whole payload.
+#[uniffi::export]
+#[must_use]
+pub fn device_group_service_envelope_max_len() -> u32 {
+    u32::try_from(lakko_mls::MAX_SERVICE_ENVELOPE_LEN).unwrap_or(u32::MAX)
 }
 
 /// Parsed envelope returned by
@@ -1256,7 +1275,7 @@ pub struct ParsedDeviceGroupPayload {
     /// Leaf index of the device that authored this payload.
     pub sender_leaf: u32,
     /// Concrete payload — one of `ReadCursor` / `Draft` /
-    /// `Flags` / `Order`.
+    /// `Flags` / `Order` / `ServiceEnvelope`.
     pub body: DeviceGroupBody,
 }
 
@@ -1296,6 +1315,7 @@ impl From<DeviceGroupBody> for lakko_mls::device_group::DeviceGroupBody {
                 unread_override,
             },
             DeviceGroupBody::Order { group_ids } => Inner::Order { group_ids },
+            DeviceGroupBody::ServiceEnvelope { envelope } => Inner::ServiceEnvelope { envelope },
         }
     }
 }
@@ -1336,6 +1356,7 @@ impl From<lakko_mls::device_group::DeviceGroupBody> for DeviceGroupBody {
                 unread_override,
             },
             Inner::Order { group_ids } => Self::Order { group_ids },
+            Inner::ServiceEnvelope { envelope } => Self::ServiceEnvelope { envelope },
         }
     }
 }
@@ -3027,6 +3048,28 @@ impl DeviceGroup {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let bytes = g.create_devicegroup_message(&identity.inner, body.into(), hlc)?;
         Ok(bytes)
+    }
+
+    /// Compose + encrypt a [`DeviceGroupBody::ServiceEnvelope`] carrying a
+    /// `lakko-contacts` envelope (ADR-0060 section 7: `composeVisibility` /
+    /// `composeReachState` output) verbatim. Same as
+    /// [`Self::create_devicegroup_message`] with that body.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Codec`] when `envelope` is empty or longer than
+    /// [`device_group_service_envelope_max_len`]; nothing is encrypted.
+    pub fn create_service_envelope_message(
+        &self,
+        identity: &Identity,
+        envelope: Vec<u8>,
+        hlc: u64,
+    ) -> Result<Vec<u8>, FfiError> {
+        self.create_devicegroup_message(
+            identity,
+            DeviceGroupBody::ServiceEnvelope { envelope },
+            hlc,
+        )
     }
 
     /// Decrypt / advance the state machine for an inbound

@@ -883,6 +883,36 @@ impl ChannelStore for SqlChannelStore {
         Ok(())
     }
 
+    async fn unsubscribe(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<(), StorageError> {
+        if !self.exists(channel).await {
+            return Err(StorageError::UnknownChannel);
+        }
+        // One transaction: the subscriber row (its envelopes and member card
+        // go with it through the FK cascades) and its staged envelopes (no FK
+        // to the subscriber, so removed explicitly).
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        sqlx::query("DELETE FROM channel_subscribers WHERE channel_id = ? AND subscriber_id = ?")
+            .bind(channel.as_bytes().as_slice())
+            .bind(subscriber.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        sqlx::query(
+            "DELETE FROM channel_staged_envelopes WHERE channel_id = ? AND subscriber_id = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(subscriber.as_bytes().as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
     async fn list_member_cards(
         &self,
         channel: ChannelId,
@@ -1031,5 +1061,76 @@ mod tests {
             s.list_member_cards(channel, None, 10).await.unwrap(),
             vec![(subs[2], subs[2].as_bytes().to_vec())]
         );
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_takes_the_row_envelopes_card_and_staged_rows() {
+        let Some(s) = store().await else {
+            return;
+        };
+        let channel = ChannelId::from_bytes(&random::<16>()).unwrap();
+        s.create(channel).await.unwrap();
+        let sub = SubscriberId::from_bytes(&random::<32>()).unwrap();
+        let keep = SubscriberId::from_bytes(&random::<32>()).unwrap();
+        for id in [sub, keep] {
+            s.subscribe(channel, id, 0).await.unwrap();
+            s.deliver_envelope(channel, id, None, vec![7; 80], 80)
+                .await
+                .unwrap();
+            s.put_member_card(channel, id, 0, vec![1; 40])
+                .await
+                .unwrap();
+        }
+        s.stage_envelopes(
+            channel,
+            1,
+            vec![(sub, vec![8; 80]), (keep, vec![8; 80])],
+            80,
+        )
+        .await
+        .unwrap();
+
+        s.unsubscribe(channel, sub).await.unwrap();
+        s.unsubscribe(channel, sub).await.unwrap();
+        assert_eq!(s.list_subscribers(channel).await.unwrap(), vec![keep]);
+        assert_eq!(
+            s.list_member_cards(channel, None, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect::<Vec<_>>(),
+            vec![keep]
+        );
+        let (envelopes,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM channel_envelopes WHERE channel_id = ? AND subscriber_id = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(sub.as_bytes().as_slice())
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+        assert_eq!(envelopes, 0);
+        let (staged,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM channel_staged_envelopes WHERE channel_id = ?")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(staged, 1, "only the remaining subscriber's staged row");
+        assert!(matches!(
+            s.unsubscribe(ChannelId::from_bytes(&random::<16>()).unwrap(), sub)
+                .await,
+            Err(StorageError::UnknownChannel)
+        ));
+    }
+
+    #[test]
+    fn the_member_card_column_fits_the_longest_card() {
+        let migration = include_str!("../migrations/0006_member_card_binding_width.sql");
+        assert!(migration.contains(&format!(
+            "VARBINARY({})",
+            lakko_channels::MEMBER_CARD_MAX_LEN
+        )));
     }
 }

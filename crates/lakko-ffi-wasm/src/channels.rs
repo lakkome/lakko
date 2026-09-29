@@ -86,8 +86,9 @@ use lakko_channels::{
     open_member_card as inner_open_member_card, open_seed,
     post::ChannelPost as RustChannelPost,
     seal_member_card as inner_seal_member_card, seal_seed, sign_member_card_request,
-    verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, EXPORTER_LABEL_V1,
-    MAX_MEMBER_CARD_PROFILE_LEN, MEMBER_CARD_SIG_HEADER, SEED_ENVELOPE_LEN, SUBSCRIBER_PK_LEN,
+    sign_unsubscribe_request, verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN,
+    EXPORTER_LABEL_V1, MAX_MEMBER_CARD_PROFILE_LEN, MEMBER_CARD_SIG_HEADER, SEED_ENVELOPE_LEN,
+    SUBSCRIBER_PK_LEN, UNSUBSCRIBE_SIG_HEADER,
 };
 use lakko_crypto::signing::SigningKey;
 
@@ -423,6 +424,44 @@ impl WasmChannelSubscriberKeypair {
         member_card_request_signature_inner(&self.inner, channel_id, card)
             .map_err(|m| JsError::new(&m))
     }
+
+    /// The `unsubscribeSigHeaderName()` header value for leaving the
+    /// channel (`DELETE /v1/channels/<id>/subscribers/<public hex>`,
+    /// ADR-0060): `<issuedAtMs>.<signature base64url>`, signed over
+    /// `lakko_channels::unsubscribe_signed_bytes`. Pass `Date.now()`; the
+    /// server accepts it within two minutes of its own clock. Throws on a
+    /// wrong-length channel id.
+    #[wasm_bindgen(js_name = "unsubscribeRequestHeader")]
+    pub fn unsubscribe_request_header(
+        &self,
+        channel_id: &[u8],
+        issued_at_ms: u64,
+    ) -> Result<String, JsError> {
+        unsubscribe_request_header_inner(&self.inner, channel_id, issued_at_ms)
+            .map_err(|m| JsError::new(&m))
+    }
+}
+
+fn unsubscribe_request_header_inner(
+    key: &SigningKey,
+    channel_id: &[u8],
+    issued_at_ms: u64,
+) -> Result<String, String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let channel: [u8; CHANNEL_ID_LEN] = channel_id
+        .try_into()
+        .map_err(|_| format!("channel_id must be exactly {CHANNEL_ID_LEN} bytes"))?;
+    let sig = sign_unsubscribe_request(key, &channel, issued_at_ms);
+    Ok(format!("{issued_at_ms}.{}", URL_SAFE_NO_PAD.encode(sig)))
+}
+
+/// The request header an unsubscribe carries its signature in
+/// (`x-lakko-unsubscribe-sig`).
+#[wasm_bindgen(js_name = "unsubscribeSigHeaderName")]
+#[must_use]
+pub fn unsubscribe_sig_header_name() -> String {
+    UNSUBSCRIBE_SIG_HEADER.to_string()
 }
 
 fn member_card_request_signature_inner(
@@ -711,28 +750,75 @@ fn seal_member_card_inner(
     epoch_id: u32,
     channel_id: &[u8],
     subscriber_pk: &[u8],
+    account_identity_seed: &[u8],
     profile: &[u8],
 ) -> Result<Vec<u8>, String> {
     let (seed, channel, pk) = member_card_args(seed, channel_id, subscriber_pk)?;
-    inner_seal_member_card(&seed, EpochId::new(epoch_id), &channel, &pk, profile)
-        .map_err(|e| format!("seal_member_card: {e}"))
+    let identity: [u8; 32] = account_identity_seed
+        .try_into()
+        .map_err(|_| "account identity seed must be exactly 32 bytes".to_string())?;
+    inner_seal_member_card(
+        &seed,
+        EpochId::new(epoch_id),
+        &channel,
+        &pk,
+        &identity,
+        profile,
+    )
+    .map_err(|e| format!("seal_member_card: {e}"))
 }
 
 /// Seal `profile` (a profile envelope, ADR-0048 v3) into a member card for
-/// `subscriberPk` in `channelId` under the 32-byte seed of `epochId`.
+/// `subscriberPk` in `channelId` under the 32-byte seed of `epochId`, bound
+/// to the account whose 32-byte Ed25519 identity seed is
+/// `accountIdentitySeed` (ADR-0060: the card names the account, signed).
 ///
-/// Throws on a wrong-length seed, channel id or subscriber key, or a profile
-/// over `maxMemberCardProfileLen()` bytes.
+/// Throws on a wrong-length seed, channel id, subscriber key or identity
+/// seed, or a profile over `maxMemberCardProfileLen()` bytes.
 #[wasm_bindgen(js_name = "sealMemberCard")]
 pub fn seal_member_card(
     seed: &[u8],
     epoch_id: u32,
     channel_id: &[u8],
     subscriber_pk: &[u8],
+    account_identity_seed: &[u8],
     profile: &[u8],
 ) -> Result<Vec<u8>, JsError> {
-    seal_member_card_inner(seed, epoch_id, channel_id, subscriber_pk, profile)
-        .map_err(|m| JsError::new(&m))
+    seal_member_card_inner(
+        seed,
+        epoch_id,
+        channel_id,
+        subscriber_pk,
+        account_identity_seed,
+        profile,
+    )
+    .map_err(|m| JsError::new(&m))
+}
+
+/// A member card opened and its account binding verified.
+#[wasm_bindgen]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedMemberCard {
+    identity_pk: Vec<u8>,
+    profile: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl OpenedMemberCard {
+    /// The 32-byte account identity public key that signed the card: file
+    /// the profile and any grant under this account.
+    #[wasm_bindgen(getter, js_name = identityPk)]
+    #[must_use]
+    pub fn identity_pk(&self) -> Vec<u8> {
+        self.identity_pk.clone()
+    }
+
+    /// The profile envelope; decode it with `decodeProfileEnvelope`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn profile(&self) -> Vec<u8> {
+        self.profile.clone()
+    }
 }
 
 /// The clear epoch of a member card, to pick the matching seed before
@@ -750,22 +836,29 @@ fn open_member_card_inner(
     card: &[u8],
     channel_id: &[u8],
     subscriber_pk: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<OpenedMemberCard, String> {
     let (seed, channel, pk) = member_card_args(seed, channel_id, subscriber_pk)?;
-    inner_open_member_card(&seed, card, &channel, &pk).map_err(|e| format!("open_member_card: {e}"))
+    let opened = inner_open_member_card(&seed, card, &channel, &pk)
+        .map_err(|e| format!("open_member_card: {e}"))?;
+    Ok(OpenedMemberCard {
+        identity_pk: opened.identity_pk.to_vec(),
+        profile: opened.profile,
+    })
 }
 
 /// Open a member card served for `subscriberPk` in `channelId` with the
-/// 32-byte seed of the epoch it names; returns the profile envelope (decode
-/// it with `decodeProfileEnvelope`). Fail-closed: a card sealed for another
-/// subscriber, channel or epoch does not open. Throws on any failure.
+/// 32-byte seed of the epoch it names and verify its account binding;
+/// returns `{identityPk, profile}` (decode the profile with
+/// `decodeProfileEnvelope`). Fail-closed: a card sealed for another
+/// subscriber, channel or epoch, or naming an account that did not sign it,
+/// does not open. Throws on any failure.
 #[wasm_bindgen(js_name = "openMemberCard")]
 pub fn open_member_card(
     seed: &[u8],
     card: &[u8],
     channel_id: &[u8],
     subscriber_pk: &[u8],
-) -> Result<Vec<u8>, JsError> {
+) -> Result<OpenedMemberCard, JsError> {
     open_member_card_inner(seed, card, channel_id, subscriber_pk).map_err(|m| JsError::new(&m))
 }
 
@@ -1001,11 +1094,17 @@ mod tests {
     #[test]
     fn member_card_seals_and_opens_through_the_boundary() {
         let (seed, channel, pk) = ([0x33u8; 32], [0x44u8; 16], [0x55u8; 32]);
-        let card = seal_member_card(&seed, 7, &channel, &pk, b"profile").unwrap();
+        let account = [0x66u8; 32];
+        let card = seal_member_card(&seed, 7, &channel, &pk, &account, b"profile").unwrap();
         assert_eq!(member_card_epoch(&card).unwrap(), 7);
+        let opened = open_member_card(&seed, &card, &channel, &pk).unwrap();
+        assert_eq!(opened.profile(), b"profile".to_vec());
         assert_eq!(
-            open_member_card(&seed, &card, &channel, &pk).unwrap(),
-            b"profile".to_vec()
+            opened.identity_pk(),
+            SigningKey::from_seed(&account)
+                .verifying_key()
+                .to_bytes()
+                .to_vec()
         );
         assert!(open_member_card_inner(&seed, &card, &channel, &[0x56; 32]).is_err());
         assert!(seal_member_card_inner(
@@ -1013,10 +1112,33 @@ mod tests {
             7,
             &channel,
             &pk,
+            &account,
             &vec![0; max_member_card_profile_len() + 1]
         )
         .is_err());
-        assert!(seal_member_card_inner(&seed[..31], 7, &channel, &pk, b"p").is_err());
+        assert!(seal_member_card_inner(&seed[..31], 7, &channel, &pk, &account, b"p").is_err());
+        assert!(seal_member_card_inner(&seed, 7, &channel, &pk, &account[..31], b"p").is_err());
+    }
+
+    #[test]
+    fn the_unsubscribe_header_verifies_with_the_core() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let key = SigningKey::from_seed(&[0x51; 32]);
+        let channel = [0x0C; CHANNEL_ID_LEN];
+        let header = unsubscribe_request_header_inner(&key, &channel, 5_000).unwrap();
+        let (stamp, sig) = header.split_once('.').unwrap();
+        assert_eq!(stamp, "5000");
+        lakko_channels::verify_unsubscribe_request(
+            &channel,
+            &key.verifying_key().to_bytes(),
+            5_000,
+            &URL_SAFE_NO_PAD.decode(sig).unwrap(),
+            5_000,
+        )
+        .unwrap();
+        assert!(unsubscribe_request_header_inner(&key, &channel[..15], 1).is_err());
+        assert_eq!(unsubscribe_sig_header_name(), "x-lakko-unsubscribe-sig");
     }
 
     #[test]

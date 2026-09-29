@@ -1208,6 +1208,75 @@ async fn delete_member_card(
     }
 }
 
+/// The header carrying an unsubscribe signature (ADR-0060):
+/// `<issued_at_ms>.<signature base64url>`. Defined in `lakko-channels`.
+pub use lakko_channels::UNSUBSCRIBE_SIG_HEADER;
+
+/// Parse the [`UNSUBSCRIBE_SIG_HEADER`] value into `(issued_at_ms,
+/// signature)`. `None` for anything malformed.
+fn parse_unsubscribe_header(headers: &HeaderMap) -> Option<(u64, Vec<u8>)> {
+    let value = headers.get(UNSUBSCRIBE_SIG_HEADER)?.to_str().ok()?;
+    let (stamp, sig) = value.split_once('.')?;
+    // Digits only: `u64::from_str` would also accept a leading `+`.
+    if stamp.is_empty() || !stamp.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let issued_at_ms = stamp.parse::<u64>().ok()?;
+    let sig = URL_SAFE_NO_PAD.decode(sig).ok()?;
+    Some((issued_at_ms, sig))
+}
+
+/// `DELETE /v1/channels/:channel_id/subscribers/:pubkey_hex` — leave the
+/// channel (ADR-0060 section 3): the subscriber row, its seed envelopes, its
+/// member card and any staged envelope go. Signed by the subscriber key the
+/// path names over `lakko_channels::unsubscribe_signed_bytes`, stamped with
+/// the signer's clock and accepted only within
+/// `lakko_channels::UNSUBSCRIBE_WINDOW_MS` of the server's. The signature is
+/// checked before the store is consulted, so an unsigned request learns
+/// nothing about who subscribes. Idempotent `204`.
+async fn unsubscribe(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, pubkey_hex)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let (channel, sub) = match bad_ids(&channel_id, &pubkey_hex) {
+        Ok(ids) => ids,
+        Err(resp) => return *resp,
+    };
+    let Some((issued_at_ms, sig)) = parse_unsubscribe_header(&headers) else {
+        return bad_unsubscribe_signature("bad-unsubscribe-signature");
+    };
+    match lakko_channels::verify_unsubscribe_request(
+        channel.as_bytes(),
+        sub.as_bytes(),
+        issued_at_ms,
+        &sig,
+        unix_ms(),
+    ) {
+        Ok(()) => {},
+        Err(lakko_channels::ChannelError::StaleRequest) => {
+            return bad_unsubscribe_signature("stale-unsubscribe");
+        },
+        Err(_) => return bad_unsubscribe_signature("bad-unsubscribe-signature"),
+    }
+    match state.store.unsubscribe(channel, sub).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => member_store_error(e),
+    }
+}
+
+fn bad_unsubscribe_signature(code: &'static str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(err(
+            code,
+            "an unsubscribe must be signed by the subscriber key it names, \
+             stamped within the freshness window",
+        )),
+    )
+        .into_response()
+}
+
 /// Query string for `GET /v1/channels/:id/members`.
 #[derive(Deserialize)]
 pub struct MembersQuery {
@@ -1329,6 +1398,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/channels/{channel_id}/subscribers",
             post(subscribe).get(list_subscribers),
+        )
+        .route(
+            "/v1/channels/{channel_id}/subscribers/{pubkey_hex}",
+            axum::routing::delete(unsubscribe),
         )
         .route(
             "/v1/channels/{channel_id}/subscribers/{pubkey_hex}/envelope",

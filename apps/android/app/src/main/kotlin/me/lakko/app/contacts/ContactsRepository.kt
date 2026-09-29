@@ -351,11 +351,11 @@ public class ContactsRepository(
                         certificateHex = certificateHex,
                         accountIdHex = accountIdHex,
                         senderKeyB64 = senderKeyB64,
-                        oprf = { name -> discovery.oprfUsername(name) },
+                        lookupKey = { name -> discovery.oprfUsername(name).lookupKey },
                         verifyBinding = key?.let { k ->
-                            { cert, hash, account ->
+                            { cert, lookupKey, account ->
                                 try {
-                                    uniffi.lakko_ffi_uniffi.verifyUsernameBinding(cert, k, hash, account)
+                                    uniffi.lakko_ffi_uniffi.verifyUsernameBinding(cert, k, lookupKey, account)
                                     true
                                 } catch (_: Throwable) {
                                     false

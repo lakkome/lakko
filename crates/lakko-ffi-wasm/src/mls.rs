@@ -2695,6 +2695,30 @@ impl DeviceGroup {
         )
     }
 
+    /// Compose a `serviceEnvelope` cross-device payload carrying a
+    /// `lakko-contacts` envelope verbatim (ADR-0060 section 7: the output
+    /// of `composeVisibilityEnvelope` / `composeReachStateEnvelope`).
+    ///
+    /// # Errors
+    ///
+    /// Throws when `envelope` is empty or longer than
+    /// `deviceGroupServiceEnvelopeMaxLen()`; nothing is encrypted.
+    #[wasm_bindgen(js_name = createServiceEnvelopeMessage)]
+    pub fn create_service_envelope_message(
+        &self,
+        identity: &Identity,
+        envelope: &[u8],
+        hlc: u64,
+    ) -> Result<Vec<u8>, JsValue> {
+        self.create_devicegroup_body(
+            identity,
+            lakko_mls::device_group::DeviceGroupBody::ServiceEnvelope {
+                envelope: envelope.to_vec(),
+            },
+            hlc,
+        )
+    }
+
     /// Decrypt / advance the state machine for an inbound
     /// DeviceGroup wire message (Phase 2a3e2). JS layer reads
     /// `kind`:
@@ -2839,6 +2863,15 @@ const KIND_READ_CURSOR: &str = "readCursor";
 const KIND_DRAFT: &str = "draft";
 const KIND_FLAGS: &str = "flags";
 const KIND_ORDER: &str = "order";
+const KIND_SERVICE_ENVELOPE: &str = "serviceEnvelope";
+
+/// Longest envelope a DeviceGroup `serviceEnvelope` payload carries
+/// (ADR-0060 section 7).
+#[wasm_bindgen(js_name = deviceGroupServiceEnvelopeMaxLen)]
+#[must_use]
+pub fn device_group_service_envelope_max_len() -> u32 {
+    u32::try_from(lakko_mls::MAX_SERVICE_ENVELOPE_LEN).unwrap_or(u32::MAX)
+}
 
 /// JS-side projection of
 /// [`lakko_mls::device_group::ParsedDeviceGroupPayload`]
@@ -2870,6 +2903,7 @@ pub struct ParsedDeviceGroupPayload {
     archived_val: bool,
     unread_override_val: bool,
     order_group_ids_val: Vec<Vec<u8>>,
+    service_envelope_val: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -2887,8 +2921,8 @@ impl ParsedDeviceGroupPayload {
     }
 
     /// One of `"readCursor"` / `"draft"` / `"flags"` /
-    /// `"order"`. JS reads this to decide which other fields
-    /// are meaningful.
+    /// `"order"` / `"serviceEnvelope"`. JS reads this to decide
+    /// which other fields are meaningful.
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
         self.kind_val.to_string()
@@ -2961,6 +2995,15 @@ impl ParsedDeviceGroupPayload {
             .map(|g| js_sys::Uint8Array::from(g.as_slice()))
             .collect()
     }
+
+    /// `serviceEnvelope` only: the `lakko-contacts` envelope bytes,
+    /// uninterpreted (ADR-0060 section 7). Hand them to
+    /// `dispatchIncomingEnvelope` and keep only Visibility / ReachState.
+    /// Empty for other kinds.
+    #[wasm_bindgen(getter, js_name = serviceEnvelope)]
+    pub fn service_envelope(&self) -> Vec<u8> {
+        self.service_envelope_val.clone()
+    }
 }
 
 /// Parse a DeviceGroup application-payload plaintext (the
@@ -2984,6 +3027,7 @@ pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPa
         archived_val: false,
         unread_override_val: false,
         order_group_ids_val: Vec::new(),
+        service_envelope_val: Vec::new(),
     };
     match parsed.body {
         Body::ReadCursor {
@@ -3023,6 +3067,10 @@ pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPa
         Body::Order { group_ids } => {
             out.kind_val = KIND_ORDER;
             out.order_group_ids_val = group_ids;
+        },
+        Body::ServiceEnvelope { envelope } => {
+            out.kind_val = KIND_SERVICE_ENVELOPE;
+            out.service_envelope_val = envelope;
         },
     }
     Ok(out)

@@ -13,18 +13,24 @@
 //!   to 65 entries, the content-key unwrap and the payload open (a forged
 //!   entry is an `Open` error, never a panic) and, on the rare input whose
 //!   tag matches and whose wrap authenticates, the payload decode;
+//! * `open_public_record` under the same OPRF output - the Everyone record
+//!   discovery serves (ADR-0060 section 5), the same record shape with the
+//!   opposite grant rule;
 //! * `IntroductionPayload::decode` on the raw bytes - the payload parser is
 //!   otherwise reachable only past the AEAD, so it is fed directly too.
 //!
-//! Asserted: no panic, and round-trip stability of whatever decodes (the
-//! record and payload encodings are canonical).
+//! Asserted: no panic, round-trip stability of whatever decodes (the record
+//! and payload encodings are canonical), and the grant rule of each opener:
+//! `open_introduction` never returns a payload without its `fof` grant, and
+//! `open_public_record` never returns one with a grant.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 
 use lakko_contacts::introduction::{
-    introduction_tags, open_introduction, IntroductionPayload, IntroductionRecord,
+    introduction_tags, open_introduction, open_public_record, IntroductionPayload,
+    IntroductionRecord,
     INTRODUCTION_RECORD_MAX_LEN, INTRODUCTION_RECORD_MIN_LEN, OPRF_OUTPUT_LEN,
 };
 
@@ -45,7 +51,12 @@ fuzz_target!(|data: &[u8]| {
             introduction_tags(data).expect("tags of a decoded record"),
             record.tags()
         );
-        let _ = open_introduction(data, &OPRF);
+        if let Ok(Some(opened)) = open_introduction(data, &OPRF) {
+            assert!(opened.fof.is_some(), "an introduction opens with its grant");
+        }
+        if let Ok(Some(opened)) = open_public_record(data, &OPRF) {
+            assert!(opened.fof.is_none(), "a public record opens without a grant");
+        }
     }
     if let Ok(payload) = IntroductionPayload::decode(data) {
         let encoded = payload

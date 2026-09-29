@@ -17,6 +17,12 @@
 //! bounds, the version gate, the epoch / nonce slicing and the
 //! AEAD refusal. Any panic / slice-out-of-bounds is a bug; an
 //! opened card must fit the profile bound.
+//!
+//! Since the account binding (ADR-0060, `identity_pk(32) || sig(64) ||
+//! profile` inside the AEAD), the same bytes are also fed to the binding
+//! parser directly through `fuzz_api::member_card_binding`, which the AEAD
+//! otherwise keeps out of reach: no panic, and a binding that verifies
+//! leaves a profile within the bound.
 
 #![no_main]
 
@@ -33,7 +39,10 @@ const FIXED_SUBSCRIBER: [u8; SUBSCRIBER_PK_LEN] = [0x5B; SUBSCRIBER_PK_LEN];
 fuzz_target!(|data: &[u8]| {
     let _ = member_card_epoch(data);
     let seed = ContentKeySeed::from_bytes_for_test([0xAB; 32]);
-    if let Ok(profile) = open_member_card(&seed, data, &FIXED_CHANNEL, &FIXED_SUBSCRIBER) {
-        assert!(profile.len() <= MAX_MEMBER_CARD_PROFILE_LEN);
+    if let Ok(opened) = open_member_card(&seed, data, &FIXED_CHANNEL, &FIXED_SUBSCRIBER) {
+        assert!(opened.profile.len() <= MAX_MEMBER_CARD_PROFILE_LEN);
+    }
+    if let Some(len) = lakko_channels::fuzz_api::member_card_binding(data) {
+        assert!(len <= MAX_MEMBER_CARD_PROFILE_LEN);
     }
 });

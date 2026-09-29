@@ -3441,13 +3441,15 @@ mod tests {
             display_name: Some("Anna".into()),
             username: None,
             username_certificate: None,
-            fof: lakko_contacts::reach::ReachGrant::derive(
-                &[3; 32],
-                lakko_contacts::reach::ReachClass::Fof,
-                b"",
-                1,
-            )
-            .unwrap(),
+            fof: Some(
+                lakko_contacts::reach::ReachGrant::derive(
+                    &[3; 32],
+                    lakko_contacts::reach::ReachClass::Fof,
+                    b"",
+                    1,
+                )
+                .unwrap(),
+            ),
         };
         let record = compose_introduction(&rust_payload, &[[5; 64]], 1).unwrap();
 

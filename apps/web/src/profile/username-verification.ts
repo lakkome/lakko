@@ -8,7 +8,7 @@
  * after this module has resolved it and found it bound to the sender's
  * authenticated key. Since ADR-0060 section 5 the resolution is the
  * discovery-signed username certificate the sender's own profile carries,
- * checked against `OPRF(username)` and the account id the profile claims
+ * checked against the lookup key of `OPRF(username)` and the account id the profile claims
  * (`verifyUsernameBinding`, the key pinned or fetched once) — no lookup, so a
  * person hidden from lookups keeps a verifiable username, and no endpoint
  * confirms a guessed username for a known account. The resolver lives in

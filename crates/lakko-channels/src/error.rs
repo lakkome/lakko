@@ -92,6 +92,18 @@ pub enum ChannelError {
     /// subscriber key is Ed25519, its X25519 seed-envelope key derived).
     #[error("subscriber key is not a valid Ed25519 key of full order")]
     BadSubscriberKey,
+
+    /// A member card opened but its account binding did not verify: the
+    /// identity key is not a valid Ed25519 key of full order, or its
+    /// signature does not cover this channel, subscriber key and profile
+    /// (ADR-0060 section 3). The card is dropped, never shown.
+    #[error("member card is not signed by the account it names")]
+    MemberCardBinding,
+
+    /// A signed unsubscribe request is outside its freshness window
+    /// (ADR-0060 section 3, [`crate::unsubscribe`]).
+    #[error("unsubscribe request is outside its freshness window")]
+    StaleRequest,
 }
 
 impl From<lakko_crypto::error::Error> for ChannelError {

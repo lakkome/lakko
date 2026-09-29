@@ -10,11 +10,23 @@
 //!   invisible to both: a lookup of their username answers exactly as for an
 //!   unregistered one. Who else can find them is decided by reach keys the
 //!   server never sees (ADR-0060 sections 1-4).
-//! - **Name terms** are OPRF outputs (`lakko_discovery_client::name`
-//!   normalises and splits the name client-side); the plaintext name never
-//!   reaches the server (invariant #1).
+//! - **Name terms** arrive as lookup keys
+//!   (`lakko_discovery_client::discovery_lookup_key` of each term's OPRF
+//!   output; `lakko_discovery_client::name` normalises and splits the name
+//!   client-side); the plaintext name never reaches the server (invariant #1).
+//!   Every `oprf_hash` this service stores is such a lookup key, never an
+//!   OPRF output.
+//! - **Public record**: entering Everyone also stores one opaque public
+//!   record (`lakko_contacts::introduction::compose_public_record`, keyed
+//!   per term over the OPRF outputs of the username and the name terms, no
+//!   `fof` grant). Both lookups return it beside the account id and the
+//!   searcher opens it with the OPRF output it already holds. The lookup
+//!   keys in these tables are one-way from the outputs, so a copy of the
+//!   database opens no record; the operator, who holds the OPRF key, can
+//!   still evaluate guessed names (ADR-0060 section 5). The server checks
+//!   the record's structure only.
 //! - **Username certificate** (`lakko_attest::username_cert`): discovery signs
-//!   `(OPRF(username), account_id, issued_at)` with a dedicated Ed25519 key, so
+//!   `(lookup key of OPRF(username), account_id, issued_at)` with a dedicated Ed25519 key, so
 //!   a viewer verifies a claimed username with one OPRF evaluation and no
 //!   lookup, and no endpoint confirms a guessed username for a known account.
 
@@ -25,6 +37,7 @@ use axum::Json;
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use lakko_attest::{UsernameCertificate, OPRF_HASH_LEN};
+use lakko_contacts::introduction::{IntroductionRecord, INTRODUCTION_RECORD_MAX_LEN};
 use lakko_crypto::signing::SigningKey;
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
@@ -41,6 +54,11 @@ pub(crate) const MAX_NAME_TERMS: usize = 64;
 /// (ADR-0060 open question 2); the client fetches each profile and filters
 /// by the whole query.
 pub(crate) const MAX_NAME_RESULTS: usize = 20;
+
+/// The longest public record accepted: the longest introduction record the
+/// codec composes. `migrations/0025_public_records.sql` sizes its column to
+/// it (pinned by a test).
+pub(crate) const MAX_PUBLIC_RECORD_LEN: usize = INTRODUCTION_RECORD_MAX_LEN;
 
 /// Dev / e2e override of the certificate signing seed (64 hex characters),
 /// so a test can pin the verifying key ahead of time. Never set in
@@ -212,10 +230,40 @@ pub(crate) async fn get_certificate(
 pub(crate) struct VisibilityRequest {
     /// `true` for Everyone.
     pub(crate) public: bool,
-    /// Standard base64 of each name term's 64-byte OPRF output. At most
+    /// Standard base64 of each name term's 64-byte lookup key (derived from
+    /// the term's OPRF output, which never reaches the server). At most
     /// [`MAX_NAME_TERMS`], only when `public`.
     #[serde(default)]
     pub(crate) name_terms_b64: Vec<String>,
+    /// Standard base64 of the public record (ADR-0060 section 5). Required
+    /// when `public`, refused otherwise; at most [`MAX_PUBLIC_RECORD_LEN`]
+    /// bytes and a well-formed introduction record (at least one term).
+    #[serde(default)]
+    pub(crate) public_record_b64: Option<String>,
+}
+
+/// Decode and structurally check a public record. The length is checked on
+/// the base64 text before decoding so an oversized body never allocates the
+/// decoded bytes.
+fn decode_public_record(b64: &str) -> Result<Vec<u8>, HandlerError> {
+    if b64.len() > MAX_PUBLIC_RECORD_LEN.div_ceil(3) * 4 {
+        return Err(bad_request(format!(
+            "public record: at most {MAX_PUBLIC_RECORD_LEN} bytes"
+        )));
+    }
+    let bytes = B64
+        .decode(b64)
+        .map_err(|_| bad_request("public record: bad base64"))?;
+    if bytes.len() > MAX_PUBLIC_RECORD_LEN {
+        return Err(bad_request(format!(
+            "public record: at most {MAX_PUBLIC_RECORD_LEN} bytes"
+        )));
+    }
+    // Structure only (entries, distinct tags, sealed length): the payload
+    // stays sealed. A record that parses carries at least one tag.
+    IntroductionRecord::decode(&bytes)
+        .map_err(|e| bad_request(format!("public record: {}", e.code())))?;
+    Ok(bytes)
 }
 
 fn decode_hash(b64: &str) -> Result<[u8; OPRF_HASH_LEN], HandlerError> {
@@ -230,10 +278,12 @@ fn decode_hash(b64: &str) -> Result<[u8; OPRF_HASH_LEN], HandlerError> {
 /// `PUT /discovery/visibility` - enter or leave Everyone.
 ///
 /// Session-gated; the account comes from the token, never the body. In one
-/// transaction: sets `is_public` on the caller's username, and replaces the
-/// caller's name terms with the given set (entering) or deletes them all
-/// (leaving). Entering Everyone without a username is a `409`: the name
-/// lookup only ever returns accounts whose username is public. Idempotent.
+/// transaction: sets `is_public` on the caller's username, replaces the
+/// caller's name terms with the given set and stores the public record
+/// (entering), or deletes both (leaving). Entering Everyone without a
+/// username is a `409`: the name lookup only ever returns accounts whose
+/// username is public. Entering without a public record, or leaving with
+/// one, is a `400`. Idempotent.
 pub(crate) async fn put_visibility(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<AuthenticatedAccount>,
@@ -245,6 +295,14 @@ pub(crate) async fn put_visibility(
     if !req.public && !req.name_terms_b64.is_empty() {
         return Err(bad_request("name terms are published only in Everyone"));
     }
+    let record = match (req.public, req.public_record_b64.as_deref()) {
+        (true, Some(b64)) => Some(decode_public_record(b64)?),
+        (true, None) => return Err(bad_request("Everyone requires a public record")),
+        (false, Some(_)) => {
+            return Err(bad_request("a public record is published only in Everyone"));
+        },
+        (false, None) => None,
+    };
     let mut terms = Vec::with_capacity(req.name_terms_b64.len());
     for b64 in &req.name_terms_b64 {
         terms.push(decode_hash(b64)?);
@@ -311,6 +369,26 @@ pub(crate) async fn put_visibility(
             .await
             .map_err(db_err("store name terms"))?;
     }
+    match &record {
+        Some(record) => {
+            sqlx::query(
+                "INSERT INTO public_records (account_id, record) VALUES (?, ?) \
+                 ON DUPLICATE KEY UPDATE record = VALUES(record)",
+            )
+            .bind(account)
+            .bind(record.as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err("store public record"))?;
+        },
+        None => {
+            sqlx::query("DELETE FROM public_records WHERE account_id = ?")
+                .bind(account)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err("clear public record"))?;
+        },
+    }
     tx.commit().await.map_err(db_err("commit visibility"))?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -318,15 +396,25 @@ pub(crate) async fn put_visibility(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NameLookupRequest {
-    /// Standard base64 of one name term's 64-byte OPRF output.
+    /// Standard base64 of one name term's 64-byte lookup key.
     pub(crate) oprf_hash_b64: String,
+}
+
+/// One person in Everyone found by a name term.
+#[derive(Serialize)]
+pub(crate) struct NameLookupResult {
+    /// Standard base64 of the account id.
+    pub(crate) account_id_b64: String,
+    /// Standard base64 of their public record; the searcher opens it with
+    /// the OPRF output of the term it looked up (`openPublicRecord`).
+    pub(crate) public_record_b64: String,
 }
 
 #[derive(Serialize)]
 pub(crate) struct NameLookupResponse {
-    /// Standard base64 of each account id, at most [`MAX_NAME_RESULTS`],
-    /// ascending. Empty when nobody in Everyone has the term.
-    pub(crate) account_ids_b64: Vec<String>,
+    /// At most [`MAX_NAME_RESULTS`], ascending by account id. Empty when
+    /// nobody in Everyone has the term.
+    pub(crate) results: Vec<NameLookupResult>,
 }
 
 /// `POST /discovery/name/lookup` - the accounts in Everyone that published a
@@ -337,8 +425,9 @@ pub(crate) async fn name_lookup(
     Json(req): Json<NameLookupRequest>,
 ) -> Result<Json<NameLookupResponse>, HandlerError> {
     let hash = decode_hash(&req.oprf_hash_b64)?;
-    let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
-        "SELECT d.account_id FROM display_names d \
+    let rows: Vec<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT d.account_id, p.record FROM display_names d \
+         JOIN public_records p ON p.account_id = d.account_id \
          WHERE d.oprf_hash = ? \
            AND EXISTS (SELECT 1 FROM usernames u \
                        WHERE u.account_id = d.account_id AND u.is_public = TRUE) \
@@ -350,7 +439,13 @@ pub(crate) async fn name_lookup(
     .await
     .map_err(db_err("name lookup"))?;
     Ok(Json(NameLookupResponse {
-        account_ids_b64: rows.into_iter().map(|(id,)| B64.encode(id)).collect(),
+        results: rows
+            .into_iter()
+            .map(|(id, record)| NameLookupResult {
+                account_id_b64: B64.encode(id),
+                public_record_b64: B64.encode(record),
+            })
+            .collect(),
     }))
 }
 
@@ -358,6 +453,16 @@ pub(crate) async fn name_lookup(
 mod tests {
     use super::*;
     use lakko_attest::{verify_username_binding, UsernameCertError};
+
+    #[test]
+    fn the_public_record_column_fits_the_longest_record() {
+        assert_eq!(MAX_PUBLIC_RECORD_LEN, 6550);
+        let migration = include_str!("../migrations/0025_public_records.sql");
+        assert!(
+            migration.contains(&format!("VARBINARY({MAX_PUBLIC_RECORD_LEN})")),
+            "the migration sizes public_records.record to MAX_PUBLIC_RECORD_LEN"
+        );
+    }
 
     #[test]
     fn the_caps_mirror_the_client_crate() {
@@ -417,6 +522,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt as _;
+    use lakko_discovery_client::discovery_lookup_key;
     use tower::ServiceExt as _;
 
     fn random<const N: usize>() -> [u8; N] {
@@ -493,7 +599,8 @@ mod tests {
             (status, text)
         }
 
-        async fn name_lookup(&self, term: [u8; 64]) -> Vec<String> {
+        /// `(account_id_b64, public_record_b64)` per result.
+        async fn name_lookup_records(&self, term: [u8; 64]) -> Vec<(String, String)> {
             let (status, json, text) = self
                 .call(
                     "POST",
@@ -503,30 +610,91 @@ mod tests {
                 )
                 .await;
             assert_eq!(status, StatusCode::OK, "{text}");
-            json["account_ids_b64"]
+            json["results"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|v| v.as_str().unwrap().to_owned())
+                .map(|v| {
+                    (
+                        v["account_id_b64"].as_str().unwrap().to_owned(),
+                        v["public_record_b64"].as_str().unwrap().to_owned(),
+                    )
+                })
                 .collect()
         }
 
+        async fn name_lookup(&self, term: [u8; 64]) -> Vec<String> {
+            self.name_lookup_records(term)
+                .await
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        }
+
+        /// Enter (with a public record keyed over `terms`) or leave
+        /// Everyone, the way a client does.
         async fn visibility(
             &self,
             account: [u8; 16],
             public: bool,
             terms: &[[u8; 64]],
         ) -> StatusCode {
-            let terms: Vec<String> = terms.iter().map(|t| B64.encode(t)).collect();
-            self.call(
-                "PUT",
-                "/discovery/visibility",
-                Some(account),
-                Some(serde_json::json!({ "public": public, "name_terms_b64": terms })),
-            )
-            .await
-            .0
+            let record = public.then(|| B64.encode(public_record(account, terms)));
+            self.put_visibility(account, public, terms, record).await
         }
+
+        async fn put_visibility(
+            &self,
+            account: [u8; 16],
+            public: bool,
+            terms: &[[u8; 64]],
+            record_b64: Option<String>,
+        ) -> StatusCode {
+            let terms: Vec<String> = terms.iter().map(|t| B64.encode(t)).collect();
+            let mut body = serde_json::json!({ "public": public, "name_terms_b64": terms });
+            if let Some(record) = record_b64 {
+                body["public_record_b64"] = serde_json::Value::String(record);
+            }
+            self.call("PUT", "/discovery/visibility", Some(account), Some(body))
+                .await
+                .0
+        }
+    }
+
+    async fn count_rows(db: &MySqlPool, table: &str, account: [u8; 16]) -> i64 {
+        let sql = match table {
+            "display_names" => "SELECT COUNT(*) FROM display_names WHERE account_id = ?",
+            "public_records" => "SELECT COUNT(*) FROM public_records WHERE account_id = ?",
+            other => panic!("no such table in this test: {other}"),
+        };
+        let (rows,): (i64,) = sqlx::query_as(sql)
+            .bind(&account[..])
+            .fetch_one(db)
+            .await
+            .unwrap();
+        rows
+    }
+
+    /// A public record for `account`, findable by `terms` (or by one random
+    /// term when none: a person in Everyone with no name terms still has a
+    /// username, whose OPRF output keys the record in a real client).
+    /// `terms` are OPRF outputs, not the lookup keys the server stores.
+    fn public_record(account: [u8; 16], terms: &[[u8; 64]]) -> Vec<u8> {
+        use lakko_contacts::introduction::{compose_public_record, IntroductionPayload};
+        let payload = IntroductionPayload {
+            identity_pk: [7; 32],
+            account_id: account,
+            display_name: Some("Anna Weber".to_string()),
+            username: None,
+            username_certificate: None,
+            fof: None,
+        };
+        let terms = if terms.is_empty() {
+            vec![random::<64>()]
+        } else {
+            terms.to_vec()
+        };
+        compose_public_record(&payload, &terms, 1).expect("compose public record")
     }
 
     async fn client(name: &str) -> Option<Client> {
@@ -544,7 +712,11 @@ mod tests {
             return;
         };
         let account = random::<16>();
-        let hash = random::<64>();
+        // What the client holds and what it hands the server: the record is
+        // sealed under the OPRF output, the server only ever sees the lookup
+        // key derived from it.
+        let output = random::<64>();
+        let hash = discovery_lookup_key(&output);
         let registered = c.register(account, hash).await;
 
         // The certificate verifies under the key the service publishes.
@@ -566,15 +738,46 @@ mod tests {
         assert_eq!(unregistered.0, StatusCode::NOT_FOUND);
         assert_eq!(c.lookup(hash).await, unregistered);
 
-        // Everyone: found by username and by each name term.
-        let terms = [random::<64>(), random::<64>()];
+        // Everyone: found by username and by each name term, each answer
+        // carrying the public record, which opens under the OPRF output the
+        // searcher used (username or term) and carries no grant.
+        let term_outputs = [random::<64>(), random::<64>()];
+        let terms = term_outputs.map(|o| discovery_lookup_key(&o));
+        let record = public_record(account, &[output, term_outputs[0], term_outputs[1]]);
         assert_eq!(
-            c.visibility(account, true, &terms).await,
+            c.put_visibility(account, true, &terms, Some(B64.encode(&record)))
+                .await,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(c.lookup(hash).await.0, StatusCode::OK);
-        for term in terms {
-            assert_eq!(c.name_lookup(term).await, vec![B64.encode(account)]);
+        let (status, body) = c.lookup(hash).await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["account_id"], B64.encode(account));
+        let served = B64
+            .decode(body["public_record_b64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(served, record);
+        // The lookup key the server holds does not open it.
+        assert!(
+            lakko_contacts::introduction::open_public_record(&served, &hash)
+                .unwrap()
+                .is_none()
+        );
+        let opened = lakko_contacts::introduction::open_public_record(&served, &output)
+            .unwrap()
+            .expect("opens under the username's OPRF output");
+        assert_eq!(opened.account_id, account);
+        assert!(opened.fof.is_none());
+        for (term, term_output) in terms.into_iter().zip(term_outputs) {
+            let found = c.name_lookup_records(term).await;
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].0, B64.encode(account));
+            let served = B64.decode(&found[0].1).unwrap();
+            assert!(
+                lakko_contacts::introduction::open_public_record(&served, &term_output)
+                    .unwrap()
+                    .is_some()
+            );
         }
         // Idempotent, and a new set replaces the old one.
         let renamed = [random::<64>()];
@@ -596,13 +799,13 @@ mod tests {
         );
         assert_eq!(c.lookup(hash).await, unregistered);
         assert!(c.name_lookup(renamed[0]).await.is_empty());
-        let (rows,): (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM display_names WHERE account_id = ?")
-                .bind(&account[..])
-                .fetch_one(&c.state.db)
-                .await
-                .unwrap();
-        assert_eq!(rows, 0);
+        for table in ["display_names", "public_records"] {
+            assert_eq!(
+                count_rows(&c.state.db, table, account).await,
+                0,
+                "{table} emptied on leaving Everyone"
+            );
+        }
 
         // The certificate can be fetched again later.
         let (status, json, _) = c
@@ -663,6 +866,40 @@ mod tests {
             )
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // The public record: required in Everyone, refused outside it,
+        // parsed so garbage and oversized bodies are refused.
+        let term = [random::<64>()];
+        assert_eq!(
+            c.put_visibility(account, true, &term, None).await,
+            StatusCode::BAD_REQUEST,
+            "Everyone without a public record"
+        );
+        assert_eq!(
+            c.put_visibility(
+                account,
+                false,
+                &[],
+                Some(B64.encode(public_record(account, &term)))
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "a public record outside Everyone"
+        );
+        for garbage in [
+            B64.encode([0u8; 40]),
+            "not base64!".to_string(),
+            B64.encode(vec![1u8; MAX_PUBLIC_RECORD_LEN + 1]),
+        ] {
+            assert_eq!(
+                c.put_visibility(account, true, &term, Some(garbage)).await,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            c.visibility(account, true, &term).await,
+            StatusCode::NO_CONTENT
+        );
         // No session: refused before anything is read.
         let (status, _, _) = c
             .call(
@@ -674,18 +911,18 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-        // Erasure takes the terms with it.
+        // Erasure takes the terms and the public record with it.
         let (status, _, _) = c
             .call("DELETE", "/discovery/account", Some(account), None)
             .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        let (rows,): (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM display_names WHERE account_id = ?")
-                .bind(&account[..])
-                .fetch_one(&c.state.db)
-                .await
-                .unwrap();
-        assert_eq!(rows, 0);
+        for table in ["display_names", "public_records"] {
+            assert_eq!(
+                count_rows(&c.state.db, table, account).await,
+                0,
+                "{table} erased"
+            );
+        }
     }
 
     #[tokio::test]

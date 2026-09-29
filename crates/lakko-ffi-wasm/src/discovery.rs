@@ -9,8 +9,9 @@
 //!     `/discovery/oprf` round-trip. Static `blind(username)`
 //!     normalises the input and produces the base64 blinded
 //!     element; `finalize(evaluatedB64)` consumes the server's
-//!     evaluation and returns the 64-byte OPRF hash that goes
-//!     into `/discovery/{register, lookup}` as `oprf_hash`.
+//!     evaluation and returns an [`OprfResult`]: the OPRF output, which
+//!     stays on the device, and its `lookupKey`, which goes into
+//!     `/discovery/{register, lookup}` as `oprf_hash`.
 //!
 //!   * [`validateUsername`] — the ADR-0048 §4 username rule
 //!     (normalise, then ASCII `[a-z0-9_]`, 3 to 32 characters). Throws
@@ -26,9 +27,9 @@
 //!     the normalisation rules.
 
 use lakko_discovery_client::{
-    is_name_term as inner_is_name_term, login_handle as inner_login_handle,
-    name_matches_query as inner_name_matches_query, name_query_term as inner_name_query_term,
-    name_search_terms as inner_name_search_terms,
+    discovery_lookup_key as inner_lookup_key, is_name_term as inner_is_name_term,
+    login_handle as inner_login_handle, name_matches_query as inner_name_matches_query,
+    name_query_term as inner_name_query_term, name_search_terms as inner_name_search_terms,
     normalize_name_for_search as inner_normalize_name_for_search,
     normalize_username as inner_normalize, validate_username as inner_validate,
     DiscoveryClientError, OprfBlinder as InnerBlinder, UsernameError, MAX_NAME_TERMS,
@@ -222,8 +223,10 @@ pub fn max_name_terms() -> usize {
 ///   body: JSON.stringify({ pow, blinded: blinder.blindedB64 }),
 /// }).then((r) => r.json());
 ///
-/// // 3. Finalize → 64-byte hash for /discovery/{register, lookup}.
-/// const oprfHash = blinder.finalize(evaluated); // Uint8Array(64)
+/// // 3. Finalize: lookupKey goes to /discovery/{register, lookup};
+/// //    output never leaves the device.
+/// const done = blinder.finalize(evaluated);
+/// const oprfHash = done.lookupKey; // Uint8Array(64)
 /// ```
 #[wasm_bindgen]
 pub struct OprfBlinder {
@@ -330,17 +333,61 @@ impl OprfBlinder {
         }
     }
 
-    /// Finalise the OPRF dance with the server's evaluation.
-    /// Returns the 64-byte OPRF hash as a `Uint8Array`.
+    /// Finalise the OPRF dance with the server's evaluation. Returns the
+    /// OPRF output and its lookup key; only `lookupKey` goes to the server.
     ///
     /// Single-use — a second call returns an error.
-    pub fn finalize(&self, evaluated_b64: &str) -> Result<Vec<u8>, JsError> {
+    pub fn finalize(&self, evaluated_b64: &str) -> Result<OprfResult, JsError> {
         let mut guard = self.inner.lock().map_err(|_| lock_poisoned())?;
         let blinder = guard.take().ok_or_else(already_finalized)?;
-        let hash = blinder.finalize(evaluated_b64).map_err(discovery_err)?;
-        debug_assert_eq!(hash.len(), OPRF_HASH_LEN);
-        Ok(hash.to_vec())
+        let done = blinder.finalize(evaluated_b64).map_err(discovery_err)?;
+        Ok(OprfResult {
+            output: done.output().to_vec(),
+            lookup_key: done.lookup_key().to_vec(),
+        })
     }
+}
+
+/// What one OPRF round yields (ADR-0060 section 5). `lookupKey` is the
+/// `oprf_hash` of every discovery request and what a username certificate
+/// binds; `output` never leaves the device, because public and introduction
+/// records are sealed under keys derived from it.
+#[wasm_bindgen]
+pub struct OprfResult {
+    output: Vec<u8>,
+    lookup_key: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl OprfResult {
+    /// The 64-byte OPRF output. Never send it to the server.
+    #[wasm_bindgen(getter)]
+    pub fn output(&self) -> Vec<u8> {
+        self.output.clone()
+    }
+
+    /// The 64-byte lookup key derived from `output`.
+    #[wasm_bindgen(getter, js_name = lookupKey)]
+    pub fn lookup_key(&self) -> Vec<u8> {
+        self.lookup_key.clone()
+    }
+}
+
+/// The lookup key of an OPRF output (ADR-0060 section 5), for a caller that
+/// kept an output from an earlier round.
+///
+/// # Errors
+///
+/// Throws when `output` is not 64 bytes.
+#[wasm_bindgen(js_name = discoveryLookupKey)]
+pub fn discovery_lookup_key(output: &[u8]) -> Result<Vec<u8>, JsError> {
+    let output = <[u8; OPRF_HASH_LEN]>::try_from(output).map_err(|_| {
+        JsError::new(&format!(
+            "an OPRF output must be {OPRF_HASH_LEN} bytes, got {}",
+            output.len()
+        ))
+    })?;
+    Ok(inner_lookup_key(&output).to_vec())
 }
 
 #[cfg(test)]

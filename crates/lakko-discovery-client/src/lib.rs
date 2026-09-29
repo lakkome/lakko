@@ -17,9 +17,13 @@
 //!   2. (state, blinded_b64) = blind(normalised)
 //!   3. POST /discovery/oprf { pow, blinded: blinded_b64 }
 //!         → { evaluated: evaluated_b64 }
-//!   4. oprf_hash = state.finalize(normalised, evaluated_b64)
-//!   5. POST /discovery/{register, lookup} { pow, account_id?, oprf_hash }
+//!   4. done = state.finalize(evaluated_b64)
+//!   5. POST /discovery/{register, lookup} { account_id?, oprf_hash: done.lookup_key() }
 //! ```
+//!
+//! The OPRF output (`done.output()`) stays on the client: public records
+//! are sealed under keys derived from it, and the server stores only the
+//! one-way lookup key (see the `blinder` module).
 //!
 //! The server never sees `normalised` — only the blinded element.
 //! Two different clients looking up the same username produce the
@@ -98,7 +102,9 @@ mod error;
 mod name;
 mod normalize;
 
-pub use blinder::{OprfBlinder, OPRF_HASH_LEN};
+pub use blinder::{
+    discovery_lookup_key, OprfBlinder, OprfFinalized, DISCOVERY_LOOKUP_DOMAIN, OPRF_HASH_LEN,
+};
 pub use error::DiscoveryClientError;
 pub use lakko_contacts::username::{UsernameError, USERNAME_MAX_LEN, USERNAME_MIN_LEN};
 pub use name::{

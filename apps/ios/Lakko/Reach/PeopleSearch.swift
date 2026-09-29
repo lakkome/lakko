@@ -44,27 +44,35 @@ public enum PeopleSearchOutcome: Equatable {
 }
 
 /// The network lookups a search makes, injected so the rules run in a test.
+///
+/// ADR-0060 section 5: every OPRF round yields an `OprfResult`. Its
+/// `lookupKey` is the only half a port sends to discovery (and the value a
+/// username certificate binds); its `output` never leaves the device and is
+/// what public and introduction records are opened with.
 public struct PeopleSearchPorts {
-    /// `@username` -> account id, or `nil` (only people in Everyone answer).
-    public var lookupUsername: (String) async throws -> Data?
-    /// The 64-byte OPRF output of a username.
-    public var usernameOprf: (String) async throws -> Data
-    /// The 64-byte OPRF output of a name term.
-    public var nameTermOprf: (String) async throws -> Data
-    /// Account ids in Everyone that published a name term.
-    public var nameLookup: (Data) async throws -> [Data]
+    /// `/discovery/lookup` by a username's LOOKUP KEY -> the account and its
+    /// public record, or `nil` (only people in Everyone answer).
+    public var lookupUsername: (Data) async throws -> PublicAccountHit?
+    /// One OPRF round over a username.
+    public var usernameOprf: (String) async throws -> OprfResult
+    /// One OPRF round over a name term.
+    public var nameTermOprf: (String) async throws -> OprfResult
+    /// `/discovery/name/lookup` by a name term's LOOKUP KEY -> the people in
+    /// Everyone that published it, each with its public record.
+    public var nameLookup: (Data) async throws -> [PublicAccountHit]
     /// account id -> the identity (account) public key, verified.
     public var identityKey: (Data) async throws -> Data?
     /// Is the key of `seed` still registered on the mailbox of `accountKey`?
     public var reachCheck: (Data, Data) async throws -> Bool
-    /// Verify a username certificate for `(oprf, accountId)`.
+    /// Verify a username certificate for `(certificate, lookupKey, accountId)`
+    /// — the certificate binds the LOOKUP KEY, never the output.
     public var verifyCertificate: (Data, Data, Data) async -> Bool
 
     public init(
-        lookupUsername: @escaping (String) async throws -> Data?,
-        usernameOprf: @escaping (String) async throws -> Data,
-        nameTermOprf: @escaping (String) async throws -> Data,
-        nameLookup: @escaping (Data) async throws -> [Data],
+        lookupUsername: @escaping (Data) async throws -> PublicAccountHit?,
+        usernameOprf: @escaping (String) async throws -> OprfResult,
+        nameTermOprf: @escaping (String) async throws -> OprfResult,
+        nameLookup: @escaping (Data) async throws -> [PublicAccountHit],
         identityKey: @escaping (Data) async throws -> Data?,
         reachCheck: @escaping (Data, Data) async throws -> Bool,
         verifyCertificate: @escaping (Data, Data, Data) async -> Bool
@@ -120,23 +128,24 @@ public enum PeopleSearch {
         return out
     }
 
-    /// One introduction record, opened with any of `oprfs` and filtered by the
-    /// whole query: by `nameMatchesQuery` when opened under a name term, by the
-    /// exact username when opened under the username's output.
+    /// One introduction record, opened with the OPRF output of the username or
+    /// of the name term and filtered by the whole query: by `nameMatchesQuery`
+    /// when opened under a name term, by the exact username when opened under
+    /// the username's output.
     static func openRecord(
         _ record: Data,
-        nameOprf: Data?,
-        usernameOprf: (oprf: Data, canonical: String)?,
+        nameOprf: OprfResult?,
+        usernameOprf: (oprf: OprfResult, canonical: String)?,
         query: String
     ) -> (payload: FfiIntroductionPayload, byUsername: Bool)? {
         guard let tags = try? introductionTags(record: record) else { return nil }
-        if let u = usernameOprf, let tag = try? fofTag(oprfOutput: u.oprf), tags.contains(tag),
-           let payload = try? openIntroduction(record: record, oprfOutput: u.oprf),
+        if let u = usernameOprf, let tag = try? fofTag(oprfOutput: u.oprf.output), tags.contains(tag),
+           let payload = try? openIntroduction(record: record, oprfOutput: u.oprf.output),
            payload.username == u.canonical {
             return (payload, true)
         }
-        if let n = nameOprf, let tag = try? fofTag(oprfOutput: n), tags.contains(tag),
-           let payload = try? openIntroduction(record: record, oprfOutput: n),
+        if let n = nameOprf, let tag = try? fofTag(oprfOutput: n.output), tags.contains(tag),
+           let payload = try? openIntroduction(record: record, oprfOutput: n.output),
            let name = payload.displayName,
            nameMatchesQuery(displayName: name, query: query) {
             return (payload, false)
@@ -162,17 +171,25 @@ public enum PeopleSearch {
         }
 
         // 1. The username, when the text could be one (people in Everyone).
-        var usernameOprf: (oprf: Data, canonical: String)?
+        var usernameOprf: (oprf: OprfResult, canonical: String)?
         if NameLookup.looksLikeAName(bare) {
             let canonical = normalizeUsername(input: bare)
             do {
-                usernameOprf = (try await ports.usernameOprf(canonical), canonical)
-                if let accountId = try await ports.lookupUsername(canonical),
-                   let key = try await ports.identityKey(accountId) {
+                let oprf = try await ports.usernameOprf(canonical)
+                usernameOprf = (oprf, canonical)
+                if let hit = try await ports.lookupUsername(oprf.lookupKey),
+                   let key = try await ports.identityKey(hit.accountId) {
                     let claim = knownProfiles[key.base64EncodedString()]
+                    let opened = hit.publicRecord.flatMap {
+                        Self.openPublic($0, output: oprf.output, accountId: hit.accountId)
+                    }
+                    // The public record's name counts only when it names the
+                    // key the verified identity bundle serves.
+                    let publicName = opened?.identityPk == key ? opened?.displayName : nil
                     found.append(FoundPerson(
-                        accountKey: key, accountId: accountId,
-                        displayName: claim?.displayName, username: canonical, writeSeed: nil))
+                        accountKey: key, accountId: hit.accountId,
+                        displayName: claim?.displayName ?? publicName,
+                        username: canonical, writeSeed: nil))
                 }
             } catch {
                 note(error)
@@ -180,21 +197,31 @@ public enum PeopleSearch {
         }
 
         // 2. One name term (the query's longest word), in Everyone.
-        var nameOprf: Data?
+        var nameOprf: OprfResult?
         if let term = nameQueryTerm(query: query) {
             do {
                 let oprf = try await ports.nameTermOprf(term)
                 nameOprf = oprf
-                for accountId in try await ports.nameLookup(oprf) {
-                    // A public person is named from a profile this device holds;
-                    // the server keeps no names, so one it has never seen cannot
-                    // be filtered or shown.
-                    guard let hit = knownProfiles.first(where: { $0.value.accountId == accountId }),
-                          let name = hit.value.displayName,
-                          nameMatchesQuery(displayName: name, query: query),
-                          let key = Data(base64Encoded: hit.key) else { continue }
+                for hit in try await ports.nameLookup(oprf.lookupKey) {
+                    // Named from a profile this device holds, else from the
+                    // public record, opened with the term's OPRF output (the
+                    // server keeps no names).
+                    if let known = knownProfiles.first(where: { $0.value.accountId == hit.accountId }),
+                       let name = known.value.displayName,
+                       let key = Data(base64Encoded: known.key) {
+                        guard nameMatchesQuery(displayName: name, query: query) else { continue }
+                        found.append(FoundPerson(
+                            accountKey: key, accountId: hit.accountId, displayName: name,
+                            username: nil, writeSeed: nil))
+                        continue
+                    }
+                    guard let record = hit.publicRecord,
+                          let payload = Self.openPublic(
+                              record, output: oprf.output, accountId: hit.accountId),
+                          let name = payload.displayName,
+                          nameMatchesQuery(displayName: name, query: query) else { continue }
                     found.append(FoundPerson(
-                        accountKey: key, accountId: accountId, displayName: name,
+                        accountKey: payload.identityPk, accountId: hit.accountId, displayName: name,
                         username: nil, writeSeed: nil))
                 }
             } catch {
@@ -204,29 +231,41 @@ public enum PeopleSearch {
 
         // 3. Contacts of contacts: the introduction records, matched locally.
         for record in records {
+            // An introduction record always carries the `fof` grant that
+            // reaches its owner; one without it gives this device no way in.
             guard let (payload, byUsername) = openRecord(
-                record, nameOprf: nameOprf, usernameOprf: usernameOprf, query: query) else { continue }
+                record, nameOprf: nameOprf, usernameOprf: usernameOprf, query: query),
+                  let fof = payload.fof else { continue }
             var username: String?
             if byUsername, let u = usernameOprf, let cert = payload.usernameCertificate,
-               await ports.verifyCertificate(cert, u.oprf, payload.accountId) {
+               await ports.verifyCertificate(cert, u.oprf.lookupKey, payload.accountId) {
                 username = u.canonical
             }
             // The reach check: a narrowed setting takes effect at the next
             // search, not at the next rotation.
             do {
-                guard try await ports.reachCheck(payload.identityPk, payload.fof.seed) else { continue }
+                guard try await ports.reachCheck(payload.identityPk, fof.seed) else { continue }
             } catch {
                 failed = true
                 continue
             }
             found.append(FoundPerson(
                 accountKey: payload.identityPk, accountId: payload.accountId,
-                displayName: payload.displayName, username: username, writeSeed: payload.fof.seed))
+                displayName: payload.displayName, username: username, writeSeed: fof.seed))
         }
 
         var seen = Set<Data>()
         let unique = found.filter { seen.insert($0.accountKey).inserted }
         return outcome(found: unique, allowanceUsed: allowance, failed: failed)
+    }
+
+    /// A public record served beside `accountId`, opened with the OPRF
+    /// `output` of the searched term; `nil` when it does not open or names
+    /// another account.
+    static func openPublic(_ record: Data, output: Data, accountId: Data) -> FfiIntroductionPayload? {
+        guard let payload = try? openPublicRecord(record: record, oprfOutput: output),
+              payload.accountId == accountId else { return nil }
+        return payload
     }
 
     /// Found people win; then a used-up allowance; then ANY network failure is

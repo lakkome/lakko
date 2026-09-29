@@ -33,9 +33,13 @@ enum ChannelMemberCards {
         }
         do {
             let kp = try ChannelSubscriberKeypair.fromSecret(secret: keys.secret)
-            let card = try sealMemberCard(
+            // The card is bound to the account (ADR-0060 section 3): with no
+            // active account there is no seed to sign with, and a reader
+            // drops an unbound card.
+            guard let card = try ReachCenter.shared.sealOwnMemberCard(
                 seed: seed, epochId: epoch, channelId: channelIdBytes,
                 subscriberPk: kp.`public`(), profile: try composeProfileEnvelope(profile: profile))
+            else { return }
             let sig = try kp.memberCardRequestSignature(channelId: channelIdBytes, card: card)
             try await ChannelsClient().putMemberCard(
                 channelIdHex: channelId,
@@ -64,10 +68,11 @@ enum ChannelMemberCards {
     }
 
     /// Read the channel's member cards, open each with the seed of its epoch,
-    /// and keep the `channel` grants they carry — filed under the member's
-    /// account key, resolved from the card's account id through the identity
-    /// directory (the card itself names no key). Returns the names read, for a
-    /// member list. Best effort.
+    /// and keep the `channel` grants they carry — filed under the account key
+    /// the card's binding verified under, never under the account id the
+    /// profile claims. A claimed account id the directory publishes a
+    /// different key for is a card naming someone else and is dropped.
+    /// Returns the names read, for a member list. Best effort.
     @discardableResult
     static func refresh(
         state: ChannelsUiState, channelId: String, resolveKey: (Data) async -> Data?
@@ -82,17 +87,22 @@ enum ChannelMemberCards {
             guard let page = try? await ChannelsClient().listMemberCards(
                 channelIdHex: channelId, after: after) else { break }
             for member in page.members where member.subscriberPk != ownPk {
+                // Opening verifies the card's account binding; a card that
+                // does not verify throws and is dropped.
                 guard let epoch = try? memberCardEpoch(card: member.card), let seed = seeds[epoch],
-                      let plain = try? openMemberCard(
+                      let opened = try? openMemberCard(
                           seed: seed, card: member.card, channelId: channelIdBytes,
                           subscriberPk: member.subscriberPk),
-                      let profile = try? decodeProfileEnvelope(plaintext: plain) else { continue }
+                      let profile = try? decodeProfileEnvelope(plaintext: opened.profile) else { continue }
+                let key = opened.identityPk
+                if let accountId = profile.accountId {
+                    guard let published = await resolveKey(accountId), published == key else { continue }
+                }
                 names.append(ProfileClaim(
                     displayName: profile.displayName, username: profile.username,
                     updatedAtMs: profile.updatedAtMs, accountId: profile.accountId,
                     usernameCertificate: profile.usernameCertificate))
-                guard let accountId = profile.accountId, !profile.grants.isEmpty,
-                      let key = await resolveKey(accountId) else { continue }
+                guard !profile.grants.isEmpty else { continue }
                 for grant in profile.grants {
                     ReachCenter.shared.keep(
                         grant, carrier: .channelMemberCard,

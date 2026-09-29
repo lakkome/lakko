@@ -10,6 +10,7 @@ import {
   decodePublication,
   encodePublication,
   everyoneAction,
+  everyoneKey,
   offerKey,
   offerNeedsRebuild,
   offerTargets,
@@ -19,19 +20,23 @@ import {
 import { keepsScopedEnvelope } from "./scoped-intake";
 
 describe("the Everyone publication", () => {
-  it("publishes on entering Everyone and on every name change, and only then", () => {
-    expect(everyoneAction(null, true, "Anna")).toEqual({ kind: "publish", name: "Anna" });
-    expect(everyoneAction({ public: true, name: "Anna" }, true, "Anna")).toEqual({ kind: "none" });
-    expect(everyoneAction({ public: true, name: "Anna" }, true, "Anna W")).toEqual({
-      kind: "publish",
-      name: "Anna W",
-    });
+  const anna = everyoneKey("Anna", "anna", "c");
+  it("publishes on entering Everyone and whenever the name, username or certificate moved, and only then", () => {
+    expect(everyoneAction(null, true, anna)).toEqual({ kind: "publish" });
+    expect(everyoneAction({ public: true, key: anna }, true, anna)).toEqual({ kind: "none" });
+    for (const moved of [
+      everyoneKey("Anna W", "anna", "c"),
+      everyoneKey("Anna", null, null),
+      everyoneKey("Anna", "anna", "c2"),
+    ]) {
+      expect(everyoneAction({ public: true, key: anna }, true, moved)).toEqual({ kind: "publish" });
+    }
   });
 
   it("withdraws on leaving, and never withdraws what was never published", () => {
-    expect(everyoneAction({ public: true, name: "Anna" }, false, "Anna")).toEqual({ kind: "withdraw" });
-    expect(everyoneAction(null, false, "Anna")).toEqual({ kind: "none" });
-    expect(everyoneAction({ public: false, name: null }, false, "Anna")).toEqual({ kind: "none" });
+    expect(everyoneAction({ public: true, key: anna }, false, anna)).toEqual({ kind: "withdraw" });
+    expect(everyoneAction(null, false, anna)).toEqual({ kind: "none" });
+    expect(everyoneAction({ public: false, key: null }, false, anna)).toEqual({ kind: "none" });
   });
 });
 
@@ -63,14 +68,19 @@ describe("the introduction record", () => {
   });
 
   it("spends a token only for a term not evaluated before", () => {
-    const state = { ...EMPTY_PUBLICATION, termHashes: { "n:ann": "x" } };
+    const state = { ...EMPTY_PUBLICATION, termOutputs: { "n:ann": "x" } };
     expect(termsToEvaluate(state, ["n:ann", "n:anna", "n:anna"])).toEqual(["n:anna"]);
   });
 
   it("round-trips", () => {
-    const state = { ...EMPTY_PUBLICATION, everyone: { public: true, name: "A" }, termHashes: { t: "h" } };
+    const state = { ...EMPTY_PUBLICATION, everyone: { public: true, key: "k" }, termOutputs: { t: "h" } };
     expect(decodePublication(encodePublication(state))).toEqual(state);
     expect(decodePublication("[")).toEqual(EMPTY_PUBLICATION);
+  });
+
+  it("reads a version-1 row (raw OPRF outputs sent to discovery) as empty, so it is published again", () => {
+    const v1 = JSON.stringify({ v: 1, everyone: { public: true, name: "A" }, termHashes: { t: "h" } });
+    expect(decodePublication(v1)).toEqual(EMPTY_PUBLICATION);
   });
 });
 

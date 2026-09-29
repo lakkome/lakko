@@ -247,10 +247,10 @@ public final class ContactsRepository: ObservableObject {
     public func peopleSearchPorts() -> PeopleSearchPorts {
         let factory = clientFactory
         return PeopleSearchPorts(
-            lookupUsername: { try await DiscoveryClient().lookup(username: $0).account },
-            usernameOprf: { try await DiscoveryClient().usernameOprfHash($0) },
-            nameTermOprf: { try await DiscoveryClient().nameTermOprfHash($0) },
-            nameLookup: { try await DiscoveryClient().nameLookup(termHash: $0) },
+            lookupUsername: { try await DiscoveryClient().lookupPublic(lookupKey: $0) },
+            usernameOprf: { try await DiscoveryClient().usernameOprf($0) },
+            nameTermOprf: { try await DiscoveryClient().nameTermOprf($0) },
+            nameLookup: { try await DiscoveryClient().nameLookup(termLookupKey: $0) },
             identityKey: { accountId in
                 try await factory().resolveVerifiedBundle(accountId: accountId).signaturePubkey
             },
@@ -258,9 +258,9 @@ public final class ContactsRepository: ObservableObject {
                 let mailbox = try IdentityPseudonym.fromIdentity(pubkey: accountKey).asBytes()
                 return try await DsClient().reachCheck(pseudonym: mailbox, reachSeed: seed)
             },
-            verifyCertificate: { cert, oprf, accountId in
+            verifyCertificate: { cert, lookupKey, accountId in
                 await ProfileDirectory.shared.verifyCertificate(
-                    certificate: cert, oprfHash: oprf, accountId: accountId)
+                    certificate: cert, lookupKey: lookupKey, accountId: accountId)
             })
     }
 

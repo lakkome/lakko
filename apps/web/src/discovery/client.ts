@@ -49,6 +49,7 @@ import {
   type AnonTokenPool,
 } from "../tokens/anon-token-pool";
 import { inviteLinkWidths } from "../contacts/invite-link";
+import { finalizeOprf } from "./oprf-pair";
 import type {
   ChannelLookupRequest,
   ChannelLookupResponse,
@@ -792,12 +793,15 @@ export class DiscoveryClient {
 
     const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
 
-    const oprfHashBytes = blinder.finalize(oprfResp.evaluated);
-    const oprfHashB64 = base64Encode(oprfHashBytes);
+    // ADR-0060 section 5: discovery receives the lookup key only; the raw
+    // OPRF output stays on this device (it keys sealed records).
+    const lookupKeyB64 = base64Encode(
+      finalizeOprf(blinder, oprfResp.evaluated).lookupKey,
+    );
 
     const registerResp = await this.register({
       account_id: base64Encode(accountId),
-      oprf_hash: oprfHashB64,
+      oprf_hash: lookupKeyB64,
     });
     if (!registerResp.ok) {
       throw new DiscoveryHttpError(
@@ -1613,11 +1617,14 @@ export class DiscoveryClient {
 
     const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
 
-    const oprfHashBytes = blinder.finalize(oprfResp.evaluated);
-    const oprfHashB64 = base64Encode(oprfHashBytes);
+    // ADR-0060 section 5: discovery receives the lookup key only; the raw
+    // OPRF output stays on this device (it keys sealed records).
+    const lookupKeyB64 = base64Encode(
+      finalizeOprf(blinder, oprfResp.evaluated).lookupKey,
+    );
 
     const lookupResp = await this.lookupRaw({
-      oprf_hash: oprfHashB64,
+      oprf_hash: lookupKeyB64,
     });
     if (lookupResp === null) {
       return { normalisedUsername, account: null };
@@ -1670,11 +1677,14 @@ export class DiscoveryClient {
 
     const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
 
-    const oprfHashBytes = blinder.finalize(oprfResp.evaluated);
-    const oprfHashB64 = base64Encode(oprfHashBytes);
+    // ADR-0060 section 5: discovery receives the lookup key only; the raw
+    // OPRF output stays on this device (it keys sealed records).
+    const lookupKeyB64 = base64Encode(
+      finalizeOprf(blinder, oprfResp.evaluated).lookupKey,
+    );
 
     const registerResp = await this.channelRegister({
-      oprf_hash: oprfHashB64,
+      oprf_hash: lookupKeyB64,
       channel_id: base64Encode(channelId),
     });
     if (!registerResp.ok) {
@@ -1702,11 +1712,14 @@ export class DiscoveryClient {
 
     const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
 
-    const oprfHashBytes = blinder.finalize(oprfResp.evaluated);
-    const oprfHashB64 = base64Encode(oprfHashBytes);
+    // ADR-0060 section 5: discovery receives the lookup key only; the raw
+    // OPRF output stays on this device (it keys sealed records).
+    const lookupKeyB64 = base64Encode(
+      finalizeOprf(blinder, oprfResp.evaluated).lookupKey,
+    );
 
     const lookupResp = await this.channelLookupRaw({
-      oprf_hash: oprfHashB64,
+      oprf_hash: lookupKeyB64,
     });
     if (lookupResp === null) {
       return { normalisedHandle, channel: null };

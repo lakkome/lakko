@@ -82,6 +82,26 @@ pub const MAX_CHOSEN_SCOPES: usize = 1024;
 /// Most entries a reach state holds. Chosen, not measured.
 pub const MAX_REACH_STATE_ENTRIES: usize = 4096;
 
+/// Longest setting envelope [`compose_visibility`] produces: the 35-byte
+/// fixed part plus [`MAX_CHOSEN_SCOPES`] entries of `2 + MAX_SCOPE_ID_LEN`
+/// bytes (67 619 bytes). A carrier that bounds its payload (the ADR-0060
+/// DeviceGroup `ServiceEnvelope`) must admit at least this much.
+pub const MAX_VISIBILITY_ENVELOPE_LEN: usize = VISIBILITY_ENVELOPE_DOMAIN_V1.len()
+    + 1
+    + 8
+    + 4
+    + 2
+    + MAX_CHOSEN_SCOPES * (2 + MAX_SCOPE_ID_LEN);
+
+/// Longest reach-state envelope [`compose_reach_state`] produces: the
+/// 32-byte fixed part plus [`MAX_REACH_STATE_ENTRIES`] entries of
+/// `2 + MAX_REACH_SCOPE_ID_LEN + 4` bytes (286 752 bytes).
+pub const MAX_REACH_STATE_ENVELOPE_LEN: usize = REACH_STATE_ENVELOPE_DOMAIN_V1.len()
+    + 1
+    + 8
+    + 2
+    + MAX_REACH_STATE_ENTRIES * (2 + crate::reach::MAX_REACH_SCOPE_ID_LEN + 4);
+
 const FLAG_CONTACTS_OF_CONTACTS: u8 = 0b01;
 const FLAG_LAST_CONTACTS_OF_CONTACTS: u8 = 0b10;
 
@@ -1195,5 +1215,54 @@ mod tests {
         }
         assert!(!VISIBILITY_ENVELOPE_DOMAIN_V1.starts_with(REACH_STATE_ENVELOPE_DOMAIN_V1));
         assert!(!REACH_STATE_ENVELOPE_DOMAIN_V1.starts_with(VISIBILITY_ENVELOPE_DOMAIN_V1));
+    }
+
+    #[test]
+    fn advertised_maxima_are_the_longest_composable_envelopes() {
+        let chosen: Vec<ScopeId> = (0..MAX_CHOSEN_SCOPES)
+            .map(|i| {
+                let mut id = vec![0u8; MAX_SCOPE_ID_LEN];
+                id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                ScopeId {
+                    kind: ScopeKind::Group,
+                    id,
+                }
+            })
+            .collect();
+        let setting = VisibilitySetting {
+            mode: VisibilityMode::Some,
+            contacts_of_contacts: true,
+            groups: Some(GroupsForm::Chosen),
+            chosen,
+            last_contacts_of_contacts: true,
+            last_groups: Some(GroupsForm::Chosen),
+            updated_at_ms: u64::MAX,
+        };
+        assert_eq!(
+            compose_visibility(&setting).unwrap().len(),
+            MAX_VISIBILITY_ENVELOPE_LEN
+        );
+        assert_eq!(MAX_VISIBILITY_ENVELOPE_LEN, 67_619);
+
+        let entries: Vec<ReachStateEntry> = (0..MAX_REACH_STATE_ENTRIES)
+            .map(|i| {
+                let mut scope_id = vec![0u8; crate::reach::MAX_REACH_SCOPE_ID_LEN];
+                scope_id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                ReachStateEntry {
+                    class: ReachClass::Group,
+                    scope_id,
+                    version: u32::MAX,
+                }
+            })
+            .collect();
+        let state = ReachState {
+            entries,
+            updated_at_ms: u64::MAX,
+        };
+        assert_eq!(
+            compose_reach_state(&state).unwrap().len(),
+            MAX_REACH_STATE_ENVELOPE_LEN
+        );
+        assert_eq!(MAX_REACH_STATE_ENVELOPE_LEN, 286_752);
     }
 }

@@ -37,6 +37,8 @@ pub(crate) async fn delete_account(
         "DELETE FROM keypackages WHERE account_id = ?",
         // ADR-0060 - the name search terms of a person in Everyone.
         "DELETE FROM display_names WHERE account_id = ?",
+        // ADR-0060 - the public record published beside them.
+        "DELETE FROM public_records WHERE account_id = ?",
     ] {
         sqlx::query(sql)
             .bind(account_id.as_slice())

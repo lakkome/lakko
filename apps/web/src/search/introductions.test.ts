@@ -49,7 +49,7 @@ describe("introductions", () => {
   it("opens the record a probe's tag matches, and reveals the claim and the grant", () => {
     const records = recordsOf(rowOf([record("Anna Weber", [oprf(1), oprf(2)])]), core);
     expect(records.length).toBeGreaterThanOrEqual(1);
-    const opened = openMatchingIntroductions(records, [{ oprf: oprf(2), via: "term" }], core);
+    const opened = openMatchingIntroductions(records, [{ oprfOutput: oprf(2), via: "term" }], core);
     expect(opened).toHaveLength(1);
     expect(opened[0]).toMatchObject({ displayName: "Anna Weber", username: null, via: "term" });
     expect(opened[0]!.identityPk).toEqual(IDENTITY);
@@ -65,13 +65,13 @@ describe("introductions", () => {
 
   it("opens nothing for a term the record was not sealed under", () => {
     const records = recordsOf(rowOf([record("Anna Weber", [oprf(1)])]), core);
-    expect(openMatchingIntroductions(records, [{ oprf: oprf(9), via: "term" }], core)).toEqual([]);
+    expect(openMatchingIntroductions(records, [{ oprfOutput: oprf(9), via: "term" }], core)).toEqual([]);
   });
 
   it("reads a contact's own offer as well as the relayed bundles", () => {
     const offer = record("Bo Lind", [oprf(7)]);
     const records = recordsOf(rowOf([record("Anna Weber", [oprf(1)])], offer), core);
-    const opened = openMatchingIntroductions(records, [{ oprf: oprf(7), via: "username" }], core);
+    const opened = openMatchingIntroductions(records, [{ oprfOutput: oprf(7), via: "username" }], core);
     expect(opened.map((o) => o.displayName)).toEqual(["Bo Lind"]);
     expect(opened[0]!.via).toBe("username");
   });
@@ -82,13 +82,13 @@ describe("introductions", () => {
       offers: {},
     };
     expect(recordsOf(row, core)).toEqual([]);
-    expect(openMatchingIntroductions([new Uint8Array([9, 9])], [{ oprf: oprf(1), via: "term" }], core)).toEqual([]);
+    expect(openMatchingIntroductions([new Uint8Array([9, 9])], [{ oprfOutput: oprf(1), via: "term" }], core)).toEqual([]);
   });
 
   it("drops a record whose tag matched but which does not authenticate: a forgery, never shown", () => {
     const good = record("Anna Weber", [oprf(1)]);
     const tampered = good.slice();
     tampered[tampered.length - 1] = (tampered[tampered.length - 1] ?? 0) ^ 0xff;
-    expect(openMatchingIntroductions([tampered], [{ oprf: oprf(1), via: "term" }], core)).toEqual([]);
+    expect(openMatchingIntroductions([tampered], [{ oprfOutput: oprf(1), via: "term" }], core)).toEqual([]);
   });
 });

@@ -42,13 +42,14 @@ use lakko_contacts::introduction::{
     bundle_is_newer as rust_bundle_is_newer, compose_bundle as rust_compose_bundle,
     compose_introduction as rust_compose_introduction,
     compose_introduction_offer as rust_compose_introduction_offer,
+    compose_public_record as rust_compose_public_record,
     decode_introduction_offer as rust_decode_introduction_offer,
     decode_introductions as rust_decode_introductions, fof_tag as rust_fof_tag,
     introduction_tags as rust_introduction_tags, open_introduction as rust_open_introduction,
-    IntroductionError, IntroductionPayload as RustIntroductionPayload,
-    IntroductionRecord as RustIntroductionRecord, IntroductionsBundle as RustIntroductionsBundle,
-    BUNDLE_SIZE_BUCKETS, FOF_TAG_LEN, IDENTITY_PK_LEN, MAX_BUNDLE_RECORDS, MAX_INTRODUCTION_TERMS,
-    OPRF_OUTPUT_LEN,
+    open_public_record as rust_open_public_record, IntroductionError,
+    IntroductionPayload as RustIntroductionPayload, IntroductionRecord as RustIntroductionRecord,
+    IntroductionsBundle as RustIntroductionsBundle, BUNDLE_SIZE_BUCKETS, FOF_TAG_LEN,
+    IDENTITY_PK_LEN, MAX_BUNDLE_RECORDS, MAX_INTRODUCTION_TERMS, OPRF_OUTPUT_LEN,
 };
 use lakko_contacts::profile::{ProfileError, ACCOUNT_ID_LEN};
 use lakko_contacts::reach::{
@@ -450,7 +451,7 @@ impl IntroductionPayload {
         display_name: Option<String>,
         username: Option<String>,
         username_certificate: Option<Vec<u8>>,
-        fof: &ReachGrant,
+        fof: Option<&ReachGrant>,
     ) -> Result<Self, Refusal> {
         let identity_pk = <[u8; IDENTITY_PK_LEN]>::try_from(identity_pk).map_err(|_| {
             length_refusal(
@@ -477,7 +478,7 @@ impl IntroductionPayload {
                 display_name,
                 username,
                 username_certificate,
-                fof: fof.inner.clone(),
+                fof: fof.map(|g| g.inner.clone()),
             },
         })
     }
@@ -485,8 +486,9 @@ impl IntroductionPayload {
 
 #[wasm_bindgen]
 impl IntroductionPayload {
-    /// Build a payload. The field rules (name, username, certificate, a
-    /// `Fof` grant) are checked by `composeIntroduction`.
+    /// Build a contacts-of-contacts payload carrying its `Fof` grant. The
+    /// field rules (name, username, certificate, a `Fof` grant) are checked
+    /// by `composeIntroduction`.
     ///
     /// # Errors
     ///
@@ -507,7 +509,32 @@ impl IntroductionPayload {
             display_name,
             username,
             username_certificate,
-            fof,
+            Some(fof),
+        ))
+    }
+
+    /// Build the payload of an Everyone public record (ADR-0060 section 5):
+    /// the same fields with no grant. Pass it to `composePublicRecord`.
+    ///
+    /// # Errors
+    ///
+    /// Throws with `introductionError` `identityPkLength` or
+    /// `accountIdLength`.
+    #[wasm_bindgen(js_name = forPublicRecord)]
+    pub fn for_public_record(
+        identity_pk: &[u8],
+        account_id: &[u8],
+        display_name: Option<String>,
+        username: Option<String>,
+        username_certificate: Option<Vec<u8>>,
+    ) -> Result<IntroductionPayload, JsValue> {
+        js(Self::new_inner(
+            identity_pk,
+            account_id,
+            display_name,
+            username,
+            username_certificate,
+            None,
         ))
     }
 
@@ -546,13 +573,14 @@ impl IntroductionPayload {
         self.inner.username_certificate.clone()
     }
 
-    /// The `Fof` reach grant (secret).
+    /// The `Fof` reach grant (secret); `undefined` in a public record.
     #[wasm_bindgen(getter)]
     #[must_use]
-    pub fn fof(&self) -> ReachGrant {
-        ReachGrant {
-            inner: self.inner.fof.clone(),
-        }
+    pub fn fof(&self) -> Option<ReachGrant> {
+        self.inner
+            .fof
+            .as_ref()
+            .map(|g| ReachGrant { inner: g.clone() })
     }
 }
 
@@ -637,19 +665,80 @@ fn open_introduction_inner(
 }
 
 /// Open a record wire with one 64-byte OPRF output; `undefined` when no
-/// entry matches (not this person, or a padding dummy).
+/// entry matches (not this person, or a padding dummy). A payload returned
+/// always carries its `fof` grant.
 ///
 /// # Errors
 ///
 /// Throws with `introductionError` `open` when a tag matched but the record
-/// failed to authenticate (a forgery, never a miss), or for a malformed
-/// record.
+/// failed to authenticate (a forgery, never a miss), `grant.missing` when
+/// it opened without a grant, or for a malformed record.
 #[wasm_bindgen(js_name = openIntroduction)]
 pub fn open_introduction(
     record: &[u8],
     oprf_output: &[u8],
 ) -> Result<Option<IntroductionPayload>, JsValue> {
     js(open_introduction_inner(record, oprf_output))
+}
+
+fn compose_public_record_inner(
+    payload: &IntroductionPayload,
+    term_oprfs: &[Vec<u8>],
+    issued_at_ms: u64,
+) -> Result<Vec<u8>, Refusal> {
+    let terms = term_oprfs
+        .iter()
+        .map(|t| oprf64(t))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rust_compose_public_record(
+        &payload.inner,
+        &terms,
+        issued_at_ms,
+    )?)
+}
+
+/// Build the public record a person in Everyone publishes with
+/// `PUT /discovery/visibility` (ADR-0060 section 5): the introduction record
+/// shape, findable by the username's OPRF output and every name term's,
+/// with NO grant (build the payload with `IntroductionPayload.forPublicRecord`).
+///
+/// # Errors
+///
+/// Throws with `introductionError` `grant.unexpected` when the payload
+/// carries a grant, and every error of `composeIntroduction`.
+#[wasm_bindgen(js_name = composePublicRecord)]
+pub fn compose_public_record(
+    payload: &IntroductionPayload,
+    term_oprfs: Vec<js_sys::Uint8Array>,
+    issued_at_ms: u64,
+) -> Result<Vec<u8>, JsValue> {
+    let owned: Vec<Vec<u8>> = term_oprfs.into_iter().map(|a| a.to_vec()).collect();
+    js(compose_public_record_inner(payload, &owned, issued_at_ms))
+}
+
+fn open_public_record_inner(
+    record: &[u8],
+    oprf_output: &[u8],
+) -> Result<Option<IntroductionPayload>, Refusal> {
+    Ok(rust_open_public_record(record, &oprf64(oprf_output)?)?
+        .map(|inner| IntroductionPayload { inner }))
+}
+
+/// Open a public record served by `/discovery/lookup` or
+/// `/discovery/name/lookup` with the OPRF output of the searched username or
+/// name term; `undefined` when no entry matches. A payload returned never
+/// carries a grant (the person's mailbox is open).
+///
+/// # Errors
+///
+/// Throws with `introductionError` `grant.unexpected` when it opened with a
+/// grant, and every error of `openIntroduction`.
+#[wasm_bindgen(js_name = openPublicRecord)]
+pub fn open_public_record(
+    record: &[u8],
+    oprf_output: &[u8],
+) -> Result<Option<IntroductionPayload>, JsValue> {
+    js(open_public_record_inner(record, oprf_output))
 }
 
 /// Wrap one record as an introduction offer (owner to a contact, in their
@@ -1613,7 +1702,8 @@ pub struct UsernameCertificate {
 
 #[wasm_bindgen]
 impl UsernameCertificate {
-    /// The certified 64-byte OPRF output of the username.
+    /// The certified 64-byte lookup key of the username (the
+    /// `discoveryLookupKey` of its OPRF output).
     #[wasm_bindgen(getter, js_name = oprfHash)]
     #[must_use]
     pub fn oprf_hash(&self) -> Vec<u8> {
@@ -1673,8 +1763,9 @@ fn verify_username_binding_inner(
 }
 
 /// Verify a claimed username: the certificate's signature under the pinned
-/// discovery key and its binding to `expectedOprfHash` (the OPRF output of
-/// the CLAIMED username) and `expectedAccountId`. No freshness check. Show
+/// discovery key and its binding to `expectedOprfHash` (the `lookupKey` of
+/// the OPRF round over the CLAIMED username, never its `output`) and
+/// `expectedAccountId`. No freshness check. Show
 /// the username only on success.
 ///
 /// # Errors
@@ -1881,6 +1972,44 @@ mod tests {
     }
 
     #[test]
+    fn a_public_record_carries_no_grant() {
+        let public = IntroductionPayload::new_inner(
+            &[1; 32],
+            &[2; 16],
+            Some("Anna Weber".to_string()),
+            Some("anna".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+        let terms = vec![vec![5u8; 64], vec![6u8; 64]];
+        let record = compose_public_record_inner(&public, &terms, 3).unwrap();
+        let opened = open_public_record_inner(&record, &terms[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(opened, public);
+        assert!(opened.fof().is_none());
+        assert_eq!(
+            open_introduction_inner(&record, &terms[0])
+                .unwrap_err()
+                .code,
+            "grant.missing"
+        );
+        assert_eq!(
+            compose_public_record_inner(&payload(), &terms, 1)
+                .unwrap_err()
+                .code,
+            "grant.unexpected"
+        );
+        assert_eq!(
+            compose_introduction_inner(&public, &terms, 1)
+                .unwrap_err()
+                .code,
+            "grant.missing"
+        );
+    }
+
+    #[test]
     fn introduction_refusals_carry_their_code() {
         let e = compose_introduction_inner(&payload(), &[], 1).unwrap_err();
         assert_eq!(
@@ -1898,7 +2027,7 @@ mod tests {
             Some("a\nb".into()),
             None,
             None,
-            &fof,
+            Some(&fof),
         )
         .unwrap();
         let e = compose_introduction_inner(&bad, &[vec![5; 64]], 1).unwrap_err();
@@ -1907,7 +2036,7 @@ mod tests {
             ("profileError", "displayName.lineBreak")
         );
         assert_eq!(
-            IntroductionPayload::new_inner(&[1; 31], &[2; 16], None, None, None, &fof)
+            IntroductionPayload::new_inner(&[1; 31], &[2; 16], None, None, None, Some(&fof))
                 .unwrap_err()
                 .code,
             "identityPkLength"

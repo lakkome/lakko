@@ -154,13 +154,14 @@ export function peopleSearchDeps(args: {
       const found = await discovery.lookupChannel(handle);
       return found.channel === null ? null : bytesToHex(found.channel);
     },
-    usernameHash: (username) => scoped.usernameHash(username),
-    accountOfUsernameHash: async (hash) => {
-      const res = await discovery.lookupRaw({ oprf_hash: base64Encode(hash) });
+    usernameOprf: (username) => scoped.usernameOprf(username),
+    accountOfUsernameLookupKey: async (lookupKey) => {
+      const res = await discovery.lookupRaw({ oprf_hash: base64Encode(lookupKey) });
       return res === null ? null : base64Decode(res.account_id);
     },
-    nameTermHash: (term) => scoped.nameTermHash(term),
-    accountsOfNameTermHash: (hash) => scoped.nameLookup(hash),
+    nameTermOprf: (term) => scoped.nameTermOprf(term),
+    accountsOfNameTermLookupKey: async (lookupKey) =>
+      (await scoped.nameLookup(lookupKey)).map((hit) => hit.accountId),
     identityKeyOf: async (accountId) => {
       const bundle = await discovery.identityFetch(accountId);
       return bundle === null ? null : base64Decode(bundle.signature_pubkey);
@@ -172,9 +173,9 @@ export function peopleSearchDeps(args: {
       const row = await loadIntroductions(session.accountIdB64);
       return openMatchingIntroductions(recordsOf(row, wasm), probes, wasm);
     },
-    verifyUsername: async (certificate, oprfHash, accountId) => {
+    verifyUsername: async (certificate, usernameLookupKey, accountId) => {
       try {
-        const cert = wasm.verifyUsernameBinding(certificate, await usernameCertKey(), oprfHash, accountId);
+        const cert = wasm.verifyUsernameBinding(certificate, await usernameCertKey(), usernameLookupKey, accountId);
         cert.free();
         return true;
       } catch {

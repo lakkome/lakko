@@ -4,7 +4,7 @@
 //! Username certificate ([ADR-0060] section 5).
 //!
 //! A *username certificate* is a compact, domain-separated, Ed25519-signed
-//! statement by `services/discovery` that the OPRF output of a username was
+//! statement by `services/discovery` that the lookup key of a username was
 //! registered to an account. Discovery signs it once, at username registration,
 //! with a **dedicated** key (published at a well-known path and pinned in the
 //! clients, the [ADR-0015] pattern). A viewer who is shown a claimed username
@@ -21,9 +21,13 @@
 //! - **Permanent.** Usernames are immutable in Lakko, so a certificate carries
 //!   an `issued_at` timestamp (informational) and no expiry, and
 //!   [`verify_username_binding`] applies **no freshness check**.
-//! - **Binds the OPRF output, never the username.** The plaintext username never
+//! - **Binds the lookup key, never the username.** The plaintext username never
 //!   reaches the server (invariant #1), so the certificate carries the 64-byte
-//!   OPRF output the discovery table is keyed on.
+//!   lookup key the discovery table is keyed on: a one-way derivation of the
+//!   username's OPRF output (`lakko_discovery_client::discovery_lookup_key`).
+//!   The output itself stays on the client, because public records are sealed
+//!   under keys derived from it (ADR-0060 section 5). This crate treats the
+//!   field as opaque bytes; the name `oprf_hash` is the wire field's.
 //!
 //! The format deliberately mirrors [`GenesisAttestation`](crate::GenesisAttestation):
 //! a small fixed-layout binary blob (not a JWT), so the verifier stays trivial to
@@ -78,8 +82,8 @@ const DOMAIN: &[u8] = b"lakko/username-cert/v1";
 /// Wire-format version. The verifier refuses any other value.
 const VERSION: u8 = 1;
 
-/// Length of the OPRF output the certificate binds (the Ristretto255-SHA512
-/// VOPRF output discovery keys its username table on).
+/// Length of the lookup key the certificate binds (the 64-byte value
+/// discovery keys its username table on).
 pub const OPRF_HASH_LEN: usize = 64;
 
 /// Length of the account id (raw UUIDv7 bytes).
@@ -119,7 +123,7 @@ pub enum UsernameCertError {
     /// of another attestation kind, or malformed signature bytes).
     #[error("username certificate signature is invalid")]
     BadSignature,
-    /// The certified OPRF output does not match the OPRF of the claimed
+    /// The certified lookup key does not match the lookup key of the claimed
     /// username.
     #[error("username certificate does not match the claimed username")]
     UsernameMismatch,
@@ -151,7 +155,7 @@ impl UsernameCertificate {
         }
     }
 
-    /// The certified OPRF output of the username.
+    /// The certified lookup key of the username.
     #[must_use]
     pub const fn oprf_hash(&self) -> &[u8; OPRF_HASH_LEN] {
         &self.oprf_hash
@@ -245,12 +249,13 @@ impl UsernameCertificate {
 }
 
 /// Verify a username certificate's signature and its binding to the claimed
-/// username (as the OPRF output the viewer computed over it) and the claimed
+/// username (as the lookup key of the OPRF output the viewer computed over it)
+/// and the claimed
 /// account, with **no freshness check** — usernames are immutable, so a
 /// certificate is a permanent artifact.
 ///
 /// The binding fields are compared with plain equality: both are public data
-/// (the certificate travels in the profile, the OPRF output is what anyone with
+/// (the certificate travels in the profile, the lookup key is what anyone with
 /// a token can compute for a guessed username), so a timing difference reveals
 /// nothing the caller does not already hold.
 ///

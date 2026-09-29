@@ -229,11 +229,12 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       const accountHex = held?.accountIdHex ?? null;
       if (certB64 === null || accountHex === null) return { kind: "unregistered" };
       const w = await loadWasm();
-      const [hash, key] = await Promise.all([scoped.usernameHash(username), usernameCertKey()]);
+      // The certificate binds the username's LOOKUP KEY, never its OPRF output.
+      const [round, key] = await Promise.all([scoped.usernameOprf(username), usernameCertKey()]);
       const accountId = new Uint8Array(16);
       for (let i = 0; i < 16; i++) accountId[i] = Number.parseInt(accountHex.slice(i * 2, i * 2 + 2), 16);
       try {
-        w.verifyUsernameBinding(base64Decode(certB64), key, hash, accountId).free();
+        w.verifyUsernameBinding(base64Decode(certB64), key, round.lookupKey, accountId).free();
       } catch {
         return { kind: "unregistered" };
       }

@@ -11,7 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { base64Encode } from "../auth/account-id";
 import { AnonTokenQuotaExhaustedError } from "../tokens/anon-token-pool";
-import type { OpenedIntroduction } from "./introductions";
+import type { IntroductionProbe, OpenedIntroduction } from "./introductions";
 import { toHex } from "./people";
 import { searchPeople, type KnownPerson, type PeopleSearchDeps } from "./people-search";
 
@@ -21,6 +21,13 @@ const BO_KEY = new Uint8Array(32).fill(0xb1);
 const BO_ACC = new Uint8Array(16).fill(0xb2);
 const OTHER_KEY = new Uint8Array(32).fill(0xc1);
 const FOF_WIRE = new Uint8Array(37).fill(0x0f);
+
+/** A fake OPRF round whose two halves differ, so a test can tell which one
+ *  reached which question. */
+const round = (prefix: string, text: string) => ({
+  lookupKey: new TextEncoder().encode(`key:${prefix}:${text}`),
+  output: new TextEncoder().encode(`out:${prefix}:${text}`),
+});
 
 const NOBODY: KnownPerson = { name: null, verifiedUsername: null, isContact: false, keptGrantWireB64: null };
 
@@ -48,10 +55,10 @@ function deps(over: Partial<PeopleSearchDeps> = {}, known: Record<string, KnownP
         .every((part) => words.some((w) => w.startsWith(part)));
     },
     lookupChannel: async () => null,
-    usernameHash: async (u) => new TextEncoder().encode(`u:${u}`),
-    accountOfUsernameHash: async () => null,
-    nameTermHash: async (t) => new TextEncoder().encode(`t:${t}`),
-    accountsOfNameTermHash: async () => [],
+    usernameOprf: async (u) => round("u", u),
+    accountOfUsernameLookupKey: async () => null,
+    nameTermOprf: async (t) => round("t", t),
+    accountsOfNameTermLookupKey: async () => [],
     identityKeyOf: async (acc) => bundles.get(toHex(acc)) ?? null,
     known: (keyB64) => known[keyB64] ?? NOBODY,
     openIntroductions: async () => [],
@@ -79,7 +86,7 @@ describe("searchPeople: the username", () => {
     const out = await searchPeople(
       "anna",
       deps(
-        { accountOfUsernameHash: async () => ANNA_ACC },
+        { accountOfUsernameLookupKey: async () => ANNA_ACC },
         { [base64Encode(ANNA_KEY)]: { ...NOBODY, name: "Anna Weber" } },
       ),
     );
@@ -95,16 +102,39 @@ describe("searchPeople: the username", () => {
   });
 
   it("names someone it holds no profile for by the username itself", async () => {
-    const out = await searchPeople("anna", deps({ accountOfUsernameHash: async () => ANNA_ACC }));
+    const out = await searchPeople("anna", deps({ accountOfUsernameLookupKey: async () => ANNA_ACC }));
     expect(out.people[0]).toMatchObject({ name: "@anna", username: "anna" });
   });
 
   it("asks no username or channel question for text that cannot be a username", async () => {
-    const usernameHash = vi.fn(async () => new Uint8Array(64));
+    const usernameOprf = vi.fn(async () => round("u", "x"));
     const lookupChannel = vi.fn(async () => null);
-    await searchPeople("Anna Weber", deps({ usernameHash, lookupChannel }));
-    expect(usernameHash).not.toHaveBeenCalled();
+    await searchPeople("Anna Weber", deps({ usernameOprf, lookupChannel }));
+    expect(usernameOprf).not.toHaveBeenCalled();
     expect(lookupChannel).not.toHaveBeenCalled();
+  });
+});
+
+describe("searchPeople: which half of an OPRF round goes where (ADR-0060 section 5)", () => {
+  it("asks discovery with lookup keys and opens records with outputs", async () => {
+    const accountOfUsernameLookupKey = vi.fn(async () => null);
+    const accountsOfNameTermLookupKey = vi.fn(async () => []);
+    const openIntroductions = vi.fn(
+      async (_probes: readonly IntroductionProbe[]): Promise<OpenedIntroduction[]> => [],
+    );
+    await searchPeople(
+      "bolind",
+      deps({ accountOfUsernameLookupKey, accountsOfNameTermLookupKey, openIntroductions }),
+    );
+    expect(accountOfUsernameLookupKey).toHaveBeenCalledWith(round("u", "bolind").lookupKey);
+    expect(accountsOfNameTermLookupKey).toHaveBeenCalledWith(round("t", "bolind").lookupKey);
+    const probes = openIntroductions.mock.calls[0]![0];
+    expect(probes.map((p) => [p.via, p.oprfOutput]).sort()).toEqual(
+      [
+        ["term", round("t", "bolind").output],
+        ["username", round("u", "bolind").output],
+      ].sort(),
+    );
   });
 });
 
@@ -118,7 +148,7 @@ describe("searchPeople: the states", () => {
     const out = await searchPeople(
       "anna",
       deps({
-        accountOfUsernameHash: async () => {
+        accountOfUsernameLookupKey: async () => {
           throw new Error("offline");
         },
       }),
@@ -130,7 +160,7 @@ describe("searchPeople: the states", () => {
     const out = await searchPeople(
       "anna",
       deps({
-        usernameHash: async () => {
+        usernameOprf: async () => {
           throw new AnonTokenQuotaExhaustedError("discovery-lookup", null);
         },
       }),
@@ -150,7 +180,7 @@ describe("searchPeople: names in Everyone", () => {
     const out = await searchPeople(
       "anna w",
       deps(
-        { accountsOfNameTermHash: async () => [ANNA_ACC, BO_ACC] },
+        { accountsOfNameTermLookupKey: async () => [ANNA_ACC, BO_ACC] },
         { [base64Encode(ANNA_KEY)]: { ...NOBODY, name: "Anna Weber" } },
       ),
     );
@@ -162,7 +192,7 @@ describe("searchPeople: names in Everyone", () => {
     const out = await searchPeople(
       "anna x",
       deps(
-        { accountsOfNameTermHash: async () => [ANNA_ACC] },
+        { accountsOfNameTermLookupKey: async () => [ANNA_ACC] },
         { [base64Encode(ANNA_KEY)]: { ...NOBODY, name: "Anna Weber" } },
       ),
     );
@@ -220,17 +250,18 @@ describe("searchPeople: contacts of contacts", () => {
     expect(out.people).toEqual([]);
   });
 
-  it("shows the username only after its certificate verifies, reusing the typed username's hash", async () => {
-    const usernameHash = vi.fn(async (u: string) => new TextEncoder().encode(`u:${u}`));
+  it("shows the username only after its certificate verifies, reusing the typed username's round", async () => {
+    const usernameOprf = vi.fn(async (u: string) => round("u", u));
     const verifyUsername = vi.fn(async () => true);
     const opened = intro({ via: "username", username: "bolind", usernameCertificate: new Uint8Array([1]) });
     const out = await searchPeople(
       "bolind",
-      deps({ openIntroductions: async () => [opened], usernameHash, verifyUsername }),
+      deps({ openIntroductions: async () => [opened], usernameOprf, verifyUsername }),
     );
     expect(out.people[0]).toMatchObject({ username: "bolind", name: "Bo Lind" });
-    expect(usernameHash).toHaveBeenCalledTimes(1);
-    expect(verifyUsername).toHaveBeenCalledWith(new Uint8Array([1]), new TextEncoder().encode("u:bolind"), BO_ACC);
+    expect(usernameOprf).toHaveBeenCalledTimes(1);
+    // The certificate binds the lookup key, never the output.
+    expect(verifyUsername).toHaveBeenCalledWith(new Uint8Array([1]), round("u", "bolind").lookupKey, BO_ACC);
   });
 
   it("shows no username when the certificate does not verify", async () => {
@@ -252,7 +283,7 @@ describe("searchPeople: one list", () => {
     const out = await searchPeople(
       "bolind",
       deps({
-        accountOfUsernameHash: async () => BO_ACC,
+        accountOfUsernameLookupKey: async () => BO_ACC,
         openIntroductions: async () => [intro({ via: "username", username: "bolind" })],
         reachCheck,
       }),
@@ -278,7 +309,7 @@ describe("searchPeople: one list", () => {
   it("never lists the viewer", async () => {
     const out = await searchPeople(
       "anna",
-      deps({ accountOfUsernameHash: async () => ANNA_ACC, ownKeyHex: toHex(ANNA_KEY) }),
+      deps({ accountOfUsernameLookupKey: async () => ANNA_ACC, ownKeyHex: toHex(ANNA_KEY) }),
     );
     expect(out.people).toEqual([]);
   });

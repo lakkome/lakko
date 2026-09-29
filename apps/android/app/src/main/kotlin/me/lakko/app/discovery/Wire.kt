@@ -43,7 +43,8 @@ data class OprfRequest(
 /** Response body of `POST /discovery/oprf`. */
 @Serializable
 data class OprfResponse(
-    /** base64(EvaluationElement). Feed to `blinder.finalize(evaluated)`. */
+    /** base64(EvaluationElement). Feed to `blinder.finalize(evaluated)`, which
+     *  returns an `OprfResult { output, lookupKey }`. */
     val evaluated: String,
 )
 
@@ -56,8 +57,10 @@ data class OprfResponse(
 data class RegisterRequest(
     /** base64(account_id) — raw 16 bytes. */
     val account_id: String,
-    /** base64(VOPRF output) — exactly 64 bytes, the OPRF hash the
-     *  client just computed via `blinder.finalize`. */
+    /** base64 of the 64-byte discovery lookup key,
+     *  `blinder.finalize(..).lookupKey`. ADR-0060 §5: never the OPRF
+     *  output itself, which keys public and introduction records and
+     *  stays on the device. The field name is the server's. */
     val oprf_hash: String,
 )
 
@@ -68,7 +71,7 @@ data class RegisterRequest(
 data class RegisterResponse(
     val ok: Boolean,
     /** ADR-0060 §5 — standard base64 of the 153-byte username certificate
-     *  binding the OPRF hash to the account. */
+     *  binding the username's lookup key to the account. */
     val username_certificate_b64: String? = null,
 )
 
@@ -90,12 +93,16 @@ data class UsernameCertKeyResponse(
 @Serializable
 data class VisibilityRequest(
     val public: Boolean,
+    /** base64 of each name search term's 64-byte lookup key
+     *  (`OprfResult.lookupKey`), never an OPRF output. */
     val name_terms_b64: List<String> = emptyList(),
 )
 
 /** Body of `POST /discovery/name/lookup` (ADR-0060 §5). */
 @Serializable
 data class NameLookupRequest(
+    /** base64 of the term's 64-byte lookup key (`OprfResult.lookupKey`),
+     *  never an OPRF output. The field name is the server's. */
     val oprf_hash_b64: String,
 )
 
@@ -129,8 +136,8 @@ data class LookupResponse(
 //   (services/discovery/src/channel_names.rs — G4-5, ADR-0010)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/channel/register`. Binds an OPRF-
- *  hashed `@channelname` to a 16-byte `channel_id` pseudonym.
+/** Body of `POST /discovery/channel/register`. Binds the lookup key
+ *  of an OPRF'd `@channelname` to a 16-byte `channel_id` pseudonym.
  *  Same OPRF ciphersuite + wire shape as [RegisterRequest]
  *  (Ristretto255-SHA512, 64-byte hash) — the `/discovery/oprf`
  *  evaluate endpoint is namespace-agnostic, so the client reuses
@@ -139,8 +146,9 @@ data class LookupResponse(
  *  different channel id is 409 Conflict. */
 @Serializable
 data class ChannelRegisterRequest(
-    /** base64(VOPRF output) — exactly 64 bytes, from
-     *  `blinder.finalize`. */
+    /** base64 of the 64-byte discovery lookup key,
+     *  `blinder.finalize(..).lookupKey` (ADR-0060 §5, never the OPRF
+     *  output). */
     val oprf_hash: String,
     /** base64(channel_id) — raw 16 bytes (ADR-0010 §"Wire
      *  surfaces"). */

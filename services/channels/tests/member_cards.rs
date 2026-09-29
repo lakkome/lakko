@@ -84,10 +84,39 @@ impl Member {
             EpochId::new(epoch),
             &channel,
             &self.pk(),
+            &self.account_seed(),
             profile,
         )
         .unwrap()
     }
+    /// The member's account identity seed (distinct from its subscriber
+    /// key: the card binds the one to the other).
+    fn account_seed(&self) -> [u8; 32] {
+        let mut seed = self.key.to_seed();
+        seed[0] ^= 0xA5;
+        seed
+    }
+    fn unsubscribe_header(&self, issued_at_ms: u64) -> String {
+        let channel: [u8; 16] = hex::decode(CHANNEL_HEX).unwrap().try_into().unwrap();
+        format!(
+            "{issued_at_ms}.{}",
+            URL_SAFE_NO_PAD.encode(lakko_channels::sign_unsubscribe_request(
+                &self.key,
+                &channel,
+                issued_at_ms
+            ))
+        )
+    }
+}
+
+fn now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
 }
 
 async fn setup(client: &reqwest::Client, addr: SocketAddr, members: &[&Member]) {
@@ -172,14 +201,20 @@ async fn a_signed_card_round_trips_and_opens_for_a_seed_holder() {
         .unwrap();
     assert_eq!(served, card);
     let channel: [u8; 16] = hex::decode(CHANNEL_HEX).unwrap().try_into().unwrap();
-    let profile = open_member_card(
+    let opened = open_member_card(
         &ContentKeySeed::from_bytes_for_test([1; 32]),
         &served,
         &channel,
         &alice.pk(),
     )
     .unwrap();
-    assert_eq!(profile, b"profile v3 of alice");
+    assert_eq!(opened.profile, b"profile v3 of alice");
+    assert_eq!(
+        opened.identity_pk,
+        SigningKey::from_seed(&alice.account_seed())
+            .verifying_key()
+            .to_bytes()
+    );
     assert!(body["next_after"].is_null());
 }
 
@@ -385,4 +420,131 @@ async fn the_member_list_pages_by_subscriber_key() {
         .status()
         .as_u16();
     assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn a_signed_unsubscribe_removes_the_subscriber_and_its_card() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    let alice = Member::new(1);
+    let bob = Member::new(2);
+    setup(&client, addr, &[&alice, &bob]).await;
+    for m in [&alice, &bob] {
+        let card = m.card(0, b"me");
+        let (status, _) = put(&client, addr, &m.hex(), card.clone(), Some(m.sign(&card))).await;
+        assert_eq!(status, 204);
+    }
+    let unsubscribe = |path: String, header: Option<String>| {
+        let client = client.clone();
+        async move {
+            let mut req = client.delete(format!(
+                "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{path}"
+            ));
+            if let Some(h) = header {
+                req = req.header(lakko_channels::UNSUBSCRIBE_SIG_HEADER, h);
+            }
+            let resp = req.send().await.unwrap();
+            let status = resp.status().as_u16();
+            let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+            (status, body["code"].as_str().map(str::to_owned))
+        }
+    };
+    let now = now_ms();
+    // Unsigned, signed by another subscriber, malformed, stale: refused, and
+    // nothing is removed.
+    assert_eq!(
+        unsubscribe(alice.hex(), None).await,
+        (401, Some("bad-unsubscribe-signature".into()))
+    );
+    assert_eq!(
+        unsubscribe(alice.hex(), Some(bob.unsubscribe_header(now)))
+            .await
+            .0,
+        401
+    );
+    assert_eq!(
+        unsubscribe(alice.hex(), Some("+1.AAAA".into())).await.0,
+        401
+    );
+    assert_eq!(
+        unsubscribe(
+            alice.hex(),
+            Some(alice.unsubscribe_header(now - lakko_channels::UNSUBSCRIBE_WINDOW_MS - 60_000))
+        )
+        .await,
+        (401, Some("stale-unsubscribe".into()))
+    );
+    let (_, body) = list(&client, addr, "").await;
+    assert_eq!(body["members"].as_array().unwrap().len(), 2);
+
+    // Signed and fresh: 204, idempotent; the card and the registration go.
+    assert_eq!(
+        unsubscribe(alice.hex(), Some(alice.unsubscribe_header(now)))
+            .await
+            .0,
+        204
+    );
+    assert_eq!(
+        unsubscribe(alice.hex(), Some(alice.unsubscribe_header(now)))
+            .await
+            .0,
+        204
+    );
+    let (_, body) = list(&client, addr, "").await;
+    let members = body["members"].as_array().unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(
+        members[0]["subscriber_pk_b64"].as_str().unwrap(),
+        URL_SAFE_NO_PAD.encode(bob.pk())
+    );
+    let resp = client
+        .get(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
+        ))
+        .send()
+        .await
+        .unwrap();
+    let subs = resp.text().await.unwrap();
+    assert!(!subs.contains(&alice.hex()), "{subs}");
+    assert!(subs.contains(&bob.hex()), "{subs}");
+    // A card upload for the departed subscriber is refused: it is no longer
+    // registered.
+    let card = alice.card(0, b"me again");
+    let (status, _) = put(
+        &client,
+        addr,
+        &alice.hex(),
+        card.clone(),
+        Some(alice.sign(&card)),
+    )
+    .await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn an_unsubscribe_from_an_unknown_channel_is_404_after_the_signature() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    let alice = Member::new(1);
+    setup(&client, addr, &[&alice]).await;
+    let now = now_ms();
+    let other = "ffeeddccbbaa99887766554433221100";
+    let resp = client
+        .delete(format!(
+            "http://{addr}/v1/channels/{other}/subscribers/{}",
+            alice.hex()
+        ))
+        .header(lakko_channels::UNSUBSCRIBE_SIG_HEADER, {
+            let channel: [u8; 16] = hex::decode(other).unwrap().try_into().unwrap();
+            format!(
+                "{now}.{}",
+                URL_SAFE_NO_PAD.encode(lakko_channels::sign_unsubscribe_request(
+                    &alice.key, &channel, now
+                ))
+            )
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 404);
 }

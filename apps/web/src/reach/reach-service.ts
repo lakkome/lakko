@@ -209,6 +209,22 @@ export class ReachSession {
     return this.wasm.DsProofSigner.forReach(this.accountSeed);
   }
 
+  /**
+   * Seal this account's member card (ADR-0060 section 3): the profile bound
+   * to the account by the account identity key's signature, which a reader
+   * verifies before filing the card under the account. Here so the account
+   * seed never leaves the session.
+   */
+  sealMemberCard(
+    epochSeed: Uint8Array,
+    epoch: number,
+    channelId: Uint8Array,
+    subscriberPk: Uint8Array,
+    profile: Uint8Array,
+  ): Uint8Array {
+    return this.wasm.sealMemberCard(epochSeed, epoch, channelId, subscriberPk, this.accountSeed, profile);
+  }
+
   /** The grants a profile carries in a conversation (ADR-0060 section 3 and
    *  the section 6 contact grant): `member` always, `group` when the setting
    *  lets this group's members find the owner, `contact` in a one-to-one. */

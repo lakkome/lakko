@@ -28,6 +28,7 @@ import {
   decodePublication,
   encodePublication,
   everyoneAction,
+  everyoneKey,
   offerKey,
   offerNeedsRebuild,
   offerTargets,
@@ -38,6 +39,7 @@ import {
 import { reachSession, reachSessionSignal } from "./reach-service";
 import { loadReachRow, saveReachRow } from "./reach-store";
 import { ScopedDiscoveryClient } from "./scoped-discovery";
+import type { OprfPair } from "../discovery/oprf-pair";
 import { loadIntroductions } from "./scoped-intake";
 import { visibilitySetting } from "./visibility-store";
 
@@ -96,52 +98,84 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
     const name = profiles.ownProfile().displayName;
     const username = profiles.ownUsername();
 
-    /** OPRF outputs of the terms (cached; each new one costs a token). */
-    const hashesOf = async (terms: readonly { key: string; evaluate: () => Promise<Uint8Array> }[]) => {
+    const certificate = username === null ? null : profiles.ownUsernameCertificate();
+
+    /** A term to evaluate: its cache key and the OPRF round that yields it. */
+    type Term = { readonly key: string; readonly evaluate: () => Promise<OprfPair> };
+
+    /** The OPRF OUTPUTS of the terms (cached; each new one costs a token).
+     *  Outputs never leave the device; see `lookupKeysOf`. */
+    const outputsOf = async (terms: readonly Term[]): Promise<Uint8Array[]> => {
       const missing = termsToEvaluate(state, terms.map((t) => t.key));
       if (missing.length > 0) {
         const added: Record<string, string> = {};
         for (const t of terms) {
           if (!missing.includes(t.key)) continue;
-          added[t.key] = base64Encode(await t.evaluate());
+          added[t.key] = base64Encode((await t.evaluate()).output);
         }
-        await save({ ...state, termHashes: { ...state.termHashes, ...added } });
+        await save({ ...state, termOutputs: { ...state.termOutputs, ...added } });
       }
-      return terms.map((t) => base64Decode(state.termHashes[t.key] ?? ""));
+      return terms.map((t) => base64Decode(state.termOutputs[t.key] ?? ""));
     };
-    const nameTerms = (n: string | null): { key: string; evaluate: () => Promise<Uint8Array> }[] =>
+    /** The lookup keys discovery gets for these outputs (ADR-0060 §5). */
+    const lookupKeysOf = (outputs: readonly Uint8Array[]): Uint8Array[] =>
+      outputs.map((o) => wasm.discoveryLookupKey(o));
+    const nameTerms = (n: string | null): Term[] =>
       n === null
         ? []
         : wasm.nameSearchTerms(n).map((term) => ({
             key: `n:${term}`,
-            evaluate: () => scoped.nameTermHash(term),
+            evaluate: () => scoped.nameTermOprf(term),
           }));
+    const usernameTerms = (u: string | null): Term[] =>
+      u === null ? [] : [{ key: `u:${u}`, evaluate: () => scoped.usernameOprf(u) }];
 
     // 1. Everyone (ADR-0060 section 5). The mailbox's `open` flag is the
-    //    reach session's; this is the discovery half.
+    //    reach session's; this is the discovery half: the lookup keys of the
+    //    name terms, and the public record sealed under the OUTPUTS of the
+    //    name terms plus the username.
     const everyone = setting.mode === wasm.VisibilityMode.Everyone;
-    const action = everyoneAction(state.everyone, everyone, name);
+    const pubKey = everyoneKey(name, username, certificate === null ? null : base64Encode(certificate));
+    const action = everyoneAction(state.everyone, everyone, pubKey);
     if (action.kind === "publish") {
-      const hashes = await hashesOf(nameTerms(action.name));
-      await scoped.putVisibility(true, hashes);
-      await save({ ...state, everyone: { public: true, name: action.name } });
+      const names = nameTerms(name);
+      const all = [...names, ...usernameTerms(username)];
+      if (all.length === 0) {
+        // A public record needs a term, and discovery refuses Everyone
+        // without one: nothing to publish until a name or a username exists.
+        // eslint-disable-next-line no-console
+        console.warn("[reach] Everyone not published: no name and no username yet");
+      } else {
+        const outputs = await outputsOf(all);
+        const nameLookupKeys = lookupKeysOf(outputs.slice(0, names.length));
+        const payload = wasm.IntroductionPayload.forPublicRecord(
+          session.accountKey,
+          base64Decode(account),
+          name ?? undefined,
+          username ?? undefined,
+          certificate ?? undefined,
+        );
+        let publicRecord: Uint8Array;
+        try {
+          publicRecord = wasm.composePublicRecord(payload, outputs, BigInt(Date.now()));
+        } finally {
+          payload.free();
+        }
+        await scoped.putVisibility({ public: true, nameTermLookupKeys: nameLookupKeys, publicRecord });
+        await save({ ...state, everyone: { public: true, key: pubKey } });
+      }
     } else if (action.kind === "withdraw") {
-      await scoped.putVisibility(false, []);
-      await save({ ...state, everyone: { public: false, name: null } });
+      await scoped.putVisibility({ public: false });
+      await save({ ...state, everyone: { public: false, key: null } });
     }
 
     // 2. The introduction record (section 4), rebuilt when an input moved.
     const fof = wasm.allowsContactsOfContacts(setting);
     const key = offerKey(session.currentVersion("fof"), name, username);
     if (offerNeedsRebuild(state.offer, fof, key)) {
-      const terms = [
-        ...nameTerms(name),
-        ...(username === null
-          ? []
-          : [{ key: `u:${username}`, evaluate: () => scoped.usernameHash(username) }]),
-      ];
+      const terms = [...nameTerms(name), ...usernameTerms(username)];
       if (terms.length > 0) {
-        const oprfs = await hashesOf(terms);
+        const outputs = await outputsOf(terms);
         const grant = session.grant("fof");
         const accountId = base64Decode(account);
         const payload = new wasm.IntroductionPayload(
@@ -149,12 +183,12 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
           accountId,
           name ?? undefined,
           username ?? undefined,
-          username === null ? undefined : (profiles.ownUsernameCertificate() ?? undefined),
+          certificate ?? undefined,
           grant,
         );
         grant.free();
         try {
-          const record = wasm.composeIntroduction(payload, oprfs, BigInt(Date.now()));
+          const record = wasm.composeIntroduction(payload, outputs, BigInt(Date.now()));
           await save({ ...state, offer: { key, recordB64: base64Encode(record) }, offerSentTo: {} });
         } finally {
           payload.free();
@@ -209,6 +243,7 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
     visibilitySetting();
     profiles.ownProfile();
     profiles.ownUsername();
+    profiles.ownUsernameCertificate();
     chats.groups();
     untrack(trigger);
   });

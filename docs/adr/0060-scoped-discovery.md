@@ -166,6 +166,20 @@ seeds), deleted on unsubscribe (a signed `DELETE`) and by the existing 90-day
 subscriber prune. The `channel` reach key is versioned by the channel epoch.
 Publishers upload a card like anyone else.
 
+**A card is bound to the account behind it** (decided 2026-09-29 after S4/S5).
+The sealed card plaintext is `identity_pk(32) ‖ sig(64) ‖ profile`, where `sig`
+is the account identity key's Ed25519 signature over
+`"lakko/channel/member-card-binding/v1" ‖ channel_id ‖ subscriber_pk ‖
+BLAKE3(profile)`; a reader that cannot verify it drops the card. Without it
+any subscriber could upload a card naming another account, and the reader
+would file the card's grant and name under that account.
+
+**A subscriber can unsubscribe.** `DELETE /v1/channels/{id}/subscribers/{pk}`,
+signed by the subscriber key over its own domain
+(`lakko/channel/unsubscribe/v1`), removes the row, its seed envelopes and its
+member card. Before it there was no way to leave a channel on the server
+short of the 90-day prune.
+
 **A subscriber's key becomes Ed25519** (amended 2026-09-28 after S2, the
 maintainer's call). The key a subscriber registered was the X25519 key of the
 seed envelope, which cannot sign a card. A subscriber now holds one Ed25519
@@ -218,16 +232,43 @@ filters by the whole query, runs the reach check, and shows the result.
   (oprf_hash, account_id))`, one row per name search term. `POST
   /discovery/name/lookup` returns up to 20 account ids for one term's hash (a
   cap chosen, not measured); the client fetches their profiles and filters by
-  the whole query. The name is on the server only as OPRF outputs, never
-  plaintext (invariant #1). The server learns how many terms each public
+  the whole query. The name is on the server only as lookup keys, never
+  plaintext and never as OPRF outputs (invariant #1; see the lookup-key item
+  below). The server learns how many terms each public
   person has (roughly their name's length) and which accounts share a term;
   anyone with tokens can list the people in Everyone by walking prefixes,
   which is what Everyone means.
+- **A person in Everyone is found with a name** (decided 2026-09-29 after
+  S4/S5; the first draft said "the client fetches their profiles" with no
+  store behind it). Entering Everyone also publishes one **public record**:
+  the section 4 introduction record, keyed per term over the same name terms
+  plus the username, with no `fof` grant in its payload (the mailbox is open,
+  so none is needed, and a grant given to the world would outlive leaving
+  Everyone). Discovery keeps it opaque in `public_records(account_id,
+  record)`; `/discovery/name/lookup` and `/discovery/lookup` return it beside
+  each account id, and the searcher opens it with the OPRF output it already
+  holds for its query term.
+- **Discovery stores lookup keys, never OPRF outputs** (decided 2026-09-29,
+  found after the core blocker sprint). The public record is sealed under keys
+  derived from the OPRF output of each term, so if discovery held the outputs
+  themselves, anyone reading its tables could open every public record and
+  read every name in it. Every `oprf_hash` a client sends - username
+  register and lookup, name terms, name lookup, channel handles - is instead
+  `lookup_key = BLAKE3-keyed-XOF(BLAKE3-derive-key("lakko/discovery/lookup/v1"), output)`,
+  64 bytes, so the server columns and the certificate keep their width. It is
+  one-way, so a copy of the database opens no record. `finalize` on both FFI
+  surfaces returns the pair (`output`, `lookupKey`) so every call site names
+  which one it uses; the output never leaves the device. This does not help
+  against the operator, who holds the OPRF key (Residuals).
+- **A username found by `/discovery/lookup` counts as verified without a
+  certificate**: discovery is the authority that signs certificates and is
+  the one that answered. Every other username a client shows needs its
+  certificate.
 - **Leaving Everyone** clears `public`, deletes the name rows and the `open`
   flag. `lookup` of a non-public username answers exactly as for an
   unregistered one.
 - **Username certificate.** At registration, discovery signs
-  `(OPRF(username), account_id)` with a dedicated Ed25519 key (published at a
+  `(lookup key of OPRF(username), account_id)` with a dedicated Ed25519 key (published at a
   well-known path and pinned in the clients, the ADR-0015 pattern). A viewer
   verifies a claimed username by one OPRF evaluation plus the certificate,
   with no lookup - so ADR-0048 verification keeps working for people who do
@@ -286,8 +327,13 @@ key set that can drift between mailboxes.
 A bounded `lakko-contacts` envelope carrying the position, the two parts, the
 all/chosen form, the chosen group and channel ids, the last-parts memory (UX
 section 3) and every reach key version counter, sent over the DeviceGroup so
-all of the person's devices agree (the reserved DeviceGroup fields of
-ADR-0050, which this makes the first incremental sync). Ordered by a strictly
+all of the person's devices agree. **The carrier** (decided 2026-09-29 after
+S4/S5): a DeviceGroup body `ServiceEnvelope { bytes envelope }` at field 20 of
+`DeviceGroupPayload` (14-17 stay ADR-0050's, 18-19 are the chat-folders
+branch's), carrying a `lakko-contacts` envelope verbatim; the receiver
+dispatches it and keeps only Visibility and ReachState from it, ordered by
+their own stamps. A device that joins the DeviceGroup is sent the current
+Visibility and ReachState by the device that admits it. Ordered by a strictly
 increasing stamp (the ADR-0044 lesson: a re-send carries its original stamp).
 The UI transition rules of UX section 11 live in `lakko_ui_rules`.
 
@@ -335,9 +381,12 @@ The UI transition rules of UX section 11 live in `lakko_ui_rules`.
 
 ### Invariants
 
-- **#1** held: names only as OPRF outputs, only for people who chose Everyone.
+- **#1** held: names only as one-way lookup keys, only for people who chose
+  Everyone; the operator can still evaluate guessed names (Residuals).
 - **#2** held: reach keys are public keys; seeds never leave E2EE carriers.
-- **#3** untouched: no `lakko-mls` change.
+- **#3** touched once: the DeviceGroup `ServiceEnvelope` body (section 7) is a
+  `lakko-mls` payload change, with property tests and the extended
+  `devicegroup_payload` fuzz target; no state-machine change.
 - **#4** held: the mailbox refuses; a username that fails its certificate is
   not shown.
 - **#5** strengthened (no stranger reach), with the residuals below.
@@ -360,6 +409,13 @@ The UI transition rules of UX section 11 live in `lakko_ui_rules`.
 - **Prefix search is enumerable.** With enough anonymous tokens, a searcher can
   walk every 3-letter prefix and list the people in Everyone, and the contacts
   of their own contacts who turned 2.1 on. The token quota is the only bound.
+- **The operator reads the names of the people in Everyone.** It holds the
+  OPRF key, so it can evaluate every 3-letter prefix itself at no token cost,
+  derive each lookup key, fetch the public records and open them. Storing
+  lookup keys instead of outputs protects the names against a copy of the
+  database, not against the operator. Inherent to server-side prefix search
+  with an operator-held OPRF key; a person who does not accept this does not
+  choose Everyone.
 - **A contact** can pass their key to anyone. As today with a username; fixed
   by the rotation on removal.
 - **`member`**: a co-member the owner hides from holds a key that the DS
@@ -469,20 +525,26 @@ envelope on the DeviceGroup)
   cards, keys registered or removed, `open` set, introduction offers sent or
   withdrawn, Everyone published or unpublished. Default for a new account:
   `defaultVisibilitySetting()`.
-- Everyone: `PUT /discovery/visibility {public, name_terms_b64}` with the OPRF
-  hash of every `nameSearchTerms(displayName)` term (`blindNameTerm`), on
-  entering Everyone and on every name change; `public: false` on leaving.
+- Every discovery request carries `OprfResult.lookupKey`, never
+  `OprfResult.output`; records (public and introduction) are composed and
+  opened with the `output`s. A client that kept outputs derives keys with
+  `discoveryLookupKey`.
+- Everyone: `PUT /discovery/visibility {public, name_terms_b64}` with the
+  lookup key of every `nameSearchTerms(displayName)` term (`blindNameTerm`),
+  and the public record composed over the outputs, on entering Everyone and
+  on every name change; `public: false` on leaving.
 - Username certificate: kept from `POST /discovery/register` or fetched with
   `GET /discovery/username-certificate`, carried in profile v3; a viewer shows
-  a username only after `verifyUsernameBinding` against the key from
+  a username only after `verifyUsernameBinding` (expected hash = the lookup
+  key of the claimed username) against the key from
   `GET /.well-known/lakko-username-cert-key` (pinned at build time where the
   client pins keys). This replaces the ADR-0048 lookup verification.
 - Search: local first (contacts, profiles holding a grant, any part of any
   word, `nameMatchesQuery`); the network search takes the username
   (`/discovery/lookup`, public accounts only) and one name term
   (`nameQueryTerm` -> `/discovery/name/lookup`), then the introduction bundles
-  (`introductionTags` / `openIntroduction` against the OPRF of the username and
-  of the query term), filters by the whole query, and runs
+  (`introductionTags` / `openIntroduction` against the OPRF output of the
+  username and of the query term), filters by the whole query, and runs
   `POST /ds/mailbox/{hex}/reach/check` with the grant before showing a result.
 - Contacts of contacts: when 2.1 is on, compose one introduction record per
   version over `nameSearchTerms` + the username and send it to each contact as

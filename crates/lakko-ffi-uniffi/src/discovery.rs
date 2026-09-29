@@ -16,9 +16,10 @@
 //!   * [`OprfBlinder`] — the OPRF dance handle. Construct with
 //!     `OprfBlinder::blind(username)`, read `blinded_b64` for the
 //!     `/discovery/oprf` request body, then call `finalize` with
-//!     the server's `evaluated` response to obtain the 64-byte
-//!     OPRF hash (consumed by `/discovery/lookup` /
-//!     `/discovery/register` as `oprf_hash`).
+//!     the server's `evaluated` response to obtain an [`OprfResult`]:
+//!     the OPRF output, which stays on the device, and its lookup key,
+//!     which `/discovery/lookup` / `/discovery/register` consume as
+//!     `oprf_hash`.
 //!
 //! ## "Consume on `finalize`" model
 //!
@@ -34,16 +35,52 @@
 use std::sync::Mutex;
 
 use lakko_discovery_client::{
-    is_name_term as inner_is_name_term, login_handle as inner_login_handle,
-    name_matches_query as inner_name_matches_query, name_query_term as inner_name_query_term,
-    name_search_terms as inner_name_search_terms,
+    discovery_lookup_key as inner_lookup_key, is_name_term as inner_is_name_term,
+    login_handle as inner_login_handle, name_matches_query as inner_name_matches_query,
+    name_query_term as inner_name_query_term, name_search_terms as inner_name_search_terms,
     normalize_name_for_search as inner_normalize_name_for_search,
     normalize_username as inner_normalize, validate_username as inner_validate,
     DiscoveryClientError, OprfBlinder as InnerBlinder, MAX_NAME_TERMS, NAME_INPUT_MAX_BYTES,
-    NAME_SEARCH_MIN_CHARS, NAME_TERM_MAX_CHARS, NAME_TERM_MIN_CHARS,
+    NAME_SEARCH_MIN_CHARS, NAME_TERM_MAX_CHARS, NAME_TERM_MIN_CHARS, OPRF_HASH_LEN,
 };
 
 use crate::FfiError;
+
+/// What one OPRF round yields ([ADR-0060] section 5).
+///
+/// Two values on purpose, so each call site names the one it uses:
+/// `lookup_key` is the `oprf_hash` of every discovery request (register,
+/// lookup, name register and lookup, channel handles) and what a username
+/// certificate binds; `output` never leaves the device, because a public
+/// record and an introduction record are sealed under keys derived from it.
+///
+/// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct OprfResult {
+    /// The 64-byte OPRF output. Never send it to the server.
+    pub output: Vec<u8>,
+    /// The 64-byte lookup key derived from `output`.
+    pub lookup_key: Vec<u8>,
+}
+
+/// The lookup key of an OPRF output ([ADR-0060] section 5), for a caller
+/// that kept an output from an earlier round.
+///
+/// # Errors
+///
+/// [`FfiError::Discovery`] when `output` is not 64 bytes.
+///
+/// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+#[uniffi::export]
+pub fn discovery_lookup_key(output: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    let output = <[u8; OPRF_HASH_LEN]>::try_from(output.as_slice()).map_err(|_| {
+        FfiError::Discovery(format!(
+            "an OPRF output must be {OPRF_HASH_LEN} bytes, got {}",
+            output.len()
+        ))
+    })?;
+    Ok(inner_lookup_key(&output).to_vec())
+}
 
 impl From<DiscoveryClientError> for FfiError {
     fn from(e: DiscoveryClientError) -> Self {
@@ -199,8 +236,9 @@ pub fn max_name_terms() -> u32 {
 /// val blinder = OprfBlinder.blind("alice")
 /// val request = OprfChallengeRequest(blinded = blinder.blindedB64())
 /// // POST /discovery/oprf → response.evaluated
-/// val hash = blinder.finalize(response.evaluated)  // 64-byte ByteArray
-/// // hash → oprf_hash field on /discovery/lookup
+/// val done = blinder.finalize(response.evaluated)
+/// // done.lookupKey → oprf_hash field on /discovery/lookup
+/// // done.output stays on the device (records are sealed under it)
 /// ```
 #[derive(uniffi::Object)]
 pub struct OprfBlinder {
@@ -318,7 +356,8 @@ impl OprfBlinder {
 
     /// Finalise the OPRF dance with the server's evaluation.
     ///
-    /// Returns the 64-byte OPRF hash. Single-use: a second call
+    /// Returns the OPRF output and its lookup key ([`OprfResult`]); only
+    /// the lookup key goes to the server. Single-use: a second call
     /// on the same instance returns
     /// [`FfiError::DiscoveryAlreadyFinalized`] rather than
     /// producing a second hash.
@@ -331,11 +370,14 @@ impl OprfBlinder {
     ///   `EvaluationElement`, or the underlying `voprf`
     ///   finalisation rejected the math (wire corruption in
     ///   the non-verifiable mode we use).
-    pub fn finalize(&self, evaluated_b64: String) -> Result<Vec<u8>, FfiError> {
+    pub fn finalize(&self, evaluated_b64: String) -> Result<OprfResult, FfiError> {
         let mut guard = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let blinder = guard.take().ok_or(FfiError::DiscoveryAlreadyFinalized)?;
-        let hash = blinder.finalize(&evaluated_b64)?;
-        Ok(hash.to_vec())
+        let done = blinder.finalize(&evaluated_b64)?;
+        Ok(OprfResult {
+            output: done.output().to_vec(),
+            lookup_key: done.lookup_key().to_vec(),
+        })
     }
 }
 

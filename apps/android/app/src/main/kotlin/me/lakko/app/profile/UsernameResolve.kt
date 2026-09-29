@@ -66,8 +66,8 @@ private const val SIGNATURE_KEY_BYTES = 32
  * instead of a public lookup (which a person outside Everyone no longer
  * answers).
  *
- * Found only when all three hold: the certificate verifies for the OPRF of
- * [username] and the claimed account ([accountIdHex]) under the pinned key
+ * Found only when all three hold: the certificate verifies for the discovery
+ * lookup key of [username] and the claimed account ([accountIdHex]) under the pinned key
  * ([verifyBinding]); and that account's published signature key is the
  * sender's ([senderKeyB64], resolved at receipt, C-68) — without the last
  * check a member could copy a stranger's certificate and account id into
@@ -75,7 +75,9 @@ private const val SIGNATURE_KEY_BYTES = 32
  * network failure or a missing key is [UsernameResolution.Unavailable] (no
  * conclusion, retried later).
  *
- * @param oprf the 64-byte OPRF output of the username (one lookup token).
+ * @param lookupKey the 64-byte discovery lookup key of the username
+ *   (`OprfResult.lookupKey`, one lookup token). The certificate binds the
+ *   lookup key, never the OPRF output (ADR-0060 §5).
  * @param verifyBinding the certificate check (`verifyUsernameBinding`), `true`
  *   when it accepts; `null` when no verifying key is available.
  */
@@ -84,8 +86,8 @@ public suspend fun verifyUsernameByCertificate(
     certificateHex: String,
     accountIdHex: String,
     senderKeyB64: String,
-    oprf: suspend (String) -> ByteArray,
-    verifyBinding: ((certificate: ByteArray, oprfHash: ByteArray, accountId: ByteArray) -> Boolean)?,
+    lookupKey: suspend (String) -> ByteArray,
+    verifyBinding: ((certificate: ByteArray, lookupKey: ByteArray, accountId: ByteArray) -> Boolean)?,
     fetchSignatureKey: suspend (ByteArray) -> ByteArray?,
 ): UsernameResolution {
     val certificate = hexBytesOrNull(certificateHex) ?: return UsernameResolution.NotRegistered
@@ -93,8 +95,8 @@ public suspend fun verifyUsernameByCertificate(
         ?: return UsernameResolution.NotRegistered
     val binding = verifyBinding ?: return UsernameResolution.Unavailable(null)
     return try {
-        val hash = oprf(username)
-        if (!binding(certificate, hash, accountId)) return UsernameResolution.NotRegistered
+        val key = lookupKey(username)
+        if (!binding(certificate, key, accountId)) return UsernameResolution.NotRegistered
         val published = fetchSignatureKey(accountId) ?: return UsernameResolution.NotRegistered
         if (Base64.getEncoder().encodeToString(published) != senderKeyB64) {
             UsernameResolution.NotRegistered

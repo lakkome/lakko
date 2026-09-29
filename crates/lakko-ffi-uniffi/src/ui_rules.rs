@@ -221,6 +221,10 @@ pub enum InfoSection {
     ManageChannel,
     /// Stop following a channel.
     Unsubscribe,
+    /// The channel's member list, for its readers (ADR-0060 section 3,
+    /// UX `who-can-find-me.md` 6.3). Appended last: uniffi decodes by
+    /// ordinal.
+    ChannelMembers,
 }
 
 impl From<RustInfoSection> for InfoSection {
@@ -245,6 +249,7 @@ impl From<RustInfoSection> for InfoSection {
             RustInfoSection::SubscriberCount => Self::SubscriberCount,
             RustInfoSection::ManageChannel => Self::ManageChannel,
             RustInfoSection::Unsubscribe => Self::Unsubscribe,
+            RustInfoSection::ChannelMembers => Self::ChannelMembers,
         }
     }
 }
@@ -676,6 +681,12 @@ mod tests {
             subscriber_count_known: false,
         })
         .contains(&InfoSection::Unsubscribe));
+        assert!(channel_info_sections(ChannelInfoCapabilities {
+            is_publisher: true,
+            is_subscriber: false,
+            subscriber_count_known: true,
+        })
+        .contains(&InfoSection::ChannelMembers));
         assert_eq!(info_target(ConversationKind::Chat), InfoTarget::Person);
     }
 

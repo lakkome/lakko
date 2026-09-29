@@ -64,8 +64,10 @@ fn decode_fixed<const N: usize>(
 pub(crate) struct RegisterRequest {
     /// Base64-encoded UUIDv7 raw bytes (16 bytes).
     pub(crate) account_id: String,
-    /// Base64-encoded VOPRF output bytes (64 bytes for Ristretto255-SHA512).
-    /// The client computes this locally after a `/discovery/oprf` round trip.
+    /// Base64-encoded 64-byte lookup key: the client finalises a
+    /// `/discovery/oprf` round trip and derives this from the OPRF output
+    /// (`lakko_discovery_client::discovery_lookup_key`). The output itself
+    /// never reaches the server (ADR-0060 section 5).
     pub(crate) oprf_hash: String,
 }
 
@@ -156,6 +158,10 @@ pub(crate) struct LookupResponse {
     /// Base64-encoded UUIDv7 raw bytes — the `account_id` registered
     /// under this OPRF-hashed username.
     pub(crate) account_id: String,
+    /// Standard base64 of the account's public record (ADR-0060 section 5):
+    /// the searcher opens it with the OPRF output it just used for the
+    /// username (`openPublicRecord`).
+    pub(crate) public_record_b64: String,
 }
 
 /// `POST /discovery/lookup` — resolve an OPRF-hashed username to its
@@ -174,23 +180,29 @@ pub(crate) async fn lookup(
     let oprf_hash = decode_fixed::<OPRF_HASH_LEN>(&payload.oprf_hash, "oprf_hash")?;
 
     // ADR-0060: only a person in Everyone answers; a hidden username gets the
-    // very response an unregistered one does.
-    let row: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT account_id FROM usernames WHERE oprf_hash = ? AND is_public = TRUE")
-            .bind(&oprf_hash[..])
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "lookup usernames");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal db error".to_string(),
-                )
-            })?;
+    // very response an unregistered one does. `PUT /discovery/visibility`
+    // stores a public record in the transaction that sets `is_public`, so the
+    // join drops nobody who entered Everyone through it.
+    let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT u.account_id, p.record FROM usernames u \
+         JOIN public_records p ON p.account_id = u.account_id \
+         WHERE u.oprf_hash = ? AND u.is_public = TRUE",
+    )
+    .bind(&oprf_hash[..])
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "lookup usernames");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
 
     match row {
-        Some((account_id,)) => Ok(Json(LookupResponse {
+        Some((account_id, record)) => Ok(Json(LookupResponse {
             account_id: B64.encode(account_id),
+            public_record_b64: B64.encode(record),
         })),
         None => Err((StatusCode::NOT_FOUND, "username not found".to_string())),
     }

@@ -14,8 +14,14 @@ final class PeopleSearchTests: XCTestCase {
 
     /// Stand-in for the server OPRF: 64 bytes, deterministic per input and per
     /// domain, which is all the record's tag / key derivation needs.
-    private func fakeOprf(_ domain: String, _ s: String) -> Data {
+    private func fakeOutput(_ domain: String, _ s: String) -> Data {
         Data(SHA512.hash(data: Data((domain + "|" + s).utf8)))
+    }
+
+    /// The pair `finalize` returns: the output and its real lookup key.
+    private func fakeOprf(_ domain: String, _ s: String) -> OprfResult {
+        let output = fakeOutput(domain, s)
+        return OprfResult(output: output, lookupKey: try! discoveryLookupKey(output: output)) // swiftlint:disable:this force_try
     }
 
     private let annaKey = try! Identity.fromSeed(seed: Data(repeating: 0x51, count: 32)) // swiftlint:disable:this force_try
@@ -27,15 +33,26 @@ final class PeopleSearchTests: XCTestCase {
         let payload = FfiIntroductionPayload(
             identityPk: annaKey.signaturePublicKey(), accountId: annaAccount,
             displayName: name, username: nil, usernameCertificate: nil, fof: fof)
-        let terms = nameSearchTerms(displayName: name).map { fakeOprf("name", $0) }
+        let terms = nameSearchTerms(displayName: name).map { fakeOutput("name", $0) }
         return (try composeIntroduction(payload: payload, termOprfs: terms, issuedAtMs: 1), fof)
+    }
+
+    /// Anna's public record (ADR-0060 section 5): no grant, sealed under the
+    /// OUTPUTS of her name terms and username.
+    private func annaPublicRecord(name: String = "Anna Weber", username: String? = nil) throws -> Data {
+        let payload = FfiIntroductionPayload(
+            identityPk: annaKey.signaturePublicKey(), accountId: annaAccount,
+            displayName: name, username: nil, usernameCertificate: nil, fof: nil)
+        var terms = nameSearchTerms(displayName: name).map { fakeOutput("name", $0) }
+        if let username { terms.append(fakeOutput("user", username)) }
+        return try composePublicRecord(payload: payload, termOprfs: terms, issuedAtMs: 1)
     }
 
     private func ports(
         reachCheck: @escaping (Data, Data) async throws -> Bool = { _, _ in true },
-        lookupUsername: @escaping (String) async throws -> Data? = { _ in nil },
+        lookupUsername: @escaping (Data) async throws -> PublicAccountHit? = { _ in nil },
         identityKey: @escaping (Data) async throws -> Data? = { _ in nil },
-        nameLookup: @escaping (Data) async throws -> [Data] = { _ in [] }
+        nameLookup: @escaping (Data) async throws -> [PublicAccountHit] = { _ in [] }
     ) -> PeopleSearchPorts {
         PeopleSearchPorts(
             lookupUsername: lookupUsername,
@@ -97,11 +114,61 @@ final class PeopleSearchTests: XCTestCase {
         let outcome = await PeopleSearch.network(
             query: "@anna_w", records: [], knownProfiles: [:],
             ports: ports(
-                lookupUsername: { $0 == "anna_w" ? self.annaAccount : nil },
+                lookupUsername: {
+                    $0 == self.fakeOprf("user", "anna_w").lookupKey
+                        ? PublicAccountHit(accountId: self.annaAccount, publicRecord: nil) : nil
+                },
                 identityKey: { $0 == self.annaAccount ? key : nil }))
         guard case .found(let people) = outcome else { return XCTFail("\(outcome)") }
         XCTAssertEqual(people.first?.username, "anna_w")
         XCTAssertNil(people.first?.writeSeed)
+    }
+
+    /// ADR-0060 section 5 — discovery is asked with the LOOKUP KEY only; the
+    /// OPRF output never reaches a network port.
+    func testOnlyLookupKeysReachDiscovery() async throws {
+        var sent: [Data] = []
+        _ = await PeopleSearch.network(
+            query: "anna_w", records: [], knownProfiles: [:],
+            ports: ports(
+                lookupUsername: { sent.append($0); return nil },
+                nameLookup: { sent.append($0); return [] }))
+        let user = fakeOprf("user", "anna_w")
+        let term = fakeOprf("name", nameQueryTerm(query: "anna_w") ?? "")
+        XCTAssertEqual(sent, [user.lookupKey, term.lookupKey])
+        XCTAssertFalse(sent.contains(user.output))
+        XCTAssertFalse(sent.contains(term.output))
+        XCTAssertNotEqual(user.lookupKey, user.output)
+    }
+
+    /// A person in Everyone this device has never seen is named from the
+    /// public record served beside the name hit, opened with the term's
+    /// OUTPUT; the whole query still filters it.
+    func testANameHitIsNamedFromItsPublicRecord() async throws {
+        let record = try annaPublicRecord()
+        let hit = PublicAccountHit(accountId: annaAccount, publicRecord: record)
+        let outcome = await PeopleSearch.network(
+            query: "anna web", records: [], knownProfiles: [:],
+            ports: ports(nameLookup: { _ in [hit] }))
+        guard case .found(let people) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertEqual(people.map(\.accountKey), [annaKey.signaturePublicKey()])
+        XCTAssertEqual(people.first?.displayName, "Anna Weber")
+        XCTAssertNil(people.first?.writeSeed, "a public person's mailbox is open")
+
+        let narrowed = await PeopleSearch.network(
+            query: "anna x", records: [], knownProfiles: [:],
+            ports: ports(nameLookup: { _ in [hit] }))
+        XCTAssertEqual(narrowed, .notFound)
+    }
+
+    /// A public record served beside another account id is not trusted.
+    func testAPublicRecordForAnotherAccountIsIgnored() async throws {
+        let record = try annaPublicRecord()
+        let hit = PublicAccountHit(accountId: Data(repeating: 0x01, count: 16), publicRecord: record)
+        let outcome = await PeopleSearch.network(
+            query: "anna", records: [], knownProfiles: [:],
+            ports: ports(nameLookup: { _ in [hit] }))
+        XCTAssertEqual(outcome, .notFound)
     }
 
     /// Found wins over a partial failure; a used-up allowance is its own
