@@ -1865,6 +1865,12 @@ pub enum FfiIncomingEnvelopeKind {
     /// of a one-to-one), then keep it only when [`pin_is_newer`] for that
     /// message.
     Pin,
+    /// A journal root handing one member its Delivery Service registrar seed
+    /// (ADR-0057). `payload` is the whole envelope as received. Never render
+    /// it as a chat bubble. This surface does not yet decode or open it: the
+    /// ADR-0057 client wiring adds that; until then a client drops it.
+    /// Appended last so every earlier variant keeps its ordinal.
+    RegistrarSeed,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1974,6 +1980,12 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             pin = Some(op.into());
             (FfiIncomingEnvelopeKind::Pin, Vec::new(), None, None)
         },
+        IncomingEnvelope::RegistrarSeed(_) => (
+            FfiIncomingEnvelopeKind::RegistrarSeed,
+            plaintext.clone(),
+            None,
+            None,
+        ),
         IncomingEnvelope::IntroMessage(p) => (
             FfiIncomingEnvelopeKind::IntroMessage,
             p.to_vec(),

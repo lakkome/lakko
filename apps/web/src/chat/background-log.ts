@@ -103,10 +103,21 @@ export function mergeForegroundSlot(
     return id !== null && (newest === null || id > newest);
   });
   const lastViewed = maxBigintString(slot?.lastViewedMessageId, newest);
+  // The feed's seen ids above the new watermark survive the view's write;
+  // the ones it now covers are dropped (ADR-0058 section 5).
+  const through = lastViewed === undefined ? null : BigInt(lastViewed);
+  const feedSeen = (slot?.feedSeen ?? []).filter((id) => {
+    try {
+      return through === null || BigInt(id) > through;
+    } catch {
+      return false;
+    }
+  });
   return {
     cursor: maxCursor(slot?.cursor, foreground.cursor),
     messages: [...foreground.messages, ...newerStored.sort(compareById)],
     ...(lastViewed === undefined ? {} : { lastViewedMessageId: lastViewed }),
+    ...(feedSeen.length === 0 ? {} : { feedSeen }),
   };
 }
 
@@ -168,12 +179,14 @@ export function summarizeGroupSlot(
       // Unparseable: ignore, keep the synced position.
     }
   }
+  // ADR-0058 section 5 - a message the feed showed is not unread.
+  const feedSeen = new Set(slot?.feedSeen ?? []);
   let unread = 0;
   for (const m of messages) {
     if (m.direction !== "incoming") continue;
     const id = idOf(m);
     if (id === null) continue;
-    if (readUpTo === null || id > readUpTo) {
+    if ((readUpTo === null || id > readUpTo) && !feedSeen.has(m.messageId)) {
       unread += 1;
       if (unread >= 100) break;
     }

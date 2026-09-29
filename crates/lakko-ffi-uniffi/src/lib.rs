@@ -46,6 +46,7 @@ pub mod contacts;
 pub mod device_link;
 pub mod discovery;
 pub mod ds_proof;
+pub mod feed;
 pub mod mnemonic;
 pub mod pairing;
 pub mod pow;
@@ -476,6 +477,16 @@ pub enum FfiError {
     /// One variant on purpose: the page says "this link is damaged".
     #[error("{0}")]
     InviteLinkDamaged(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0058 feed rules — appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// A feed rule failed a bound or did not decode. The message starts
+    /// with the frozen `lakko_feed::FeedRuleError::code()` (for example
+    /// `name`, `noKinds`, `words`, `wrongDomain`, `truncated`) followed by
+    /// `": "` and the reason, so a client selects copy from the code.
+    #[error("{0}")]
+    FeedRule(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

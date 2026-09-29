@@ -42,6 +42,7 @@ import {
   type ChannelSharedMeta,
 } from "../channels/channel-log-codec";
 import { deleteChannelLog, loadChannelLog, saveChannelLog } from "../channels/channel-log-store";
+import { deleteChannelPostLog } from "../feed/channel-post-log-store";
 import { channelIdFromHex } from "../channels/composer";
 import { issueAndAdvance, loadAllCounters, seedCounter } from "../channels/publish-counter-store";
 import { base64Encode } from "../auth/account-id";
@@ -460,6 +461,8 @@ export function clearChannelsSession(): Promise<void> {
 export async function wipeChannelsForAccount(accountIdB64: string): Promise<void> {
   await clearChannelsSession();
   await deleteChannelLog(accountIdB64);
+  // The decrypted posts the feed ranks (ADR-0058 section 3) go with it.
+  await deleteChannelPostLog(accountIdB64);
 }
 
 // ---------------------------------------------------------

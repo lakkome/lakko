@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0058: The feed is ranked on the device, by one shared rule engine
 
-- **Status:** Accepted (maintainer, 2026-09-28). S1, the `lakko-feed` crate, built the same day; this text was corrected to what it built
+- **Status:** Accepted (maintainer, 2026-09-28). S1 (the `lakko-feed` crate) and S2 (both FFI surfaces) built the same day; this text was corrected to what they built
 - **Date:** 2026-09-28
 - **Context:** product completeness, new destination. UX spec:
   [`docs/ux/feed.md`](../ux/feed.md). Recommendations (Discover) are a
@@ -296,17 +296,86 @@ same open question as the rest of per-device state.
   plus 3 property tests driving the fuzz harness's assertions over random
   bytes and damaged valid encodings); fuzz target `feed_rule_decode` builds
   but was not run (cargo-fuzz is not installed where it was built).
-- **S2** both FFI surfaces.
+- **S2** both FFI surfaces. **Built 2026-09-28**: `feed.rs` on UniFFI
+  (records + `encodeFeedRule` / `decodeFeedRule` / `validateFeedRule` /
+  `exportFeedRule` / `feedPresetRule` / `feedPresets` / `rankFeed` /
+  `mentionsUsername` / `contiguousSeen` / `normalizeFeedWord` and the
+  bounds; the kind enum is `FeedConversationKind` because `ConversationKind`
+  is taken by `lakko-ui-rules`; a refusal is `FfiError::FeedRule`, appended,
+  message `"<code>: <reason>"`) and on wasm (a `FeedRule` class with getters
+  and setters, conversation ids as arrays of `Uint8Array`, a refusal throws
+  an `Error` with an own `feedRuleError` code). Not on the extension
+  surface. Verified: clippy clean on both crates, `cargo test` 273
+  (UniFFI) and 179 (wasm) passed, the wasm crate builds for `wasm32`, the
+  Swift and Kotlin bindings regenerate with the new functions.
 - **S3** web: post log, channel polling, seen set and the new read state,
   the Feed destination, editor, share and import; measure a feed build.
+  **Built so far (2026-09-29):** the Feed destination (preset switcher,
+  items with reactions and folded replies, open in chat, the "show new"
+  pill, empty and first-run states); the channel-post log
+  (`apps/web/src/feed/channel-post-log.ts` + `-store.ts`, IndexedDB
+  `lakko-channel-post-log`, sealed under the device root key, wiped with
+  the channel log on `forgetDevice`) with a cap of **500 posts per
+  channel** (chosen) beside the 30-day retention; and the foreground
+  channel sync (`ChannelPostSync.tsx`, once a minute while the tab is
+  visible, on hydration and on becoming visible; a post whose epoch is
+  newer than every held seed stops the cursor until the seed arrives, an
+  older one without a seed is passed over; a metadata record read on the
+  way is folded into the channel's name). Verified: `tsc` adds no error,
+  `vitest` feed suites 20 passed, `vite build` succeeds. Not run in a
+  browser: the preview host cannot read the external volume the worktree
+  lives on. Seen and read state, the same day: the message log's group
+  slot gains `feedSeen` (the ids above `lastViewedMessageId` the feed
+  showed; the chat view's own "everything it holds is seen" is unchanged
+  and the view's write keeps the ids it does not cover); a group message
+  fully on screen in the feed for 2 s is filed through the serialized
+  `updateMessageLog`, `contiguousSeen` moves `lastViewedMessageId` when the
+  set is contiguous, and only then does the feed send the group a read
+  receipt (on the no-wake control path) and the other devices a
+  `ReadCursor` at that watermark; unread counts skip `feedSeen` ids
+  (`feed/feed-seen.ts`, `feed-seen-writer.ts`; 9 tests). Built
+  differently from section 5: the seen set is the watermark plus loose
+  ids rather than ranges, since the ids fold into the watermark as soon as
+  they are contiguous. Not built: a seen set for channel posts (no receipt
+  depends on it; it would feed an unread count channels do not show).
+  Own feeds, share and import (S3d), the same day: `feed/feed-draft.ts`
+  moves every rule field between the core's `FeedRule` and plain data and
+  turns the core's refusal codes into sentences (no bound of its own);
+  `feed/FeedEditor.tsx` is the UX spec 4.1 editor (sources with
+  per-conversation Only / Never, the six weights, fade, look-back, filters,
+  word lists through `normalizeFeedWord`, suggestions) with a live preview
+  ranked by the core and Save disabled on the core's `validate`; saved
+  feeds sit in the switcher after the presets with Edit and Share, stored
+  per account in IndexedDB `lakko-feed-state` under the device root key
+  (at most 20, chosen; wiped on `forgetDevice`); Share gives the stripped
+  export as a link `<origin>/feed/import#<base64url>` and a `.lakkofeed`
+  file; `/feed/import` opens either, shows the rule summary and saves only
+  on confirmation, refusing anything the core refuses whole (`feed-draft`
+  and store codec: 10 tests). Not built: unpinning a preset, feed icons,
+  the "New" divider, the item menu, native deep links for the import
+  link. Measured (S3e), the same day, on synthetic logs in Node v25.8.1
+  on an Apple M3 Pro with the release wasm, not on a phone: at 10k
+  candidates the build takes 8.8 ms and ranking 5.6-13.6 ms; at 100k,
+  73.5 ms and 72.7-184.7 ms; at 300k, 226.4 ms and 287.4-708.4 ms. Both
+  grow linearly. Latest is the slowest preset because it returns the most
+  entries: at 100k, 46.6 ms of its time is marshalling across the wasm
+  boundary and 88.2 ms is `rankFeed`. The native engine (release) ranks
+  100k in 13.9-34.7 ms. A dev build of the wasm was about 4x slower, so
+  numbers from `vite dev` do not describe the product.
 - **S4** iOS and Android, the same.
 - **S5** docs reconcile; ADR-0059 lands the Discover preset.
 
 ## Open questions
 
-1. The per-channel cap of the post log (section 3).
-2. Whether the feed build needs an index rather than a scan of the log;
-   decided by the S3 measurement.
+1. ~~The per-channel cap of the post log (section 3).~~ 500 posts per
+   channel, chosen at S3; not measured.
+2. ~~Whether the feed build needs an index rather than a scan of the
+   log.~~ Not at the sizes a device holds today: the scan is linear, and at 100k
+   candidates on a laptop the build plus ranking takes about 150-260 ms
+   (S3e above), paid when the feed opens or its inputs change. Revisit
+   with a phone measurement at S4; if the budget is exceeded there, the
+   first lever is returning fewer entries across the boundary, not an
+   index.
 3. Whether display-name mentions matter enough to put mentions on the
    wire (alternative 6).
 

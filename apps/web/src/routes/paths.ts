@@ -68,6 +68,11 @@ export const paths = {
   /** Calls — the call history and one action, `New call`
    *  (`docs/ux/call-links.md` section 2). Also where a call started from that
    *  button returns to while it is still connecting. */
+  /** `docs/ux/feed.md` - the ranked feed of group messages and channel posts. */
+  feed: "/feed",
+  /** A shared feed opened from its link or file (`docs/ux/feed.md` 4.1); the
+   *  rule rides in the fragment. `feed/feed-draft.ts` `shareLink` builds it. */
+  feedImport: "/feed/import",
   calls: "/calls",
   /**
    * Developer probe — runs the "Hello core" round-trip from 1.16a.

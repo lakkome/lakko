@@ -36,6 +36,7 @@ lakko-contacts.workspace = true
 # conversation list and the gate in front of the discovery lookup
 # (docs/ux/navigation.md). One copy, reached from two FFI surfaces.
 lakko-ui-rules.workspace = true
+lakko-feed.workspace = true
 # Phase 4 G4-2-crypto — channel post composer + decoder.
 # The web client uses this to produce signed encrypted
 # ChannelPosts instead of raw bytes in the publish form.

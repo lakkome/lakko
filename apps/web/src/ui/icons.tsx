@@ -12,6 +12,8 @@ const PATHS = {
   chat: `<path d="M4 6a2.5 2.5 0 0 1 2.5-2.5h11A2.5 2.5 0 0 1 20 6v8a2.5 2.5 0 0 1-2.5 2.5H9.2L4.8 20v-3.6A2.5 2.5 0 0 1 4 14z"/>`,
   contacts: `<circle cx="9" cy="8" r="3.2"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><circle cx="17" cy="9" r="2.4"/><path d="M15.6 14.3a4.4 4.4 0 0 1 4.9 4.2"/>`,
   channels: `<path d="M4 10v4a1 1 0 0 0 1 1h3l6 4V5L8 9H5a1 1 0 0 0-1 1z"/><path d="M17 9.5a3.5 3.5 0 0 1 0 5"/>`,
+  // Stacked cards: the Feed destination.
+  feed: `<rect x="4" y="4" width="16" height="6.5" rx="1.8"/><rect x="4" y="13.5" width="16" height="6.5" rx="1.8"/>`,
   calls: `<path d="M6.6 3.5h2.9l1.5 4-2 1.5a10 10 0 0 0 6 6l1.5-2 4 1.5v2.9a2 2 0 0 1-2 2A15.5 15.5 0 0 1 4.6 5.5a2 2 0 0 1 2-2z"/>`,
   groups: `<circle cx="12" cy="7.5" r="3"/><path d="M6.5 19a5.5 5.5 0 0 1 11 0"/><circle cx="5" cy="9.5" r="2.2"/><path d="M1.5 17.5a4 4 0 0 1 4.2-3.9"/><circle cx="19" cy="9.5" r="2.2"/><path d="M22.5 17.5a4 4 0 0 0-4.2-3.9"/>`,
   settings: `<circle cx="12" cy="12" r="3.3"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/>`,

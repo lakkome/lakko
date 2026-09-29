@@ -139,6 +139,7 @@ import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { deleteMessageLog } from "../chat/message-log-store";
 import { wipeChannelsForAccount } from "../state/channels-state";
+import { deleteFeedState } from "../feed/feed-store";
 import { clearConversationKinds } from "../chat/conversation-kind-store";
 import { deleteProfileRow } from "../profile/profile-idb";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
@@ -3293,6 +3294,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // goes with it; the publish counters stay (see the function's doc).
         try {
           await wipeChannelsForAccount(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // The person's own feeds on this device (ADR-0058 section 6).
+        try {
+          await deleteFeedState(cached.accountIdB64);
         } catch {
           // best-effort
         }

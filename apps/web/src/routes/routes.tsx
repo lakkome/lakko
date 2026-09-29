@@ -37,6 +37,8 @@ import Contacts from "./Contacts";
 import Settings from "./Settings";
 import Call from "./Call";
 import Calls from "./Calls";
+import Feed from "./Feed";
+import FeedImport from "./FeedImport";
 import { ChannelSubscribe, ChannelView, JoinCoPublisher, NewChannel } from "./Channels";
 import ChannelsLayout, { ChannelsIndex } from "./ChannelsLayout";
 import Chat from "./Chat";
@@ -142,6 +144,9 @@ export const routes: RouteDefinition[] = [
       { path: contactRoutePattern, component: Contacts },
       // `docs/ux/navigation.md` section 5 - Calls is a destination again, and
       // this time it has the history the redesign removed it for lacking.
+      // `docs/ux/feed.md` section 2 - Feed is the second destination.
+      { path: paths.feed, component: Feed },
+      { path: paths.feedImport, component: FeedImport },
       { path: paths.calls, component: Calls },
       { path: "/settings/:section?", component: Settings },
       // The old profile URL lands on its Settings section.

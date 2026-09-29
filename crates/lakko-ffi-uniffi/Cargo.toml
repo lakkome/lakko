@@ -52,6 +52,7 @@ lakko-contacts.workspace = true
 # conversation list and the gate in front of the discovery lookup
 # (docs/ux/navigation.md). One copy, reached from two FFI surfaces.
 lakko-ui-rules.workspace = true
+lakko-feed.workspace = true
 lakko-crypto.workspace = true
 # G-4 (ADR-0007 §6) — identity supersession proof surface for the
 # rotation-on-recover (sign) + peer-side verify paths.

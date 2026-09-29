@@ -417,7 +417,8 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 .UsernameEmpty, .UsernameTooShort, .UsernameTooLong, .UsernameInvalidCharacters,
                 .DisplayNameLineBreak, .DisplayNameControlOrFormatCharacter,
                 .DisplayNameTooLong, .DisplayNameTooManyBytes, .ChannelMeta,
-                .AnonToken, .AnonTokenAlreadyFinalized:
+                .AnonToken, .AnonTokenAlreadyFinalized, .DeviceLinkWrongCode, .DeviceLink,
+                .InviteLinkDamaged, .FeedRule:
                 return nil
             }
         }

@@ -637,6 +637,9 @@ class MultiJoinerCall private constructor(
             // under the conversation's lock. A relay payload binds the pin to
             // no conversation and no member; dropped, never stored.
             FfiIncomingEnvelopeKind.PIN -> Unit
+            // ADR-0057 — a registrar seed rides the GROUP JOURNAL, sealed to one
+            // member's account key, never the SFU signal-relay; dropped.
+            FfiIncomingEnvelopeKind.REGISTRAR_SEED -> Unit
         }
     }
 

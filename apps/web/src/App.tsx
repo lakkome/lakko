@@ -35,6 +35,7 @@ import { BackgroundReceiveProvider } from "./chat/BackgroundReceiveContext";
 import { CallActionListener } from "./calls/CallActionListener";
 import { CallHostProvider, CallHostView } from "./calls/CallHostContext";
 import { ChannelsHydration } from "./channels/ChannelsHydration";
+import { ChannelPostSync } from "./feed/ChannelPostSync";
 import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
 import {
   MailboxJoinFailureBanner,
@@ -159,6 +160,11 @@ const App: Component = () => (
            * PublisherGroup open.
            */}
           <ChannelsHydration />
+          {/*
+           * ADR-0058 section 4: while the app is in front, channel posts are
+           * fetched and filed into the log the Feed ranks.
+           */}
+          <ChannelPostSync />
           {/*
            * A Welcome this device could not open. Top level for the same
            * reason as the update banner below: it is received for the whole
