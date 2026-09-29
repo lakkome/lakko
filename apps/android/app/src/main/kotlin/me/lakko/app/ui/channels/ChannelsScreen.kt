@@ -483,12 +483,30 @@ public fun ChannelDetailScreen(
     // (section 2.3: "where the client has it").
     val subscriberCount = SubscriberFanoutRegistry.subscriberCounts()[channelId]
 
+    // ADR-0060 section 3 / UX 6.3 — the channel's member list, opened from
+    // the `Members` row of channel info.
+    var membersOpen by remember { mutableStateOf(false) }
+    if (membersOpen && channel != null) {
+        ChannelMembersSheet(
+            channelId = channelId,
+            state = state,
+            client = client,
+            onDismiss = { membersOpen = false },
+        )
+    }
+
     if (infoOpen && channel != null) {
         ChannelInfoSheet(
             channel = channel,
             isPublisher = keys != null,
-            isSubscriber = isSubscriber,
+            // A publisher registers a subscriber key only to upload its member
+            // card (ADR-0060 section 3); it still has no subscription to end.
+            isSubscriber = isSubscriber && keys == null,
             subscriberCount = subscriberCount,
+            onOpenMembers = {
+                infoOpen = false
+                membersOpen = true
+            },
             onManage = {
                 infoOpen = false
                 onManage()
@@ -685,7 +703,13 @@ private fun OwnerChannelView(
         }
     }
 
-    LaunchedEffect(channelId) { refresh() }
+    val context = LocalContext.current
+    LaunchedEffect(channelId) {
+        refresh()
+        // ADR-0060 section 3 — publishers upload a member card like anyone
+        // else, under a subscriber key registered on the channel.
+        me.lakko.app.channels.ChannelMemberCards.refreshPublisherCard(context, state, client, channelId)
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         PostList(
@@ -898,6 +922,8 @@ private fun ChannelInfoSheet(
     isPublisher: Boolean,
     isSubscriber: Boolean,
     subscriberCount: Int?,
+    /** Open the channel's member list (ADR-0060 section 3). */
+    onOpenMembers: () -> Unit,
     onManage: () -> Unit,
     /** Stop following on this device. See [STOP_FOLLOWING_SUPPORTING]. */
     onStopFollowing: () -> Unit,
@@ -983,6 +1009,26 @@ private fun ChannelInfoSheet(
                     onClick = onManage,
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Manage channel") }
+            }
+            // docs/ux/who-can-find-me.md section 6.3 — a channel lists its
+            // members to its members. The core decides the block.
+            if (InfoSection.CHANNEL_MEMBERS in sections) {
+                Spacer(Modifier.height(16.dp))
+                HorizontalDivider()
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpenMembers() }
+                        .padding(vertical = 14.dp),
+                ) {
+                    Text("Members", style = MaterialTheme.typography.bodyLarge)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "Who reads this channel and shared a card.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
             // docs/ux/who-can-find-me.md section 5 — this channel's
             // `Members can find me` switch (absent unless the setting includes
@@ -1159,6 +1205,7 @@ private fun SubscriberChannelView(
     val postsByChannel by state.postsByChannel.collectAsState()
     val posts = postsByChannel[channelId] ?: emptyList()
 
+    val context = LocalContext.current
     var bootstrap by remember(channelId) { mutableStateOf(SubscribeBootstrap.Registering) }
     var attempt by remember(channelId) { mutableIntStateOf(0) }
     val decodedByCursor = remember(channelId) { mutableStateMapOf<ULong, PostRender>() }
@@ -1289,6 +1336,9 @@ private fun SubscriberChannelView(
             if (haveCurrent) {
                 bootstrap = SubscribeBootstrap.Active
                 loadAndDecodePosts()
+                // ADR-0060 section 3 — this reader's member card for the
+                // newest epoch it holds (uploaded only when due).
+                me.lakko.app.channels.ChannelMemberCards.refreshReaderCard(context, state, client, channelId)
             }
             var ticks = 0
             while (true) {
@@ -1297,6 +1347,12 @@ private fun SubscriberChannelView(
                 try {
                     if (!haveCurrent || ticks % EPOCH_RECHECK_EVERY_TICKS == 0) {
                         haveCurrent = catchUp(pubHex)
+                        // A rotation brings a new epoch: the card follows it.
+                        if (haveCurrent) {
+                            me.lakko.app.channels.ChannelMemberCards.refreshReaderCard(
+                                context, state, client, channelId,
+                            )
+                        }
                     }
                     if (state.subscribedSeeds(channelId).isNotEmpty()) {
                         bootstrap = SubscribeBootstrap.Active

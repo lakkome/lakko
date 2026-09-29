@@ -481,6 +481,98 @@ public class ContactsRepository(
     }
 
     /**
+     * ADR-0060 — a contact request to a person a search found by their
+     * username (they are in Everyone). [grantWire] is the grant the search
+     * found them under (`encodeReachGrant`), used for this one request and
+     * never kept; without one the write takes the grant this device holds
+     * for them, or goes unsigned into their open mailbox.
+     */
+    public suspend fun sendFoundContactRequestByUsername(
+        recipientUsername: String,
+        introMessage: ByteArray,
+        grantWire: ByteArray?,
+    ): SendResult {
+        val secrets = authRepo.identitySecrets.value
+            ?: throw ContactsError.wrap(IllegalStateException("no identity secrets — please re-enter your password"))
+        val explicit = grantWire?.let(::reachAuthOfGrantWire)
+        return useClientWith(secrets) { client, sender ->
+            val result = client.sendContactRequest(
+                senderSigningSeed = sender.signingSeed,
+                senderAccountId = secrets.accountId,
+                senderSignaturePubkey = sender.signaturePubkey,
+                recipientUsername = recipientUsername,
+                introMessage = introMessage,
+                senderProfile = ownProfileForWire(secrets.accountId),
+                mintReply = { key -> reach()?.mintReply(key) },
+                reachFor = { key ->
+                    explicit ?: reach()?.reachAuthFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
+                },
+            )
+            recordSent(result.recipientUsername, result)
+            result
+        }
+    }
+
+    /**
+     * ADR-0060 — a contact request to a person a search found, written to the
+     * identity bundle the caller fetched and cross-checked against the key the
+     * person was found as. [grantWire] as in [sendFoundContactRequestByUsername].
+     * [shownUsername] (a verified one, or `null`) names the request in Sent.
+     */
+    public suspend fun sendFoundContactRequestToBundle(
+        recipientAccountId: ByteArray,
+        recipientSignaturePubkey: ByteArray,
+        recipientX25519Pubkey: ByteArray,
+        introMessage: ByteArray,
+        grantWire: ByteArray?,
+        shownUsername: String?,
+    ): SendResult {
+        val secrets = authRepo.identitySecrets.value
+            ?: throw ContactsError.wrap(IllegalStateException("no identity secrets — please re-enter your password"))
+        val explicit = grantWire?.let(::reachAuthOfGrantWire)
+        val replyGrant = reach()?.mintReply(recipientSignaturePubkey)
+        return useClientWith(secrets) { client, sender ->
+            val result = client.sendContactRequestToBundle(
+                senderSigningSeed = sender.signingSeed,
+                senderAccountId = secrets.accountId,
+                senderSignaturePubkey = sender.signaturePubkey,
+                recipientAccountId = recipientAccountId,
+                recipientSignaturePubkey = recipientSignaturePubkey,
+                recipientX25519Pubkey = recipientX25519Pubkey,
+                introMessage = introMessage,
+                senderProfile = ownProfileForWire(secrets.accountId),
+                replyGrant = replyGrant,
+                reach = explicit ?: reach()?.reachAuthFor(
+                    recipientSignaturePubkey,
+                    me.lakko.app.reach.WritePurpose.CONTACT_REQUEST,
+                ),
+            )
+            // The Sent list shows `@username`; a person found by name alone
+            // has none to show there.
+            shownUsername?.let { recordSent(it, result) }
+            result
+        }
+    }
+
+    private fun recordSent(username: String, result: SendResult) {
+        mutableState.update { state ->
+            state.copy(
+                sent = state.sent + SentContactRequest(
+                    recipientUsername = username,
+                    recipientAccountIdB64 = base64Encode(result.recipientAccountId),
+                    messageId = result.messageId,
+                    createdAt = result.createdAt,
+                ),
+            )
+        }
+    }
+
+    private fun reachAuthOfGrantWire(wire: ByteArray): me.lakko.app.ds.DsReachAuth {
+        val grant = uniffi.lakko_ffi_uniffi.decodeReachGrant(wire)
+        return me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(grant.seed))
+    }
+
+    /**
      * Resolve `@username -> (accountId, signaturePubkey)` through the
      * G-4-verified [ContactsClient.resolveVerifiedRecipient]. Used by the
      * group-chat add-member flow ([me.lakko.app.chat.ChatViewModel]); the

@@ -685,6 +685,17 @@ public class ReachManager internal constructor(
      *  [acceptReceivedGrant]. A newer version replaces an older one. */
     public fun keepHeld(ownerKey: ByteArray, grant: FfiReachGrant, scopeHex: String) {
         val b = binding.get() ?: return
+        scope.launch { storeHeld(b, ownerKey, grant, scopeHex) }
+    }
+
+    /** [keepHeld], awaited: the grant is in the store when this returns
+     *  (the member-card reader checks what it holds right after filing). */
+    public suspend fun fileHeld(ownerKey: ByteArray, grant: FfiReachGrant, scopeHex: String) {
+        val b = binding.get() ?: return
+        storeHeld(b, ownerKey, grant, scopeHex)
+    }
+
+    private suspend fun storeHeld(b: Binding, ownerKey: ByteArray, grant: FfiReachGrant, scopeHex: String) {
         val kind = grant.`class`.toKind()
         val ownerHex = reachHex(ownerKey)
         val scopeKey = if (kind == ReachKind.GROUP || kind == ReachKind.MEMBER || kind == ReachKind.CHANNEL) {
@@ -697,26 +708,64 @@ public class ReachManager internal constructor(
         } catch (_: Throwable) {
             return
         }
-        scope.launch {
-            lock.withLock {
-                val existing = doc.held.firstOrNull {
-                    it.ownerKeyHex == ownerHex && it.kind == kind.name && it.scopeHex == scopeKey
-                }
-                if (existing != null && existing.grantHex == reachHex(wire)) return@withLock
-                if (existing != null) {
-                    val old = runCatching {
-                        uniffi.lakko_ffi_uniffi.decodeReachGrant(reachUnhex(existing.grantHex)!!)
-                    }.getOrNull()
-                    if (old != null && old.version > grant.version) return@withLock
-                }
-                doc = doc.copy(
-                    held = doc.held.filterNot {
-                        it.ownerKeyHex == ownerHex && it.kind == kind.name && it.scopeHex == scopeKey
-                    } + StoredHeld(ownerHex, kind.name, scopeKey, reachHex(wire)),
-                )
-                store.save(b.accountIdB64, doc)
+        lock.withLock {
+            if (binding.get() !== b) return@withLock
+            val existing = doc.held.firstOrNull {
+                it.ownerKeyHex == ownerHex && it.kind == kind.name && it.scopeHex == scopeKey
             }
+            if (existing != null && existing.grantHex == reachHex(wire)) return@withLock
+            if (existing != null) {
+                val old = runCatching {
+                    uniffi.lakko_ffi_uniffi.decodeReachGrant(reachUnhex(existing.grantHex)!!)
+                }.getOrNull()
+                if (old != null && old.version > grant.version) return@withLock
+            }
+            doc = doc.copy(
+                held = doc.held.filterNot {
+                    it.ownerKeyHex == ownerHex && it.kind == kind.name && it.scopeHex == scopeKey
+                } + StoredHeld(ownerHex, kind.name, scopeKey, reachHex(wire)),
+            )
+            store.save(b.accountIdB64, doc)
         }
+    }
+
+    /** Drop the grant of [kind] held for [ownerKey] at [scopeHex] (a member
+     *  card that no longer carries its `channel` grant, ADR-0060 §3). */
+    public suspend fun withdrawHeld(ownerKey: ByteArray, kind: ReachKind, scopeHex: String) {
+        val b = binding.get() ?: return
+        val ownerHex = reachHex(ownerKey)
+        val scopeKey = scopeHex.lowercase()
+        lock.withLock {
+            if (binding.get() !== b) return@withLock
+            val kept = doc.held.filterNot {
+                it.ownerKeyHex == ownerHex && it.kind == kind.name && it.scopeHex == scopeKey
+            }
+            if (kept.size == doc.held.size) return@withLock
+            doc = doc.copy(held = kept)
+            store.save(b.accountIdB64, doc)
+        }
+    }
+
+    /** Whether a grant of [kind] is held for [ownerKey] at [scopeHex]. */
+    public fun holdsHeld(ownerKey: ByteArray, kind: ReachKind, scopeHex: String): Boolean {
+        val ownerHex = reachHex(ownerKey)
+        val scopeKey = scopeHex.lowercase()
+        return doc.held.any { it.ownerKeyHex == ownerHex && it.kind == kind.name && it.scopeHex == scopeKey }
+    }
+
+    /**
+     * The widest grant held for [ownerKey] as its wire, or `null` (web
+     * `bestGrantFor`): `contact`, else a `group`, else a `channel`. A bare
+     * `member` key is never one: a co-member the person hides from holds it
+     * (UX section 6.2). SECRET.
+     */
+    public fun bestHeldGrantWire(ownerKey: ByteArray): ByteArray? {
+        val held = heldFor(ownerKey)
+        for (kind in listOf(ReachKind.CONTACT, ReachKind.GROUP, ReachKind.CHANNEL)) {
+            val pick = held.filter { it.first.kind == kind }.minByOrNull { it.first.scopeHex } ?: continue
+            return runCatching { uniffi.lakko_ffi_uniffi.encodeReachGrant(pick.second) }.getOrNull()
+        }
+        return null
     }
 
     /** Drop every grant held for [ownerKey] (a contact removed). */
@@ -772,6 +821,124 @@ public class ReachManager internal constructor(
             }
         }
         return null
+    }
+
+    // -----------------------------------------------------------------
+    // Contacts of contacts (ADR-0060 §4)
+    // -----------------------------------------------------------------
+
+    /** Keep the introduction record [senderKey] offered in the one-to-one
+     *  conversation (the caller checked it came from the other participant).
+     *  The newest per contact wins. */
+    public suspend fun keepIntroductionOffer(senderKey: ByteArray, record: ByteArray) {
+        val b = binding.get() ?: return
+        val senderHex = reachHex(senderKey)
+        val recordHex = reachHex(record)
+        lock.withLock {
+            if (binding.get() !== b || doc.introOffers[senderHex] == recordHex) return@withLock
+            doc = doc.copy(introOffers = doc.introOffers + (senderHex to recordHex))
+            store.save(b.accountIdB64, doc)
+        }
+    }
+
+    /** Keep the bundle [senderKey] relayed, when strictly newer than the one
+     *  held (`bundleIsNewer`: a re-send carries its original stamp). */
+    public suspend fun keepIntroductionsBundle(senderKey: ByteArray, wire: ByteArray, updatedAtMs: ULong) {
+        val b = binding.get() ?: return
+        val senderHex = reachHex(senderKey)
+        lock.withLock {
+            if (binding.get() !== b) return@withLock
+            val held = doc.introBundles[senderHex]
+            if (held != null &&
+                !uniffi.lakko_ffi_uniffi.bundleIsNewer(updatedAtMs, held.updatedAtMs.toULong())
+            ) {
+                return@withLock
+            }
+            doc = doc.copy(
+                introBundles = doc.introBundles + (senderHex to StoredIntroBundle(reachHex(wire), updatedAtMs.toLong())),
+            )
+            store.save(b.accountIdB64, doc)
+        }
+    }
+
+    /** Every relayed bundle wire this device keeps. */
+    public fun introductionBundleWires(): List<ByteArray> =
+        doc.introBundles.toSortedMap().values.mapNotNull { reachUnhex(it.bundleHex) }
+
+    /** Every record the contacts offered, hex, ordered by contact key. */
+    public fun offeredIntroductionRecordsHex(): List<String> = doc.introOffers.toSortedMap().values.toList()
+
+    /** The contacts-of-contacts publication state held here. */
+    internal fun introPublicationState(): IntroPublicationState = IntroPublicationState(
+        termOutputs = doc.termOutputs,
+        ownOffer = doc.ownOffer,
+        offerSentTo = doc.offerSentTo,
+        bundleSentTo = doc.bundleSentTo,
+    )
+
+    /** Persist the publication state after a step. */
+    internal suspend fun saveIntroPublicationState(state: IntroPublicationState) {
+        val b = binding.get() ?: return
+        lock.withLock {
+            if (binding.get() !== b) return@withLock
+            doc = doc.copy(
+                termOutputs = state.termOutputs,
+                ownOffer = state.ownOffer,
+                offerSentTo = state.offerSentTo,
+                bundleSentTo = state.bundleSentTo,
+            )
+            store.save(b.accountIdB64, doc)
+        }
+    }
+
+    /** The current version of the `fof` slot. */
+    public fun fofVersion(): Int = versionOf(doc, ReachSlot(ReachKind.FOF, ""))
+
+    // -----------------------------------------------------------------
+    // Channels (ADR-0060 §3)
+    // -----------------------------------------------------------------
+
+    /**
+     * The `channel` key is versioned by the channel epoch: raise the slot of
+     * [channelHex] to [epoch] when it is behind (never lowers it), so the
+     * mailbox carries the key of the epoch the member card names (web
+     * `channelEpoch`).
+     */
+    public suspend fun raiseChannelVersion(channelHex: String, epoch: Int) {
+        val b = binding.get() ?: return
+        val slot = ReachSlot(ReachKind.CHANNEL, channelHex.lowercase())
+        val envelope = lock.withLock {
+            if (binding.get() !== b) return
+            if (versionOf(doc, slot) >= epoch) {
+                syncLocked(b, System.currentTimeMillis())
+                return
+            }
+            doc = doc.copy(
+                versions = doc.versions.filterNot { it.kind == slot.kind.name && it.scopeHex == slot.scopeHex } +
+                    StoredVersion(slot.kind.name, slot.scopeHex, epoch),
+            )
+            val envelope = stampReachStateLocked()
+            store.save(b.accountIdB64, doc)
+            syncLocked(b, System.currentTimeMillis())
+            envelope
+        }
+        envelope?.let(::publishToDevices)
+    }
+
+    /**
+     * Seal this account's member card (ADR-0060 §3): [profile] (a profile
+     * envelope) under the epoch [seed], bound to the account identity, or
+     * `null` without a session (a reader drops an unbound card).
+     */
+    public fun sealOwnMemberCard(
+        seed: ByteArray,
+        epoch: UInt,
+        channelId: ByteArray,
+        subscriberPk: ByteArray,
+        profile: ByteArray,
+    ): ByteArray? {
+        val b = binding.get() ?: return null
+        return uniffi.lakko_ffi_uniffi.sealMemberCard(seed, epoch, channelId, subscriberPk, b.accountSeed, profile)
     }
 
     // -----------------------------------------------------------------

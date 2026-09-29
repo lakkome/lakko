@@ -6631,34 +6631,72 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0060 section 4 — contacts of contacts. In each one-to-one
     /// conversation: this account's own introduction record as an
     /// IntroductionOffer (while 2.1 is on), and the records this account's
-    /// contacts offered, as a padded Introductions bundle. Sent only when what
-    /// would be sent changed; best effort.
+    /// contacts offered, as a padded Introductions bundle capped at
+    /// `maxBundleRecords()`. The two are tracked apart, as on web: an offer is
+    /// re-sent when the own record changed, a bundle when the relayed set did,
+    /// and each is marked sent only after its send succeeded. Best effort.
     public func sendIntroductions() async {
         guard ReachCenter.shared.isActive else { return }
         let offer = await ReachCenter.shared.ownIntroductionRecord()
+        let offerKey = offer.map { Data(SHA256.hash(data: $0)).base64EncodedString() }
         let relayed = IntroductionBook.shared.offeredRecords()
-        let digest = Data(SHA256.hash(data: (offer ?? Data()) + relayed.sorted {
-            $0.lexicographicallyPrecedes($1) }.reduce(Data(), +))).base64EncodedString()
+        let bundleDigest = Self.introductionsBundleDigest(relayed)
+        let capped = Self.relayBundleRecords(relayed)
         for groupIdHex in groups.keys.sorted() {
             guard conversationKind(groupIdHex: groupIdHex) == .chat,
                   (memberCount(groupIdHex: groupIdHex) ?? 0) == 2,
-                  !membershipEnded(membershipStateNow(groupIdHex: groupIdHex)),
-                  ReachCenter.shared.introductionsChanged(groupIdHex: groupIdHex, digest: digest)
+                  !membershipEnded(membershipStateNow(groupIdHex: groupIdHex))
             else { continue }
-            do {
-                if let offer {
+            if let offer, let offerKey,
+               ReachCenter.shared.offerNeedsSending(groupIdHex: groupIdHex, key: offerKey) {
+                do {
                     try await publishApplicationMessage(
                         groupIdHex: groupIdHex, plaintextBytes: try composeIntroductionOffer(record: offer))
+                    ReachCenter.shared.markOfferSent(groupIdHex: groupIdHex, key: offerKey)
+                } catch {
+                    NSLog("ADR-0060: introduction offer not sent: \(error)")
                 }
-                if !relayed.isEmpty {
+            }
+            if !capped.isEmpty,
+               ReachCenter.shared.bundleNeedsSending(groupIdHex: groupIdHex, digest: bundleDigest) {
+                do {
                     let bundle = try composeIntroductionsBundle(
-                        records: relayed, updatedAtMs: UInt64(Self.nowMs()))
+                        records: capped, updatedAtMs: UInt64(Self.nowMs()))
                     try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bundle)
+                    ReachCenter.shared.markBundleSent(groupIdHex: groupIdHex, digest: bundleDigest)
+                } catch {
+                    NSLog("ADR-0060: introductions bundle not sent: \(error)")
                 }
-            } catch {
-                NSLog("ADR-0060: introductions not sent: \(error)")
             }
         }
+    }
+
+    /// The records one relayed bundle carries: at most `maxBundleRecords()`,
+    /// as on web (the core refuses a larger bundle).
+    static func relayBundleRecords(_ records: [Data]) -> [Data] {
+        Array(records.prefix(Int(maxBundleRecords())))
+    }
+
+    /// The digest the relay tracks a bundle by: over the whole relayed set in
+    /// a stable order, so reordering never counts as a change.
+    static func introductionsBundleDigest(_ records: [Data]) -> String {
+        let joined = records.sorted { $0.lexicographicallyPrecedes($1) }
+            .reduce(Data()) { $0 + Data(SHA256.hash(data: $1)) }
+        return Data(SHA256.hash(data: joined)).base64EncodedString()
+    }
+
+    /// The account key of every person in every conversation this device is
+    /// in (ADR-0050: one key per person), for local people search.
+    public func allMemberAccountKeys() -> [Data] {
+        var seen = Set<Data>()
+        var out: [Data] = []
+        for groupIdHex in groups.keys.sorted() {
+            for member in members(groupIdHex: groupIdHex) ?? []
+            where seen.insert(member.signaturePublicKey).inserted {
+                out.append(member.signaturePublicKey)
+            }
+        }
+        return out
     }
 
     /// Every conversation group this device is in (ADR-0060: the `member` and

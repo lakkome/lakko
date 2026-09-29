@@ -129,10 +129,21 @@ data class NameLookupRequest(
     val oprf_hash_b64: String,
 )
 
-/** Response of `POST /discovery/name/lookup`. */
+/** One person in Everyone found by a name term (`services/discovery/src/visibility.rs`
+ *  `NameLookupResult`). */
+@Serializable
+data class NameLookupResult(
+    /** Standard base64 of the 16-byte account id. */
+    val account_id_b64: String,
+    /** Standard base64 of their public record; the searcher opens it with
+     *  the OPRF OUTPUT of the term it looked up (`openPublicRecord`). */
+    val public_record_b64: String? = null,
+)
+
+/** Response of `POST /discovery/name/lookup` (at most 20 results). */
 @Serializable
 data class NameLookupResponse(
-    val account_ids_b64: List<String> = emptyList(),
+    val results: List<NameLookupResult> = emptyList(),
 )
 
 // ----------------------------------------------------------------------------
@@ -152,6 +163,9 @@ data class LookupRequest(
 @Serializable
 data class LookupResponse(
     val account_id: String,
+    /** ADR-0060 §5 — standard base64 of the account's public record, opened
+     *  with the OPRF output of the username the lookup used. */
+    val public_record_b64: String? = null,
 )
 
 // ----------------------------------------------------------------------------

@@ -72,8 +72,13 @@ struct PeopleSearchSection: View {
                                 }
                             }
                             Spacer()
-                            Button("Add contact") { requesting = person }
-                                .buttonStyle(.borderless)
+                            // A contact has nothing to add; someone who does
+                            // not let this account find them is shown by
+                            // name only (UX section 6.1, web `canAddContact`).
+                            if person.canAddContact {
+                                Button("Add contact") { requesting = person }
+                                    .buttonStyle(.borderless)
+                            }
                         }
                     }
                 } else if let message = PeopleSearch.message(for: outcome) {

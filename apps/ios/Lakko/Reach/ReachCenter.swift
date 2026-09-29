@@ -606,6 +606,32 @@ public final class ReachCenter: ObservableObject {
         return true
     }
 
+    /// Withdraw the grant of `reachClass` held from the person with account
+    /// key `fromAccountKeyB64` in `scopeHex` (a channel member card that no
+    /// longer carries it: the person narrowed their setting). Returns whether
+    /// one was held.
+    @discardableResult
+    public func withdrawHeld(
+        _ reachClass: FfiReachClass, fromAccountKeyB64 key: String, scopeHex: String
+    ) -> Bool {
+        let name = ReachRules.className(reachClass)
+        guard var held = record.held[key],
+              held.contains(where: { $0.classRaw == name && $0.scopeHex == scopeHex }) else { return false }
+        held.removeAll { $0.classRaw == name && $0.scopeHex == scopeHex }
+        record.held[key] = held.isEmpty ? nil : held
+        persist()
+        return true
+    }
+
+    /// Whether a grant of `reachClass` is held from the person with account
+    /// key `fromAccountKeyB64` in `scopeHex`.
+    public func holdsGrant(
+        _ reachClass: FfiReachClass, fromAccountKeyB64 key: String, scopeHex: String
+    ) -> Bool {
+        let name = ReachRules.className(reachClass)
+        return record.held[key]?.contains { $0.classRaw == name && $0.scopeHex == scopeHex } ?? false
+    }
+
     /// Drop every grant held for a person (they were removed as a contact and
     /// left every shared group) — best effort; their rotation retires them
     /// anyway.
@@ -858,13 +884,17 @@ public final class ReachCenter: ObservableObject {
         guard isActive, let fof = fofGrant(), let identityPk = ownAccountKey else { return nil }
         let own = ownNameProvider()
         guard let accountId = own.accountId, accountId.count == 16 else { return nil }
-        let cacheKey = "\(fof.version)|\(own.displayName ?? "")|\(own.username ?? "")"
+        let cacheKey = "\(fof.version)|\(own.displayName ?? "")|\(own.username ?? "")|"
+            + (ownUsernameCertificate?.base64EncodedString() ?? "")
         if record.ownOfferFofVersion == fof.version, let cached = record.ownOfferB64,
            record.ownOfferCacheKey.first == cacheKey, let bytes = Data(base64Encoded: cached) {
             return bytes
         }
-        let cert = own.username == nil ? nil : ownUsernameCertificate
-        let username = cert == nil ? nil : own.username
+        // The username rides in the record whether or not its certificate is
+        // held yet, as on web: the searcher shows it only after the
+        // certificate verifies, and the record is findable by it either way.
+        let username = own.username
+        let cert = username == nil ? nil : ownUsernameCertificate
         // The record is sealed under the OPRF outputs; they never leave the
         // device (ADR-0060 section 5).
         var termOutputs: [Data] = []
@@ -880,7 +910,7 @@ public final class ReachCenter: ObservableObject {
         guard !termOutputs.isEmpty else { return nil }
         let payload = FfiIntroductionPayload(
             identityPk: identityPk, accountId: accountId, displayName: own.displayName,
-            username: username, usernameCertificate: username == nil ? nil : cert, fof: fof)
+            username: username, usernameCertificate: cert, fof: fof)
         guard let record = try? composeIntroduction(
             payload: payload, termOprfs: termOutputs, issuedAtMs: Self.nowMs()) else { return nil }
         self.record.ownOfferB64 = record.base64EncodedString()
@@ -890,13 +920,31 @@ public final class ReachCenter: ObservableObject {
         return record
     }
 
-    /// Whether the introductions for `groupIdHex` changed since last sent
-    /// there; records the new digest when they did.
-    public func introductionsChanged(groupIdHex: String, digest: String) -> Bool {
-        guard record.introductionsSentDigest[groupIdHex] != digest else { return false }
-        record.introductionsSentDigest[groupIdHex] = digest
+    /// Whether the own introduction record keyed `key` has not been offered
+    /// in `groupIdHex` yet. Marked by ``markOfferSent(groupIdHex:key:)``
+    /// after the send succeeded, so a failed send is retried.
+    public func offerNeedsSending(groupIdHex: String, key: String) -> Bool {
+        record.introductionsSentDigest[groupIdHex] != key
+    }
+
+    public func markOfferSent(groupIdHex: String, key: String) {
+        guard record.introductionsSentDigest[groupIdHex] != key else { return }
+        record.introductionsSentDigest[groupIdHex] = key
         persist()
-        return true
+    }
+
+    /// Whether the relayed set digested `digest` has not been sent as a bundle
+    /// in `groupIdHex` yet.
+    public func bundleNeedsSending(groupIdHex: String, digest: String) -> Bool {
+        record.bundleSentDigest?[groupIdHex] != digest
+    }
+
+    public func markBundleSent(groupIdHex: String, digest: String) {
+        guard record.bundleSentDigest?[groupIdHex] != digest else { return }
+        var sent = record.bundleSentDigest ?? [:]
+        sent[groupIdHex] = digest
+        record.bundleSentDigest = sent
+        persist()
     }
 
     // MARK: - Internals

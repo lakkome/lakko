@@ -7,6 +7,8 @@ import android.text.format.DateFormat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -146,6 +148,15 @@ public fun ChatListScreen(
      * its slot and adds no state of its own.
      */
     callHost: me.lakko.app.calls.OneToOneCallHost<*>? = null,
+    /**
+     * `docs/ux/who-can-find-me.md` section 6.1 — people in the search field:
+     * the people this device knows as the person types, and the one **Search
+     * people** row (username, name, contacts of contacts, and the channel
+     * namespace). `null` keeps the plain lookup row (tests, previews).
+     */
+    peopleSearch: me.lakko.app.search.PeopleSearchService? = null,
+    /** A contact row of the people results: open their chat. */
+    onOpenContact: (keyB64: String) -> Unit = {},
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -336,7 +347,27 @@ public fun ChatListScreen(
                     // different place.
                     rows.isEmpty() -> EmptyPanel(onStart = { createMenuOpen = true })
                     else -> Column(modifier = Modifier.fillMaxSize()) {
-                        if (visible.isEmpty()) {
+                        if (visible.isEmpty() && peopleSearch != null && query.isNotBlank()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .verticalScroll(rememberScrollState()),
+                            ) {
+                                PeopleSearchSection(
+                                    query = query,
+                                    service = peopleSearch,
+                                    conversationMatches = 0,
+                                    onOpenChannel = { id, handle ->
+                                        query = ""
+                                        onSubscribeToChannel(id, handle)
+                                    },
+                                    onOpenContact = { key ->
+                                        query = ""
+                                        onOpenContact(key)
+                                    },
+                                )
+                            }
+                        } else if (visible.isEmpty()) {
                             NoMatchPanel(
                                 offerLookup = lookupOffered,
                                 label = findByNameRowLabelSafely(query),
@@ -413,6 +444,25 @@ public fun ChatListScreen(
                                                 callHost?.accept(withVideo = withVideo)
                                             },
                                             onDeclineCall = { callHost?.decline() },
+                                        )
+                                    }
+                                }
+                                // UX who-can-find-me 6.1 — people under the
+                                // matching conversations.
+                                if (peopleSearch != null && query.isNotBlank()) {
+                                    item(key = "people-search") {
+                                        PeopleSearchSection(
+                                            query = query,
+                                            service = peopleSearch,
+                                            conversationMatches = visible.size,
+                                            onOpenChannel = { id, handle ->
+                                                query = ""
+                                                onSubscribeToChannel(id, handle)
+                                            },
+                                            onOpenContact = { key ->
+                                                query = ""
+                                                onOpenContact(key)
+                                            },
                                         )
                                     }
                                 }

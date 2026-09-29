@@ -51,17 +51,22 @@ final class PeopleSearchTests: XCTestCase {
     private func ports(
         reachCheck: @escaping (Data, Data) async throws -> Bool = { _, _ in true },
         lookupUsername: @escaping (Data) async throws -> PublicAccountHit? = { _ in nil },
-        identityKey: @escaping (Data) async throws -> Data? = { _ in nil },
-        nameLookup: @escaping (Data) async throws -> [PublicAccountHit] = { _ in [] }
+        identityKey: ((Data) async throws -> Data?)? = nil,
+        nameLookup: @escaping (Data) async throws -> [PublicAccountHit] = { _ in [] },
+        usernameOprf: ((String) async throws -> OprfResult)? = nil,
+        verifyCertificate: @escaping (Data, Data, Data) async -> Bool = { _, _, _ in false }
     ) -> PeopleSearchPorts {
-        PeopleSearchPorts(
+        // By default the identity bundle serves Anna's key for Anna's account.
+        let annaAccount = self.annaAccount
+        let annaPk = annaKey.signaturePublicKey()
+        return PeopleSearchPorts(
             lookupUsername: lookupUsername,
-            usernameOprf: { self.fakeOprf("user", $0) },
+            usernameOprf: usernameOprf ?? { self.fakeOprf("user", $0) },
             nameTermOprf: { self.fakeOprf("name", $0) },
             nameLookup: nameLookup,
-            identityKey: identityKey,
+            identityKey: identityKey ?? { $0 == annaAccount ? annaPk : nil },
             reachCheck: reachCheck,
-            verifyCertificate: { _, _, _ in false })
+            verifyCertificate: verifyCertificate)
     }
 
     /// `anna web` finds `Anna Weber` through a contact's relayed record, with
@@ -69,7 +74,7 @@ final class PeopleSearchTests: XCTestCase {
     func testAContactOfAContactIsFoundByWordPrefixes() async throws {
         let (record, fof) = try annaRecord()
         let outcome = await PeopleSearch.network(
-            query: "anna web", records: [record], knownProfiles: [:], ports: ports())
+            query: "anna web", records: [record], ports: ports())
         guard case .found(let people) = outcome else { return XCTFail("\(outcome)") }
         XCTAssertEqual(people.map(\.accountKey), [annaKey.signaturePublicKey()])
         XCTAssertEqual(people.first?.displayName, "Anna Weber")
@@ -81,7 +86,7 @@ final class PeopleSearchTests: XCTestCase {
     func testTheWholeQueryFiltersTheResult() async throws {
         let (record, _) = try annaRecord()
         let outcome = await PeopleSearch.network(
-            query: "anna x", records: [record], knownProfiles: [:], ports: ports())
+            query: "anna x", records: [record], ports: ports())
         XCTAssertEqual(outcome, .notFound)
     }
 
@@ -90,7 +95,7 @@ final class PeopleSearchTests: XCTestCase {
     func testARefusedReachCheckHidesThePerson() async throws {
         let (record, _) = try annaRecord()
         let outcome = await PeopleSearch.network(
-            query: "anna", records: [record], knownProfiles: [:],
+            query: "anna", records: [record],
             ports: ports(reachCheck: { _, _ in false }))
         XCTAssertEqual(outcome, .notFound)
     }
@@ -99,7 +104,7 @@ final class PeopleSearchTests: XCTestCase {
     func testANetworkFailureIsNotNotFound() async throws {
         let (record, _) = try annaRecord()
         let outcome = await PeopleSearch.network(
-            query: "anna", records: [record], knownProfiles: [:],
+            query: "anna", records: [record],
             ports: ports(reachCheck: { _, _ in throw URLError(.notConnectedToInternet) }))
         XCTAssertEqual(outcome, .failed)
         XCTAssertEqual(
@@ -112,7 +117,7 @@ final class PeopleSearchTests: XCTestCase {
     func testAUsernameInEveryoneIsFoundUnsigned() async throws {
         let key = annaKey.signaturePublicKey()
         let outcome = await PeopleSearch.network(
-            query: "@anna_w", records: [], knownProfiles: [:],
+            query: "@anna_w", records: [],
             ports: ports(
                 lookupUsername: {
                     $0 == self.fakeOprf("user", "anna_w").lookupKey
@@ -129,7 +134,7 @@ final class PeopleSearchTests: XCTestCase {
     func testOnlyLookupKeysReachDiscovery() async throws {
         var sent: [Data] = []
         _ = await PeopleSearch.network(
-            query: "anna_w", records: [], knownProfiles: [:],
+            query: "anna_w", records: [],
             ports: ports(
                 lookupUsername: { sent.append($0); return nil },
                 nameLookup: { sent.append($0); return [] }))
@@ -150,7 +155,7 @@ final class PeopleSearchTests: XCTestCase {
         let key = annaKey.signaturePublicKey()
         let bundle: (Data) async throws -> Data? = { $0 == self.annaAccount ? key : nil }
         let outcome = await PeopleSearch.network(
-            query: "anna web", records: [], knownProfiles: [:],
+            query: "anna web", records: [],
             ports: ports(identityKey: bundle, nameLookup: { _ in [hit] }))
         guard case .found(let people) = outcome else { return XCTFail("\(outcome)") }
         XCTAssertEqual(people.map(\.accountKey), [key])
@@ -158,7 +163,7 @@ final class PeopleSearchTests: XCTestCase {
         XCTAssertNil(people.first?.writeSeed, "a public person's mailbox is open")
 
         let narrowed = await PeopleSearch.network(
-            query: "anna x", records: [], knownProfiles: [:],
+            query: "anna x", records: [],
             ports: ports(identityKey: bundle, nameLookup: { _ in [hit] }))
         XCTAssertEqual(narrowed, .notFound)
     }
@@ -171,7 +176,7 @@ final class PeopleSearchTests: XCTestCase {
         let hit = PublicAccountHit(accountId: annaAccount, publicRecord: record)
         let other = try Identity.fromSeed(seed: Data(repeating: 0x52, count: 32)).signaturePublicKey()
         let outcome = await PeopleSearch.network(
-            query: "anna", records: [], knownProfiles: [:],
+            query: "anna", records: [],
             ports: ports(identityKey: { _ in other }, nameLookup: { _ in [hit] }))
         XCTAssertEqual(outcome, .notFound)
     }
@@ -181,8 +186,8 @@ final class PeopleSearchTests: XCTestCase {
     func testANameHitWithoutAnIdentityKeyIsDropped() async throws {
         let hit = PublicAccountHit(accountId: annaAccount, publicRecord: try annaPublicRecord())
         let outcome = await PeopleSearch.network(
-            query: "anna", records: [], knownProfiles: [:],
-            ports: ports(nameLookup: { _ in [hit] }))
+            query: "anna", records: [],
+            ports: ports(identityKey: { _ in nil }, nameLookup: { _ in [hit] }))
         XCTAssertEqual(outcome, .notFound)
     }
 
@@ -192,8 +197,9 @@ final class PeopleSearchTests: XCTestCase {
         let hit = PublicAccountHit(accountId: annaAccount, publicRecord: nil)
         let outcome = await PeopleSearch.network(
             query: "anna", records: [],
-            knownProfiles: [key.base64EncodedString(): ProfileClaim(
-                displayName: "Anna W", username: nil, updatedAtMs: 1)],
+            known: { $0 == key
+                ? KnownPerson(name: "Anna W", verifiedUsername: nil, isContact: false, keptSeed: nil)
+                : .unknown },
             ports: ports(identityKey: { _ in key }, nameLookup: { _ in [hit] }))
         guard case .found(let people) = outcome else { return XCTFail("\(outcome)") }
         XCTAssertEqual(people.map(\.accountKey), [key])
@@ -206,7 +212,7 @@ final class PeopleSearchTests: XCTestCase {
         let hit = PublicAccountHit(accountId: Data(repeating: 0x01, count: 16), publicRecord: record)
         let key = annaKey.signaturePublicKey()
         let outcome = await PeopleSearch.network(
-            query: "anna", records: [], knownProfiles: [:],
+            query: "anna", records: [],
             ports: ports(identityKey: { _ in key }, nameLookup: { _ in [hit] }))
         XCTAssertEqual(outcome, .notFound)
     }
@@ -223,21 +229,159 @@ final class PeopleSearchTests: XCTestCase {
         XCTAssertEqual(PeopleSearch.outcome(found: [], allowanceUsed: false, failed: false), .notFound)
     }
 
-    /// Local matching is as loose as local search, and only people this device
-    /// holds a grant for are offered.
-    func testLocalSearchMatchesAnyPartOfAnyWord() {
-        let key = Data(repeating: 3, count: 32).base64EncodedString()
-        let other = Data(repeating: 4, count: 32).base64EncodedString()
-        let profiles = [
-            key: ProfileClaim(displayName: "Zoë Müller", username: nil, updatedAtMs: 1),
-            other: ProfileClaim(displayName: "Zoe Mull", username: nil, updatedAtMs: 1),
-        ]
-        let found = PeopleSearch.local(
-            query: "ull", profiles: profiles,
-            seedFor: { $0 == key ? Data(repeating: 9, count: 32) : nil })
-        XCTAssertEqual(found.map { $0.accountKey.base64EncodedString() }, [key])
+    // MARK: - Local half (web `people.ts`)
+
+    private func candidate(_ seed: UInt8, _ known: KnownPerson, accountId: Data? = nil) -> LocalCandidate {
+        LocalCandidate(accountKey: Data(repeating: seed, count: 32), accountId: accountId, known: known)
+    }
+
+    /// Every word of the query is a part of some word of the name; case and
+    /// accents never matter.
+    func testLocalMatchingIsPerWord() {
+        XCTAssertTrue(PeopleSearch.localMatches("Anna Weber", query: "ann"))
+        XCTAssertTrue(PeopleSearch.localMatches("Anna Weber", query: "nna"))
+        XCTAssertTrue(PeopleSearch.localMatches("Anna Weber", query: "weber an"))
+        XCTAssertFalse(PeopleSearch.localMatches("Anna Weber", query: "anna x"))
+        XCTAssertFalse(PeopleSearch.localMatches("Anna Weber", query: "annaweber"),
+                       "a query word matches within one name word, not across a space")
         XCTAssertTrue(PeopleSearch.localMatches("Zoë Müller", query: "zoe"))
         XCTAssertFalse(PeopleSearch.offersNetworkSearch("a"))
         XCTAssertTrue(PeopleSearch.offersNetworkSearch("an"))
+    }
+
+    /// Contacts and known members are listed even without a grant: a known
+    /// member without one is shown by name only (reach `none`, no username,
+    /// no Add contact); someone with a kept grant can be added; a contact has
+    /// nothing to add; a candidate with no name is never listed.
+    func testLocalListsKnownPeopleWithAndWithoutAGrant() {
+        let seed = Data(repeating: 9, count: 32)
+        let account = Data(repeating: 0x0A, count: 16)
+        let found = PeopleSearch.local(
+            query: "ull",
+            candidates: [
+                candidate(1, KnownPerson(name: "Zoë Müller", verifiedUsername: "zoe_m",
+                                         isContact: false, keptSeed: nil), accountId: account),
+                candidate(2, KnownPerson(name: "Zoe Mull", verifiedUsername: "zoe2",
+                                         isContact: false, keptSeed: seed), accountId: account),
+                candidate(3, KnownPerson(name: "Paul Mullins", verifiedUsername: nil,
+                                         isContact: true, keptSeed: nil), accountId: account),
+                candidate(4, KnownPerson(name: nil, verifiedUsername: "ullr",
+                                         isContact: false, keptSeed: seed)),
+            ],
+            ownAccountKey: nil)
+        XCTAssertEqual(found.map(\.reach), [.none, .grant, .contact])
+        XCTAssertNil(found[0].username, "a hidden person's username never shows")
+        XCTAssertFalse(found[0].canAddContact)
+        XCTAssertNil(found[0].writeSeed)
+        XCTAssertEqual(found[1].username, "zoe2")
+        XCTAssertTrue(found[1].canAddContact)
+        XCTAssertEqual(found[1].writeSeed, seed)
+        XCTAssertFalse(found[2].canAddContact, "a contact has nothing to add")
+    }
+
+    /// A verified username matches too, but only for someone this account
+    /// may find; the own account never appears.
+    func testLocalMatchesAUsernameOnlyWhereItMayShow() {
+        let seed = Data(repeating: 9, count: 32)
+        let own = Data(repeating: 7, count: 32)
+        let found = PeopleSearch.local(
+            query: "@anna_w",
+            candidates: [
+                candidate(1, KnownPerson(name: "A", verifiedUsername: "anna_w", isContact: false, keptSeed: nil)),
+                candidate(2, KnownPerson(name: "B", verifiedUsername: "anna_w", isContact: false, keptSeed: seed)),
+                LocalCandidate(accountKey: own, accountId: nil, known: KnownPerson(
+                    name: "Me", verifiedUsername: "anna_w", isContact: true, keptSeed: nil)),
+            ],
+            ownAccountKey: own)
+        XCTAssertEqual(found.map(\.accountKey), [Data(repeating: 2, count: 32)])
+    }
+
+    /// Merging keeps the strongest reach and the first list's name, and gates
+    /// the username by the merged reach.
+    func testMergeKeepsTheStrongestReachAndTheLocalName() {
+        let key = Data(repeating: 5, count: 32)
+        let local = FoundPerson(accountKey: key, accountId: nil, displayName: "Renamed",
+                                username: nil, writeSeed: nil, reach: PersonReach.none)
+        let network = FoundPerson(accountKey: key, accountId: annaAccount, displayName: "Published",
+                                  username: "anna_w", writeSeed: nil, reach: .open)
+        let merged = PeopleSearch.merge([[local], [network]], ownAccountKey: nil)
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged[0].displayName, "Renamed")
+        XCTAssertEqual(merged[0].reach, .open)
+        XCTAssertEqual(merged[0].username, "anna_w")
+        XCTAssertEqual(merged[0].accountId, annaAccount)
+    }
+
+    // MARK: - Contacts of contacts (web `people-search.ts`)
+
+    /// An opened introduction is dropped unless the identity bundle fetched
+    /// for its account id names its identity key.
+    func testAnIntroductionWhoseBundleNamesAnotherKeyIsDropped() async throws {
+        let (record, _) = try annaRecord()
+        let other = try Identity.fromSeed(seed: Data(repeating: 0x52, count: 32)).signaturePublicKey()
+        let outcome = await PeopleSearch.network(
+            query: "anna web", records: [record],
+            ports: ports(identityKey: { _ in other }))
+        XCTAssertEqual(outcome, .notFound)
+        let unpublished = await PeopleSearch.network(
+            query: "anna web", records: [record],
+            ports: ports(identityKey: { _ in nil }))
+        XCTAssertEqual(unpublished, .notFound)
+    }
+
+    /// A bundle lookup that fails is a failed search, never "not found".
+    func testAnIntroductionBundleLookupFailureIsAFailure() async throws {
+        let (record, _) = try annaRecord()
+        let outcome = await PeopleSearch.network(
+            query: "anna web", records: [record],
+            ports: ports(identityKey: { _ in throw URLError(.notConnectedToInternet) }))
+        XCTAssertEqual(outcome, .failed)
+    }
+
+    /// Anna's introduction record naming a username, with a certificate.
+    private func annaRecordWithUsername(name: String, username: String) throws -> Data {
+        let fof = try deriveReachGrant(
+            accountSeed: annaKey.ed25519Seed(), class: .fof, scopeId: Data(), version: 1)
+        let payload = FfiIntroductionPayload(
+            identityPk: annaKey.signaturePublicKey(), accountId: annaAccount,
+            displayName: name, username: username, usernameCertificate: Data(repeating: 1, count: 153),
+            fof: fof)
+        var terms = nameSearchTerms(displayName: name).map { fakeOutput("name", $0) }
+        terms.append(fakeOutput("user", username))
+        return try composeIntroduction(payload: payload, termOprfs: terms, issuedAtMs: 1)
+    }
+
+    /// A name-matched introduction's username is verified with an extra OPRF
+    /// lookup of that username, against its lookup key.
+    func testANameMatchedIntroductionsUsernameIsVerifiedByAnExtraLookup() async throws {
+        let record = try annaRecordWithUsername(name: "Anna Weber", username: "anna_w")
+        var looked: [String] = []
+        let outcome = await PeopleSearch.network(
+            query: "weber", records: [record],
+            ports: ports(
+                usernameOprf: { looked.append($0); return self.fakeOprf("user", $0) },
+                verifyCertificate: { _, lookupKey, _ in lookupKey == self.fakeOprf("user", "anna_w").lookupKey }))
+        guard case .found(let people) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertEqual(people.first?.username, "anna_w")
+        XCTAssertTrue(looked.contains("anna_w"))
+    }
+
+    /// Extra username checks are capped at `maxExtraUsernameChecks` per search;
+    /// the rest show their name without a username.
+    func testExtraUsernameChecksAreCapped() async throws {
+        var records: [Data] = []
+        let n = PeopleSearch.maxExtraUsernameChecks + 2
+        for i in 0..<n {
+            records.append(try annaRecordWithUsername(name: "Anna Weber", username: "anna_\(i)"))
+        }
+        var looked: [String] = []
+        _ = await PeopleSearch.network(
+            query: "weber", records: records,
+            ports: ports(
+                usernameOprf: { looked.append($0); return self.fakeOprf("user", $0) },
+                verifyCertificate: { _, _, _ in true }))
+        // The typed text "weber" is itself a username candidate: one round for
+        // it, then at most the cap for the records.
+        XCTAssertEqual(looked.filter { $0.hasPrefix("anna_") }.count, PeopleSearch.maxExtraUsernameChecks)
     }
 }

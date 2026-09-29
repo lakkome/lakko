@@ -693,17 +693,39 @@ public class DiscoveryClient(
     /** `POST /discovery/name/lookup` (anonymous): the accounts in Everyone
      *  that published the name term whose discovery lookup key is [lookupKey]
      *  (`OprfResult.lookupKey`, never the OPRF output; at most 20). */
-    public suspend fun nameLookup(lookupKey: ByteArray): List<ByteArray> {
+    public suspend fun nameLookup(lookupKey: ByteArray): List<PublicAccountHit> {
         val resp = doPostNullableOn404<NameLookupResponse>("/discovery/name/lookup", anonymous = true) {
             contentType(ContentType.Application.Json)
             setBody(NameLookupRequest(oprf_hash_b64 = base64Encode(lookupKey)))
         } ?: return emptyList()
-        return resp.account_ids_b64.mapNotNull {
-            try {
-                base64Decode(it).takeIf { id -> id.size == ACCOUNT_ID_LEN }
+        return resp.results.mapNotNull { r ->
+            val id = try {
+                base64Decode(r.account_id_b64).takeIf { id -> id.size == ACCOUNT_ID_LEN }
             } catch (_: IllegalArgumentException) {
                 null
-            }
+            } ?: return@mapNotNull null
+            PublicAccountHit(accountId = id, publicRecord = decodeRecordOrNull(r.public_record_b64))
+        }
+    }
+
+    /**
+     * `POST /discovery/lookup` by a username's discovery LOOKUP KEY
+     * (`OprfResult.lookupKey`, never the OPRF output): the account in
+     * Everyone and its public record, or `null` (404 — unregistered and
+     * hidden answer alike). ADR-0060 §5.
+     */
+    public suspend fun lookupPublic(lookupKey: ByteArray): PublicAccountHit? {
+        val resp = lookupRaw(LookupRequest(oprf_hash = base64Encode(lookupKey))) ?: return null
+        val id = base64Decode(resp.account_id)
+        if (id.size != ACCOUNT_ID_LEN) return null
+        return PublicAccountHit(accountId = id, publicRecord = decodeRecordOrNull(resp.public_record_b64))
+    }
+
+    private fun decodeRecordOrNull(b64: String?): ByteArray? = b64?.let {
+        try {
+            base64Decode(it)
+        } catch (_: IllegalArgumentException) {
+            null
         }
     }
 
@@ -1868,6 +1890,16 @@ public sealed interface ListInvitesResult {
      *  status to deny status-code probing. */
     public data object NotFoundOrNotOwner : ListInvitesResult
 }
+
+/** ADR-0060 §5 — one account in Everyone a lookup answered with, and its
+ *  public record (`null` when discovery sent none). */
+public class PublicAccountHit(
+    /** Raw 16-byte account id. */
+    public val accountId: ByteArray,
+    /** The opaque public record, opened with the OPRF OUTPUT of the round
+     *  that found the hit (`openPublicRecord`). */
+    public val publicRecord: ByteArray?,
+)
 
 /** Result of [DiscoveryClient.lookup]. */
 public data class LookupResult(

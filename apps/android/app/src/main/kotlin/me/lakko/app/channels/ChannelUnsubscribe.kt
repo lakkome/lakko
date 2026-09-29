@@ -65,6 +65,9 @@ public object ChannelUnsubscribe {
         }
         state.clearSubscriberKeys(channelId)
         state.removeChannel(channelId)
+        // ADR-0060 §3 — the server drops the member card with the
+        // subscription, so a later subscription uploads afresh.
+        ChannelMemberCards.forgetUploads(channelId)
         if (keys == null) return
         scope.launch {
             try {

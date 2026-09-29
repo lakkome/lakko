@@ -60,12 +60,81 @@ enum ChannelMemberCards {
         uploaded = uploaded.filter { !$0.hasPrefix("\(channelId)|") }
     }
 
+    // MARK: - Reading the member list (the rules mirror web `member-cards.ts`)
+
+    /// What to do with the grant state of one card read from the member list
+    /// (web `cardGrantDecision`).
+    enum CardGrantDecision: Equatable {
+        /// File the card's `channel` grant under its author's account key.
+        case file
+        /// The card carries no `channel` grant: withdraw one held from before
+        /// (the person narrowed their setting).
+        case withdraw
+        /// Leave the held grants alone.
+        case skip
+    }
+
+    /// Decide the grant outcome of one card. A grant is filed only after the
+    /// DS reach check showed it registered on the author's mailbox
+    /// (`grantVerified == true`): a grant another member copied or made up
+    /// would otherwise be filed under someone else's key. A refused grant is
+    /// not the person narrowing their setting (that is a card without one),
+    /// and an unanswered check proves nothing, so both leave the store alone.
+    static func cardGrantDecision(
+        isOwnCard: Bool, authorAccountKey: Data?, ownAccountKey: Data?,
+        carriesChannelGrant: Bool, grantVerified: Bool?
+    ) -> CardGrantDecision {
+        if isOwnCard { return .skip }
+        guard let author = authorAccountKey else { return .skip }
+        if let own = ownAccountKey, author == own { return .skip }
+        if !carriesChannelGrant { return .withdraw }
+        return grantVerified == true ? .file : .skip
+    }
+
+    /// Whether a card whose binding verified under `cardKey` is kept, given
+    /// the account key the directory publishes for the account id the card's
+    /// profile claims. Nothing published (unknown account, or the lookup
+    /// failed) keeps the card; only a DIFFERENT published key drops it — that
+    /// card names someone else's account.
+    static func cardKept(cardKey: Data, publishedKey: Data?) -> Bool {
+        guard let publishedKey else { return true }
+        return publishedKey == cardKey
+    }
+
+    /// The username a member row shows (UX section 6.2: the username goes
+    /// with the permission): only while the card carries the `channel` grant
+    /// AND this device keeps it for this channel.
+    static func shownUsername(username: String?, carriesChannelGrant: Bool, grantHeld: Bool) -> String? {
+        carriesChannelGrant && grantHeld ? username : nil
+    }
+
+    /// `accountKey|channel|seed` -> the reach-check answer, this process only
+    /// (a relaunch re-checks once).
+    private static var verifiedGrants: [String: Bool] = [:]
+
+    /// The DS reach check of the author's mailbox with a card's grant, cached;
+    /// `nil` when the check could not answer.
+    private static func verifyGrant(
+        _ grant: FfiReachGrant, authorAccountKey: Data, channelId: String
+    ) async -> Bool? {
+        let cacheKey = "\(authorAccountKey.base64EncodedString())|\(channelId)|\(grant.seed.base64EncodedString())"
+        if let cached = verifiedGrants[cacheKey] { return cached }
+        guard let mailbox = ReachCenter.mailbox(of: authorAccountKey),
+              let ok = try? await DsClient().reachCheck(pseudonym: mailbox, reachSeed: grant.seed)
+        else { return nil }
+        verifiedGrants[cacheKey] = ok
+        return ok
+    }
+
     /// Read the channel's member cards, open each with the seed of its epoch,
-    /// and keep the `channel` grants they carry — filed under the account key
-    /// the card's binding verified under, never under the account id the
-    /// profile claims. A claimed account id the directory publishes a
-    /// different key for is a card naming someone else and is dropped.
-    /// Returns the names read, for a member list. Best effort.
+    /// and file or withdraw the `channel` grants they carry, the way web does:
+    /// a card is filed under the account key its binding verified under; one
+    /// whose claimed account id the directory publishes a DIFFERENT key for is
+    /// dropped (nothing published keeps it); a grant is filed only once the
+    /// reach check shows it registered on the author's mailbox; a card without
+    /// the grant withdraws one held from before; a username is returned only
+    /// while the card carries the grant and this device keeps it. Returns the
+    /// names read, for a member list. Best effort.
     @discardableResult
     static func refresh(
         state: ChannelsUiState, channelId: String, resolveKey: (Data) async -> Data?
@@ -74,7 +143,9 @@ enum ChannelMemberCards {
         guard !seeds.isEmpty, let channelIdBytes = CoPublisher.hexToData(channelId) else { return [] }
         let ownPk = state.subscriberKeysByChannel[channelId]
             .flatMap { try? ChannelSubscriberKeypair.fromSecret(secret: $0.secret).`public`() }
+        let ownAccountKey = ReachCenter.shared.ownAccountKey
         var names: [ProfileClaim] = []
+        var seen = Set<Data>()
         var after: String?
         repeat {
             guard let page = try? await ChannelsClient().listMemberCards(
@@ -88,21 +159,44 @@ enum ChannelMemberCards {
                           subscriberPk: member.subscriberPk),
                       let profile = try? decodeProfileEnvelope(plaintext: opened.profile) else { continue }
                 let key = opened.identityPk
-                if let accountId = profile.accountId {
-                    guard let published = await resolveKey(accountId), published == key else { continue }
+                if let accountId = profile.accountId,
+                   !cardKept(cardKey: key, publishedKey: await resolveKey(accountId)) {
+                    continue
                 }
-                names.append(ProfileClaim(
-                    displayName: profile.displayName, username: profile.username,
+                let keyB64 = key.base64EncodedString()
+                let channelGrant = profile.grants.first { $0.class == .channel }
+                var verified: Bool?
+                if let channelGrant, key != ownAccountKey {
+                    verified = await verifyGrant(channelGrant, authorAccountKey: key, channelId: channelId)
+                }
+                switch cardGrantDecision(
+                    isOwnCard: false, authorAccountKey: key, ownAccountKey: ownAccountKey,
+                    carriesChannelGrant: channelGrant != nil, grantVerified: verified) {
+                case .file:
+                    if let channelGrant {
+                        ReachCenter.shared.keep(
+                            channelGrant, carrier: .channelMemberCard,
+                            fromAccountKeyB64: keyB64, scopeHex: channelId)
+                    }
+                case .withdraw:
+                    ReachCenter.shared.withdrawHeld(.channel, fromAccountKeyB64: keyB64, scopeHex: channelId)
+                case .skip:
+                    break
+                }
+                // Every device of the own account is "you", not a member row.
+                guard key != ownAccountKey, seen.insert(key).inserted else { continue }
+                let username = shownUsername(
+                    username: profile.username, carriesChannelGrant: channelGrant != nil,
+                    grantHeld: ReachCenter.shared.holdsGrant(
+                        .channel, fromAccountKeyB64: keyB64, scopeHex: channelId))
+                let claim = ProfileClaim(
+                    displayName: profile.displayName, username: username,
                     updatedAtMs: profile.updatedAtMs, accountId: profile.accountId,
-                    usernameCertificate: profile.usernameCertificate))
-                guard !profile.grants.isEmpty else { continue }
-                for grant in profile.grants {
-                    ReachCenter.shared.keep(
-                        grant, carrier: .channelMemberCard,
-                        fromAccountKeyB64: key.base64EncodedString(), scopeHex: channelId)
+                    usernameCertificate: username == nil ? nil : profile.usernameCertificate)
+                names.append(claim)
+                if channelGrant != nil {
+                    ProfileDirectory.shared.acceptReceived(claim, signatureKeyB64: keyB64)
                 }
-                ProfileDirectory.shared.acceptReceived(
-                    names[names.count - 1], signatureKeyB64: key.base64EncodedString())
             }
             after = page.nextAfter
         } while after != nil

@@ -823,23 +823,34 @@ private struct SessionRoot: View, Equatable {
                     },
                     onFoundPerson: { handOffToContacts(username: $0) },
                     peopleSearch: PeopleSearchActions(
-                        search: { [contactsRepository] query in
-                            // Local first: people this device can already
-                            // reach whose profiles it holds.
-                            let reach = ReachCenter.shared
-                            let profiles = ProfileDirectory.shared.receivedProfiles()
+                        search: { [contactsRepository, chatRepository] query in
+                            // Local first (web `localPeople`): contacts and
+                            // the members of this device's groups and
+                            // channels, with or without a grant.
+                            let own = ReachCenter.shared.ownAccountKey
+                            let contacts = contactsRepository.state.accepted.map {
+                                (accountKey: $0.request.fromPubkey, accountId: $0.request.fromAccountId)
+                            }
+                            let contactKeys = Set(contacts.map { $0.accountKey.base64EncodedString() })
                             let local = PeopleSearch.local(
-                                query: query, profiles: profiles,
-                                seedFor: { reach.heldSeed(forAccountKeyB64: $0, groupIdHex: nil) })
+                                query: query,
+                                candidates: PeopleSearchWiring.localCandidates(
+                                    contacts: contacts,
+                                    groupPeopleKeys: chatRepository.allMemberAccountKeys(),
+                                    profiles: ProfileDirectory.shared.receivedProfiles()),
+                                ownAccountKey: own)
                             let network = await PeopleSearch.network(
                                 query: query,
                                 records: IntroductionBook.shared.relayedRecords()
                                     + IntroductionBook.shared.offeredRecords(),
-                                knownProfiles: profiles,
+                                known: {
+                                    PeopleSearchWiring.known(
+                                        keyB64: $0.base64EncodedString(), contactKeys: contactKeys)
+                                },
+                                ownAccountKey: own,
                                 ports: contactsRepository.peopleSearchPorts())
                             if case .found(let people) = network {
-                                let localKeys = Set(local.map(\.accountKey))
-                                return .found(local + people.filter { !localKeys.contains($0.accountKey) })
+                                return .found(PeopleSearch.merge([local, people], ownAccountKey: own))
                             }
                             return local.isEmpty ? network : .found(local)
                         },

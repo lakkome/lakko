@@ -74,6 +74,20 @@ internal data class StoredDelegation(
     val envelopeHex: String,
 )
 
+/** ADR-0060 §4 — a contact's relayed introductions bundle, kept whole. */
+@Serializable
+internal data class StoredIntroBundle(
+    /** The Introductions envelope as received, hex. */
+    val bundleHex: String,
+    /** Its stamp, the `bundleIsNewer` order key. */
+    val updatedAtMs: Long,
+)
+
+/** ADR-0060 §4 — this account's own introduction record and the inputs it
+ *  was built from ([introductionOfferKey]). */
+@Serializable
+internal data class StoredOwnOffer(val key: String, val recordHex: String)
+
 /** The whole per-account document. */
 @Serializable
 internal data class ReachDoc(
@@ -102,6 +116,20 @@ internal data class ReachDoc(
      *  composed here on a rotation, or accepted verbatim from another of the
      *  account's devices. Carries its stamp, so a re-send keeps it. */
     val reachStateHex: String? = null,
+    /** ADR-0060 §4 — the introduction record each contact offered for
+     *  their own 2.1 publication: account key hex -> record hex. */
+    val introOffers: Map<String, String> = emptyMap(),
+    /** ADR-0060 §4 — the bundle each contact relayed: account key hex. */
+    val introBundles: Map<String, StoredIntroBundle> = emptyMap(),
+    /** ADR-0060 §4/§5 — the OPRF OUTPUT of each term already evaluated
+     *  (`"n:<term>"` / `"u:<username>"` -> hex). Never sent anywhere. */
+    val termOutputs: Map<String, String> = emptyMap(),
+    /** ADR-0060 §4 — this account's current introduction record. */
+    val ownOffer: StoredOwnOffer? = null,
+    /** One-to-one group hex -> the offer key last sent there. */
+    val offerSentTo: Map<String, String> = emptyMap(),
+    /** One-to-one group hex -> the relayed-bundle digest last sent there. */
+    val bundleSentTo: Map<String, String> = emptyMap(),
 )
 
 /** Where the documents live. An interface so the manager is testable. */

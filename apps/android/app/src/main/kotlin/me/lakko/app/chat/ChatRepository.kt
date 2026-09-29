@@ -1102,6 +1102,10 @@ public class ChatRepository(
             reach.onVisibilityChanged = { onVisibilityChanged(it) }
             reach.bind(accountIdB64, account)
             publishThreadList()
+            // ADR-0060 §4 — the introduction record and the relayed bundle,
+            // now and on the periodic re-check.
+            runIntroductionsBestEffort()
+            startIntroductionTicker()
             // ADR-0060 §5 — the username certificate this account's profile
             // carries, so a viewer shows the username without a lookup. A
             // first certificate republishes the profile everywhere.
@@ -1253,6 +1257,9 @@ public class ChatRepository(
         // this join lands never re-sends. Launched, never awaited: the publish
         // takes the per-group lock itself.
         profileRequestScope.launch { requestProfilesBestEffort(groupIdHex, joinedJustNow = true) }
+        // ADR-0060 §4 — a new one-to-one gets the introduction record and the
+        // relayed bundle.
+        runIntroductionsBestEffort()
         return groupIdHex
     }
 
@@ -4023,6 +4030,8 @@ public class ChatRepository(
         profileRepublish.publishNowToAll(targets)
         // ADR-0060 §5 — the Everyone publication follows the name.
         refreshEveryoneBestEffort()
+        // ADR-0060 §4 — and so does the introduction record.
+        runIntroductionsBestEffort()
     }
 
     /**
@@ -4094,6 +4103,125 @@ public class ChatRepository(
                 throw cause
             } catch (cause: Throwable) {
                 android.util.Log.w("ChatRepository", "ADR-0060 Everyone publication failed: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0060 §4 — contacts of contacts: offer and relay
+    // -----------------------------------------------------------------
+
+    /** ADR-0060 §4 — how often the introductions re-check without a
+     *  trigger. Chosen (the web runtime's `TICK_MS`), not measured. */
+    private val INTRODUCTIONS_TICK_MS: Long = 5L * 60 * 1000
+
+    /** One run at a time; a trigger during a run asks for one more. */
+    private val introductionMutex = kotlinx.coroutines.sync.Mutex()
+
+    @Volatile
+    private var introductionsAgain = false
+
+    /** The periodic re-check (web `TICK_MS`): an offer that arrived, a new
+     *  one-to-one. Started on bind, cancelled on clear. */
+    @Volatile
+    private var introductionTicker: kotlinx.coroutines.Job? = null
+
+    /**
+     * ADR-0060 §4 — publish what contacts of contacts find this account by:
+     * rebuild this account's introduction record when 2.1 is on and an input
+     * moved, offer it in every one-to-one conversation not sent this version
+     * yet, and relay the records this account's contacts offered as one
+     * bundle (`me.lakko.app.reach.publishIntroductions`). Idempotent against
+     * the stored state; best-effort and fire-and-forget.
+     */
+    public fun runIntroductionsBestEffort() {
+        val account = keyPackageAccount.get() ?: return
+        reachScope.launch {
+            if (!introductionMutex.tryLock()) {
+                introductionsAgain = true
+                return@launch
+            }
+            try {
+                do {
+                    introductionsAgain = false
+                    runIntroductions(account)
+                } while (introductionsAgain)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w(
+                    "ChatRepository",
+                    "ADR-0060 introductions step failed; retried at the next run: ${cause.javaClass.simpleName}",
+                )
+            } finally {
+                introductionMutex.unlock()
+            }
+        }
+    }
+
+    private suspend fun runIntroductions(account: KeyPackageAccount) {
+        val identity = canonicalIdentity.get() ?: return
+        val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
+        val setting = reach.currentVisibility() ?: return
+        val fof = uniffi.lakko_ffi_uniffi.allowsContactsOfContacts(setting)
+        val own = me.lakko.app.profile.OwnProfileStore.load(applicationContext, account.accountId)
+        val username = own?.username?.takeIf { it.isNotEmpty() }
+        val oneToOnes = synchronized(groups) { groups.entries.toList() }
+            .filter { (_, record) ->
+                readIsActive { record.group.isActive() } != false && isOneToOne(record.group)
+            }
+            .map { it.key }
+            .sorted()
+        keyPackageDiscoveryFactory().use { client ->
+            me.lakko.app.reach.publishIntroductions(
+                initial = reach.introPublicationState(),
+                inputs = me.lakko.app.reach.IntroPublicationInputs(
+                    contactsOfContacts = fof,
+                    fofVersion = reach.fofVersion(),
+                    fofGrant = reach.grant(me.lakko.app.reach.ReachKind.FOF),
+                    displayName = own?.displayName,
+                    username = username,
+                    certificate = username?.let { reach.usernameCertificate() },
+                    identityPk = reach.ownAccountKey(),
+                    accountId = account.accountId,
+                    offeredRecordsHex = reach.offeredIntroductionRecordsHex(),
+                    oneToOneGroups = oneToOnes,
+                    nowMs = System.currentTimeMillis(),
+                ),
+                ops = me.lakko.app.reach.IntroPublicationOps(
+                    nameSearchTerms = { uniffi.lakko_ffi_uniffi.nameSearchTerms(it) },
+                    oprfNameTerm = { client.oprfNameTerm(it) },
+                    oprfUsername = { client.oprfUsername(it) },
+                    composeIntroduction = { payload, outputs, issuedAt ->
+                        uniffi.lakko_ffi_uniffi.composeIntroduction(payload, outputs, issuedAt)
+                    },
+                    composeOffer = { uniffi.lakko_ffi_uniffi.composeIntroductionOffer(it) },
+                    composeBundle = { records, updatedAt ->
+                        uniffi.lakko_ffi_uniffi.composeIntroductionsBundle(records, updatedAt)
+                    },
+                    maxBundleRecords = uniffi.lakko_ffi_uniffi.maxBundleRecords().toInt(),
+                    send = { groupHex, envelope ->
+                        val record = groups[groupHex] ?: throw IllegalStateException("conversation gone")
+                        broadcastControlToGroup(
+                            identity = identity,
+                            groupIdHex = groupHex,
+                            group = record.group,
+                            envelope = envelope,
+                        )
+                    },
+                    save = { reach.saveIntroPublicationState(it) },
+                ),
+            )
+        }
+    }
+
+    /** Start the periodic introductions re-check for this session. */
+    private fun startIntroductionTicker() {
+        introductionTicker?.cancel()
+        introductionTicker = reachScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(INTRODUCTIONS_TICK_MS)
+                runIntroductionsBestEffort()
             }
         }
     }
@@ -5932,6 +6060,8 @@ public class ChatRepository(
      * full-wipe path. Called from `AuthRepository.logout`.
      */
     public fun clear() {
+        introductionTicker?.cancel()
+        introductionTicker = null
         me.lakko.app.reach.ReachManager.peek()?.clear()
         DeviceReadmission.clearSlots()
         wipeInMemoryState()
@@ -5982,6 +6112,8 @@ public class ChatRepository(
         }
         // ADR-0060 — the grants this device holds and its reach bookkeeping
         // go with the device.
+        introductionTicker?.cancel()
+        introductionTicker = null
         me.lakko.app.reach.ReachManager.peek()?.clear(forget = true)
         clear()
         // ADR-0048 — the names learned on this device and this account's own

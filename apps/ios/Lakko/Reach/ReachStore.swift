@@ -42,10 +42,15 @@ public struct ReachRecord: Codable, Equatable {
     public var ownOfferFofVersion: UInt32?
     /// What the cached own record was composed for (`fof version|name|username`).
     public var ownOfferCacheKey: [String] = []
-    /// Per one-to-one conversation (group hex), a digest of the introduction
-    /// offer and relayed records last sent there, so an unchanged set is not
+    /// Per one-to-one conversation (group hex), the key of the own
+    /// introduction record last offered there, so an unchanged offer is not
     /// re-sent.
     public var introductionsSentDigest: [String: String] = [:]
+    /// Per one-to-one conversation (group hex), a digest of the relayed
+    /// records last sent there as a bundle. Tracked apart from the offer, as
+    /// web does: either can change without the other. Optional so a record
+    /// stored before the split still decodes.
+    public var bundleSentDigest: [String: String]?
 
     public init() {}
 
