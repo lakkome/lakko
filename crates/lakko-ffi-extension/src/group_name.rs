@@ -152,15 +152,13 @@ mod tests {
     /// renders a rename — the domain text, the stamp bytes and the name — as
     /// chat text.
     #[test]
-    fn an_unfiltered_group_name_would_otherwise_render_as_chat_text() {
+    fn an_unfiltered_group_name_is_never_chat_text() {
         let wire = compose_group_name(&group_name("Trio")).unwrap();
-        match lakko_attachments::parse_body(&wire) {
-            lakko_attachments::MessageBody::Chat { text, .. } => assert!(
-                text.starts_with("lakko/group-name/v1"),
-                "the lossy fallback is what this arm pre-empts",
-            ),
-            other => panic!("expected the lossy Chat fallback, got {other:?}"),
-        }
+        assert_eq!(
+            lakko_attachments::parse_body(&wire),
+            lakko_attachments::MessageBody::ServiceEnvelope,
+            "a service envelope is never chat text, even with this arm absent",
+        );
         decode_group_name_envelope(wire).expect("the filter arm must recognise it");
     }
 

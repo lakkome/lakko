@@ -247,6 +247,14 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0053 point 2 — groups already claimed this session (claim-on-open
     /// runs on the first poll of each group per session).
     private var claimedGroupsThisSession: Set<String> = []
+    /// ADR-0057, live walk 2026-09-29 — the owner's claim of each group
+    /// journal, once per session, sent without waiting for a `401` (an
+    /// unclaimed journal never answers one). Awaited before any epoch
+    /// registration of the group.
+    private let claimOnOpen = JournalClaimOnOpen()
+    /// Live walk 2026-09-29 — per group, the retry backoff after the DS
+    /// refused a sweep's epoch registration (`400` / `401` / `403`).
+    private var sweepRegistrationBackoff: [String: SweepRegistrationBackoff] = [:]
     /// ADR-0057 — this device's registrar seeds + the owner's appointment
     /// ledger, per `(account, group)`.
     private let registrarSeeds: RegistrarSeedStore
@@ -779,6 +787,8 @@ public final class ChatRepository: ObservableObject {
         registrarSetsSent.removeAll()
         journalRepair.reset()
         claimedGroupsThisSession.removeAll()
+        claimOnOpen.reset()
+        sweepRegistrationBackoff.removeAll()
         knockThrottle.reset()
         attributionThrottle.reset()
         // ADR-0045 — a new session re-establishes its own beacon cadence; a
@@ -2300,6 +2310,10 @@ public final class ChatRepository: ObservableObject {
         // would build on N+1 and publish commit(N+1 -> N+2), which peers still
         // at N drop as wrong-epoch, stranding the WHOLE group (the
         // "device-ahead" hazard).
+        // ADR-0057, live walk 2026-09-29 — the owner's claim on open precedes
+        // the registration, taken here while the group is still at N (the
+        // create below eager-merges).
+        await ensureOwnerClaimOnOpen(groupIdHex: groupIdHex)
         let commitPublish: PublishResult = try await DirectCommitSteps(
             currentSigner: { try record.group.dsAccessSigner(identity: identity) },
             create: { () throws -> AddMember in
@@ -2553,6 +2567,9 @@ public final class ChatRepository: ObservableObject {
         // before the commit, so the root can revoke its registrar key in the
         // same registration.
         let evicted = evictedAccountKeys(group: record.group, removedLeaves: [leafIndex])
+        // ADR-0057, live walk 2026-09-29 — the owner's claim on open first,
+        // while the group is still at N.
+        await ensureOwnerClaimOnOpen(groupIdHex: groupIdHex)
         let commitPublish: PublishResult = try await DirectCommitSteps(
             currentSigner: { try record.group.dsAccessSigner(identity: identity) },
             create: { () throws -> Data in
@@ -3942,15 +3959,6 @@ public final class ChatRepository: ObservableObject {
         // G-38 step 2 — the NETWORK half, outside the lock. Both values are read
         // here and re-validated under the lock; `groupId` is the record's cached
         // copy, so the fetch reads no `Group` handle at all.
-        // ADR-0057 — no proactive claim-on-open any more: a device that is
-        // behind would register an OLDER epoch under the root and drop the
-        // newer ones. The owner claims lazily, only when its signed read is
-        // refused (`DsAuth.reclaim`). Once per session the owner re-checks the
-        // journal's registrars against the roster (obligation 3).
-        if !claimedGroupsThisSession.contains(groupIdHex) {
-            claimedGroupsThisSession.insert(groupIdHex)
-            reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
-        }
         let after = record.cursor
         let groupId = record.groupId
         // ADR-0053 point 7 — an owner / admin device reads what non-members
@@ -3972,6 +3980,22 @@ public final class ChatRepository: ObservableObject {
         // G-38 steps 3+4 — the MLS half, inside the per-group commit chain.
         try await withCommitLock(groupIdHex: groupIdHex) { [self] in
             applyFetchedBatch(groupIdHex: groupIdHex, after: after, raw: raw)
+        }
+        // ADR-0057, live walk 2026-09-29 — the owner claims the journal on
+        // open, once per session, then re-checks its registrars against the
+        // roster (obligation 3). Not left to the lazy claim: an UNCLAIMED
+        // journal never refuses a signed read, so a `401`-triggered claim
+        // never ran and a journal whose claim the DS dropped stayed unclaimed,
+        // refusing every epoch registration. Only once the poll reached the
+        // journal head, so the claim names the epoch the other members are at
+        // (a claim at an older epoch would lock the members who are ahead
+        // out). Idempotent for the same root; a `409` is left alone (this
+        // device is behind), never answered with a reset.
+        if !raw.hasMore, !claimedGroupsThisSession.contains(groupIdHex) {
+            await ensureOwnerClaimOnOpen(groupIdHex: groupIdHex)
+            if claimOnOpen.isSettled(journalIdHex: groupIdHex) {
+                claimedGroupsThisSession.insert(groupIdHex)
+            }
         }
         // ADR-0045 — the sweep trigger. This is the ONLY thing that makes a
         // waiting request ever end, so it runs at the tail of every poll rather
@@ -5284,14 +5308,43 @@ public final class ChatRepository: ObservableObject {
                     guard let signerN1 = try record.group.dsStagedAccessSigner(identity: identity) else {
                         throw ChatError.argument("no staged sweep to register an epoch for")
                     }
-                    try await self.registerNextEpoch(
-                        record: record, groupIdHex: groupIdHex, next: signerN1,
-                        evictedAccountKeys: record.stagedEvictedAccountKeys)
+                    // The staged sweep has not merged, so the group is still at
+                    // N: the owner's claim (once per session) names N, and only
+                    // then is N+1 registered.
+                    await self.ensureOwnerClaimOnOpen(groupIdHex: groupIdHex)
+                    let epochN = (try? record.group.epoch()) ?? 0
+                    do {
+                        try await self.registerNextEpoch(
+                            record: record, groupIdHex: groupIdHex, next: signerN1,
+                            evictedAccountKeys: record.stagedEvictedAccountKeys)
+                        self.sweepRegistrationBackoff[groupIdHex] = nil
+                    } catch {
+                        if SweepRegistrationBackoff.appliesTo(error) {
+                            let next = SweepRegistrationBackoff.afterRefusal(
+                                self.sweepRegistrationBackoff[groupIdHex],
+                                nowMs: Self.nowMs(), epoch: epochN)
+                            self.sweepRegistrationBackoff[groupIdHex] = next
+                            NSLog("ADR-0057: sweep epoch registration refused (%@); next attempt in %lld s",
+                                  String(describing: error),
+                                  SweepRegistrationBackoff.delayMs(failures: next.failures) / 1000)
+                        }
+                        throw error
+                    }
                 },
                 // ADR-0057 obligation 5 — no root and no registrar seed: this
                 // device cannot register the next epoch, so it never stages.
                 canRegister: { [weak self] in
                     self?.canRegisterJournalEpochs(groupIdHex: groupIdHex) ?? false
+                },
+                // Live walk 2026-09-29 — a refused registration waits out its
+                // backoff; an epoch change (a membership or role change) ends
+                // the wait at once.
+                registrationDue: { [weak self] in
+                    guard let self, let backoff = self.sweepRegistrationBackoff[groupIdHex] else {
+                        return true
+                    }
+                    let epoch = (try? record.group.epoch()) ?? backoff.epoch
+                    return backoff.allows(nowMs: Self.nowMs(), epoch: epoch)
                 }
             ),
             outbox: SweepOutboxPort(
@@ -5893,24 +5946,58 @@ public final class ChatRepository: ObservableObject {
     /// otherwise (this device waits for the committer's registration).
     @discardableResult
     func claimGroupJournal(groupIdHex: String) async -> DsRequestSigner? {
-        guard let record = groups[groupIdHex],
-              let signer = currentDsSigner(record: record, groupIdHex: groupIdHex) else { return nil }
+        let (outcome, signer) = await claimJournalAsOwner(groupIdHex: groupIdHex)
+        switch outcome {
+        case .claimed:
+            reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
+            return signer
+        case .alreadyClaimed, .notOwner, .failed:
+            return nil
+        }
+    }
+
+    /// The owner's claim of the group journal at the group's CURRENT epoch,
+    /// shared by the lazy claim and the claim on open. A non-owner sends
+    /// nothing. A landed claim sets the root-held marker and clears the sweep
+    /// registration backoff (the refusal it backed off from is gone).
+    private func claimJournalAsOwner(
+        groupIdHex: String
+    ) async -> (JournalOwnership.LazyClaimOutcome, DsProofSigner?) {
+        guard let record = groups[groupIdHex] else { return (.failed, nil) }
+        guard isJournalOwner(record: record) else { return (.notOwner, nil) }
+        guard let signer = currentDsSigner(record: record, groupIdHex: groupIdHex) else {
+            return (.failed, nil)
+        }
         let outcome = await JournalOwnership.lazyClaim(
-            isOwner: isJournalOwner(record: record),
+            isOwner: true,
             root: { try self.journalRootSigner(groupId: record.groupId) },
             journalId: record.groupId,
             epoch: signer.epoch(),
             epochKey: signer.verifyingKey(),
             ds: dsClient)
-        switch outcome {
-        case .claimed:
+        if outcome == .claimed {
             if let accountIdB64 = currentAccountIdB64 {
                 registrarSeeds.markRootHeld(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
             }
-            reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
-            return signer
-        case .alreadyClaimed, .notOwner, .failed:
-            return nil
+            sweepRegistrationBackoff[groupIdHex] = nil
+            NSLog("ADR-0057: the owner claimed the group journal on open")
+        }
+        return (outcome, signer)
+    }
+
+    /// Live walk 2026-09-29 — the owner's claim on open, at most once per
+    /// group per session (``JournalClaimOnOpen``), followed by the registrar
+    /// reconcile whatever the claim came to (a non-owner's reconcile returns at
+    /// once; an owner whose journal was claimed already probes for the root).
+    /// Awaited before every epoch registration of the group, with the group
+    /// still at the epoch it is registering FROM, so the claim never names an
+    /// epoch no member reached.
+    func ensureOwnerClaimOnOpen(groupIdHex: String) async {
+        await claimOnOpen.ensure(journalIdHex: groupIdHex) { [weak self] in
+            guard let self else { return .failed }
+            let (outcome, _) = await self.claimJournalAsOwner(groupIdHex: groupIdHex)
+            self.reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
+            return outcome
         }
     }
 
@@ -7599,6 +7686,11 @@ private final class GroupRecord {
                 // the addressee and on the sender being the owner, then opens
                 // and stores it.
                 registrarSeedSink?(plaintext, senderLeaf)
+            case .serviceEnvelope:
+                // A service envelope this build cannot read (a newer version
+                // from a client ahead of this one). Dropped: no bubble, no
+                // chat-list preview, no unread count.
+                continue
             }
         }
     }

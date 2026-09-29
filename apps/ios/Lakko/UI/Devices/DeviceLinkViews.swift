@@ -125,6 +125,9 @@ struct DeviceLinkRequestModal: View {
             }
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
+                // A step change restarts this task and cancels the old one
+                // mid-sleep; a cancelled check would cancel its own request.
+                if Task.isCancelled { break }
                 await flow.check()
             }
         }

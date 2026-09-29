@@ -1020,6 +1020,16 @@ internal fun toEvent(
                         senderKey = senderKey,
                         createdAt = createdAt,
                     )
+                    // A `lakko/`-domain envelope none of the arms above
+                    // recognised: an unknown kind, or a known domain whose body
+                    // this build cannot decode (a newer version from a client
+                    // on another build). The core classifies it instead of
+                    // degrading it to lossy-UTF-8 chat text, and it is DROPPED:
+                    // never a bubble, never a chat-list preview line.
+                    MessageBodyKind.SERVICE_ENVELOPE -> IncomingChatEvent.ServiceEnvelope(
+                        messageId = messageId,
+                        createdAt = createdAt,
+                    )
                 }
             }
         }
@@ -1205,6 +1215,15 @@ public sealed interface IncomingChatEvent {
          *  key handed a departed member's whole read history to whoever was
          *  added into their slot. `null` ⇒ dropped. */
         val senderKey: MemberIdentity?,
+        val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** A service envelope the core recognised by its `lakko/` domain but
+     *  that no arm here decodes (an unknown kind, or a version this build
+     *  cannot read). Machine-to-machine: consumed as a no-op, never a
+     *  timeline row and never a preview. */
+    public data class ServiceEnvelope(
+        val messageId: Long,
         val createdAt: String,
     ) : IncomingChatEvent
 

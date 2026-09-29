@@ -277,10 +277,14 @@ public final class DsClient {
 
     /// ADR-0057 — send one ownership statement: `PUT <request.path>` with the
     /// statement body the FFI signer produced, no proof header (the statement
-    /// carries its own signature). A `409` is retried once: the DS answers a
-    /// lost race for the group's lock row with the same status as a real
-    /// conflict, and a second attempt tells the two apart. Every refusal
-    /// surfaces as ``DsStatementError``.
+    /// carries its own signature). A `409` for a lost race on the group's lock
+    /// row (body ``lockRaceBody``) is retried once with the same bytes: the
+    /// transaction rolled back, so the statement's nonce was not spent. A
+    /// DECIDED conflict (claimed already, an append past the head, a binding
+    /// held elsewhere) is never re-sent: the DS spends the nonce before it
+    /// decides, so the identical re-send would be refused `401` and a real
+    /// `409` would surface as ``DsStatementError/unauthorized`` (live walk
+    /// 2026-09-29). Every refusal surfaces as ``DsStatementError``.
     public func putStatement(_ request: DsStatementRequest) async throws {
         let body = Data(request.bodyJson.utf8)
         var attempt = 0
@@ -295,7 +299,10 @@ public final class DsClient {
                 acceptAnyStatus: true
             )
             if (200..<300).contains(http.statusCode) { return }
-            if http.statusCode == 409, attempt == 1 { continue }
+            if http.statusCode == 409, attempt == 1,
+               String(data: data, encoding: .utf8)?.contains(Self.lockRaceBody) == true {
+                continue
+            }
             throw DsStatementError.from(
                 status: http.statusCode,
                 body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>"))
@@ -551,6 +558,11 @@ public final class DsClient {
     /// because it's a useful helper for tests + for any caller
     /// assembling DS URLs directly without going through this
     /// client.
+    /// The DS body of a `409` that lost a race for a group's lock row (the
+    /// transaction rolled back, nothing was decided), as opposed to a decided
+    /// conflict. `services/ds/src/access.rs` `registration_db_error`.
+    static let lockRaceBody = "concurrent registration"
+
     public static func pseudonymHex(_ bytes: Data) -> String {
         var out = String()
         out.reserveCapacity(bytes.count * 2)

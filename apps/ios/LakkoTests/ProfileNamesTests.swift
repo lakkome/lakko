@@ -387,12 +387,16 @@ final class ProfileNamesTests: XCTestCase {
         }
     }
 
-    func testWithoutTheArmTheProfileWouldRenderAsText() throws {
+    func testWithoutTheArmTheProfileWouldBeDroppedUnread() throws {
         let bytes = try composeProfileEnvelope(
             profile: FfiProfile(displayName: "Alice", username: nil, updatedAtMs: 1, accountId: nil))
         let parsed = parseBodyEnvelope(bytes: bytes)
-        XCTAssertEqual(parsed.kind, .chat, "the legacy fallback degrades it to a chat body")
-        XCTAssertTrue(parsed.text.contains("lakko/profile/v1"))
+        // Since 2026-09-29 the parser drops any `lakko/` plaintext as a service
+        // envelope (it used to degrade it to a chat body reading
+        // `lakko/profile/v1` plus binary). Without the arm the envelope would
+        // therefore never render, and never reach its receive handler either.
+        XCTAssertEqual(parsed.kind, .serviceEnvelope)
+        XCTAssertEqual(parsed.text, "")
     }
 
     func testAChatEnvelopeStillClassifiesAsChat() throws {

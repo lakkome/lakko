@@ -13,7 +13,6 @@ import me.lakko.app.ds.DsClient
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
-import uniffi.lakko_ffi_uniffi.MessageBodyKind
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
 import uniffi.lakko_ffi_uniffi.committerBeaconEnvelopeLen
 import uniffi.lakko_ffi_uniffi.decodeCommitterBeacon
@@ -293,14 +292,10 @@ private class RealThrowawayGroup(
         } catch (_: Throwable) {
             return null
         }
-        val kind = when (body.kind) {
-            MessageBodyKind.CHAT -> ProcessedKind.CHAT
-            MessageBodyKind.EDIT -> ProcessedKind.EDIT
-            MessageBodyKind.DELETE -> ProcessedKind.DELETE
-            MessageBodyKind.REACTION -> ProcessedKind.REACTION
-            MessageBodyKind.TYPING -> ProcessedKind.TYPING
-            MessageBodyKind.READ_RECEIPT -> ProcessedKind.READ_RECEIPT
-        }
+        // A `lakko/` envelope the peeks above did not recognise (an unknown
+        // kind, or a newer version of a known one) comes back as
+        // SERVICE_ENVELOPE and is dropped like any other service envelope.
+        val kind = previewKindOf(body.kind) ?: return null
         return ProcessedRow(
             kind = kind,
             text = body.text,

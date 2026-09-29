@@ -648,6 +648,13 @@ export function DeviceGroupSyncProvider(props: {
     }
 
     while (!signal.aborted) {
+      // ADR-0057 obligation 2 - every device of the account holds the
+      // DeviceGroup's root: claim the journal on open, once per session (an
+      // unclaimed journal never answers the 401 the lazy claim waits for).
+      // Asked on every pass, which costs nothing once settled, so a claim
+      // attempted before the session's signer factory was installed, or one
+      // that met a network failure, is retried (`ds/owner-claim.ts`).
+      void ds.ensureOwnerClaim(groupId);
       let raw;
       try {
         raw = await ds.fetchGroup(groupId, {

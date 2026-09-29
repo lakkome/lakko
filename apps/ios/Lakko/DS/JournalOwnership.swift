@@ -584,6 +584,82 @@ public final class JournalFoundingMarks {
     }
 }
 
+// MARK: - Claim on open
+
+/// The owner's claim of a conversation group's journal, once per group per
+/// session, without waiting for a `401`.
+///
+/// Live walk 2026-09-29: ADR-0057 migration 0006 dropped every earlier claim,
+/// and a journal was re-claimed only by the owner's lazy claim, which runs
+/// after a signed request is refused `401`. An UNCLAIMED journal never refuses
+/// a signed read (it keeps the open posture), so a pre-existing group stayed
+/// unclaimed for good, and every epoch registration in it was refused `401`:
+/// no sweep could ever land and a new device was never admitted.
+///
+/// So the owner claims on open. The claim is idempotent for the same root at
+/// the same key (`204`) and refused otherwise (`409`, or `401` when another
+/// root holds the journal); neither refusal is answered with a reset — for a
+/// conversation group a `409` usually means this device is behind.
+///
+/// ``ensure(journalIdHex:claim:)`` is what a registration awaits first, so an
+/// owner's claim always precedes its first epoch registration of the session.
+/// A settled outcome (claimed, claimed already, not the owner) is kept for the
+/// session; a failed claim may be tried again after ``retryAfterFailureMs``.
+@MainActor
+public final class JournalClaimOnOpen {
+    /// How long a failed claim waits before the next attempt. Chosen, not
+    /// measured: the root probe's interval.
+    public static let retryAfterFailureMs: Int64 = 60_000
+
+    private var settled: [String: JournalOwnership.LazyClaimOutcome] = [:]
+    private var failedAtMs: [String: Int64] = [:]
+    private var inflight: [String: Task<JournalOwnership.LazyClaimOutcome, Never>] = [:]
+    private let nowMs: () -> Int64
+
+    public init(nowMs: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }) {
+        self.nowMs = nowMs
+    }
+
+    /// Run `claim` for `journalIdHex` unless it already settled this session;
+    /// a caller arriving while it runs awaits the same run. Returns the
+    /// outcome, or `nil` when a failed claim is still inside its retry wait
+    /// (nothing is sent then).
+    @discardableResult
+    public func ensure(
+        journalIdHex: String,
+        claim: @escaping @MainActor () async -> JournalOwnership.LazyClaimOutcome
+    ) async -> JournalOwnership.LazyClaimOutcome? {
+        if let outcome = settled[journalIdHex] { return outcome }
+        if let task = inflight[journalIdHex] { return await task.value }
+        if let failed = failedAtMs[journalIdHex] {
+            let now = nowMs()
+            if now >= failed, now < failed + Self.retryAfterFailureMs { return nil }
+        }
+        let task = Task { @MainActor in await claim() }
+        inflight[journalIdHex] = task
+        let outcome = await task.value
+        inflight[journalIdHex] = nil
+        if outcome == .failed {
+            failedAtMs[journalIdHex] = nowMs()
+        } else {
+            failedAtMs[journalIdHex] = nil
+            settled[journalIdHex] = outcome
+        }
+        return outcome
+    }
+
+    /// Whether the claim settled this session (claimed, claimed already, or
+    /// not the owner).
+    public func isSettled(journalIdHex: String) -> Bool { settled[journalIdHex] != nil }
+
+    /// Forget everything (a logout / account switch starts a new session).
+    public func reset() {
+        settled.removeAll()
+        failedAtMs.removeAll()
+        inflight.removeAll()
+    }
+}
+
 // MARK: - Registrar seed store
 
 /// This device's registrar seeds, per `(account, group)`, plus the owner's

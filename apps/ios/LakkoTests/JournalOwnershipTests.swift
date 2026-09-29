@@ -649,7 +649,10 @@ final class JournalOwnershipTests: XCTestCase {
 
     func testAStatementIsAPutWithoutAProofAndA409IsRetriedOnce() async throws {
         let scope = DsAccessURLProtocol.freshScope()
-        DsAccessURLProtocol.script(scope, [.init(status: 409, body: Data()), .init(status: 204, body: Data())])
+        DsAccessURLProtocol.script(scope, [
+            .init(status: 409, body: Data("concurrent registration; retry".utf8)),
+            .init(status: 204, body: Data()),
+        ])
         let request = DsStatementRequest(path: "/ds/group/ab/access", bodyJson: #"{"statement_b64":"AA"}"#)
         try await DsAccessURLProtocol.client(scope).putStatement(request)
         let seen = DsAccessURLProtocol.requests(scope)
@@ -658,6 +661,25 @@ final class JournalOwnershipTests: XCTestCase {
         XCTAssertEqual(seen.first?.url.path, "/native/ds/ds/group/ab/access")
         XCTAssertNil(seen.first?.proof, "a statement carries no proof header")
         XCTAssertEqual(seen.first?.body, Data(request.bodyJson.utf8))
+    }
+
+    /// Live walk 2026-09-29 — a DECIDED conflict is not re-sent: the DS spent
+    /// the statement's nonce before deciding, so the identical re-send would be
+    /// refused `401` and the conflict would surface as `unauthorized`.
+    func testADecidedConflictIsNotResent() async {
+        let scope = DsAccessURLProtocol.freshScope()
+        DsAccessURLProtocol.script(scope, [
+            .init(status: 409, body: Data("journal already claimed; a reset replaces its chain".utf8)),
+            .init(status: 401, body: Data("proof required".utf8)),
+        ])
+        let request = DsStatementRequest(path: "/ds/group/ab/claim", bodyJson: #"{"statement_b64":"AA"}"#)
+        do {
+            try await DsAccessURLProtocol.client(scope).putStatement(request)
+            XCTFail("expected a conflict")
+        } catch {
+            XCTAssertEqual(error as? DsStatementError, .conflict)
+        }
+        XCTAssertEqual(DsAccessURLProtocol.requests(scope).count, 1)
     }
 
     func testTheStatementRefusalsAreTyped() async {

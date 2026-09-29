@@ -41,6 +41,7 @@
  * is computed at the moment of use and nothing can free the signer under it.
  */
 
+import { OwnerClaimMemo } from "./owner-claim";
 import type { JournalAuthority } from "./ownership";
 
 /** The header a proof travels in (`dsProofHeaderName()` on the wasm surface;
@@ -132,6 +133,10 @@ export class DsAccessRegistry {
   private readonly mailboxes = new Map<string, ProofSigner>();
   private readonly ownerSources = new Set<JournalOwnerSource>();
   private authorityFactory: JournalAuthorityFactory | null = null;
+  private readonly claimListeners = new Set<(groupId: Uint8Array) => void>();
+  /** ADR-0057 obligation 2 - which journals the owner claimed this session
+   *  (`./owner-claim`). Shared by every `DsClient`. */
+  readonly ownerClaims = new OwnerClaimMemo();
 
   /** Add a source; returns the function that removes it. */
   registerGroupSource(source: GroupSignerSource): () => void {
@@ -278,6 +283,32 @@ export class DsAccessRegistry {
     }
   }
 
+  /**
+   * ADR-0057 obligation 2 - the owner's claim of `groupId` landed (`204`),
+   * lazily after a refused request or on opening the group: mark the root
+   * held, settle the session memo, and tell the listeners (the registrar
+   * reconcile, the sweep backoff). Never throws.
+   */
+  noteOwnerClaimed(groupId: Uint8Array): void {
+    this.markRootHeld(groupId);
+    this.ownerClaims.noteClaimed(groupId);
+    for (const listener of this.claimListeners) {
+      try {
+        listener(groupId);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+
+  /** Listen for {@link noteOwnerClaimed}; returns the function that stops. */
+  onOwnerClaimed(listener: (groupId: Uint8Array) => void): () => void {
+    this.claimListeners.add(listener);
+    return () => {
+      this.claimListeners.delete(listener);
+    };
+  }
+
   /** Install the signer of one of this device's own mailboxes (the account
    *  mailbox and the device mailbox). Replaces a signer for the same
    *  pseudonym; the registry owns it. */
@@ -312,6 +343,7 @@ export class DsAccessRegistry {
     for (const signer of this.mailboxes.values()) freeQuietly(signer);
     this.mailboxes.clear();
     this.authorityFactory = null;
+    this.ownerClaims.clear();
   }
 }
 

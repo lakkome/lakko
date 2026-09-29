@@ -272,19 +272,26 @@ public struct SweepJournalPort {
     /// owner sent). Without one a commit could never be registered, so the
     /// sweep is never staged: it is left to an admin or the owner.
     public var canRegister: () -> Bool
+    /// Whether a NEW sweep may register an epoch now, or the last refusal's
+    /// backoff (``SweepRegistrationBackoff``) is still running. Asked only
+    /// where a fresh sweep would start: an owed verdict and an owed Welcome
+    /// fan-out are resolved first and never wait on it (C-67).
+    public var registrationDue: () -> Bool
 
     public init(
         fetch: @escaping (Int64) async throws -> [SweepJournalRow],
         publishGroup: @escaping (Data) async throws -> Int64,
         publishMailbox: @escaping (Data, Data) async throws -> Int64,
         registerStagedEpoch: @escaping () async throws -> Void,
-        canRegister: @escaping () -> Bool = { true }
+        canRegister: @escaping () -> Bool = { true },
+        registrationDue: @escaping () -> Bool = { true }
     ) {
         self.fetch = fetch
         self.publishGroup = publishGroup
         self.publishMailbox = publishMailbox
         self.registerStagedEpoch = registerStagedEpoch
         self.canRegister = canRegister
+        self.registrationDue = registrationDue
     }
 }
 
@@ -450,6 +457,10 @@ public enum SweepOutcome: Equatable {
     /// journal root nor a registrar seed, so it cannot register an epoch and
     /// did not stage. The sweep is left to an appointed admin or the owner.
     case noJournalAuthority(rank: UInt32)
+    /// The DS refused this group's last epoch registration (`400` / `401` /
+    /// `403`) and the retry backoff has not run out, so no new sweep was
+    /// staged. Owed verdicts and Welcomes were still resolved first.
+    case registrationBackedOff(rank: UInt32)
     /// Obligation 3 — the journal moved since our cursor, so a commit may
     /// already be in flight. Stood down without staging; the poll drains the
     /// rows and the next attempt re-evaluates.
@@ -630,6 +641,13 @@ public func runCommitterSweep(_ ports: SweepPorts) async throws -> SweepOutcome 
     // never be published, so it does not stage. Asked after the election, so
     // a device that would have deferred anyway still reports the deferral.
     guard ports.journal.canRegister() else { return .noJournalAuthority(rank: rank) }
+
+    // Live walk 2026-09-29 — a refused registration is not retried on every
+    // poll tail: the DS refuses the same statement the same way until
+    // something changes (a claim, a membership or role change). Asked after
+    // the owed-verdict and owed-Welcome obligations above, which never wait,
+    // and before any network, so a backed-off group costs nothing.
+    guard ports.journal.registrationDue() else { return .registrationBackedOff(rank: rank) }
 
     // Obligation 3 — the stand-down re-read, immediately before creating the
     // commit.
@@ -991,4 +1009,92 @@ private func publishWelcomes(
     // cannot read a claimed journal, and it does not need to: its Welcome is
     // in its own mailbox like every other added member's.
     return ids
+}
+
+// MARK: - Registration backoff
+
+/// The retry schedule of a sweep whose epoch registration the DS refused.
+///
+/// Live walk 2026-09-29: an old device's sweep was refused `401` (an unclaimed
+/// journal) or `400` on `PUT /ds/group/{id}/access` and retried at the tail of
+/// every poll, about every 5 s, in every group, forever. A refusal of that kind
+/// does not resolve on its own: the DS answers the same statement the same way
+/// until the journal is claimed, the roster or roles change, or the owner
+/// appoints this device. So after a refusal the next NEW sweep waits
+/// ``firstDelayMs``, doubling per consecutive refusal up to ``maxDelayMs``.
+///
+/// What resets it: a registration that lands, the owner's claim of the journal
+/// landing (the caller drops the value), and an epoch change — a membership or
+/// role change is a commit, and a commit moves the epoch, so a value recorded
+/// at another epoch no longer holds anything back and the next refusal counts
+/// from one again.
+///
+/// Only the cadence changes. A staged sweep's owed verdict and an owed Welcome
+/// fan-out are resolved before this is consulted (ADR-0045 C-67).
+///
+/// Pure: the caller supplies the clock and the epoch.
+public struct SweepRegistrationBackoff: Equatable {
+    /// The wait after the first refusal. Chosen, not measured.
+    public static let firstDelayMs: Int64 = 30_000
+    /// The ceiling the doubling stops at. Chosen, not measured.
+    public static let maxDelayMs: Int64 = 600_000
+
+    /// Consecutive refusals at ``epoch``, at least 1.
+    public let failures: Int
+    /// The group epoch the last refusal happened at.
+    public let epoch: UInt64
+    /// When the last refusal happened (caller's clock, ms).
+    public let failedAtMs: Int64
+
+    public init(failures: Int, epoch: UInt64, failedAtMs: Int64) {
+        self.failures = max(1, failures)
+        self.epoch = epoch
+        self.failedAtMs = failedAtMs
+    }
+
+    /// The wait after `failures` consecutive refusals: 30 s, 60 s, 120 s, ...
+    /// capped at 10 minutes. `0` for no refusal.
+    public static func delayMs(failures: Int) -> Int64 {
+        guard failures > 0 else { return 0 }
+        var delay = firstDelayMs
+        var step = 1
+        while step < failures && delay < maxDelayMs {
+            delay = min(delay * 2, maxDelayMs)
+            step += 1
+        }
+        return delay
+    }
+
+    /// The earliest time a new sweep may register again.
+    public var notBeforeMs: Int64 { failedAtMs + Self.delayMs(failures: failures) }
+
+    /// Whether a new sweep may register at `epoch` at `nowMs`. `true` once the
+    /// wait ran out, when the epoch moved since the refusal, or when the clock
+    /// went backwards past the refusal (a wait measured on a clock that moved
+    /// back is not a wait anyone can reason about).
+    public func allows(nowMs: Int64, epoch: UInt64) -> Bool {
+        epoch != self.epoch || nowMs >= notBeforeMs || nowMs < failedAtMs
+    }
+
+    /// The value after a refusal at `epoch`: one more consecutive refusal when
+    /// `previous` is at the same epoch, else the first.
+    public static func afterRefusal(
+        _ previous: SweepRegistrationBackoff?,
+        nowMs: Int64,
+        epoch: UInt64
+    ) -> SweepRegistrationBackoff {
+        let failures = previous.map { $0.epoch == epoch ? $0.failures + 1 : 1 } ?? 1
+        return SweepRegistrationBackoff(failures: failures, epoch: epoch, failedAtMs: nowMs)
+    }
+
+    /// Whether `error` is a refusal the backoff applies to: `400`, `401` or
+    /// `403` on the registration. A `409` is a lost append race (another
+    /// committer registered first) and a network failure is transient; both
+    /// keep the ordinary cadence.
+    public static func appliesTo(_ error: Error) -> Bool {
+        switch error as? DsStatementError {
+        case .malformed?, .unauthorized?, .rankShortfall?: return true
+        default: return false
+        }
+    }
 }

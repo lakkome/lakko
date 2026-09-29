@@ -110,6 +110,7 @@ import {
   type SweepPorts,
   type StagedSweepArtifacts,
 } from "../chat/sweep";
+import { isBackoffRefusal, sweepBackoff } from "../chat/sweep-backoff";
 import type { ActingCommitter } from "../chat/committer-beacon";
 // ADR-0045 — the ONE dispatch ladder that turns a processed MLS message into a
 // timeline event. The sweep's verdict apply consumes journal rows the poll will
@@ -733,6 +734,8 @@ function sweepPortsFor(
           // ADR-0057 — consumed at receipt, like the poll does, never shown.
           if (event.kind === "registrarSeed") {
             await consumeRegistrarSeed(group, event);
+          } else if (event.kind === "serviceEnvelope") {
+            // An unrecognised `lakko/…` service envelope: dropped, never shown.
           } else {
             onSweptEvent(event);
           }
@@ -842,6 +845,9 @@ function sweepPortsFor(
         return next;
       });
       const authority = dsAccess.journalAuthority(groupIdBytes);
+      // Read BEFORE the network: the backoff is keyed on the membership the
+      // refusal was about.
+      const fingerprint = membershipFingerprint(group);
       try {
         const evictees = evicteeAccountKeys(
           rosterOf(group) as unknown as OwnershipRosterMember[],
@@ -851,11 +857,24 @@ function sweepPortsFor(
         releaseAuthority(authority);
         // The DS client signs with the same authority it resolves itself.
         await registerBeforePublish(ds, groupIdBytes, staged, revoke);
+        sweepBackoff.reset(groupIdB64);
+      } catch (err) {
+        // A refusal that will not change by the next poll: back off the next
+        // sweep start (`chat/sweep-backoff.ts`). The sweep itself abandons as
+        // before; nothing is published.
+        if (isBackoffRefusal(err)) {
+          const waitMs = sweepBackoff.noteRefused(groupIdB64, Date.now(), fingerprint);
+          // eslint-disable-next-line no-console
+          console.warn(`ds: staged epoch registration refused; next sweep in ${Math.round(waitMs / 1000)} s`);
+        }
+        throw err;
       } finally {
         releaseAuthority(authority);
         staged?.free();
       }
     },
+    mayStartSweep: () =>
+      sweepBackoff.mayStart(groupIdB64, Date.now(), membershipFingerprint(group)),
     mayRegister: () => {
       const authority = dsAccess.journalAuthority(groupIdBytes);
       try {
@@ -894,6 +913,29 @@ function hasPendingRoleChange(group: WasmGroup): boolean {
     );
   } catch {
     return false;
+  }
+}
+
+/**
+ * The group's membership and role table as one string, for the sweep backoff:
+ * a change to either ends the wait (`chat/sweep-backoff.ts`). A torn read
+ * yields a value that differs from any real one, which ends a wait rather
+ * than extending it.
+ */
+function membershipFingerprint(group: WasmGroup): string {
+  try {
+    const keys = (group.members() as Array<{ signaturePublicKey: Uint8Array }>)
+      .map((m) => base64Encode(m.signaturePublicKey))
+      .sort();
+    const owner = group.roleTableOwner();
+    const admins = group.roleTableAdmins();
+    return [
+      keys.join(","),
+      owner === undefined ? "-" : base64Encode(owner),
+      base64Encode(admins),
+    ].join("|");
+  } catch {
+    return `unreadable:${Math.random()}`;
   }
 }
 

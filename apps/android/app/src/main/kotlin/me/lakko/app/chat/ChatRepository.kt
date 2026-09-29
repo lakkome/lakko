@@ -257,6 +257,14 @@ public class ChatRepository(
     private val pushScope: CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** ADR-0057 — the owner's journal claims launched on open, awaited by a
+     *  sweep before it registers an epoch. */
+    private val ownerClaimGate = OwnerClaimGate()
+
+    /** ADR-0045 x ADR-0057 — the per-group hold after a refused sweep
+     *  registration. */
+    private val sweepBackoff = SweepRegistrationBackoffTracker()
+
     /**
      * `docs/ux/calls.md` section 6 — process-lifetime scope for writing a
      * finished call's transcript row to disk.
@@ -6401,7 +6409,12 @@ public class ChatRepository(
             put = { make -> dsClient.putStatement(make) },
         )
         android.util.Log.i("ChatRepository", "ADR-0057: owner claim $outcome")
-        if (outcome == me.lakko.app.ds.JournalClaimOutcome.CLAIMED) markRootHeld(groupIdHex)
+        if (outcome == me.lakko.app.ds.JournalClaimOutcome.CLAIMED) {
+            markRootHeld(groupIdHex)
+            // The journal is claimed now: a sweep held after a refused
+            // registration may try again at once.
+            sweepBackoff.reset(groupIdHex)
+        }
         return outcome == me.lakko.app.ds.JournalClaimOutcome.CLAIMED
     }
 
@@ -6414,14 +6427,22 @@ public class ChatRepository(
      */
     private fun claimJournalBestEffort(groupIdHex: String) {
         if (groups[groupIdHex] == null) return
-        pushScope.launch {
+        // Sent on every open, not only after a signed request's 401: a journal
+        // the ADR-0057 flag day left unclaimed is OPEN, and an open journal
+        // never answers 401, so a lazy-only claim would never be made. Tracked
+        // by [ownerClaimGate] so a sweep registers its epoch after it.
+        val claim = ownerClaimGate.start(groupIdHex, pushScope) {
             try {
                 claimJournalAsOwner(groupIdHex)
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
                 android.util.Log.w("ChatRepository", "ADR-0057: claim of a group journal did not land", cause)
+                false
             }
+        }
+        pushScope.launch {
+            claim.join()
             // Finding 2 — the owner converges the registrar set once per group
             // per session (a no-op for a non-owner), whatever the claim said: a
             // live journal answers the lazy claim with 409 and still needs it.
@@ -8371,6 +8392,9 @@ public class ChatRepository(
                     val evictees: List<ByteArray>,
                     val rank: me.lakko.app.ds.JournalRepairRank,
                 )
+                // ADR-0057 — a claim of this journal launched on open may still
+                // be in flight; register after it, not ahead of it (bounded).
+                ownerClaimGate.awaitBeforeRegistering(groupIdHex)
                 val prepared = providerLock.withLock {
                     val next = record.group.dsStagedAccessSigner(identity)?.let(::FfiDsJournalSigner)
                     val evictees = me.lakko.app.ds.evictedAccounts(
@@ -8389,17 +8413,40 @@ public class ChatRepository(
                 // Append: a 409 abandons the staged sweep (the caller's
                 // rollback), never a Replace; an owner or admin notes the
                 // group for the repair check.
-                noteAppendConflict(groupIdHex, record.groupId, prepared.current, prepared.rank) {
-                    me.lakko.app.ds.registerEpochBeforePublish(
-                        journalId = record.groupId,
-                        before = prepared.current,
-                        after = prepared.next,
-                        statements = prepared.statements,
-                        revoke = prepared.revoke,
-                        put = { make -> dsClient.putStatement(make) },
-                    )
+                try {
+                    noteAppendConflict(groupIdHex, record.groupId, prepared.current, prepared.rank) {
+                        me.lakko.app.ds.registerEpochBeforePublish(
+                            journalId = record.groupId,
+                            before = prepared.current,
+                            after = prepared.next,
+                            statements = prepared.statements,
+                            revoke = prepared.revoke,
+                            put = { make -> dsClient.putStatement(make) },
+                        )
+                    }
+                } catch (cause: DsHttpError) {
+                    // A refusal that will not change on its own holds the next
+                    // stage of this group; the sweep itself is abandoned by the
+                    // caller exactly as before.
+                    if (SweepRegistrationBackoff.isBackoffStatus(cause.status)) {
+                        val hold = sweepBackoff.onRefused(groupIdHex, prepared.current?.epoch)
+                        android.util.Log.i(
+                            "ChatRepository",
+                            "ADR-0057: sweep registration refused (${cause.status}); next attempt in ${hold.delayMs} ms",
+                        )
+                    }
+                    throw cause
                 }
+                sweepBackoff.reset(groupIdHex)
                 forgetRevokedAppointments(groupIdHex, prepared.evictees, prepared.revoke)
+            },
+            mayStage = {
+                val epoch = try {
+                    record.group.epoch()
+                } catch (_: Throwable) {
+                    null
+                }
+                sweepBackoff.mayStage(groupIdHex, epoch)
             },
         )
     }
@@ -9344,6 +9391,12 @@ private class GroupRecord(
                         createdAt = event.createdAt,
                     ),
                 )
+                is IncomingChatEvent.ServiceEnvelope -> {
+                    // An unrecognised or undecodable `lakko/` envelope (for
+                    // example a newer profile version from another build). Not
+                    // a timeline row and so never a chat-list preview either:
+                    // dropped.
+                }
                 is IncomingChatEvent.CallSignaling -> {
                     // Phase 3a10 — route into the call state
                     // machines (the group-call ledger and the 1x1

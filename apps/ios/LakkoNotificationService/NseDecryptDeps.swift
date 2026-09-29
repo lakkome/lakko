@@ -260,6 +260,10 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         case .reaction: kind = .reaction
         case .typing: kind = .typing
         case .readReceipt: kind = .readReceipt
+        // A service envelope the filter above did not recognise (a newer
+        // version from a client ahead of this one): the pure core never
+        // previews it.
+        case .serviceEnvelope: kind = .serviceEnvelope
         }
         return NseProcessedRow(
             kind: kind,

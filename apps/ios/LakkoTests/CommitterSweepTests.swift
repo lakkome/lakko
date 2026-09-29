@@ -1033,6 +1033,56 @@ final class CommitterSweepTests: XCTestCase {
         XCTAssertFalse(h.group.staged)
     }
 
+    // MARK: - Live walk 2026-09-29: a refused registration backs off
+
+    private func backedOff(_ h: Harness) -> SweepPorts {
+        var ports = h.ports
+        let inner = ports.journal
+        ports.journal = SweepJournalPort(
+            fetch: inner.fetch,
+            publishGroup: inner.publishGroup,
+            publishMailbox: inner.publishMailbox,
+            registerStagedEpoch: inner.registerStagedEpoch,
+            canRegister: inner.canRegister,
+            registrationDue: { false })
+        return ports
+    }
+
+    /// Inside the backoff a NEW sweep neither stages nor registers nor touches
+    /// the network.
+    func testABackedOffSweepStagesNothing() async throws {
+        let h = makeHarness()
+
+        let outcome = try await runCommitterSweep(backedOff(h))
+
+        XCTAssertEqual(outcome, .registrationBackedOff(rank: 0))
+        XCTAssertFalse(h.log.contains("stage"), "nothing staged")
+        XCTAssertFalse(h.log.contains("register"), "nothing registered")
+        XCTAssertFalse(h.log.contains("fetch"), "no network inside the wait")
+        XCTAssertTrue(h.journal.published.isEmpty)
+    }
+
+    /// C-67 — the backoff changes the cadence only: an owed verdict is still
+    /// resolved while it runs.
+    func testTheBackoffNeverHoldsBackAnOwedVerdict() async throws {
+        let h = makeHarness()
+        h.group.staged = true
+        h.group.pending = 1
+        h.outbox.owed = SweepDurableEntry(
+            id: "owed-backoff",
+            commitB64: base64Encode(Data([0xC0, 0x06])),
+            welcomeEnvelopeB64: nil,
+            welcomeMailboxesB64: []
+        )
+
+        let outcome = try await runCommitterSweep(backedOff(h))
+
+        guard case .committed = outcome else {
+            return XCTFail("the owed verdict must be resolved inside the backoff, got \(outcome)")
+        }
+        XCTAssertFalse(h.group.staged)
+    }
+
     // MARK: - ADR-0053 point 8: Welcomes go to mailboxes only
 
     /// Two adds -> two mailbox Welcomes and NOTHING to the group journal but

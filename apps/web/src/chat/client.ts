@@ -475,6 +475,17 @@ export type IncomingChatEvent =
       /** The sender's ACCOUNT key resolved at receipt (C-68). */
       senderKey: MemberIdentity | undefined;
       createdAt: string;
+    }
+  | {
+      /** A `lakko/…` service envelope none of the sniffers above claimed: a
+       *  newer version of a known kind or a kind this build does not know
+       *  (the core's `MessageBody::ServiceEnvelope`). Never rendered and never
+       *  persisted: the poll and the sweep drop it at receipt, and every view
+       *  carries a defensive arm. Listed in the union, like `registrarSeed`,
+       *  only so a caller that forgets to drop it cannot render it. */
+      kind: "serviceEnvelope";
+      messageId: number;
+      createdAt: string;
     };
 
 /**
@@ -1241,6 +1252,8 @@ export class ChatClient {
         await consumeRegistrarSeed(group, event);
         continue;
       }
+      // Never shown, never persisted, never previewed.
+      if (event.kind === "serviceEnvelope") continue;
       events.push(event);
     }
 
@@ -1527,6 +1540,12 @@ export async function toEvent(
     // `application` event; an op returns the `op` event the UI
     // folds into the target message.
     const body = await parseBodyEnvelope(bytes);
+    // A service envelope the sniffers above did not recognise (a v3 profile
+    // from a newer build reached every client as a chat bubble reading
+    // `lakko/profile/v1` plus binary before the core classified it).
+    if (body.kind === "service-envelope") {
+      return { kind: "serviceEnvelope", messageId, createdAt };
+    }
     if (body.kind === "chat") {
       return {
         kind: "application",

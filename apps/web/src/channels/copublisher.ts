@@ -130,6 +130,10 @@ export function registerPublisherGroupAccess(
   const unregisterOwner = dsAccess.registerOwnerSource((groupId) =>
     matches(groupId) ? true : null,
   );
+  // ADR-0057 obligation 2 - the owner claims the journal on open (once per
+  // session): an unclaimed journal never answers the 401 the lazy claim
+  // waits for.
+  void new DsClient().ensureOwnerClaim(own);
   return () => {
     unregisterSource();
     unregisterOwner();

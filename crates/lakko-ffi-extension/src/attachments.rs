@@ -30,6 +30,11 @@ pub enum MessageBodyKind {
     Typing,
     /// ADR-0024 — a read receipt: read up to `target` (inclusive).
     ReadReceipt,
+    /// A Lakko service envelope this build did not recognise (a newer
+    /// profile, group-name, pin or beacon version). Never render it; drop it
+    /// like any other service envelope. Appended last so every earlier
+    /// variant keeps its ordinal.
+    ServiceEnvelope,
 }
 
 /// A decoded attachment reference (ADR-0023).
@@ -174,6 +179,14 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             text: String::new(),
             attachments: Vec::new(),
             target: Some(up_to),
+            emoji: None,
+            is_typing: None,
+        },
+        inner::MessageBody::ServiceEnvelope => ParsedBody {
+            kind: MessageBodyKind::ServiceEnvelope,
+            text: String::new(),
+            attachments: Vec::new(),
+            target: None,
             emoji: None,
             is_typing: None,
         },

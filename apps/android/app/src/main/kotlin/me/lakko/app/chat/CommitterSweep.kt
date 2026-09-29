@@ -412,6 +412,13 @@ internal class SweepPorts(
      * applies a commit whose epoch the server does not know.
      */
     val registerStagedEpoch: suspend (staged: StagedSweepArtifacts) -> Unit = {},
+    /**
+     * Whether a NEW sweep may be staged now: `false` while the group is held
+     * after a refused epoch registration ([SweepRegistrationBackoff]).
+     * Consulted only after the owed verdict and owed Welcome paths, so a hold
+     * never delays an obligation (C-67), only the next attempt.
+     */
+    val mayStage: () -> Boolean = { true },
 )
 
 /** What one sweep attempt did. */
@@ -429,6 +436,11 @@ public sealed class SweepOutcome {
 
     /** Nothing authorised was pending and nothing was staged. */
     object NothingPending : SweepOutcome()
+
+    /** This device would sweep, but an earlier epoch registration for this
+     *  group was refused and the hold has not ended
+     *  ([SweepRegistrationBackoff]). Nothing was staged. */
+    object BackedOff : SweepOutcome()
 
     /** Obligation 3 — the journal moved since our cursor, so a commit may
      *  already be in flight. Stood down without staging; the poll drains the
@@ -593,6 +605,10 @@ internal suspend fun runCommitterSweep(ports: SweepPorts): SweepOutcome {
             toRank = (acting as? ActingCommitter.Defer)?.toRank,
         )
     }
+
+    // A refused epoch registration holds re-staging for a while: the refusal
+    // does not change until the journal is claimed or the group changes.
+    if (!ports.mayStage()) return SweepOutcome.BackedOff
 
     // Obligation 3 — the stand-down re-read, immediately before creating the
     // commit. Runs OUTSIDE the provider lock: it is pure network and touches no

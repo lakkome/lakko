@@ -507,13 +507,25 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         self.ports = ports
     }
 
+    /// How often an active app looks for a sign-in request (Android's 4 s).
+    public static let foregroundPollNanos: UInt64 = 4_000_000_000
+
     /// One check: called when the app comes to the foreground and on a timer
     /// while the modal is up.
     public func check(now: Date = Date()) async {
         guard !acting, let token = ports.sessionToken(), let handle = ports.ownHandle() else { return }
         acting = true
         defer { acting = false }
-        guard let request = try? await ports.relay.openRequest(sessionToken: token) else {
+        let fetched: DeviceLinkPendingRequest?
+        do {
+            fetched = try await ports.relay.openRequest(sessionToken: token)
+        } catch {
+            // Offline, a server error, or this check cancelled: nothing is
+            // known about the request, so nothing changes. Only an answer
+            // saying there is no open request closes the modal.
+            return
+        }
+        guard let request = fetched else {
             // Gone while asking or showing the code: declined elsewhere or
             // expired.
             if case .code = modal { modal = nil }

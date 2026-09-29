@@ -1287,6 +1287,11 @@ function previewFromProcessed(wasm, processed) {
   }
   try {
     const kind = parsed.kind;
+    // A `lakko/…` service envelope none of the arms of `isServiceEnvelope`
+    // recognised (a newer version of a known kind, or an unknown kind): the
+    // core classifies it rather than degrading it to lossy-UTF-8 chat text.
+    // Never a preview — null keeps an older real row, or the generic banner.
+    if (kind === "service-envelope") return null;
     // A normal chat message → its text (or an attachment hint).
     if (kind === "chat") {
       const text = typeof parsed.text === "string" ? parsed.text : "";

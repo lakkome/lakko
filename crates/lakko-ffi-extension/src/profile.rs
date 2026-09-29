@@ -124,15 +124,13 @@ mod tests {
     /// Pinned as the reason the module exists: without this arm the NSE
     /// renders a profile — the sender's name included — as chat text.
     #[test]
-    fn an_unfiltered_profile_would_otherwise_render_as_chat_text() {
+    fn an_unfiltered_profile_is_never_chat_text() {
         let wire = compose_profile(&profile(Some("Alice"), Some("alice"))).unwrap();
-        match lakko_attachments::parse_body(&wire) {
-            lakko_attachments::MessageBody::Chat { text, .. } => assert!(
-                text.starts_with("lakko/profile/v1"),
-                "the lossy fallback is what this arm pre-empts",
-            ),
-            other => panic!("expected the lossy Chat fallback, got {other:?}"),
-        }
+        assert_eq!(
+            lakko_attachments::parse_body(&wire),
+            lakko_attachments::MessageBody::ServiceEnvelope,
+            "a service envelope is never chat text, even with this arm absent",
+        );
         decode_profile_envelope(wire).expect("the filter arm must recognise it");
     }
 

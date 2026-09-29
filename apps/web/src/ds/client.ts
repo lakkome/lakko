@@ -57,7 +57,9 @@ import {
   type ProofSigner,
 } from "./access";
 import { DS_WAKE_HEADER, dsWakeHeaderValue, type DsWake } from "./wake";
+import { type OwnerClaimOutcome } from "./owner-claim";
 import {
+  NoJournalAuthorityError,
   claimAsOwner,
   isStatus,
   registerEpochWith,
@@ -314,7 +316,7 @@ export class DsClient implements StatementSender {
     try {
       if (authority.kind !== "root") return false;
       const outcome = await claimAsOwner(this, groupId, authority.signer, current.epoch, current.verifyingKey());
-      if (outcome === "claimed") this.access.markRootHeld(groupId);
+      if (outcome === "claimed") this.access.noteOwnerClaimed(groupId);
       return outcome === "claimed";
     } finally {
       releaseAuthority(authority);
@@ -408,10 +410,46 @@ export class DsClient implements StatementSender {
     });
   }
 
+  /**
+   * ADR-0057 obligation 2 - claim `groupId` with this account's root when this
+   * account owns it, once per session (`./owner-claim`). Called when a group
+   * is opened and before every registration, because an UNCLAIMED journal
+   * never answers the `401` the lazy claim waits for. Never throws; a `204`
+   * reaches {@link DsAccessRegistry.noteOwnerClaimed}.
+   */
+  ensureOwnerClaim(groupId: Uint8Array): Promise<OwnerClaimOutcome> {
+    if (groupId.length === 0) return Promise.resolve("not-owner");
+    return this.access.ownerClaims.run(groupId, {
+      ownsJournal: (g) => this.access.ownsJournal(g),
+      currentEpochKey: (g) => {
+        const { current } = this.access.groupSigners(g);
+        return current === null ? null : { epoch: current.epoch, key: current.verifyingKey() };
+      },
+      claim: async (g, epoch, key) => {
+        // The ROOT, whatever the "root held" marker says: this is how an owner
+        // whose journal lost its claim gets it back. A journal held by another
+        // root answers 401 and is left to the takeover.
+        const authority = this.access.rootAuthority(g);
+        try {
+          if (authority.kind !== "root") throw new NoJournalAuthorityError();
+          const outcome = await claimAsOwner(this, g, authority.signer, epoch, key);
+          if (outcome === "already-claimed") throw new DsHttpError(409, `/ds/group/${pseudonymHex(g)}/claim`, "");
+        } finally {
+          releaseAuthority(authority);
+        }
+      },
+      onClaimed: (g) => this.access.noteOwnerClaimed(g),
+      now: this.now,
+    });
+  }
+
   /** {@link EpochRegistrar} over this client: register `epochKey` at `epoch`
    *  signed with this device's authority over the journal (root or
    *  registrar), revoking `revokeKeys`. Throws `NoJournalAuthorityError`
-   *  when this device holds neither. */
+   *  when this device holds neither.
+   *
+   *  The owner claims the journal first (once per session): a registration in
+   *  an unclaimed journal is refused `401` and nothing would ever claim it. */
   async registerGroupEpoch(
     groupId: Uint8Array,
     epoch: bigint,
@@ -419,6 +457,7 @@ export class DsClient implements StatementSender {
     revokeKeys: readonly Uint8Array[] = [],
   ): Promise<void> {
     if (groupId.length === 0) throw new DsClientArgError("groupId must be non-empty");
+    await this.ensureOwnerClaim(groupId);
     const authority = this.access.journalAuthority(groupId);
     try {
       await registerEpochWith(this, groupId, authority, epoch, epochKey, revokeKeys);

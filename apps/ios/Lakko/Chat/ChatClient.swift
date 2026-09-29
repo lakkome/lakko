@@ -784,6 +784,13 @@ public final class ChatClient {
                     senderKey: senderKey,
                     createdAt: createdAt
                 )
+            case .serviceEnvelope:
+                // A service envelope the sniffs above did not recognise (a
+                // newer version from a client ahead of this one). Never
+                // rendered: without this arm it would be text, and with the
+                // pre-2026-09-29 parser it WAS a bubble of domain text and
+                // binary.
+                return .serviceEnvelope(messageId: messageId, createdAt: createdAt)
             }
         case .commit:
             return .system(
@@ -1285,6 +1292,16 @@ public enum IncomingChatEvent: Equatable {
         senderLeaf: UInt32?,
         createdAt: String
     )
+
+    /// A Lakko service envelope none of the arms above recognised: the
+    /// plaintext opens with `lakko/` and is not a chat envelope, most often a
+    /// newer version of a profile, group name, pin or beacon envelope from a
+    /// client ahead of this one (seen live 2026-09-29 when a profile v3 reached
+    /// v2 clients and rendered as a bubble of domain text and binary). The core
+    /// parser classifies it (`MessageBodyKind.serviceEnvelope`); it is NEVER a
+    /// timeline row, a chat-list preview or an unread message, and nothing is
+    /// carried onward because this build cannot read it.
+    case serviceEnvelope(messageId: Int64, createdAt: String)
 }
 
 /// ADR-0024 — an inbound ephemeral chat-status signal lifted out of

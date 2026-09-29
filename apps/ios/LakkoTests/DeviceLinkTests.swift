@@ -23,6 +23,8 @@ private final class FakeDeviceLinkServer: DeviceLinkRelay {
     var log: [String] = []
     /// Set to answer the next `answer` with a 409 (another device answered).
     var answeredElsewhere = false
+    /// Set to make `openRequest` throw, as an offline or cancelled request does.
+    var openFails = false
     private var counter: UInt8 = 0
 
     func createRequest(handle: Data) async throws -> String {
@@ -47,6 +49,7 @@ private final class FakeDeviceLinkServer: DeviceLinkRelay {
     }
 
     func openRequest(sessionToken: String) async throws -> DeviceLinkPendingRequest? {
+        if openFails { throw URLError(.cancelled) }
         guard let row, !row.declined else { return nil }
         return DeviceLinkPendingRequest(
             requestIdB64: row.id, pakeB: row.pakeB, pakeA: row.pakeA,
@@ -313,6 +316,37 @@ final class DeviceLinkTests: XCTestCase {
         XCTAssertEqual(made, 1)
         XCTAssertEqual(server.log, ["create", "pake"])
         guard case .code = old.modal else { return XCTFail("the code after Yes") }
+    }
+
+    /// Live walk 2026-09-29: the code step closed a second after "Yes" because
+    /// a cancelled poll read as "the request is gone". A failed or cancelled
+    /// poll changes nothing; only an answer with no open request closes.
+    func testAFailedPollKeepsTheCodeOnScreen() async throws {
+        let server = FakeDeviceLinkServer()
+        let old = responder(server, limit: try limit(), paired: Paired())
+        _ = try await server.createRequest(handle: handle)
+        await old.check()
+        await old.yesItsMe()
+        guard case .code = old.modal else { return XCTFail("the code after Yes") }
+        server.openFails = true
+        await old.check()
+        guard case .code = old.modal else { return XCTFail("a failed poll must not close the code") }
+        server.openFails = false
+        server.row = nil
+        await old.check()
+        XCTAssertNil(old.modal, "no open request closes the code")
+    }
+
+    /// A failed poll while asking keeps the question too.
+    func testAFailedPollKeepsTheQuestion() async throws {
+        let server = FakeDeviceLinkServer()
+        let old = responder(server, limit: try limit(), paired: Paired())
+        _ = try await server.createRequest(handle: handle)
+        await old.check()
+        XCTAssertEqual(old.modal, .confirm)
+        server.openFails = true
+        await old.check()
+        XCTAssertEqual(old.modal, .confirm)
     }
 
     /// Dismissing the question without choosing sends nothing, and the same

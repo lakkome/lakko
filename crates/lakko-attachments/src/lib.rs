@@ -1216,6 +1216,27 @@ pub enum MessageBody {
         /// The highest `messageId` the sender has read.
         up_to: i64,
     },
+    /// A Lakko service envelope (a plaintext opening with
+    /// [`SERVICE_ENVELOPE_PREFIX`]) that the caller did not recognise before
+    /// asking this parser: most often a newer version of a profile, group
+    /// name, pin or beacon envelope from a client ahead of this one.
+    /// **Never rendered.** Before this variant such bytes fell through the
+    /// bare-UTF-8 fallback and showed as a bubble of domain text and binary
+    /// (seen live 2026-09-29 when a profile v3 reached v2 clients). A chat
+    /// message is a JSON envelope and opens with `{`, so no chat message is
+    /// ever classified here.
+    ServiceEnvelope,
+}
+
+/// The prefix every Lakko service envelope's domain separator opens with
+/// (`lakko/profile/v1\0`, `lakko/group-name/v1\0`, `lakko/pin/v1\0`, ...).
+pub const SERVICE_ENVELOPE_PREFIX: &[u8] = b"lakko/";
+
+/// Whether `bytes` is a Lakko service envelope rather than a chat message:
+/// not a JSON chat envelope and opening with [`SERVICE_ENVELOPE_PREFIX`].
+#[must_use]
+pub fn is_service_envelope(bytes: &[u8]) -> bool {
+    bytes.starts_with(SERVICE_ENVELOPE_PREFIX)
 }
 
 impl Envelope {
@@ -1501,7 +1522,8 @@ pub fn parse(bytes: &[u8]) -> (String, Vec<AttachmentRef>) {
 /// edit / delete / reaction op so the receiver can route it.
 ///
 /// Fail-safe like [`parse`]: a non-JSON body becomes a bare-UTF-8
-/// [`MessageBody::Chat`]; a wrong-`v` envelope becomes a placeholder
+/// [`MessageBody::Chat`], except a Lakko service envelope, which becomes
+/// [`MessageBody::ServiceEnvelope`] and is never rendered; a wrong-`v` envelope becomes a placeholder
 /// chat; an ambiguous or malformed op (more than one op field, or a
 /// reaction without a valid emoji) degrades to chat. The caller's
 /// author-only gate (ADR-0023) decides whether to apply an op — this
@@ -1516,6 +1538,8 @@ pub fn parse_body(bytes: &[u8]) -> MessageBody {
             reply: None,
             forward: None,
         },
+        // A service envelope nobody recognised is dropped, never shown.
+        Err(_) if is_service_envelope(bytes) => MessageBody::ServiceEnvelope,
         Err(_) => MessageBody::Chat {
             text: String::from_utf8_lossy(bytes).into_owned(),
             attachments: Vec::new(),
@@ -1733,6 +1757,8 @@ pub mod fuzz_api {
             MessageBody::ReadReceipt { up_to } => {
                 let _ = up_to;
             },
+            // Never rendered; a service envelope must never be chat.
+            MessageBody::ServiceEnvelope => assert!(super::is_service_envelope(bytes)),
         }
         !refs.is_empty()
     }
@@ -1745,6 +1771,36 @@ pub mod fuzz_api {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Live walk 2026-09-29: a profile v3 reached v2 clients and rendered as
+    /// a bubble of domain text and binary. An unrecognised Lakko service
+    /// envelope is classified as such and never becomes chat.
+    #[test]
+    fn an_unrecognised_service_envelope_is_never_chat() {
+        let mut v3_profile = b"lakko/profile/v1\0".to_vec();
+        v3_profile.extend_from_slice(&[0x03, 0xff, 0x00, 0x52, 0x53]);
+        assert_eq!(parse_body(&v3_profile), MessageBody::ServiceEnvelope);
+        assert_eq!(
+            parse_body(b"lakko/something-new/v9\0\x01"),
+            MessageBody::ServiceEnvelope
+        );
+        assert!(is_service_envelope(&v3_profile));
+    }
+
+    /// A legacy bare-text message and a JSON chat envelope are unchanged.
+    #[test]
+    fn plain_text_and_chat_envelopes_stay_chat() {
+        match parse_body(b"see lakko/ docs") {
+            MessageBody::Chat { text, .. } => assert_eq!(text, "see lakko/ docs"),
+            other => panic!("expected chat, got {other:?}"),
+        }
+        let wire = compose("lakko/ is a prefix", Vec::new()).expect("compose");
+        match parse_body(&wire) {
+            MessageBody::Chat { text, .. } => assert_eq!(text, "lakko/ is a prefix"),
+            other => panic!("expected chat, got {other:?}"),
+        }
+        assert!(!is_service_envelope(&wire));
+    }
 
     #[test]
     fn round_trip_encrypts_and_decrypts() {

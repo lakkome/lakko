@@ -20,6 +20,11 @@
  *     commit, every sweep) and once per group when the session starts: it
  *     converges the DS registrar set to the roster (`registrars-set`) and
  *     sends the seed envelopes still owed;
+ *   - the owner's claim on opening (`owner-claim.ts`): the reconcile of an
+ *     owned group first claims its journal, once per session, because an
+ *     unclaimed journal never answers the `401` the DS client's lazy claim
+ *     waits for (the live walk of 2026-09-29); a claim that lands runs the
+ *     reconcile again, wherever it was sent from;
  *   - the "root held" marker (`root-held.ts`) and the probe that sets it for
  *     an owned group that lacks it (the second security pass, finding 4);
  *   - both halves of the root handover (`root-handover.ts`): the outgoing
@@ -38,6 +43,7 @@ import { getDeviceKey } from "../auth/key-store";
 import { useChats } from "../chat/ChatContext";
 import { ChatClient } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
+import { sweepBackoff } from "../chat/sweep-backoff";
 import { DiscoveryClient } from "../discovery/client";
 import { onGroupMlsIdle } from "../mls/group-lock";
 import { useProfiles } from "../profile/ProfileContext";
@@ -287,6 +293,17 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
     const groupId = base64Decode(groupIdB64);
     const ownB64 = base64Encode(own.signaturePublicKey);
     const rosterNow = rosterOf(entry.group);
+    // ADR-0057 obligation 2 - the owner claims on open (once per session). A
+    // `204` marks the root held, so the probe below is skipped and the
+    // appointments proceed in this same run.
+    if (rosterNow?.ownerAccountKeyB64 === ownB64) {
+      const claim = await ds.ensureOwnerClaim(groupId);
+      if (claim === "claimed") {
+        // eslint-disable-next-line no-console
+        console.info("ds: the owner claimed its journal on open");
+      }
+      if (accountId() !== account) return;
+    }
     await probeIfUnheld(account, groupIdB64, rosterNow, ownB64);
     if (accountId() !== account) return;
     // An owner whose root is not confirmed yet (a takeover still to land)
@@ -543,6 +560,16 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
     }
   }
 
+  // A claim that landed anywhere (on open, before a registration, or lazily
+  // after a refused request) runs the registrar reconcile for that group.
+  // It also ends that group's sweep backoff: the refusal it was waiting out
+  // may have been the missing claim (`chat/sweep-backoff.ts`).
+  const unsubscribeClaimed = dsAccess.onOwnerClaimed((groupId) => {
+    const groupIdB64 = base64Encode(groupId);
+    sweepBackoff.reset(groupIdB64);
+    scheduleReconcile(groupIdB64);
+  });
+
   const unsubscribeIdle = onGroupMlsIdle((groupIdB64) => {
     scheduleReconcile(groupIdB64);
     const account = accountId();
@@ -568,6 +595,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
       handoverSentAt.clear();
       takeoverRunning.clear();
       takeoverNotBefore.clear();
+      sweepBackoff.clear();
       dropDerived();
       journalRepair.install(null);
       if (account === null) {
@@ -656,6 +684,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
 
   onCleanup(() => {
     journalRepair.install(null);
+    unsubscribeClaimed();
     unsubscribeIdle();
     unsubscribeTransition();
     unregisterOwner();

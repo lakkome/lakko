@@ -71,13 +71,12 @@ mod tests {
 
     /// Pinned as the reason the module exists.
     #[test]
-    fn an_unfiltered_registrar_seed_would_otherwise_render_as_chat_text() {
-        match lakko_attachments::parse_body(&wire()) {
-            lakko_attachments::MessageBody::Chat { text, .. } => {
-                assert!(text.starts_with("lakko/ds-registrar-seed/v1"));
-            },
-            other => panic!("expected the lossy Chat fallback, got {other:?}"),
-        }
+    fn an_unfiltered_registrar_seed_is_never_chat_text() {
+        assert_eq!(
+            lakko_attachments::parse_body(&wire()),
+            lakko_attachments::MessageBody::ServiceEnvelope,
+            "a service envelope is never chat text, even with this arm absent",
+        );
     }
 
     /// The Swift pre-filter keys on `count == len && first == 0x6c`; written

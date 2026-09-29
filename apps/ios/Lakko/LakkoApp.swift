@@ -215,7 +215,7 @@ struct LakkoApp: App {
                     _ = try PairingCodec.parsePairingQrPayload(
                         wireBytes: payload, expectedLoginHandle: handle)
                 },
-                runPairing: { [weak auth, weak chat] payload in
+                runPairing: { [weak auth, weak chat, weak sync] payload in
                     guard let auth, let session = DeviceSession.current(auth),
                           let handle = session.loginHandle else {
                         throw AuthClientError.argument("no session")
@@ -234,6 +234,18 @@ struct LakkoApp: App {
                         accountIdB64: session.accountIdB64,
                         recovery: recovery
                     )
+                    // The add ran on a DeviceGroup handle of its own: the sync
+                    // runtime reloads from the snapshot the pairing persisted,
+                    // as the QR route does (`AddDeviceScreen.onDeviceAdded`).
+                    // Without it, the long-lived handle stays an epoch behind,
+                    // cannot read what the new device sends, and its next
+                    // persist rolls the stored DeviceGroup back (seen live
+                    // 2026-09-29: WrongEpoch on the new web device's folder).
+                    if let secrets = auth.identitySecrets {
+                        await MainActor.run { [weak sync] in
+                            sync?.reloadAfterLocalMembershipChange(secrets: secrets)
+                        }
+                    }
                     // ADR-0050 section 2.8 — admit the new device to every chat.
                     let deviceKey = scanned.newDeviceKey
                     Task { @MainActor [weak chat] in
@@ -347,9 +359,6 @@ struct LakkoApp: App {
                 // arrived while backgrounded rings if it is still fresh.
                 foregroundReceive.scheduler.setForeground(phase == .active)
                 if phase == .active {
-                    // ADR-0049 section 2 — a sign-in request waiting for this
-                    // device's code.
-                    Task { await deviceLinkResponder.check() }
                     // `docs/ux/calls.md` section 2.1 — refresh the names the
                     // notification extension may have to put on a ringing
                     // lock screen while this app is not running.
@@ -360,8 +369,16 @@ struct LakkoApp: App {
                 foregroundReceive.scheduler.start()
                 foregroundReceive.scheduler.setForeground(scenePhase == .active)
             }
-            .task {
-                if scenePhase == .active { await deviceLinkResponder.check() }
+            .task(id: scenePhase) {
+                // ADR-0049 section 2 — a sign-in request waiting for this
+                // device's answer. Polled for as long as the app is active,
+                // not only when it becomes active: a request usually arrives
+                // while this device is open in front of the person.
+                guard scenePhase == .active else { return }
+                while !Task.isCancelled {
+                    await deviceLinkResponder.check()
+                    try? await Task.sleep(nanoseconds: DeviceLinkResponderFlow.foregroundPollNanos)
+                }
             }
             .sheet(isPresented: Binding(
                 get: { deviceLinkResponder.modal != nil },

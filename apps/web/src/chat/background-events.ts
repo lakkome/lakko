@@ -27,6 +27,7 @@
  *   | committerBeacon       | the beacon observation store  | no                      |
  *   | group-name            | the gated group-name store    | no                      |
  *   | pin                   | the gated pin store           | no                      |
+ *   | serviceEnvelope       | dropped (never rendered)      | no                      |
  *
  * Typing is in-memory state in the chat view, so handing it over matches what
  * the chat would have shown had it been open this session. Read receipts are
@@ -163,6 +164,10 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
       case "registrarSeed":
         // ADR-0057 — consumed at receipt by the chat client and never handed
         // on; a stray one is dropped here rather than rendered.
+        break;
+      case "serviceEnvelope":
+        // An unrecognised `lakko/…` service envelope: dropped at receipt by
+        // the chat client; a stray one is dropped here, never rendered.
         break;
       default: {
         const unhandled: never = e;

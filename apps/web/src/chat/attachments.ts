@@ -633,7 +633,12 @@ export type ParsedBodyResult =
   // Neither renders a bubble; the receive loop folds them into the
   // ephemeral typing registry / the monotone read watermark.
   | { kind: "typing"; isTyping: boolean }
-  | { kind: "read-receipt"; target: number };
+  | { kind: "read-receipt"; target: number }
+  // A `lakko/…` service envelope this build did not recognise (a newer
+  // version of a known kind, or a kind it does not know at all). The core
+  // classifies it instead of degrading it to lossy-UTF-8 chat text, and it is
+  // NEVER rendered: no bubble, no preview line, no notification text.
+  | { kind: "service-envelope" };
 
 /**
  * Parse an incoming MLS Application-message body into the
@@ -681,6 +686,13 @@ export async function parseBodyEnvelope(
     // ADR-0024 — read receipt. `target` is the read-up-to messageId.
     if (kind === "read-receipt") {
       return { kind: "read-receipt", target: Number(parsed.target ?? 0n) };
+    }
+    // A service envelope the receive loop's own sniffers did not claim (the
+    // live walk of 2026-09-29: a profile envelope v3 from another build).
+    // Before the core classified these they reached the chat fallback below
+    // and rendered as `lakko/profile/v1` plus binary. Dropped by every caller.
+    if (kind === "service-envelope") {
+      return { kind: "service-envelope" };
     }
     // "chat" (and any unexpected discriminator) — surface text +
     // attachments. The same memory dance parseEnvelope runs.

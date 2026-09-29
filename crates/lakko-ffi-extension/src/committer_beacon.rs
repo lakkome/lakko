@@ -154,16 +154,14 @@ mod tests {
     /// reason the module exists, so deleting it fails loudly rather than
     /// quietly reinstating the bug.
     #[test]
-    fn an_unfiltered_beacon_would_otherwise_render_as_chat_text() {
+    fn an_unfiltered_beacon_is_never_chat_text() {
         let wire = compose_committer_beacon();
         let body = lakko_attachments::parse_body(&wire);
-        match body {
-            lakko_attachments::MessageBody::Chat { text, .. } => assert!(
-                text.starts_with("lakko/committer-beacon/v1"),
-                "the legacy lossy-UTF-8 fallback is what this filter arm exists to pre-empt",
-            ),
-            other => panic!("expected the lossy Chat fallback, got {other:?}"),
-        }
+        assert_eq!(
+            body,
+            lakko_attachments::MessageBody::ServiceEnvelope,
+            "a service envelope is never chat text, even with this arm absent",
+        );
         // ...and the filter arm catches it first.
         decode_committer_beacon(wire).expect("the filter arm must recognise it");
     }

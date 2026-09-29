@@ -331,6 +331,14 @@ export interface SweepPorts {
    */
   mayRegister?(): boolean;
   /**
+   * May a NEW sweep start now? `false` while the group is backing off after
+   * the server refused a staged epoch's registration (`./sweep-backoff`).
+   * Consulted only after the owed verdict and the owed Welcomes, so it never
+   * delays an obligation (C-67), only the next attempt. Optional (absent =
+   * may).
+   */
+  mayStartSweep?(): boolean;
+  /**
    * After a LOST verdict — capture the group's current access key before rows
    * are applied; the returned function, called with `true`, registers the key
    * of the epoch the apply reached with this device's authority (root or
@@ -383,6 +391,10 @@ export type SweepOutcome =
     }
   /** Nothing authorised was pending and nothing was staged. */
   | { readonly kind: "nothing-pending" }
+  /** The server refused this group's last staged-epoch registration and the
+   *  backoff has not run out (`./sweep-backoff`). Nothing staged; a later
+   *  poll tries again. */
+  | { readonly kind: "backing-off"; readonly rank: number }
   /** Obligation 3 — the journal moved since our cursor, so a commit may
    *  already be in flight. Stood down without staging; the poll drains the
    *  rows and the next attempt re-evaluates. */
@@ -528,6 +540,13 @@ export async function runCommitterSweep(ports: SweepPorts): Promise<SweepOutcome
   }
 
   if (group.pendingProposalCount() === 0) return { kind: "nothing-pending" };
+
+  // A registration the server refused does not change between two polls:
+  // wait out the backoff before staging again. Only the cadence changes;
+  // both obligations above have already run.
+  if (ports.mayStartSweep !== undefined && !ports.mayStartSweep()) {
+    return { kind: "backing-off", rank };
+  }
 
   // ADR-0045 S4b — is anyone strictly better placed announcing itself? Asked
   // only once there is something to sweep, so a quiet group never pays for it.

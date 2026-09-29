@@ -8,6 +8,7 @@ import me.lakko.app.chat.looksLikeGroupNameEnvelope
 import me.lakko.app.chat.looksLikePinEnvelope
 import me.lakko.app.chat.looksLikeProfileEnvelope
 import me.lakko.app.profile.looksLikeProfileRequestEnvelope
+import uniffi.lakko_ffi_uniffi.MessageBodyKind
 
 /**
  * SERVICE-ENVELOPE classifier for the background push-preview path.
@@ -158,6 +159,24 @@ internal enum class BackgroundPayloadKind {
 
     /** Anything else — a real chat envelope, or legacy plain UTF-8 text. */
     MESSAGE,
+}
+
+/**
+ * The preview kind of a body the core's `parseBodyEnvelope` classified, or
+ * `null` for [MessageBodyKind.SERVICE_ENVELOPE]: a `lakko/`-domain plaintext
+ * that is not JSON (an unknown envelope kind, or a known domain whose body this
+ * build cannot decode, e.g. a newer profile version). It is dropped like every
+ * other service envelope, so the loop falls back to the newest real message or
+ * the generic banner. Pure, so the host suite pins the mapping.
+ */
+internal fun previewKindOf(kind: MessageBodyKind): ProcessedKind? = when (kind) {
+    MessageBodyKind.CHAT -> ProcessedKind.CHAT
+    MessageBodyKind.EDIT -> ProcessedKind.EDIT
+    MessageBodyKind.DELETE -> ProcessedKind.DELETE
+    MessageBodyKind.REACTION -> ProcessedKind.REACTION
+    MessageBodyKind.TYPING -> ProcessedKind.TYPING
+    MessageBodyKind.READ_RECEIPT -> ProcessedKind.READ_RECEIPT
+    MessageBodyKind.SERVICE_ENVELOPE -> null
 }
 
 /** Classify one decrypted MLS Application plaintext. See [isServiceEnvelope]

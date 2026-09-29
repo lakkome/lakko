@@ -202,15 +202,17 @@ describe("ADR-0057 statements", () => {
 
   it("registerGroupEpoch signs with the root when this account owns the journal", async () => {
     const reg = ownedRegistry(() => fakeSigner(4n), true);
-    const { fetchImpl, sent } = fakeFetch([{ status: 204 }]);
+    // The owner's once-per-session claim goes first (`owner-claim.ts`).
+    const { fetchImpl, sent } = fakeFetch([{ status: 204 }, { status: 204 }]);
     await new DsClient("/api/ds", { access: reg, fetchImpl }).registerGroupEpoch(
       GID,
       5n,
       new Uint8Array(32).fill(5),
       [new Uint8Array(32).fill(9)],
     );
-    const st = parseFakeStatement(new TextDecoder().decode(sent[0]?.body));
-    expect(sent[0]?.url).toBe(`/api/ds/ds/group/${GID_HEX}/access`);
+    expect(sent[0]?.url).toBe(`/api/ds/ds/group/${GID_HEX}/claim`);
+    const st = parseFakeStatement(new TextDecoder().decode(sent[1]?.body));
+    expect(sent[1]?.url).toBe(`/api/ds/ds/group/${GID_HEX}/access`);
     expect(st.signer).toBe("root");
     expect(st.epoch).toBe("5");
     expect(st.keys).toBe("09".repeat(32));

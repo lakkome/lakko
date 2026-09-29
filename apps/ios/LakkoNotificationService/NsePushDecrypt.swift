@@ -134,6 +134,13 @@ public struct NseFetchedRow: Equatable {
 /// ``NseCallSignalingParser``.
 public enum NseProcessedKind: Equatable {
     case chat, edit, delete, reaction, typing, readReceipt
+    /// A Lakko service envelope the pre-filter did not recognise (a plaintext
+    /// opening with `lakko/` that is not a chat envelope: most often a newer
+    /// version of a profile, group name, pin or beacon envelope from a client
+    /// ahead of this one). The parser says so (`MessageBodyKind.serviceEnvelope`);
+    /// it is never a preview, so an older real message stays the preview or the
+    /// handler falls back to its generic banner.
+    case serviceEnvelope
     /// An incoming call offer, and whether the caller asked for video.
     case callOffer(video: Bool)
     /// A call ended (cancelled, declined, answered elsewhere, timed out).
@@ -724,6 +731,10 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     // delete / reaction / typing / read-receipt carry no standalone preview —
     // skip so an older real message stays the preview.
     case .delete, .reaction, .typing, .readReceipt:
+        return nil
+    // A service envelope this build cannot read (live walk 2026-09-29: a
+    // profile v3 reached v2 clients). Never rendered, whatever text it carries.
+    case .serviceEnvelope:
         return nil
     // A call is not a message preview — it is its own outcome, decided by the
     // caller before this function is reached.

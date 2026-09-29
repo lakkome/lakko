@@ -119,6 +119,11 @@ final class RotationPanelModel: ObservableObject {
                 identity = id
                 publisherGroup = pg
                 cron = makeCron(identity: id, publisherGroup: pg)
+                // ADR-0057, live walk 2026-09-29 — the channel owner claims
+                // the publisher journal on open (idempotent; a co-publisher
+                // device never claims), so a rotation's epoch registration is
+                // not refused on a journal whose claim the DS dropped.
+                await CoPublisher.claimJournal(ds: DsClient(), identity: id, publisherGroup: pg)
                 ready = true
             } catch {
                 NSLog("Channels: open publisher group failed: %@", String(describing: error))

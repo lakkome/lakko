@@ -1484,15 +1484,24 @@ public fun ChannelManageScreen(
             val pub = publisher ?: throw IllegalStateException("channel publisher identity not available")
             // Open-or-create: persisted so a group minted here is not lost.
             val opened = pub.withIdentity { id -> CoPublisher.openPublisherGroup(id, channelId) }
-            pubGroup = opened
             // ADR-0057 — the channel OWNER claims the publisher journal (at
             // creation the first registration, afterwards an idempotent
             // re-send). A co-publisher device never claims: its root would
-            // squat the journal against the owner. Best effort.
-            val coPublished = CoPublishedJournals.onDevice(context)
-            pub.withIdentity(persist = false) { id ->
-                DsClient().use { ds -> CoPublisher.claimJournal(ds, id, opened, coPublished) }
+            // squat the journal against the owner. Best effort, and BEFORE the
+            // handle is published to this screen: the rotation heartbeat and
+            // the approve path register epochs on it, and a registration ahead
+            // of the claim is refused on a journal still unclaimed.
+            try {
+                val coPublished = CoPublishedJournals.onDevice(context)
+                pub.withIdentity(persist = false) { id ->
+                    DsClient().use { ds -> CoPublisher.claimJournal(ds, id, opened, coPublished) }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "publisher journal claim did not run", e)
             }
+            pubGroup = opened
         } catch (e: Throwable) {
             Log.w(TAG, "open publisher group failed", e)
             openError = LegacyChannelV1.describe(e) { "Could not open this channel's keys on this device." }

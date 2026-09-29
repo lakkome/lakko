@@ -17,9 +17,10 @@ import LakkoCore
 /// `parseBodyEnvelope`, whose lossy-UTF-8 fallback is CORRECT on its own terms
 /// (pre-envelope legacy plaintext must still render) and therefore turns the
 /// beacon into a visible bubble reading `lakko/committer-beacon/v1` plus two
-/// control bytes. ``beaconBytesWouldRenderAsAChatBubbleWithoutTheArm`` below
-/// runs the real parser on the real beacon and shows exactly that, so the
-/// arm's necessity is demonstrated rather than asserted.
+/// control bytes. Since 2026-09-29 the parser itself classifies any `lakko/`
+/// plaintext as `.serviceEnvelope` (no text), so a missing arm would now DROP
+/// the beacon rather than render it — and the fold would lose the observation.
+/// ``testWithoutTheArmTheParserWouldDropTheBeaconUnobserved`` pins that.
 ///
 /// ## Why there are no doubles here
 ///
@@ -150,35 +151,35 @@ final class ChatServiceEnvelopeTests: XCTestCase {
         XCTAssertNil(senderLeaf)
     }
 
-    func testBeaconBytesWouldRenderAsAChatBubbleWithoutTheArm() {
-        // The defect, demonstrated on the real parser: `parse_body`'s
-        // lossy-UTF-8 fallback DEGRADES binary input to `.chat` — it does NOT
-        // throw — which is both correct for legacy plaintext and exactly why
-        // the beacon needs its own arm ahead of it. This is also the check
-        // that this suite is faithful: the real parser's behaviour here is the
-        // thing a naive double would get wrong.
+    func testWithoutTheArmTheParserWouldDropTheBeaconUnobserved() {
+        // Since 2026-09-29 the real parser no longer degrades a `lakko/`
+        // plaintext to a `.chat` body: `parse_body` classifies it as
+        // `.serviceEnvelope` with no text, so even without the arm a beacon
+        // would never be a bubble. The arm is still load-bearing for the other
+        // half of its job: surfacing WHO beaconed and HOW OLD the row is, which
+        // a dropped service envelope does not carry. (Until that change this
+        // case asserted the lossy fallback text; that fallback was the live
+        // defect of 2026-09-29 for envelope versions no arm recognised.)
         let parsed = AttachmentBridge.parseBodyEnvelopeBytes(composeCommitterBeacon())
 
-        XCTAssertEqual(parsed.kind, .chat)
-        XCTAssertTrue(
-            parsed.text.contains("lakko/committer-beacon/v1"),
-            "expected the lossy fallback text, got '\(parsed.text)'"
-        )
+        XCTAssertEqual(parsed.kind, .serviceEnvelope)
+        XCTAssertEqual(parsed.text, "", "a service envelope carries no renderable text")
     }
 
     func testUnknownBeaconVersionIsNotSwallowedByTheArm() {
         // Fail-closed on the version byte: the arm claims only what this
-        // build's codec accepts. A future v2 beacon falls through to the chat
-        // parser like any other unrecognised plaintext rather than being
-        // silently eaten by a length-only match — which is what keeps the
-        // cheap peek honest about being backed by the codec.
+        // build's codec accepts, so a future v2 beacon is not classified as a
+        // beacon by a length-only match — which is what keeps the cheap peek
+        // honest about being backed by the codec. What it falls through to
+        // changed on 2026-09-29: the parser now drops it as an unrecognised
+        // service envelope instead of rendering it as chat text.
         var notABeacon = composeCommitterBeacon()
         notABeacon[notABeacon.count - 1] = 0xFF
 
         let event = classify(notABeacon)
 
-        guard case .application = event else {
-            return XCTFail("an unknown beacon version must fall through to chat, got \(event)")
+        guard case .serviceEnvelope = event else {
+            return XCTFail("an unknown beacon version must be dropped, never a beacon or a bubble, got \(event)")
         }
     }
 
