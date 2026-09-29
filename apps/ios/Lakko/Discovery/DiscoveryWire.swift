@@ -282,27 +282,23 @@ public struct KeyPackageFetchResponse: Codable, Equatable {
 // Added in 1.14e6, parallel to the Android 1.15e9 addendum.
 
 /// Body of `POST /discovery/invite`, `POST /discovery/call-invite` and
-/// `POST /discovery/group-invite` since the sealed-links amendment of
-/// 2026-09-28 (ADR-0028, ADR-0009): the sealed blob the server stores opaque,
-/// plus the clear fields the server can no longer read out of the capability.
-/// Field names match `services/discovery` `UploadRequest` exactly.
-public struct SealedInviteUploadRequest: Codable, Equatable {
-    /// Standard-alphabet base64 of ``InviteLinkMint/sealed``.
+/// `POST /discovery/group-invite` (ADR-0028 amendment 2026-09-28, sealed
+/// links). The ledger stores the SEALED blob only; what the server used to
+/// read out of the capability arrives in clear fields. `label` and
+/// `bootstrapReferral` are sent for `/i/` only (`nil` omits them).
+public struct InviteUploadRequest: Codable, Equatable {
+    /// Standard-alphabet base64 of the sealed link blob (`InviteLinkMint.sealed`).
     public let sealed: String
     /// Standard-alphabet base64 of the 32-byte Ed25519 key that signed the
-    /// capability (``InviteLinkMint/issuerPubkey``): the key an issuer-signed
-    /// revoke verifies against.
+    /// capability — the key an issuer-signed revoke verifies against.
     public let issuerPubkey: String
-    /// The capability's `expiry_ms` (`0` = never expires), for the fetch
-    /// filter and the pruner.
+    /// The capability's expiry (`0` = never), for the fetch filter and pruner.
     public let expiryMs: UInt64
-    /// The consume ceiling: `0` = single-use, `0xFFFFFFFF` = unlimited.
+    /// The consume ceiling sentinel (`0` single use, `UInt32.max` unlimited).
     public let maxUses: UInt32
-    /// `/i/` only: the capability's label, for the owner's own list. Omitted
-    /// from the JSON for `/c/` and `/g/`.
+    /// `/i/` only: the owner's label for its own list.
     public let label: String?
-    /// `/i/` only: the capability's `bootstrap_referral` flag. Omitted from
-    /// the JSON for `/c/` and `/g/`.
+    /// `/i/` only: the capability's bootstrap-referral flag.
     public let bootstrapReferral: Bool?
 
     public init(
@@ -329,12 +325,22 @@ public struct SealedInviteUploadRequest: Codable, Equatable {
         case label
         case bootstrapReferral = "bootstrap_referral"
     }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(sealed, forKey: .sealed)
+        try c.encode(issuerPubkey, forKey: .issuerPubkey)
+        try c.encode(expiryMs, forKey: .expiryMs)
+        try c.encode(maxUses, forKey: .maxUses)
+        try c.encodeIfPresent(label, forKey: .label)
+        try c.encodeIfPresent(bootstrapReferral, forKey: .bootstrapReferral)
+    }
 }
 
-/// Response body of every invite upload.
+/// Response body of `POST /discovery/invite`.
 public struct InviteUploadResponse: Codable, Equatable {
-    /// base64url-no-pad of the random 6-byte ledger id (8 characters) the
-    /// server mints fresh for every upload.
+    /// base64url-no-pad of `SHA-256(capability_bytes)` — same bytes
+    /// ⇒ same id; a retried upload is a no-op (server-side upsert).
     public let blobId: String
 
     public init(blobId: String) {
@@ -346,11 +352,13 @@ public struct InviteUploadResponse: Codable, Equatable {
     }
 }
 
-/// Response body of `GET /discovery/{invite,call-invite,group-invite}/{id}`.
-/// 404 surfaces as `nil` (the server folds expired rows into the same status).
+/// Response body of `GET /discovery/invite/{blob_id_b64url}`. 404
+/// surfaces as `nil` in ``DiscoveryClient/inviteFetch(blobId:)``
+/// (server-side expiry filter folds expired-blob into the same
+/// status).
 public struct InviteFetchResponse: Codable, Equatable {
-    /// Standard-alphabet base64 of the stored sealed blob. Opens only under the
-    /// link secret from the URL fragment.
+    /// Standard-alphabet base64 of the sealed link blob; opened on the device
+    /// with the link's fragment secret (`XCapability.openLink`).
     public let sealed: String
 
     public init(sealed: String) {

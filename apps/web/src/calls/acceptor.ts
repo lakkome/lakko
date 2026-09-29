@@ -10,19 +10,17 @@
  * result so the `/c/<slug>` landing page can render the
  * right outcome copy without re-implementing the dispatch:
  *
- *   1. `parseCallInviteSlug(slug)` → pointer | inline | error, and
- *      the link secret from the fragment (missing or damaged →
- *      `damaged`, 2026-09-28 security pass)
+ *   1. `parseCallInviteSlug(slug)` → pointer | inline | error
  *   2. (pointer branch) `DiscoveryClient.fetchCallInvite(blobId)`
- *      → sealed bytes | null (404 → `notFound`)
+ *      → bytes | null (404 → `notFound`)
  *   3. `CallInviteCapability.openLink(sealed, secret)` — opens
- *      the seal and checks the Ed25519 signature locally (a
- *      malicious server serving substituted bytes cannot open)
+ *      the sealed blob with the fragment's secret and verifies
+ *      the capability inside (a missing / malformed fragment, a
+ *      substituted or tampered blob → `damaged`)
  *   4. `capability.isValidNow(nowMs)` — expiry filter
  *   5. (pointer branch) `DiscoveryClient.consumeCallInvite(
- *      blobId, capability.wire, joinerAccountId)` — atomic
- *      counter bump + per-joiner dedup tag over the plaintext
- *      capability
+ *      blobId, capabilityBytes, joinerAccountId)` — atomic
+ *      counter bump + per-joiner dedup tag
  *   6. `acceptCallInvite(capability, joinerIdentity)` —
  *      bootstrap a fresh MLS group with joiner as founder +
  *      owner added via the embedded KeyPackage
@@ -47,9 +45,9 @@ import {
 import {
   inviteLinkWidths,
   isInviteLinkDamaged,
-  linkSecretFromFragment,
+  openInviteLinkFromUrl,
 } from "../contacts/invite-link";
-import { parseCallInviteSlug } from "./invite";
+import { CALL_INVITE_INLINE_MIN_LEN, parseCallInviteSlug } from "./invite";
 
 // Re-exported by `loadWasm()` — the wasm module surfaces
 // `CallInviteCapability` + `acceptCallInvite` + (joiner-side)
@@ -73,10 +71,10 @@ export interface AcceptCallInviteOptions {
    *  ≥ 400 bytes of inline capability (censored-region
    *  fallback). */
   readonly slug: string;
-  /** The URL fragment (`location.hash`, with or without its `#`): the link
-   *  secret the whole capability is sealed under. Missing or damaged →
-   *  `damaged`. */
-  readonly fragment: string | null | undefined;
+  /** The URL fragment (`location.hash`): the link secret the capability is
+   *  sealed under (sealed-link amendment, 2026-09-28). Missing or malformed
+   *  is `damaged`. */
+  readonly hash: string | null | undefined;
   /** Joiner's 16-byte UUIDv7 account_id — folded into the
    *  per-joiner dedup tag locally before posting to consume.
    *  Never crosses the wire in plaintext. */
@@ -103,8 +101,8 @@ export interface AcceptCallInviteOptions {
 export type AcceptCallInviteResult =
   | {
       readonly kind: "accepted";
-      /** The plaintext capability wire the sealed link opened
-       *  to. UI can re-render details (label, expiry) from it. */
+      /** Wire-format bytes the joiner just consumed. UI can
+       *  re-render details (label, expiry) from these. */
       readonly capabilityBytes: Uint8Array;
       /** Owner's 16-byte UUIDv7 `account_id` — the Welcome
        *  ferry target. */
@@ -152,7 +150,8 @@ export type AcceptCallInviteResult =
    *  again later. Never folded into `notFound`. */
   | { readonly kind: "rateLimited" }
   | { readonly kind: "malformedSlug"; readonly reason: string }
-  /** The fragment is missing, or does not open the link. */
+  /** The link does not open under its fragment: missing or malformed
+   *  fragment, wrong secret, tampered or substituted blob. */
   | { readonly kind: "damaged" }
   | { readonly kind: "signatureFailure"; readonly reason: string }
   | { readonly kind: "failed"; readonly message: string };
@@ -179,56 +178,52 @@ export type AcceptCallInviteResult =
 export async function acceptCallInviteFromSlug(
   opts: AcceptCallInviteOptions,
 ): Promise<AcceptCallInviteResult> {
-  // ---- 1. Parse the slug -----------------------------------
+  // ---- 1-3. Parse, fetch, open under the fragment ----------
+  // A malformed slug or fragment is refused before any request; the sealed
+  // blob opens only under the fragment's secret, which also verifies the
+  // capability inside (catches a substituted or tampered blob).
   const wasm = await loadWasm();
-  const widths = inviteLinkWidths(wasm);
-  let parsed: ReturnType<typeof parseCallInviteSlug>;
+  let widths: ReturnType<typeof inviteLinkWidths>;
   try {
-    parsed = parseCallInviteSlug(opts.slug, widths);
+    widths = inviteLinkWidths(wasm);
+    parseCallInviteSlug(opts.slug, widths);
   } catch (err) {
     return {
       kind: "malformedSlug",
       reason: err instanceof Error ? err.message : String(err),
     };
   }
-  const linkSecret = linkSecretFromFragment(opts.fragment, widths);
-  if (linkSecret === null) return { kind: "damaged" };
-
-  // ---- 2. Pointer branch: fetch the sealed blob ------------
-  let sealed: Uint8Array;
-  let blobId: Uint8Array | null = null;
-  if (parsed.kind === "pointer") {
-    blobId = parsed.blobId;
-    try {
-      const fetched = await opts.discoveryClient.fetchCallInvite(blobId);
-      if (fetched === null) {
-        return { kind: "notFound" };
-      }
-      sealed = fetched;
-    } catch (err) {
-      if (err instanceof DiscoveryHttpError && err.status === 404) {
-        return { kind: "notFound" };
-      }
-      if (isDiscoveryRateLimited(err)) return { kind: "rateLimited" };
-      throw err; // bubble up network / non-404 HTTP errors
-    }
-  } else {
-    sealed = parsed.sealed;
-  }
-
-  // ---- 3. openLink --- opens the seal and verifies the
-  //          signature (catches substitution + tamper) -------
-  let capability: import("../../wasm/lakko_ffi_wasm").CallInviteCapability;
+  let capability: {
+    readonly callId: Uint8Array;
+    readonly ownerAccountId: Uint8Array;
+    readonly expiryMs: bigint;
+    readonly ownerFingerprint: string;
+    readonly wire: Uint8Array;
+    isValidNow(nowMs: bigint): boolean;
+  };
+  let blobId: Uint8Array | null;
   try {
-    capability = wasm.CallInviteCapability.openLink(sealed, linkSecret);
+    const opened = await openInviteLinkFromUrl({
+      slug: opts.slug,
+      hash: opts.hash,
+      widths,
+      inlineMinLen: CALL_INVITE_INLINE_MIN_LEN,
+      what: "call-invite",
+      fetchPointer: (id) => opts.discoveryClient.fetchCallInvite(id),
+      open: (sealed, secret) => wasm.CallInviteCapability.openLink(sealed, secret),
+    });
+    if (opened.kind === "not-found") return { kind: "notFound" };
+    capability = opened.capability;
+    blobId = opened.blobId;
   } catch (err) {
     if (isInviteLinkDamaged(err)) return { kind: "damaged" };
-    return {
-      kind: "signatureFailure",
-      reason: err instanceof Error ? err.message : String(err),
-    };
+    if (err instanceof DiscoveryHttpError && err.status === 404) {
+      return { kind: "notFound" };
+    }
+    if (isDiscoveryRateLimited(err)) return { kind: "rateLimited" };
+    throw err; // bubble up network / non-404 HTTP errors
   }
-  // The plaintext wire: what the per-joiner consume tag is computed over.
+  // The PLAINTEXT wire the joiner tag is computed over, never the sealed blob.
   const capabilityBytes = capability.wire;
 
   // ---- 4. Expiry check ------------------------------------
@@ -238,7 +233,7 @@ export async function acceptCallInviteFromSlug(
   }
 
   // ---- 5. Pointer branch: consume (counter bump + dedup) --
-  if (parsed.kind === "pointer" && blobId !== null) {
+  if (blobId !== null) {
     let consumeResult: Awaited<
       ReturnType<DiscoveryClient["consumeCallInvite"]>
     >;

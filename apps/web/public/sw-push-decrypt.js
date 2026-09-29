@@ -227,6 +227,14 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   media flags to shape a notification and never applies, answers or stores
  *   anything (C-59). Optional — absent means every call frame is suppressed,
  *   i.e. exactly the pre-ring behaviour.
+ * @property {(bytes: Uint8Array) => any} [decodeRegistrarSeedEnvelope]
+ *   ADR-0057 — the fail-closed registrar-seed-envelope codec (the seed stays
+ *   sealed). THROWS when the bytes are not that envelope. Used ONLY to
+ *   classify the row out of the preview path — the SW never opens or keeps a
+ *   registrar seed (C-59). Optional so an older deps object still loads.
+ * @property {() => number} [registrarSeedEnvelopeLen]
+ *   ADR-0057 — the one on-wire length of a registrar-seed envelope, read from
+ *   the FFI. Optional; absent means the arm is off.
  * @property {() => number} [committerBeaconEnvelopeLen]
  *   ADR-0045 — the exact on-wire length of a beacon envelope, read from
  *   the FFI rather than hand-copied into each client (the drift class
@@ -800,10 +808,10 @@ function callNoticeFrom(wasm, processed, message, groupHex, nowMs) {
  * kinds before its chat parse; this is the background mirror of that
  * same two-step peek, in the same order.
  *
- * Eight arms below: call signaling, the ADR-0042 / ADR-0044 push-routing
+ * Nine arms below: call signaling, the ADR-0042 / ADR-0044 push-routing
  * secret, the ADR-0045 committer beacon, the ADR-0048 profile, the ADR-0048
- * profile request, the ADR-0051 group name, the ADR-0052 shared pin, and the
- * ADR-0058 scoped-discovery envelopes (with the ADR-0057 registrar seed). Each arm is a cheap byte peek gating an
+ * profile request, the ADR-0051 group name, the ADR-0052 shared pin, the
+ * ADR-0057 registrar seed, and the ADR-0058 scoped-discovery envelopes. Each arm is a cheap byte peek gating an
  * authoritative codec.
  *
  * Classification ONLY — no writes, no cursor advance (C-59 / ADR-0041).
@@ -832,13 +840,56 @@ function isServiceEnvelope(wasm, bytes) {
   if (isProfileRequestEnvelope(wasm, bytes)) return true;
   // 7. Shared pin (ADR-0052 decision 3).
   if (isPinEnvelope(wasm, bytes)) return true;
-  // 8. Scoped discovery (ADR-0058) and the ADR-0057 registrar seed.
+  // 8. Registrar seed (ADR-0057).
+  if (isRegistrarSeedEnvelope(wasm, bytes)) return true;
+
+  // 9. Scoped discovery (ADR-0058).
   if (isScopedDiscoveryEnvelope(wasm, bytes)) return true;
   return false;
 }
 
 /**
- * The dispatcher kinds arm 8 suppresses. Each carries secrets (a delegation,
+ * First byte of the ADR-0057 registrar-seed domain separator (`'l'`). Its own
+ * constant, like the ones below.
+ */
+const REGISTRAR_SEED_FIRST_BYTE = 0x6c;
+
+/**
+ * Arm 8 of {@link isServiceEnvelope} — the ADR-0057 registrar-seed envelope a
+ * group's owner sends one member. Fixed length (read from
+ * `registrarSeedEnvelopeLen()`, never written down here), so the peek is the
+ * length and the first byte, and the codec confirms. Without the length there
+ * is no safe suppress, so the arm is off rather than guessing.
+ *
+ * Classification ONLY: the SW never opens the seed and never stores it (C-59).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isRegistrarSeedEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== REGISTRAR_SEED_FIRST_BYTE) return false;
+  if (typeof wasm.registrarSeedEnvelopeLen !== "function") return false;
+  let expected;
+  try {
+    expected = wasm.registrarSeedEnvelopeLen();
+  } catch {
+    return false;
+  }
+  if (typeof expected !== "number" || bytes.length !== expected) return false;
+  if (typeof wasm.decodeRegistrarSeedEnvelope !== "function") return false;
+  let decoded;
+  try {
+    decoded = wasm.decodeRegistrarSeedEnvelope(bytes);
+  } catch {
+    return false;
+  }
+  freeQuietly(decoded);
+  return true;
+}
+
+/**
+ * The dispatcher kinds arm 9 suppresses. Each carries secrets (a delegation,
  * an introduction record, a registrar seed) or DeviceGroup-only state, and
  * would otherwise be previewed as a notification body of domain bytes.
  */
@@ -852,7 +903,7 @@ const SCOPED_DISCOVERY_KINDS = [
 ];
 
 /**
- * Arm 8 of {@link isServiceEnvelope} — the ADR-0058 scoped-discovery
+ * Arm 9 of {@link isServiceEnvelope} — the ADR-0058 scoped-discovery
  * envelopes, classified by the core's `dispatchIncomingEnvelope` (which
  * answers `IntroMessage` for anything it does not recognise). Same cheap
  * first-byte peek as the other `lakko/...` arms. Classification ONLY (C-59).

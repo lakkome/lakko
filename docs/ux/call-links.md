@@ -130,7 +130,21 @@ written out three times - the reason [`navigation.md`](navigation.md) section
 | `Invite`, first time in this call | Busy while minting, which includes a proof-of-work solve, so it says what it is doing rather than only spinning. |
 | `Invite`, link ready | The platform's share mechanism, or a copy with confirmation. |
 | Mint failed | One sentence on what happened and that it can be tried again. The call is unaffected and does not end. |
+| Opening a damaged link (the arriving side) | `This invite link is damaged. Ask for a new link.` and nothing else. Shown when the fragment is missing or malformed, or the link does not open under it (see below). |
 | Signed out mid-flow | One sentence: sign in again. |
+
+### The link's shape (amended 2026-09-28)
+
+`https://lakko.me/c/<8-char id>#<16-char secret>`, or
+`https://lakko.me/c/<sealed capability>#<16-char secret>` when the upload
+failed. The capability is encrypted under the fragment's secret
+([ADR-0009](../adr/0009-link-based-call-invitations.md) and
+[ADR-0028](../adr/0028-group-join-ticket.md), the sealed-link amendment), so
+the share action and any copy must carry the fragment: **a link without its
+fragment is damaged**, the same state and sentence as a `/g/` or `/i/` link
+([`group-invite-page.md`](group-invite-page.md) section 3). A missing or
+malformed fragment is refused before any request is made. This is what stops a
+guessed or leaked short id from being a seat in the call.
 
 ## 6. What is deleted
 

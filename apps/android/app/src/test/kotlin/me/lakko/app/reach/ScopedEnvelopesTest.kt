@@ -26,7 +26,6 @@ class ScopedEnvelopesTest {
             "lakko/visibility/v1" to ScopedEnvelopeKind.VISIBILITY,
             "lakko/reach-state/v1" to ScopedEnvelopeKind.REACH_STATE,
             "lakko/committer-delegation/v1" to ScopedEnvelopeKind.COMMITTER_DELEGATION,
-            "lakko/ds-registrar-seed/v1" to ScopedEnvelopeKind.REGISTRAR_SEED,
         )
         for ((domain, kind) in expected) {
             assertEquals(domain, kind, scopedEnvelopeKindOf(envelope(domain, 1, 2, 3)))

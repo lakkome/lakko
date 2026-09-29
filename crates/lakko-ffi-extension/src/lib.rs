@@ -94,6 +94,7 @@ pub mod pin;
 pub mod profile;
 pub mod profile_request;
 pub mod push_routing;
+pub mod registrar_seed;
 pub mod scoped_discovery;
 
 uniffi::setup_scaffolding!();

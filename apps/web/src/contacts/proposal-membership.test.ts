@@ -78,8 +78,13 @@
  * change that let the sweep reach a group whose core would refuse it.
  */
 
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { fakeAccessSigner } from "../ds/access-test-doubles";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  fakeAccessSigner,
+  fakeRegistrarAuthority,
+  fakeRootAuthority,
+} from "../ds/access-test-doubles";
+import { dsAccess } from "../ds/access";
 
 // No IndexedDB in the node test env; the store round-trip is covered by
 // `src/chat/commit-outbox.test.ts`.
@@ -324,6 +329,19 @@ function ds(order: string[], journal: unknown[] = []): Partial<DsClient> {
     })) as unknown as DsClient["fetchGroup"],
   };
 }
+
+// ADR-0057 — the sweep stages only on a device that holds the journal's root
+// or a registrar seed. These tests are not about ADR-0057, so every device in
+// them holds a registrar seed (the DS double accepts every registration).
+beforeAll(() => {
+  dsAccess.setAuthorityFactory({
+    root: () => fakeRootAuthority(),
+    registrar: () => fakeRegistrarAuthority("reg", 2),
+  });
+});
+afterAll(() => {
+  dsAccess.setAuthorityFactory(null);
+});
 
 afterEach(() => {
   vi.clearAllMocks();

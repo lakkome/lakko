@@ -57,7 +57,6 @@ import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { ContactsClient } from "../contacts/client";
-import { loadWasm } from "../wasm";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { base64Encode } from "../auth/account-id";
 // ADR-0045 S7 residual 1, the joiner's half. The copy and the one repair live
@@ -81,14 +80,11 @@ import { recordConversationKind } from "../chat/conversation-kind-store";
 // ADR-0028 v2 — the sealed preview and the link key in the URL fragment
 // (docs/ux/group-invite-page.md). The copy lives in a plain module for the
 // same `vitest` reason as the wait copy above.
-import { parseGroupInviteSlug } from "../contacts/group-invite";
 import {
   INVITE_LINK_DAMAGED,
   INVITE_LINK_RATE_LIMITED,
   INVITE_LINK_TRY_AGAIN,
-  inviteLinkWidths,
   isInviteLinkDamaged,
-  parseInviteFragment,
 } from "../contacts/invite-link";
 import { reachSession } from "../reach/reach-service";
 import { journalHex } from "../ds/access";
@@ -112,10 +108,8 @@ interface DecodedTicket {
   fingerprint: string;
   valid: boolean;
   /** The sealed preview, opened with the link secret from the URL fragment,
-   *  or `null` when the link carries none. A link without its fragment, or
-   *  one whose fragment does not open it, never reaches here: it is refused
-   *  as damaged (2026-09-28 security pass: the whole capability is sealed
-   *  under the fragment's secret). */
+   *  or `null` when the link was minted without one. A preview that does not
+   *  open never reaches here: the link is refused as damaged. */
   preview: GroupInvitePreviewData | null;
 }
 
@@ -151,28 +145,22 @@ export default function JoinGroup() {
     source,
     async ({ slug, hash }): Promise<DecodedTicket | LinkRefusal | null> => {
       try {
-        const wasm = await loadWasm();
-        const widths = inviteLinkWidths(wasm);
-        // An old-width or malformed slug is invalid (it throws into the
-        // invalid-or-expired state below) and never reaches the network.
-        parseGroupInviteSlug(slug, widths);
-        // The whole capability is sealed under the fragment's link secret: a
-        // link without one, or with anything but a 16-character secret (the
-        // pre-amendment 43-character key included), opens nothing. Refused
-        // before any network round-trip.
-        const fragment = parseInviteFragment(hash, widths);
-        if (fragment.kind !== "secret") return "damaged";
-        const { capabilityWire, blobId } = await client.resolveGroupInviteSlug(slug, hash);
-        const cap = wasm.GroupInviteCapability.decodeAndVerify(capabilityWire);
+        // Sealed-link amendment of ADR-0028 (2026-09-28): the capability is
+        // encrypted under the fragment's secret. A missing or malformed
+        // fragment is damaged before any request; a blob that does not open
+        // under it (a wrong secret, a tampered or substituted blob) is
+        // damaged too. An old-width or malformed slug throws into the
+        // invalid-or-expired state below and never reaches the network.
+        const opened = await client.openGroupInviteLink(slug, hash);
+        const cap = opened.capability;
         try {
-          // A blob a server swapped in under a live id does not open under
-          // the link's secret at all; a preview that does not open under it
-          // is refused the same way. No half-opened page.
-          const outcome = resolveInvitePreview(cap, fragment);
+          // A present preview that does not open under the same secret is
+          // damaged as well: no preview-less join is offered.
+          const outcome = resolveInvitePreview(cap, opened.linkSecret);
           if (outcome.kind === "damaged") return "damaged";
           return {
-            wire: capabilityWire,
-            blobId,
+            wire: opened.capabilityWire,
+            blobId: opened.blobId,
             fingerprint: cap.issuerFingerprint(),
             valid: cap.isValidNow(BigInt(Date.now())),
             preview: outcome.kind === "preview" ? outcome.preview : null,

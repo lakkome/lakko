@@ -523,7 +523,7 @@ class DiscoveryClientTest {
     // ===================================================================
 
     @Test
-    fun `inviteUpload sends the sealed blob + parses blob_id`() = runTest {
+    fun `inviteUpload sends the sealed link + clear fields + parses blob_id`() = runTest {
         val captured = mutableListOf<CapturedRequest>()
         client(
             responses = listOf(HttpStatusCode.OK to """{"blob_id":"BLOB_B64URL"}"""),
@@ -531,17 +531,24 @@ class DiscoveryClientTest {
         ).use { client ->
             val resp = client.inviteUpload(
                 InviteUploadRequest(
-                    sealed = "CAP_B64",
+                    sealed = "SEALED_B64",
                     issuer_pubkey = "PK_B64",
-                    expiry_ms = 5L,
-                    max_uses = 0L,
+                    expiry_ms = 42L,
+                    max_uses = 3L,
+                    label = "team",
+                    bootstrap_referral = true,
                 ),
             )
             assertEquals("BLOB_B64URL", resp.blob_id)
         }
         val body = captured[0].body!!
-        assertEquals("CAP_B64", body["sealed"]!!.jsonPrimitive.content)
+        assertEquals("SEALED_B64", body["sealed"]!!.jsonPrimitive.content)
         assertEquals("PK_B64", body["issuer_pubkey"]!!.jsonPrimitive.content)
+        assertEquals("42", body["expiry_ms"]!!.jsonPrimitive.content)
+        assertEquals("3", body["max_uses"]!!.jsonPrimitive.content)
+        assertEquals("team", body["label"]!!.jsonPrimitive.content)
+        assertEquals("true", body["bootstrap_referral"]!!.jsonPrimitive.content)
+        assertNull(body["capability"])
         assertTrue(captured[0].url.endsWith("/discovery/invite"))
     }
 
@@ -659,7 +666,7 @@ class DiscoveryClientTest {
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
                 DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
-                    client.uploadInvite(ByteArray(0), ByteArray(32), 0L, 0L)
+                    client.uploadInvite(SealedInviteUpload(ByteArray(0), ByteArray(32), 0L, 0L))
                 }
             }
         }
@@ -671,11 +678,11 @@ class DiscoveryClientTest {
         val err = assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
                 DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
-                    client.uploadInvite(ByteArray(2049), ByteArray(32), 0L, 0L)
+                    client.uploadInvite(SealedInviteUpload(ByteArray(2048 + 65), ByteArray(32), 0L, 0L))
                 }
             }
         }
-        assertTrue(err.message!!.contains("2048"))
+        assertTrue(err.message!!.contains("2112"))
     }
 
     @Test

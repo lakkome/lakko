@@ -271,6 +271,10 @@ pub(crate) fn build_app(state: AppState) -> Router {
             "/ds/group/{group_hex}/registrars",
             put(ownership::put_registrars),
         )
+        .route(
+            "/ds/group/{group_hex}/registrars-set",
+            put(ownership::put_registrars_set),
+        )
         .route("/ds/group/{group_hex}/root", put(ownership::put_root))
         .route(
             "/ds/group/{group_hex}/push-binding",

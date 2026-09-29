@@ -39,15 +39,10 @@ import Foundation
 @MainActor
 public final class InviteIntake: ObservableObject {
 
-    /// The slug from the most recent `lakko.me/i/<slug>` Universal
-    /// Link tap. `nil` when no invite is pending.
+    /// The link token (`slug#fragment`, see ``InviteLinkSecret/token(slug:fragment:)``)
+    /// from the most recent `lakko.me/i/<slug>` Universal Link tap. `nil` when
+    /// no invite is pending.
     @Published public private(set) var pendingSlug: String?
-
-    /// The URL fragment (the link secret) that came with ``pendingSlug``, or
-    /// `nil` when the link had none. Since the sealed-links amendment of
-    /// 2026-09-28 every kind needs it: without it the capability does not
-    /// open and the landing shows the damaged state.
-    public private(set) var pendingFragment: String?
 
     /// ADR-0028 (G-3) — the slug from the most recent
     /// `lakko.me/g/<slug>` group join-ticket link tap. `nil` when no
@@ -55,20 +50,16 @@ public final class InviteIntake: ObservableObject {
     @Published public private(set) var pendingGroupJoinSlug: String?
 
     /// ADR-0028 v2 - the URL fragment that came with ``pendingGroupJoinSlug``
-    /// (the link secret the capability is sealed under, base64url), or `nil`
-    /// when the link had none. Kept beside the slug rather than inside it because the slug is
+    /// (the sealed preview's link key, base64url), or `nil` when the link had
+    /// none. Kept beside the slug rather than inside it because the slug is
     /// what the ledger and the parsers see and the fragment must reach neither
     /// - it is decoded on the device and nowhere else.
     public private(set) var pendingGroupJoinFragment: String?
 
-    /// ADR-0032 (G-21/G-22) — the slug from the most recent
-    /// `lakko.me/c/<slug>` multi-joiner call-invite link tap. `nil` when no
-    /// call-join is pending. Drives ``JoinCallLandingScreen``.
+    /// ADR-0032 (G-21/G-22) — the link token (`slug#fragment`) from the most
+    /// recent `lakko.me/c/<slug>` multi-joiner call-invite link tap. `nil` when
+    /// no call-join is pending. Drives ``JoinCallLandingScreen``.
     @Published public private(set) var pendingCallJoinSlug: String?
-
-    /// The URL fragment (the link secret) that came with
-    /// ``pendingCallJoinSlug``, or `nil` when the link had none.
-    public private(set) var pendingCallJoinFragment: String?
 
     /// ADR-0032 — set when a guest signup is kicked off from the `/c/` landing,
     /// so that once the session lands and the landing re-mounts, the join
@@ -92,19 +83,18 @@ public final class InviteIntake: ObservableObject {
     /// claiming this bundle id.
     public func handle(_ url: URL) {
         let path = url.path
-        // Every fragment is set BEFORE its published slug so an observer that
-        // wakes on the slug already finds the secret.
         if let slug = Self.slug(from: path, prefix: "/i/") {
-            pendingFragment = Self.fragment(of: url)
-            pendingSlug = slug
+            // ADR-0028 amendment 2026-09-28 — the sealed-link secret rides the
+            // fragment; it is parked inside the token (`slug#fragment`) so it
+            // reaches the landing through the route, never a server.
+            pendingSlug = InviteLinkSecret.token(slug: slug, fragment: Self.fragment(of: url))
         } else if let slug = Self.slug(from: path, prefix: "/g/") {
             // The fragment is set BEFORE the published slug so an observer
             // that wakes on the slug already finds its key.
             pendingGroupJoinFragment = Self.fragment(of: url)
             pendingGroupJoinSlug = slug
         } else if let slug = Self.slug(from: path, prefix: "/c/") {
-            pendingCallJoinFragment = Self.fragment(of: url)
-            pendingCallJoinSlug = slug
+            pendingCallJoinSlug = InviteLinkSecret.token(slug: slug, fragment: Self.fragment(of: url))
         }
     }
 
@@ -136,7 +126,6 @@ public final class InviteIntake: ObservableObject {
     /// chat / etc.).
     public func clear() {
         pendingSlug = nil
-        pendingFragment = nil
     }
 
     /// ADR-0028 (G-3) — consume the pending group-join slug, called by
@@ -150,14 +139,12 @@ public final class InviteIntake: ObservableObject {
     /// by ``JoinCallLandingScreen`` on dismiss.
     public func clearCallJoin() {
         pendingCallJoinSlug = nil
-        pendingCallJoinFragment = nil
         callJoinAutoResume = false
     }
 
     /// ADR-0032 — park a call link again (the "Open" of a running link call's
     /// status line), exactly as if its URL had just been tapped.
-    public func parkCallJoin(slug: String, fragment: String?) {
-        pendingCallJoinFragment = fragment
+    public func parkCallJoin(slug: String) {
         pendingCallJoinSlug = slug
     }
 

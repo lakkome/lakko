@@ -7,7 +7,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import me.lakko.app.ds.DsJournalSigner
 import me.lakko.app.ds.DsRegistrationUnavailable
-import me.lakko.app.ds.registerBeforePublish
+import me.lakko.app.ds.FakeJournalSigner
+import me.lakko.app.ds.RecordingStatementSigner
+import me.lakko.app.ds.registerEpochBeforePublish
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
@@ -15,7 +17,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0053 client contract point 3 for a DIRECT (eager-merged) commit: the
+ * ADR-0053 client contract point 3 / ADR-0057 obligation 5 for a DIRECT
+ * (eager-merged) commit: the
  * registration runs after the create call and before the ADR-0040 outbox
  * write, and a registration that does not land aborts exactly like a failed
  * outbox write — the group is reset to its durable epoch and nothing is
@@ -23,11 +26,9 @@ import org.junit.Test
  */
 class JournalRegistrationTest {
 
-    private class Signer(override val epoch: ULong) : DsJournalSigner {
-        override fun sign(method: String, path: String, query: String, body: ByteArray) = "p"
-        override fun groupClaimBody() = "{}"
-        override fun mailboxClaimBody() = "{}"
-    }
+    private fun Signer(epoch: ULong): DsJournalSigner = FakeJournalSigner(epoch)
+
+    private val journal = ByteArray(32) { 7 }
 
     /** The direct-commit sequence as the repository runs it, over fakes. */
     private suspend fun directCommit(
@@ -36,7 +37,13 @@ class JournalRegistrationTest {
     ) {
         trace += "create"
         val signer = registerOrReset(reset = { trace += "reset" }) {
-            registerBeforePublish(Signer(4uL), Signer(5uL)) { _, _ ->
+            registerEpochBeforePublish(
+                journalId = journal,
+                before = Signer(4uL),
+                after = Signer(5uL),
+                statements = RecordingStatementSigner("root"),
+                revoke = emptyList(),
+            ) { _ ->
                 trace += "register"
                 register()
             }
@@ -75,7 +82,9 @@ class JournalRegistrationTest {
         assertThrows(DsRegistrationUnavailable::class.java) {
             runBlocking {
                 registerOrReset(reset = { trace += "reset" }) {
-                    registerBeforePublish(null, Signer(1uL)) { _, _ -> trace += "register" }
+                    registerEpochBeforePublish(journal, null, Signer(1uL), RecordingStatementSigner("root"), emptyList()) {
+                        trace += "register"
+                    }
                 }
             }
         }

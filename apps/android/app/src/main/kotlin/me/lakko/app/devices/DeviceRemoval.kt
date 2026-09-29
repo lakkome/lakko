@@ -173,6 +173,16 @@ public object DeviceRemoval {
         seed.fill(0)
 
         try {
+            // ADR-0057 finding 3 — a founding not yet claimed is claimed first.
+            DsClient().use { ds ->
+                DeviceGroupJournalAccess.claimFoundingIfUnconfirmed(
+                    context = context,
+                    accountIdB64 = accountIdB64,
+                    group = ensured.group,
+                    identity = ensured.identity,
+                    ds = ds,
+                )
+            }
             val signerBeforeCommit = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity)
             val commitBytes = ensured.group.removeDeviceAt(
                 identity = ensured.identity,
@@ -188,6 +198,7 @@ public object DeviceRemoval {
                     groupId = groupId,
                     before = signerBeforeCommit,
                     after = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity),
+                    root = DeviceGroupJournalAccess.rootOf(context, accountIdB64, ensured.group.groupId()),
                 )
             }
 
@@ -258,6 +269,7 @@ public object DeviceRemoval {
                     groupId = groupId,
                     before = signerBeforeCommit,
                     after = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity),
+                    root = DeviceGroupJournalAccess.rootOf(context, accountIdB64, ensured.group.groupId()),
                 )
                 ds.publishGroup(groupId = groupId, payload = envelope, signer = commitSigner)
             }

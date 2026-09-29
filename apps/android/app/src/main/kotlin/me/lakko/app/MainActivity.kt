@@ -347,9 +347,12 @@ class MainActivity : ComponentActivity() {
         if (!path.startsWith("/i/")) return
         val slug = path.removePrefix("/i/").trim().removeSuffix("/")
         if (slug.isEmpty()) return
-        // The 2026-09-28 security pass — the `#<link secret>` fragment opens
-        // the sealed capability; carried with the slug as one token.
-        inviteIntake.publish(me.lakko.app.discovery.joinLinkToken(slug, uri.fragment))
+        // Sealed links (2026-09-28): the `#<link secret>` fragment opens the
+        // link, so it travels with the slug as one argument; a link that lost
+        // it is refused as damaged on the landing, before any request.
+        inviteIntake.publish(
+            me.lakko.app.discovery.InviteLinkArgument(slug, uri.fragment?.takeIf { it.isNotBlank() }).encode(),
+        )
     }
 
     /**
@@ -365,11 +368,10 @@ class MainActivity : ComponentActivity() {
         if (!path.startsWith("/g/")) return
         val slug = path.removePrefix("/g/").trim().removeSuffix("/")
         if (slug.isEmpty()) return
-        // ADR-0028 v2 — the `#<link secret>` fragment unlocks the page's
-        // preview. It is read here and nowhere else: `Uri.fragment` is decoded,
-        // never sent, and a URL that lost it still joins, only without the
-        // preview. Its width is checked on the landing (a wrong one refuses
-        // the link), not here.
+        // Sealed links — the `#<link secret>` fragment opens the link and its
+        // preview. It is read here and nowhere else: `Uri.fragment` is decoded
+        // and never sent. A URL that lost it, or carries a wrong one, is
+        // refused as damaged on the landing, not here.
         inviteIntake.publishGroupJoin(slug, uri.fragment?.takeIf { it.isNotBlank() })
     }
 
@@ -388,7 +390,11 @@ class MainActivity : ComponentActivity() {
         if (!path.startsWith("/c/")) return
         val slug = path.removePrefix("/c/").trim().removeSuffix("/")
         if (slug.isEmpty()) return
-        inviteIntake.publishCallJoin(me.lakko.app.discovery.joinLinkToken(slug, uri.fragment))
+        // Sealed links: the fragment opens the capability and travels with
+        // the slug; the landing refuses a link without it as damaged.
+        inviteIntake.publishCallJoin(
+            me.lakko.app.discovery.InviteLinkArgument(slug, uri.fragment?.takeIf { it.isNotBlank() }).encode(),
+        )
     }
 
     /**
@@ -653,6 +659,12 @@ private fun AppRoot(
                 onOpen = { slug -> inviteIntake.publishCallJoin(slug) },
             )
         }
+        // ADR-0049 section 2 — "confirm on another device": this signed-in
+        // device answers a sign-in request while it is in the foreground.
+        me.lakko.app.ui.devices.DeviceLinkRequestHost(
+            authRepository = authRepository,
+            chatRepository = chatRepository,
+        )
         // The group call's and the call-link call's in-call screens.
         me.lakko.app.ui.call.GroupCallOverlay(
             host = me.lakko.app.calls.AppCallHost.group,
@@ -1140,6 +1152,9 @@ private fun SessionRoot(
     }
     val forgetDevice = {
         me.lakko.app.calls.AppCallHost.reset()
+        // The invite-link secrets this device kept (UX 5.3) go with it; read
+        // before clear() drops the session binding.
+        contactsRepository.forgetDevice()
         contactsRepository.clear()
         // The account's channel log + publisher provider snapshot go with the
         // device, like the chat snapshot below.

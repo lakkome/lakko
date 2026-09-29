@@ -1232,6 +1232,10 @@ public final class AuthRepository: ObservableObject {
             // clean-wipe rationale; the next recover starts from the
             // zero-anchor freshness-window path.
             BackupFloorStore.deleteFloor(accountIdB64: cached.accountIdB64)
+            // `docs/ux/client-redesign.md` section 5.3 — the `/i/` link
+            // secrets this device kept for the account. Same clean-wipe
+            // rationale.
+            InviteLinkSecretStore.shared.clear(accountIdB64: cached.accountIdB64)
             // Phase 2a2c2 — drop the cached export key too. Same
             // clean-wipe rationale.
             ExportKeyStore.deleteExportKey(accountIdB64: cached.accountIdB64)

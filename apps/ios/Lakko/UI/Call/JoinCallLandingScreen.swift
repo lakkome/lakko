@@ -73,9 +73,8 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// The ledger answered `429` on the link fetch: the link may be fine, so
     /// the screen says "try again later" rather than "invalid".
     @Published public private(set) var rateLimited = false
-    /// The link is damaged (sealed-links amendment of 2026-09-28): no
-    /// fragment, a fragment that is not a link secret, or a sealed capability
-    /// that does not open under it. Never retried without the secret.
+    /// ADR-0028 amendment 2026-09-28 — the link's fragment secret is missing or
+    /// malformed, or the blob does not open under it.
     @Published public private(set) var damaged = false
     /// ADR-0048 / UX spec §4 — a guest (no session) is asked for a name here,
     /// prefilled `Guest`. It becomes the new account's own profile.
@@ -89,8 +88,6 @@ public final class JoinCallLandingViewModel: ObservableObject {
     private var guestCommitting = false
 
     private let slug: String
-    /// The link's fragment (the link secret), `nil` when it had none.
-    private let fragment: String?
     private let authRepository: AuthRepository
     private let intake: InviteIntake
     /// The call itself lives here, app-wide, so it survives this screen.
@@ -103,15 +100,8 @@ public final class JoinCallLandingViewModel: ObservableObject {
     private var mintingGuest = false
     private var beginning = false
 
-    init(
-        slug: String,
-        fragment: String?,
-        authRepository: AuthRepository,
-        intake: InviteIntake,
-        linkCallHost: LinkCallHost
-    ) {
+    init(slug: String, authRepository: AuthRepository, intake: InviteIntake, linkCallHost: LinkCallHost) {
         self.slug = slug
-        self.fragment = fragment
         self.authRepository = authRepository
         self.intake = intake
         self.linkCallHost = linkCallHost
@@ -308,25 +298,17 @@ public final class JoinCallLandingViewModel: ObservableObject {
 
     private func decode() async {
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
-        let parsed: CallInviteUrl.ParsedCallInvite
-        do {
-            parsed = try CallInviteUrl.parseCallInviteSlug(slug)
-        } catch {
-            NSLog("join-call: the slug is malformed")
-            decoded = nil
-            loading = false
-            return
-        }
-        // The capability is sealed under the fragment's secret: without a
-        // well-formed one the link is damaged, refused before any request.
-        guard let linkSecret = InviteLink.secret(fromFragment: fragment) else {
+        // `slug` is the link token `slug#fragment`.
+        let parts = InviteLinkSecret.split(slug)
+        guard let linkSecret = InviteLinkSecret.read(parts.fragment) else {
             decoded = nil
             damaged = true
             loading = false
             return
         }
-        let sealed: Data
         do {
+            let parsed = try CallInviteUrl.parseCallInviteSlug(parts.base)
+            let capabilityBytes: Data
             switch parsed {
             case .pointer(let blobId):
                 guard let fetched = try await DiscoveryClient().fetchCallInvite(blobId: blobId) else {
@@ -334,43 +316,40 @@ public final class JoinCallLandingViewModel: ObservableObject {
                     loading = false
                     return
                 }
-                sealed = fetched
+                capabilityBytes = fetched
             case .inline(let bytes):
-                sealed = bytes
+                capabilityBytes = bytes
             }
+            let cap: CallInviteCapability
+            do {
+                cap = try CallInviteCapability.openLink(sealed: capabilityBytes, linkSecret: linkSecret)
+            } catch {
+                decoded = nil
+                damaged = true
+                loading = false
+                return
+            }
+            var isOwner = false
+            if let seed = authRepository.identitySecrets?.accountIdentitySeed {
+                let mine = try Identity.fromSeed(seed: seed).signaturePublicKey()
+                isOwner = hexEncode(mine) == hexEncode(cap.ownerSignaturePubkey())
+            }
+            decoded = Decoded(
+                callId: cap.callId(),
+                ownerAccountId: cap.ownerAccountId(),
+                ownerSignatureKey: cap.ownerSignaturePubkey(),
+                ownerFingerprint: cap.ownerFingerprint(),
+                mediaVideo: cap.media().video,
+                valid: cap.isValidNow(nowMs: nowMs),
+                isOwner: isOwner
+            )
+            loading = false
         } catch {
-            NSLog("join-call: fetch failed: %@", String(describing: error))
+            NSLog("join-call: decode/verify failed: %@", String(describing: error))
             decoded = nil
             rateLimited = DiscoveryClientError.isRateLimited(error)
             loading = false
-            return
         }
-        let cap: CallInviteCapability
-        do {
-            cap = try CallInviteCapability.openLink(sealed: sealed, linkSecret: linkSecret)
-        } catch {
-            // Wrong secret, another kind, a substituted or tampered blob.
-            NSLog("join-call: the link does not open (damaged)")
-            decoded = nil
-            damaged = true
-            loading = false
-            return
-        }
-        var isOwner = false
-        if let seed = authRepository.identitySecrets?.accountIdentitySeed,
-           let mine = try? Identity.fromSeed(seed: seed).signaturePublicKey() {
-            isOwner = hexEncode(mine) == hexEncode(cap.ownerSignaturePubkey())
-        }
-        decoded = Decoded(
-            callId: cap.callId(),
-            ownerAccountId: cap.ownerAccountId(),
-            ownerSignatureKey: cap.ownerSignaturePubkey(),
-            ownerFingerprint: cap.ownerFingerprint(),
-            mediaVideo: cap.media().video,
-            valid: cap.isValidNow(nowMs: nowMs),
-            isOwner: isOwner
-        )
-        loading = false
     }
 
     // MARK: - Begin
@@ -387,7 +366,6 @@ public final class JoinCallLandingViewModel: ObservableObject {
         let outcome = await linkCallHost.start(
             LinkCallHost.Request(
                 slug: slug,
-                fragment: fragment,
                 callId: decoded.callId,
                 ownerAccountId: decoded.ownerAccountId,
                 ownerSignatureKey: decoded.ownerSignatureKey,
@@ -447,7 +425,7 @@ public struct JoinCallLandingScreen: View {
                 .buttonStyle(.bordered)
                 closeButton
             } else if viewModel.damaged {
-                Text(callInviteDamagedMessage)
+                Text(inviteLinkDamagedMessage)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                 closeButton

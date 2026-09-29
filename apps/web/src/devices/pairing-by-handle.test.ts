@@ -8,7 +8,8 @@
  *   - the pairing payload carries the handle of the typed name;
  *   - the confirming side decodes with its OWN handle, and a payload for
  *     another name reads as the wrong-account copy;
- *   - the device request carries the handle, never an account id;
+ *   - the device request carries the handle alone, never an account id
+ *     and never the pairing payload (that travels sealed, device-link.ts);
  *   - the grant redeem carries the grant alone, and the account id the fresh
  *     device ends up with is the one the redeem answered;
  *   - no request leaves the device while the fresh device prepares (no
@@ -178,10 +179,11 @@ describe("the auth routes of the fresh device", () => {
       status: 200,
       json: { request_id_b64: "r", expires_in_secs: 600 },
     }));
-    const payload = new Uint8Array([5, 6, 7]);
-    await new AuthClient("/api/auth").deviceRequestCreate(alice(), payload);
+    await new AuthClient("/api/auth").deviceRequestCreate(alice());
     expect(seen.map((s) => s.url)).toEqual(["/api/auth/device/request"]);
-    expect(seen[0]?.body).toEqual({ handle: b64url(alice()), pairing_payload_b64: "BQYH" });
+    // ADR-0049 amended 2026-09-28: the handle alone; the pairing payload
+    // travels later, sealed inside the device link.
+    expect(seen[0]?.body).toEqual({ handle: b64url(alice()) });
   });
 
   it("the redeem sends the grant alone and returns the account id it answered", async () => {

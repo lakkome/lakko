@@ -246,6 +246,8 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             profileRequestEnvelopeLen: Self.profileRequestEnvelopeLength,
             decodesAsPin: Self.decodesAsPin,
             pinEnvelopeLen: Self.pinEnvelopeLength,
+            decodesAsRegistrarSeed: Self.decodesAsRegistrarSeed,
+            registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLength,
             decodesAsScopedDiscovery: Self.decodesAsScopedDiscovery,
             scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLengths
         ) {
@@ -422,6 +424,20 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     /// narrowing this filter.
     private static var pinEnvelopeLength: Int {
         Int(pinEnvelopeLen())
+    }
+
+    /// The AUTHORITATIVE half of the ADR-0057 registrar-seed filter: the slim
+    /// FFI's `decodeRegistrarSeedEnvelope` (a pure decode; the seed stays
+    /// sealed). The NSE never opens or stores it (C-59); the foreground app
+    /// gates and keeps it on its own receive path.
+    private static func decodesAsRegistrarSeed(_ bytes: Data) -> Bool {
+        (try? decodeRegistrarSeedEnvelope(plaintext: bytes)) != nil
+    }
+
+    /// The exact length of an ADR-0057 registrar-seed envelope, from the slim
+    /// FFI's `registrarSeedEnvelopeLen()` (173).
+    private static var registrarSeedEnvelopeLength: Int {
+        Int(registrarSeedEnvelopeLen())
     }
 
     /// LOAD-BEARING: this does NOT persist — no `snapshotStorage()` /

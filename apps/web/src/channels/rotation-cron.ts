@@ -156,22 +156,19 @@ export async function runRotationOnce(
   //    server's atomic-rotation guarantee means no partial
   //    landings are observable.
   // ADR-0053 — the rotation is a self-update commit, so the PublisherGroup's
-  // DS access key moves with it. Take the old epoch's key before, register the
-  // new one proven under it after. Best effort, unlike a published commit:
-  // the rotation commit is not published and cannot be rolled back here, so a
-  // refused registration is logged, and the journal's read tier plus the
-  // next claim on open cover the gap.
+  // DS access key moves with it: register the new epoch's key after, signed
+  // with the channel owner's root (ADR-0057). Best effort, unlike a published
+  // commit: the rotation commit is not published and cannot be rolled back
+  // here, so a refused registration is logged, and the owner's lazy claim on
+  // the next refused request (which registers the current epoch with the
+  // root) covers the gap.
   const signerN = takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.identity));
   ctx.publisherGroup.rotate(ctx.identity);
   {
     const signerN1 = takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.identity));
     try {
-      await registerBeforePublish(
-        new DsClient(),
-        ctx.publisherGroup.groupId(),
-        signerN,
-        signerN1,
-      );
+      // ADR-0057 — registered with the channel owner's root.
+      await registerBeforePublish(new DsClient(), ctx.publisherGroup.groupId(), signerN1);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("ds: PublisherGroup epoch registration after rotation failed", err);

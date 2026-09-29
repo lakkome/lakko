@@ -4,10 +4,10 @@
 package me.lakko.app.discovery
 
 import me.lakko.app.auth.base64UrlDecodeNoPad
-import uniffi.lakko_ffi_uniffi.groupInviteLinkSecretLen
-import uniffi.lakko_ffi_uniffi.groupInviteLinkSecretUrlLen
 import uniffi.lakko_ffi_uniffi.inviteBlobIdLen
 import uniffi.lakko_ffi_uniffi.inviteBlobIdUrlLen
+import uniffi.lakko_ffi_uniffi.inviteLinkSecretLen
+import uniffi.lakko_ffi_uniffi.inviteLinkSecretUrlLen
 
 /**
  * The widths of a short invite link (ADR-0028 amendment of 2026-09-27), read
@@ -15,8 +15,9 @@ import uniffi.lakko_ffi_uniffi.inviteBlobIdUrlLen
  *
  * - [blobIdLen] / [blobIdUrlLen]: the server-assigned ledger id of an `/i/`,
  *   `/c/` or `/g/` pointer link, 6 bytes / 8 base64url characters.
- * - [linkSecretLen] / [linkSecretUrlLen]: the `/g/` link secret in the URL
- *   fragment, 12 bytes / 16 base64url characters.
+ * - [linkSecretLen] / [linkSecretUrlLen]: the link secret in the URL fragment
+ *   of every kind (`/i/`, `/c/`, `/g/`), 12 bytes / 16 base64url characters;
+ *   since the sealed-link amendment of 2026-09-28 it opens the whole link.
  *
  * Production reads [core], which asks the FFI once. Every pure function that
  * needs a width takes an [InviteLinkLengths] parameter defaulting to [core],
@@ -35,8 +36,8 @@ public data class InviteLinkLengths(
             InviteLinkLengths(
                 blobIdLen = inviteBlobIdLen().toInt(),
                 blobIdUrlLen = inviteBlobIdUrlLen().toInt(),
-                linkSecretLen = groupInviteLinkSecretLen().toInt(),
-                linkSecretUrlLen = groupInviteLinkSecretUrlLen().toInt(),
+                linkSecretLen = inviteLinkSecretLen().toInt(),
+                linkSecretUrlLen = inviteLinkSecretUrlLen().toInt(),
             )
         }
     }
@@ -80,21 +81,3 @@ public const val INVITE_RATE_LIMITED_COPY: String =
     "Too many requests from this network right now. Try again in a minute."
 
 private const val HTTP_TOO_MANY_REQUESTS: Int = 429
-
-/**
- * Split a link token — the text after `/i/`, `/c/` or `/g/`, which since the
- * 2026-09-28 security pass carries the link secret as its fragment,
- * `<slug>#<secret>` — into the slug and the fragment (`null` when there is
- * none). The router passes the two as one string so every landing gets both.
- */
-public fun splitLinkToken(token: String): Pair<String, String?> {
-    val at = token.indexOf('#')
-    if (at < 0) return token.trim().removeSuffix("/") to null
-    val slug = token.substring(0, at).trim().removeSuffix("/")
-    val fragment = token.substring(at + 1).trim().takeIf { it.isNotEmpty() }
-    return slug to fragment
-}
-
-/** Join a slug and a fragment back into one link token. */
-public fun joinLinkToken(slug: String, fragment: String?): String =
-    if (fragment.isNullOrBlank()) slug else "$slug#$fragment"

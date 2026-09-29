@@ -37,7 +37,8 @@
  */
 import { loadWasm } from "../wasm";
 import { DsClient } from "../ds/client";
-import { registerBeforePublish, takeSigner, type ProofSigner } from "../ds/access";
+import { dsAccess, registerBeforePublish, takeSigner, type ProofSigner } from "../ds/access";
+import { claimOrReset, releaseAuthority } from "../ds/ownership";
 import type {
   DeviceGroup as WasmDeviceGroup,
   Identity as WasmIdentity,
@@ -84,6 +85,12 @@ export async function ensureDeviceGroup(
   accountIdB64: string,
   deviceIdentitySeed: Uint8Array,
   deviceKey: CryptoKey,
+  /** ADR-0057 — the account's phrase seed, so a founding can claim (or, on a
+   *  re-found, reset) the journal with the account's root even before the
+   *  session has installed its signer factory. Optional: without it the
+   *  registry's root is used, and failing that the first refused request
+   *  claims. */
+  accountIdentitySeed?: Uint8Array,
 ): Promise<EnsuredDeviceGroup> {
   const wasm = await loadWasm();
 
@@ -131,23 +138,60 @@ export async function ensureDeviceGroup(
   // Bootstrap. Local device becomes the founding leaf of the
   // user's DeviceGroup.
   const group = wasm.DeviceGroup.createFounder(identity, accountIdBytes);
-  const fresh = identity.snapshotStorage();
-  await putDeviceGroupSnapshot(accountIdB64, fresh, deviceKey);
-  // ADR-0053 contract point 2 — claim the DeviceGroup journal at founding.
-  // Unsigned: the first registration of an unclaimed journal. Best effort: a
-  // failure leaves it unclaimed (today's behaviour) and the sync provider's
-  // first request claims it.
-  const founding = takeSigner(() => group.dsAccessSigner(identity));
-  if (founding !== null) {
+  // ADR-0057 obligations 1 + 7 — the account owns its DeviceGroup, so every
+  // device holds its root. Claim the journal at founding with it; a 409 means
+  // the id already carries an older DeviceGroup's chain (this is a re-found
+  // after a lost-state recovery), and the root then RESETS it.
+  //
+  // FAIL-CLOSED (the second security pass, finding 3): the claim (or reset)
+  // must land BEFORE the founding is persisted, and so before any device is
+  // added and any Welcome sent. A failed claim, or no root available yet,
+  // throws: nothing is persisted, the in-memory founder is dropped, and the
+  // next call founds and claims again.
+  try {
+    const founding = takeSigner(() => group.dsAccessSigner(identity));
+    if (founding === null) throw new Error("ds: the DeviceGroup founding key could not be derived");
+    const groupId = group.groupId();
+    let authority = dsAccess.journalAuthority(groupId);
+    if (authority.kind !== "root" && accountIdentitySeed !== undefined) {
+      releaseAuthority(authority);
+      const account = wasm.Identity.fromSeed(accountIdentitySeed);
+      try {
+        authority = {
+          kind: "root",
+          signer: wasm.dsJournalRootSigner(account, groupId),
+          rootSeed: wasm.dsJournalRootSeed(account.ed25519Seed, groupId),
+        };
+      } finally {
+        account.free();
+      }
+    }
     try {
-      await new DsClient().claimGroupWith(group.groupId(), founding, null);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("ds: DeviceGroup claim at founding failed; claimed on first open", err);
+      if (authority.kind !== "root") {
+        throw new Error("ds: the DeviceGroup root is not available yet");
+      }
+      await claimOrReset(new DsClient(), groupId, authority.signer, founding.epoch, founding.verifyingKey());
     } finally {
+      releaseAuthority(authority);
       founding.free();
     }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("ds: DeviceGroup claim at founding failed; not founded", err);
+    try {
+      group.free();
+    } catch {
+      /* already freed */
+    }
+    try {
+      identity.free();
+    } catch {
+      /* already freed */
+    }
+    throw err;
   }
+  const fresh = identity.snapshotStorage();
+  await putDeviceGroupSnapshot(accountIdB64, fresh, deviceKey);
   return { identity, group, bootstrapped: true };
 }
 
@@ -199,20 +243,22 @@ export async function persistDeviceGroupSnapshotWithCursor(
 /**
  * ADR-0053 contract point 3 for a one-shot DeviceGroup commit (add device,
  * remove device, the attested-removal policy): register the key of the epoch
- * the commit just moved `group` to, proven under `signerN` - the key taken
- * BEFORE the create call. THROWS on a refusal; the caller then aborts before
- * persisting or publishing, which leaves the durable DeviceGroup at N (these
- * paths hold an ephemeral group that is freed without being written).
+ * the commit just moved `group` to, signed with the account's ROOT (ADR-0057:
+ * every device of the account holds it). `_signerN`, the key taken BEFORE the
+ * create call, still proves the publish that follows; it registers nothing.
+ * THROWS on a refusal; the caller then aborts before persisting or
+ * publishing, which leaves the durable DeviceGroup at N (these paths hold an
+ * ephemeral group that is freed without being written).
  */
 export async function registerDeviceGroupEpochOrThrow(
   ds: DsClient,
   group: WasmDeviceGroup,
   identity: WasmIdentity,
-  signerN: ProofSigner | null,
+  _signerN: ProofSigner | null,
 ): Promise<void> {
   const signerN1 = takeSigner(() => group.dsAccessSigner(identity));
   try {
-    await registerBeforePublish(ds, group.groupId(), signerN, signerN1);
+    await registerBeforePublish(ds, group.groupId(), signerN1);
   } finally {
     signerN1?.free();
   }

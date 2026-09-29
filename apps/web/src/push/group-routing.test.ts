@@ -179,6 +179,7 @@ import {
   rotatePushRoutingSecretIfMembershipShrank,
   routingSecretVerdict,
   ROUTING_NETWORK_TIMEOUT_MS,
+  setPushBindingSender,
   subscribeGroupUnderPushGid,
   tryDecodeSecretEnvelope,
   verdictAccepts,
@@ -190,6 +191,8 @@ import {
   putGroupRouting,
 } from "./group-routing-store";
 import { base64Encode } from "../auth/account-id";
+import { dsAccess } from "../ds/access";
+import { fakeRegistrarAuthority, fakeRootAuthority } from "../ds/access-test-doubles";
 
 // ---- helpers -------------------------------------------------------------
 
@@ -405,6 +408,83 @@ describe("group-routing orchestration (ADR-0042)", () => {
     const subTarget = subscribeGroup.mock.calls[0]![1];
     expect(Array.from(subTarget)).toEqual(Array.from(pushGid));
     expect(Array.from(subTarget)).not.toEqual(Array.from(groupId));
+  });
+
+  it("ADR-0057 obligation 8 (finding 5) — the owner's mint binds the journal to its push_gid BEFORE the broadcast", async () => {
+    const groupId = new Uint8Array(32).fill(0x3e);
+    const group = mockGroup(groupId, wasm.Role.Owner);
+    const off = dsAccess.registerOwnerSource(() => true);
+    dsAccess.setAuthorityFactory({ root: () => fakeRootAuthority("root"), registrar: () => ({ kind: "none" }) });
+    const events: string[] = [];
+    const binds: Array<{ path: string; body: string }> = [];
+    setPushBindingSender({
+      putStatement: async (path, body) => {
+        events.push("bind");
+        binds.push({ path, body });
+      },
+    });
+    try {
+      await ensureGroupPushRouting("acctBind", group, DUMMY_IDENTITY, async () => {
+        events.push("broadcast");
+      });
+      expect(events).toEqual(["bind", "broadcast"]);
+      const putArg = vi.mocked(putGroupRouting).mock.calls[0]![0];
+      expect(binds[0]!.path).toBe(`/ds/group/${"3e".repeat(32)}/push-binding`);
+      expect(JSON.parse(binds[0]!.body).pushGid).toBe(putArg.pushGidHex);
+    } finally {
+      off();
+      dsAccess.setAuthorityFactory(null);
+      setPushBindingSender(null);
+    }
+  });
+
+  it("finding 5 — a 409 (the id is bound elsewhere) mints a fresh secret once and binds that; 503 still broadcasts", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const groupId = new Uint8Array(32).fill(0x3f);
+    const group = mockGroup(groupId, wasm.Role.Owner);
+    const off = dsAccess.registerOwnerSource(() => true);
+    dsAccess.setAuthorityFactory({ root: () => fakeRootAuthority("root"), registrar: () => ({ kind: "none" }) });
+    const statuses = [409, 503];
+    const binds: string[] = [];
+    const events: string[] = [];
+    setPushBindingSender({
+      putStatement: async (_path, body) => {
+        events.push("bind");
+        binds.push(JSON.parse(body).pushGid as string);
+        const status = statuses.shift() ?? 204;
+        if (status >= 400) throw Object.assign(new Error(`HTTP ${status}`), { status });
+      },
+    });
+    try {
+      const broadcasts: Uint8Array[] = [];
+      await ensureGroupPushRouting("acct409", group, DUMMY_IDENTITY, async (b) => {
+        events.push("broadcast");
+        broadcasts.push(b);
+      });
+      // Two binds (the second for a fresh secret), then the broadcast.
+      expect(events).toEqual(["bind", "bind", "broadcast"]);
+      expect(binds[0]).not.toBe(binds[1]);
+      const putArg = vi.mocked(putGroupRouting).mock.calls[0]![0];
+      expect(putArg.pushGidHex).toBe(binds[1]);
+      expect(toHex(wasm.derivePushGid(decodeSecret(broadcasts[0]!)))).toBe(binds[1]);
+    } finally {
+      off();
+      dsAccess.setAuthorityFactory(null);
+      setPushBindingSender(null);
+      warn.mockRestore();
+    }
+  });
+
+  it("finding 5 — a member never binds (it never mints)", async () => {
+    const group = mockGroup(new Uint8Array(32).fill(0x40), wasm.Role.Member);
+    const sender = { putStatement: vi.fn(async () => undefined) };
+    setPushBindingSender(sender);
+    try {
+      await ensureGroupPushRouting("acctMem", group, DUMMY_IDENTITY, async () => {});
+      expect(sender.putStatement).not.toHaveBeenCalled();
+    } finally {
+      setPushBindingSender(null);
+    }
   });
 
   it("a second provision of the same owned group is a no-op (no re-mint / re-broadcast)", async () => {
@@ -1467,6 +1547,35 @@ describe("rotatePushRoutingSecret (ADR-0043)", () => {
       groupIdB64: GRP_B64,
     });
   }
+
+  it("finding 5 — an admin's rotation binds the NEW push_gid before broadcasting it", async () => {
+    seedSettled(OLD);
+    const group = mockGroup(GROUP_ID, undefined);
+    const events: string[] = [];
+    const binds: string[] = [];
+    dsAccess.setAuthorityFactory({
+      root: () => ({ kind: "none" }),
+      registrar: () => fakeRegistrarAuthority("adm", 2),
+    });
+    setPushBindingSender({
+      putStatement: async (_path, body) => {
+        events.push("bind");
+        binds.push(JSON.parse(body).pushGid as string);
+      },
+    });
+    try {
+      const outcome = await rotatePushRoutingSecret(ACCT, group, "admin", async () => {
+        events.push("broadcast");
+      });
+      expect(outcome).toBe("rotated");
+      expect(events).toEqual(["bind", "broadcast"]);
+      const stored = h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array;
+      expect(binds[0]).toBe(toHex(wasm.derivePushGid(stored)));
+    } finally {
+      dsAccess.setAuthorityFactory(null);
+      setPushBindingSender(null);
+    }
+  });
 
   it("the OWNER re-keys: new secret persisted + broadcast, NEW gid subscribed + indexed, OLD gid unsubscribed + de-indexed", async () => {
     seedSettled(OLD);

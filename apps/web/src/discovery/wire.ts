@@ -164,54 +164,44 @@ export interface KeyPackageFetchResponse {
 // /discovery/invite   (services/discovery/src/invite.rs — Phase 1.18d1)
 // ----------------------------------------------------------------------------
 
-/** The body every ledger upload shares since the 2026-09-28 security pass
- *  (`services/discovery/src/{invite,call_invite,group_invite}.rs`
- *  `UploadRequest`). The server stores the sealed blob opaquely: it can read
- *  neither the capability nor the link secret, so the fields it needs for the
- *  fetch filter, the consume ceiling and the owner-signed revoke ride in
- *  clear beside it. */
-export interface SealedLedgerUploadRequest {
+/** Body of `POST /discovery/invite` (sealed links, ADR-0028 amendment of
+ *  2026-09-28). The server stores the sealed blob opaque: it cannot open it
+ *  (the secret rides only in the link's fragment), so what it needs from the
+ *  capability arrives in clear fields. */
+export interface InviteUploadRequest {
   /** Standard-alphabet base64 of `InviteLinkMint.sealed`. */
   sealed: string;
-  /** Standard-alphabet base64 of the 32-byte Ed25519 key that signed the
-   *  capability (`InviteLinkMint.issuerPubkey`); the revoke verifies
-   *  against it. */
+  /** Standard-alphabet base64 of `InviteLinkMint.issuerPubkey` (32 bytes),
+   *  the key an owner-signed revoke verifies against. */
   issuer_pubkey: string;
   /** The capability's `expiry_ms` (`0` = never expires). */
   expiry_ms: number;
-  /** The consume ceiling: `0` = single-use, `0xFFFFFFFF` = unlimited, any
-   *  other N = at most N consumes. */
+  /** The capability's `max_uses` sentinel. */
   max_uses: number;
+  /** The capability's label, for the owner's own list. `/i/` only. */
+  label?: string;
+  /** The capability's referral flag, for the owner's own list. `/i/` only. */
+  bootstrap_referral?: boolean;
 }
 
-/** Body of `POST /discovery/invite`: the shared sealed upload plus the two
- *  fields the owner's own list renders, in clear because the server cannot
- *  read them out of the seal. */
-export interface InviteUploadRequest extends SealedLedgerUploadRequest {
-  /** The capability's label (UTF-8, at most 64 bytes); empty when none. */
-  label: string;
-  /** The capability's `bootstrap_referral` flag. */
-  bootstrap_referral: boolean;
-}
-
-/** Body of `POST /discovery/call-invite`. */
-export type CallInviteUploadRequest = SealedLedgerUploadRequest;
-
-/** Response body of every ledger upload. */
+/** Response body of `POST /discovery/invite`. */
 export interface InviteUploadResponse {
-  /** base64url-no-pad of the random 6-byte ledger id the server minted for
-   *  this upload (8 characters): the same blob uploaded twice gets two ids.
-   *  The client puts it in the `/<k>/<blob_id>#<secret>` URL. */
+  /** base64url-no-pad of `SHA-256(capability_bytes)` — same
+   *  bytes ⇒ same id, retried upload is a no-op (server-side
+   *  upsert via `INSERT ... ON DUPLICATE KEY UPDATE`). The
+   *  client substitutes this directly into the
+   *  `https://<host>/i/<blob_id>` pointer URL. */
   blob_id: string;
 }
 
-/** Response body of every ledger fetch (`GET /discovery/{invite,call-invite,
- *  group-invite}/{blob_id_b64url}`). 404 surfaces as `null` in the
- *  high-level client (the server folds an expired row into the same
- *  status). */
+/** Response body of `GET /discovery/invite/{blob_id_b64url}`.
+ *  404 surfaces as `null` in the high-level client (server-side
+ *  expiry filter folds expired-blob into the same status — see
+ *  `services/discovery/src/invite.rs::fetch` for why we don't
+ *  use 410). */
 export interface InviteFetchResponse {
-  /** Standard-alphabet base64 of the stored sealed blob; the joiner opens it
-   *  with the link secret from the URL fragment. */
+  /** Standard-alphabet base64 of the stored sealed blob; opened with the
+   *  link secret from the fragment (`XCapability.openLink`). */
   sealed: string;
 }
 
@@ -248,10 +238,20 @@ export interface InviteConsumeResponse {
   already_consumed: boolean;
 }
 
-/** Body of `POST /discovery/group-invite` (ADR-0028, G-3). `max_uses` is a
- *  SOFT anti-spam ceiling, not part of the signed capability and not an
- *  access control: the admin approval gate (ADR-0027) is the boundary. */
-export type GroupInviteUploadRequest = SealedLedgerUploadRequest;
+/** Body of `POST /discovery/group-invite` and `POST /discovery/call-invite`
+ *  (sealed links, ADR-0028 amendment of 2026-09-28). `max_uses` is a SOFT
+ *  consume ceiling for `/g/` (not part of the signed capability, not an
+ *  access control); for `/c/` it is the capability's own sentinel. */
+export interface GroupInviteUploadRequest {
+  /** Standard-alphabet base64 of `InviteLinkMint.sealed`. */
+  sealed: string;
+  /** Standard-alphabet base64 of `InviteLinkMint.issuerPubkey` (32 bytes). */
+  issuer_pubkey: string;
+  /** The capability's `expiry_ms` (`0` = never expires). */
+  expiry_ms: number;
+  /** `0` = single-use, `0xFFFFFFFF` = unlimited, any other N = at most N. */
+  max_uses: number;
+}
 
 /** Body of `DELETE /discovery/invite/{blob_id_b64url}` (Phase
  *  1.18d2b). The `signature` field carries proof that the

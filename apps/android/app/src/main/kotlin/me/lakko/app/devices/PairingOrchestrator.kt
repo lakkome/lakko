@@ -661,6 +661,17 @@ public object PairingOrchestrator {
         seed.fill(0)
 
         try {
+            // ADR-0057 finding 3 — no Welcome for a DeviceGroup whose founding
+            // claim has not landed: claim first, fail closed.
+            DsClient().use { ds ->
+                DeviceGroupJournalAccess.claimFoundingIfUnconfirmed(
+                    context = context,
+                    accountIdB64 = accountIdB64,
+                    group = ensured.group,
+                    identity = ensured.identity,
+                    ds = ds,
+                )
+            }
             val signerBeforeCommit = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity)
             val addition = ensured.group.addDeviceFromWire(
                 identity = ensured.identity,
@@ -676,6 +687,7 @@ public object PairingOrchestrator {
                     groupId = ensured.group.groupId(),
                     before = signerBeforeCommit,
                     after = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity),
+                    root = DeviceGroupJournalAccess.rootOf(context, accountIdB64, ensured.group.groupId()),
                 )
             }
 

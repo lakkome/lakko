@@ -53,7 +53,7 @@ import { ensureDeviceIdentitySeed } from "../../auth/device-identity-store";
 import { getDeviceKey } from "../../auth/key-store";
 import { deleteSyncState, loadSyncState, saveSyncState } from "./sync-state-idb";
 import { DsClient, DsHttpError, DsNetworkError } from "../../ds/client";
-import { dsAccess, healAfterApply, takeSigner } from "../../ds/access";
+import { dsAccess } from "../../ds/access";
 import { loadWasm } from "../../wasm";
 import type {
   DeviceGroup as WasmDeviceGroup,
@@ -189,8 +189,8 @@ export function DeviceGroupSyncProvider(props: {
 
   // ADR-0053 contract point 1 — every request to the DeviceGroup journal is
   // proven under the access key of the epoch this device's DeviceGroup is at.
-  // The DS client asks at the moment of each request, and claims the journal
-  // the first time it sees it in a session (contract point 2, claim on open).
+  // The DS client asks at the moment of each request; a refused request makes
+  // it claim the journal with the account's root (ADR-0057 obligation 2).
   const unregisterDsSource = dsAccess.registerGroupSource((groupId) => {
     if (group === null || identity === null) return null;
     const own = group.groupId();
@@ -200,7 +200,22 @@ export function DeviceGroupSyncProvider(props: {
   });
   onCleanup(unregisterDsSource);
 
+  // ADR-0057 — the account owns its DeviceGroup: every device holds the root.
+  // Keyed on the id derived from the account (`deviceGroupIdFor`), set before
+  // the group is ensured, so the founding claim finds the root too.
+  let ownDeviceGroupId: Uint8Array | null = null;
+  const unregisterOwner = dsAccess.registerOwnerSource((groupId) => {
+    const own = ownDeviceGroupId ?? group?.groupId() ?? null;
+    if (own === null || own.length !== groupId.length) return null;
+    for (let i = 0; i < own.length; i++) if (own[i] !== groupId[i]) return null;
+    return true;
+  });
+  onCleanup(unregisterOwner);
+
   // ----- Lifecycle: session ↔ anon transitions --------------------
+
+  /** How long a failed bootstrap waits before trying again. */
+  const BOOTSTRAP_RETRY_MS = 30_000;
 
   createEffect(() => {
     const s = auth.state();
@@ -239,6 +254,11 @@ export function DeviceGroupSyncProvider(props: {
     // Already bootstrapping concurrently — drop the duplicate.
     if (activeAccountIdB64 === accountIdB64 && identity !== null) return;
     activeAccountIdB64 = accountIdB64;
+    try {
+      ownDeviceGroupId = (await loadWasm()).deviceGroupIdFor(accountIdBytes);
+    } catch {
+      ownDeviceGroupId = null;
+    }
 
     const deviceKey = await getDeviceKey(accountIdB64);
     if (deviceKey === null) {
@@ -256,12 +276,23 @@ export function DeviceGroupSyncProvider(props: {
         accountIdB64,
         seed,
         deviceKey,
+        auth.identitySecrets()?.accountIdentitySeed,
       );
       seed.fill(0);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("DeviceGroupSyncProvider bootstrap failed", err);
       activeAccountIdB64 = null;
+      // A founding whose journal claim did not land (ADR-0057, the second
+      // security pass: it fails closed, nothing persisted) is retried while
+      // the session lasts. Chosen, not measured.
+      setTimeout(() => {
+        const now = auth.state();
+        const again = auth.identitySecrets();
+        if (now.kind !== "session" || again === null) return;
+        if (now.account.accountId !== accountIdB64 || activeAccountIdB64 !== null) return;
+        void bootstrap(accountIdB64, again.accountId);
+      }, BOOTSTRAP_RETRY_MS);
       return;
     }
 
@@ -324,6 +355,7 @@ export function DeviceGroupSyncProvider(props: {
     }
     const closing = activeAccountIdB64;
     activeAccountIdB64 = null;
+    ownDeviceGroupId = null;
     ownPublishedIds.clear();
     setReady(false);
     setDrafts({});
@@ -438,8 +470,6 @@ export function DeviceGroupSyncProvider(props: {
         attestVk = new Uint8Array(32);
       }
 
-      // ADR-0053 contract point 4 — the key of the epoch before this batch.
-      const signerBefore = takeSigner(() => g.dsAccessSigner(id));
       const batch = await applyDeviceJournalBatch(raw.messages, cursor, {
         isOwnEcho: (rowId) => ownPublishedIds.has(rowId),
         apply: async (message) => {
@@ -489,13 +519,8 @@ export function DeviceGroupSyncProvider(props: {
           );
         },
       });
-      // Heal on apply: when the batch moved the epoch, register the new key
-      // proven under the old one. Best effort, not awaited.
-      const signerAfter = takeSigner(() => g.dsAccessSigner(id));
-      void healAfterApply(ds, groupId, signerBefore, signerAfter).finally(() => {
-        signerBefore?.free();
-        signerAfter?.free();
-      });
+      // ADR-0057 obligation 6 — no heal on apply: the device that committed
+      // registered the epoch with the account's root before publishing.
       if (batch.persisted) {
         cursor = batch.nextCursor;
         // Past the cursor on disk now, so these ids can never come back.

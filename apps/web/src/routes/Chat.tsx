@@ -3632,6 +3632,9 @@ function ChatView(props: {
         });
         continue;
       }
+      // ADR-0057 — consumed at receipt by the chat client; a stray one is
+      // dropped here, never shown.
+      if (e.kind === "registrarSeed") continue;
       if (incomingIds.has(e.messageId)) continue;
       fresh.push({ kind: "incoming", event: e });
     }
@@ -8394,6 +8397,11 @@ function timelineRowToPersisted(
   if (row.event.kind === "scopedDiscovery") {
     // ADR-0058 — a service envelope; its payload can hold secrets (a
     // delegation, an introduction record). Never a row, never persisted.
+    return null;
+  }
+  if (row.event.kind === "registrarSeed") {
+    // ADR-0057 — consumed at receipt by the chat client and never a row.
+    // Never persist it: it carries a sealed registrar seed.
     return null;
   }
   if (row.event.kind === "membershipProposal") {

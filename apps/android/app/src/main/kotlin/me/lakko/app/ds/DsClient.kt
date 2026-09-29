@@ -427,65 +427,42 @@ public class DsClient(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0053: claims and registrations
+    // ADR-0057: journal statements (claim, reset, register, registrars,
+    // push binding)
     // -----------------------------------------------------------------
 
     /**
-     * `PUT /ds/group/{hex}/access` registering [signer]'s key at its epoch,
-     * proven by [provenBy] when given (unsigned otherwise: the first claim of
-     * an unclaimed journal, or a re-send of an already-registered key, needs
-     * no proof). Throws [DsHttpError] on a refusal.
+     * `PUT <statement.path>` with the statement's JSON body and NO proof
+     * header — the statement carries its own root or registrar signature.
+     * [make] signs a fresh statement per attempt (a statement's nonce is spent
+     * on the first try, so a retry must never re-send the same bytes).
+     *
+     * `409` is retried once: it is either a conflict the retry answers the
+     * same way, or a lock race the retry wins. Any other non-2xx throws a
+     * [DsHttpError] carrying the status (`400` malformed, `401` a stranger
+     * signer or an unclaimed journal on a non-claim route, `403` a rank
+     * shortfall, `503` push binding disabled).
      */
-    public suspend fun claimGroup(
-        groupId: ByteArray,
-        signer: DsJournalSigner,
-        provenBy: DsJournalSigner? = null,
-    ) {
-        val endpoint = "/ds/group/${pseudonymHex(groupId)}/access"
-        val body = signer.groupClaimBody().toByteArray(Charsets.UTF_8)
-        val response = send(
-            method = HttpMethod.Put,
-            endpoint = endpoint,
-            query = "",
-            body = body,
-            contentType = ContentType.Application.Json,
-            waitSecs = null,
-            signer = provenBy,
-        )
-        if (!response.status.isSuccess()) {
-            throw proofOrHttpError(response, endpoint)
+    public suspend fun putStatement(make: () -> DsStatement) {
+        var attempt = 0
+        while (true) {
+            attempt += 1
+            val statement = make()
+            val body = statement.bodyJson.toByteArray(Charsets.UTF_8)
+            val response = send(
+                method = HttpMethod.Put,
+                endpoint = statement.path,
+                query = "",
+                body = body,
+                contentType = ContentType.Application.Json,
+                waitSecs = null,
+                signer = null,
+            )
+            if (response.status.isSuccess()) return
+            val status = response.status.value
+            if (status == HTTP_CONFLICT && attempt < STATEMENT_ATTEMPTS) continue
+            throw DsHttpError(status, statement.path, response.safeReadBody())
         }
-    }
-
-    /**
-     * Register the key of the epoch a commit moves to ([next]) proven under
-     * the epoch it leaves ([current]) — ADR-0053 client contract point 3,
-     * run BEFORE the commit is persisted or published. On a refusal, retry
-     * once after re-claiming [current] (proven by the registry's previous
-     * signer for this journal, when held): the one case that repairs is a
-     * journal whose registration of [current] never landed. Throws on a
-     * second refusal; the caller aborts the commit.
-     */
-    public suspend fun registerNextEpoch(
-        groupId: ByteArray,
-        next: DsJournalSigner,
-        current: DsJournalSigner,
-    ) {
-        try {
-            claimGroup(groupId, next, provenBy = current)
-            return
-        } catch (e: DsHttpError) {
-            if (e.status != HTTP_UNAUTHORIZED && e.status != HTTP_CONFLICT) throw e
-        }
-        val previous = signers.previous(dsGroupKey(groupId))?.takeIf { it.epoch < current.epoch }
-        try {
-            claimGroup(groupId, current, provenBy = previous)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Throwable) {
-            // The retry below says whether it helped.
-        }
-        claimGroup(groupId, next, provenBy = current)
     }
 
     /**
@@ -665,8 +642,9 @@ public class DsClient(
     /**
      * ADR-0053 client contract points 1 and 5: sign with the journal's
      * current signer; on a `401`, once more with the previous epoch's signer
-     * (a read that raced a lagging registration), then once after a
-     * claim-on-open; a third refusal surfaces as [DsProofRefusedError],
+     * (a read that raced a lagging registration), then — for a journal this
+     * account OWNS (ADR-0057) or a mailbox — once after a claim; a third
+     * refusal surfaces as [DsProofRefusedError],
      * blaming the clock when the response `Date` says so. A request to a
      * journal no signer is known for goes out unsigned, and its `401` is
      * surfaced at once.
@@ -695,12 +673,18 @@ public class DsClient(
             if (response.status.value != HTTP_UNAUTHORIZED) return response
         }
         if (journal.reclaim) {
+            // ADR-0057 — a group journal is re-claimed only by its OWNER (the
+            // source installs the hook for an owned journal only), with the
+            // root; a plain member waits for the committer's registration and
+            // retries on its next poll. A mailbox keeps the ADR-0053 re-claim.
             val reclaimed = try {
                 when (journal.kind) {
-                    Journal.Kind.GROUP -> claimGroup(journal.pseudonym, first, provenBy = previous)
-                    Journal.Kind.MAILBOX -> claimMailbox(journal.pseudonym, first)
+                    Journal.Kind.GROUP -> signers.ownerClaim(journal.key)?.invoke() ?: false
+                    Journal.Kind.MAILBOX -> {
+                        claimMailbox(journal.pseudonym, first)
+                        true
+                    }
                 }
-                true
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Throwable) {
@@ -712,7 +696,16 @@ public class DsClient(
                 if (response.status.value != HTTP_UNAUTHORIZED) return response
             }
         }
-        throw refusedError(response, endpoint)
+        val refused = refusedError(response, endpoint)
+        // ADR-0057 second security pass, finding 1 — refused at this device's
+        // own epoch after everything else was tried: an owner or admin
+        // schedules the repair check (a member's note is dropped there). A
+        // wrong device clock is not a journal defect and notes nothing.
+        if (journal.kind == Journal.Kind.GROUP && !refused.clockSkewed) {
+            val epoch = (signers.current(journal.key) ?: first).epoch
+            signers.refusedAtHead(journal.key, epoch)
+        }
+        throw refused
     }
 
     private suspend fun refusedError(response: HttpResponse, endpoint: String): DsProofRefusedError =
@@ -865,6 +858,10 @@ public class DsClient(
         private const val HTTP_UNAUTHORIZED: Int = 401
 
         private const val HTTP_CONFLICT: Int = 409
+
+        /** ADR-0057 — a statement is tried at most twice: once, and once
+         *  more after a `409` (a lock race the retry wins). */
+        private const val STATEMENT_ATTEMPTS: Int = 2
 
         /**
          * ADR-0053 — the query string of a fetch, built ONCE and used both in

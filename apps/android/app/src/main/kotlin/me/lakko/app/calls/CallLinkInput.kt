@@ -30,10 +30,11 @@ package me.lakko.app.calls
 public fun callInviteSlugFromInput(input: String): String? {
     var text = input.trim()
     if (text.isEmpty()) return null
-    // The fragment is the link secret (the 2026-09-28 security pass) and is
-    // kept, carried with the slug as one `<slug>#<secret>` token; a query a
+    // Sealed links (2026-09-28): the fragment is the link secret and opens the
+    // capability, so it is KEPT and travels with the slug as `<slug>#<secret>`;
+    // the landing refuses a missing or malformed one as damaged. A query a
     // sharing app appended is dropped.
-    val fragment = text.substringAfter('#', "").trim().takeIf { it.isNotEmpty() }
+    val fragment = text.substringAfter('#', missingDelimiterValue = "").trim().ifEmpty { null }
     text = text.substringBefore('#').substringBefore('?').trimEnd('/')
     if (text.isEmpty()) return null
     val marker = CALL_INVITE_URL_PREFIX
@@ -46,5 +47,5 @@ public fun callInviteSlugFromInput(input: String): String? {
         if (text.contains('/') || text.contains(':')) return null
         text
     }
-    return me.lakko.app.discovery.joinLinkToken(slug, fragment)
+    return me.lakko.app.discovery.InviteLinkArgument(slug, fragment).encode()
 }

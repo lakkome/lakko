@@ -156,6 +156,10 @@ fn stand_in_account_id(key: &[u8; 32]) -> [u8; ACCOUNT_ID_LEN] {
 pub(crate) struct Resolved {
     /// The bound account id, or the handle's stand-in.
     pub(crate) account_id: [u8; ACCOUNT_ID_LEN],
+    /// The handle's stand-in whether or not it is bound: where a route
+    /// that must not act on the account (a suspended device link) files the
+    /// request instead, so it answers exactly as for an unknown name.
+    pub(crate) stand_in: [u8; ACCOUNT_ID_LEN],
     /// Whether a real account holds the handle. Callers MUST NOT branch on
     /// it in a way a client can observe; it exists for tests.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -178,13 +182,16 @@ pub(crate) async fn resolve(
             .await
             .map_err(ApiError::Db)?;
     let bound = row.and_then(|(v,)| <[u8; ACCOUNT_ID_LEN]>::try_from(v.as_slice()).ok());
+    let stand_in = stand_in_account_id(&key);
     Ok(match bound {
         Some(account_id) => Resolved {
             account_id,
+            stand_in,
             bound: true,
         },
         None => Resolved {
-            account_id: stand_in_account_id(&key),
+            account_id: stand_in,
+            stand_in,
             bound: false,
         },
     })

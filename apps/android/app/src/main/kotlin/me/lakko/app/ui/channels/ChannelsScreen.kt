@@ -97,6 +97,7 @@ import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsComposerException
 import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.channels.CoPublishedJournals
 import me.lakko.app.channels.CoPublisher
 import me.lakko.app.channels.LegacyChannelException
 import me.lakko.app.channels.LegacyChannelV1
@@ -297,6 +298,26 @@ public fun NewChannelScreen(
                     val wantedHandle = handle.trim().removePrefix("@")
                     scope.launch {
                         try {
+                            val publisher = state.publisher
+                                ?: throw IllegalStateException("channel publisher identity not available")
+                            // ADR-0057 finding 3 — the channel's PublisherGroup
+                            // journal is claimed with the owner's root BEFORE
+                            // anything announces the channel; a claim that does
+                            // not land aborts the creation with nothing sent.
+                            try {
+                                publisher.withIdentity { identity ->
+                                    DsClient().use { ds ->
+                                        CoPublisher.foundAndClaimAtCreation(ds, identity, id)
+                                    }
+                                }
+                            } catch (e: LegacyChannelException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                Log.w(TAG, "channel journal claim did not land; not created", e)
+                                error = "Could not reach the server. Try again."
+                                busy = false
+                                return@launch
+                            }
                             // Claim the optional handle FIRST so a first-come
                             // collision aborts cleanly without a half-created
                             // channel. An empty handle skips discovery.
@@ -334,8 +355,6 @@ public fun NewChannelScreen(
                             // created in the shared publisher identity's
                             // provider and snapshotted with it so the seed
                             // survives a relaunch.
-                            val publisher = state.publisher
-                                ?: throw IllegalStateException("channel publisher identity not available")
                             val keys = publisher.withIdentity { identity ->
                                 ChannelsComposer.freshPublisherKeys(
                                     identity = identity,
@@ -1475,10 +1494,13 @@ public fun ChannelManageScreen(
             // Open-or-create: persisted so a group minted here is not lost.
             val opened = pub.withIdentity { id -> CoPublisher.openPublisherGroup(id, channelId) }
             pubGroup = opened
-            // ADR-0053 — claim the publisher journal (at creation the first
-            // registration, afterwards an idempotent re-send). Best effort.
+            // ADR-0057 — the channel OWNER claims the publisher journal (at
+            // creation the first registration, afterwards an idempotent
+            // re-send). A co-publisher device never claims: its root would
+            // squat the journal against the owner. Best effort.
+            val coPublished = CoPublishedJournals.onDevice(context)
             pub.withIdentity(persist = false) { id ->
-                DsClient().use { ds -> CoPublisher.claimJournal(ds, id, opened) }
+                DsClient().use { ds -> CoPublisher.claimJournal(ds, id, opened, coPublished) }
             }
         } catch (e: Throwable) {
             Log.w(TAG, "open publisher group failed", e)
@@ -2036,6 +2058,10 @@ public fun JoinCoPublisherScreen(
     var offerRetry by remember { mutableStateOf(false) }
     val ds = remember { DsClient() }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    // ADR-0057 — marks the channel's journal as co-published, so this device
+    // never claims it.
+    val coPublished = remember(context) { CoPublishedJournals.onDevice(context) }
 
     Scaffold(topBar = { ChannelTopBar(title = "Join as co-publisher", onBack = onBack) }) { inner ->
         Column(
@@ -2084,7 +2110,7 @@ public fun JoinCoPublisherScreen(
                         // below must run on the SAME identity, and the
                         // joined group is persisted with it.
                         val request = publisher.withIdentity { identity ->
-                            CoPublisher.requestToCoPublish(ds, identity, trimmed)
+                            CoPublisher.requestToCoPublish(ds, identity, trimmed, coPublished)
                         }
                         status = "Waiting for the channel owner to approve..."
                         var keys: ChannelPublisherKeys? = null
@@ -2097,6 +2123,7 @@ public fun JoinCoPublisherScreen(
                                     request.groupId,
                                     request.joinerKey,
                                     request.channelIdHex,
+                                    coPublished,
                                     // G-29 — reuse the persisted signing seed on a re-poll.
                                     state.persistedPublisherSigningSeed(request.channelIdHex),
                                 )

@@ -7,16 +7,14 @@
  * absence. Pure, so `vitest` can hold the copy to the spec; `JoinGroup.tsx`
  * only places the lines.
  *
- * A missing preview is a state, not an error, when the link has no fragment
- * (a chat app stripped it, a hand-typed URL): the page reads "You are invited
- * to a group" and nothing here invents a name. A fragment that is present but
- * does not open the preview is a different state since the short-link
- * amendment of ADR-0028 (2026-09-27): the preview key binds the capability's
- * group id and issuer, so a capability a server swapped in under a live
- * ledger id fails here, and the page refuses the link as damaged rather than
- * offering a join without a preview.
+ * A missing preview is a state, not an error, when the link was minted
+ * without one: the page reads "You are invited to a group" and nothing here
+ * invents a name. Since the sealed-link amendment of ADR-0028 (2026-09-28) a
+ * link that reached this point already opened under its fragment's secret
+ * (`GroupInviteCapability.openLink`), so the secret is always present here; a
+ * preview that is present but does not open under it is damaged, and the
+ * page refuses the link rather than offering a join without a preview.
  */
-import type { GroupInviteFragment } from "../contacts/invite-link";
 
 /** What `GroupInviteCapability.openPreview` yields, as plain data. */
 export interface GroupInvitePreviewData {
@@ -83,14 +81,11 @@ export interface PreviewSource {
 
 /** What the page does with a link's preview:
  *
- *   * `preview` — the fragment's secret opened it; show the names.
- *   * `none` — the capability carries no preview (a link minted without
- *     names); show the page without one. A link with no fragment at all is
- *     refused before this runs: since the 2026-09-28 security pass nothing
- *     opens without the link secret.
- *   * `damaged` — the fragment is malformed, or the preview does not open
- *     under it (a wrong or truncated secret, a tampered preview). The page
- *     refuses the link. */
+ *   * `preview` — the link secret opened it; show the names.
+ *   * `none` — the capability carries no preview; show the page without one.
+ *   * `damaged` — the capability carries a preview that does not open under
+ *     the secret (a tampered preview, a capability other than the one the
+ *     secret was minted with). The page refuses the link. */
 export type InvitePreviewOutcome =
   | { readonly kind: "preview"; readonly preview: GroupInvitePreviewData }
   | { readonly kind: "none" }
@@ -99,17 +94,12 @@ export type InvitePreviewOutcome =
 /** Decide the preview outcome. Never throws. */
 export function resolveInvitePreview(
   cap: PreviewSource,
-  fragment: GroupInviteFragment,
+  secret: Uint8Array,
 ): InvitePreviewOutcome {
-  if (fragment.kind === "none") return { kind: "none" };
-  if (fragment.kind === "damaged") return { kind: "damaged" };
-  // The capability was opened with this very secret (`openLink`), so one
-  // minted without a preview (a co-publisher link) is a link without names,
-  // not a swapped capability.
   if (!cap.hasPreview) return { kind: "none" };
   let opened: GroupInvitePreviewData | undefined;
   try {
-    opened = cap.openPreview(fragment.secret);
+    opened = cap.openPreview(secret);
   } catch {
     return { kind: "damaged" };
   }

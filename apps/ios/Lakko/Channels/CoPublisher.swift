@@ -41,7 +41,12 @@ public enum CoPublisher {
             throw CoPublisherError.badChannelId(channelIdHex)
         }
         do {
-            return try publisherGroupOpenOrCreate(identity: identity, channelId: channelId)
+            if let existing = try publisherGroupLoad(identity: identity, channelId: channelId) {
+                return existing
+            }
+            let created = try publisherGroupOpenOrCreate(identity: identity, channelId: channelId)
+            markFounded(created)
+            return created
         } catch {
             // A channel minted under the retired v1 derivation refuses here and
             // cannot be repaired — surface the readable copy, not the raw string.
@@ -49,83 +54,43 @@ public enum CoPublisher {
         }
     }
 
+    /// ADR-0057 obligation 7 — this device founded the PublisherGroup: its
+    /// next claim may reset a journal the same root claimed before (a channel
+    /// whose local PublisherGroup was lost and founded again).
+    static func markFounded(_ group: PublisherGroup) {
+        guard let groupId = try? group.groupId() else { return }
+        JournalFoundingMarks.shared.mark(journalIdHex: DsClient.pseudonymHex(groupId))
+    }
+
     /// Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`.
     /// A non-member opens it, requests to join, and the owner approves (reusing
     /// the ADR-0027/0028 external-join machinery). `0` = never expires.
     ///
-    /// Sealed links (ADR-0028 amendment of 2026-09-28): the capability is
-    /// sealed under a fresh 12-byte secret that rides the fragment only; the
-    /// sealed blob goes to the `/g/` ledger on `discovery` (a session-bearing
-    /// client, the upload is `require_session`) and the short pointer link is
-    /// returned. Only a TRANSPORT failure falls back to the inline link; a
-    /// server refusal surfaces.
+    /// ADR-0028 amendment 2026-09-28 — the capability is sealed under a 12-byte
+    /// link secret that rides the fragment. A co-publisher link was never put
+    /// on the discovery ledger, so it keeps the inline shape:
+    /// `<origin>/g/<b64url sealed>#<secret>`.
     public static func createCoPublisherLink(
         identity: Identity,
         publisherGroup: PublisherGroup,
-        discovery: DiscoveryClient,
         origin: String = defaultOrigin
-    ) async throws -> String {
+    ) throws -> String {
         let groupId = try publisherGroup.groupId()
         let mint = try composeGroupInviteCapability(
             issuerSigningSeed: identity.ed25519Seed(),
             groupId: groupId,
             expiryMs: 0
         )
-        do {
-            let blobId = try await discovery.uploadGroupInvite(
-                mint: mint, expiryMs: 0, maxUses: UInt32.max)
-            return InviteLink.pointer(
-                origin: origin, prefix: urlPrefix, blobId: blobId, secret: mint.linkSecret)
-        } catch let error where InviteLink.uploadFallsBackInline(error) {
-            NSLog("co-publisher link upload failed (network); sharing the inline link")
-            return InviteLink.inline(
-                origin: origin, prefix: urlPrefix, sealed: mint.sealed, secret: mint.linkSecret)
-        }
+        return InviteLinkSecret.link(
+            base: "\(origin)\(urlPrefix)\(Self.base64UrlEncode(mint.sealed))",
+            secret: mint.linkSecret)
     }
 
-    /// Open a pasted `/g/` co-publisher link: read the secret from the
-    /// fragment (none or malformed → ``CoPublisherError/damagedLink``, before
-    /// any request), take the sealed blob inline or fetch it by id, and open
-    /// + verify it. Returns the opened capability.
-    static func openCoPublisherLink(
-        _ link: String,
-        discovery: DiscoveryClient
-    ) async throws -> GroupInviteCapability {
-        let (base, fragment) = InviteLink.split(link.trimmingCharacters(in: .whitespacesAndNewlines))
-        guard let idx = base.range(of: urlPrefix, options: .backwards) else {
-            throw CoPublisherError.notACoPublisherLink(link)
-        }
-        let slug = String(base[idx.upperBound...])
-        let parsed: GroupInviteUrl.ParsedGroupInvite
-        do {
-            parsed = try GroupInviteUrl.parseGroupInviteSlug(slug)
-        } catch {
-            throw CoPublisherError.notACoPublisherLink(link)
-        }
-        guard let secret = InviteLink.secret(fromFragment: fragment) else {
-            throw CoPublisherError.damagedLink
-        }
-        let sealed: Data
-        switch parsed {
-        case .inline(let bytes):
-            sealed = bytes
-        case .pointer(let blobId):
-            guard let fetched = try await discovery.fetchGroupInvite(blobId: blobId) else {
-                throw CoPublisherError.notACoPublisherLink(link)
-            }
-            sealed = fetched
-        }
-        do {
-            return try GroupInviteCapability.openLink(sealed: sealed, linkSecret: secret)
-        } catch {
-            throw CoPublisherError.damagedLink
-        }
-    }
-
-    // MARK: - ADR-0053 journal access
+    // MARK: - ADR-0053 / ADR-0057 journal access
 
     /// The auth for a request to the PublisherGroup's journal (contract point
-    /// 1): its current-epoch access signer, and a claim-on-open as the retry.
+    /// 1): its current-epoch access signer, and the root's lazy claim as the
+    /// retry.
     public static func auth(
         ds: DsClient,
         identity: Identity,
@@ -134,30 +99,97 @@ public enum CoPublisher {
         guard let signer = try? publisherGroup.dsAccessSigner(identity: identity) else { return nil }
         return DsAuth(
             signer: signer,
-            reclaim: { await claimJournal(ds: ds, identity: identity, publisherGroup: publisherGroup) }
+            reclaim: { await lazyClaim(ds: ds, identity: identity, publisherGroup: publisherGroup) }
         )
     }
 
-    /// Claim-on-open (contract point 2) — register the current epoch's access
-    /// key; the first open after `publisherGroupOpenOrCreate` is the claim at
-    /// creation. Idempotent and unsigned; a failure is logged and retried on
-    /// the next open.
+    /// The PublisherGroup journal's root: the channel owner's ACCOUNT identity
+    /// (channels run on the account identity).
+    static func rootSigner(identity: Identity, publisherGroup: PublisherGroup) throws
+        -> DsStatementSignerProtocol {
+        try dsJournalRootSigner(accountIdentity: identity, journalId: try publisherGroup.groupId())
+    }
+
+    /// Claim on open. A PublisherGroup this device just founded claims with
+    /// the root and resets on a `409` (obligation 7); otherwise the claim is
+    /// the idempotent re-send and a refusal is left alone. Best effort.
+    ///
+    /// Only the CHANNEL OWNER claims. A co-publisher's root is derived from
+    /// its own account seed, so its claim would squat the journal against the
+    /// owner; a co-publisher device (``CoPublishedJournals``) never claims, and
+    /// when the journal is still unclaimed it waits for the owner.
     @discardableResult
     public static func claimJournal(
-        ds: DsClient,
+        ds: DsStatementSending,
         identity: Identity,
-        publisherGroup: PublisherGroup
+        publisherGroup: PublisherGroup,
+        marks: JournalFoundingMarks = .shared,
+        coPublished: CoPublishedJournals = .shared
     ) async -> DsRequestSigner? {
         guard let signer = try? publisherGroup.dsAccessSigner(identity: identity),
               let groupId = try? publisherGroup.groupId() else { return nil }
+        let hex = DsClient.pseudonymHex(groupId)
+        guard !coPublished.contains(journalIdHex: hex) else {
+            NSLog("ADR-0057: co-publisher device; the channel owner claims the journal")
+            return signer
+        }
+        guard let root = try? rootSigner(identity: identity, publisherGroup: publisherGroup)
+        else { return nil }
         do {
-            try await ds.claimGroup(
-                groupId: groupId, bodyJson: signer.groupClaimBodyJson(), provenBy: nil)
+            if marks.isMarked(journalIdHex: hex) {
+                try await JournalOwnership.claimOrReset(
+                    root: root, journalId: groupId, epoch: signer.epoch(),
+                    epochKey: signer.verifyingKey(), ds: ds)
+                marks.clear(journalIdHex: hex)
+            } else {
+                try await JournalOwnership.claim(
+                    root: root, journalId: groupId, epoch: signer.epoch(),
+                    epochKey: signer.verifyingKey(), ds: ds)
+            }
+        } catch DsStatementError.conflict {
+            // Already claimed by this root at another chain; commits register
+            // under the root.
         } catch {
-            NSLog("ADR-0053: PublisherGroup journal claim failed, retried on the next open: %@",
+            NSLog("ADR-0057: PublisherGroup journal claim failed, retried on the next open: %@",
                   String(describing: error))
         }
         return signer
+    }
+
+    /// The root's lazy claim after a `401` (obligation 2) — the channel
+    /// owner's only: a co-publisher device never claims (its root would squat
+    /// the journal), it waits. An already-claimed journal (`409`) is left
+    /// alone.
+    static func lazyClaim(
+        ds: DsStatementSending,
+        identity: Identity,
+        publisherGroup: PublisherGroup,
+        coPublished: CoPublishedJournals = .shared
+    ) async -> DsRequestSigner? {
+        guard let signer = try? publisherGroup.dsAccessSigner(identity: identity),
+              let groupId = try? publisherGroup.groupId() else { return nil }
+        let outcome = await JournalOwnership.lazyClaim(
+            isOwner: !coPublished.contains(journalIdHex: DsClient.pseudonymHex(groupId)),
+            root: { try rootSigner(identity: identity, publisherGroup: publisherGroup) },
+            journalId: groupId, epoch: signer.epoch(), epochKey: signer.verifyingKey(), ds: ds)
+        switch outcome {
+        case .claimed: return signer
+        case .alreadyClaimed, .notOwner, .failed: return nil
+        }
+    }
+
+    /// Register the epoch a PublisherGroup commit moves to under the root
+    /// (obligation 5). Throws: a refused registration aborts the commit.
+    static func registerEpoch(
+        ds: DsStatementSending,
+        identity: Identity,
+        publisherGroup: PublisherGroup,
+        next: DsGroupSigner
+    ) async throws {
+        try await JournalOwnership.registerEpoch(
+            authority: .root(try rootSigner(identity: identity, publisherGroup: publisherGroup)),
+            journalId: try publisherGroup.groupId(), epoch: next.epoch(),
+            epochKey: next.verifyingKey(), revoke: [], ds: ds)
     }
 
     /// What one ``pollJournal(ds:identity:publisherGroup:knockAfter:)`` did.
@@ -175,8 +207,8 @@ public enum CoPublisher {
     /// (`PublisherGroup.processKnock`), which refuses anything that is not a
     /// stranger's external-join proposal for this group before processing it —
     /// a refused row is dropped and the cursor still advances. Our own
-    /// already-merged commits throw and are skipped. A batch that moved the epoch re-registers the new key
-    /// (heal-on-apply, point 4).
+    /// already-merged commits throw and are skipped. (ADR-0057: no
+    /// heal-on-apply; the committer registered the epoch.)
     public static func pollJournal(
         ds: DsClient,
         identity: Identity,
@@ -185,7 +217,6 @@ public enum CoPublisher {
         readKnocks: Bool = true
     ) async throws -> PollOutcome {
         let groupId = try publisherGroup.groupId()
-        let signerBefore = try? publisherGroup.dsAccessSigner(identity: identity)
         let raw = try await ds.fetchGroup(
             groupId: groupId, after: 0, waitSecs: 0,
             auth: auth(ds: ds, identity: identity, publisherGroup: publisherGroup))
@@ -224,9 +255,6 @@ public enum CoPublisher {
                 }
             }
         }
-        await dsHealRegistration(
-            ds: ds, groupId: groupId, before: signerBefore,
-            after: try? publisherGroup.dsAccessSigner(identity: identity))
         return PollOutcome(
             pendingCount: try publisherGroup.pendingExternalJoins().count,
             knockCursor: knockCursor)
@@ -264,9 +292,9 @@ public enum CoPublisher {
             create: {
                 try publisherGroup.approveExternalJoin(identity: identity, proposalRef: proposalRef)
             },
-            register: { next, provenBy in
-                try await ds.claimGroup(
-                    groupId: groupId, bodyJson: next.groupClaimBodyJson(), provenBy: provenBy)
+            register: { next in
+                try await registerEpoch(
+                    ds: ds, identity: identity, publisherGroup: publisherGroup, next: next)
             },
             prepare: { added in added },
             rollback: {},
@@ -332,13 +360,27 @@ public enum CoPublisher {
     public static func requestToCoPublish(
         ds: DsClient,
         identity: Identity,
-        link: String,
-        discovery: DiscoveryClient = DiscoveryClient()
+        link: String
     ) async throws -> CoPublishRequest {
-        let cap = try await openCoPublisherLink(link, discovery: discovery)
-        // The PLAINTEXT capability the link opened to: what the attribution
-        // carries (the ledger consume is not driven here; the co-publisher
-        // link is minted with an unlimited ceiling).
+        // ADR-0028 amendment 2026-09-28 — `<origin>/g/<b64url sealed>#<secret>`:
+        // the capability is sealed under the fragment's secret.
+        let parts = InviteLinkSecret.split(link)
+        guard let idx = parts.base.range(of: urlPrefix, options: .backwards) else {
+            throw CoPublisherError.notACoPublisherLink(parts.base)
+        }
+        let slug = String(parts.base[idx.upperBound...])
+        guard let sealed = Self.base64UrlDecode(slug) else {
+            throw CoPublisherError.notACoPublisherLink(parts.base)
+        }
+        guard let secret = InviteLinkSecret.read(parts.fragment) else {
+            throw CoPublisherError.linkDamaged
+        }
+        let cap: GroupInviteCapability
+        do {
+            cap = try GroupInviteCapability.openLink(sealed: sealed, linkSecret: secret)
+        } catch {
+            throw CoPublisherError.linkDamaged
+        }
         let wire = cap.wire()
         let groupId = cap.groupId()
         guard let channelIdBytes = channelIdFromPublisherGroupId(groupId: groupId) else {
@@ -351,6 +393,9 @@ public enum CoPublisher {
             throw CoPublisherError.notAChannelGroup
         }
         let channelIdHex = ChannelsComposer.bytesToHex(channelIdBytes)
+        // ADR-0057 — this device asks to CO-publish, so it is not the channel
+        // owner: it must never claim the PublisherGroup journal.
+        CoPublishedJournals.shared.mark(journalIdHex: DsClient.pseudonymHex(groupId))
         // ADR-0053 point 6 — the knock: a probe learns the registered epoch,
         // the proposal is built for it, a second knock carries the self-signed
         // attribution (OQ2, advisory) and the proposal. No journal read.
@@ -401,7 +446,6 @@ public enum CoPublisher {
         // has co-published to the channel before (nil on a first join).
         existingSigningSeed: Data? = nil
     ) async throws -> ChannelPublisherKeys? {
-        _ = groupId
         let mailbox = try IdentityPseudonym.fromIdentity(pubkey: joinerKey).asBytes()
         let signer = dsMailboxSigner(identity: identity)
         var candidates: [Data] = []
@@ -431,6 +475,9 @@ public enum CoPublisher {
             }
         }
         guard joined else { return nil }
+        // ADR-0057 — a co-publisher never claims the journal (idempotent with
+        // the mark set when the request was sent).
+        CoPublishedJournals.shared.mark(journalIdHex: DsClient.pseudonymHex(groupId))
         return try ChannelsComposer.freshPublisherKeys(
             identity: identity,
             channelIdHex: channelIdHex,
@@ -522,11 +569,9 @@ public enum CoPublisherError: Error, LocalizedError {
     case malformedSubscriberHex(String)
     case notACoPublisherLink(String)
     case notAChannelGroup
-    /// The link has no fragment, a fragment that is not a link secret, or a
-    /// sealed capability that does not open under it.
-    case damagedLink
-    /// No session token, so the ledger upload cannot be made.
-    case notSignedIn
+    /// ADR-0028 amendment 2026-09-28 — the link's secret is missing or the
+    /// capability does not open under it.
+    case linkDamaged
 
     public var errorDescription: String? {
         switch self {
@@ -540,10 +585,35 @@ public enum CoPublisherError: Error, LocalizedError {
             return "not a /g/ co-publisher link: \(link)"
         case .notAChannelGroup:
             return "co-publisher link does not target a channel PublisherGroup"
-        case .damagedLink:
-            return "co-publisher link is damaged"
-        case .notSignedIn:
-            return "not signed in: no session token for discovery"
+        case .linkDamaged:
+            return inviteLinkDamagedMessage
         }
+    }
+}
+
+/// ADR-0057 — PublisherGroup journals this device joined as a CO-publisher.
+/// Only the channel owner claims a PublisherGroup journal: a co-publisher's
+/// root is derived from its own account seed, so its claim would squat the
+/// journal against the owner. A PublisherGroup exposes no role table, so the
+/// device remembers that it asked to co-publish. Plain `UserDefaults`: a
+/// journal id is a public DS address.
+public final class CoPublishedJournals {
+    public static let shared = CoPublishedJournals()
+
+    private let defaults: UserDefaults
+    private static let key = "me.lakko.ds.co-published.v1"
+
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    public func mark(journalIdHex: String) {
+        var set = Set(defaults.stringArray(forKey: Self.key) ?? [])
+        guard set.insert(journalIdHex.lowercased()).inserted else { return }
+        defaults.set(Array(set).sorted(), forKey: Self.key)
+    }
+
+    public func contains(journalIdHex: String) -> Bool {
+        (defaults.stringArray(forKey: Self.key) ?? []).contains(journalIdHex.lowercased())
     }
 }

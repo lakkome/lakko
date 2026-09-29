@@ -267,17 +267,24 @@ public struct SweepJournalPort {
     /// anything is recorded or published: a commit is never on the wire before
     /// the server knows its epoch. A throw on the first run abandons the sweep.
     public var registerStagedEpoch: () async throws -> Void
+    /// ADR-0057 obligation 5 — whether this device holds a key the DS accepts
+    /// an epoch registration from (the journal root, or a registrar seed the
+    /// owner sent). Without one a commit could never be registered, so the
+    /// sweep is never staged: it is left to an admin or the owner.
+    public var canRegister: () -> Bool
 
     public init(
         fetch: @escaping (Int64) async throws -> [SweepJournalRow],
         publishGroup: @escaping (Data) async throws -> Int64,
         publishMailbox: @escaping (Data, Data) async throws -> Int64,
-        registerStagedEpoch: @escaping () async throws -> Void
+        registerStagedEpoch: @escaping () async throws -> Void,
+        canRegister: @escaping () -> Bool = { true }
     ) {
         self.fetch = fetch
         self.publishGroup = publishGroup
         self.publishMailbox = publishMailbox
         self.registerStagedEpoch = registerStagedEpoch
+        self.canRegister = canRegister
     }
 }
 
@@ -439,6 +446,10 @@ public enum SweepOutcome: Equatable {
     case deferred(rank: UInt32, toRank: UInt32?)
     /// Nothing authorised was pending and nothing was staged.
     case nothingPending
+    /// ADR-0057 — this device is a committer candidate but holds neither the
+    /// journal root nor a registrar seed, so it cannot register an epoch and
+    /// did not stage. The sweep is left to an appointed admin or the owner.
+    case noJournalAuthority(rank: UInt32)
     /// Obligation 3 — the journal moved since our cursor, so a commit may
     /// already be in flight. Stood down without staging; the poll drains the
     /// rows and the next attempt re-evaluates.
@@ -613,6 +624,13 @@ public func runCommitterSweep(_ ports: SweepPorts) async throws -> SweepOutcome 
         return .deferred(rank: rank, toRank: nil)
     }
 
+    // ADR-0057 obligation 5 — the ACTING committer must hold a key the DS
+    // takes an epoch registration from. A candidate the owner has not
+    // appointed yet (no registrar seed) could only produce a commit that can
+    // never be published, so it does not stage. Asked after the election, so
+    // a device that would have deferred anyway still reports the deferral.
+    guard ports.journal.canRegister() else { return .noJournalAuthority(rank: rank) }
+
     // Obligation 3 — the stand-down re-read, immediately before creating the
     // commit.
     let cursorBefore = ports.cursor.read()
@@ -752,18 +770,12 @@ private func publishAndAdjudicate(
 
     let entry: SweepDurableEntry
     if let owed {
+        // ADR-0057 — nothing is re-registered for an owed verdict. The first
+        // run registered the next epoch before it wrote this entry; if the
+        // sweep then LOST, a re-registration (by the root, which replaces every
+        // epoch at and above it) would replace the winner's epoch and cut the
+        // group off. The verdict is resolved only.
         entry = owed
-        // ADR-0053 — the first run registered the next epoch before it wrote
-        // this entry, so re-sending the registration is normally the
-        // idempotent no-op. Best effort: the commit is (probably) already on
-        // the wire, so abandoning here on a transient DS failure would strand
-        // this device behind its own commit.
-        do {
-            try await ports.journal.registerStagedEpoch()
-        } catch {
-            NSLog("ADR-0053: re-registration of an owed sweep's epoch not accepted: %@",
-                  String(describing: error))
-        }
     } else {
         // ADR-0053 point 3 — register the next epoch, then obligation 4 —
         // durably record the artifacts before ANY publish. The Welcome is

@@ -166,6 +166,10 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
       case "scopedDiscovery":
         scoped.push(e);
         break;
+      case "registrarSeed":
+        // ADR-0057 — consumed at receipt by the chat client and never handed
+        // on; a stray one is dropped here rather than rendered.
+        break;
       default: {
         const unhandled: never = e;
         throw new Error(

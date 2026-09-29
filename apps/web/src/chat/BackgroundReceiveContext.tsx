@@ -50,6 +50,7 @@ import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { useCallHost } from "../calls/CallHostContext";
 import { isDsNetworkFailure } from "../ds/client";
+import { JOURNAL_REPAIR_MAX_POLLS, journalRepair } from "../ds/journal-repair";
 import {
   createWakeLatch,
   LONG_POLL_WAIT_SECS,
@@ -1047,7 +1048,24 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   // load-bearing call `WakeNavigator` and `CallActionListener` make).
   if (typeof swContainer?.startMessages === "function") swContainer.startMessages();
 
+  // ADR-0057 second security pass, finding 1 - the repair check polls a
+  // conversation group to its journal head before deciding. A group the chat
+  // view has open is already long-polled to its head by the view, so only a
+  // background group is polled here (the same exclusion as `syncGroupNow`).
+  const unregisterHeadPoller = journalRepair.registerHeadPoller({
+    owns: (groupId) => chats.get(base64Encode(groupId)) !== undefined,
+    pollToHead: async (groupId) => {
+      const groupIdB64 = base64Encode(groupId);
+      if (coordinator.isForeground(groupIdB64)) return;
+      for (let i = 0; i < JOURNAL_REPAIR_MAX_POLLS; i++) {
+        const r = await pollGroup(groupIdB64, 0, new AbortController().signal);
+        if (!r.yieldedRows) return;
+      }
+    },
+  });
+
   onCleanup(() => {
+    unregisterHeadPoller();
     globalThis.document?.removeEventListener("visibilitychange", onVisibility);
     swContainer?.removeEventListener("message", onSwMessage);
     stop();

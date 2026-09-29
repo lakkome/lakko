@@ -183,7 +183,7 @@ class PushPreviewDecryptTest {
         val signer = object : me.lakko.app.ds.DsJournalSigner {
             override val epoch: ULong = 7uL
             override fun sign(method: String, path: String, query: String, body: ByteArray) = "v1.proof"
-            override fun groupClaimBody() = "{}"
+            override val verifyingKey: ByteArray = ByteArray(32)
             override fun mailboxClaimBody() = "{}"
         }
         val group = FakeThrowawayGroup(decode = { chat("hello") }, signer = signer)

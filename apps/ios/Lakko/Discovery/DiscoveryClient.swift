@@ -670,18 +670,20 @@ public final class DiscoveryClient {
 
     // MARK: - Invite endpoints (1.14e6, parallel to Android 1.15e9)
 
-    /// `POST /discovery/invite` — upload a sealed `/i/` capability, get the
-    /// server-minted 6-byte `blob_id` back (8 base64url characters). Not
-    /// idempotent: every upload gets a fresh random id.
+    /// `POST /discovery/invite` — upload a verified
+    /// `InviteCapability` blob, get the server-minted 6-byte
+    /// `blob_id` back (8 base64url characters). Not idempotent:
+    /// every upload gets a fresh random id.
     public func inviteUpload(
-        _ request: SealedInviteUploadRequest
+        _ request: InviteUploadRequest
     ) async throws -> InviteUploadResponse {
         try await post(endpoint: "/discovery/invite", body: request)
     }
 
-    /// `GET /discovery/invite/{blob_id_b64url}`. Returns the sealed blob on
-    /// 200, `nil` on 404 (server folds expired blobs into the same status),
-    /// throws on any other non-2xx.
+    /// `GET /discovery/invite/{blob_id_b64url}`. Returns the
+    /// capability wire shape on 200, `nil` on 404 (server folds
+    /// expired blobs into the same status), throws on any other
+    /// non-2xx.
     public func inviteFetch(blobId: Data) async throws -> InviteFetchResponse? {
         guard blobId.count == Self.blobIdLength else {
             throw DiscoveryClientError.argument(
@@ -696,12 +698,11 @@ public final class DiscoveryClient {
 
     // MARK: - High-level invite flows
 
-    /// Upload a freshly-minted sealed `/i/` capability and receive the
-    /// server-minted `blobId` (6 random bytes). Carries the clear fields the
-    /// server needs (sealed-links amendment of 2026-09-28): the issuer key,
-    /// the expiry and the consume ceiling, plus the label and the
-    /// bootstrap-referral flag for the owner's own list. The link secret is
-    /// never part of the request.
+    /// Upload a freshly-minted SEALED `/i/` link (ADR-0028 amendment
+    /// 2026-09-28) and receive the server-minted `blobId` (6 random bytes).
+    /// The ledger stores only `mint.sealed`; the clear fields carry what the
+    /// server needs (revoke key, expiry, consume ceiling, the owner's label).
+    /// A second upload of the same bytes gets a second id.
     public func uploadInvite(
         mint: InviteLinkMint,
         expiryMs: UInt64,
@@ -709,18 +710,24 @@ public final class DiscoveryClient {
         label: String,
         bootstrapReferral: Bool
     ) async throws -> Data {
-        let request = try Self.sealedUploadRequest(
-            mint: mint, expiryMs: expiryMs, maxUses: maxUses,
-            maxSealedBytes: Self.maxSealedInviteBytes,
-            label: label, bootstrapReferral: bootstrapReferral)
-        let resp = try await inviteUpload(request)
-        return try Self.uploadedBlobId(resp, endpoint: "/discovery/invite")
+        try Self.checkSealed(mint.sealed, ceiling: Self.maxCapabilityBytes)
+        let resp = try await inviteUpload(
+            InviteUploadRequest(
+                sealed: base64Encode(mint.sealed),
+                issuerPubkey: base64Encode(mint.issuerPubkey),
+                expiryMs: expiryMs,
+                maxUses: maxUses,
+                label: label,
+                bootstrapReferral: bootstrapReferral
+            )
+        )
+        return try Self.parseBlobId(resp.blobId, endpoint: "/discovery/invite")
     }
 
-    /// Fetch a previously-uploaded sealed `/i/` capability by its ledger
-    /// `blobId`. Returns `nil` on 404, the sealed bytes on 200; the caller
-    /// opens them with `InviteCapability.openLink(sealed:linkSecret:)`, which
-    /// refuses a substituted blob.
+    /// Fetch a previously-uploaded SEALED `/i/` link by its ledger `blobId`.
+    /// Returns `nil` on 404, the sealed bytes on 200; the caller opens them
+    /// with the link's fragment secret (`InviteCapability.openLink`), which
+    /// also re-verifies the signature, so a substituted blob opens nothing.
     public func fetchInvite(blobId: Data) async throws -> Data? {
         guard let raw = try await inviteFetch(blobId: blobId) else {
             return nil
@@ -934,18 +941,23 @@ public final class DiscoveryClient {
         )
     }
 
-    /// `POST /discovery/call-invite` — upload a sealed `/c/` capability.
-    /// Sibling of ``inviteUpload(_:)``; the wire shape
-    /// ``SealedInviteUploadRequest`` is shared (without `label` /
-    /// `bootstrap_referral`), only the URL path differs.
+    /// `POST /discovery/call-invite` — upload a verified
+    /// `CallInviteCapability` blob (Phase 3c3-server). Sibling
+    /// of ``inviteUpload(_:)`` — wire shape
+    /// ``InviteUploadRequest`` is shared; only the URL path
+    /// differs. The high-level
+    /// ``uploadCallInvite(capabilityBytes:)`` wrapper drives
+    /// the token.
     public func callInviteUpload(
-        _ request: SealedInviteUploadRequest
+        _ request: InviteUploadRequest
     ) async throws -> InviteUploadResponse {
         try await post(endpoint: "/discovery/call-invite", body: request)
     }
 
-    /// `GET /discovery/call-invite/{blob_id_b64url}`. Returns the sealed blob
-    /// on 200, `nil` on 404, throws on any other non-2xx.
+    /// `GET /discovery/call-invite/{blob_id_b64url}`. Returns
+    /// the capability wire shape on 200, `nil` on 404 (server
+    /// folds expired blobs into the same status), throws on any
+    /// other non-2xx.
     public func callInviteFetch(blobId: Data) async throws -> InviteFetchResponse? {
         guard blobId.count == Self.blobIdLength else {
             throw DiscoveryClientError.argument(
@@ -958,24 +970,28 @@ public final class DiscoveryClient {
         )
     }
 
-    /// Upload a freshly-minted sealed `/c/` capability and receive the
+    /// Upload a freshly-minted SEALED `/c/` link and receive the
     /// server-minted `blobId` (6 random bytes). Drives
-    /// `POST /discovery/call-invite`; every upload gets a fresh id.
+    /// `POST /discovery/call-invite`. Every upload gets a fresh id.
     public func uploadCallInvite(
         mint: InviteLinkMint,
         expiryMs: UInt64,
         maxUses: UInt32
     ) async throws -> Data {
-        let request = try Self.sealedUploadRequest(
-            mint: mint, expiryMs: expiryMs, maxUses: maxUses,
-            maxSealedBytes: Self.maxSealedCallInviteBytes)
-        let resp = try await callInviteUpload(request)
-        return try Self.uploadedBlobId(resp, endpoint: "/discovery/call-invite")
+        try Self.checkSealed(mint.sealed, ceiling: Self.maxCallCapabilityBytes)
+        let resp = try await callInviteUpload(
+            InviteUploadRequest(
+                sealed: base64Encode(mint.sealed),
+                issuerPubkey: base64Encode(mint.issuerPubkey),
+                expiryMs: expiryMs,
+                maxUses: maxUses
+            )
+        )
+        return try Self.parseBlobId(resp.blobId, endpoint: "/discovery/call-invite")
     }
 
-    /// Fetch a previously-uploaded sealed `/c/` capability by its ledger
-    /// `blobId`. Returns `nil` on 404, the sealed bytes on 200; the caller
-    /// opens them with `CallInviteCapability.openLink(sealed:linkSecret:)`.
+    /// Fetch a previously-uploaded SEALED `/c/` link. `nil` on 404, the
+    /// sealed bytes on 200 (opened with `CallInviteCapability.openLink`).
     public func fetchCallInvite(blobId: Data) async throws -> Data? {
         guard let raw = try await callInviteFetch(blobId: blobId) else {
             return nil
@@ -1071,16 +1087,18 @@ public final class DiscoveryClient {
     // ADR-0028 (G-3) — group join-ticket blob ledger
     // ------------------------------------------------------------------------
 
-    /// `POST /discovery/group-invite` — upload a sealed `/g/` capability.
-    /// Low-level helper driven by ``uploadGroupInvite(mint:expiryMs:maxUses:)``.
+    /// `POST /discovery/group-invite` — upload a verified
+    /// `GroupInviteCapability` blob. Low-level helper driven by
+    /// ``uploadGroupInvite(capabilityBytes:maxUses:)``.
     public func groupInviteUpload(
-        _ request: SealedInviteUploadRequest
+        _ request: InviteUploadRequest
     ) async throws -> InviteUploadResponse {
         try await post(endpoint: "/discovery/group-invite", body: request)
     }
 
-    /// `GET /discovery/group-invite/{blob_id_b64url}`. Returns the sealed blob
-    /// on 200, `nil` on 404, throws on any other non-2xx.
+    /// `GET /discovery/group-invite/{blob_id_b64url}`. Returns the capability
+    /// wire shape on 200, `nil` on 404 (server folds expired blobs into the
+    /// same status), throws on any other non-2xx.
     public func groupInviteFetch(blobId: Data) async throws -> InviteFetchResponse? {
         guard blobId.count == Self.blobIdLength else {
             throw DiscoveryClientError.argument(
@@ -1093,28 +1111,32 @@ public final class DiscoveryClient {
         )
     }
 
-    /// Upload a freshly-minted sealed `/g/` capability and receive the
-    /// server-minted `blobId` (6 random bytes). Drives `POST
-    /// /discovery/group-invite`. Every upload gets a fresh id.
+    /// Upload a freshly-minted SEALED `/g/` link and receive the
+    /// server-minted `blobId` (6 random bytes). Drives
+    /// `POST /discovery/group-invite`. Every upload gets a fresh id.
     ///
-    /// `maxUses` is a SOFT anti-spam throttle (not an access control — the
-    /// admin approval gate is the security boundary): `0` = single-use,
-    /// `0xFFFFFFFF` = unlimited.
+    /// `maxUses` is a SOFT anti-spam throttle (NOT part of the signed
+    /// capability, NOT an access control — the admin approval gate is the
+    /// security boundary): `0` = single-use, `0xFFFFFFFF` = unlimited.
     public func uploadGroupInvite(
         mint: InviteLinkMint,
         expiryMs: UInt64,
         maxUses: UInt32
     ) async throws -> Data {
-        let request = try Self.sealedUploadRequest(
-            mint: mint, expiryMs: expiryMs, maxUses: maxUses,
-            maxSealedBytes: Self.maxSealedGroupInviteBytes)
-        let resp = try await groupInviteUpload(request)
-        return try Self.uploadedBlobId(resp, endpoint: "/discovery/group-invite")
+        try Self.checkSealed(mint.sealed, ceiling: Self.maxGroupCapabilityBytes)
+        let resp = try await groupInviteUpload(
+            InviteUploadRequest(
+                sealed: base64Encode(mint.sealed),
+                issuerPubkey: base64Encode(mint.issuerPubkey),
+                expiryMs: expiryMs,
+                maxUses: maxUses
+            )
+        )
+        return try Self.parseBlobId(resp.blobId, endpoint: "/discovery/group-invite")
     }
 
-    /// Fetch a previously-uploaded sealed `/g/` capability by its ledger
-    /// `blobId`. Returns `nil` on 404, the sealed bytes on 200; the caller
-    /// opens them with `GroupInviteCapability.openLink(sealed:linkSecret:)`.
+    /// Fetch a previously-uploaded SEALED `/g/` link. `nil` on 404, the
+    /// sealed bytes on 200 (opened with `GroupInviteCapability.openLink`).
     public func fetchGroupInvite(blobId: Data) async throws -> Data? {
         guard let raw = try await groupInviteFetch(blobId: blobId) else {
             return nil
@@ -1808,59 +1830,41 @@ public final class DiscoveryClient {
     /// misbehaving caller.
     fileprivate static let maxKeyPackageBytes: Int = 2048
 
-    /// Mirror of `lakko_contacts::invite::MAX_SEALED_LEN` — the `/i/` ledger
-    /// column width and the server's upload ceiling (migration `0022`).
-    static let maxSealedInviteBytes: Int = 254
-
-    /// Mirror of `lakko_contacts::call_invite::MAX_SEALED_LEN` (`/c/`, which
-    /// embeds a one-time MLS KeyPackage).
-    static let maxSealedCallInviteBytes: Int = 4338
-
-    /// Mirror of `lakko_contacts::group_invite::MAX_SEALED_LEN` (`/g/`).
-    static let maxSealedGroupInviteBytes: Int = 938
-
-    /// Build the upload body for any kind, refusing locally what the server
-    /// would refuse (empty or oversized blob, a key that is not 32 bytes).
-    static func sealedUploadRequest(
-        mint: InviteLinkMint,
-        expiryMs: UInt64,
-        maxUses: UInt32,
-        maxSealedBytes: Int,
-        label: String? = nil,
-        bootstrapReferral: Bool? = nil
-    ) throws -> SealedInviteUploadRequest {
-        guard !mint.sealed.isEmpty else {
-            throw DiscoveryClientError.argument("sealed must be non-empty")
+    /// A sealed blob must be non-empty and within the ledger's ceiling.
+    fileprivate static func checkSealed(_ sealed: Data, ceiling: Int) throws {
+        guard !sealed.isEmpty else {
+            throw DiscoveryClientError.argument("sealed link must be non-empty")
         }
-        guard mint.sealed.count <= maxSealedBytes else {
+        guard sealed.count <= ceiling else {
             throw DiscoveryClientError.argument(
-                "sealed exceeds the \(maxSealedBytes)-byte ceiling (got \(mint.sealed.count) bytes)"
-            )
+                "sealed link exceeds the \(ceiling)-byte ceiling (got \(sealed.count) bytes)")
         }
-        guard mint.issuerPubkey.count == pubkeyLength else {
-            throw DiscoveryClientError.argument("issuerPubkey must be \(pubkeyLength) bytes")
-        }
-        return SealedInviteUploadRequest(
-            sealed: base64Encode(mint.sealed),
-            issuerPubkey: base64Encode(mint.issuerPubkey),
-            expiryMs: expiryMs,
-            maxUses: maxUses,
-            label: label,
-            bootstrapReferral: bootstrapReferral)
     }
 
-    /// The 6-byte id out of an upload answer; anything else is refused.
-    static func uploadedBlobId(_ resp: InviteUploadResponse, endpoint: String) throws -> Data {
-        guard let blobId = base64UrlDecodeNoPad(resp.blobId),
-              blobId.count == blobIdLength else {
+    /// Parse the server-minted ledger id.
+    fileprivate static func parseBlobId(_ slug: String, endpoint: String) throws -> Data {
+        guard let blobId = base64UrlDecodeNoPad(slug), blobId.count == blobIdLength else {
             throw DiscoveryClientError.http(
-                status: 200,
-                endpoint: endpoint,
-                body: "server returned malformed blob_id"
-            )
+                status: 200, endpoint: endpoint, body: "server returned malformed blob_id")
         }
         return blobId
     }
+
+    /// The `/i/` sealed-blob ceiling (`lakko_contacts::invite::MAX_SEALED_LEN`).
+    fileprivate static let maxCapabilityBytes: Int = 254
+
+    /// Mirror of `services/discovery`'s `MAX_CALL_CAPABILITY_BYTES`
+    /// — the call-invite ledger uses an 8192-byte ceiling
+    /// (vs. contact-invite's 2048) because `CallInviteCapability`
+    /// embeds a one-time MLS KeyPackage (~4 KiB upper bound per
+    /// `MAX_KEY_PACKAGE_LEN`).
+    fileprivate static let maxCallCapabilityBytes: Int = 4338
+
+    /// Mirror of `services/discovery`'s group-invite `MAX_CAPABILITY_BYTES`
+    /// (ADR-0028) — the group join-ticket wire is leaner than a call-invite
+    /// (no embedded KeyPackage); it tops out near 363 bytes, so the ledger
+    /// column + this client-side ceiling are 512.
+    fileprivate static let maxGroupCapabilityBytes: Int = 938
 
     /// The ledger id of an invite (`/i/`, `/c/`, `/g/`): a random 6-byte id
     /// the discovery service mints at upload (ADR-0028 amendment of

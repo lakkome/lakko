@@ -314,6 +314,17 @@ No PII, no key material in the clear, nothing that identifies a person
 > section 4 (amended the same day). Residual stated plainly: the `spake2`
 > crate has not been independently audited and does not zeroize its own
 > copy of the password and its ephemeral scalar; recorded for G-39.
+>
+> **Amended again 2026-09-28 (second security pass): consent first, and a
+> guess budget the server keeps.** The old device answered a request (posted
+> `pake_b`) on its poll, before anyone tapped anything, so every anonymous
+> request was a free one-in-a-million guess, and the only daily limit lived in
+> the old device's local storage. Now the old device asks `Is this you?` and
+> answers only after `Yes, it's me`; and `services/auth` counts wrong-code
+> outcomes per account, pausing the account's requests after three in 24 h
+> for an hour and after six for a day (chosen, not measured). A paused
+> account's new requests answer exactly like any other and are stored
+> against the stand-in, so the pause tells a requester nothing.
 
 The existing flow (ADR-0018 factor (a)) already does the right cryptography:
 a single-use `device_grants` token for ACCESS, the seed sealed over the

@@ -267,6 +267,19 @@ public final class PushGroupRouting {
     /// never invoked); injectable so tests can spy on the target.
     private let unsubscribeUnderPushGid: (Data) async throws -> Void
 
+    /// ADR-0057 obligation 8, second security pass finding 5 — bind the
+    /// group's journal to `derivePushGid(secret)` BEFORE the secret is
+    /// broadcast, called with `(account, group, secret)`. The repository binds
+    /// with the root (owner) or the admin registrar key and answers
+    /// ``PushBindOutcome/notPermitted`` for a member. Runs under the routing
+    /// lock, bounded by ``networkCallTimeout``. `nil` binds nothing.
+    public var bindSecret: ((String, String, Data) async -> PushBindOutcome)?
+
+    /// Groups whose last bind did not land (`503` disabled, offline): the next
+    /// provisioning pass binds again (wakes are dropped until bound).
+    /// Session-scoped.
+    private var bindRetry: Set<String> = []
+
     /// Per-group in-flight provisioning keys, so a concurrent legacy-sweep
     /// + onAppear for the same group mint the random secret exactly once.
     private var inflight: Set<String> = []
@@ -1400,6 +1413,55 @@ public final class PushGroupRouting {
         }
     }
 
+    // MARK: - Bind before broadcast (ADR-0057 second security pass, finding 5)
+
+    /// Bind with the network bounded (this runs under the routing-row lock).
+    /// Never throws; a timeout counts as ``PushBindOutcome/failed``. A `503`
+    /// or a failure marks the group for a re-bind on the next provisioning
+    /// pass.
+    private func bindBounded(accountIdB64: String, groupIdHex: String, secret: Data) async -> PushBindOutcome {
+        guard let bindSecret else { return .notPermitted }
+        let lockKey = Self.lockKey(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        var outcome: PushBindOutcome = .failed
+        do {
+            try await withNetworkTimeout("bind") {
+                outcome = await bindSecret(accountIdB64, groupIdHex, secret)
+            }
+        } catch {
+            outcome = .failed
+        }
+        switch outcome {
+        case .disabled, .failed: bindRetry.insert(lockKey)
+        case .bound, .conflict, .notPermitted: bindRetry.remove(lockKey)
+        }
+        return outcome
+    }
+
+    /// Mint a fresh secret and bind the journal to its routing id BEFORE the
+    /// caller persists and broadcasts it (finding 5): `204` bound; `503` or a
+    /// failure: broadcast anyway and re-bind later; `409` (the id is bound to
+    /// another journal): mint once more and bind again, and if that also
+    /// fails, broadcast it unbound. A member binds nothing (only an owner or
+    /// an admin mints or rotates). `mint` is injectable for tests.
+    func mintAndBind(
+        accountIdB64: String,
+        groupIdHex: String,
+        mint: () -> Data? = { PushGroupRouting.mintSecret() }
+    ) async -> Data? {
+        guard var secret = mint() else { return nil }
+        var outcome = await bindBounded(accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret)
+        if outcome == .conflict {
+            NSLog("push-routing: the minted routing id is bound elsewhere; minting another once")
+            guard let second = mint() else { return nil }
+            secret = second
+            outcome = await bindBounded(accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret)
+            if outcome == .conflict {
+                NSLog("push-routing: the second routing id is bound elsewhere too; broadcasting unbound")
+            }
+        }
+        return secret
+    }
+
     // MARK: - Owner-mint funnel
 
     /// Ensure a group's push routing is provisioned for this device.
@@ -1459,10 +1521,10 @@ public final class PushGroupRouting {
     /// none, and waits for the receive path).
     ///
     /// A per-group in-flight guard coalesces a concurrent legacy-sweep +
-    /// onAppear. The mint → persist is synchronous (no `await` before
-    /// ``PushRoutingStore/hasSecret(accountIdB64:groupIdHex:)`` flips true),
-    /// so even absent the guard a second concurrent call would never
-    /// re-mint; the guard additionally suppresses a redundant re-broadcast.
+    /// onAppear. Since the second security pass the mint awaits the push
+    /// binding before it persists, so it is the serializing routing lock that
+    /// keeps a second concurrent call from re-minting; the guard additionally
+    /// suppresses a redundant re-broadcast.
     ///
     /// - Parameter broadcast: posts the distribution-envelope bytes to the
     ///   group journal as an E2EE MLS application message
@@ -1517,6 +1579,9 @@ public final class PushGroupRouting {
         // open-question decision to keep un-owned legacy groups on deferred
         // push until a natural re-creation.
         let isOwner = (try? group.ownRole(identity: identity)) == .owner
+        // Finding 5 — the mint and the re-broadcast bind in this pass; only a
+        // row that was already distributed on entry retries a failed bind.
+        var boundThisPass = false
 
         if !store.hasSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
             // MINT — OWNER ONLY. The secret is 32 RANDOM bytes, so a second
@@ -1535,12 +1600,17 @@ public final class PushGroupRouting {
                         accountIdB64: accountIdB64, groupIdHex: groupIdHex)
                     return
                 }
-                // Persist synchronously (flips `hasSecret` true) before any
-                // await, marked NOT distributed, then tell the group over the
+                // Persist (flips `hasSecret` true) right after the bind, marked
+                // NOT distributed, then tell the group over the
                 // E2EE journal. Persist-before-broadcast stays: minting twice
                 // would diverge the group's routing id, which is far worse
                 // than re-broadcasting one envelope.
-                guard let secret = Self.mintSecret() else { return }
+                // Bind BEFORE broadcasting (finding 5 of the second security
+                // pass). The coalescing guard and the routing lock keep a
+                // second mint out while this awaits.
+                guard let secret = await mintAndBind(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex) else { return }
+                boundThisPass = true
                 if persistSecret(
                     accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret,
                     distributed: false, mintEpoch: mintEpoch) != nil {
@@ -1583,10 +1653,23 @@ public final class PushGroupRouting {
             // secret a newer position than the rotation that superseded it and
             // reproduce the finding with the ordering gate fully armed. The
             // pair comes from the ONE `getRecord` above.
+            //
+            // Finding 5 — bound before it goes on the wire (a 204 when it is
+            // bound already; a member binds nothing).
+            _ = await bindBounded(accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: pending.secret)
+            boundThisPass = true
             await broadcastAndSettle(
                 secret: pending.secret, mintEpoch: pending.mintEpoch,
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex,
                 what: "re-broadcast", broadcast: broadcast)
+        }
+        // A bind that did not land (503 disabled, offline) is retried here, on
+        // the next provisioning pass (finding 5: wakes are dropped until bound).
+        if !boundThisPass,
+           bindRetry.contains(Self.lockKey(accountIdB64: accountIdB64, groupIdHex: groupIdHex)),
+           let held = store.getRecord(accountIdB64: accountIdB64, groupIdHex: groupIdHex),
+           held.distributed {
+            _ = await bindBounded(accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: held.secret)
         }
         // A device holding a secret it cannot READ (`getRecord` nil while
         // `hasSecret` is true — wrap key rotated / corrupt row) falls through
@@ -1895,7 +1978,9 @@ public final class PushGroupRouting {
         // (4) — mint + persist PENDING. Persist before broadcasting for
         // the same reason the mint path does: two divergent random secrets
         // are worse than two identical envelopes.
-        guard let next = Self.mintSecret() else { return .skipNoSecret }
+        // Bind BEFORE broadcasting (finding 5 of the second security pass).
+        guard let next = await mintAndBind(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex) else { return .skipNoSecret }
         guard persistSecret(
             accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: next,
             distributed: false, mintEpoch: stamp) != nil else {

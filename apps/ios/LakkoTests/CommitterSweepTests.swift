@@ -373,12 +373,36 @@ final class CommitterSweepTests: XCTestCase {
         )
         XCTAssertEqual(
             h.log,
-            ["register", "publish:commit", "fetch", "merge", "welcomes-owed",
+            ["publish:commit", "fetch", "merge", "welcomes-owed",
              "publish:welcome", "ack"],
-            "the re-publish is idempotent (peers at N+1 drop the duplicate as wrong-epoch) and "
-            + "NO second durable record is written — the entry already exists"
+            "the re-publish is idempotent (peers at N+1 drop the duplicate as wrong-epoch), "
+            + "NO second durable record is written — the entry already exists — and NOTHING "
+            + "is re-registered (ADR-0057: the first run registered before it recorded)"
         )
         XCTAssertTrue(h.outbox.recorded.isEmpty, "a re-publish must not re-record")
+    }
+
+    /// ADR-0057 — an owed verdict that turns out LOST must not have
+    /// re-registered the epoch on the way: a root registration replaces every
+    /// epoch at and above it, so it would replace the winner's epoch and cut
+    /// the group off. The verdict is resolved only.
+    func testAnOwedVerdictThatLostReRegistersNothing() async throws {
+        let h = makeHarness()
+        h.group.staged = true
+        h.group.pending = 1
+        h.outbox.owed = SweepDurableEntry(id: "owed-1", commitB64: base64Encode(Data([0xC0, 0x05])))
+        let ports = swapFetch(h) { _ in
+            [SweepJournalRow(id: 50, payload: Data([FakeGroup.foreignCommitTag]), createdAt: "t-50")]
+        }
+
+        let outcome = try await resolveOwedVerdict(ports)
+
+        guard case .lost = outcome else {
+            return XCTFail("a foreign commit below ours is a LOSS, got \(outcome)")
+        }
+        XCTAssertFalse(h.log.contains("register"), "an owed verdict never re-registers: \(h.log)")
+        XCTAssertEqual(
+            h.log, ["publish:commit", "fetch", "apply", "persist-applied", "abandon", "discard"])
     }
 
     /// Obligation 1 runs BEFORE the rank check, and that ordering is the whole
@@ -983,6 +1007,32 @@ final class CommitterSweepTests: XCTestCase {
         )
         return ports
     }
+    // MARK: - ADR-0057 obligation 5: no key, no stage
+
+    /// A committer candidate the owner has not appointed yet (no registrar
+    /// seed, not the root) cannot register the epoch its commit would move to,
+    /// so it never stages: the sweep is left to an admin or the owner.
+    func testACandidateWithoutARootOrRegistrarSeedDoesNotStage() async throws {
+        let h = makeHarness()
+        h.group.rank = 1
+        var ports = h.ports
+        let inner = ports.journal
+        ports.journal = SweepJournalPort(
+            fetch: inner.fetch,
+            publishGroup: inner.publishGroup,
+            publishMailbox: inner.publishMailbox,
+            registerStagedEpoch: inner.registerStagedEpoch,
+            canRegister: { false })
+
+        let outcome = try await runCommitterSweep(ports)
+
+        XCTAssertEqual(outcome, .noJournalAuthority(rank: 1))
+        XCTAssertFalse(h.log.contains("stage"), "nothing staged")
+        XCTAssertFalse(h.log.contains("register"), "nothing registered")
+        XCTAssertTrue(h.journal.published.isEmpty, "nothing published")
+        XCTAssertFalse(h.group.staged)
+    }
+
     // MARK: - ADR-0053 point 8: Welcomes go to mailboxes only
 
     /// Two adds -> two mailbox Welcomes and NOTHING to the group journal but
@@ -1055,10 +1105,11 @@ final class CommitterSweepTests: XCTestCase {
         XCTAssertEqual(h.journal.published.count, 0, "nothing may be published")
     }
 
-    /// On the restart path the commit may already be on the wire, so a failed
-    /// re-registration must NOT abandon — that would strand this device behind
-    /// its own commit. The re-publish and the verdict proceed.
-    func testAFailedReRegistrationOnTheRestartPathDoesNotAbandon() async throws {
+    /// ADR-0057 — the restart path re-registers NOTHING (a root
+    /// re-registration after a lost sweep would replace the winner's epoch),
+    /// so a registration that would fail cannot touch it either: no abandon,
+    /// the re-publish and the verdict proceed.
+    func testTheRestartPathNeverRegistersAndNeverAbandonsOverIt() async throws {
         let h = makeHarness()
         h.group.staged = true
         h.outbox.owed = SweepDurableEntry(id: "owed-1", commitB64: base64Encode(Data([0xC0, 0x05])))
@@ -1070,7 +1121,8 @@ final class CommitterSweepTests: XCTestCase {
             return XCTFail("the owed verdict must still be read, got \(outcome)")
         }
         XCTAssertFalse(h.log.contains("abandon"))
-        XCTAssertEqual(Array(h.log.prefix(2)), ["register", "publish:commit"])
+        XCTAssertFalse(h.log.contains("register"))
+        XCTAssertEqual(Array(h.log.prefix(2)), ["publish:commit", "fetch"])
     }
 
 }

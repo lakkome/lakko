@@ -839,6 +839,115 @@ public class AuthClient(
     }
 
     // -----------------------------------------------------------------
+    // Device link - ADR-0049 section 2 (amended 2026-09-28)
+    // -----------------------------------------------------------------
+
+    /** `POST /device/request` (anonymous): open a request for the account
+     *  [handle] names; the raw 16-byte request id. */
+    public suspend fun deviceRequestCreate(handle: ByteArray): ByteArray {
+        requireHandle(handle)
+        val resp: DeviceRequestCreateResponse =
+            post("/device/request", DeviceRequestCreateBody(handle = base64UrlEncodeNoPad(handle)))
+        return base64UrlDecodeNoPad(resp.request_id_b64)
+    }
+
+    /** `POST /device/request/status` (anonymous). */
+    public suspend fun deviceRequestStatus(requestId: ByteArray): me.lakko.app.devices.DeviceRequestStatus {
+        val resp: DeviceRequestStatusResponse =
+            post("/device/request/status", DeviceRequestStatusBody(request_id_b64 = base64UrlEncodeNoPad(requestId)))
+        return me.lakko.app.devices.DeviceRequestStatus(
+            pending = resp.pending,
+            pakeB = resp.pake_b_b64?.let(::base64Decode),
+            outcome = resp.outcome,
+            confirmB = resp.confirm_b_b64?.let(::base64Decode),
+        )
+    }
+
+    /** `POST /device/request/payload` (anonymous), once per request. */
+    public suspend fun deviceRequestPayload(
+        requestId: ByteArray,
+        pakeA: ByteArray,
+        sealedPayload: ByteArray,
+        confirmA: ByteArray,
+    ) {
+        post<DeviceRequestPayloadBody, kotlinx.serialization.json.JsonObject>(
+            "/device/request/payload",
+            DeviceRequestPayloadBody(
+                request_id_b64 = base64UrlEncodeNoPad(requestId),
+                pake_a_b64 = base64Encode(pakeA),
+                sealed_payload_b64 = base64Encode(sealedPayload),
+                confirm_a_b64 = base64Encode(confirmA),
+            ),
+        )
+    }
+
+    /** `GET /device/requests` (bearer): the account's open request, or `null`. */
+    public suspend fun deviceRequestsList(sessionToken: String): me.lakko.app.devices.PendingDeviceRequest? {
+        val resp: DeviceRequestListResponse = doRequest(HttpMethod.Get, "/device/requests") {
+            header(HttpHeaders.Authorization, "Bearer $sessionToken")
+        }
+        val r = resp.request ?: return null
+        return me.lakko.app.devices.PendingDeviceRequest(
+            requestId = base64UrlDecodeNoPad(r.request_id_b64),
+            pakeB = r.pake_b_b64?.let(::base64Decode),
+            pakeA = r.pake_a_b64?.let(::base64Decode),
+            sealedPayload = r.sealed_payload_b64?.let(::base64Decode),
+            confirmA = r.confirm_a_b64?.let(::base64Decode),
+            outcome = r.outcome,
+        )
+    }
+
+    /** `POST /device/requests/{id}/pake` (bearer): the answer, once. */
+    public suspend fun deviceRequestAnswer(
+        sessionToken: String,
+        requestId: ByteArray,
+        pakeB: ByteArray,
+    ): me.lakko.app.devices.DeviceLinkAnswer =
+        try {
+            sendJson<DeviceRequestAnswerBody, kotlinx.serialization.json.JsonObject>(
+                HttpMethod.Post,
+                "/device/requests/${base64UrlEncodeNoPad(requestId)}/pake",
+                DeviceRequestAnswerBody(pake_b_b64 = base64Encode(pakeB)),
+                bearer = sessionToken,
+            )
+            me.lakko.app.devices.DeviceLinkAnswer.ANSWERED
+        } catch (e: AuthHttpError) {
+            when (e.status) {
+                HTTP_CONFLICT -> me.lakko.app.devices.DeviceLinkAnswer.ALREADY_ANSWERED
+                HTTP_NOT_FOUND -> me.lakko.app.devices.DeviceLinkAnswer.NOT_FOUND
+                else -> throw e
+            }
+        }
+
+    /** `POST /device/requests/{id}/result` (bearer), once. */
+    public suspend fun deviceRequestResult(
+        sessionToken: String,
+        requestId: ByteArray,
+        accepted: Boolean,
+        confirmB: ByteArray?,
+    ) {
+        sendJson<DeviceRequestResultBody, kotlinx.serialization.json.JsonObject>(
+            HttpMethod.Post,
+            "/device/requests/${base64UrlEncodeNoPad(requestId)}/result",
+            DeviceRequestResultBody(
+                outcome = if (accepted) me.lakko.app.devices.OUTCOME_ACCEPTED else me.lakko.app.devices.OUTCOME_WRONG_CODE,
+                confirm_b_b64 = if (accepted) confirmB?.let(::base64Encode) else null,
+            ),
+            bearer = sessionToken,
+        )
+    }
+
+    /** `DELETE /device/requests/{id}` (bearer): "It is not me". */
+    public suspend fun deviceRequestDecline(sessionToken: String, requestId: ByteArray) {
+        doRequest<kotlinx.serialization.json.JsonObject>(
+            HttpMethod.Delete,
+            "/device/requests/${base64UrlEncodeNoPad(requestId)}",
+        ) {
+            header(HttpHeaders.Authorization, "Bearer $sessionToken")
+        }
+    }
+
+    // -----------------------------------------------------------------
     // Login handle - ADR-0054 S5
     // -----------------------------------------------------------------
 
@@ -1014,6 +1123,8 @@ public class AuthClient(
 
         /** `PUT /auth/login-handle` for a handle another account holds. */
         private const val HTTP_CONFLICT: Int = 409
+
+        private const val HTTP_NOT_FOUND: Int = 404
 
         /** ADR-0054 S5 login handle length. */
         public const val LOGIN_HANDLE_LEN: Int = 32

@@ -267,27 +267,27 @@ data class KeyPackageFetchResponse(
 // /discovery/invite   (services/discovery/src/invite.rs — Phase 1.18d1)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/invite` (sealed since the 2026-09-28 security
- *  pass): the server stores the sealed link blob opaque and reads what it
- *  needs from the clear fields. */
+/** Body of `POST /discovery/invite` (sealed-link amendment of 2026-09-28):
+ *  the SEALED capability plus the fields the ledger needs in clear. */
 @Serializable
 data class InviteUploadRequest(
-    /** Standard-alphabet base64 of `InviteLinkMint.sealed`. */
+    /** Standard base64 of the sealed link (`InviteLinkMint.sealed`). Opaque
+     *  to the server. */
     val sealed: String,
-    /** Standard-alphabet base64 of the 32-byte key that signed the capability
-     *  (`InviteLinkMint.issuerPubkey`), what an owner-signed revoke verifies. */
+    /** Standard base64 of the 32-byte key that signed the capability — the
+     *  key a later owner-signed revoke must verify against. */
     val issuer_pubkey: String,
-    /** The capability's expiry (`0` = never), for the fetch filter. */
+    /** The capability's `expiry_ms` (`0` = never), for the fetch filter. */
     val expiry_ms: Long,
     /** The capability's `max_uses` sentinel, for the consume ceiling. */
     val max_uses: Long,
-    /** The label, for the owner's own list. */
+    /** The capability's label, for the owner's own list. */
     val label: String = "",
-    /** The bootstrap-referral flag, for the owner's own list. */
+    /** The capability's `bootstrap_referral` flag, for the owner's list. */
     val bootstrap_referral: Boolean = false,
 )
 
-/** Body of `POST /discovery/call-invite` (sealed). */
+/** Body of `POST /discovery/call-invite` (sealed-link amendment). */
 @Serializable
 data class CallInviteUploadRequest(
     val sealed: String,
@@ -313,8 +313,8 @@ data class InviteUploadResponse(
  *  status). */
 @Serializable
 data class InviteFetchResponse(
-    /** Standard-alphabet base64 of the sealed link blob; opened locally with
-     *  the link secret from the URL fragment. */
+    /** Standard base64 of the sealed link; opened locally under the URL
+     *  fragment's secret. */
     val sealed: String,
 )
 
@@ -352,19 +352,18 @@ data class InviteConsumeResponse(
 // /discovery/group-invite   (services/discovery/src/group_invite.rs — ADR-0028)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/group-invite` (ADR-0028, G-3). Unlike the
- *  contact-/call-invite uploads (which reuse [InviteUploadRequest]), the
- *  group-invite carries a separate `max_uses` field: the `GroupInviteCapability`
- *  wire format does NOT embed it, so the server reads it from the request. It is
+/** Body of `POST /discovery/group-invite` (ADR-0028, G-3; sealed since
+ *  2026-09-28). The `GroupInviteCapability` wire format does NOT embed
+ *  `max_uses`, so the server reads it from the request. It is
  *  a SOFT anti-spam throttle (`0` = single-use, `0xFFFFFFFF` = unlimited), NOT a
  *  security boundary — the admin approval gate (ADR-0027) is the boundary. */
 @Serializable
 data class GroupInviteUploadRequest(
-    /** Standard-alphabet base64 of the sealed link blob. Opaque to the server. */
+    /** Standard base64 of the sealed link (`InviteLinkMint.sealed`). */
     val sealed: String,
-    /** Standard-alphabet base64 of the issuer's 32-byte signing key. */
+    /** Standard base64 of the 32-byte key that signed the capability. */
     val issuer_pubkey: String,
-    /** The capability's expiry (`0` = never). */
+    /** The capability's `expiry_ms` (`0` = never). */
     val expiry_ms: Long,
     /** Soft consume ceiling. Serialised as a JSON number the server reads as a
      *  `u32`; `0xFFFFFFFF` (= 4294967295) means unlimited. */

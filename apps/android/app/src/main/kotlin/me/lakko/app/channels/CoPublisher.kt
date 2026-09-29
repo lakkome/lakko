@@ -14,8 +14,6 @@ import me.lakko.app.contacts.wrapEnvelope
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsJournalSigner
 import me.lakko.app.ds.FfiDsJournalSigner
-import me.lakko.app.ds.healRegistration
-import me.lakko.app.ds.registerBeforePublish
 import uniffi.lakko_ffi_uniffi.IdentityPseudonym
 import uniffi.lakko_ffi_uniffi.dsMailboxSigner
 import uniffi.lakko_ffi_uniffi.Group
@@ -105,10 +103,15 @@ public object CoPublisher {
         origin: String = DEFAULT_ORIGIN,
     ): String {
         val groupId = publisherGroup.groupId()
-        // The 2026-09-28 security pass — the capability travels sealed under a
-        // link secret that rides in the fragment.
         val mint = composeGroupInviteCapability(identity.ed25519Seed(), groupId, 0uL)
-        return "$origin$URL_PREFIX${base64UrlEncode(mint.sealed)}#${base64UrlEncode(mint.linkSecret)}"
+        // Sealed links (2026-09-28): the inline form carries the SEALED
+        // capability, and the fragment carries the secret that opens it. A
+        // co-publisher link has never gone through the ledger; that is
+        // unchanged.
+        return me.lakko.app.discovery.appendInviteLinkSecret(
+            "$origin$URL_PREFIX${base64UrlEncode(mint.sealed)}",
+            mint.linkSecret,
+        )
     }
 
     /** Poll the PublisherGroup's DS journal and apply incoming MLS messages
@@ -127,8 +130,8 @@ public object CoPublisher {
     ): JournalPoll {
         val groupId = publisherGroup.groupId()
         // ADR-0053 — the journal is claimed: every read carries a proof under
-        // the current epoch's key, and a poll that advanced the epoch
-        // re-registers the reached key (heal on apply).
+        // the current epoch's key. ADR-0057: nobody "heals" a registration on
+        // apply any more; the committer (the owner's root) registers.
         val signerBefore = signerOf(publisherGroup, identity)
         val raw = ds.fetchGroup(groupId, after = 0L, waitSecs = 0, signer = signerBefore)
         var applied = 0
@@ -140,15 +143,6 @@ public object CoPublisher {
                 // A commit we have already merged (epoch mismatch) or a non-MLS
                 // row — skip; the FIFO journal catches up on any genuinely-new
                 // commit on the next poll.
-            }
-        }
-        healRegistration(signerBefore, signerOf(publisherGroup, identity))?.let { (next, current) ->
-            try {
-                ds.claimGroup(groupId, next, provenBy = current)
-            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-                throw e
-            } catch (_: Throwable) {
-                // Best effort: someone registered first, or this device lags.
             }
         }
         // ADR-0053 client contract point 7 — what prospective co-publishers
@@ -196,19 +190,79 @@ public object CoPublisher {
         }
 
     /**
-     * ADR-0053 client contract point 2 — claim the PublisherGroup journal at
-     * its current epoch (at creation this is the first registration; on every
-     * later open an idempotent re-send). Best effort: a failure is logged and
-     * the next open retries.
+     * ADR-0057 obligations 1 and 7 — the channel owner claims the
+     * PublisherGroup journal with its ROOT (derived from the account identity
+     * the publisher runs on) at the current epoch: at creation the first
+     * claim, on every later open an idempotent re-send. A `409` while the
+     * group sits at its founding epoch 0 means the group was re-founded under
+     * its deterministic id after lost state, and the root RESETS the chain the
+     * gone group left; at any later epoch a `409` is left alone. Best effort:
+     * a failure is logged and the next open retries.
+     *
+     * Only the CHANNEL OWNER claims. A co-publisher's root is derived from its
+     * own account seed, so its claim would squat the journal against the
+     * owner; a device in [coPublished] never claims or resets, and while the
+     * journal is still unclaimed it waits for the owner.
      */
-    public suspend fun claimJournal(ds: DsClient, identity: Identity, publisherGroup: PublisherGroup) {
+    public suspend fun claimJournal(
+        ds: DsClient,
+        identity: Identity,
+        publisherGroup: PublisherGroup,
+        coPublished: CoPublishedJournalMarks,
+    ) {
         val signer = signerOf(publisherGroup, identity) ?: return
+        val groupId = publisherGroup.groupId()
         try {
-            ds.claimGroup(publisherGroup.groupId(), signer)
+            val outcome = claimPublisherJournal(
+                journalId = groupId,
+                journalIdHex = DsClient.pseudonymHex(groupId),
+                epoch = signer.epoch,
+                epochKey = signer.verifyingKey,
+                refounded = signer.epoch == 0uL,
+                coPublished = coPublished,
+                root = { me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId) },
+                put = { make -> ds.putStatement(make) },
+            )
+            android.util.Log.i("CoPublisher", "ADR-0057: publisher journal claim $outcome")
         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
             throw e
         } catch (e: Throwable) {
-            android.util.Log.w("CoPublisher", "ADR-0053: publisher journal claim did not land", e)
+            android.util.Log.w("CoPublisher", "ADR-0057: publisher journal claim did not land", e)
+        }
+    }
+
+    /**
+     * ADR-0057 second security pass, finding 3 — creating a channel: found its
+     * PublisherGroup and claim the journal with the owner's ROOT, requiring
+     * the 204 (a `409` on the fresh founding epoch is a root reset), BEFORE
+     * the channel is announced (its handle registered, the channel created on
+     * the service, a post published). Throws when the claim does not land;
+     * the caller then announces nothing. The founded group stays in the
+     * provider; the channel id is minted fresh per attempt, so a retry founds
+     * and claims anew.
+     */
+    public suspend fun foundAndClaimAtCreation(
+        ds: DsClient,
+        identity: Identity,
+        channelIdHex: String,
+    ) {
+        val publisherGroup = openPublisherGroup(identity, channelIdHex)
+        try {
+            val signer = signerOf(publisherGroup, identity)
+                ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the channel journal key could not be derived")
+            val groupId = publisherGroup.groupId()
+            me.lakko.app.ds.requireClaim {
+                me.lakko.app.ds.claimOrReset(
+                    journalId = groupId,
+                    epoch = signer.epoch,
+                    epochKey = signer.verifyingKey,
+                    statements = me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId),
+                    refounded = signer.epoch == 0uL,
+                    put = { make -> ds.putStatement(make) },
+                )
+            }
+        } finally {
+            publisherGroup.close()
         }
     }
 
@@ -242,14 +296,18 @@ public object CoPublisher {
         val groupId = publisherGroup.groupId()
         val signerBeforeCommit = signerOf(publisherGroup, identity)
         val added = publisherGroup.approveExternalJoin(identity, proposalRef)
-        // ADR-0053 client contract point 3 — register epoch N+1's key proven
-        // under N's before the commit is published. A refusal throws: the
+        // ADR-0057 — register epoch N+1's key with the owner's root before the
+        // commit is published. A refusal throws: the
         // caller's `withIdentity` then persists nothing, so the durable group
         // stays at N and nothing reached the wire.
-        val commitSigner = registerBeforePublish(
+        val commitSigner = me.lakko.app.ds.registerEpochBeforePublish(
+            journalId = groupId,
             before = signerBeforeCommit,
             after = signerOf(publisherGroup, identity),
-        ) { next, current -> ds.registerNextEpoch(groupId, next, current) }
+            statements = me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId),
+            revoke = emptyList(),
+            put = { make -> ds.putStatement(make) },
+        )
         ds.publishGroup(groupId, added.commit, signer = commitSigner)
         // ADR-0053 client contract point 8 — the Welcome goes to the joiner's
         // own mailbox (the pseudonym of the key its proposal carried), in the
@@ -316,22 +374,27 @@ public object CoPublisher {
         ds: DsClient,
         identity: Identity,
         link: String,
+        coPublished: CoPublishedJournalMarks,
     ): CoPublishRequest {
         val idx = link.lastIndexOf(URL_PREFIX)
         if (idx < 0) throw CoPublisherException.NotACoPublisherLink(link)
-        val (slug, fragment) = me.lakko.app.discovery.splitLinkToken(link.substring(idx + URL_PREFIX.length))
-        val sealed = base64UrlDecode(slug)
+        val argument = me.lakko.app.discovery.InviteLinkArgument.decode(
+            link.substring(idx + URL_PREFIX.length).trim(),
+        )
+        // Sealed links: the fragment opens the capability; a missing or
+        // malformed one is refused before any request.
+        val secret = me.lakko.app.discovery.requireInviteLinkSecret(argument.fragment)
+        val sealed = base64UrlDecode(argument.slug.trimEnd('/'))
             ?: throw CoPublisherException.NotACoPublisherLink(link)
-        val secret = fragment?.let(::base64UrlDecode)
-            ?: throw CoPublisherException.NotACoPublisherLink(link)
-        val cap = try {
-            GroupInviteCapability.openLink(sealed, secret)
-        } catch (_: Throwable) {
-            throw CoPublisherException.NotACoPublisherLink(link)
+        val cap = me.lakko.app.discovery.openSealedInviteLink(sealed, secret) { bytes, key ->
+            GroupInviteCapability.openLink(bytes, key)
         }
-        val wire = cap.wire()
-        val groupId = try {
-            cap.groupId()
+        val groupId: ByteArray
+        val wire: ByteArray
+        try {
+            groupId = cap.groupId()
+            // The attribution is computed over the PLAINTEXT capability.
+            wire = cap.wire()
         } finally {
             cap.close()
         }
@@ -345,6 +408,10 @@ public object CoPublisher {
                 CoPublisherException.NotAChannelGroup
             }
         val channelIdHex = ChannelsComposer.bytesToHex(channelIdBytes)
+        // ADR-0057 — this device asks to CO-publish, so it is not the channel
+        // owner: it must never claim the PublisherGroup journal. Marked before
+        // the knock, so no later open of this channel can claim first.
+        coPublished.mark(DsClient.pseudonymHex(groupId))
         // ADR-0053 client contract point 6 — the PublisherGroup journal is
         // claimed, so a prospective co-publisher never reads it: an empty knock
         // learns the epoch, a second knock carries the self-signed attribution
@@ -382,6 +449,7 @@ public object CoPublisher {
         groupId: ByteArray,
         joinerKey: ByteArray,
         channelIdHex: String,
+        coPublished: CoPublishedJournalMarks,
         // G-29 — reuse the persisted per-channel signing seed if this device
         // has co-published to the channel before (null on a first join).
         existingSigningSeed: ByteArray? = null,
@@ -429,6 +497,9 @@ public object CoPublisher {
             }
         }
         if (!joined) return null
+        // ADR-0057 — a co-publisher never claims the journal (idempotent with
+        // the mark set when the request was sent).
+        coPublished.mark(DsClient.pseudonymHex(groupId))
         return ChannelsComposer.freshPublisherKeys(
             identity, channelIdHex, existingSigningSeed)
     }

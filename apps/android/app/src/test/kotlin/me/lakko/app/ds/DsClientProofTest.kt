@@ -43,7 +43,7 @@ class DsClientProofTest {
             return "proof-$tag-${calls.size}"
         }
 
-        override fun groupClaimBody(): String = """{"epoch":$epoch,"access_pk_b64":"$tag"}"""
+        override val verifyingKey: ByteArray = ByteArray(32) { epoch.toByte() }
 
         override fun mailboxClaimBody(): String = """{"identity_pk_b64":"$tag"}"""
     }
@@ -229,23 +229,49 @@ class DsClientProofTest {
     }
 
     @Test
-    fun `a second refusal claims the journal and retries with the current signer`() = runTest {
+    fun `a plain member never claims on a refusal - the 401 surfaces`() = runTest {
+        // ADR-0057 obligation 6 — no owner hook installed: no claim, no
+        // self-registration, the refusal is the answer.
         val seen = mutableListOf<Seen>()
         val signer = FakeSigner(6uL, "cur")
-        client(
-            listOf(
-                Reply(HttpStatusCode.Unauthorized),
-                Reply(HttpStatusCode.NoContent),
-                Reply(HttpStatusCode.OK, emptyFetch),
-            ),
-            seen,
-        ).use { it.fetchGroup(groupId, signer = signer) }
+        val error = assertThrows(DsProofRefusedError::class.java) {
+            kotlinx.coroutines.runBlocking {
+                client(
+                    listOf(Reply(HttpStatusCode.Unauthorized), Reply(HttpStatusCode.NoContent)),
+                    seen,
+                ).use { it.fetchGroup(groupId, signer = signer) }
+            }
+        }
+        assertEquals(401, error.status)
+        assertEquals(listOf(HttpMethod.Get), seen.map { it.method })
+    }
 
-        assertEquals(listOf(HttpMethod.Get, HttpMethod.Put, HttpMethod.Get), seen.map { it.method })
-        assertEquals("/native/ds/ds/group/$groupHex/access", seen[1].encodedPath)
-        assertEquals(signer.groupClaimBody(), String(seen[1].body!!, Charsets.UTF_8))
-        assertNull("no previous signer held: the claim goes unsigned", seen[1].proof)
-        assertTrue(seen[1].contentType!!.startsWith("application/json"))
+    @Test
+    fun `the owner's lazy claim runs once on a refusal and the read is retried`() = runTest {
+        // ADR-0057 obligation 2 — only a journal whose source carries the
+        // owner hook claims on a 401.
+        val seen = mutableListOf<Seen>()
+        val registry = DsSignerRegistry()
+        var claims = 0
+        val signer = FakeSigner(6uL, "cur")
+        registry.install(
+            dsGroupKey(groupId),
+            object : DsSignerSource {
+                override fun epoch(): ULong = 6uL
+                override fun derive(): DsJournalSigner = signer
+                override val ownerClaim: (suspend () -> Boolean) = {
+                    claims += 1
+                    true
+                }
+            },
+        )
+        client(
+            listOf(Reply(HttpStatusCode.Unauthorized), Reply(HttpStatusCode.OK, emptyFetch)),
+            seen,
+            registry,
+        ).use { it.fetchGroup(groupId) }
+        assertEquals(1, claims)
+        assertEquals(listOf(HttpMethod.Get, HttpMethod.Get), seen.map { it.method })
     }
 
     @Test
@@ -310,44 +336,125 @@ class DsClientProofTest {
         assertNull(error.userMessage)
     }
 
-    // ------------------------------------------------------------ claims
-
-    @Test
-    fun `registering the next epoch is proven under the current one`() = runTest {
-        val seen = mutableListOf<Seen>()
-        val current = FakeSigner(8uL, "n")
-        val next = FakeSigner(9uL, "n1")
-        client(listOf(Reply(HttpStatusCode.NoContent)), seen).use {
-            it.registerNextEpoch(groupId, next, current)
-        }
-        val put = seen.single()
-        assertEquals(HttpMethod.Put, put.method)
-        assertEquals(next.groupClaimBody(), String(put.body!!, Charsets.UTF_8))
-        assertEquals("proof-n-1", put.proof)
-        val call = current.calls.single()
-        assertEquals("PUT", call.method)
-        assertEquals("/ds/group/$groupHex/access", call.path)
-        assertArrayEquals(put.body, call.body)
-        assertTrue("the next signer proves nothing", next.calls.isEmpty())
+    private fun listeningRegistry(epoch: ULong, heard: MutableList<ULong>): DsSignerRegistry {
+        val registry = DsSignerRegistry()
+        val signer = FakeSigner(epoch, "cur")
+        registry.install(
+            dsGroupKey(groupId),
+            object : DsSignerSource {
+                override fun epoch(): ULong = epoch
+                override fun derive(): DsJournalSigner = signer
+                override val onRefusedAtHead: ((ULong) -> Unit) = { heard += it }
+            },
+        )
+        return registry
     }
 
     @Test
-    fun `a refused registration surfaces after one re-claim`() = runTest {
+    fun `a final refusal at this device's epoch is reported for the repair check`() = runTest {
+        // ADR-0057 second security pass, finding 1.
+        val heard = mutableListOf<ULong>()
         val seen = mutableListOf<Seen>()
+        assertThrows(DsProofRefusedError::class.java) {
+            kotlinx.coroutines.runBlocking {
+                client(listOf(Reply(HttpStatusCode.Unauthorized)), seen, listeningRegistry(7uL, heard)).use {
+                    it.fetchGroup(groupId)
+                }
+            }
+        }
+        assertEquals(listOf(7uL), heard)
+    }
+
+    @Test
+    fun `a refusal blamed on the device clock is not reported`() = runTest {
+        val now = 1_800_000_000_000L
+        val serverDate = DateTimeFormatter.RFC_1123_DATE_TIME
+            .format(Instant.ofEpochMilli(now + 5 * 60_000L).atZone(ZoneOffset.UTC))
+        val heard = mutableListOf<ULong>()
+        assertThrows(DsProofRefusedError::class.java) {
+            kotlinx.coroutines.runBlocking {
+                client(
+                    listOf(Reply(HttpStatusCode.Unauthorized, date = serverDate)),
+                    mutableListOf(),
+                    listeningRegistry(7uL, heard),
+                    nowMs = now,
+                ).use { it.fetchGroup(groupId) }
+            }
+        }
+        assertTrue(heard.isEmpty())
+    }
+
+    @Test
+    fun `a request that succeeds reports nothing`() = runTest {
+        val heard = mutableListOf<ULong>()
+        client(listOf(Reply(HttpStatusCode.OK, emptyFetch)), mutableListOf(), listeningRegistry(7uL, heard)).use {
+            it.fetchGroup(groupId)
+        }
+        assertTrue(heard.isEmpty())
+    }
+
+    // ------------------------------------------------------------ claims
+
+    @Test
+    fun `a statement is PUT to its own path with its JSON body and no proof`() = runTest {
+        val seen = mutableListOf<Seen>()
+        client(listOf(Reply(HttpStatusCode.NoContent)), seen).use {
+            it.putStatement { DsStatement("/ds/group/$groupHex/access", """{"statement_b64":"AA=="}""") }
+        }
+        val put = seen.single()
+        assertEquals(HttpMethod.Put, put.method)
+        assertEquals("/native/ds/ds/group/$groupHex/access", put.encodedPath)
+        assertEquals("""{"statement_b64":"AA=="}""", String(put.body!!, Charsets.UTF_8))
+        assertNull("a statement carries its own signature", put.proof)
+        assertTrue(put.contentType!!.startsWith("application/json"))
+    }
+
+    @Test
+    fun `a 409 is retried once with a freshly signed statement`() = runTest {
+        val seen = mutableListOf<Seen>()
+        var signed = 0
         val error = assertThrows(DsHttpError::class.java) {
             kotlinx.coroutines.runBlocking {
                 client(
-                    listOf(
-                        Reply(HttpStatusCode.Unauthorized),
-                        Reply(HttpStatusCode.Unauthorized),
-                        Reply(HttpStatusCode.Unauthorized),
-                    ),
+                    listOf(Reply(HttpStatusCode.Conflict), Reply(HttpStatusCode.Conflict), Reply(HttpStatusCode.NoContent)),
                     seen,
-                ).use { it.registerNextEpoch(groupId, FakeSigner(2uL, "b"), FakeSigner(1uL, "a")) }
+                ).use {
+                    it.putStatement {
+                        signed += 1
+                        DsStatement("/ds/group/$groupHex/claim", """{"n":$signed}""")
+                    }
+                }
             }
         }
-        assertEquals(401, error.status)
-        assertEquals(3, seen.size)
+        assertEquals(409, error.status)
+        assertEquals(2, signed)
+        assertEquals(2, seen.size)
+        assertEquals("""{"n":2}""", String(seen[1].body!!, Charsets.UTF_8))
+    }
+
+    @Test
+    fun `a lock race 409 then success lands`() = runTest {
+        val seen = mutableListOf<Seen>()
+        client(listOf(Reply(HttpStatusCode.Conflict), Reply(HttpStatusCode.NoContent)), seen).use {
+            it.putStatement { DsStatement("/ds/group/$groupHex/access", "{}") }
+        }
+        assertEquals(2, seen.size)
+    }
+
+    @Test
+    fun `any other refusal surfaces at once with its status`() = runTest {
+        for (status in listOf(HttpStatusCode.BadRequest, HttpStatusCode.Unauthorized, HttpStatusCode.Forbidden, HttpStatusCode.ServiceUnavailable)) {
+            val seen = mutableListOf<Seen>()
+            val error = assertThrows(DsHttpError::class.java) {
+                kotlinx.coroutines.runBlocking {
+                    client(listOf(Reply(status)), seen).use {
+                        it.putStatement { DsStatement("/ds/group/$groupHex/push-binding", "{}") }
+                    }
+                }
+            }
+            assertEquals(status.value, error.status)
+            assertEquals(1, seen.size)
+        }
     }
 
     @Test

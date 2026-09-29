@@ -32,7 +32,6 @@ import me.lakko.app.ds.DsJournalSigner
 import me.lakko.app.ds.DsSignerRegistry
 import me.lakko.app.ds.DsSignerSource
 import me.lakko.app.ds.dsGroupKey
-import me.lakko.app.ds.healRegistration
 import me.lakko.app.ds.DsHttpError
 import me.lakko.app.ds.DsNetworkError
 import uniffi.lakko_ffi_uniffi.DeviceGroup
@@ -107,6 +106,10 @@ public class DeviceGroupSyncRepository(
     private val identity = AtomicReference<Identity?>(null)
     private val group = AtomicReference<DeviceGroup?>(null)
     private val activeAccountIdB64 = AtomicReference<String?>(null)
+
+    /** ADR-0057 — the DeviceGroup journal's root signer (every device of the
+     *  account holds it), derived at bootstrap from the account seed. */
+    @Volatile private var rootSigner: me.lakko.app.ds.DsStatementSigning? = null
     @Volatile private var pollJob: Job? = null
 
     /** The debounced snapshot writer, cancelled with the poll loop. */
@@ -194,9 +197,10 @@ public class DeviceGroupSyncRepository(
         // process (the poll below, the send paths, the pairing / removal
         // publishes) and claim it: at founding this is the first registration,
         // on every later open an idempotent re-send.
+        rootSigner = me.lakko.app.devices.DeviceGroupJournalAccess.rootOfSeed(secrets.accountIdentitySeed, groupId)
         installJournalSigner(groupId)
         pollJob = scope.launch {
-            claimJournalBestEffort(groupId)
+            claimJournalBestEffort(groupId, refounded = true)
             runPollLoop(
                 accountIdB64 = accountIdB64,
                 groupId = groupId,
@@ -440,8 +444,6 @@ public class DeviceGroupSyncRepository(
                     ByteArray(32)
                 }
 
-                // ADR-0053 — the signer as it stood before this batch.
-                val signerBeforeBatch = DsSignerRegistry.shared.current(dsGroupKey(groupId))
                 var mutated = false
                 for (message in result.messages) {
                     cursor = message.id
@@ -492,7 +494,6 @@ public class DeviceGroupSyncRepository(
                             accountIdB64 = accountIdB64,
                         )
                     }
-                    healJournalRegistration(ds, groupId, signerBeforeBatch)
                 }
             }
         }
@@ -572,36 +573,61 @@ public class DeviceGroupSyncRepository(
                     val id = identity.get() ?: return null
                     return DeviceGroupJournalAccess.signerOf(g, id)
                 }
+
+                // ADR-0057 — every device of the account OWNS the DeviceGroup
+                // journal, so a signed request's 401 may run the root claim.
+                override val ownerClaim: (suspend () -> Boolean)?
+                    get() = if (rootSigner == null) {
+                        null
+                    } else {
+                        { claimJournalBestEffort(groupId, refounded = false) }
+                    }
             },
             owner = DeviceGroupJournalAccess.REGISTRY_OWNER,
         )
     }
 
-    /** ADR-0053 client contract point 2 — claim-on-open, best effort. */
-    private suspend fun claimJournalBestEffort(groupId: ByteArray) {
+    /**
+     * ADR-0057 obligations 1, 2 and 7 — claim the DeviceGroup journal with the
+     * account's ROOT at the current epoch, best effort. At founding this is
+     * the first claim; on every later open an idempotent re-send. A `409` on a
+     * group this device just FOUNDED ([refounded]: no snapshot was found, so it
+     * re-created the DeviceGroup under its deterministic id after lost state)
+     * is a root RESET of the chain the gone group left; on a restored group a
+     * `409` is left alone.
+     */
+    private suspend fun claimJournalBestEffort(groupId: ByteArray, refounded: Boolean): Boolean {
         val key = dsGroupKey(groupId)
-        val signer = DsSignerRegistry.shared.current(key) ?: return
-        try {
+        val signer = DsSignerRegistry.shared.current(key) ?: return false
+        val root = rootSigner ?: return false
+        val accountIdB64 = activeAccountIdB64.get()
+        // ADR-0057 finding 3 — a reset is only ever for a founding this device
+        // has not confirmed yet (lost state re-created the DeviceGroup under
+        // its deterministic id); a confirmed group's 409 is left alone.
+        val unconfirmed = refounded && accountIdB64 != null &&
+            me.lakko.app.devices.DeviceGroupJournalAccess.isFoundingUnconfirmed(applicationContext, accountIdB64)
+        return try {
             DsClient().use { ds ->
-                ds.claimGroup(groupId, signer, provenBy = DsSignerRegistry.shared.previous(key))
+                val outcome = me.lakko.app.ds.claimOrReset(
+                    journalId = groupId,
+                    epoch = signer.epoch,
+                    epochKey = signer.verifyingKey,
+                    statements = root,
+                    refounded = unconfirmed,
+                    put = { make -> ds.putStatement(make) },
+                )
+                Log.i(LOG_TAG, "DeviceGroup journal claim: $outcome")
+                val landed = outcome != me.lakko.app.ds.JournalClaimOutcome.ALREADY_CLAIMED
+                if (landed && accountIdB64 != null) {
+                    me.lakko.app.devices.DeviceGroupJournalAccess.clearFoundingUnconfirmed(applicationContext, accountIdB64)
+                }
+                landed
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (cause: Throwable) {
             Log.w(LOG_TAG, "DeviceGroup journal claim did not land", cause)
-        }
-    }
-
-    /** ADR-0053 client contract point 4 — heal on apply, best effort. */
-    private suspend fun healJournalRegistration(ds: DsClient, groupId: ByteArray, before: DsJournalSigner?) {
-        val (next, current) =
-            healRegistration(before, DsSignerRegistry.shared.current(dsGroupKey(groupId))) ?: return
-        try {
-            ds.claimGroup(groupId, next, provenBy = current)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (cause: Throwable) {
-            Log.i(LOG_TAG, "DeviceGroup heal registration not taken: ${cause.javaClass.simpleName}")
+            false
         }
     }
 
@@ -617,6 +643,7 @@ public class DeviceGroupSyncRepository(
         // JNA finalizer reclaims the Rust-side Arc.
         identity.set(null)
         group.set(null)
+        rootSigner = null
         DsSignerRegistry.shared.clearOwner(DeviceGroupJournalAccess.REGISTRY_OWNER)
     }
 

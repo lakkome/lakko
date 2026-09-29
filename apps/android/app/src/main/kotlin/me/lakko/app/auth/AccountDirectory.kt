@@ -85,7 +85,9 @@ internal class DiscoveryAccountDirectory(
  * order:
  *
  *   1. bind the handle at auth (`PUT /auth/login-handle`); a `409` means the
- *      name is taken and discovery is never asked;
+ *      name is taken and discovery is never asked; a `429 handle-bind-limited`
+ *      stops here the same way, propagated as the [AuthHttpError] whose copy
+ *      is [handleBindLimitedCopy] (the form keeps its contents);
  *   2. register the name at discovery; if that fails (taken or otherwise) the
  *      handle is released again (`DELETE /auth/login-handle`), so the name is
  *      not left held at auth by an account that never got it.

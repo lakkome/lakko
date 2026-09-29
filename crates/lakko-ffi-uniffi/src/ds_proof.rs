@@ -119,6 +119,11 @@ impl DsProofSigner {
 
     /// The JSON body of `PUT /ds/group/{hex}/access` registering this
     /// signer's key at its epoch.
+    ///
+    /// **Superseded by ADR-0057; the Delivery Service no longer accepts this
+    /// body** (`PUT .../access` now takes a signed statement, and an epoch
+    /// key registers nothing). Kept only until the clients move to the
+    /// statement signers; do not add a caller.
     pub fn group_claim_body_json(&self) -> String {
         self.inner.group_claim_body_json()
     }

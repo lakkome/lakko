@@ -137,17 +137,13 @@ struct InviteLinkRow: Equatable, Identifiable {
         /// From `listActiveInvites` — revoked through the slug.
         case server
         /// Generated this session and not (yet) in the server list — revoked
-        /// through its raw blob id, or not revocable (`nil`) when it is an
-        /// inline link with no ledger row.
-        case session(blobId: Data?)
+        /// through its raw blob id.
+        case session(blobId: Data)
     }
 
     let slug: String
-    /// The whole link with its secret, or `nil` when this device does not
-    /// hold it: the server lists a link by id only and never learns the
-    /// secret (sealed-links amendment of 2026-09-28), so a link made on
-    /// another device, or before this launch, can be revoked but not shared
-    /// again from here.
+    /// The whole link with its secret, or `nil` when the secret is not on this
+    /// device (ADR-0028 amendment 2026-09-28).
     let url: String?
     /// The user-set label, or empty.
     let label: String
@@ -171,16 +167,16 @@ enum InviteLinkRows {
     static func merge(
         active: [ActiveInvite],
         sessionGenerated: [GeneratedInvite],
-        now: Date
+        now: Date,
+        accountIdB64: String?,
+        secrets: InviteLinkSecretStore = .shared
     ) -> [InviteLinkRow] {
         let nowMs = UInt64(max(0, now.timeIntervalSince1970 * 1000))
-        let sessionUrls = Dictionary(
-            sessionGenerated.map { ($0.blobIdSlug, $0.url) }, uniquingKeysWith: { first, _ in first })
         var rows: [InviteLinkRow] = active.compactMap { invite in
             guard !isExpired(expiryMs: invite.expiryMs, nowMs: nowMs) else { return nil }
             return InviteLinkRow(
                 slug: invite.blobIdSlug,
-                url: sessionUrls[invite.blobIdSlug],
+                url: url(slug: invite.blobIdSlug, accountIdB64: accountIdB64, secrets: secrets),
                 label: invite.label,
                 createdAt: parseCreatedAt(invite.createdAt),
                 expiryMs: invite.expiryMs,
@@ -208,6 +204,21 @@ enum InviteLinkRows {
 
     static func isExpired(expiryMs: UInt64, nowMs: UInt64) -> Bool {
         expiryMs != 0 && expiryMs <= nowMs
+    }
+
+    /// `docs/ux/client-redesign.md` section 5.3 — what a row whose secret
+    /// this device does not hold shows in place of Copy and Share (Revoke
+    /// stays).
+    static let createdElsewhereCopy = "Created on another device. Copy it there, or revoke it here."
+
+    /// `https://lakko.me/i/<slug>#<secret>`, or `nil` when this device does
+    /// not hold the link's secret for the account.
+    static func url(
+        slug: String, accountIdB64: String?, secrets: InviteLinkSecretStore = .shared
+    ) -> String? {
+        guard let accountIdB64,
+              let secret = secrets.secret(accountIdB64: accountIdB64, slug: slug) else { return nil }
+        return InviteLinkSecret.link(base: ContactsRepository.inviteUrlPrefix + slug, secret: secret)
     }
 
     /// Sentinels as `lakko-contacts` defines them: 0 = single use,

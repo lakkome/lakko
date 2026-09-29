@@ -72,9 +72,9 @@ import {
   INVITE_LINK_TRY_AGAIN,
   inviteLinkWidths,
   isInviteLinkDamaged,
-  linkSecretFromFragment,
+  openInviteLinkFromUrl,
 } from "../contacts/invite-link";
-import { parseCallInviteSlug } from "../calls/invite";
+import { CALL_INVITE_INLINE_MIN_LEN } from "../calls/invite";
 import { useCallHost, type CallHostApi } from "../calls/CallHostContext";
 import { callIdHex } from "../calls/call-signaling-dispatch";
 import { hexKey } from "../calls/multi-joiner-election";
@@ -128,41 +128,39 @@ export default function JoinCall() {
 
   const discovery = new DiscoveryClient();
 
-  // Open + verify the sealed link in a resource so the panel renders the
-  // right state declaratively. Re-runs on navigation. The link secret rides
-  // in the fragment (2026-09-28 security pass); a link without it opens
-  // nothing and is reported as damaged, never as "invalid or expired".
+  // Decode + verify the capability in a resource so the panel renders the
+  // right state declaratively. Re-runs on navigation.
   const location = useLocation();
-  const linkSignal = createMemo(() => ({ slug: params.slug, hash: location.hash }));
+  // The fragment is the link secret (sealed-link amendment): re-run on it too.
+  const slugSignal = createMemo(() => ({ slug: params.slug, hash: location.hash }));
   /** The ledger answered 429: the link may be fine, so the page says "try
    *  again later" instead of "invalid" (ADR-0028 short-link amendment). */
   const [rateLimited, setRateLimited] = createSignal(false);
-  /** The fragment is missing or does not open the link. */
+  /** The link does not open under its fragment (missing, malformed, wrong
+   *  secret, tampered or substituted): docs/ux/call-links.md section 5. */
   const [damaged, setDamaged] = createSignal(false);
   const [decoded, { refetch }] = createResource(
-    linkSignal,
+    slugSignal,
     async ({ slug, hash }): Promise<DecodedCall | null> => {
-      setRateLimited(false);
-      setDamaged(false);
       let cap: import("../../wasm/lakko_ffi_wasm").CallInviteCapability | null = null;
       try {
+        setRateLimited(false);
+        setDamaged(false);
         const wasm = await loadWasm();
-        const widths = inviteLinkWidths(wasm);
-        const parsed = parseCallInviteSlug(slug, widths);
-        const secret = linkSecretFromFragment(hash, widths);
-        if (secret === null) {
-          setDamaged(true);
-          return null;
-        }
-        let sealed: Uint8Array;
-        if (parsed.kind === "pointer") {
-          const fetched = await discovery.fetchCallInvite(parsed.blobId);
-          if (fetched === null) return null;
-          sealed = fetched;
-        } else {
-          sealed = parsed.sealed;
-        }
-        cap = wasm.CallInviteCapability.openLink(sealed, secret);
+        // Sealed-link amendment of ADR-0028 / ADR-0009 (2026-09-28): a
+        // missing or malformed fragment is refused before any request, and
+        // the blob opens only under the fragment's secret.
+        const opened = await openInviteLinkFromUrl({
+          slug,
+          hash,
+          widths: inviteLinkWidths(wasm),
+          inlineMinLen: CALL_INVITE_INLINE_MIN_LEN,
+          what: "call-invite",
+          fetchPointer: (blobId) => discovery.fetchCallInvite(blobId),
+          open: (sealed, secret) => wasm.CallInviteCapability.openLink(sealed, secret),
+        });
+        if (opened.kind === "not-found") return null;
+        cap = opened.capability;
         const identity = chats.identity();
         const isOwner =
           identity !== null &&
@@ -332,8 +330,8 @@ export default function JoinCall() {
       ownerSignatureKey: d.ownerSignatureKey,
       mediaVideo: d.mediaVideo,
       isOwner: d.isOwner,
-      // The fragment (the link secret) comes along: the way back to this
-      // screen must still open the link.
+      // The fragment is the link secret: without it the page it returns to
+      // could not open the link again.
       routePath: `${paths.joinCall(params.slug)}${location.hash}`,
     });
     switch (outcome.kind) {
@@ -372,6 +370,9 @@ export default function JoinCall() {
           <Show when={decoded.loading}>
             <p>Loading call link…</p>
           </Show>
+          <Show when={!decoded.loading && decoded() === null && damaged()}>
+            <p>{INVITE_LINK_DAMAGED}</p>
+          </Show>
           <Show when={!decoded.loading && decoded() === null && rateLimited()}>
             <p>{INVITE_LINK_RATE_LIMITED}</p>
             <button type="button" class="primary" onClick={() => void refetch()}>
@@ -386,7 +387,8 @@ export default function JoinCall() {
           <Show
             when={
               !decoded.loading &&
-              ((decoded() === null && !rateLimited() && !damaged()) || decoded()?.valid === false)
+              ((decoded() === null && !rateLimited() && !damaged()) ||
+                decoded()?.valid === false)
             }
           >
             <p>This call link is invalid or has expired.</p>

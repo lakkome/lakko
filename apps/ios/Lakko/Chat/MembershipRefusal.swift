@@ -417,8 +417,8 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 .UsernameEmpty, .UsernameTooShort, .UsernameTooLong, .UsernameInvalidCharacters,
                 .DisplayNameLineBreak, .DisplayNameControlOrFormatCharacter,
                 .DisplayNameTooLong, .DisplayNameTooManyBytes, .ChannelMeta,
-                .AnonToken, .AnonTokenAlreadyFinalized, .DeviceLinkWrongCode, .DeviceLink,
-                .InviteLinkDamaged, .Reach, .Introduction, .Visibility, .UsernameCertificate,
+                .AnonToken, .AnonTokenAlreadyFinalized, .InviteLinkDamaged, .DeviceLink,
+                .DeviceLinkWrongCode, .Reach, .Introduction, .Visibility, .UsernameCertificate,
                 .CommitterDelegation:
                 return nil
             }

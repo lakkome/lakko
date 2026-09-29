@@ -114,6 +114,11 @@ public class ContactsRepository(
      *  Tests + the contacts-only configurations pass `null` and
      *  Welcomes drop on the floor (the cursor still advances). */
     private val chatRepo: ChatRepository? = null,
+    /** UX 5.3 — the link secrets of the `/i/` links this device created, kept
+     *  per account across restarts (EncryptedSharedPreferences in production,
+     *  in memory without a [Context]). */
+    private val inviteSecretStore: InviteLinkSecretStore =
+        appContext?.let { EncryptedInviteLinkSecretStore(it) } ?: InMemoryInviteLinkSecretStore(),
 ) {
     /**
      * Build a [DiscoveryClient] pre-stamped with the current
@@ -916,42 +921,45 @@ public class ContactsRepository(
     public suspend fun acceptInviteLink(slug: String): AcceptInviteResult {
         val secrets = authRepo.identitySecrets.value
             ?: return AcceptInviteResult.RequiresReauth
-        // ADR-0028 amendment of 2026-09-27: an `/i/` slug is the 8-character
-        // ledger id (6 bytes); the pre-amendment 43-character id is refused.
-        // Since the 2026-09-28 security pass the token also carries the link
-        // secret as its fragment (`<slug>#<secret>`), without which the
-        // sealed capability does not open.
-        val (slugPart, fragment) = me.lakko.app.discovery.splitLinkToken(slug.trim())
-        val blobId = me.lakko.app.discovery.decodeInviteBlobId(slugPart)
-            ?: return AcceptInviteResult.MalformedSlug
-        val linkSecret = (me.lakko.app.chat.parseGroupInviteFragment(fragment)
-            as? me.lakko.app.chat.GroupInviteFragment.Secret)?.bytes
-            ?: return AcceptInviteResult.MalformedSlug
-
-        val sealed = try {
-            authenticatedDiscoveryClient().use { discovery ->
-                discovery.fetchInvite(blobId)
-            }
-        } catch (e: Throwable) {
-            if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return AcceptInviteResult.RateLimited
-            return AcceptInviteResult.Failed(message = e.message ?: "fetch failed")
-        } ?: return AcceptInviteResult.NotFound
+        // Sealed links (2026-09-28): the argument is `<slug>#<secret>`; a
+        // missing or malformed secret is refused before any request.
+        val link = me.lakko.app.discovery.InviteLinkArgument.decode(slug.trim())
+        val secret = me.lakko.app.discovery.inviteLinkSecretOf(link.fragment)
+            ?: return AcceptInviteResult.Damaged
+        // ADR-0028 amendment of 2026-09-27: a pointer slug is the 8-character
+        // ledger id (6 bytes); anything longer is an inline sealed link (the
+        // inviter's upload failed in transport). The pre-amendment
+        // 43-character id is neither.
+        val blobId = me.lakko.app.discovery.decodeInviteBlobId(link.slug)
+        val sealed: ByteArray = if (blobId != null) {
+            try {
+                authenticatedDiscoveryClient().use { discovery ->
+                    discovery.fetchInvite(blobId)
+                }
+            } catch (e: Throwable) {
+                if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return AcceptInviteResult.RateLimited
+                return AcceptInviteResult.Failed(message = e.message ?: "fetch failed")
+            } ?: return AcceptInviteResult.NotFound
+        } else {
+            inlineSealedInviteOrNull(link.slug) ?: return AcceptInviteResult.MalformedSlug
+        }
 
         val cap = try {
-            InviteCapability.openLink(sealed, linkSecret)
-        } catch (_: Throwable) {
-            // A blob that does not open under the link's secret (a guessed
-            // id, a substituted blob) or a signature that fails: not found
-            // from the user's perspective.
-            return AcceptInviteResult.NotFound
+            me.lakko.app.discovery.openSealedInviteLink(sealed, secret) { bytes, key ->
+                InviteCapability.openLink(bytes, key)
+            }
+        } catch (_: me.lakko.app.discovery.InviteLinkDamaged) {
+            // A wrong secret, a tampered link and a blob a server swapped in
+            // under a live id all fail the same way: the damaged state.
+            return AcceptInviteResult.Damaged
         }
+        // The consume dedup tag is computed over the PLAINTEXT capability.
+        val capabilityBytes = cap.wire()
         return cap.use { capability ->
             val nowMs = System.currentTimeMillis().toULong()
             if (!capability.isValidNow(nowMs)) {
                 return@use AcceptInviteResult.Expired
             }
-            // The joiner tag is computed over the PLAINTEXT capability.
-            val capabilityBytes = capability.wire()
             // ADR-0058 §6 — the link grant lets this device write the request
             // (and the 1:1 Welcome) into the inviter's closed mailbox. Used
             // for this flow only and never kept.
@@ -966,8 +974,11 @@ public class ContactsRepository(
             val inviterSigPubkey = capability.ownerSignaturePubkey()
             val inviterX25519Pubkey = capability.ownerX25519Pubkey()
 
-            // Consume — atomic counter bump + per-joiner dedup.
-            val consumeResult = try {
+            // Consume — atomic counter bump + per-joiner dedup. An inline link
+            // has no ledger row, so nothing to consume.
+            val consumeResult = if (blobId == null) {
+                me.lakko.app.discovery.ConsumeInviteResult.Consumed(usedCount = 0, maxUses = 0)
+            } else try {
                 authenticatedDiscoveryClient().use { discovery ->
                     discovery.consumeInvite(blobId, capabilityBytes, secrets.accountId)
                 }
@@ -1145,29 +1156,62 @@ public class ContactsRepository(
             } catch (e: Throwable) {
                 throw ContactsError.wrap(e)
             }
-            val blobId = try {
+            // Sealed links (2026-09-28): the ledger stores only the sealed
+            // capability; the secret rides in the fragment. Only a transport
+            // failure falls back to the inline form; a refusal is thrown.
+            val upload = me.lakko.app.discovery.SealedInviteUpload(
+                sealed = mint.sealed,
+                issuerPubkey = mint.issuerPubkey,
+                expiryMs = expiryMs.toLong(),
+                maxUses = maxUses.toLong(),
+                label = label,
+                bootstrapReferral = bootstrapReferral,
+            )
+            val blobId: ByteArray? = try {
                 authenticatedDiscoveryClient().use { discovery ->
-                    discovery.uploadInvite(
-                        sealed = mint.sealed,
-                        issuerPubkey = mint.issuerPubkey,
-                        expiryMs = expiryMs.toLong(),
-                        maxUses = maxUses.toLong(),
-                        label = label,
-                        bootstrapReferral = bootstrapReferral,
-                    )
+                    discovery.uploadInvite(upload)
                 }
             } catch (e: Throwable) {
-                manager.retireLink(linkId)
-                throw ContactsError.wrap(e)
+                if (e is kotlinx.coroutines.CancellationException) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                        manager.retireLink(linkId)
+                    }
+                    throw e
+                }
+                if (!me.lakko.app.discovery.isInviteUploadTransportFailure(e)) {
+                    // ADR-0058 §6 — a refused upload shares no link, so its
+                    // key comes off the mailbox again.
+                    manager.retireLink(linkId)
+                    throw ContactsError.wrap(e)
+                }
+                // An inline link keeps its key: it is shared, and it is retired
+                // at expiry like any other.
+                android.util.Log.w("ContactsRepository", "invite upload unreachable; sharing the inline link")
+                null
             }
-            manager.noteLinkBlob(linkId, blobId)
+            if (blobId != null) manager.noteLinkBlob(linkId, blobId)
 
-            val blobIdSlug = base64UrlEncodeNoPad(blobId)
-            // The link secret rides in the fragment, never sent to a server.
-            val url = me.lakko.app.chat.appendGroupInviteLinkKey("$INVITE_URL_PREFIX$blobIdSlug", mint.linkSecret)
+            val slug = base64UrlEncodeNoPad(blobId ?: mint.sealed)
+            val url = me.lakko.app.discovery.composeSealedInviteUrl(
+                origin = me.lakko.app.config.ApiEndpoints.webOrigin,
+                prefix = "/i/",
+                blobId = blobId,
+                sealed = mint.sealed,
+                linkSecret = mint.linkSecret,
+            )
+            // UX 5.3 — keep the secret of a pointer link (the only kind the
+            // server lists) so this device can copy and share it later, after
+            // a restart included. An inline link has no ledger row.
+            if (blobId != null) {
+                inviteSecretStore.put(
+                    base64Encode(secrets.accountId),
+                    slug,
+                    base64UrlEncodeNoPad(mint.linkSecret),
+                )
+            }
             val invite = GeneratedInvite(
                 blobId = blobId,
-                blobIdSlug = blobIdSlug,
+                blobIdSlug = slug,
                 url = url,
                 label = label,
                 expiryMs = expiryMs.toLong(),
@@ -1211,11 +1255,13 @@ public class ContactsRepository(
                 if (result is me.lakko.app.discovery.RevokeInviteResult.Revoked) {
                     // ADR-0058 §6 — the link's key comes off the mailbox.
                     reach()?.retireLinkByBlob(blobId)
+                    // UX 5.3 — a revoked link's secret leaves with it.
+                    inviteSecretStore.remove(base64Encode(secrets.accountId), base64UrlEncodeNoPad(blobId))
                     val blobIdHex = blobId.toList()
                     mutableState.update { state ->
                         state.copy(
                             outstandingInvites = state.outstandingInvites
-                                .filterNot { it.blobId.toList() == blobIdHex },
+                                .filterNot { it.blobId?.toList() == blobIdHex },
                         )
                     }
                 }
@@ -1259,6 +1305,29 @@ public class ContactsRepository(
                 signingSeed.fill(0)
             }
         }
+    }
+
+    /**
+     * UX 5.3 — the full shareable URL of each listed `/i/` link whose secret
+     * this device kept when it created it, keyed by slug. A slug missing from
+     * the result is a link created on another device: it can be revoked here,
+     * not copied or shared.
+     */
+    public fun heldInviteLinkUrls(slugs: Collection<String>): Map<String, String> {
+        val secrets = authRepo.identitySecrets.value ?: return emptyMap()
+        val held = inviteSecretStore.all(base64Encode(secrets.accountId))
+        if (held.isEmpty()) return emptyMap()
+        val origin = me.lakko.app.config.ApiEndpoints.webOrigin
+        return slugs.mapNotNull { slug ->
+            me.lakko.app.discovery.heldInviteLinkUrl(origin, "/i/", slug, held[slug])?.let { slug to it }
+        }.toMap()
+    }
+
+    /** Forget-device: the invite-link secrets this device kept for the
+     *  account leave with it. Call BEFORE [clear] (it reads the session). */
+    public fun forgetDevice() {
+        val accountB64 = authRepo.identitySecrets.value?.let { base64Encode(it.accountId) } ?: return
+        inviteSecretStore.clearForAccount(accountB64)
     }
 
     /** Clear the in-memory state. Called from the AuthRepository
@@ -1432,6 +1501,10 @@ public data class ContactsState(
  *     message for diagnostics.
  */
 public sealed interface AcceptInviteResult {
+    /** The link's fragment is missing or malformed, or the link does not
+     *  open under it (sealed links, 2026-09-28). */
+    public data object Damaged : AcceptInviteResult
+
     public data class Accepted(
         val recipientAccountId: ByteArray,
         /** 71-char Signal-style safety number derived from
@@ -1476,11 +1549,13 @@ public sealed interface AcceptInviteResult {
 /** An invite link the owner has just generated this session. */
 public data class GeneratedInvite(
     /** Raw 6-byte server-assigned ledger id (the same value
-     *  `revokeInviteLink` takes). */
-    val blobId: ByteArray,
-    /** base64url-no-pad of [blobId] — the slug portion of [url]. */
+     *  `revokeInviteLink` takes), or `null` for an inline link (the upload
+     *  failed in transport; there is no ledger row to revoke). */
+    val blobId: ByteArray?,
+    /** The slug portion of [url]: base64url of [blobId], or of the sealed
+     *  bytes for an inline link. */
     val blobIdSlug: String,
-    /** `https://lakko.me/i/<slug>` — the URL the owner shares. */
+    /** `https://lakko.me/i/<slug>#<secret>` — the URL the owner shares. */
     val url: String,
     /** Human-visible label (empty when the user didn't set one). */
     val label: String,
@@ -1520,6 +1595,22 @@ public data class GeneratedInvite(
 /** Default invite expiry — 7 days from generation. Mirrors the
  *  web side's `7 * 86_400_000` constant. */
 private const val DEFAULT_INVITE_EXPIRY_MS: Long = 7L * 24 * 60 * 60 * 1000
+
+/** The sealed bytes of an inline `/i/` slug (base64url of the sealed link),
+ *  or `null` when it does not decode or is too short to be one. */
+internal fun inlineSealedInviteOrNull(slug: String): ByteArray? {
+    val bytes = try {
+        me.lakko.app.auth.base64UrlDecodeNoPad(slug)
+    } catch (_: IllegalArgumentException) {
+        return null
+    }
+    return bytes.takeIf { it.size >= INLINE_SEALED_INVITE_MIN_LEN }
+}
+
+/** Floor on an inline sealed `/i/` slug: far above the 6-byte pointer and
+ *  below any real sealed contact capability (a loose discriminator, like the
+ *  `/g/` and `/c/` inline floors). */
+private const val INLINE_SEALED_INVITE_MIN_LEN: Int = 100
 
 /** Server-side sentinel for `max_uses = single-use`. */
 private val SINGLE_USE: UInt = 0u

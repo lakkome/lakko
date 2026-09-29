@@ -1994,6 +1994,13 @@ pub enum FfiIncomingEnvelopeKind {
     /// of a one-to-one), then keep it only when [`pin_is_newer`] for that
     /// message.
     Pin,
+    /// A journal root hands one member its Delivery Service registrar seed
+    /// (ADR-0057). `payload` is the whole envelope, for
+    /// `decodeRegistrarSeedEnvelope` / `openRegistrarSeedEnvelope`. Never
+    /// render it; keep it only when addressed to the own account key and the
+    /// sender resolves (C-68) to the group's owner. Appended last so every
+    /// earlier variant keeps its ordinal.
+    RegistrarSeed,
     /// A contact's introduction record to relay (ADR-0058 §4). The record
     /// wire rides the `introduction_record` field; `payload` is empty. Never
     /// render it. **Accept only from the other participant of a 1:1
@@ -2017,11 +2024,6 @@ pub enum FfiIncomingEnvelopeKind {
     /// rules as `Visibility`, ordered by
     /// [`crate::scoped_discovery::reach_state_is_newer`].
     ReachState,
-    /// A journal root handing this member its Delivery Service registrar
-    /// seed (ADR-0057). `payload` is the whole envelope as received; the
-    /// ADR-0057 client surface (addressee check, open) is not on this FFI
-    /// yet, so a caller only drops it and never renders it.
-    RegistrarSeed,
     /// A proposer's committer delegations (ADR-0058 §6). The structurally
     /// decoded envelope rides the `committer_delegation` field; `payload` is
     /// empty. Never render it. Keep the newest per `(MLS sender resolved at

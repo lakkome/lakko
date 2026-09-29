@@ -242,6 +242,13 @@ public final class ProfileDirectory: ObservableObject {
         )
     }
 
+    /// The account id a member's own profile claimed (profile envelope v2), or
+    /// `nil`. A claim: ADR-0057 uses it only to fetch an identity bundle whose
+    /// signature key must then match the member's.
+    public func accountId(signatureKeyB64: String) -> Data? {
+        received.profile(signatureKeyB64: signatureKeyB64)?.accountId
+    }
+
     /// ``resolve(signatureKey:)`` for a base64 key (a `MemberIdentity`).
     public func resolve(signatureKeyB64: String) -> ResolvedDisplayName? {
         guard let key = Data(base64Encoded: signatureKeyB64) else { return nil }

@@ -90,6 +90,9 @@ public fun joinFailureCopy(error: Throwable): String {
     val seen = HashSet<Throwable>()
     while (cause != null && seen.add(cause)) {
         if (cause is GroupNotAcceptingRequests) return GROUP_NOT_ACCEPTING_REQUESTS
+        if (cause is me.lakko.app.discovery.InviteLinkDamaged || cause is GroupInviteLinkDamaged) {
+            return me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY
+        }
         if (cause is me.lakko.app.anon.AnonTokenQuotaExhausted) {
             return me.lakko.app.anon.ACTION_ALLOWANCE_USED_COPY
         }

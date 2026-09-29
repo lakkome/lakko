@@ -45,6 +45,7 @@ import { ProfileProvider } from "./profile/ProfileContext";
 import { ReachProvider } from "./reach/ReachProvider";
 import { ScopedDiscoveryRuntime } from "./reach/ScopedDiscoveryRuntime";
 import { GroupNameProvider } from "./chat/GroupNameContext";
+import { JournalOwnershipProvider } from "./ds/JournalOwnershipContext";
 import { PinProvider } from "./chat/PinContext";
 import { ReadWatermarkProvider } from "./chat/ReadWatermarkContext";
 import { CallLogProvider } from "./calls/CallLogContext";
@@ -106,6 +107,12 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     and publishes through the canonical identity) and ABOVE the mailbox,
  *     whose Welcome joins and contact requests feed it.
  *
+ *   <JournalOwnershipProvider> — ADR-0057 journal ownership: which journals
+ *     this account owns (root), the registrar seeds other owners handed it,
+ *     and the owner's appointment of registrars. Inside the profile provider
+ *     (it reads the account ids profiles carry) and ABOVE every receive loop,
+ *     which hands it registrar-seed envelopes.
+ *
  *   <GroupNameProvider> — ADR-0051 shared group names: the per-group store,
  *     the role-gated receive and the growth re-send. Inside Auth + Chat for
  *     the same reasons, and ABOVE the mailbox, whose Welcome joins title
@@ -148,6 +155,7 @@ const App: Component = () => (
       <DeviceGroupSyncProvider>
         <ReachProvider>
         <ProfileProvider>
+        <JournalOwnershipProvider>
         <GroupNameProvider>
         <PinProvider>
         <ReadWatermarkProvider>
@@ -209,6 +217,7 @@ const App: Component = () => (
         </ReadWatermarkProvider>
         </PinProvider>
         </GroupNameProvider>
+        </JournalOwnershipProvider>
         </ProfileProvider>
         </ReachProvider>
       </DeviceGroupSyncProvider>

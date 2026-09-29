@@ -68,6 +68,9 @@ public final class ContactsViewModel: ObservableObject {
     // MARK: - Wiring
 
     private let repository: ContactsRepository
+
+    /// The key the per-account invite link secrets are read under.
+    var inviteAccountIdB64: String? { repository.inviteAccountIdB64 }
     /// Optional bridge to the chat surface. When non-nil,
     /// ``onAcceptClicked(messageId:)`` drives
     /// ``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:)``

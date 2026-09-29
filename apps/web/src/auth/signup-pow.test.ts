@@ -165,7 +165,7 @@ describe("every other auth route lost its proof of work", () => {
     ["/recovery-contact/recover/finish", (c: AuthClient) => c.recoveryContactRecoverFinish(HANDLE, ContactKind.Email, "123456")],
     ["/recovery-contact/enroll/start", (c: AuthClient) => c.recoveryContactEnrollStart("tok", ContactKind.Email, "a@b.c")],
     ["/device/authorize/redeem", (c: AuthClient) => c.deviceAuthorizeRedeem("grant")],
-    ["/device/request", (c: AuthClient) => c.deviceRequestCreate(new Uint8Array(32).fill(7), new Uint8Array([1]))],
+    ["/device/request", (c: AuthClient) => c.deviceRequestCreate(new Uint8Array(32).fill(7))],
   ])("%s: one request, no pow field", async (path, run) => {
     const seen = stubFetch(() => ({ status: 401, json: {} }));
     await run(new AuthClient("/api/auth")).catch(() => undefined);

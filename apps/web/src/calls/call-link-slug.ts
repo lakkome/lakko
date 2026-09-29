@@ -19,17 +19,20 @@ export function callLinkSlug(input: string): string | null {
 }
 
 /**
- * The in-app path to open a pasted call link: `/c/<slug>#<fragment>`. The
- * fragment is the link secret the whole capability is sealed under (the
- * 2026-09-28 security pass), so it comes along verbatim; a link pasted
- * without one still navigates, and the landing screen says it is damaged.
- * `null` when the input is not a call link at all.
+ * The slug AND the fragment of a pasted call link. The fragment is the link
+ * secret the capability is sealed under (sealed-link amendment of ADR-0028 /
+ * ADR-0009, 2026-09-28), so the landing page must receive it: dropping it
+ * would turn every pasted link into a damaged one. `hash` is `""` when the
+ * paste carried none (the landing page then shows the damaged state).
  */
-export function callLinkPath(input: string): string | null {
+export function callLinkTarget(input: string): { slug: string; hash: string } | null {
   const slug = callLinkSlug(input);
   if (slug === null) return null;
-  const trimmed = input.trim();
-  const hashAt = trimmed.indexOf("#");
-  const fragment = hashAt < 0 ? "" : trimmed.slice(hashAt);
-  return `/c/${slug}${fragment}`;
+  let hash = "";
+  try {
+    hash = new URL(input.trim(), "https://lakko.me").hash;
+  } catch {
+    hash = "";
+  }
+  return { slug, hash };
 }

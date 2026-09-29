@@ -1958,27 +1958,28 @@ pub enum WasmIncomingEnvelopeKind {
     /// authority is the receiver's role-table check, then `pinIsNewer` for
     /// that message.
     Pin = 9,
+    /// A journal root hands one member its Delivery Service registrar seed
+    /// (ADR-0057). `payload` is the whole envelope, for
+    /// `decodeRegistrarSeedEnvelope` / `openRegistrarSeedEnvelope`. Never
+    /// render it; keep it only when addressed to the own account key and
+    /// the sender resolves (C-68) to the group's owner.
+    RegistrarSeed = 10,
     /// A contact's introduction record to relay (ADR-0058 §4). The record
     /// wire rides the `introductionRecord` getter; `payload` is empty. Never
     /// render it; accept it only from the other participant of a 1:1
     /// conversation and keep the newest per contact.
-    IntroductionOffer = 10,
+    IntroductionOffer = 11,
     /// A contact's bundle of introduction records (ADR-0058 §4), on the
     /// `introductions` getter. Keep the newest per contact via
     /// `bundleIsNewer`, search it locally, never re-relay it.
-    Introductions = 11,
+    Introductions = 12,
     /// The owner's "who can find me" setting from another of their devices
     /// (ADR-0058 §7), on the `visibility` getter. Accept only on the owner's
     /// DeviceGroup, keep via `visibilityIsNewer`.
-    Visibility = 12,
+    Visibility = 13,
     /// The owner's reach-key version counters (ADR-0058 §7), on the
     /// `reachState` getter. Same rules, ordered by `reachStateIsNewer`.
-    ReachState = 13,
-    /// A journal root handing this member its Delivery Service registrar
-    /// seed (ADR-0057). `payload` is the whole envelope as received; the
-    /// ADR-0057 client surface is not on this FFI yet, so a caller only drops
-    /// it and never renders it.
-    RegistrarSeed = 14,
+    ReachState = 14,
     /// A proposer's committer delegations (ADR-0058 §6), on the
     /// `committerDelegation` getter; `payload` is empty. Never render it.
     /// Keep the newest per `(MLS sender resolved at receipt,
@@ -2143,6 +2144,7 @@ impl WasmIncomingEnvelope {
 /// is malformed (below the Welcome / KP-forward minimum floor,
 /// or an invalid media-state payload).
 #[wasm_bindgen(js_name = dispatchIncomingEnvelope)]
+#[allow(clippy::too_many_lines)] // one arm per envelope kind, each spelled out
 pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelope, JsError> {
     dispatch_incoming_envelope_inner(plaintext).map_err(|msg| JsError::new(&msg))
 }

@@ -117,11 +117,15 @@ internal fun isServiceEnvelope(
     decodesAsRoutingSecret: (ByteArray) -> Boolean,
     decodesAsCommitterBeacon: (ByteArray) -> Boolean,
     committerBeaconEnvelopeLen: Int,
+    decodesAsRegistrarSeed: (ByteArray) -> Boolean = { false },
+    registrarSeedEnvelopeLen: Int = -1,
 ): Boolean = classifyBackgroundPayload(
     payload,
     decodesAsRoutingSecret,
     decodesAsCommitterBeacon,
     committerBeaconEnvelopeLen,
+    decodesAsRegistrarSeed,
+    registrarSeedEnvelopeLen,
 ) != BackgroundPayloadKind.MESSAGE
 
 /**
@@ -149,7 +153,7 @@ internal enum class BackgroundPayloadKind {
     CALL_SIGNALING,
 
     /** Machine-to-machine: routing secret, committer beacon, profile, group
-     *  name, profile request, shared pin. */
+     *  name, profile request, shared pin, registrar seed. */
     SERVICE_ENVELOPE,
 
     /** Anything else — a real chat envelope, or legacy plain UTF-8 text. */
@@ -163,6 +167,8 @@ internal fun classifyBackgroundPayload(
     decodesAsRoutingSecret: (ByteArray) -> Boolean,
     decodesAsCommitterBeacon: (ByteArray) -> Boolean,
     committerBeaconEnvelopeLen: Int,
+    decodesAsRegistrarSeed: (ByteArray) -> Boolean = { false },
+    registrarSeedEnvelopeLen: Int = -1,
 ): BackgroundPayloadKind {
     // Cheap unambiguous discriminator: the CallSignalingPayload oneof
     // body tags, fields 10..16 (0x52/0x5A/0x62/0x6A, the group-control
@@ -176,6 +182,8 @@ internal fun classifyBackgroundPayload(
             decodesAsRoutingSecret,
             decodesAsCommitterBeacon,
             committerBeaconEnvelopeLen,
+            decodesAsRegistrarSeed,
+            registrarSeedEnvelopeLen,
         )
     ) {
         BackgroundPayloadKind.SERVICE_ENVELOPE
@@ -189,6 +197,8 @@ private fun isServiceEnvelopeOtherThanCall(
     decodesAsRoutingSecret: (ByteArray) -> Boolean,
     decodesAsCommitterBeacon: (ByteArray) -> Boolean,
     committerBeaconEnvelopeLen: Int,
+    decodesAsRegistrarSeed: (ByteArray) -> Boolean = { false },
+    registrarSeedEnvelopeLen: Int = -1,
 ): Boolean {
     // Kind 1 — cheap pre-filter (exact 70-byte length + leading `l`)
     // before the throwing codec, so a real chat message never costs an
@@ -236,12 +246,22 @@ private fun isServiceEnvelopeOtherThanCall(
     // reads the journal.
     if (looksLikePinEnvelope(payload)) return true
 
-    // Kind 8 — ADR-0058 scoped discovery (introduction offer / bundle,
-    // visibility, reach state, committer delegation) and the ADR-0057
-    // registrar seed. The same NUL-terminated-prefix classification the
-    // foreground `ChatClient` uses ([me.lakko.app.reach.scopedEnvelopeKindOf]),
-    // so the two paths cannot drift. Suppressed only: keeping any of them is
-    // a WRITE, and this path is read-only (C-59).
+    // Kind 8 — ADR-0057 registrar seed, the owner appointing one member as a
+    // registrar of the group's journal. The same length + first-byte peek the
+    // foreground classifier uses, then the fail-closed decode. Suppressed
+    // only: OPENING and storing the seed is a write under the conversation's
+    // lock, which this read-only path must never do (C-59); the foreground
+    // applies it when it next reads the journal.
+    if (me.lakko.app.chat.looksLikeRegistrarSeedEnvelope(payload, registrarSeedEnvelopeLen, decodesAsRegistrarSeed)) {
+        return true
+    }
+
+    // Kind 9 — ADR-0058 scoped discovery (introduction offer / bundle,
+    // visibility, reach state, committer delegation). The same NUL-terminated-
+    // prefix classification the foreground `ChatClient` uses
+    // ([me.lakko.app.reach.scopedEnvelopeKindOf]), so the two paths cannot
+    // drift. Suppressed only: keeping any of them is a WRITE, and this path is
+    // read-only (C-59).
     if (me.lakko.app.reach.scopedEnvelopeKindOf(payload) != null) return true
 
     return false

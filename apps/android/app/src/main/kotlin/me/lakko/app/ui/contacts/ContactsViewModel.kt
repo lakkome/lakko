@@ -149,6 +149,7 @@ public class ContactsViewModel(
             inviteError = ui.inviteError,
             activeInvitesLoaded = ui.activeInvitesLoaded,
             activeInvites = ui.activeInvites,
+            activeInviteUrls = ui.activeInviteUrls,
             loadingActiveInvites = ui.loadingActiveInvites,
             activeInvitesError = ui.activeInvitesError,
             revokingActiveInviteSlug = ui.revokingActiveInviteSlug,
@@ -344,11 +345,17 @@ public class ContactsViewModel(
                     is me.lakko.app.discovery.ListInvitesResult.List -> result.invites
                     me.lakko.app.discovery.ListInvitesResult.NotFoundOrNotOwner -> emptyList()
                 }
+                val urls = try {
+                    repo.heldInviteLinkUrls(rows.map { it.blobIdSlug })
+                } catch (_: Throwable) {
+                    emptyMap()
+                }
                 mutableUi.update {
                     it.copy(
                         loadingActiveInvites = false,
                         activeInvitesLoaded = true,
                         activeInvites = rows,
+                        activeInviteUrls = urls,
                     )
                 }
             } catch (err: ContactsError) {
@@ -562,6 +569,9 @@ public class ContactsViewModel(
          *  differs. */
         val activeInvitesLoaded: Boolean = false,
         val activeInvites: List<me.lakko.app.discovery.ActiveInvite> = emptyList(),
+        /** UX 5.3 — the full URL of each listed link whose secret this device
+         *  kept, by slug. */
+        val activeInviteUrls: Map<String, String> = emptyMap(),
         val loadingActiveInvites: Boolean = false,
         val activeInvitesError: String? = null,
         /** `blobIdSlug` of the row currently being revoked, when
@@ -590,6 +600,9 @@ public data class ContactsUiState(
     /** Phase 1.18d2b-list. */
     val activeInvitesLoaded: Boolean,
     val activeInvites: List<me.lakko.app.discovery.ActiveInvite>,
+    /** UX 5.3 — slug -> full URL for the listed links this device can share;
+     *  a listed slug absent here was created on another device. */
+    val activeInviteUrls: Map<String, String> = emptyMap(),
     val loadingActiveInvites: Boolean,
     val activeInvitesError: String?,
     val revokingActiveInviteSlug: String?,
