@@ -727,9 +727,9 @@ public final class ContactsRepository: ObservableObject {
         let expiryMs = nowMs + expiryMillisFromNow
 
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
-        let capabilityBytes: Data
+        let mint: InviteLinkMint
         do {
-            capabilityBytes = try composeInviteCapability(
+            mint = try composeInviteCapability(
                 ownerSigningSeed: identity.ed25519Seed(),
                 ownerAccountId: secrets.accountId,
                 ownerX25519Pubkey: identity.x25519PublicKey(),
@@ -742,27 +742,54 @@ public final class ContactsRepository: ObservableObject {
             throw ContactsError.wrap(error)
         }
 
+        // Sealed links (ADR-0028 amendment of 2026-09-28): upload the sealed
+        // blob with its clear fields and share the short pointer link; the
+        // secret rides the fragment and is never sent. Only a TRANSPORT
+        // failure falls back to the inline link, which has no ledger row and
+        // so no consume ceiling and no revoke; a server refusal surfaces.
         let discovery = authenticatedDiscoveryClient()
-        let blobId: Data
+        let blobId: Data?
         do {
             blobId = try await discovery.uploadInvite(
-                capabilityBytes: capabilityBytes
+                mint: mint,
+                expiryMs: UInt64(expiryMs),
+                maxUses: maxUses,
+                label: label,
+                bootstrapReferral: bootstrapReferral
             )
+        } catch let error where InviteLink.uploadFallsBackInline(error) {
+            NSLog("invite upload failed (network); sharing the inline link")
+            blobId = nil
         } catch {
             throw ContactsError.wrap(error)
         }
 
-        let blobIdSlug = base64UrlEncodeNoPad(blobId)
-        let url = "\(Self.inviteUrlPrefix)\(blobIdSlug)"
-        let invite = GeneratedInvite(
-            blobId: blobId,
-            blobIdSlug: blobIdSlug,
-            url: url,
-            label: label,
-            expiryMs: expiryMs,
-            maxUses: Int64(maxUses),
-            createdAtMs: nowMs
-        )
+        let invite: GeneratedInvite
+        if let blobId {
+            invite = GeneratedInvite(
+                blobId: blobId,
+                blobIdSlug: base64UrlEncodeNoPad(blobId),
+                url: InviteLink.pointer(
+                    origin: ApiEndpoints.webOrigin, prefix: "/i/",
+                    blobId: blobId, secret: mint.linkSecret),
+                label: label,
+                expiryMs: expiryMs,
+                maxUses: Int64(maxUses),
+                createdAtMs: nowMs
+            )
+        } else {
+            invite = GeneratedInvite(
+                blobId: nil,
+                blobIdSlug: base64UrlEncodeNoPad(mint.sealed),
+                url: InviteLink.inline(
+                    origin: ApiEndpoints.webOrigin, prefix: "/i/",
+                    sealed: mint.sealed, secret: mint.linkSecret),
+                label: label,
+                expiryMs: expiryMs,
+                maxUses: Int64(maxUses),
+                createdAtMs: nowMs
+            )
+        }
         state = state.with(
             outstandingInvites: state.outstandingInvites + [invite]
         )
@@ -843,16 +870,30 @@ public final class ContactsRepository: ObservableObject {
     /// side opens on the other.
     public nonisolated static var inviteUrlPrefix: String { ApiEndpoints.webOrigin + "/i/" }
 
-    /// The 6-byte ledger id an `/i/<slug>` names, or `nil` for any other slug:
-    /// exactly 8 base64url characters decoding to ``DiscoveryClient`` 's id
-    /// width. A contact invite has no inline form, so the retired 43-character
-    /// id and everything else are refused before any request.
-    public nonisolated static func parseInviteSlug(_ slug: String) -> Data? {
-        guard slug.count == Int(inviteBlobIdUrlLen()),
-              isBase64Url(slug),
-              let bytes = base64UrlDecodeNoPad(slug),
-              bytes.count == Int(inviteBlobIdLen()) else { return nil }
-        return bytes
+    /// What an `/i/<slug>` names: a 6-byte ledger id (exactly 8 base64url
+    /// characters, the pointer form) or the sealed blob itself (the inline
+    /// fallback, at least ``inviteInlineMinLen`` bytes).
+    public enum ParsedInviteSlug: Equatable {
+        case pointer(blobId: Data)
+        case inline(sealed: Data)
+    }
+
+    /// Floor on the inline form: well under the smallest sealed `/i/`
+    /// capability and well over the retired 32-byte (43-character) id, which
+    /// is therefore refused rather than read as a blob.
+    public nonisolated static let inviteInlineMinLen = 100
+
+    /// Parse an `/i/<slug>` (the part before `#`), or `nil` for any other
+    /// shape, refused before any request.
+    public nonisolated static func parseInviteSlug(_ slug: String) -> ParsedInviteSlug? {
+        guard isBase64Url(slug), let bytes = base64UrlDecodeNoPad(slug) else { return nil }
+        if slug.count == Int(inviteBlobIdUrlLen()), bytes.count == Int(inviteBlobIdLen()) {
+            return .pointer(blobId: bytes)
+        }
+        if bytes.count >= inviteInlineMinLen {
+            return .inline(sealed: bytes)
+        }
+        return nil
     }
 
     // MARK: - Joiner-side invite consume (1.14e8)
@@ -866,14 +907,14 @@ public final class ContactsRepository: ObservableObject {
     /// outcome copy.
     ///
     /// Steps:
-    ///   1. base64url-decode the slug to recover the 6-byte
-    ///      `blob_id` (exactly 8 characters; the retired
-    ///      43-character id is refused as malformed).
-    ///   2. `DiscoveryClient.fetchInvite(blobId)` → capability wire
-    ///      bytes (404 → `notFound`).
-    ///   3. `InviteCapability.decodeAndVerify(wire)` — local
-    ///      Ed25519 signature check (a malicious server cannot
-    ///      serve substituted bytes).
+    ///   1. Parse the slug: a 6-byte `blob_id` (exactly 8 characters) or an
+    ///      inline sealed blob; anything else (the retired 43-character id
+    ///      included) is malformed. Read the link secret from the fragment;
+    ///      without one the link is `damaged`, before any request.
+    ///   2. `DiscoveryClient.fetchInvite(blobId)` → the sealed blob (404 →
+    ///      `notFound`); an inline link carries it.
+    ///   3. `InviteCapability.openLink(sealed, secret)` — AEAD open + Ed25519
+    ///      verify; any failure (a substituted blob included) is `damaged`.
     ///   4. `isValidNow(now)` — expiry check.
     ///   5. `DiscoveryClient.consumeInvite(blobId, capabilityBytes,
     ///      joinerAccountId)` — atomic counter bump + dedup tag.
@@ -884,35 +925,52 @@ public final class ContactsRepository: ObservableObject {
     ///      bridge is wired, returning `groupIdHex`; falls back to
     ///      `nil` (best-effort) if the bridge is absent or the
     ///      call fails.
-    public func acceptInviteLink(slug: String) async -> AcceptInviteResult {
+    public func acceptInviteLink(slug: String, fragment: String?) async -> AcceptInviteResult {
         guard let secrets = authRepository.identitySecrets else {
             return .requiresReauth
         }
-        guard let blobId = Self.parseInviteSlug(slug) else {
+        guard let parsed = Self.parseInviteSlug(slug) else {
             return .malformedSlug
         }
-
-        let discovery = authenticatedDiscoveryClient()
-        let capabilityBytes: Data?
-        do {
-            capabilityBytes = try await discovery.fetchInvite(blobId: blobId)
-        } catch {
-            if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
-            return .failed(message: (error as? LocalizedError)?.errorDescription
-                ?? "fetch failed")
-        }
-        guard let capabilityBytes = capabilityBytes else {
-            return .notFound
+        // The capability is sealed under the fragment's secret: a link
+        // without a well-formed one is damaged, refused before any request.
+        guard let linkSecret = InviteLink.secret(fromFragment: fragment) else {
+            return .damaged
         }
 
+        let sealed: Data
+        let blobId: Data?
+        switch parsed {
+        case .inline(let bytes):
+            sealed = bytes
+            blobId = nil
+        case .pointer(let id):
+            blobId = id
+            let discovery = authenticatedDiscoveryClient()
+            let fetched: Data?
+            do {
+                fetched = try await discovery.fetchInvite(blobId: id)
+            } catch {
+                if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
+                return .failed(message: (error as? LocalizedError)?.errorDescription
+                    ?? "fetch failed")
+            }
+            guard let fetched else {
+                return .notFound
+            }
+            sealed = fetched
+        }
+
+        // Open + verify: a wrong secret, a blob of another kind, a substituted
+        // or tampered blob all refuse here as the one damaged-link state.
         let capability: InviteCapability
         do {
-            capability = try InviteCapability.decodeAndVerify(wire: capabilityBytes)
+            capability = try InviteCapability.openLink(sealed: sealed, linkSecret: linkSecret)
         } catch {
-            // Signature / wire-format failure → treat as
-            // not-found from the user's perspective.
-            return .notFound
+            return .damaged
         }
+        // The joiner tag is computed over the PLAINTEXT capability wire.
+        let capabilityBytes = capability.wire()
 
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         if !capability.isValidNow(nowMs: nowMs) {
@@ -924,19 +982,24 @@ public final class ContactsRepository: ObservableObject {
         let inviterSigPubkey = capability.ownerSignaturePubkey()
         let inviterX25519Pubkey = capability.ownerX25519Pubkey()
 
-        // Consume — atomic counter bump + per-joiner dedup.
+        // Consume — atomic counter bump + per-joiner dedup. An inline link
+        // has no ledger row, so nothing to consume.
         let consumeResult: ConsumeInviteResult
-        do {
-            let discoveryConsume = authenticatedDiscoveryClient()
-            consumeResult = try await discoveryConsume.consumeInvite(
-                blobId: blobId,
-                capabilityBytes: capabilityBytes,
-                joinerAccountId: secrets.accountId
-            )
-        } catch {
-            if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
-            return .failed(message: (error as? LocalizedError)?.errorDescription
-                ?? "consume failed")
+        if let blobId {
+            do {
+                let discoveryConsume = authenticatedDiscoveryClient()
+                consumeResult = try await discoveryConsume.consumeInvite(
+                    blobId: blobId,
+                    capabilityBytes: capabilityBytes,
+                    joinerAccountId: secrets.accountId
+                )
+            } catch {
+                if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
+                return .failed(message: (error as? LocalizedError)?.errorDescription
+                    ?? "consume failed")
+            }
+        } else {
+            consumeResult = .consumed(usedCount: 0, maxUses: 0)
         }
         switch consumeResult {
         case .exhausted:
@@ -1057,6 +1120,10 @@ public enum AcceptInviteResult: Equatable {
     case exhausted
     case notFound
     case malformedSlug
+    /// The link's fragment is missing or is not a link secret, or the sealed
+    /// capability does not open under it (sealed-links amendment of
+    /// 2026-09-28). Nothing is retried without the secret.
+    case damaged
     /// `429` from the discovery ledger on the fetch or the consume: the link
     /// may be fine, the server asked this network address to slow down. The
     /// screen says "try again later", never "invalid".
@@ -1224,11 +1291,14 @@ public struct SentContactRequest: Equatable {
 /// (1.14e7, landed). Surfaced via
 /// ``ContactsState/outstandingInvites``.
 public struct GeneratedInvite: Equatable {
-    /// Raw 32-byte content-addressed id.
-    public let blobId: Data
-    /// base64url-no-pad of `blobId` — the slug portion of `url`.
+    /// The 6-byte ledger id, or `nil` for an inline link (the upload failed on
+    /// transport, so there is no ledger row to consume or revoke).
+    public let blobId: Data?
+    /// The slug portion of `url` (base64url of `blobId`, or of the sealed
+    /// blob for an inline link) — the row's identity in the links sheet.
     public let blobIdSlug: String
-    /// `https://lakko.me/i/<slug>` — the URL the owner shares.
+    /// `https://lakko.me/i/<slug>#<secret>` — the URL the owner shares. The
+    /// only place the link secret lives on this device.
     public let url: String
     /// Human-visible label (empty when the user didn't set one).
     public let label: String
@@ -1240,7 +1310,7 @@ public struct GeneratedInvite: Equatable {
     public let createdAtMs: Int64
 
     public init(
-        blobId: Data,
+        blobId: Data?,
         blobIdSlug: String,
         url: String,
         label: String,

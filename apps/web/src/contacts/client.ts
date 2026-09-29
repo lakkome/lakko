@@ -46,18 +46,22 @@ import type { Wasm } from "../wasm";
 import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import {
-  appendGroupInviteLinkSecret,
   composeInlineGroupInviteUrl,
   composePointerGroupInviteUrl,
+  GROUP_INVITE_INLINE_MIN_LEN,
   parseGroupInviteSlug,
   splitGroupInviteLink,
 } from "./group-invite";
-import { inviteLinkWidths } from "./invite-link";
+import {
+  inviteLinkWidths,
+  openSealedInviteLink,
+  takeInviteLinkMint,
+  type InviteLinkMintParts,
+} from "./invite-link";
 import { DsClient } from "../ds/client";
 import { withGroupMlsLock } from "../mls/group-lock";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type {
-  GroupInviteMint as WasmGroupInviteMint,
   Group as WasmGroup,
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
@@ -3361,17 +3365,18 @@ export class ContactsClient {
 
   /** ADR-0028 (G-3) — mint a group invite-link (the owner/admin side). Signs a
    *  `GroupInviteCapability` over this group's `group_id` with the local
-   *  identity's Ed25519 key and returns the full `<origin>/g/<base64url>` link
-   *  the owner shares out-of-band. A non-member opens it, reads the group's
+   *  identity's Ed25519 key, seals it under a fresh 12-byte link secret (the
+   *  2026-09-28 sealed-link amendment) and returns the full
+   *  `<origin>/g/<id>#<secret>` link the owner shares out-of-band. A non-member opens it, reads the group's
    *  current epoch from the journal, and posts an external-join proposal the
    *  admin approves (ADR-0027). The link conveys only the `group_id` — it
    *  authorizes nobody; the admin approval gate is the security boundary.
    *
    *  ADR-0028 v2 (docs/ux/group-invite-page.md): the capability also carries a
    *  **sealed preview** — the group's name, the inviter's display name and the
-   *  member count at mint time — encrypted under a fresh link key that rides
-   *  the URL **fragment** (`#<key>`), which no browser sends and no ledger
-   *  stores. Both the pointer and the inline form carry the same fragment. A
+   *  member count at mint time — encrypted under the same link secret, which
+   *  rides the URL **fragment** (`#<secret>`), which no browser sends and no
+   *  ledger stores. Both the pointer and the inline form carry the fragment. A
    *  name the display-name rule refuses is left out rather than failing the
    *  mint: the page then shows no name, never a guess.
    *
@@ -3400,28 +3405,28 @@ export class ContactsClient {
         names.inviterName,
         memberCount,
       );
-    let wire: Uint8Array;
-    let linkKey: Uint8Array;
+    let mint: InviteLinkMintParts;
     try {
-      let mint: WasmGroupInviteMint;
       try {
-        mint = mintWith({ groupName: preview.groupName, inviterName: preview.inviterName });
+        mint = takeInviteLinkMint(
+          mintWith({ groupName: preview.groupName, inviterName: preview.inviterName }),
+        );
       } catch (err) {
         // The names come from user-typed fields (a group label, a profile
         // name); one the rule refuses must not take the link with it.
         // eslint-disable-next-line no-console
         console.warn("group-invite: preview names refused, minting without names", err);
-        mint = mintWith({});
+        mint = takeInviteLinkMint(mintWith({}));
       }
-      wire = mint.wire;
-      linkKey = mint.linkKey;
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    // Production default (ADR-0028 OQ1): upload to the discovery ledger — the
-    // server-side anti-abuse surface (per-joiner consume dedup + soft max_uses)
-    // — and return the short pointer URL. `max_uses` is a soft throttle, not
-    // an access control: the admin approval gate stays the security boundary.
+    // Production default (ADR-0028 OQ1): upload the sealed blob to the
+    // discovery ledger — the server-side anti-abuse surface (per-joiner
+    // consume dedup + soft max_uses) — and return the short pointer URL. The
+    // server cannot read the capability, so the issuer key and expiry travel
+    // in clear beside it. `max_uses` is a soft throttle, not an access
+    // control: the admin approval gate stays the security boundary.
     //
     // The inline form is the fallback for a TRANSPORT failure only (a
     // censored / offline network), where the link must still work without the
@@ -3432,8 +3437,13 @@ export class ContactsClient {
     const widths = inviteLinkWidths(wasm);
     let url: string;
     try {
-      const blobId = await this.discovery.uploadGroupInvite(wire, maxUses);
-      url = composePointerGroupInviteUrl(blobId, widths, origin);
+      const blobId = await this.discovery.uploadGroupInvite({
+        sealed: mint.sealed,
+        issuerPubkey: mint.issuerPubkey,
+        expiryMs,
+        maxUses,
+      });
+      url = composePointerGroupInviteUrl(blobId, mint.linkSecret, widths, origin);
     } catch (err) {
       if (!(err instanceof DiscoveryNetworkError)) {
         const status = (err as { status?: unknown }).status;
@@ -3447,9 +3457,9 @@ export class ContactsClient {
       }
       // eslint-disable-next-line no-console
       console.warn("group-invite: ledger unreachable, using the inline link");
-      url = composeInlineGroupInviteUrl(wire, origin);
+      url = composeInlineGroupInviteUrl(mint.sealed, mint.linkSecret, widths, origin);
     }
-    return appendGroupInviteLinkSecret(url, linkKey, widths);
+    return url;
   }
 
   /** ADR-0028 revoke — the issuer revokes a previously-created group invite
@@ -3483,40 +3493,60 @@ export class ContactsClient {
     return true;
   }
 
-  /** ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
-   *  fetching from the discovery ledger when the slug is an 8-character
-   *  ledger id (the production form) or passing the bytes straight through
-   *  when it is an inline capability (the upload-failed fallback). Returns the
-   *  `blobId` (non-null only for the pointer form) so the caller can drive
-   *  `consumeGroupInvite` before requesting to join. A 429 from the ledger
-   *  surfaces as a wrapped `DiscoveryRateLimitedError` (see
+  /** ADR-0028 (G-3) — resolve a `/g/<slug>#<secret>` link to the PLAINTEXT
+   *  capability wire: read the fragment secret, fetch the sealed blob from the
+   *  discovery ledger when the slug is an 8-character ledger id (the
+   *  production form) or take it straight from the slug (the upload-failed
+   *  fallback), and open it with `GroupInviteCapability.openLink`, which also
+   *  verifies the signature inside. A missing or wrong fragment, an unreadable
+   *  slug, or a blob the secret does not open is `"damaged"` — never retried
+   *  without the secret, and a damaged fragment never reaches the network.
+   *  Returns the `blobId` (non-null only for the pointer form) so the caller
+   *  can drive `consumeGroupInvite`, and the secret for the preview. A 429
+   *  from the ledger surfaces as a wrapped `DiscoveryRateLimitedError` (see
    *  `isDiscoveryRateLimited`), never as "not found". */
-  async resolveGroupInviteSlug(
+  async resolveGroupInviteLink(
     slug: string,
-  ): Promise<{ capabilityWire: Uint8Array; blobId: Uint8Array | null }> {
-    let parsed;
+    fragment: string | null | undefined,
+  ): Promise<
+    | { capabilityWire: Uint8Array; blobId: Uint8Array | null; linkSecret: Uint8Array }
+    | "damaged"
+  > {
+    const wasm = await loadWasm();
+    let opened;
     try {
-      parsed = parseGroupInviteSlug(slug, inviteLinkWidths(await loadWasm()));
+      opened = await openSealedInviteLink({
+        slug,
+        fragment,
+        widths: inviteLinkWidths(wasm),
+        inlineMinLen: GROUP_INVITE_INLINE_MIN_LEN,
+        what: "group-invite",
+        fetchSealed: (blobId) => this.discovery.fetchGroupInvite(blobId),
+        open: (sealed, linkSecret) => {
+          const cap = wasm.GroupInviteCapability.openLink(sealed, linkSecret);
+          try {
+            return { wire: cap.wire, linkSecret };
+          } finally {
+            cap.free();
+          }
+        },
+      });
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    if (parsed.kind === "inline") {
-      return { capabilityWire: parsed.capabilityBytes, blobId: null };
-    }
-    let fetched: Uint8Array | null;
-    try {
-      fetched = await this.discovery.fetchGroupInvite(parsed.blobId);
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-    if (fetched === null) {
+    if (opened.kind === "damaged") return "damaged";
+    if (opened.kind === "not-found") {
       throw ContactsError.wrap(new Error("group invite not found or expired"));
     }
-    return { capabilityWire: fetched, blobId: parsed.blobId };
+    return {
+      capabilityWire: opened.capability.wire,
+      blobId: opened.blobId,
+      linkSecret: opened.capability.linkSecret,
+    };
   }
 
   /** ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/` link
-   *  capability (the wire bytes the slug base64url-decodes to). Decodes +
+   *  capability (the PLAINTEXT wire `resolveGroupInviteLink` opened). Decodes +
    *  verifies the capability (fail-closed on a forged / malformed / expired
    *  link, before any post), reads the group's current epoch from the journal
    *  head's public MLS framing (`epochAfterMessage` over the paged journal, no group secret), crafts an

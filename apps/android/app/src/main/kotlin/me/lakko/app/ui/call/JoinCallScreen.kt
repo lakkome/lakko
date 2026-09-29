@@ -135,6 +135,9 @@ data class JoinCallUiState(
     /** The discovery service answered `429` while resolving the link: not an
      *  invalid link, the screen says to try again later. */
     val rateLimited: Boolean = false,
+    /** The link's `#fragment` is missing or wrong, or the sealed blob does
+     *  not open under it (sealed-link amendment of 2026-09-28). */
+    val damaged: Boolean = false,
     val phase: JoinCallPhase = JoinCallPhase.Idle,
     val error: String? = null,
     /** ADR-0048 UX §4 — a guest's "Your name", prefilled `Guest`. */
@@ -185,6 +188,9 @@ class JoinCallViewModel(
     /** Set by [decode] when the ledger answered `429`. */
     private var lastDecodeRateLimited = false
 
+    /** Set by [decode] when the link is damaged. */
+    private var lastDecodeDamaged = false
+
     init {
         runDecode()
     }
@@ -192,8 +198,16 @@ class JoinCallViewModel(
     private fun runDecode() {
         viewModelScope.launch {
             lastDecodeRateLimited = false
+            lastDecodeDamaged = false
             val d = decode(slug)
-            local.update { it.copy(loading = false, decoded = d, rateLimited = d == null && lastDecodeRateLimited) }
+            local.update {
+                it.copy(
+                    loading = false,
+                    decoded = d,
+                    rateLimited = d == null && lastDecodeRateLimited,
+                    damaged = d == null && lastDecodeDamaged,
+                )
+            }
         }
     }
 
@@ -218,10 +232,20 @@ class JoinCallViewModel(
         return copy(phase = phase, error = if (phase == JoinCallPhase.Error) slot.errorMessage ?: error else error)
     }
 
-    private suspend fun decode(slug: String): DecodedCall? {
+    /** Resolve the link. [argument] is `<slug>` or `<slug>#<fragment>`
+     *  ([me.lakko.app.discovery.composeInviteLinkArgument]); the fragment is
+     *  the secret the sealed blob opens under. */
+    private suspend fun decode(argument: String): DecodedCall? {
+        val tap = me.lakko.app.discovery.parseInviteLinkArgument(argument)
+        val linkSecret = me.lakko.app.discovery.inviteLinkSecretOrNull(tap.fragment)
+        if (linkSecret == null) {
+            // No secret, nothing opens: never fetch, never retry without it.
+            lastDecodeDamaged = true
+            return null
+        }
         return try {
-            val parsed = parseCallInviteSlug(slug)
-            val capabilityBytes: ByteArray = when (parsed) {
+            val parsed = parseCallInviteSlug(tap.slug)
+            val sealed: ByteArray = when (parsed) {
                 is ParsedCallInvite.Pointer -> {
                     val discovery = DiscoveryClient()
                     try {
@@ -230,9 +254,9 @@ class JoinCallViewModel(
                         discovery.close()
                     }
                 }
-                is ParsedCallInvite.Inline -> parsed.capabilityBytes
+                is ParsedCallInvite.Inline -> parsed.sealed
             }
-            CallInviteCapability.decodeAndVerify(capabilityBytes).use { cap ->
+            CallInviteCapability.openLink(sealed, linkSecret).use { cap ->
                 val secrets = authRepository.identitySecrets.value
                 val isOwner = secrets != null &&
                     Identity.fromSeed(secrets.accountIdentitySeed).use {
@@ -257,7 +281,11 @@ class JoinCallViewModel(
                 null
             }
         } catch (e: Throwable) {
-            Log.w("JoinCall", "decode/verify failed", e)
+            if (me.lakko.app.discovery.isInviteLinkDamaged(e)) {
+                lastDecodeDamaged = true
+            } else {
+                Log.w("JoinCall", "decode/verify failed", e)
+            }
             null
         }
     }
@@ -531,6 +559,10 @@ fun JoinCallScreen(
             ui.rateLimited -> {
                 Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY)
                 TextButton(onClick = { viewModel.retryDecode() }) { Text("Try again") }
+                TextButton(onClick = onExit) { Text("Go back") }
+            }
+            ui.damaged -> {
+                Text(me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY)
                 TextButton(onClick = onExit) { Text("Go back") }
             }
             ui.decoded == null || ui.decoded?.valid == false -> {

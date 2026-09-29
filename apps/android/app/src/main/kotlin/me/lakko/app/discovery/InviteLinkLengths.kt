@@ -4,10 +4,10 @@
 package me.lakko.app.discovery
 
 import me.lakko.app.auth.base64UrlDecodeNoPad
-import uniffi.lakko_ffi_uniffi.groupInviteLinkSecretLen
-import uniffi.lakko_ffi_uniffi.groupInviteLinkSecretUrlLen
 import uniffi.lakko_ffi_uniffi.inviteBlobIdLen
 import uniffi.lakko_ffi_uniffi.inviteBlobIdUrlLen
+import uniffi.lakko_ffi_uniffi.inviteLinkSecretLen
+import uniffi.lakko_ffi_uniffi.inviteLinkSecretUrlLen
 
 /**
  * The widths of a short invite link (ADR-0028 amendment of 2026-09-27), read
@@ -15,8 +15,9 @@ import uniffi.lakko_ffi_uniffi.inviteBlobIdUrlLen
  *
  * - [blobIdLen] / [blobIdUrlLen]: the server-assigned ledger id of an `/i/`,
  *   `/c/` or `/g/` pointer link, 6 bytes / 8 base64url characters.
- * - [linkSecretLen] / [linkSecretUrlLen]: the `/g/` link secret in the URL
- *   fragment, 12 bytes / 16 base64url characters.
+ * - [linkSecretLen] / [linkSecretUrlLen]: the link secret in the URL fragment
+ *   of every kind (the sealed-link amendment of 2026-09-28), 12 bytes / 16
+ *   base64url characters.
  *
  * Production reads [core], which asks the FFI once. Every pure function that
  * needs a width takes an [InviteLinkLengths] parameter defaulting to [core],
@@ -35,8 +36,8 @@ public data class InviteLinkLengths(
             InviteLinkLengths(
                 blobIdLen = inviteBlobIdLen().toInt(),
                 blobIdUrlLen = inviteBlobIdUrlLen().toInt(),
-                linkSecretLen = groupInviteLinkSecretLen().toInt(),
-                linkSecretUrlLen = groupInviteLinkSecretUrlLen().toInt(),
+                linkSecretLen = inviteLinkSecretLen().toInt(),
+                linkSecretUrlLen = inviteLinkSecretUrlLen().toInt(),
             )
         }
     }

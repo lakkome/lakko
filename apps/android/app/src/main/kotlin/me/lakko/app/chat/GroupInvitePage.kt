@@ -3,152 +3,72 @@
 
 package me.lakko.app.chat
 
-import me.lakko.app.auth.base64UrlDecodeNoPad
-import me.lakko.app.auth.base64UrlEncodeNoPad
-import me.lakko.app.discovery.InviteLinkLengths
+import me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY
+import me.lakko.app.discovery.InviteLinkFragment
+import me.lakko.app.discovery.inviteLinkSlugOf
+import me.lakko.app.discovery.isInviteLinkDamaged
 
 /**
  * The group invite page (ADR-0028 v2, `docs/ux/group-invite-page.md`) — the
- * pure half: the link secret in the URL fragment, the route argument that
- * carries the fragment with the slug, and the card copy derived from a preview.
+ * pure half: the route argument that carries the fragment with the slug, the
+ * preview decision, and the card copy derived from a preview.
  *
- * A v2 capability carries a sealed preview (group name, inviter name, member
- * count at mint time) encrypted under a key derived from a random 12-byte
- * **link secret** bound to the capability's group id and issuer (ADR-0028
- * amendment of 2026-09-27). The secret rides in the URL **fragment** —
- * `https://lakko.me/g/<8-char id>#<16-char secret>` — because the fragment is
- * the one part of a URL a browser never sends and an app never uploads, so the
- * discovery ledger and every access log stay ciphertext-only.
- *
- * A link without a fragment still works; it only loses the preview. A link
- * WITH a fragment whose preview does not open is refused as damaged: since the
- * ledger id is no longer a hash of the capability, a server could serve a
- * different validly-signed capability under a live id, and the secret not
- * opening its preview is how the page notices. The widths come from the core
- * ([InviteLinkLengths.core]) and are a parameter so a host JVM test can pass
- * them in.
+ * Since the sealed-link amendment of 2026-09-28 the whole capability is
+ * encrypted under the 12-byte link secret in the URL **fragment** —
+ * `https://lakko.me/g/<8-char id>#<16-char secret>` — and the same secret
+ * opens the capability's sealed preview (group name, inviter name, member
+ * count at mint time). The fragment is the one part of a URL a browser never
+ * sends and an app never uploads, so the discovery ledger and every access log
+ * stay ciphertext-only. A link without the fragment, or with one that does not
+ * open the blob, is **damaged**: nothing opens without it. The fragment
+ * helpers are shared by all kinds and live in `discovery/InviteLink.kt`.
  */
 
-/**
- * Append the link secret to a finished `/g/<slug>` URL as its fragment. Both
- * the pointer and the inline form take the same suffix; `Copy link` copies it
- * whole.
- *
- * @throws IllegalArgumentException when [linkSecret] is not the core's secret
- *   width (12 bytes) — a mint handed the wrong bytes must not produce a link
- *   every opener then refuses as damaged.
- */
-public fun appendGroupInviteLinkKey(
-    url: String,
-    linkSecret: ByteArray,
-    lengths: InviteLinkLengths = InviteLinkLengths.core,
-): String {
-    require(linkSecret.size == lengths.linkSecretLen) {
-        "link secret must be ${lengths.linkSecretLen} bytes, got ${linkSecret.size}"
-    }
-    return "$url#${base64UrlEncodeNoPad(linkSecret)}"
-}
-
-/** What the fragment of a tapped `/g/` link carries. */
-public sealed interface GroupInviteFragment {
-    /** No fragment (or a blank one): the link works, without a preview. */
-    public data object Absent : GroupInviteFragment
-
-    /** A fragment that is not exactly the 16-character / 12-byte secret — the
-     *  pre-amendment 43-character key included. The link is refused. */
-    public data object Malformed : GroupInviteFragment
-
-    /** The 12-byte link secret. */
-    public class Secret(public val bytes: ByteArray) : GroupInviteFragment {
-        override fun equals(other: Any?): Boolean = other is Secret && bytes.contentEquals(other.bytes)
-        override fun hashCode(): Int = bytes.contentHashCode()
-    }
-}
-
-/**
- * Read the link secret back out of a URL fragment (the text after `#`,
- * without the `#`). Absent for a missing or blank fragment; Malformed for one
- * that is not exactly [InviteLinkLengths.linkSecretUrlLen] base64url
- * characters decoding to [InviteLinkLengths.linkSecretLen] bytes.
- */
-public fun parseGroupInviteFragment(
-    fragment: String?,
-    lengths: InviteLinkLengths = InviteLinkLengths.core,
-): GroupInviteFragment {
-    val text = fragment?.trim().orEmpty()
-    if (text.isEmpty()) return GroupInviteFragment.Absent
-    if (text.length != lengths.linkSecretUrlLen) return GroupInviteFragment.Malformed
-    val bytes = try {
-        base64UrlDecodeNoPad(text)
-    } catch (_: IllegalArgumentException) {
-        return GroupInviteFragment.Malformed
-    }
-    return if (bytes.size == lengths.linkSecretLen) {
-        GroupInviteFragment.Secret(bytes)
-    } else {
-        GroupInviteFragment.Malformed
-    }
-}
-
-/** What the page makes of the fragment and the capability's preview. */
+/** What the page makes of the opened capability's preview. */
 public sealed interface GroupInvitePreviewOutcome {
-    /** Show the page; [preview] is `null` for a link without a fragment. */
+    /** Show the page; [preview] is `null` for a capability minted without
+     *  one (the capability itself opened under the secret, so it is the one
+     *  the inviter made). */
     public data class Shown(val preview: GroupInvitePreviewUi?) : GroupInvitePreviewOutcome
 
-    /** The link carried a fragment the preview does not open under (or a
-     *  malformed one): refuse the link, never show it without a preview. */
+    /** The link carried no usable secret, or the preview does not open under
+     *  it: refuse the link, never show it without a preview. */
     public data object Damaged : GroupInvitePreviewOutcome
 }
 
 /**
  * Decide the page's preview, fail closed. [open] opens the capability's
  * sealed preview under the secret, returning `null` when the capability has
- * none and throwing when it does not open; both are [GroupInvitePreviewOutcome.Damaged]
- * when the link carried a secret.
+ * none and throwing when it does not open. A missing or malformed fragment is
+ * [GroupInvitePreviewOutcome.Damaged] without calling [open]; so is a preview
+ * that throws. A capability that carries no preview is shown without one: the
+ * capability already opened under the same secret, so a server could not
+ * have substituted it.
  */
 public fun resolveGroupInvitePreview(
-    fragment: GroupInviteFragment,
+    fragment: InviteLinkFragment,
     open: (ByteArray) -> GroupInvitePreviewUi?,
 ): GroupInvitePreviewOutcome = when (fragment) {
-    GroupInviteFragment.Absent -> GroupInvitePreviewOutcome.Shown(null)
-    GroupInviteFragment.Malformed -> GroupInvitePreviewOutcome.Damaged
-    is GroupInviteFragment.Secret -> {
-        val opened = try {
-            open(fragment.bytes)
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            null
-        }
-        if (opened != null) GroupInvitePreviewOutcome.Shown(opened) else GroupInvitePreviewOutcome.Damaged
+    InviteLinkFragment.Absent, InviteLinkFragment.Malformed -> GroupInvitePreviewOutcome.Damaged
+    is InviteLinkFragment.Secret -> try {
+        GroupInvitePreviewOutcome.Shown(open(fragment.bytes))
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        GroupInvitePreviewOutcome.Damaged
     }
 }
 
 /** Thrown by [ChatRepository.inspectGroupInvite] when the link is damaged
  *  (see [GroupInvitePreviewOutcome.Damaged]). */
-public class GroupInviteLinkDamaged : Exception("group invite link fragment does not open the preview")
+public class GroupInviteLinkDamaged : Exception("group invite link is damaged")
 
 /**
  * The `/g/` slug of a full invite link, with any `#fragment` stripped — the
  * revoke path parses this, not the whole tail. `null` when [link] has no `/g/`
  * segment or an empty slug.
  */
-public fun groupInviteSlugOf(link: String): String? {
-    val idx = link.lastIndexOf(GROUP_INVITE_URL_PREFIX)
-    if (idx < 0) return null
-    val slug = link.substring(idx + GROUP_INVITE_URL_PREFIX.length)
-        .substringBefore('#')
-        .trim()
-        .removeSuffix("/")
-    return slug.ifEmpty { null }
-}
-
-/** The fragment of a full invite link (text after the first `#`), or `null`. */
-public fun groupInviteFragmentOf(link: String): String? {
-    val idx = link.indexOf('#')
-    if (idx < 0) return null
-    return link.substring(idx + 1).ifEmpty { null }
-}
+public fun groupInviteSlugOf(link: String): String? = inviteLinkSlugOf(link, GROUP_INVITE_URL_PREFIX)
 
 // =============================================================
 // Route argument
@@ -157,8 +77,7 @@ public fun groupInviteFragmentOf(link: String): String? {
 /**
  * What a tapped `/g/` deep-link brings into the app: the slug, and the
  * fragment when the link still had one (a chat app that strips fragments hands
- * us `null`, and the page then shows no preview; a fragment that is present
- * but wrong refuses the link).
+ * us `null`, and the link is then damaged).
  */
 public data class GroupJoinLink(
     val slug: String,
@@ -248,9 +167,8 @@ public fun memberCountLine(count: Int): String =
 /** Copy for a link that does not decode, verify, or has expired. */
 public const val GROUP_INVITE_INVALID_COPY: String = "This invite link is invalid or has expired."
 
-/** Copy for a link whose fragment does not open its preview (fail closed). */
-public const val GROUP_INVITE_DAMAGED_COPY: String =
-    "This invite link is damaged. Ask for a new link."
+/** Copy for a damaged link (fail closed). */
+public const val GROUP_INVITE_DAMAGED_COPY: String = INVITE_LINK_DAMAGED_COPY
 
 /** The one control of the card. */
 public const val GROUP_INVITE_REQUEST_TO_JOIN: String = "Request to join"
@@ -271,7 +189,8 @@ public enum class GroupInviteOpenFailure {
     /** Does not decode, verify, resolve, or has expired. */
     Invalid,
 
-    /** Carries a fragment its preview does not open under. */
+    /** No usable secret in the fragment, or the blob does not open under
+     *  it. */
     Damaged,
 
     /** The discovery service answered `429`: try again later, the link may
@@ -287,6 +206,7 @@ public fun groupInviteOpenFailure(error: Throwable): GroupInviteOpenFailure {
         if (cause is GroupInviteLinkDamaged) return GroupInviteOpenFailure.Damaged
         cause = cause.cause
     }
+    if (isInviteLinkDamaged(error)) return GroupInviteOpenFailure.Damaged
     if (me.lakko.app.discovery.isDiscoveryRateLimited(error)) return GroupInviteOpenFailure.RateLimited
     return GroupInviteOpenFailure.Invalid
 }

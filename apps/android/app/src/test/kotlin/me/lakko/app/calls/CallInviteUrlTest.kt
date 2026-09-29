@@ -27,6 +27,8 @@ class CallInviteUrlTest {
 
     private val L = TEST_INVITE_LINK_LENGTHS
     private val BLOB_ID_LEN = L.blobIdLen
+    private val SECRET = ByteArray(12) { (it * 11 + 1).toByte() }
+    private val SECRET_TEXT = me.lakko.app.auth.base64UrlEncodeNoPad(SECRET)
 
     // -----------------------------------------------------------
     // Pointer-URL round-trip
@@ -35,7 +37,7 @@ class CallInviteUrlTest {
     @Test
     fun `pointer URL has the c slash prefix`() {
         val blobId = ByteArray(BLOB_ID_LEN) { it.toByte() }
-        val url = composePointerCallInviteUrl(blobId, lengths = L)
+        val url = composePointerCallInviteUrl(blobId, SECRET, lengths = L)
         assertTrue(
             "expected URL to contain '/c/' prefix, got: $url",
             url.contains("/c/"),
@@ -45,7 +47,7 @@ class CallInviteUrlTest {
     @Test
     fun `pointer URL uses the default origin`() {
         val blobId = ByteArray(BLOB_ID_LEN) { 0xAB.toByte() }
-        val url = composePointerCallInviteUrl(blobId, lengths = L)
+        val url = composePointerCallInviteUrl(blobId, SECRET, lengths = L)
         assertTrue(
             "expected URL to start with default origin, got: $url",
             url.startsWith(CALL_INVITE_DEFAULT_ORIGIN),
@@ -55,7 +57,7 @@ class CallInviteUrlTest {
     @Test
     fun `pointer URL respects a custom origin`() {
         val blobId = ByteArray(BLOB_ID_LEN) { 0xCD.toByte() }
-        val url = composePointerCallInviteUrl(blobId, origin = "https://example.test", lengths = L)
+        val url = composePointerCallInviteUrl(blobId, SECRET, origin = "https://example.test", lengths = L)
         assertTrue(
             "expected URL to start with custom origin, got: $url",
             url.startsWith("https://example.test/c/"),
@@ -66,7 +68,7 @@ class CallInviteUrlTest {
     fun `pointer URL rejects wrong blob id length`() {
         val tooShort = ByteArray(16) { 0x01 }
         val ex = assertThrows(CallInviteUrlException.WrongBlobIdLength::class.java) {
-            composePointerCallInviteUrl(tooShort, lengths = L)
+            composePointerCallInviteUrl(tooShort, SECRET, lengths = L)
         }
         assertEquals(BLOB_ID_LEN, ex.expected)
         assertEquals(16, ex.got)
@@ -79,7 +81,7 @@ class CallInviteUrlTest {
     @Test
     fun `inline URL accepts a capability above the floor`() {
         val bytes = ByteArray(CALL_INVITE_INLINE_MIN_LEN) { 0x42 }
-        val url = composeInlineCallInviteUrl(bytes)
+        val url = composeInlineCallInviteUrl(bytes, SECRET, lengths = L)
         assertTrue(url.contains("/c/"))
     }
 
@@ -87,7 +89,7 @@ class CallInviteUrlTest {
     fun `inline URL rejects a too-small capability`() {
         val tooSmall = ByteArray(CALL_INVITE_INLINE_MIN_LEN - 1) { 0x42 }
         val ex = assertThrows(CallInviteUrlException.InlineTooSmall::class.java) {
-            composeInlineCallInviteUrl(tooSmall)
+            composeInlineCallInviteUrl(tooSmall, SECRET, lengths = L)
         }
         assertEquals(CALL_INVITE_INLINE_MIN_LEN, ex.minimum)
         assertEquals(CALL_INVITE_INLINE_MIN_LEN - 1, ex.got)
@@ -100,9 +102,9 @@ class CallInviteUrlTest {
     @Test
     fun `parse recovers a pointer payload`() {
         val blobId = ByteArray(BLOB_ID_LEN) { (it xor 0xA5).toByte() }
-        val url = composePointerCallInviteUrl(blobId, lengths = L)
+        val url = composePointerCallInviteUrl(blobId, SECRET, lengths = L)
         // Extract the slug after the prefix.
-        val slug = url.substringAfter("/c/")
+        val slug = url.substringAfter("/c/").substringBefore('#')
         val parsed = parseCallInviteSlug(slug, L)
         assertTrue(
             "expected Pointer, got ${parsed::class.simpleName}",
@@ -117,8 +119,8 @@ class CallInviteUrlTest {
     @Test
     fun `parse recovers an inline payload`() {
         val bytes = ByteArray(CALL_INVITE_INLINE_MIN_LEN + 50) { 0x33 }
-        val url = composeInlineCallInviteUrl(bytes)
-        val slug = url.substringAfter("/c/")
+        val url = composeInlineCallInviteUrl(bytes, SECRET, lengths = L)
+        val slug = url.substringAfter("/c/").substringBefore('#')
         val parsed = parseCallInviteSlug(slug, L)
         assertTrue(
             "expected Inline, got ${parsed::class.simpleName}",
@@ -168,8 +170,8 @@ class CallInviteUrlTest {
 
     @Test
     fun `a pointer URL carries the 8-character id`() {
-        val url = composePointerCallInviteUrl(ByteArray(BLOB_ID_LEN) { 9 }, origin = "https://example.test", lengths = L)
-        assertEquals(L.blobIdUrlLen, url.substringAfter("/c/").length)
+        val url = composePointerCallInviteUrl(ByteArray(BLOB_ID_LEN) { 9 }, SECRET, origin = "https://example.test", lengths = L)
+        assertEquals(L.blobIdUrlLen, url.substringAfter("/c/").substringBefore('#').length)
     }
 
     @Test
@@ -185,7 +187,7 @@ class CallInviteUrlTest {
     @Test
     fun `pointer URL refuses the old 32-byte id`() {
         assertThrows(CallInviteUrlException.WrongBlobIdLength::class.java) {
-            composePointerCallInviteUrl(ByteArray(32), lengths = L)
+            composePointerCallInviteUrl(ByteArray(32), SECRET, lengths = L)
         }
     }
 
@@ -197,11 +199,23 @@ class CallInviteUrlTest {
     }
 
     @Test
-    fun `auto compose forwards to the pointer URL on the id width`() {
-        val blobId = ByteArray(BLOB_ID_LEN) { 0x01 }
-        val urlAuto = composeCallInviteUrl(blobId)
-        val urlPointer = composePointerCallInviteUrl(blobId, lengths = L)
-        assertEquals(urlPointer, urlAuto)
+    fun `every URL form ends in the 16-character secret fragment`() {
+        val pointer = composePointerCallInviteUrl(ByteArray(BLOB_ID_LEN) { 1 }, SECRET, lengths = L)
+        val inline = composeInlineCallInviteUrl(ByteArray(CALL_INVITE_INLINE_MIN_LEN) { 2 }, SECRET, lengths = L)
+        for (url in listOf(pointer, inline)) {
+            assertEquals(SECRET_TEXT, url.substringAfter('#'))
+            assertEquals(L.linkSecretUrlLen, url.substringAfter('#').length)
+        }
+    }
+
+    @Test
+    fun `a secret of the wrong width is never put in a link`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            composePointerCallInviteUrl(ByteArray(BLOB_ID_LEN), ByteArray(32), lengths = L)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            composeInlineCallInviteUrl(ByteArray(CALL_INVITE_INLINE_MIN_LEN), ByteArray(11), lengths = L)
+        }
     }
 
     @Test

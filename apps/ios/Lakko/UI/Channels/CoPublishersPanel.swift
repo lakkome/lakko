@@ -183,8 +183,15 @@ struct CoPublishersPanel: View {
         error = nil
         defer { busy = false }
         do {
-            link = try CoPublisher.createCoPublisherLink(
-                identity: identity, publisherGroup: publisherGroup)
+            // The ledger upload is session-gated: a bearer client, read at
+            // call time, or a loud failure rather than a request the server
+            // can only answer with a 401.
+            guard let token = AmbientSessionToken.shared.current, !token.isEmpty else {
+                throw CoPublisherError.notSignedIn
+            }
+            link = try await CoPublisher.createCoPublisherLink(
+                identity: identity, publisherGroup: publisherGroup,
+                discovery: DiscoveryClient(sessionToken: token))
         } catch {
             NSLog("Channels: create co-publisher link failed: %@", String(describing: error))
             self.error = "Could not create the link. Try again."

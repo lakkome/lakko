@@ -749,13 +749,15 @@ public class ContactsRepository(
      * outcome copy.
      *
      * Steps:
-     *   1. base64url-decode the 8-character slug to recover the
-     *      6-byte `blob_id`.
-     *   2. `DiscoveryClient.fetchInvite(blobId)` → capability
-     *      wire bytes (404 → `NotFound`).
-     *   3. `InviteCapability.decodeAndVerify(wire)` — local
-     *      Ed25519 signature check (a malicious server cannot
-     *      serve substituted bytes; the joiner re-verifies).
+     *   1. Split the landing argument into slug + `#fragment`; the
+     *      fragment is the 12-byte link secret (missing / malformed
+     *      → `Damaged`, before any request). The slug is the
+     *      8-character ledger id or an inline sealed blob.
+     *   2. `DiscoveryClient.fetchInvite(blobId)` → the sealed blob
+     *      (404 → `NotFound`); an inline slug skips it.
+     *   3. `InviteCapability.openLink(sealed, secret)` — AEAD-open
+     *      under the secret + local Ed25519 check (a substituted
+     *      blob fails the open → `Damaged`).
      *   4. `isValidNow(now)` — expiry check. Expired → return
      *      `Expired` without touching the consume counter.
      *   5. `DiscoveryClient.consumeInvite(blobId, capabilityBytes,
@@ -779,33 +781,44 @@ public class ContactsRepository(
      * resulting `groupIdHex` so the joiner can immediately
      * Open Chat.
      */
-    public suspend fun acceptInviteLink(slug: String): AcceptInviteResult {
+    public suspend fun acceptInviteLink(argument: String): AcceptInviteResult {
         val secrets = authRepo.identitySecrets.value
             ?: return AcceptInviteResult.RequiresReauth
-        // ADR-0028 amendment of 2026-09-27: an `/i/` slug is the 8-character
+        val tap = me.lakko.app.discovery.parseInviteLinkArgument(argument)
+        // ADR-0028 amendment of 2026-09-27: a pointer slug is the 8-character
         // ledger id (6 bytes); the pre-amendment 43-character id is refused.
-        val blobId = me.lakko.app.discovery.decodeInviteBlobId(slug.trim())
+        val parsed = me.lakko.app.discovery.parseContactInviteSlug(tap.slug)
             ?: return AcceptInviteResult.MalformedSlug
+        // Sealed-link amendment of 2026-09-28: nothing opens without the
+        // secret in the fragment, so a link without it is damaged — never
+        // fetched, never retried without it.
+        val linkSecret = me.lakko.app.discovery.inviteLinkSecretOrNull(tap.fragment)
+            ?: return AcceptInviteResult.Damaged
+        val blobId: ByteArray? = (parsed as? me.lakko.app.discovery.ParsedContactInvite.Pointer)?.blobId
 
-        val capabilityBytes = try {
-            authenticatedDiscoveryClient().use { discovery ->
-                discovery.fetchInvite(blobId)
-            }
-        } catch (e: Throwable) {
-            if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return AcceptInviteResult.RateLimited
-            return AcceptInviteResult.Failed(message = e.message ?: "fetch failed")
-        } ?: return AcceptInviteResult.NotFound
+        val sealed = when (parsed) {
+            is me.lakko.app.discovery.ParsedContactInvite.Inline -> parsed.sealed
+            is me.lakko.app.discovery.ParsedContactInvite.Pointer -> try {
+                authenticatedDiscoveryClient().use { discovery ->
+                    discovery.fetchInvite(parsed.blobId)
+                }
+            } catch (e: Throwable) {
+                if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return AcceptInviteResult.RateLimited
+                return AcceptInviteResult.Failed(message = e.message ?: "fetch failed")
+            } ?: return AcceptInviteResult.NotFound
+        }
 
         val cap = try {
-            InviteCapability.decodeAndVerify(capabilityBytes)
+            InviteCapability.openLink(sealed, linkSecret)
         } catch (_: Throwable) {
-            // Signature / wire-format failure → treat as
-            // not-found from the user's perspective; the
-            // server might also have been compromised, but
-            // splitting hairs on that doesn't help the UI.
-            return AcceptInviteResult.NotFound
+            // Any open failure (wrong secret, substituted or tampered
+            // blob, a capability that does not verify inside) is the one
+            // refusal: the link is damaged.
+            return AcceptInviteResult.Damaged
         }
         return cap.use { capability ->
+            // The joiner tag is computed over the PLAINTEXT capability.
+            val capabilityBytes = capability.wire()
             val nowMs = System.currentTimeMillis().toULong()
             if (!capability.isValidNow(nowMs)) {
                 return@use AcceptInviteResult.Expired
@@ -816,8 +829,11 @@ public class ContactsRepository(
             val inviterSigPubkey = capability.ownerSignaturePubkey()
             val inviterX25519Pubkey = capability.ownerX25519Pubkey()
 
-            // Consume — atomic counter bump + per-joiner dedup.
-            val consumeResult = try {
+            // Consume — atomic counter bump + per-joiner dedup. An inline
+            // link has no ledger row to count against.
+            val consumeResult = if (blobId == null) {
+                me.lakko.app.discovery.ConsumeInviteResult.Consumed(usedCount = 0, maxUses = 0L)
+            } else try {
                 authenticatedDiscoveryClient().use { discovery ->
                     discovery.consumeInvite(blobId, capabilityBytes, secrets.accountId)
                 }
@@ -966,7 +982,7 @@ public class ContactsRepository(
         val expiryMs = (System.currentTimeMillis() + expiryMillisFromNow).toULong()
 
         return Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
-            val capabilityBytes = try {
+            val mint = try {
                 composeInviteCapability(
                     ownerSigningSeed = identity.ed25519Seed(),
                     ownerAccountId = secrets.accountId,
@@ -979,16 +995,34 @@ public class ContactsRepository(
             } catch (e: Throwable) {
                 throw ContactsError.wrap(e)
             }
-            val blobId = try {
+            val blobId: ByteArray? = try {
                 authenticatedDiscoveryClient().use { discovery ->
-                    discovery.uploadInvite(capabilityBytes)
+                    discovery.uploadInvite(
+                        sealed = mint.sealed,
+                        issuerPubkey = mint.issuerPubkey,
+                        expiryMs = expiryMs.toLong(),
+                        maxUses = maxUses.toLong(),
+                        label = label,
+                        bootstrapReferral = bootstrapReferral,
+                    )
                 }
+            } catch (e: me.lakko.app.discovery.DiscoveryNetworkError) {
+                // Transport failure only: the link still works inline
+                // (sealed-link amendment of 2026-09-28). An HTTP answer
+                // propagates below.
+                null
             } catch (e: Throwable) {
                 throw ContactsError.wrap(e)
             }
 
-            val blobIdSlug = base64UrlEncodeNoPad(blobId)
-            val url = "$INVITE_URL_PREFIX$blobIdSlug"
+            // The slug is the ledger id, or the sealed blob itself inline;
+            // the link secret rides in the fragment either way and is
+            // never sent to the server.
+            val blobIdSlug = base64UrlEncodeNoPad(blobId ?: mint.sealed)
+            val url = me.lakko.app.discovery.appendInviteLinkSecret(
+                "$INVITE_URL_PREFIX$blobIdSlug",
+                mint.linkSecret,
+            )
             val invite = GeneratedInvite(
                 blobId = blobId,
                 blobIdSlug = blobIdSlug,
@@ -1017,6 +1051,21 @@ public class ContactsRepository(
      * `NotFoundOrNotOwner` keeps it so the user can retry (the
      * 404-folding-of-bad-signature path may be transient).
      */
+    /**
+     * Drop an inline link (one whose upload failed on transport, so it has
+     * no ledger row) from [ContactsState.outstandingInvites]. There is
+     * nothing on the server to revoke: the link stays valid until its
+     * expiry for whoever already holds it, and this only stops listing it.
+     */
+    public fun forgetInlineInvite(slug: String) {
+        mutableState.update { state ->
+            state.copy(
+                outstandingInvites = state.outstandingInvites
+                    .filterNot { it.blobId == null && it.blobIdSlug == slug },
+            )
+        }
+    }
+
     public suspend fun revokeInviteLink(
         blobId: ByteArray,
     ): me.lakko.app.discovery.RevokeInviteResult {
@@ -1037,7 +1086,7 @@ public class ContactsRepository(
                     mutableState.update { state ->
                         state.copy(
                             outstandingInvites = state.outstandingInvites
-                                .filterNot { it.blobId.toList() == blobIdHex },
+                                .filterNot { it.blobId?.toList() == blobIdHex },
                         )
                     }
                 }
@@ -1236,8 +1285,10 @@ public data class ContactsState(
  *   * [NotFound] — server returned 404 (revoked / expired /
  *     never-issued; the server folds these into one status to
  *     deny status-code probing).
- *   * [MalformedSlug] — the URL slug is not the 8-character
- *     base64url form of a 6-byte blob_id.
+ *   * [MalformedSlug] — the URL slug is neither the 8-character
+ *     base64url form of a 6-byte blob_id nor an inline sealed blob.
+ *   * [Damaged] — the link's secret is missing, malformed or does
+ *     not open the sealed capability.
  *   * [RateLimited] — the discovery service answered `429` on
  *     fetch or consume. The link may be fine; try again later.
  *   * [RequiresReauth] — [AuthRepository.identitySecrets] is
@@ -1281,6 +1332,11 @@ public sealed interface AcceptInviteResult {
     public data object Exhausted : AcceptInviteResult
     public data object NotFound : AcceptInviteResult
     public data object MalformedSlug : AcceptInviteResult
+
+    /** The link's `#fragment` is missing or malformed, or the sealed
+     *  blob does not open under it (sealed-link amendment of
+     *  2026-09-28). */
+    public data object Damaged : AcceptInviteResult
     public data object RateLimited : AcceptInviteResult
 
     /** ADR-0054 - today's allowance of invite-consume tokens is used up. */
@@ -1293,11 +1349,15 @@ public sealed interface AcceptInviteResult {
 /** An invite link the owner has just generated this session. */
 public data class GeneratedInvite(
     /** Raw 6-byte server-assigned ledger id (the same value
-     *  `revokeInviteLink` takes). */
-    val blobId: ByteArray,
-    /** base64url-no-pad of [blobId] — the slug portion of [url]. */
+     *  `revokeInviteLink` takes), or `null` for an inline link (the
+     *  upload failed on transport; nothing on the server to revoke). */
+    val blobId: ByteArray?,
+    /** The slug portion of [url]: base64url-no-pad of [blobId], or of the
+     *  sealed blob for an inline link. */
     val blobIdSlug: String,
-    /** `https://lakko.me/i/<slug>` — the URL the owner shares. */
+    /** `https://lakko.me/i/<slug>#<secret>` — the URL the owner shares.
+     *  The only place the link secret is kept: a row the server lists
+     *  without it has no shareable URL. */
     val url: String,
     /** Human-visible label (empty when the user didn't set one). */
     val label: String,
@@ -1313,7 +1373,9 @@ public data class GeneratedInvite(
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is GeneratedInvite) return false
-        return blobId.contentEquals(other.blobId) &&
+        val otherId = other.blobId
+        val sameId = if (blobId == null) otherId == null else otherId != null && blobId.contentEquals(otherId)
+        return sameId &&
             blobIdSlug == other.blobIdSlug &&
             url == other.url &&
             label == other.label &&
@@ -1323,7 +1385,7 @@ public data class GeneratedInvite(
     }
 
     override fun hashCode(): Int {
-        var result = blobId.contentHashCode()
+        var result = blobId?.contentHashCode() ?: 0
         result = 31 * result + blobIdSlug.hashCode()
         result = 31 * result + url.hashCode()
         result = 31 * result + label.hashCode()

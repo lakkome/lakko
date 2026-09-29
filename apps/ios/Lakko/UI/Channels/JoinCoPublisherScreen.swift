@@ -132,6 +132,9 @@ struct JoinCoPublisherScreen: View {
             dismiss()
         } catch let err as LegacyChannelError {
             errorMessage = err.message
+        } catch CoPublisherError.damagedLink {
+            // No secret, or one the sealed capability does not open under.
+            errorMessage = groupInviteDamagedMessage
         } catch let err as CoPublisherError {
             // Not a co-publisher link at all: the link itself is the problem,
             // which no retry fixes — the invite page's invalid-link copy.

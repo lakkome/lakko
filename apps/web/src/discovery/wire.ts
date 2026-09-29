@@ -164,25 +164,44 @@ export interface KeyPackageFetchResponse {
 // /discovery/invite   (services/discovery/src/invite.rs — Phase 1.18d1)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/invite`. The server runs
- *  `lakko_contacts::invite::decode_and_verify` over the decoded
- *  bytes and rejects junk uploads at ingress, so the only way a
- *  POST succeeds is if `capability` is a real, signature-valid
- *  invite the client just composed. */
+/** Body of `POST /discovery/invite` (the sealed-link amendment of
+ *  2026-09-28). The server stores `sealed` opaque and cannot read the
+ *  capability inside, so what it needs arrives in clear beside it. */
 export interface InviteUploadRequest {
-  /** Standard-alphabet base64 of `wasm.InviteCapability.compose(...)`
-   *  output — same wire format as 1.18a / 1.18b / 1.18c. Server
-   *  caps decoded size at 2048 bytes. */
-  capability: string;
+  /** Standard-alphabet base64 of `InviteLinkMint.sealed`. */
+  sealed: string;
+  /** Standard-alphabet base64 of the issuer's 32-byte Ed25519 key
+   *  (`InviteLinkMint.issuerPubkey`) — the key a revoke verifies against. */
+  issuer_pubkey: string;
+  /** The capability's `expiry_ms` (`0` = never expires), for the fetch
+   *  filter and the pruner. */
+  expiry_ms: number;
+  /** The capability's `max_uses` sentinel, for the consume ceiling. */
+  max_uses: number;
+  /** The capability's label, for the owner's own list. Empty when none. */
+  label: string;
+  /** The capability's `bootstrap_referral` flag, for the owner's own list. */
+  bootstrap_referral: boolean;
+}
+
+/** Body of `POST /discovery/call-invite` — the clear fields of
+ *  [`InviteUploadRequest`] without the owner-list metadata. */
+export interface CallInviteUploadRequest {
+  /** Standard-alphabet base64 of `InviteLinkMint.sealed`. */
+  sealed: string;
+  /** Standard-alphabet base64 of the issuer's 32-byte Ed25519 key. */
+  issuer_pubkey: string;
+  /** The capability's `expiry_ms` (`0` = never expires). */
+  expiry_ms: number;
+  /** The capability's `max_uses` sentinel. */
+  max_uses: number;
 }
 
 /** Response body of `POST /discovery/invite`. */
 export interface InviteUploadResponse {
-  /** base64url-no-pad of `SHA-256(capability_bytes)` — same
-   *  bytes ⇒ same id, retried upload is a no-op (server-side
-   *  upsert via `INSERT ... ON DUPLICATE KEY UPDATE`). The
-   *  client substitutes this directly into the
-   *  `https://<host>/i/<blob_id>` pointer URL. */
+  /** base64url-no-pad of the random 6-byte ledger id the server minted
+   *  for this upload (8 characters; a re-upload gets a fresh id). The
+   *  client puts it in the `https://<host>/<k>/<blob_id>#<secret>` link. */
   blob_id: string;
 }
 
@@ -192,7 +211,8 @@ export interface InviteUploadResponse {
  *  `services/discovery/src/invite.rs::fetch` for why we don't
  *  use 410). */
 export interface InviteFetchResponse {
-  capability: string;
+  /** Standard-alphabet base64 of the stored sealed blob. */
+  sealed: string;
 }
 
 /** Body of `POST /discovery/invite/{blob_id_b64url}/consume`
@@ -228,22 +248,12 @@ export interface InviteConsumeResponse {
   already_consumed: boolean;
 }
 
-/** Body of `POST /discovery/group-invite` (ADR-0028, G-3). Mirror of
- *  [`InviteUploadRequest`] but carries an extra `max_uses` field: a
- *  `GroupInviteCapability` does NOT embed `max_uses` in its signed wire (it
- *  conveys only `group_id` + `issuer_pubkey` + `expiry_ms`), so the uploader
- *  supplies the SOFT consume ceiling out-of-band. It is an anti-spam throttle,
- *  not an access control — the security boundary is the admin approval gate
- *  (ADR-0027). The response reuses [`InviteUploadResponse`] (`blob_id`). */
-export interface GroupInviteUploadRequest {
-  /** Standard-alphabet base64 of `wasm.composeGroupInviteCapability(...)`
-   *  output. Server runs `decode_and_verify` at ingress + caps decoded size at
-   *  512 bytes. */
-  capability: string;
-  /** SOFT consume ceiling — `0` = single-use, `0xFFFFFFFF` = unlimited, any
-   *  other N = at most N consumes. NOT part of the signed capability. */
-  max_uses: number;
-}
+/** Body of `POST /discovery/group-invite` (ADR-0028, G-3). Same clear
+ *  fields as [`CallInviteUploadRequest`]; `max_uses` is a SOFT anti-spam
+ *  ceiling and not part of the signed capability — the security boundary is
+ *  the admin approval gate (ADR-0027). The response reuses
+ *  [`InviteUploadResponse`] (`blob_id`). */
+export type GroupInviteUploadRequest = CallInviteUploadRequest;
 
 /** Body of `DELETE /discovery/invite/{blob_id_b64url}` (Phase
  *  1.18d2b). The `signature` field carries proof that the

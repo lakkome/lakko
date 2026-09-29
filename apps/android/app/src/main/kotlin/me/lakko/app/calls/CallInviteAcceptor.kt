@@ -20,12 +20,14 @@ import uniffi.lakko_ffi_uniffi.acceptCallInvite
  * result so the `/c/<slug>` landing screen can render the
  * right outcome copy without re-implementing the dispatch:
  *
- *   1. [parseCallInviteSlug] — pointer vs. inline.
+ *   1. [parseCallInviteSlug] — pointer vs. inline — and the link
+ *      secret from the `#fragment` (missing / malformed = damaged,
+ *      before any request).
  *   2. (pointer branch) [DiscoveryClient.fetchCallInvite] —
- *      bytes or 404.
- *   3. [CallInviteCapability.decodeAndVerify] — local
- *      Ed25519 signature check (catches a malicious server
- *      serving substituted bytes).
+ *      sealed blob or 404.
+ *   3. [CallInviteCapability.openLink] — AEAD-open under the link
+ *      secret + local Ed25519 signature check (a substituted blob
+ *      fails the open: damaged).
  *   4. [CallInviteCapability.isValidNow] — expiry filter.
  *   5. (pointer branch) [DiscoveryClient.consumeCallInvite]
  *      — atomic counter bump + per-joiner dedup tag.
@@ -107,6 +109,11 @@ public class CallInviteAcceptor(
         public data object NotFound : Result()
         public data class MalformedSlug(val reason: String) : Result()
 
+        /** The link's `#fragment` is missing or malformed, or the sealed
+         *  blob does not open under it (sealed-link amendment of
+         *  2026-09-28). Never retried without the secret. */
+        public data object Damaged : Result()
+
         /** The discovery service answered `429` on fetch or consume. The
          *  link may be fine; the UI says to try again later. */
         public data object RateLimited : Result()
@@ -130,7 +137,9 @@ public class CallInviteAcceptor(
      * whatever transport the user has.
      *
      * @param slug             The `<slug>` segment from a
-     *                         `/c/<slug>` URL.
+     *                         `/c/<slug>#<fragment>` URL.
+     * @param fragment         The URL fragment (text after `#`), the
+     *                         link secret; `null` when the link had none.
      * @param joinerAccountId  Joiner's 16-byte UUIDv7
      *                         account_id — folded into the
      *                         per-joiner dedup tag locally
@@ -148,6 +157,7 @@ public class CallInviteAcceptor(
      */
     public suspend fun acceptFromSlug(
         slug: String,
+        fragment: String?,
         joinerAccountId: ByteArray,
         joinerIdentity: Identity,
         nowMs: Long = System.currentTimeMillis(),
@@ -158,9 +168,11 @@ public class CallInviteAcceptor(
         } catch (e: CallInviteUrlException) {
             return Result.MalformedSlug(reason = e.message ?: e::class.simpleName ?: "parse error")
         }
+        val linkSecret = me.lakko.app.discovery.inviteLinkSecretOrNull(fragment, lengths)
+            ?: return Result.Damaged
 
         // ---- 2. Pointer branch: fetch bytes -----------------
-        val capabilityBytes: ByteArray
+        val sealed: ByteArray
         var blobId: ByteArray? = null
         when (parsed) {
             is ParsedCallInvite.Pointer -> {
@@ -168,7 +180,7 @@ public class CallInviteAcceptor(
                 try {
                     val fetched = discoveryClient.fetchCallInvite(parsed.blobId)
                         ?: return Result.NotFound
-                    capabilityBytes = fetched
+                    sealed = fetched
                 } catch (e: DiscoveryHttpError) {
                     if (e.status == 404) return Result.NotFound
                     if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return Result.RateLimited
@@ -178,16 +190,19 @@ public class CallInviteAcceptor(
                 }
             }
             is ParsedCallInvite.Inline -> {
-                capabilityBytes = parsed.capabilityBytes
+                sealed = parsed.sealed
             }
         }
 
-        // ---- 3. decodeAndVerify -----------------------------
+        // ---- 3. openLink ------------------------------------
         val capability: CallInviteCapability = try {
-            CallInviteCapability.decodeAndVerify(capabilityBytes)
+            CallInviteCapability.openLink(sealed, linkSecret)
         } catch (e: Exception) {
+            if (me.lakko.app.discovery.isInviteLinkDamaged(e)) return Result.Damaged
             return Result.SignatureFailure(reason = e.message ?: e.toString())
         }
+        // The joiner tag is computed over the PLAINTEXT capability.
+        val capabilityBytes = capability.wire()
 
         // ---- 4. Expiry filter --------------------------------
         if (!capability.isValidNow(nowMs.toULong())) {

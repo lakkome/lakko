@@ -449,6 +449,7 @@ struct AppRoot: View, Equatable {
                     JoinCallLandingScreen(
                         viewModel: JoinCallLandingViewModel(
                             slug: callSlug,
+                            fragment: inviteIntake.pendingCallJoinFragment,
                             authRepository: authRepository,
                             intake: inviteIntake,
                             linkCallHost: services.linkCallHost
@@ -1177,6 +1178,7 @@ private struct SessionRoot: View, Equatable {
             InviteLandingScreen(
                 viewModel: InviteLandingViewModel(
                     slug: slug,
+                    fragment: inviteIntake.pendingFragment,
                     repository: contactsRepository,
                     intake: inviteIntake
                 ),
@@ -1206,6 +1208,7 @@ private struct SessionRoot: View, Equatable {
             JoinCallLandingScreen(
                 viewModel: JoinCallLandingViewModel(
                     slug: slug,
+                    fragment: inviteIntake.pendingCallJoinFragment,
                     authRepository: authRepository,
                     intake: inviteIntake,
                     linkCallHost: services.linkCallHost

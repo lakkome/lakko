@@ -6,12 +6,10 @@
  *
  * Two surfaces:
  *
- *   * URL plumbing — `composeInviteUrl(...)` + `parseInviteSlug(...)`.
- *     The capability bytes are base64url-no-pad encoded into the URL
- *     itself (the V1 inline form — see ROADMAP 1.18a for the
- *     trade-off). The short-pointer + server-blob form landed in
- *     1.18d1b (`composePointerInviteUrl` below + `DiscoveryClient`
- *     upload/fetch); inline is now the back-compat fallback.
+ *   * URL plumbing — `composePointerInviteUrl(...)` /
+ *     `composeInlineInviteUrl(...)` + `parseInviteSlug(...)`, over the
+ *     shared sealed-link rules of `invite-link.ts`: every link carries the
+ *     12-byte secret in its fragment and the capability is sealed under it.
  *   * Form-side enums — `ExpiryPreset` and `MaxUsesPreset` —
  *     translate UI dropdown choices into the wire-level
  *     `InviteCapability.compose` arguments. Putting them here
@@ -19,10 +17,10 @@
  *     focused on rendering and gives unit-test coverage for the
  *     defaulting logic without spinning up Solid.
  */
-import { base64UrlEncodeNoPad } from "../auth/account-id";
 import {
   classifyInviteSlug,
-  requireBlobId,
+  composeInlineInviteLink,
+  composePointerInviteLink,
   type ClassifiedInviteSlug,
   type InviteLinkWidths,
 } from "./invite-link";
@@ -39,79 +37,37 @@ export const INVITE_URL_PREFIX = "/i/";
  *  must also bump this one. */
 export const INVITE_LABEL_MAX_LEN = 64;
 
-/** Lower bound on the inline-bytes form. The 1.18a wire format
- *  is `1 + 32 + 16 + 32 + 8 + 4 + 1 + 2 + label(0..64) + 64 =
- *  160..224 bytes`; an empty label (the smallest legal payload)
- *  is 160 bytes. Far above the 6-byte ledger id (ADR-0028
- *  short-link amendment), so a slug-byte-length test cleanly
- *  discriminates inline vs pointer URLs. */
+/** Floor on the inline form: a sealed `/i/` blob is the whole capability
+ *  (>= 160 bytes with an empty label) plus the 30-byte seal envelope, far
+ *  above the 6-byte ledger id, so the byte length discriminates inline from
+ *  pointer. */
 export const INVITE_INLINE_MIN_LEN = 160;
 
-/** Auto-pick the URL form by argument shape — pointer
- *  (`blob_id`, 6 bytes) when the caller has uploaded the
- *  capability and wants the short form, inline-bytes (≥160
- *  bytes) when the caller is staying server-free.
- *
- *  Both produce a `https://<origin>/i/<base64url>` shape; the
- *  joiner side discriminates via `parseInviteSlug` on the byte
- *  length — see `INVITE_INLINE_MIN_LEN` for the gap that makes
- *  this safe.
- *
- *  Phase 1.18d1b: prefers the pointer form (shorter URLs, server-
- *  side max-uses enforcement in 1.18d2). Inline is the back-compat
- *  fallback for when `/discovery/invite` is unreachable (e.g. the
- *  censored-region path). */
-export function composeInviteUrl(
-  bytes: Uint8Array,
-  origin: string = typeof location !== "undefined"
-    ? location.origin
-    : "https://lakko.me",
-): string {
-  return `${origin}${INVITE_URL_PREFIX}${base64UrlEncodeNoPad(bytes)}`;
-}
-
-/** Builder for the **pointer** URL form — the short
- *  `https://<host>/i/<blob_id_b64url>` shape backed by
- *  `/discovery/invite/<blob_id>` lookup. Equivalent to
- *  `composeInviteUrl` (just a thin name wrapper) but reads
- *  better at the call site. */
+/** Build the **pointer** link: `https://<host>/i/<8-char id>#<secret>`. */
 export function composePointerInviteUrl(
   blobId: Uint8Array,
+  linkSecret: Uint8Array,
   widths: InviteLinkWidths,
   origin?: string,
 ): string {
-  requireBlobId(blobId, widths);
-  return composeInviteUrl(blobId, origin);
+  return composePointerInviteLink("i", blobId, linkSecret, widths, origin);
 }
 
-/** Builder for the **inline-bytes** URL form — the long shape
- *  that carries the capability inside the URL itself, no server
- *  round-trip on open. 1.18c default; 1.18d1b's back-compat. */
+/** Build the **inline** link, the fallback when the upload failed on
+ *  transport: `https://<host>/i/<base64url sealed>#<secret>`. */
 export function composeInlineInviteUrl(
-  capabilityBytes: Uint8Array,
+  sealed: Uint8Array,
+  linkSecret: Uint8Array,
+  widths: InviteLinkWidths,
   origin?: string,
 ): string {
-  if (capabilityBytes.length < INVITE_INLINE_MIN_LEN) {
-    throw new Error(
-      `capabilityBytes must be ≥ ${INVITE_INLINE_MIN_LEN} bytes, got ${capabilityBytes.length}`,
-    );
-  }
-  return composeInviteUrl(capabilityBytes, origin);
+  return composeInlineInviteLink("i", sealed, linkSecret, widths, INVITE_INLINE_MIN_LEN, origin);
 }
 
-/** Discriminated parse of a URL slug. Returns the wire-form +
- *  the decoded bytes so the caller can dispatch:
- *
- *    * `kind: "pointer"` — fetch from
- *      `DiscoveryClient.fetchInvite(blobId)` → run
- *      `decodeAndVerify` on the returned bytes.
- *    * `kind: "inline"` — run `decodeAndVerify` directly on the
- *      bytes, no server round-trip.
- *
- *  The dispatch rule (`invite-link.ts`): 8 characters decoding
- *  to 6 bytes ⇒ pointer, ≥ 160 bytes ⇒ inline (1.18a wire-format
- *  minimum). Anything else, the pre-amendment 43-character id
- *  included, is refused. */
+/** Discriminated parse of an `/i/` slug: `pointer` (fetch the sealed blob
+ *  from `DiscoveryClient.fetchInvite`) or `inline` (the sealed blob itself).
+ *  Either is opened with `InviteCapability.openLink(sealed, secret)`.
+ *  Anything else, the pre-amendment 43-character id included, is refused. */
 export type ParsedInvite = ClassifiedInviteSlug;
 
 export function parseInviteSlug(slug: string, widths: InviteLinkWidths): ParsedInvite {

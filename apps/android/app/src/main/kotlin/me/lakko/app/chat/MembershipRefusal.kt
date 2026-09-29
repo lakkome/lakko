@@ -450,6 +450,14 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.DeviceGroupPayloadRefused,
                 is FfiException.SyncedState,
                 -> null
+                // The sealed-link amendment of 2026-09-28 (a link that does
+                // not open under its secret, the damaged-link state) and the
+                // ADR-0049 section 2 PAKE add-device confirmation; not
+                // membership refusals.
+                is FfiException.InviteLinkDamaged,
+                is FfiException.DeviceLink,
+                is FfiException.DeviceLinkWrongCode,
+                -> null
 
                 // Everything that is NOT a membership refusal. Enumerated
                 // rather than defaulted, so a new `FfiException` subclass has

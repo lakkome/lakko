@@ -70,7 +70,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.contacts.GeneratedInvite
-import me.lakko.app.contacts.INVITE_URL_PREFIX
 import me.lakko.app.contacts.IncomingContactRequest
 import me.lakko.app.contacts.SentContactRequest
 import me.lakko.app.discovery.ActiveInvite
@@ -182,8 +181,12 @@ public fun ContactsScreen(
             onShare = { url -> launchShareIntent(context, url) },
             onRevoke = { row ->
                 val session = state.outstandingInvites.firstOrNull { it.blobIdSlug == row.slug }
-                if (session != null) {
-                    viewModel.onRevokeInviteClicked(session.blobId)
+                val sessionBlobId = session?.blobId
+                if (session != null && sessionBlobId != null) {
+                    viewModel.onRevokeInviteClicked(sessionBlobId)
+                } else if (session != null) {
+                    // An inline link: no ledger row to revoke.
+                    viewModel.onForgetInlineInviteClicked(session.blobIdSlug)
                 } else {
                     viewModel.onRevokeActiveInviteClicked(row.slug)
                 }
@@ -664,7 +667,10 @@ private fun GeneratedInvite.toRow(): InviteLinkRow = InviteLinkRow(
 
 private fun ActiveInvite.toRow(): InviteLinkRow = InviteLinkRow(
     slug = blobIdSlug,
-    url = INVITE_URL_PREFIX + blobIdSlug,
+    // The server lists the row but never held the link secret, so a link
+    // made on another device or in an earlier session cannot be copied
+    // again (sealed-link amendment of 2026-09-28); it can be revoked.
+    url = null,
     label = label,
     createdAtMs = null,
     expiryMs = expiryMs,
@@ -739,8 +745,8 @@ private fun InviteLinksSheet(
                     LinkRow(
                         title = row.label.ifBlank { "Invite link" },
                         meta = meta,
-                        onCopy = { onCopy(row.url) },
-                        onShare = { onShare(row.url) },
+                        onCopy = row.url?.let { url -> { onCopy(url) } },
+                        onShare = row.url?.let { url -> { onShare(url) } },
                         trailing = {
                             val revoking = state.revokingActiveInviteSlug == row.slug
                             TextButton(
@@ -784,8 +790,8 @@ private fun InviteLinksSheet(
 private fun LinkRow(
     title: String,
     meta: String,
-    onCopy: () -> Unit,
-    onShare: () -> Unit,
+    onCopy: (() -> Unit)?,
+    onShare: (() -> Unit)?,
     trailing: @Composable () -> Unit = {},
 ) {
     Row(
@@ -804,11 +810,15 @@ private fun LinkRow(
                 )
             }
         }
-        IconButton(onClick = onCopy) {
-            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy link")
+        if (onCopy != null) {
+            IconButton(onClick = onCopy) {
+                Icon(Icons.Filled.ContentCopy, contentDescription = "Copy link")
+            }
         }
-        IconButton(onClick = onShare) {
-            Icon(Icons.Filled.Share, contentDescription = "Share link")
+        if (onShare != null) {
+            IconButton(onClick = onShare) {
+                Icon(Icons.Filled.Share, contentDescription = "Share link")
+            }
         }
         trailing()
     }

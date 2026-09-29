@@ -309,6 +309,11 @@ public class ContactsViewModel(
      * row is dropped from [ContactsState.outstandingInvites]
      * automatically by [ContactsRepository.revokeInviteLink].
      */
+    /** Stop listing an inline link (no ledger row, nothing to revoke). */
+    public fun onForgetInlineInviteClicked(slug: String) {
+        repo.forgetInlineInvite(slug)
+    }
+
     public fun onRevokeInviteClicked(blobId: ByteArray) {
         viewModelScope.launch {
             try {

@@ -29,6 +29,8 @@ import type { PublisherGroupHandle } from "./publisher-group-handle";
 import { membershipRefusalOf } from "../chat/membership-refusal";
 import { membershipRefusalRetryMaySucceed } from "../../wasm/lakko_ffi_wasm";
 import { DsClient } from "../ds/client";
+import { DiscoveryClient } from "../discovery/client";
+import { useAuth } from "../auth/AuthContext";
 import { channelsActions } from "../state/channels-state";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
@@ -42,6 +44,7 @@ export function CoPublishersPanel(props: {
   readonly publisherGroup: PublisherGroupHandle;
   readonly identity: WasmIdentity;
 }): JSX.Element {
+  const auth = useAuth();
   const [link, setLink] = createSignal<string | null>(null);
   const [pending, setPending] = createSignal<Uint8Array[]>([]);
   const [busy, setBusy] = createSignal(false);
@@ -73,8 +76,21 @@ export function CoPublishersPanel(props: {
     setError(null);
     setBusy(true);
     try {
+      // The upload is session-gated; without a session the link is refused
+      // here rather than silently minted inline.
+      if (auth.identitySecrets() === null) {
+        throw new Error("Sign in again to create the link.");
+      }
+      const discovery = new DiscoveryClient(undefined, {
+        sessionToken: () => auth.identitySecrets()?.sessionToken ?? null,
+      });
       setLink(
-        await createCoPublisherLink(props.identity, props.publisherGroup, window.location.origin),
+        await createCoPublisherLink(
+          props.identity,
+          props.publisherGroup,
+          window.location.origin,
+          discovery,
+        ),
       );
     } catch (err) {
       setError(`Could not create the link: ${String(err)}`);

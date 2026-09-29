@@ -17,15 +17,15 @@ import SwiftUI
 /// `group_id` and a claim about who is inviting to what; the admin approval
 /// gate is the security boundary.
 ///
-/// **The preview is shown, absent, or the link is refused - never guessed.**
-/// No fragment renders the card without a preview, and the page does not say
-/// why. A fragment that is not a 16-character link secret, or a secret the
-/// preview does not open under, refuses the link as damaged (ADR-0028
-/// amendment of 2026-09-27): the ledger id is no longer a hash of the
-/// capability, and the preview key - bound to the capability's group id and
-/// issuer - is the one check that the capability the server returned is the
-/// one the link was made for. The issuer fingerprint stays at the foot of
-/// every card as the one thing the inviter cannot fake.
+/// **The link opens, or it is refused - never guessed.** Since the
+/// sealed-links amendment of 2026-09-28 the whole capability is encrypted
+/// under the 12-byte secret in the fragment. No fragment, a fragment that is
+/// not a 16-character link secret, or a secret the blob does not open under
+/// (another kind, a truncated or substituted blob) refuses the link as
+/// damaged; nothing is fetched without a secret. A capability minted without
+/// a preview (a channel co-publisher link) renders the card without one. The
+/// issuer fingerprint stays at the foot of every card as the one thing the
+/// inviter cannot fake.
 ///
 /// **The wait is TWO-stage since ADR-0045 S7, and the copy says so.** An
 /// admin's approve no longer admits anyone by itself: it publishes an `Add`
@@ -88,7 +88,7 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     private let intake: InviteIntake
     private var didRun = false
     private var pollTask: Task<Void, Never>?
-    /// The verified capability bytes + the ledger pointer they came from, kept
+    /// The opened (plaintext) capability bytes + the ledger pointer they came from, kept
     /// from `run()` so `Request to join` and `Request again` post against the
     /// bytes the person was shown, not a second fetch.
     private var resolved: (capabilityWire: Data, blobId: Data?)?
@@ -121,20 +121,29 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         await load()
     }
 
-    /// Resolve the slug (a pointer fetches the capability from the ledger; an
-    /// inline link passes the bytes through), verify the signature + expiry,
-    /// and open the preview under the fragment's key. Nothing is posted here.
+    /// Resolve the slug (a pointer fetches the sealed blob from the ledger;
+    /// an inline link carries it), open it under the fragment's secret, verify
+    /// the signature + expiry, and open the preview. Nothing is posted here.
     private func load() async {
-        // A malformed fragment (the retired 43-character key included) refuses
-        // the link before anything is fetched for it.
-        let fragment = GroupInviteLink.readFragment(linkKeyFragment)
-        if fragment == .malformed {
+        // A slug of no known shape (the retired 43-character id included) is
+        // "invalid or expired", whatever the fragment says; nothing is fetched.
+        if (try? GroupInviteUrl.parseGroupInviteSlug(slug)) == nil {
+            state = .invalid
+            return
+        }
+        // Sealed links (ADR-0028 amendment of 2026-09-28): without a
+        // well-formed secret the link opens nothing and is damaged, refused
+        // before anything is fetched for it (a missing fragment included).
+        guard let secret = InviteLink.secret(fromFragment: linkKeyFragment) else {
             state = .damaged
             return
         }
+        let sealed: Data
+        let blobId: Data?
         do {
-            let resolved = try await repository.resolveGroupInviteSlug(slug: slug)
-            self.resolved = resolved
+            let fetched = try await repository.resolveGroupInviteSlug(slug: slug)
+            sealed = fetched.sealed
+            blobId = fetched.blobId
         } catch let error as GroupInviteLinkError {
             NSLog("group join: the invite link resolved to nothing: %@", String(describing: error))
             state = .invalid
@@ -144,20 +153,23 @@ public final class JoinGroupLandingViewModel: ObservableObject {
             state = .failed(JoinRequestFailure.classify(error))
             return
         }
-        guard let resolved else { return }
         let cap: GroupInviteCapability
         do {
-            cap = try GroupInviteCapability.decodeAndVerify(wire: resolved.capabilityWire)
+            cap = try GroupInviteCapability.openLink(sealed: sealed, linkSecret: secret)
         } catch {
-            state = .invalid
+            // Wrong secret, another kind, a substituted or tampered blob.
+            state = .damaged
             return
         }
+        // Kept as the PLAINTEXT wire: the joiner tag, the attribution and the
+        // request are all over what the link opened to.
+        resolved = (cap.wire(), blobId)
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         guard cap.isValidNow(nowMs: nowMs) else {
             state = .invalid
             return
         }
-        switch Self.previewOutcome(of: cap, fragment: linkKeyFragment) {
+        switch Self.previewOutcome(of: cap, secret: secret) {
         case .none:
             preview = nil
         case .opened(let facts):
@@ -170,36 +182,30 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         state = .ready
     }
 
-    /// What the link's fragment does to the card.
+    /// What the preview does to the card.
     enum PreviewOutcome: Equatable {
-        /// No fragment: the card without a preview.
+        /// The capability was minted without a preview (a channel
+        /// co-publisher link): the card without one.
         case none
         /// The preview opened under the link secret.
         case opened(GroupInviteFacts)
-        /// A fragment is present and the preview does not open under it: a
-        /// malformed fragment, a capability minted without a preview, a wrong
-        /// secret, or a capability a server swapped in under a live id.
+        /// The capability carries a preview that does not open under the
+        /// secret the capability itself opened under. Cannot happen for a
+        /// capability minted by a correct client; refused, fail-closed.
         case damaged
     }
 
-    /// Decide the preview for a verified capability. Fail-closed: once the link
-    /// carries a fragment, anything short of an opened preview is `.damaged`.
+    /// Decide the preview for a capability that `openLink` already opened
+    /// under `secret` (one secret serves both layers).
     static func previewOutcome(
-        of cap: GroupInviteCapability, fragment: String?
+        of cap: GroupInviteCapability, secret: Data
     ) -> PreviewOutcome {
-        switch GroupInviteLink.readFragment(fragment) {
-        case .absent:
-            return .none
-        case .malformed:
-            return .damaged
-        case .secret(let secret):
-            guard cap.hasPreview(),
-                  let opened = try? cap.openPreview(linkKey: secret) else { return .damaged }
-            return .opened(GroupInviteFacts(
-                groupName: opened.groupName,
-                inviterName: opened.inviterName,
-                memberCount: opened.memberCount))
-        }
+        guard cap.hasPreview() else { return .none }
+        guard let opened = try? cap.openPreview(linkKey: secret) else { return .damaged }
+        return .opened(GroupInviteFacts(
+            groupName: opened.groupName,
+            inviterName: opened.inviterName,
+            memberCount: opened.memberCount))
     }
 
     /// ADR-0045 S7 residual 1 — send the request. Reached from the card's

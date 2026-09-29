@@ -42,8 +42,8 @@ public class InviteIntake {
 
     private val mutableSlug: MutableStateFlow<String?> = MutableStateFlow(null)
 
-    /** Slug from the most recent unconsumed deep-link, or
-     *  `null`. The Compose router collects this and navigates
+    /** Landing argument (`<slug>#<fragment>`) from the most recent
+     *  unconsumed deep-link, or `null`. The Compose router collects this and navigates
      *  to the [InviteLandingScreen] when non-null. */
     public val pendingInviteSlug: StateFlow<String?> = mutableSlug.asStateFlow()
 
@@ -55,12 +55,18 @@ public class InviteIntake {
      *  `null`. The router navigates to the group-join landing when non-null. */
     public val pendingGroupJoin: StateFlow<GroupJoinLink?> = mutableGroupJoin.asStateFlow()
 
-    /** Publish a new slug — called from
-     *  [me.lakko.app.MainActivity.handleInviteIntent]. Replaces
-     *  any prior unconsumed value (the user has clearly chosen
-     *  to act on the newer link). */
-    public fun publish(slug: String) {
-        mutableSlug.value = slug
+    /** Publish a tapped `/i/` link — called from
+     *  [me.lakko.app.MainActivity.handleInviteIntent]. The slot holds
+     *  the landing argument `<slug>#<fragment>`
+     *  ([me.lakko.app.discovery.composeInviteLinkArgument]); the fragment
+     *  is the link secret, `null` when the tapped URL had none (the
+     *  landing then reports the link damaged). Replaces any prior
+     *  unconsumed value (the user has clearly chosen to act on the
+     *  newer link). */
+    public fun publish(slug: String, fragment: String?) {
+        mutableSlug.value = me.lakko.app.discovery.composeInviteLinkArgument(
+            me.lakko.app.discovery.InviteLinkTap(slug = slug, fragment = fragment),
+        )
     }
 
     /** Clear the slot. Called by the router once the landing
@@ -85,17 +91,26 @@ public class InviteIntake {
 
     private val mutableCallJoinSlug: MutableStateFlow<String?> = MutableStateFlow(null)
 
-    /** ADR-0032 (G-21/G-22) — slug from the most recent unconsumed
-     *  `https://lakko.me/c/<slug>` multi-joiner call-invite deep-link, or
-     *  `null`. The router surfaces the public `JoinCall` landing when non-null.
+    /** ADR-0032 (G-21/G-22) — the landing argument (`<slug>#<fragment>`,
+     *  [me.lakko.app.discovery.composeInviteLinkArgument]) from the most recent
+     *  unconsumed `https://lakko.me/c/<slug>#<secret>` call-invite deep-link, or
+     *  `null`. The fragment is the link secret; without it the link is damaged. The router surfaces the public `JoinCall` landing when non-null.
      *  Unlike the `/i/` + `/g/` slots this one is honoured in ANY auth state
      *  (an anonymous visitor gets the ADR-0032 guest-join path). */
     public val pendingCallJoinSlug: StateFlow<String?> = mutableCallJoinSlug.asStateFlow()
 
-    /** ADR-0032 — publish a call-invite slug, called from
-     *  [me.lakko.app.MainActivity.handleCallJoinIntent]. */
-    public fun publishCallJoin(slug: String) {
-        mutableCallJoinSlug.value = slug
+    /** ADR-0032 — publish a call-link landing argument (`<slug>` or
+     *  `<slug>#<fragment>`), from a pasted link or the call notice bar. */
+    public fun publishCallJoin(argument: String) {
+        mutableCallJoinSlug.value = argument
+    }
+
+    /** ADR-0032 — publish a tapped `/c/` deep link with its fragment (the
+     *  link secret), called from [me.lakko.app.MainActivity.handleCallJoinIntent]. */
+    public fun publishCallJoin(slug: String, fragment: String?) {
+        mutableCallJoinSlug.value = me.lakko.app.discovery.composeInviteLinkArgument(
+            me.lakko.app.discovery.InviteLinkTap(slug = slug, fragment = fragment),
+        )
     }
 
     /** ADR-0032 — clear the call-join slot once the landing screen has been

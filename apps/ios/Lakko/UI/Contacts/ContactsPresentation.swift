@@ -137,12 +137,18 @@ struct InviteLinkRow: Equatable, Identifiable {
         /// From `listActiveInvites` — revoked through the slug.
         case server
         /// Generated this session and not (yet) in the server list — revoked
-        /// through its raw blob id.
-        case session(blobId: Data)
+        /// through its raw blob id, or not revocable (`nil`) when it is an
+        /// inline link with no ledger row.
+        case session(blobId: Data?)
     }
 
     let slug: String
-    let url: String
+    /// The whole link with its secret, or `nil` when this device does not
+    /// hold it: the server lists a link by id only and never learns the
+    /// secret (sealed-links amendment of 2026-09-28), so a link made on
+    /// another device, or before this launch, can be revoked but not shared
+    /// again from here.
+    let url: String?
     /// The user-set label, or empty.
     let label: String
     let createdAt: Date?
@@ -168,11 +174,13 @@ enum InviteLinkRows {
         now: Date
     ) -> [InviteLinkRow] {
         let nowMs = UInt64(max(0, now.timeIntervalSince1970 * 1000))
+        let sessionUrls = Dictionary(
+            sessionGenerated.map { ($0.blobIdSlug, $0.url) }, uniquingKeysWith: { first, _ in first })
         var rows: [InviteLinkRow] = active.compactMap { invite in
             guard !isExpired(expiryMs: invite.expiryMs, nowMs: nowMs) else { return nil }
             return InviteLinkRow(
                 slug: invite.blobIdSlug,
-                url: url(slug: invite.blobIdSlug),
+                url: sessionUrls[invite.blobIdSlug],
                 label: invite.label,
                 createdAt: parseCreatedAt(invite.createdAt),
                 expiryMs: invite.expiryMs,
@@ -200,11 +208,6 @@ enum InviteLinkRows {
 
     static func isExpired(expiryMs: UInt64, nowMs: UInt64) -> Bool {
         expiryMs != 0 && expiryMs <= nowMs
-    }
-
-    /// `https://lakko.me/i/<slug>`.
-    static func url(slug: String) -> String {
-        ContactsRepository.inviteUrlPrefix + slug
     }
 
     /// Sentinels as `lakko-contacts` defines them: 0 = single use,

@@ -43,6 +43,9 @@ import uniffi.lakko_ffi_uniffi.NoHandle
  */
 class CallInviteAcceptorTest {
 
+    /** A well-formed 16-character link secret (12 bytes). */
+    private val VALID_FRAGMENT = base64UrlEncodeNoPad(ByteArray(12) { (it + 1).toByte() })
+
     /** A 16-byte UUIDv7-shaped account id; never reaches the wire
      *  in either test, both of which return before consume. */
     private fun joinerAccountId(): ByteArray = ByteArray(16) { it.toByte() }
@@ -61,6 +64,7 @@ class CallInviteAcceptorTest {
                 .use { discovery ->
                     CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
                         slug = "not*valid*base64*url",
+                        fragment = VALID_FRAGMENT,
                         joinerAccountId = joinerAccountId(),
                         joinerIdentity = Identity(NoHandle),
                     )
@@ -92,6 +96,7 @@ class CallInviteAcceptorTest {
             .use { discovery ->
                 CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
                     slug = slug,
+                    fragment = VALID_FRAGMENT,
                     joinerAccountId = joinerAccountId(),
                     joinerIdentity = Identity(NoHandle),
                 )
@@ -117,6 +122,7 @@ class CallInviteAcceptorTest {
             .use { discovery ->
                 CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
                     slug = slug,
+                    fragment = VALID_FRAGMENT,
                     joinerAccountId = joinerAccountId(),
                     joinerIdentity = Identity(NoHandle),
                 )
@@ -137,6 +143,7 @@ class CallInviteAcceptorTest {
             .use { discovery ->
                 CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
                     slug = slug,
+                    fragment = VALID_FRAGMENT,
                     joinerAccountId = joinerAccountId(),
                     joinerIdentity = Identity(NoHandle),
                 )
@@ -145,5 +152,31 @@ class CallInviteAcceptorTest {
             "expected MalformedSlug, got $result",
             result is CallInviteAcceptor.Result.MalformedSlug,
         )
+    }
+
+    @Test
+    fun `acceptFromSlug refuses a link without its fragment as damaged before any request`() = runTest {
+        // Sealed-link amendment of 2026-09-28: nothing opens without the
+        // secret, so a link that lost its fragment (or carries a wrong one)
+        // is damaged and never fetched.
+        val engine = MockEngine {
+            error("discovery must never be reached without the link secret")
+        }
+        val slug = base64UrlEncodeNoPad(ByteArray(TEST_INVITE_LINK_LENGTHS.blobIdLen) { 7 })
+        for (fragment in listOf(null, "", "short", VALID_FRAGMENT + "A", "not*base64url!!!")) {
+            val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS })
+                .use { discovery ->
+                    CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
+                        slug = slug,
+                        fragment = fragment,
+                        joinerAccountId = joinerAccountId(),
+                        joinerIdentity = Identity(NoHandle),
+                    )
+                }
+            assertTrue(
+                "expected Damaged for fragment=$fragment, got $result",
+                result is CallInviteAcceptor.Result.Damaged,
+            )
+        }
     }
 }

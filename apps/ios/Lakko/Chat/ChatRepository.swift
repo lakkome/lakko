@@ -2772,7 +2772,7 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
-        let mint: GroupInviteMint
+        let mint: InviteLinkMint
         do {
             mint = try composeGroupInviteCapabilityWithPreview(
                 issuerSigningSeed: identity.ed25519Seed(),
@@ -2786,12 +2786,11 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped(
                 "composeGroupInviteCapabilityWithPreview failed", underlying: error)
         }
-        let wire = mint.wire
-        // Production default (ADR-0028 OQ1): upload to the discovery ledger —
-        // the server-side anti-abuse surface (per-joiner consume dedup + soft
-        // max_uses) — and share the short pointer URL. `max_uses` is a soft
-        // throttle, not an access control: the admin approval gate stays the
-        // boundary.
+        // Production default (ADR-0028 OQ1): upload the SEALED blob to the
+        // discovery ledger (sealed-links amendment of 2026-09-28) with its
+        // clear fields — the issuer key for the revoke, the expiry, the soft
+        // max_uses — and share the short pointer URL. One secret opens both
+        // the capability and its preview; it rides the fragment only.
         //
         // The upload is session-gated (`require_session` on discovery), so it
         // goes out on a bearer copy of the client; with no session at all the
@@ -2799,21 +2798,22 @@ public final class ChatRepository: ObservableObject {
         // Only a TRANSPORT failure (a censored / offline network) falls back to
         // the inline form; a refusal from the server (401, 400, 5xx) surfaces.
         let bearer = try bearerDiscovery()
-        let base: String
         do {
             let blobId = try await bearer.uploadGroupInvite(
-                capabilityBytes: wire, maxUses: UInt32.max)
-            base = try GroupInviteUrl.composePointerGroupInviteUrl(blobId: blobId)
+                mint: mint, expiryMs: 0, maxUses: UInt32.max)
+            return InviteLink.pointer(
+                origin: GroupInviteUrl.defaultOrigin, prefix: GroupInviteUrl.urlPrefix,
+                blobId: blobId, secret: mint.linkSecret)
         } catch let error where Self.groupInviteUploadFallsBackInline(error) {
             NSLog("group invite upload failed (\(Self.discoveryFailureSummary(error))); "
                 + "sharing the inline link")
-            base = (try? GroupInviteUrl.composeInlineGroupInviteUrl(capabilityBytes: wire))
-                ?? ("https://lakko.me/g/" + base64UrlEncodeNoPad(wire))
+            return InviteLink.inline(
+                origin: GroupInviteUrl.defaultOrigin, prefix: GroupInviteUrl.urlPrefix,
+                sealed: mint.sealed, secret: mint.linkSecret)
         } catch {
             NSLog("group invite upload failed (\(Self.discoveryFailureSummary(error)))")
             throw ChatError.wrapped("group invite upload failed", underlying: error)
         }
-        return GroupInviteLink.withLinkKey(base, linkKey: mint.linkKey)
     }
 
     /// The signed-in session's bearer token, read at call time. Defaults to
@@ -2839,10 +2839,7 @@ public final class ChatRepository: ObservableObject {
     /// only when the request never got an answer (DNS, TLS, no route, a
     /// censored network). Any HTTP status is the server's answer and surfaces.
     static func groupInviteUploadFallsBackInline(_ error: Error) -> Bool {
-        if let discovery = error as? DiscoveryClientError, case .network = discovery {
-            return true
-        }
-        return false
+        InviteLink.uploadFallsBackInline(error)
     }
 
     /// A log-safe summary of a discovery failure: the kind and the HTTP
@@ -2897,10 +2894,12 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
-    /// fetching from the discovery ledger when the slug is a 6-byte pointer (the
-    /// production form) or passing the bytes straight through when it is an
-    /// inline capability (the transport-failure fallback). Returns the `blobId`
+    /// ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the SEALED capability
+    /// blob (sealed-links amendment of 2026-09-28), fetching from the discovery
+    /// ledger when the slug is a 6-byte pointer (the production form) or
+    /// passing the bytes straight through when it is an inline blob (the
+    /// transport-failure fallback). The caller opens it with
+    /// `GroupInviteCapability.openLink(sealed:linkSecret:)`. Returns the `blobId`
     /// (non-nil only for the pointer form) so the caller can drive the consume
     /// gate before requesting to join.
     ///
@@ -2912,7 +2911,7 @@ public final class ChatRepository: ObservableObject {
     /// "invalid".
     public func resolveGroupInviteSlug(
         slug: String
-    ) async throws -> (capabilityWire: Data, blobId: Data?) {
+    ) async throws -> (sealed: Data, blobId: Data?) {
         let parsed: GroupInviteUrl.ParsedGroupInvite
         do {
             parsed = try GroupInviteUrl.parseGroupInviteSlug(slug)
@@ -2929,10 +2928,10 @@ public final class ChatRepository: ObservableObject {
             } catch {
                 throw ChatError.wrapped("group invite fetch failed", underlying: error)
             }
-            guard let capabilityWire = fetched else {
+            guard let sealed = fetched else {
                 throw GroupInviteLinkError.notFound
             }
-            return (capabilityWire, blobId)
+            return (sealed, blobId)
         }
     }
 

@@ -77,14 +77,21 @@ import {
   isLegacyV1PublisherGroupId,
   rethrowAsLegacyChannel,
 } from "./legacy-v1";
-import { inviteLinkWidths } from "../contacts/invite-link";
-import { parseGroupInviteSlug, splitGroupInviteLink } from "../contacts/group-invite";
+import {
+  inviteLinkWidths,
+  openSealedInviteLink,
+  takeInviteLinkMint,
+} from "../contacts/invite-link";
+import {
+  composeInlineGroupInviteUrl,
+  composePointerGroupInviteUrl,
+  GROUP_INVITE_INLINE_MIN_LEN,
+  splitGroupInviteLink,
+} from "../contacts/group-invite";
+import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
 
 type Identity = InstanceType<Wasm["Identity"]>;
 type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
-
-/** Path prefix every group/co-publisher invite URL starts with. */
-const GROUP_INVITE_URL_PREFIX = "/g/";
 
 /** Open (or create) the persistent PublisherGroup handle for a channel. The
  *  caller owns the returned handle and MUST `.free()` it when done. */
@@ -127,18 +134,48 @@ export function registerPublisherGroupAccess(
 
 /** Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`. A
  *  non-member opens it, requests to join, and the owner approves (reusing the
- *  ADR-0027/0028 external-join machinery). Inline link — the channel owner
- *  shares it out-of-band; `0n` = never expires. */
+ *  ADR-0027/0028 external-join machinery). The sealed mint (the 2026-09-28
+ *  sealed-link amendment) is uploaded to the `/g/` ledger like a group link,
+ *  with the clear issuer key, `expiry_ms = 0` (never expires) and an
+ *  unlimited `max_uses`, and the pointer link `/g/<id>#<secret>` is returned.
+ *
+ *  `discovery` must carry the owner's session token: the upload is
+ *  session-gated, and a refusal (a 401 with no session, a 429, a 5xx) is
+ *  thrown, never hidden behind the inline link. Only a TRANSPORT failure
+ *  (`DiscoveryNetworkError`) falls back to the inline `/g/<sealed>#<secret>`
+ *  link, which a joiner opens without the ledger. */
 export async function createCoPublisherLink(
   identity: Identity,
   publisherGroup: PublisherGroup,
   origin: string,
+  discovery: Pick<DiscoveryClient, "uploadGroupInvite">,
 ): Promise<string> {
   const wasm = await loadWasm();
   const groupId = publisherGroup.groupId();
-  const wire = wasm.composeGroupInviteCapability(identity.ed25519Seed, groupId, 0n);
-  return `${origin}${GROUP_INVITE_URL_PREFIX}${bytesToBase64Url(wire)}`;
+  const expiryMs = 0n;
+  const mint = takeInviteLinkMint(
+    wasm.composeGroupInviteCapability(identity.ed25519Seed, groupId, expiryMs),
+  );
+  const widths = inviteLinkWidths(wasm);
+  try {
+    const blobId = await discovery.uploadGroupInvite({
+      sealed: mint.sealed,
+      issuerPubkey: mint.issuerPubkey,
+      expiryMs,
+      maxUses: COPUBLISHER_LINK_MAX_USES,
+    });
+    return composePointerGroupInviteUrl(blobId, mint.linkSecret, widths, origin);
+  } catch (err) {
+    if (!(err instanceof DiscoveryNetworkError)) throw err;
+    // eslint-disable-next-line no-console
+    console.warn("co-publisher link: ledger unreachable, using the inline link");
+    return composeInlineGroupInviteUrl(mint.sealed, mint.linkSecret, widths, origin);
+  }
 }
+
+/** The co-publisher link's soft consume ceiling: unlimited (`u32::MAX`), as
+ *  on iOS and Android. The owner's approval is the boundary. */
+const COPUBLISHER_LINK_MAX_USES = 0xff_ff_ff_ff;
 
 /** Poll the PublisherGroup's DS journal and apply incoming MLS messages
  *  (external-join proposals from prospective co-publishers + any co-publisher
@@ -317,22 +354,37 @@ export async function requestToCoPublish(
   ds: DsClient,
   identity: Identity,
   link: string,
+  discovery: Pick<DiscoveryClient, "fetchGroupInvite"> = new DiscoveryClient(),
 ): Promise<{ groupId: Uint8Array; channelIdHex: string; joinerKey: Uint8Array }> {
   const wasm = await loadWasm();
-  // The shared `/g/` shape rules (ADR-0028 short-link amendment): the slug
-  // ends at the fragment, and a co-publisher link is always the inline form
-  // (the owner never uploads it to the ledger).
+  // The shared sealed-link rules (ADR-0028): the slug ends at the fragment,
+  // the fragment is the secret the capability is sealed under, and the slug
+  // is either the ledger id of the uploaded link (fetched from the `/g/`
+  // ledger) or the inline sealed blob (the owner's upload failed on
+  // transport).
   const widths = inviteLinkWidths(wasm);
   const split = splitGroupInviteLink(link, widths);
   if (split === null) throw new Error("not a /g/ co-publisher link");
-  if (split.fragment.kind === "damaged") throw new Error("co-publisher link is damaged");
-  const parsed = parseGroupInviteSlug(split.slug, widths);
-  if (parsed.kind !== "inline") throw new Error("co-publisher link is not an inline capability");
-  const wire = parsed.capabilityBytes;
-  const cap = wasm.GroupInviteCapability.decodeAndVerify(wire);
+  const trimmed = link.trim();
+  const fragment = trimmed.includes("#") ? trimmed.slice(trimmed.indexOf("#")) : null;
+  const opened = await openSealedInviteLink({
+    slug: split.slug,
+    fragment,
+    widths,
+    inlineMinLen: GROUP_INVITE_INLINE_MIN_LEN,
+    what: "co-publisher",
+    fetchSealed: (blobId) => discovery.fetchGroupInvite(blobId),
+    open: (sealed, secret) => wasm.GroupInviteCapability.openLink(sealed, secret),
+  });
+  if (opened.kind === "not-found") throw new Error("co-publisher link not found or expired");
+  if (opened.kind !== "opened") throw new Error("co-publisher link is damaged");
+  const cap = opened.capability;
   let groupId: Uint8Array;
+  let wire: Uint8Array;
   try {
     groupId = cap.groupId;
+    // The join attribution carries the PLAINTEXT capability wire.
+    wire = cap.wire;
   } finally {
     cap.free();
   }
@@ -492,9 +544,3 @@ function hexNibble(code: number): number {
   return -1;
 }
 
-function bytesToBase64Url(bytes: Uint8Array): string {
-  return base64Encode(bytes)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}

@@ -281,23 +281,60 @@ public struct KeyPackageFetchResponse: Codable, Equatable {
 // ----------------------------------------------------------------------------
 // Added in 1.14e6, parallel to the Android 1.15e9 addendum.
 
-/// Body of `POST /discovery/invite`.
-public struct InviteUploadRequest: Codable, Equatable {
-    /// Standard-alphabet base64 of the `composeInviteCapability(...)`
-    /// output. Server caps decoded size at 2048 bytes (mirrored
-    /// client-side in ``DiscoveryClient/uploadInvite(capabilityBytes:)``
-    /// so a misbehaving caller fails fast).
-    public let capability: String
+/// Body of `POST /discovery/invite`, `POST /discovery/call-invite` and
+/// `POST /discovery/group-invite` since the sealed-links amendment of
+/// 2026-09-28 (ADR-0028, ADR-0009): the sealed blob the server stores opaque,
+/// plus the clear fields the server can no longer read out of the capability.
+/// Field names match `services/discovery` `UploadRequest` exactly.
+public struct SealedInviteUploadRequest: Codable, Equatable {
+    /// Standard-alphabet base64 of ``InviteLinkMint/sealed``.
+    public let sealed: String
+    /// Standard-alphabet base64 of the 32-byte Ed25519 key that signed the
+    /// capability (``InviteLinkMint/issuerPubkey``): the key an issuer-signed
+    /// revoke verifies against.
+    public let issuerPubkey: String
+    /// The capability's `expiry_ms` (`0` = never expires), for the fetch
+    /// filter and the pruner.
+    public let expiryMs: UInt64
+    /// The consume ceiling: `0` = single-use, `0xFFFFFFFF` = unlimited.
+    public let maxUses: UInt32
+    /// `/i/` only: the capability's label, for the owner's own list. Omitted
+    /// from the JSON for `/c/` and `/g/`.
+    public let label: String?
+    /// `/i/` only: the capability's `bootstrap_referral` flag. Omitted from
+    /// the JSON for `/c/` and `/g/`.
+    public let bootstrapReferral: Bool?
 
-    public init(capability: String) {
-        self.capability = capability
+    public init(
+        sealed: String,
+        issuerPubkey: String,
+        expiryMs: UInt64,
+        maxUses: UInt32,
+        label: String? = nil,
+        bootstrapReferral: Bool? = nil
+    ) {
+        self.sealed = sealed
+        self.issuerPubkey = issuerPubkey
+        self.expiryMs = expiryMs
+        self.maxUses = maxUses
+        self.label = label
+        self.bootstrapReferral = bootstrapReferral
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sealed
+        case issuerPubkey = "issuer_pubkey"
+        case expiryMs = "expiry_ms"
+        case maxUses = "max_uses"
+        case label
+        case bootstrapReferral = "bootstrap_referral"
     }
 }
 
-/// Response body of `POST /discovery/invite`.
+/// Response body of every invite upload.
 public struct InviteUploadResponse: Codable, Equatable {
-    /// base64url-no-pad of `SHA-256(capability_bytes)` — same bytes
-    /// ⇒ same id; a retried upload is a no-op (server-side upsert).
+    /// base64url-no-pad of the random 6-byte ledger id (8 characters) the
+    /// server mints fresh for every upload.
     public let blobId: String
 
     public init(blobId: String) {
@@ -309,42 +346,15 @@ public struct InviteUploadResponse: Codable, Equatable {
     }
 }
 
-/// Response body of `GET /discovery/invite/{blob_id_b64url}`. 404
-/// surfaces as `nil` in ``DiscoveryClient/inviteFetch(blobId:)``
-/// (server-side expiry filter folds expired-blob into the same
-/// status).
+/// Response body of `GET /discovery/{invite,call-invite,group-invite}/{id}`.
+/// 404 surfaces as `nil` (the server folds expired rows into the same status).
 public struct InviteFetchResponse: Codable, Equatable {
-    public let capability: String
+    /// Standard-alphabet base64 of the stored sealed blob. Opens only under the
+    /// link secret from the URL fragment.
+    public let sealed: String
 
-    public init(capability: String) {
-        self.capability = capability
-    }
-}
-
-/// Body of `POST /discovery/group-invite` (ADR-0028, G-3). Mirror of
-/// ``InviteUploadRequest`` but carries an extra `max_uses`: a
-/// `GroupInviteCapability` does NOT embed `max_uses` in its signed wire (it
-/// conveys only `group_id` + `issuer_pubkey` + `expiry_ms`), so the uploader
-/// supplies the SOFT consume ceiling out-of-band. It is an anti-spam throttle,
-/// not an access control — the security boundary is the admin approval gate
-/// (ADR-0027). The response reuses ``InviteUploadResponse`` (`blob_id`).
-public struct GroupInviteUploadRequest: Codable, Equatable {
-    /// Standard-alphabet base64 of the `composeGroupInviteCapability(...)`
-    /// output. Server runs `decode_and_verify` at ingress + caps decoded size
-    /// at 512 bytes.
-    public let capability: String
-    /// SOFT consume ceiling — `0` = single-use, `0xFFFFFFFF` = unlimited, any
-    /// other N = at most N consumes. NOT part of the signed capability.
-    public let maxUses: UInt32
-
-    public init(capability: String, maxUses: UInt32) {
-        self.capability = capability
-        self.maxUses = maxUses
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case capability
-        case maxUses = "max_uses"
+    public init(sealed: String) {
+        self.sealed = sealed
     }
 }
 

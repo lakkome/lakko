@@ -37,6 +37,10 @@ final class LinkCallHost: ObservableObject {
         /// call` founds a call before any link exists, and one is minted later
         /// only if somebody asks for it.
         let slug: String?
+        /// The link's fragment (its secret), kept beside the slug so `Open`
+        /// on the call's notice re-parks a link that still opens. Never sent
+        /// anywhere; `nil` for a call started here.
+        var fragment: String? = nil
         let callId: Data
         let ownerAccountId: Data
         let ownerSignatureKey: Data
@@ -78,6 +82,8 @@ final class LinkCallHost: ObservableObject {
         let callIdHex: String
         /// `nil` for a call started here rather than opened from a link.
         let slug: String?
+        /// The link secret that came with ``slug``.
+        var fragment: String? = nil
         let isOwner: Bool
         var phase: LinkCallHostRules.Phase
         var errorMessage: String?
@@ -232,6 +238,7 @@ final class LinkCallHost: ObservableObject {
         slot = Slot(
             callIdHex: callIdHex,
             slug: request.slug,
+            fragment: request.fragment,
             isOwner: request.isOwner,
             phase: .starting,
             errorMessage: nil
