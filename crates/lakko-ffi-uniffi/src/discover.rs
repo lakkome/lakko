@@ -14,6 +14,11 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use lakko_channels::copublisher::{
+    compose_copublisher_binding, decode_copublisher_binding,
+    ChannelCoPublisherSigner as InnerCoPublisher, CoPublisherBindingError,
+    COPUBLISHER_PROOF_HEADER_NAME, MAX_COPUBLISHERS,
+};
 use lakko_channels::listing::{
     check_language, compose_channel_listing as inner_compose,
     decode_channel_listing as inner_decode, listing_is_newer as inner_is_newer, topic_name,
@@ -112,6 +117,173 @@ pub fn channel_owner_signer(
 #[must_use]
 pub fn channel_owner_proof_header_name() -> String {
     OWNER_PROOF_HEADER_NAME.to_string()
+}
+
+// ---------------------------------------------------------
+// Co-publisher keys (ADR-0059 §1, decided 2026-09-29)
+// ---------------------------------------------------------
+
+/// The frozen code of a binding refusal.
+pub(crate) const fn copublisher_binding_code(e: CoPublisherBindingError) -> &'static str {
+    match e {
+        CoPublisherBindingError::WrongDomain => "wrongDomain",
+        CoPublisherBindingError::BadLength => "badLength",
+        CoPublisherBindingError::UnknownVersion => "unknownVersion",
+        CoPublisherBindingError::BadSignature => "badSignature",
+    }
+}
+
+impl From<CoPublisherBindingError> for FfiError {
+    fn from(e: CoPublisherBindingError) -> Self {
+        Self::ChannelCoPublisherBinding(format!("{}: {e}", copublisher_binding_code(e)))
+    }
+}
+
+/// A co-publisher's own key for one channel: the key
+/// `BLAKE3-derive-key("lakko/channels/copublisher/v1", account_seed ‖ channel_id)`,
+/// which the channel's owner appoints on `services/channels`.
+#[derive(uniffi::Object)]
+pub struct ChannelCoPublisherSigner {
+    inner: InnerCoPublisher,
+}
+
+#[uniffi::export]
+impl ChannelCoPublisherSigner {
+    /// The 32-byte Ed25519 public key the owner appoints.
+    pub fn verifying_key(&self) -> Vec<u8> {
+        self.inner.verifying_key().to_bytes().to_vec()
+    }
+
+    /// The `x-lakko-channel-copublisher-proof` header value for one request
+    /// (same arguments as `ChannelOwnerSigner::sign`). Accepted only on the
+    /// routes a rotation fanout needs, and only once the owner appointed the
+    /// key.
+    pub fn sign(&self, method: String, path: String, query: String, body: Vec<u8>) -> String {
+        let req = OwnerRequest {
+            method: &method,
+            canonical_path: &path,
+            query: &query,
+            body: &body,
+        };
+        self.inner.sign_at(&req, now_ms(), fresh_nonce()).encode()
+    }
+}
+
+/// The co-publisher signer of `channel_id` for `account_identity` (the
+/// account identity, the one the PublisherGroup leaf is).
+///
+/// # Errors
+///
+/// [`FfiError::Channels`] when `channel_id` is not 16 bytes.
+#[uniffi::export]
+pub fn channel_copublisher_signer(
+    account_identity: &Identity,
+    channel_id: Vec<u8>,
+) -> Result<Arc<ChannelCoPublisherSigner>, FfiError> {
+    let channel_id = channel_id_from(&channel_id)?;
+    Ok(Arc::new(ChannelCoPublisherSigner {
+        inner: InnerCoPublisher::from_account_seed(
+            &account_identity.inner.ed25519_seed_bytes(),
+            &channel_id,
+        ),
+    }))
+}
+
+/// The request header a co-publisher proof travels in.
+#[uniffi::export]
+#[must_use]
+pub fn channel_copublisher_proof_header_name() -> String {
+    COPUBLISHER_PROOF_HEADER_NAME.to_string()
+}
+
+/// How many co-publisher keys one channel may have appointed.
+#[uniffi::export]
+#[must_use]
+pub fn channel_max_copublishers() -> u32 {
+    u32::try_from(MAX_COPUBLISHERS).unwrap_or(u32::MAX)
+}
+
+/// The service path the owner signs to appoint (`PUT`) or revoke
+/// (`DELETE`) `copublisher_key` for `channel_id`:
+/// `/v1/channels/<channel hex>/copublishers/<key hex>`.
+///
+/// # Errors
+///
+/// [`FfiError::Channels`] when `channel_id` is not 16 bytes or the key not
+/// 32.
+#[uniffi::export]
+pub fn channel_copublisher_path(
+    channel_id: Vec<u8>,
+    copublisher_key: Vec<u8>,
+) -> Result<String, FfiError> {
+    let channel_id = channel_id_from(&channel_id)?;
+    if copublisher_key.len() != 32 {
+        return Err(FfiError::Channels(format!(
+            "co-publisher key must be 32 bytes, got {}",
+            copublisher_key.len()
+        )));
+    }
+    Ok(format!(
+        "/v1/channels/{}/copublishers/{}",
+        hex_lower(&channel_id),
+        hex_lower(&copublisher_key)
+    ))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use core::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// A verified co-publisher binding.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiChannelCoPublisherBinding {
+    /// The channel the key is for (16 bytes).
+    pub channel_id: Vec<u8>,
+    /// The co-publisher's account identity key, which signed the binding.
+    /// The owner appoints only when this equals the joiner key it approved.
+    pub account_pubkey: Vec<u8>,
+    /// The co-publisher key to appoint.
+    pub copublisher_pubkey: Vec<u8>,
+}
+
+/// The binding a prospective co-publisher sends the owner with its knock:
+/// its co-publisher key for `channel_id`, signed by `account_identity`.
+///
+/// # Errors
+///
+/// [`FfiError::Channels`] when `channel_id` is not 16 bytes.
+#[uniffi::export]
+pub fn compose_channel_copublisher_binding(
+    account_identity: &Identity,
+    channel_id: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let channel_id = channel_id_from(&channel_id)?;
+    Ok(compose_copublisher_binding(
+        &account_identity.inner.ed25519_seed_bytes(),
+        &channel_id,
+    ))
+}
+
+/// Decode and verify a binding (the signature under its embedded account
+/// key). The caller still checks `account_pubkey` and `channel_id`.
+///
+/// # Errors
+///
+/// [`FfiError::ChannelCoPublisherBinding`].
+#[uniffi::export]
+pub fn decode_channel_copublisher_binding(
+    bytes: Vec<u8>,
+) -> Result<FfiChannelCoPublisherBinding, FfiError> {
+    let b = decode_copublisher_binding(&bytes)?;
+    Ok(FfiChannelCoPublisherBinding {
+        channel_id: b.channel_id.to_vec(),
+        account_pubkey: b.account_pubkey.to_vec(),
+        copublisher_pubkey: b.copublisher_pubkey.to_vec(),
+    })
 }
 
 // ---------------------------------------------------------
@@ -238,6 +410,37 @@ pub fn channel_listing_is_newer(incoming_updated_at_ms: u64, stored_updated_at_m
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn copublisher_binding_round_trips_through_the_ffi() {
+        let identity = crate::Identity::from_seed(vec![3; 64]).unwrap();
+        let wire = compose_channel_copublisher_binding(&identity, vec![4; 16]).unwrap();
+        let b = decode_channel_copublisher_binding(wire.clone()).unwrap();
+        assert_eq!(b.channel_id, vec![4; 16]);
+        let signer = channel_copublisher_signer(&identity, vec![4; 16]).unwrap();
+        assert_eq!(b.copublisher_pubkey, signer.verifying_key());
+        assert_ne!(
+            signer.verifying_key(),
+            channel_owner_signer(&identity, vec![4; 16])
+                .unwrap()
+                .verifying_key()
+        );
+        let mut bad = wire;
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        match decode_channel_copublisher_binding(bad) {
+            Err(FfiError::ChannelCoPublisherBinding(m)) => assert!(m.starts_with("badSignature")),
+            other => panic!("expected a binding error, got {other:?}"),
+        }
+        assert_eq!(
+            channel_copublisher_path(vec![0xab; 16], vec![0xcd; 32]).unwrap(),
+            format!(
+                "/v1/channels/{}/copublishers/{}",
+                "ab".repeat(16),
+                "cd".repeat(32)
+            )
+        );
+    }
+
     use super::*;
     use lakko_channels::owner::{verify_owner_proof, OwnerProof};
 

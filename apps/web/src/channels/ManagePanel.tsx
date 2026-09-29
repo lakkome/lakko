@@ -44,6 +44,8 @@ import type { PublisherGroupHandle } from "./publisher-group-handle";
 import { CoPublishersPanel } from "./CoPublishersPanel";
 import { RotationPanel } from "./RotationPanel";
 import { SubscribersPanel } from "./SubscribersPanel";
+import { ListInDiscover } from "../discover/ListInDiscover";
+import { refreshListingAfterEdit } from "../discover/listing";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { awaitChannelsHydration, channelsActions, channelsState } from "../state/channels-state";
@@ -55,6 +57,7 @@ import { awaitChannelsHydration, channelsActions, channelsState } from "../state
  * re-titles from the newest record; the `@handle` stays the unique thing.
  */
 function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Element {
+  const chats = useChats();
   const held = (): { name: string; description: string } => {
     const shared = channelsState.metaByChannel().get(props.channelIdHex);
     if (shared !== undefined) return { name: shared.name, description: shared.description };
@@ -104,6 +107,16 @@ function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Elem
       setName(meta.name);
       setDescription(meta.description);
       setNotice("Saved. Subscribers see the new name with their next posts.");
+      // ADR-0059 — a listed channel's listing carries the name and
+      // description too; editing them updates it (UX spec 6.4).
+      const id = chats.accountIdentity();
+      if (id !== null) {
+        try {
+          await refreshListingAfterEdit(props.channelIdHex, id);
+        } catch {
+          setNotice("Saved. The Discover listing could not be updated; save again to retry.");
+        }
+      }
     } catch (err) {
       const code = channelMetaErrorCode(err);
       if (code !== undefined) setError(channelMetaErrorText(code));
@@ -229,6 +242,7 @@ export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Eleme
   return (
     <div class="lk-stack lk-channel-manage-body">
       <ChannelDetailsPanel channelIdHex={props.channelIdHex} />
+      <ListInDiscover channelIdHex={props.channelIdHex} identity={identity()} />
       <SubscribersPanel channelIdHex={props.channelIdHex} identity={identity()} />
       <Show
         when={group() !== null && identity() !== null}

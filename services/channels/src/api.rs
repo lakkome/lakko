@@ -53,7 +53,7 @@ use crate::config::Config;
 use crate::directory::{
     band, normalize_search_query, rank, DirectoryEntry, BUCKET_PAGE_LEN, SEARCH_PAGE_LEN,
 };
-use crate::owner_auth::require_owner;
+use crate::owner_auth::{require_owner, require_publisher};
 use crate::storage::{
     ChannelId, ChannelStore, DirectoryQuery, StorageError, StoredListing, StoredPost, SubscriberId,
     OWNER_PUBKEY_LEN,
@@ -615,9 +615,10 @@ async fn subscribe(
     }
 }
 
-/// `GET /v1/channels/:channel_id/subscribers` — list. Owner-signed: the
-/// publisher needs the keys to reseal, nobody else does, and the exact count
-/// stops being public (ADR-0059 section 4).
+/// `GET /v1/channels/:channel_id/subscribers` — list. Owner-signed, or
+/// signed by a co-publisher key the owner appointed: a publisher needs the
+/// keys to reseal, nobody else does, and the exact count stops being public
+/// (ADR-0059 section 4).
 async fn list_subscribers(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,
@@ -632,7 +633,7 @@ async fn list_subscribers(
         )
             .into_response();
     };
-    if let Err(refused) = require_owner(&state, channel, &method, &uri, &headers, &[]).await {
+    if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &[]).await {
         return refused;
     }
     match state.store.list_subscribers(channel).await {
@@ -1280,6 +1281,106 @@ async fn delete_listing(
     }
 }
 
+/// Parse a 64-hex Ed25519 public key; `None` unless it is a curve point.
+fn parse_pubkey_hex(hex_str: &str) -> Option<[u8; 32]> {
+    if hex_str.len() != 64 {
+        return None;
+    }
+    let bytes = hex::decode(hex_str).ok()?;
+    let key: [u8; 32] = bytes.as_slice().try_into().ok()?;
+    lakko_crypto::signing::VerifyingKey::from_bytes(&key).ok()?;
+    Some(key)
+}
+
+/// `PUT /v1/channels/:channel_id/copublishers/:pubkey_hex` — appoint a
+/// co-publisher key (owner-signed, empty body). Idempotent; the owner learns
+/// the key end-to-end from the co-publisher's binding (ADR-0059 section 1),
+/// never from this service. At most `lakko_channels::MAX_COPUBLISHERS` keys
+/// per channel (`409 too-many-copublishers`).
+async fn appoint_copublisher(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, pubkey_hex)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return bad_channel_id();
+    };
+    if let Err(refused) = require_owner(&state, channel, &method, &uri, &headers, &[]).await {
+        return refused;
+    }
+    let Some(key) = parse_pubkey_hex(&pubkey_hex) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "bad-copublisher-key",
+                "the co-publisher key must be 64 hex chars of an Ed25519 public key",
+            )),
+        )
+            .into_response();
+    };
+    match state
+        .store
+        .appoint_copublisher(channel, key, lakko_channels::MAX_COPUBLISHERS, unix_ms())
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::TooManyCoPublishers) => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "too-many-copublishers",
+                "revoke a co-publisher key before appointing another",
+            )),
+        )
+            .into_response(),
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "appoint co-publisher failed");
+            internal_error()
+        },
+    }
+}
+
+/// `DELETE /v1/channels/:channel_id/copublishers/:pubkey_hex` — revoke a
+/// co-publisher key (owner-signed). Idempotent: revoking a key that is not
+/// appointed is also a 204.
+async fn revoke_copublisher(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, pubkey_hex)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return bad_channel_id();
+    };
+    if let Err(refused) = require_owner(&state, channel, &method, &uri, &headers, &[]).await {
+        return refused;
+    }
+    let Some(key) = parse_pubkey_hex(&pubkey_hex) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "bad-copublisher-key",
+                "the co-publisher key must be 64 hex chars of an Ed25519 public key",
+            )),
+        )
+            .into_response();
+    };
+    match state.store.revoke_copublisher(channel, key).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "revoke co-publisher failed");
+            internal_error()
+        },
+    }
+}
+
 /// `GET /v1/directory/bucket/:topic/:language` — the top listings of one
 /// bucket. No session, no token, no cookie; the response depends only on the
 /// bucket and the clock.
@@ -1452,6 +1553,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/channels/{channel_id}/listing",
             put(put_listing).delete(delete_listing),
+        )
+        .route(
+            "/v1/channels/{channel_id}/copublishers/{pubkey_hex}",
+            put(appoint_copublisher).delete(revoke_copublisher),
         )
         .route(
             "/v1/directory/bucket/{topic}/{language}",

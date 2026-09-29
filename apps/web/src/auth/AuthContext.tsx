@@ -140,6 +140,7 @@ import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { deleteMessageLog } from "../chat/message-log-store";
 import { wipeChannelsForAccount } from "../state/channels-state";
 import { deleteFeedState } from "../feed/feed-store";
+import { deleteDiscoverRows } from "../discover/discover-store";
 import { clearConversationKinds } from "../chat/conversation-kind-store";
 import { deleteProfileRow } from "../profile/profile-idb";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
@@ -3300,6 +3301,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // The person's own feeds on this device (ADR-0058 section 6).
         try {
           await deleteFeedState(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // Discover (ADR-0059): picked topics, decoys, cached buckets,
+        // not-interested channels, the share switches and the lists
+        // members shared.
+        try {
+          await deleteDiscoverRows(cached.accountIdB64);
         } catch {
           // best-effort
         }

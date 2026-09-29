@@ -9,6 +9,11 @@
 //!
 //! [ADR-0059]: ../../../docs/adr/0059-channel-discover.md
 
+use lakko_channels::copublisher::{
+    compose_copublisher_binding, decode_copublisher_binding,
+    ChannelCoPublisherSigner as InnerCoPublisher, CoPublisherBinding, CoPublisherBindingError,
+    COPUBLISHER_PROOF_HEADER_NAME, MAX_COPUBLISHERS,
+};
 use lakko_channels::listing::{
     check_language, compose_channel_listing as inner_compose,
     decode_channel_listing as inner_decode, listing_is_newer as inner_is_newer, topic_name,
@@ -131,6 +136,186 @@ pub fn channel_owner_signer(
 #[must_use]
 pub fn channel_owner_proof_header_name() -> String {
     OWNER_PROOF_HEADER_NAME.to_string()
+}
+
+// ---------------------------------------------------------
+// Co-publisher keys (ADR-0059 §1, decided 2026-09-29)
+// ---------------------------------------------------------
+
+const fn copublisher_binding_code(e: CoPublisherBindingError) -> &'static str {
+    match e {
+        CoPublisherBindingError::WrongDomain => "wrongDomain",
+        CoPublisherBindingError::BadLength => "badLength",
+        CoPublisherBindingError::UnknownVersion => "unknownVersion",
+        CoPublisherBindingError::BadSignature => "badSignature",
+    }
+}
+
+/// The value thrown for a refused binding: an `Error` whose own
+/// `channelCoPublisherBindingError` property is the code (`wrongDomain`,
+/// `badLength`, `unknownVersion`, `badSignature`).
+fn binding_error_value(e: CoPublisherBindingError) -> JsValue {
+    let err = js_sys::Error::new(&e.to_string());
+    let _ = js_sys::Reflect::set(
+        err.as_ref(),
+        &JsValue::from_str("channelCoPublisherBindingError"),
+        &JsValue::from_str(copublisher_binding_code(e)),
+    );
+    err.into()
+}
+
+/// A co-publisher's own key for one channel, which the channel's owner
+/// appoints on `services/channels`.
+#[wasm_bindgen]
+pub struct ChannelCoPublisherSigner {
+    inner: InnerCoPublisher,
+}
+
+#[wasm_bindgen]
+impl ChannelCoPublisherSigner {
+    /// The 32-byte Ed25519 public key the owner appoints.
+    #[wasm_bindgen(js_name = verifyingKey)]
+    pub fn verifying_key(&self) -> Vec<u8> {
+        self.inner.verifying_key().to_bytes().to_vec()
+    }
+
+    /// The `x-lakko-channel-copublisher-proof` header value for one request
+    /// (same arguments as `ChannelOwnerSigner.sign`). Fresh nonce per call.
+    pub fn sign(&self, method: &str, path: &str, query: &str, body: &[u8]) -> String {
+        let req = OwnerRequest {
+            method,
+            canonical_path: path,
+            query,
+            body,
+        };
+        self.inner.sign_at(&req, now_ms(), fresh_nonce()).encode()
+    }
+}
+
+/// The co-publisher signer of `channelId` for `accountIdentity`.
+///
+/// # Errors
+///
+/// Throws when `channelId` is not 16 bytes.
+#[wasm_bindgen(js_name = channelCoPublisherSigner)]
+pub fn channel_copublisher_signer(
+    account_identity: &Identity,
+    channel_id: &[u8],
+) -> Result<ChannelCoPublisherSigner, JsError> {
+    let channel_id = channel_id_from(channel_id)?;
+    Ok(ChannelCoPublisherSigner {
+        inner: InnerCoPublisher::from_account_seed(
+            &account_identity.mls_identity().ed25519_seed_bytes(),
+            &channel_id,
+        ),
+    })
+}
+
+/// The request header a co-publisher proof travels in.
+#[wasm_bindgen(js_name = channelCoPublisherProofHeaderName)]
+#[must_use]
+pub fn channel_copublisher_proof_header_name() -> String {
+    COPUBLISHER_PROOF_HEADER_NAME.to_string()
+}
+
+/// How many co-publisher keys one channel may have appointed.
+#[wasm_bindgen(js_name = channelMaxCoPublishers)]
+#[must_use]
+pub fn channel_max_copublishers() -> u32 {
+    u32::try_from(MAX_COPUBLISHERS).unwrap_or(u32::MAX)
+}
+
+/// The service path the owner signs to appoint (`PUT`) or revoke (`DELETE`)
+/// `copublisherKey` for `channelId`.
+///
+/// # Errors
+///
+/// Throws when `channelId` is not 16 bytes or the key not 32.
+#[wasm_bindgen(js_name = channelCoPublisherPath)]
+pub fn channel_copublisher_path(
+    channel_id: &[u8],
+    copublisher_key: &[u8],
+) -> Result<String, JsError> {
+    let channel_id = channel_id_from(channel_id)?;
+    if copublisher_key.len() != 32 {
+        return Err(JsError::new(&format!(
+            "co-publisher key must be 32 bytes, got {}",
+            copublisher_key.len()
+        )));
+    }
+    Ok(format!(
+        "/v1/channels/{}/copublishers/{}",
+        hex_lower(&channel_id),
+        hex_lower(copublisher_key)
+    ))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use core::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// A verified co-publisher binding.
+#[wasm_bindgen]
+pub struct ChannelCoPublisherBinding {
+    inner: CoPublisherBinding,
+}
+
+#[wasm_bindgen]
+impl ChannelCoPublisherBinding {
+    /// The channel the key is for (16 bytes).
+    #[wasm_bindgen(getter, js_name = channelId)]
+    pub fn channel_id(&self) -> Vec<u8> {
+        self.inner.channel_id.to_vec()
+    }
+
+    /// The co-publisher's account identity key, which signed the binding.
+    /// Appoint only when it equals the joiner key that was approved.
+    #[wasm_bindgen(getter, js_name = accountPubkey)]
+    pub fn account_pubkey(&self) -> Vec<u8> {
+        self.inner.account_pubkey.to_vec()
+    }
+
+    /// The co-publisher key to appoint.
+    #[wasm_bindgen(getter, js_name = copublisherPubkey)]
+    pub fn copublisher_pubkey(&self) -> Vec<u8> {
+        self.inner.copublisher_pubkey.to_vec()
+    }
+}
+
+/// The binding a prospective co-publisher sends the owner with its knock.
+///
+/// # Errors
+///
+/// Throws when `channelId` is not 16 bytes.
+#[wasm_bindgen(js_name = composeChannelCoPublisherBinding)]
+pub fn compose_channel_copublisher_binding(
+    account_identity: &Identity,
+    channel_id: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let channel_id = channel_id_from(channel_id)?;
+    Ok(compose_copublisher_binding(
+        &account_identity.mls_identity().ed25519_seed_bytes(),
+        &channel_id,
+    ))
+}
+
+/// Decode and verify a binding (the signature under its embedded account
+/// key). The caller still checks `accountPubkey` and `channelId`.
+///
+/// # Errors
+///
+/// Throws an `Error` carrying `channelCoPublisherBindingError`.
+#[wasm_bindgen(js_name = decodeChannelCoPublisherBinding)]
+pub fn decode_channel_copublisher_binding(
+    bytes: &[u8],
+) -> Result<ChannelCoPublisherBinding, JsValue> {
+    decode_copublisher_binding(bytes)
+        .map(|inner| ChannelCoPublisherBinding { inner })
+        .map_err(binding_error_value)
 }
 
 // ---------------------------------------------------------
@@ -311,5 +496,20 @@ mod tests {
         assert_ne!(a.verifying_key(), b.verifying_key());
         let header = a.sign("PUT", "/v1/channels/x/listing", "", b"");
         assert!(header.starts_with("v1."));
+    }
+
+    #[test]
+    fn copublisher_signer_and_binding_wasm_host() {
+        let identity = Identity::from_seed(&[3; 64]).unwrap();
+        let signer = channel_copublisher_signer(&identity, &[1; 16]).unwrap();
+        let owner = channel_owner_signer(&identity, &[1; 16]).unwrap();
+        assert_ne!(signer.verifying_key(), owner.verifying_key());
+        let wire = compose_channel_copublisher_binding(&identity, &[1; 16]).unwrap();
+        let b = decode_channel_copublisher_binding(&wire).unwrap();
+        assert_eq!(b.copublisher_pubkey(), signer.verifying_key());
+        assert_eq!(b.channel_id(), vec![1; 16]);
+        let header = signer.sign("GET", "/v1/channels/x/subscribers", "", b"");
+        assert!(header.starts_with("v1."));
+        assert_eq!(header.split('.').count(), 5);
     }
 }

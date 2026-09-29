@@ -902,6 +902,91 @@ impl ChannelStore for SqlChannelStore {
         Ok(res.rows_affected())
     }
 
+    async fn appoint_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+        max: usize,
+        now_ms: u64,
+    ) -> Result<(), StorageError> {
+        // One transaction under the channel row's lock, so two concurrent
+        // appointments cannot both pass the count and exceed the cap.
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let exists: Option<(Vec<u8>,)> =
+            sqlx::query_as("SELECT id FROM channels WHERE id = ? FOR UPDATE")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        if exists.is_none() {
+            return Err(StorageError::UnknownChannel);
+        }
+        let already: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM channel_copublishers WHERE channel_id = ? AND pubkey = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(key.as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if already.is_some() {
+            tx.commit().await.map_err(db_err)?;
+            return Ok(());
+        }
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM channel_copublishers WHERE channel_id = ?")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        if usize::try_from(count).unwrap_or(usize::MAX) >= max {
+            return Err(StorageError::TooManyCoPublishers);
+        }
+        sqlx::query(
+            "INSERT INTO channel_copublishers (channel_id, pubkey, appointed_at_ms) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(key.as_slice())
+        .bind(now_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn revoke_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError> {
+        let res =
+            sqlx::query("DELETE FROM channel_copublishers WHERE channel_id = ? AND pubkey = ?")
+                .bind(channel.as_bytes().as_slice())
+                .bind(key.as_slice())
+                .execute(&self.pool)
+                .await
+                .map_err(db_err)?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    async fn is_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM channel_copublishers WHERE channel_id = ? AND pubkey = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(key.as_slice())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(row.is_some())
+    }
+
     async fn put_listing(
         &self,
         channel: ChannelId,

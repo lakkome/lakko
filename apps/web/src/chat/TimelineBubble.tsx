@@ -217,6 +217,11 @@ export function TimelineBubble(
       // `rows()`. Defensive.
       return null;
     }
+    if (ev.kind === "shared-channels") {
+      // ADR-0059 section 6 — filed in the shared-channels store, never
+      // pushed into `rows()`. Defensive.
+      return null;
+    }
     if (ev.kind === "membershipProposal") {
       // ADR-0045 UX section 10 — a request is not something that HAPPENED to
       // the group; only outcomes belong in the timeline. The receive loop

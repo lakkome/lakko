@@ -67,7 +67,8 @@ an encrypted envelope that the server never sees.**
 
 - `owner_seed = BLAKE3-derive-key("lakko/channels/owner/v1", account_seed ‖
   channel_id)`, an Ed25519 key. Only the account that created the channel
-  can derive it; a co-publisher cannot. A separate label from ADR-0057's
+  can derive it; a co-publisher cannot, and reads the subscriber list with a
+  key of its own the owner appoints (Plan, co-publisher keys). A separate label from ADR-0057's
   journal root so one key never signs for two services.
 - `POST /v1/channels` gains `owner_pubkey`; the server stores it
   (`channels.owner_pubkey`). No migration story: no production data.
@@ -346,24 +347,158 @@ service envelopes.
   - **Finding: co-publishers lose the subscriber list.** The list is now
     owner-signed and a co-publisher cannot derive the owner key, so a
     co-publisher's rotation fanout gets `401`. The owner's own rotation and
-    the reseal-after-add (owner-side) are unaffected. Not decided here: an
-    owner-appointed co-publisher key, or leaving rotation to the owner.
+    the reseal-after-add (owner-side) are unaffected. Decided and built the same
+    day: owner-appointed co-publisher keys (below).
   - *Clients (minimal):* web, iOS and Android send `owner_pubkey_hex` at
     creation, sign the subscriber list, and spend a `channel-subscribe`
     token on subscribe; the three token pools know `channel-subscribe` and
     `directory-search`. A reader screen no longer re-registers a channel this
     device already follows on every open (it would spend a token each time);
     the missing-seed re-sync still re-registers.
+- **Co-publisher keys (maintainer, 2026-09-29; closes the S2 finding).**
+  **Built 2026-09-29: core, service, both FFI surfaces, web; iOS and Android
+  mirrored but not compiled clean (both apps already fail on the unported
+  sealed invite-link bindings, no new error on Android; see below). Not walked
+  live.**
+  - *The key.* `copublisher_seed = BLAKE3-derive-key("lakko/channels/copublisher/v1",
+    account_seed ‖ channel_id)`, Ed25519, derived from the **co-publisher's**
+    account seed (`lakko-channels::copublisher`, golden-pinned). A separate
+    label from the owner key, so an account never collides with itself.
+  - *Appointment.* `PUT` / `DELETE /v1/channels/{id}/copublishers/{key_hex}`,
+    owner-signed (the S1 owner proof over an empty body), idempotent both
+    ways; the key must decode as an Ed25519 point (`400
+    bad-copublisher-key`); at most `MAX_COPUBLISHERS` = 32 per channel
+    (chosen, not measured; `409 too-many-copublishers`), counted under the
+    channel row's lock. Migration `0007` (`channel_copublishers`, FK cascade).
+  - *The co-publisher proof.* A **separate header**,
+    `x-lakko-channel-copublisher-proof: v1.<copublisher_key_b64url>.<unix_ms>.<nonce>.<sig>`,
+    rather than a key-id field in the owner header: the owner header's shape
+    and meaning stay exactly as S1 pinned them, and naming the signing key
+    lets the server look up one appointed key instead of trying up to 32 per
+    unauthenticated request. Canonical bytes are the owner proof's with the
+    domain `lakko/channels/copublisher-proof/v1`, so neither proof verifies as
+    the other even under one key (tested). Same 120 s window, **same nonce
+    table**, same uniform `401 owner-proof-required`; the nonce is consumed
+    only after the key is found appointed and the signature verified.
+  - *Where it is accepted.* Only `GET .../subscribers` (the one call the
+    rotation fanout needs that S2 gated): `require_publisher` in
+    `src/owner_auth.rs` tries the owner header first, then the co-publisher
+    header. The listing routes and the appointment routes stay owner-only.
+    Rotate / stage / commit / deliver remain ungated (G-43, unchanged).
+  - *How the owner learns the key.* The smallest carrier with end-to-end
+    authenticity: a fixed 183-byte **binding**
+    `"lakko/channels/copublisher-binding/v1\0" ‖ 0x01 ‖ channel_id ‖
+    account_pubkey ‖ copublisher_pubkey ‖ sig`, signed by the joiner's
+    **account identity key**, sent as a third payload of the joiner's knock
+    (ADR-0053; the DS allows four). The owner accepts it only when
+    `account_pubkey` equals the joiner key it approves (the external-join
+    proposal's leaf key, which MLS already authenticated) and `channel_id` is
+    its own channel, so the DS or another knocker can carry it but cannot
+    substitute a key. Deviation from the brief: the carrier is the server's
+    knock queue, not an MLS application message, because a PublisherGroup
+    has no application-message path (ADR-0057's same finding) and adding one
+    would touch `lakko-mls`; authenticity comes from the account signature,
+    not from the carrier. The binding is not an MLS message, so `processKnock`
+    refuses it after the owner has read it. Fuzz target
+    `lakko-channels/copublisher_binding_decode` (binding decode + proof
+    header parse).
+  - *Owner flow.* The poll reads bindings off the knock queue into an
+    in-memory map keyed on (group, joiner key); `approve` appoints the bound
+    key after the load-bearing reseal and never fails the approve on it. Web
+    also remembers an approve whose binding was not read yet and appoints
+    when it arrives; iOS reads knocks with a cursor, so a binding read before
+    a restart is not kept there and that joiner is not appointed.
+  - *Co-publisher flow.* The subscriber-list read tries the owner proof and,
+    on `401`, once more with the co-publisher proof (web `listSubscribers`,
+    iOS `ChannelsClient.listSubscribers`, Android
+    `listSubscribersAsPublisher` from the rotation cron and the reseal).
+  - *When the approver is not the owner.* A PublisherGroup has no role
+    table, so a co-publisher can approve another. Its reseal works (it reads
+    the list under its own appointed key), but it cannot appoint: the
+    appointment is `401` and logged, and the newcomer's rotation fanout is
+    refused until the owner appoints it. **Unbuilt:** no client notices a
+    co-publisher it did not approve, so that newcomer stays unappointed and the
+    owner has no flow to appoint it; a member list on the PublisherGroup FFI
+    would let the owner's poll appoint every bound member.
+  - *Revocation.* `DELETE` is built on all three clients' API layers; no flow
+    calls it, since removing a co-publisher from a PublisherGroup has no
+    client flow either.
+  - FFI (UniFFI + wasm): `channelCoPublisherSigner` (`verifyingKey`, `sign`),
+    `channelCoPublisherProofHeaderName`, `channelMaxCoPublishers`,
+    `channelCoPublisherPath`, `composeChannelCoPublisherBinding`,
+    `decodeChannelCoPublisherBinding`; UniFFI appends
+    `FfiError::ChannelCoPublisherBinding` (message `"<code>: <reason>"`), wasm
+    throws an `Error` with `channelCoPublisherBindingError`.
 - **S3** web: List in Discover, Discover preset, cards, picked topics,
   decoys, search, Share my channels.
+  **S3 built 2026-09-29 on web (`apps/web/src/discover/`); tsc, vitest and
+  vite build run, no live browser run. Notes, including where it differs:**
+  - *List in Discover* (`ListInDiscover.tsx`, `listing.ts`) sits on the manage
+    screen. Whether this account is the owner is asked of the server once:
+    an owner-signed read of the subscriber list, which a co-publisher's owner
+    proof fails with `401` (the client holds no local owner flag). A
+    co-publisher sees the state only. Listing PUTs the listing first (a
+    refusal returns the switch to off: "Couldn't list this channel. Try
+    again.") and then posts metadata v2 with `listed`, topic and language;
+    withdrawing DELETEs and posts `listed = false`; a rename of a listed
+    channel re-PUTs the listing. A channel with no `@handle` cannot be listed
+    (the listing requires one) and the screen says so; there is no flow to
+    claim a handle after creation.
+  - *Metadata v2 on web.* The device's copy of a channel's metadata now keeps
+    topic, language and `listed` (channel log, optional fields); a rename
+    keeps them.
+  - *Decoys* (`decoys.ts`): one random order of all 24 topics per month and
+    language, stored in the sealed per-account prefs row on this device (so
+    "per device" is per account on a device); each round takes the next
+    unpicked topics from that order, so the same decoys come back every day.
+    Decoy buckets are fetched in the person's language. Decoy answers are
+    discarded; only picked buckets are cached. Refresh at most daily, or at
+    once when the picked set changes; a refresh whose every bucket failed
+    shows "Suggestions aren't available right now." and keeps the cache.
+  - *Card ranking* (`cards.ts`) is a small local scorer, not the ADR-0058
+    engine: `rankFeed` ranks messages of conversations the device holds and
+    a card has none of their fields. Score: picked topic 100, language 50,
+    group followers 40 each (up to 5), band index x 10, `100 - server rank`;
+    ties by name then id. Weights chosen, not measured. A listing whose
+    decoded channel id differs from the item's id is dropped.
+  - *Handles* show as plain text, never a link. Before subscribing the handle
+    is resolved through the OPRF lookup (one `discovery-lookup` token); a
+    different or missing channel is "This channel is no longer available."
+    and the card leaves for the session.
+  - *Mixing:* a saved feed whose rule says `rarely` / `sometimes` shows one
+    card after every 20 / 8 items (chosen), never first or last; the presets
+    never mix.
+  - *Search:* 2-64 characters, one `directory-search` token, "Searches are
+    sent to Lakko's server." under the field; a used-up allowance or a `429`
+    reads "Too many searches. Try again in a minute." A used-up
+    `channel-subscribe` allowance now reads "You've subscribed to a lot of
+    channels today. Try again tomorrow." everywhere.
+  - *Share my channels* (`SharedChannelsContext.tsx`): the switch sits in
+    group info for any group this device is still in, **outside the shared
+    `lakko-ui-rules` info blocks** (adding a block is a Rust change, left for
+    S4); Settings -> Security -> Channels I share lists the groups it is on
+    in. The list is sent on switch-on, an empty list on switch-off, a fresh
+    list whenever the followed listed set differs from what was last sent to
+    a group (debounced 3 s), and the last list re-sent verbatim with its
+    original stamp on group growth (the profile scheduler). Received lists
+    go through the sniff before the chat parser in the foreground and the
+    background receive, are filed per sender key under `withRoutingRowLock`,
+    strictly newer stamp wins, and the service worker suppresses the
+    envelope. A group-shared card fetches the listing when "Show
+    description" is pressed.
+  - Wiped on `forgetDevice` (`lakko-discover` IndexedDB, both rows).
+  - *Unbuilt on web:* the per-card long-press menu (Not interested and Hide
+    this topic are plain buttons), localised topic names, per-channel
+    avatars.
 - **S4** iOS and Android, the same.
 - **S5** `lakko-security`, docs reconcile, G-43 follow-up.
 
 ## Open questions
 
-1. How to draw decoy buckets so that the real ones cannot be separated
-   over many refreshes (for example a stable random set per device per
-   month rather than a fresh one per day).
+1. ~~How to draw decoy buckets.~~ A stable random set per device per
+   month (maintainer, 2026-09-29): the decoys repeat every day like the
+   real buckets, so repetition does not separate them; a change of picked
+   topics remains visible.
 2. A public report flow for listings, and who acts on reports.
 3. ~~Whether the bucket score should also use listing age.~~ Yes
    (maintainer, 2026-09-29): a temporary bonus for fresh listings so new

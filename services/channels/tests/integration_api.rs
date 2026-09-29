@@ -15,6 +15,7 @@ use lakko_anon_token::{MasterSecret, TokenContext, DEFAULT_WINDOW_SECS};
 use lakko_anon_token_server::{
     current_epoch, testing::mint_header, AnonTokenServerConfig, TokenVerifier, TOKEN_HEADER,
 };
+use lakko_channels::copublisher::{ChannelCoPublisherSigner, COPUBLISHER_PROOF_HEADER_NAME};
 use lakko_channels::owner::{ChannelOwnerSigner, OwnerRequest, OWNER_PROOF_HEADER_NAME};
 use lakko_svc_channels::{router, AppState, Config, InMemoryChannelStore};
 use serde_json::json;
@@ -1625,4 +1626,189 @@ async fn a_stale_misdirected_or_malformed_listing_is_refused() {
     let resp = put_listing(&client, addr, CHANNEL_HEX, b"not a listing".to_vec()).await;
     assert_eq!(resp.status(), 400);
     assert_eq!(code_of(resp).await, "bad-listing");
+}
+
+/// A co-publisher's account seed (another account than the owner's).
+const COPUB_SEED: [u8; 32] = [6; 32];
+
+fn copub_signer_for(channel_hex: &str, seed: &[u8; 32]) -> ChannelCoPublisherSigner {
+    let id: [u8; 16] = hex::decode(channel_hex).unwrap().try_into().unwrap();
+    ChannelCoPublisherSigner::from_account_seed(seed, &id)
+}
+
+fn copub_proof(channel_hex: &str, seed: &[u8; 32], method: &str, path: &str) -> String {
+    let req = OwnerRequest {
+        method,
+        canonical_path: path,
+        query: "",
+        body: b"",
+    };
+    copub_signer_for(channel_hex, seed)
+        .sign_at(&req, now_ms(), fresh_nonce())
+        .encode()
+}
+
+async fn appoint(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    channel_hex: &str,
+    key_hex: &str,
+    method: reqwest::Method,
+) -> reqwest::Response {
+    let path = format!("/v1/channels/{channel_hex}/copublishers/{key_hex}");
+    client
+        .request(method.clone(), format!("http://{addr}{path}"))
+        .header(
+            OWNER_PROOF_HEADER_NAME,
+            owner_proof_for(channel_hex, method.as_str(), &path, "", b""),
+        )
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_appointed_copublisher_reads_the_subscriber_list_until_revoked() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    let path = format!("/v1/channels/{CHANNEL_HEX}/subscribers");
+    let url = format!("http://{addr}{path}");
+    let key_hex = hex::encode(
+        copub_signer_for(CHANNEL_HEX, &COPUB_SEED)
+            .verifying_key()
+            .to_bytes(),
+    );
+
+    // Not appointed yet: the same single refusal.
+    let resp = client
+        .get(&url)
+        .header(
+            COPUBLISHER_PROOF_HEADER_NAME,
+            copub_proof(CHANNEL_HEX, &COPUB_SEED, "GET", &path),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    assert_eq!(code_of(resp).await, "owner-proof-required");
+
+    // A co-publisher cannot appoint itself: the route is owner-only.
+    let appoint_path = format!("/v1/channels/{CHANNEL_HEX}/copublishers/{key_hex}");
+    let resp = client
+        .put(format!("http://{addr}{appoint_path}"))
+        .header(
+            COPUBLISHER_PROOF_HEADER_NAME,
+            copub_proof(CHANNEL_HEX, &COPUB_SEED, "PUT", &appoint_path),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let resp = appoint(&client, addr, CHANNEL_HEX, &key_hex, reqwest::Method::PUT).await;
+    assert_eq!(resp.status(), 204);
+    // Idempotent.
+    let resp = appoint(&client, addr, CHANNEL_HEX, &key_hex, reqwest::Method::PUT).await;
+    assert_eq!(resp.status(), 204);
+
+    let proof = copub_proof(CHANNEL_HEX, &COPUB_SEED, "GET", &path);
+    let resp = client
+        .get(&url)
+        .header(COPUBLISHER_PROOF_HEADER_NAME, &proof)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    // Replay refused through the shared nonce table.
+    let resp = client
+        .get(&url)
+        .header(COPUBLISHER_PROOF_HEADER_NAME, &proof)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // The appointed key opens only its own channel.
+    create(&client, addr, OTHER_CHANNEL_HEX).await;
+    let other_path = format!("/v1/channels/{OTHER_CHANNEL_HEX}/subscribers");
+    let resp = client
+        .get(format!("http://{addr}{other_path}"))
+        .header(
+            COPUBLISHER_PROOF_HEADER_NAME,
+            copub_proof(CHANNEL_HEX, &COPUB_SEED, "GET", &other_path),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // Nor the owner-only listing route.
+    let listing_path = format!("/v1/channels/{CHANNEL_HEX}/listing");
+    let resp = client
+        .delete(format!("http://{addr}{listing_path}"))
+        .header(
+            COPUBLISHER_PROOF_HEADER_NAME,
+            copub_proof(CHANNEL_HEX, &COPUB_SEED, "DELETE", &listing_path),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // Revoked: refused again.
+    let resp = appoint(
+        &client,
+        addr,
+        CHANNEL_HEX,
+        &key_hex,
+        reqwest::Method::DELETE,
+    )
+    .await;
+    assert_eq!(resp.status(), 204);
+    let resp = client
+        .get(&url)
+        .header(
+            COPUBLISHER_PROOF_HEADER_NAME,
+            copub_proof(CHANNEL_HEX, &COPUB_SEED, "GET", &path),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn appointments_are_bounded_and_refuse_a_bad_key() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    let resp = appoint(
+        &client,
+        addr,
+        CHANNEL_HEX,
+        &"ab".repeat(31),
+        reqwest::Method::PUT,
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    assert_eq!(code_of(resp).await, "bad-copublisher-key");
+    for i in 0..lakko_channels::MAX_COPUBLISHERS {
+        let seed = [u8::try_from(i).unwrap() + 100; 32];
+        let key_hex = hex::encode(
+            copub_signer_for(CHANNEL_HEX, &seed)
+                .verifying_key()
+                .to_bytes(),
+        );
+        let resp = appoint(&client, addr, CHANNEL_HEX, &key_hex, reqwest::Method::PUT).await;
+        assert_eq!(resp.status(), 204, "appointment {i}");
+    }
+    let key_hex = hex::encode(
+        copub_signer_for(CHANNEL_HEX, &COPUB_SEED)
+            .verifying_key()
+            .to_bytes(),
+    );
+    let resp = appoint(&client, addr, CHANNEL_HEX, &key_hex, reqwest::Method::PUT).await;
+    assert_eq!(resp.status(), 409);
+    assert_eq!(code_of(resp).await, "too-many-copublishers");
 }

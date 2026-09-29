@@ -23,10 +23,25 @@
 //! a caller learns nothing from which step failed. A store failure is a 500
 //! and nothing is honoured (fail closed).
 //!
+//! ## Co-publishers
+//!
+//! A route the rotation fanout needs (today only the subscriber list) goes
+//! through [`require_publisher`] instead, which also accepts an
+//! `x-lakko-channel-copublisher-proof` signed by a co-publisher key the owner
+//! appointed (`PUT /v1/channels/<id>/copublishers/<key>`). The header names
+//! its key, so the gate looks up that one key: it must be appointed for the
+//! channel in the path, then the same window, signature and nonce steps run
+//! against the same nonce table, with the same single refusal. An owner proof
+//! is tried first when both headers are present. Every other owner-signed
+//! route (the listing, the appointments themselves) stays owner-only.
+//!
 //! [ADR-0059]: ../../../docs/adr/0059-channel-discover.md
 
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Json, Response};
+use lakko_channels::copublisher::{
+    verify_copublisher_proof, CoPublisherProof, COPUBLISHER_PROOF_HEADER_NAME,
+};
 use lakko_channels::owner::{
     verify_owner_proof, OwnerProof, OwnerRequest, OWNER_PROOF_HEADER_NAME, OWNER_PROOF_WINDOW_MS,
 };
@@ -101,7 +116,15 @@ pub async fn require_owner(
     if verify_owner_proof(&proof, &req, &key, now).is_err() {
         return Err(refused());
     }
-    match state.store.consume_owner_nonce(proof.nonce, now).await {
+    consume_nonce(state, proof.nonce, now).await
+}
+
+async fn consume_nonce(
+    state: &AppState,
+    nonce: [u8; lakko_channels::owner::OWNER_PROOF_NONCE_LEN],
+    now: u64,
+) -> Result<(), Response> {
+    match state.store.consume_owner_nonce(nonce, now).await {
         Ok(true) => Ok(()),
         Ok(false) => Err(refused()),
         Err(e) => {
@@ -109,4 +132,54 @@ pub async fn require_owner(
             Err(internal())
         },
     }
+}
+
+/// Require a valid owner proof, or a valid proof by a co-publisher key the
+/// owner appointed for `channel`, over this request.
+///
+/// # Errors
+///
+/// The response to return instead of running the handler: the same single
+/// `401` as [`require_owner`] for every refusal, a `500` on a store failure.
+pub async fn require_publisher(
+    state: &AppState,
+    channel: ChannelId,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(), Response> {
+    if headers.contains_key(OWNER_PROOF_HEADER_NAME) {
+        return require_owner(state, channel, method, uri, headers, body).await;
+    }
+    let Some(proof) = headers
+        .get(COPUBLISHER_PROOF_HEADER_NAME)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| CoPublisherProof::parse(v).ok())
+    else {
+        return Err(refused());
+    };
+    match state
+        .store
+        .is_copublisher(channel, proof.copublisher_key)
+        .await
+    {
+        Ok(true) => {},
+        Ok(false) => return Err(refused()),
+        Err(e) => {
+            tracing::error!(error = %e, "co-publisher key lookup failed");
+            return Err(internal());
+        },
+    }
+    let req = OwnerRequest {
+        method: method.as_str(),
+        canonical_path: uri.path(),
+        query: uri.query().unwrap_or(""),
+        body,
+    };
+    let now = unix_ms();
+    if verify_copublisher_proof(&proof, &req, now).is_err() {
+        return Err(refused());
+    }
+    consume_nonce(state, proof.proof.nonce, now).await
 }

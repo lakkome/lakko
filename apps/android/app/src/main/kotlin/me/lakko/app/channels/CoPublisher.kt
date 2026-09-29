@@ -25,6 +25,8 @@ import uniffi.lakko_ffi_uniffi.PublisherGroup
 import uniffi.lakko_ffi_uniffi.channelIdFromPublisherGroupId
 import uniffi.lakko_ffi_uniffi.composeGroupInviteCapability
 import uniffi.lakko_ffi_uniffi.composeGroupJoinAttribution
+import uniffi.lakko_ffi_uniffi.composeChannelCopublisherBinding
+import uniffi.lakko_ffi_uniffi.decodeChannelCopublisherBinding
 import uniffi.lakko_ffi_uniffi.publisherGroupOpenOrCreate
 import uniffi.lakko_ffi_uniffi.sealSubscriberSeedEnvelope
 
@@ -159,7 +161,12 @@ public object CoPublisher {
             // knock is an unauthenticated write, so a knocked commit or app
             // message must be refused before it is processed, never applied.
             // Attribution rows, stale proposals and garbage are refused too.
+            val channelId = publisherGroup.channelId()
             val drained = me.lakko.app.chat.drainKnockRows(knocks.messages, 0L) { bytes ->
+                // ADR-0059 — a co-publisher binding rides beside the proposal.
+                // It is not an MLS message: recorded here, then refused like
+                // any other non-proposal row.
+                recordCoPublisherBinding(publisherGroup.groupId(), channelId, bytes)
                 publisherGroup.processKnock(identity, bytes)
             }
             applied += drained.accepted.count {
@@ -245,6 +252,42 @@ public object CoPublisher {
         val joinerMailbox = IdentityPseudonym.fromIdentity(proposalRef).use { it.asBytes() }
         ds.publishMailbox(joinerMailbox, wrapEnvelope(KIND_WELCOME, added.welcome))
         resealSubscribers(channelsClient, identity, publisherGroup, channelIdHex)
+        // ADR-0059 — appoint the newcomer's co-publisher key so its own
+        // rotation fanout can read the subscriber list. After the
+        // load-bearing reseal; never fails the approve. Only the owner can
+        // appoint: a co-publisher approving another gets a 401 here, logged.
+        val key = coPublisherBindings[bindingSlot(groupId, proposalRef)]
+        if (key == null) {
+            android.util.Log.w("CoPublisher", "ADR-0059: no binding read for the approved joiner; not appointed")
+        } else {
+            try {
+                channelsClient.setCoPublisherAppointment(true, channelIdHex, identity, key)
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                android.util.Log.w("CoPublisher", "ADR-0059: appointing the co-publisher key failed", e)
+            }
+        }
+    }
+
+    /** Co-publisher keys read off PublisherGroup knock queues (ADR-0059
+     *  section 1), filed under the joiner account key each binding was
+     *  verified under, so the approve looks one up by the joiner key it
+     *  approves. In memory: the knock queue is re-read from the start on
+     *  every poll, so a restart refills it. */
+    private val coPublisherBindings = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+
+    private fun bindingSlot(groupId: ByteArray, joinerKey: ByteArray): String =
+        ChannelsComposer.bytesToHex(groupId) + ":" + ChannelsComposer.bytesToHex(joinerKey)
+
+    private fun recordCoPublisherBinding(groupId: ByteArray, channelId: ByteArray, bytes: ByteArray) {
+        val binding = try {
+            decodeChannelCopublisherBinding(bytes)
+        } catch (_: Throwable) {
+            return
+        }
+        if (!binding.channelId.contentEquals(channelId)) return
+        coPublisherBindings[bindingSlot(groupId, binding.accountPubkey)] = binding.copublisherPubkey
     }
 
     /** Reject a pending co-publisher — no commit, no epoch advance, nothing on
@@ -328,9 +371,13 @@ public object CoPublisher {
         // arrives in this identity's own mailbox ([pollForCoPublishWelcome]).
         // A group whose owner has not claimed it yet refuses with
         // [GroupNotAcceptingRequests]; nothing was stored.
+        // ADR-0059 section 1 — this account's co-publisher key for the
+        // channel, signed by its account identity key (the key the owner
+        // approves), rides beside the proposal. Not on the empty probe.
+        val binding = composeChannelCopublisherBinding(identity, channelIdBytes)
         runLinkJoinKnock(
             knock = { payloads ->
-                ds.knock(groupId, payloads).epoch
+                ds.knock(groupId, if (payloads.isEmpty()) payloads else payloads + listOf(binding)).epoch
             },
             buildProposal = { epoch -> identity.createExternalJoinProposal(groupId, epoch) },
             buildAttribution = { composeGroupJoinAttribution(identity.ed25519Seed(), wire) },
@@ -428,9 +475,7 @@ public object CoPublisher {
             throw CoPublisherException.UnexpectedServerEpoch(currentEpoch)
         }
         val newServerEpoch = currentEpoch + 1u
-        val subscribers = ChannelsClient.ownerSigner(identity, channelIdHex).use {
-            channelsClient.listSubscribers(channelIdHex, it)
-        }
+        val subscribers = channelsClient.listSubscribersAsPublisher(channelIdHex, identity)
         val batch = ArrayList<RotateBatchEntry>(subscribers.size)
         for (subscriberHex in subscribers) {
             val subscriberBytes = hexToBytes(subscriberHex)

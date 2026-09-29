@@ -19,6 +19,9 @@ import uniffi.lakko_ffi_uniffi.ChannelOwnerSigner
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.channelOwnerProofHeaderName
 import uniffi.lakko_ffi_uniffi.channelOwnerSigner
+import uniffi.lakko_ffi_uniffi.channelCopublisherPath
+import uniffi.lakko_ffi_uniffi.channelCopublisherProofHeaderName
+import uniffi.lakko_ffi_uniffi.channelCopublisherSigner
 import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
@@ -243,6 +246,59 @@ public class ChannelsClient(
             throw decodeError(response, "list subscribers")
         }
         return response.body<SubscribersResp>().subscribers
+    }
+
+    /** The subscriber list for a publisher of the channel, owner or
+     *  co-publisher: first owner-signed; when the server refuses that (this
+     *  account is not the owner), once more signed with this account's
+     *  co-publisher key, which the owner appointed after approving it
+     *  (ADR-0059 section 1, co-publisher keys). Not appointed yet: the 401
+     *  stands. */
+    public suspend fun listSubscribersAsPublisher(
+        channelIdHex: String,
+        accountIdentity: Identity,
+    ): List<String> {
+        try {
+            return ownerSigner(accountIdentity, channelIdHex).use { listSubscribers(channelIdHex, it) }
+        } catch (e: ChannelsApiException) {
+            if (e.status != 401) throw e
+        }
+        val path = "/v1/channels/$channelIdHex/subscribers"
+        val proof = channelCopublisherSigner(accountIdentity, channelIdBytes(channelIdHex)).use {
+            it.sign("GET", path, "", ByteArray(0))
+        }
+        val response: HttpResponse = client.get("$baseUrl$path") {
+            header(channelCopublisherProofHeaderName(), proof)
+        }
+        if (!response.status.isSuccess()) {
+            throw decodeError(response, "list subscribers")
+        }
+        return response.body<SubscribersResp>().subscribers
+    }
+
+    /** `PUT` (appoint) / `DELETE` (revoke) `/v1/channels/:id/copublishers/:key`
+     *  — owner-signed (ADR-0059 section 1). Idempotent both ways; 409
+     *  `too-many-copublishers` past the cap. [copublisherKey] must come from a
+     *  binding verified against the joiner key the owner approved, never from
+     *  the server. */
+    public suspend fun setCoPublisherAppointment(
+        appoint: Boolean,
+        channelIdHex: String,
+        accountIdentity: Identity,
+        copublisherKey: ByteArray,
+    ) {
+        val method = if (appoint) HttpMethod.Put else HttpMethod.Delete
+        val path = channelCopublisherPath(channelIdBytes(channelIdHex), copublisherKey)
+        val proof = ownerSigner(accountIdentity, channelIdHex).use {
+            it.sign(method.value, path, "", ByteArray(0))
+        }
+        val response: HttpResponse = client.request("$baseUrl$path") {
+            this.method = method
+            header(channelOwnerProofHeaderName(), proof)
+        }
+        if (!response.status.isSuccess()) {
+            throw decodeError(response, "co-publisher appointment")
+        }
     }
 
     /** `GET /v1/channels/:id/subscribers/:pk/envelope` —
@@ -491,10 +547,13 @@ public class ChannelsClient(
          *  (ADR-0059 section 1). Only the account that created the channel
          *  derives the key the server registered for it. Deriving it needs
          *  only the identity's seed; the signer outlives the identity call. */
-        public fun ownerSigner(accountIdentity: Identity, channelIdHex: String): ChannelOwnerSigner {
+        public fun ownerSigner(accountIdentity: Identity, channelIdHex: String): ChannelOwnerSigner =
+            channelOwnerSigner(accountIdentity, channelIdBytes(channelIdHex))
+
+        /** The 16 bytes of a 32-hex channel id. */
+        public fun channelIdBytes(channelIdHex: String): ByteArray {
             require(channelIdHex.length == 32) { "channel id must be 32 hex chars" }
-            val id = ByteArray(16) { i -> channelIdHex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
-            return channelOwnerSigner(accountIdentity, id)
+            return ByteArray(16) { i -> channelIdHex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
         }
 
         /** `<LAKKO_API_BASE_URL>/channels` ([ApiEndpoints]), or

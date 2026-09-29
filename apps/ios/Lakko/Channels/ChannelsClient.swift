@@ -220,6 +220,12 @@ public final class ChannelsClient {
     /// to fan out HPKE-sealed seed envelopes. Owner-signed (ADR-0059
     /// section 4) with the key `accountIdentity` derives for the channel,
     /// over the service path (never the `/channels` prefix nginx strips).
+    ///
+    /// When the server refuses the owner proof (this account is a
+    /// co-publisher, not the owner), the read is retried once with this
+    /// account's co-publisher key, which the owner appointed after approving
+    /// it (ADR-0059 section 1, co-publisher keys). Not appointed yet: the 401
+    /// stands.
     public func listSubscribers(
         channelIdHex: String,
         accountIdentity: Identity
@@ -231,8 +237,58 @@ public final class ChannelsClient {
         var request = URLRequest(url: try buildURL(endpoint: path))
         request.httpMethod = "GET"
         request.setValue(proof, forHTTPHeaderField: channelOwnerProofHeaderName())
-        let resp: Resp = try await execute(request: request)
-        return resp.subscribers
+        do {
+            let resp: Resp = try await execute(request: request)
+            return resp.subscribers
+        } catch let err as ChannelsApiError where err.status == 401 {
+            guard let id = Self.hexToData(channelIdHex), id.count == 16 else { throw err }
+            let copub = try channelCopublisherSigner(accountIdentity: accountIdentity, channelId: id)
+            var retry = URLRequest(url: try buildURL(endpoint: path))
+            retry.httpMethod = "GET"
+            retry.setValue(
+                copub.sign(method: "GET", path: path, query: "", body: Data()),
+                forHTTPHeaderField: channelCopublisherProofHeaderName())
+            let resp: Resp = try await execute(request: retry)
+            return resp.subscribers
+        }
+    }
+
+    /// `PUT` (appoint) / `DELETE` (revoke)
+    /// `/v1/channels/:id/copublishers/:key` — owner-signed (ADR-0059
+    /// section 1). Idempotent both ways; `409 too-many-copublishers` past the
+    /// cap. `copublisherKey` must come from a binding verified against the
+    /// joiner key the owner approved, never from the server.
+    public func setCoPublisherAppointment(
+        appoint: Bool,
+        channelIdHex: String,
+        accountIdentity: Identity,
+        copublisherKey: Data
+    ) async throws {
+        guard let id = Self.hexToData(channelIdHex), id.count == 16 else {
+            throw ChannelsApiError(status: -1, code: "bad-channel-id", detail: "channel id is not 32 hex chars")
+        }
+        let method = appoint ? "PUT" : "DELETE"
+        let path = try channelCopublisherPath(channelId: id, copublisherKey: copublisherKey)
+        let signer = try Self.ownerSigner(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
+        var request = URLRequest(url: try buildURL(endpoint: path))
+        request.httpMethod = method
+        request.setValue(
+            signer.sign(method: method, path: path, query: "", body: Data()),
+            forHTTPHeaderField: channelOwnerProofHeaderName())
+        let (data, response) = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
+        guard let http = response as? HTTPURLResponse else {
+            throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
+        }
+        if !(200..<300).contains(http.statusCode) {
+            struct ErrEnvelope: Decodable { let code: String; let detail: String }
+            if let body = try? decoder.decode(ErrEnvelope.self, from: data) {
+                throw ChannelsApiError(status: http.statusCode, code: body.code, detail: body.detail)
+            }
+            throw ChannelsApiError(
+                status: http.statusCode,
+                code: "unknown",
+                detail: HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
+        }
     }
 
     /// `GET /v1/channels/:id/subscribers/:pk/envelope` —

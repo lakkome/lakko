@@ -93,6 +93,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod copublisher;
 pub mod epoch;
 pub mod error;
 pub mod listing;
@@ -103,6 +104,13 @@ pub mod rotation_policy;
 pub mod seed;
 pub mod subscribe;
 
+pub use copublisher::{
+    channel_copublisher_seed, compose_copublisher_binding, decode_copublisher_binding,
+    verify_copublisher_proof, ChannelCoPublisherSigner, CoPublisherBinding,
+    CoPublisherBindingError, CoPublisherProof, COPUBLISHER_BINDING_DOMAIN_V1,
+    COPUBLISHER_BINDING_LEN, COPUBLISHER_KEY_DOMAIN, COPUBLISHER_PROOF_DOMAIN,
+    COPUBLISHER_PROOF_HEADER_NAME, MAX_COPUBLISHERS,
+};
 pub use epoch::{EpochId, EPOCH_ID_LEN};
 pub use error::{ChannelError, Result};
 pub use listing::{

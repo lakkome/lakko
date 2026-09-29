@@ -1,0 +1,658 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * Discover (docs/ux/feed.md section 6, ADR-0059): the Discover preset of the
+ * Feed and the source of suggestions other feeds mix in.
+ *
+ * {@link createDiscoverModel} holds the state (per account, sealed on this
+ * device, `discover-store.ts`) and the network: the once-a-day shortlist
+ * refresh in rounds of eight buckets padded with the month's decoys
+ * (`decoys.ts`), the explicit search (one `directory-search` token; the UI
+ * says it is sent), the listing fetch of a group-shared card when it is
+ * opened, and the handle check before subscribing (`cards.verifyDecision`).
+ * {@link DiscoverView} draws it; {@link DiscoverCardView} is one card, also
+ * used where a feed mixes suggestions in.
+ */
+
+import { createMemo, createSignal, For, onMount, Show, type Accessor, type JSX } from "solid-js";
+import { useNavigate } from "@solidjs/router";
+
+import { useAuth } from "../auth/AuthContext";
+import { getDeviceKey } from "../auth/key-store";
+import { apiError, fetchBucket, fetchListing, searchDirectory, type DirectoryItem } from "../channels/api";
+import { resolveChannelHandle } from "../channels/channel-discovery";
+import { bytesToHex } from "../channels/composer";
+import { paths } from "../routes/paths";
+import { channelsState } from "../state/channels-state";
+import { anonTokenQuotaExhausted, isAnonTokenNetworkFailure } from "../tokens/anon-token-pool";
+import { LOOKUP_ALLOWANCE_USED, SEARCH_ALLOWANCE_USED } from "../tokens/token-copy";
+import { loadWasm, type Wasm } from "../wasm";
+import {
+  cardsFromItems,
+  rankCards,
+  reasonLine,
+  verifyDecision,
+  type CardContext,
+  type DecodedListing,
+  type DirectoryCard,
+} from "./cards";
+import { currentDecoys, pickedKey, planBucketRounds, refreshDue } from "./decoys";
+import {
+  bucketKey,
+  defaultDiscoverPrefs,
+  loadDiscoverPrefs,
+  MAX_NOT_INTERESTED,
+  saveDiscoverPrefs,
+  type CachedBucket,
+  type DiscoverPrefs,
+} from "./discover-store";
+import { appLanguage, languageLabel, languageOptions } from "./languages";
+import { aggregateShared, type SharedChannelsRow } from "./shared-channels";
+
+// ----- Copy (UX spec sections 6 and 7) ---------------------------------------
+
+export const COPY = {
+  pickTitle: "Pick a few topics.",
+  pickBody:
+    "Lakko downloads suggestions for them, mixed with a few random topics so Lakko's server can't tell exactly which ones you picked. It never sees which channels you open.",
+  mixLabel: "Mix in random topics",
+  mixOffLine: "Uses less data. Lakko's server will see exactly which topics you picked.",
+  searchHelper: "Searches are sent to Lakko's server.",
+  unavailable: "Suggestions aren't available right now.",
+  noResults: "No channels found.",
+  gone: "This channel is no longer available.",
+  rateLimited: SEARCH_ALLOWANCE_USED,
+  searchTooShort: "Type at least 2 characters.",
+  nothingYet: "No suggestions yet. Pick topics, or ask people in your groups to share their channels.",
+} as const;
+
+// ----- Model -------------------------------------------------------------------
+
+type ListingDecoder = Pick<Wasm, "decodeChannelListing">;
+
+function base64UrlToBytes(b64: string): Uint8Array {
+  const std = b64.replace(/-/g, "+").replace(/_/g, "/").padEnd(b64.length + ((4 - (b64.length % 4)) % 4), "=");
+  const bin = atob(std);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** Decode one listing with the shared codec; `null` when it refuses. */
+export function decodeListingB64(w: ListingDecoder, listingB64: string): DecodedListing | null {
+  try {
+    const r = w.decodeChannelListing(base64UrlToBytes(listingB64));
+    try {
+      return {
+        channelIdHex: bytesToHex(r.channelId),
+        handle: r.handle,
+        name: r.name,
+        description: r.description,
+        topic: r.topic,
+        language: r.language,
+      };
+    } finally {
+      r.free();
+    }
+  } catch {
+    return null;
+  }
+}
+
+export interface DiscoverDeps {
+  /** The groups this device is in, for the group-shared source. */
+  readonly liveGroups: Accessor<ReadonlySet<string>>;
+  readonly groupTitle: (groupIdB64: string) => string;
+  /** A contact's display name for a member key, `null` for a non-contact. */
+  readonly contactName: (memberKeyB64: string) => string | null;
+  readonly ownKeyB64: Accessor<string | null>;
+  readonly sharedRow: Accessor<SharedChannelsRow>;
+}
+
+export type SearchState =
+  | { readonly kind: "idle" }
+  | { readonly kind: "busy" }
+  | { readonly kind: "done"; readonly query: string; readonly cards: readonly DirectoryCard[] }
+  | { readonly kind: "error"; readonly message: string };
+
+export interface DiscoverModel {
+  readonly prefs: Accessor<DiscoverPrefs>;
+  readonly loaded: Accessor<boolean>;
+  readonly topics: Accessor<ReadonlyArray<{ readonly id: number; readonly name: string }>>;
+  readonly language: Accessor<string>;
+  /** The suggestions, ranked on this device. */
+  readonly cards: Accessor<readonly DirectoryCard[]>;
+  readonly refreshing: Accessor<boolean>;
+  readonly unavailable: Accessor<boolean>;
+  readonly search: Accessor<SearchState>;
+  readonly verified: Accessor<ReadonlySet<string>>;
+  readonly notice: Accessor<string | null>;
+  topicName(id: number): string;
+  savePicks(topics: readonly number[], language: string): Promise<void>;
+  dismissIntro(): Promise<void>;
+  setMixRandom(on: boolean): Promise<void>;
+  notInterested(channelIdHex: string): Promise<void>;
+  hideTopic(topic: number): Promise<void>;
+  refresh(force?: boolean): Promise<void>;
+  runSearch(query: string): Promise<void>;
+  clearSearch(): void;
+  /** Fetch the public listing of a group-shared card (description, topic). */
+  openCard(card: DirectoryCard): Promise<void>;
+  /** Verify the handle, then go to the subscribe screen. */
+  subscribe(card: DirectoryCard): Promise<void>;
+}
+
+export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
+  const auth = useAuth();
+  const navigate = useNavigate();
+  const [prefs, setPrefs] = createSignal<DiscoverPrefs>(defaultDiscoverPrefs());
+  const [loaded, setLoaded] = createSignal(false);
+  const [wasm, setWasm] = createSignal<Wasm | null>(null);
+  const [refreshing, setRefreshing] = createSignal(false);
+  const [unavailable, setUnavailable] = createSignal(false);
+  const [search, setSearch] = createSignal<SearchState>({ kind: "idle" });
+  const [verified, setVerified] = createSignal<ReadonlySet<string>>(new Set());
+  const [gone, setGone] = createSignal<ReadonlySet<string>>(new Set());
+  const [details, setDetails] = createSignal<ReadonlyMap<string, DirectoryItem>>(new Map());
+  const [notice, setNotice] = createSignal<string | null>(null);
+
+  const account = (): string | null => {
+    const s = auth.state();
+    return s.kind === "session" ? s.account.accountId : null;
+  };
+
+  const topics = createMemo(() => {
+    const w = wasm();
+    if (w === null) return [];
+    const ids = [...w.channelTopicIds()];
+    const names = w.channelTopicNames();
+    return ids.map((id, i) => ({ id, name: names[i] ?? "Other" }));
+  });
+  const topicName = (id: number): string => wasm()?.channelTopicName(id) ?? "Other";
+  const language = (): string => prefs().language ?? appLanguage(navigator.language);
+
+  async function persist(next: DiscoverPrefs): Promise<void> {
+    setPrefs(next);
+    const a = account();
+    if (a === null) return;
+    const key = await getDeviceKey(a);
+    if (key === null) return;
+    await saveDiscoverPrefs(a, key, next).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("[discover] saving failed", err instanceof Error ? err.name : "unknown");
+    });
+  }
+
+  onMount(() => {
+    void (async (): Promise<void> => {
+      setWasm(await loadWasm());
+      const a = account();
+      if (a !== null) {
+        const key = await getDeviceKey(a);
+        if (key !== null) setPrefs(await loadDiscoverPrefs(a, key).catch(() => defaultDiscoverPrefs()));
+      }
+      setLoaded(true);
+    })();
+  });
+
+  async function refresh(force = false): Promise<void> {
+    const w = wasm();
+    const p = prefs();
+    if (w === null || refreshing() || p.topics.length === 0) return;
+    const lang = language();
+    const now = Date.now();
+    const key = pickedKey(p.topics, lang);
+    if (!force && !refreshDue(p.lastRefreshMs, p.lastFetchedKey, key, now)) return;
+    setRefreshing(true);
+    try {
+      const { draw } = currentDecoys(p.decoys, topics().map((t) => t.id), lang, now, Math.random);
+      const rounds = planBucketRounds(p.topics, draw, p.mixRandom, Math.random);
+      const picked = new Set(p.topics);
+      const buckets: Record<string, CachedBucket> = {};
+      let failures = 0;
+      let asked = 0;
+      for (const round of rounds) {
+        const results = await Promise.allSettled(round.map((t) => fetchBucket(t, lang)));
+        results.forEach((r, i) => {
+          const topic = round[i] as number;
+          asked += 1;
+          if (r.status === "rejected") {
+            failures += 1;
+            return;
+          }
+          // A decoy's answer is discarded: only picked buckets are kept.
+          if (picked.has(topic)) buckets[bucketKey(topic, lang)] = { fetchedAtMs: now, items: r.value };
+        });
+      }
+      if (asked > 0 && failures === asked) {
+        setUnavailable(true);
+        await persist({ ...p, decoys: draw });
+        return;
+      }
+      setUnavailable(false);
+      // Keep a previously cached picked bucket this round failed to refresh.
+      for (const t of picked) {
+        const k = bucketKey(t, lang);
+        const old = p.buckets[k];
+        if (buckets[k] === undefined && old !== undefined) buckets[k] = old;
+      }
+      await persist({ ...p, decoys: draw, buckets, lastRefreshMs: now, lastFetchedKey: key });
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  const ctx = (): CardContext => {
+    const p = prefs();
+    return {
+      pickedTopics: new Set(p.topics),
+      language: language(),
+      notInterested: new Set(p.notInterested),
+      hiddenTopics: new Set(p.hiddenTopics),
+      following: new Set(channelsState.channels().map((c) => c.id)),
+      gone: gone(),
+    };
+  };
+
+  const groupCards = (): DirectoryCard[] => {
+    const shared = aggregateShared(deps.sharedRow(), deps.ownKeyB64(), deps.liveGroups());
+    const extra = details();
+    return shared.map((s) => {
+      let best: { g: string; keys: readonly string[] } | null = null;
+      for (const [g, keys] of s.byGroup) {
+        if (best === null || keys.length > best.keys.length) best = { g, keys };
+      }
+      const names = (best?.keys ?? [])
+        .map((k) => deps.contactName(k))
+        .filter((n): n is string => n !== null);
+      const listing = extra.get(s.channelIdHex);
+      const decoded = listing === undefined ? null : decodeListingB64(wasmOrThrow(), listing.listing_b64);
+      return {
+        channelIdHex: s.channelIdHex,
+        handle: s.handle,
+        name: s.name,
+        description: decoded?.description ?? null,
+        topic: decoded?.topic ?? null,
+        language: decoded?.language ?? null,
+        band: listing?.subscribers ?? null,
+        source: "group",
+        serverRank: 1000,
+        followers:
+          best === null
+            ? null
+            : { groupIdB64: best.g, groupTitle: deps.groupTitle(best.g), count: best.keys.length, contactNames: names },
+      } satisfies DirectoryCard;
+    });
+  };
+
+  function wasmOrThrow(): ListingDecoder {
+    const w = wasm();
+    if (w === null) throw new Error("wasm not loaded");
+    return w;
+  }
+
+  const cards = createMemo((): readonly DirectoryCard[] => {
+    const w = wasm();
+    if (w === null) return [];
+    const p = prefs();
+    const lang = language();
+    const fromBuckets: DirectoryCard[] = [];
+    for (const t of p.topics) {
+      const b = p.buckets[bucketKey(t, lang)];
+      if (b !== undefined) fromBuckets.push(...cardsFromItems(b.items, "bucket", (x) => decodeListingB64(w, x)));
+    }
+    return rankCards([...fromBuckets, ...groupCards()], ctx());
+  });
+
+  async function runSearch(query: string): Promise<void> {
+    const q = query.trim();
+    if (q.length < 2) {
+      setSearch({ kind: "error", message: COPY.searchTooShort });
+      return;
+    }
+    setSearch({ kind: "busy" });
+    try {
+      const items = await searchDirectory(q.slice(0, 64));
+      const w = wasmOrThrow();
+      const found = rankCards(cardsFromItems(items, "search", (x) => decodeListingB64(w, x)), {
+        ...ctx(),
+        following: new Set(),
+        pickedTopics: new Set(),
+      });
+      setSearch({ kind: "done", query: q, cards: found });
+    } catch (err) {
+      setSearch({ kind: "error", message: searchErrorText(err) });
+    }
+  }
+
+  async function openCard(card: DirectoryCard): Promise<void> {
+    if (card.description !== null) return;
+    try {
+      const item = await fetchListing(card.channelIdHex);
+      if (item === null) {
+        setGone(new Set([...gone(), card.channelIdHex]));
+        setNotice(COPY.gone);
+        return;
+      }
+      const next = new Map(details());
+      next.set(card.channelIdHex, item);
+      setDetails(next);
+    } catch {
+      setNotice(COPY.unavailable);
+    }
+  }
+
+  async function subscribe(card: DirectoryCard): Promise<void> {
+    setNotice(null);
+    let resolved: string | null;
+    try {
+      resolved = await resolveChannelHandle(card.handle);
+    } catch (err) {
+      if (anonTokenQuotaExhausted(err) !== null) setNotice(LOOKUP_ALLOWANCE_USED);
+      else setNotice(COPY.unavailable);
+      return;
+    }
+    if (verifyDecision(card.channelIdHex, resolved) === "gone") {
+      setGone(new Set([...gone(), card.channelIdHex]));
+      setNotice(COPY.gone);
+      return;
+    }
+    setVerified(new Set([...verified(), card.channelIdHex]));
+    navigate(paths.channelSubscribe(card.channelIdHex), { state: { handle: card.handle } });
+  }
+
+  return {
+    prefs,
+    loaded,
+    topics,
+    language,
+    cards,
+    refreshing,
+    unavailable,
+    search,
+    verified,
+    notice,
+    topicName,
+    async savePicks(t, lang) {
+      await persist({ ...prefs(), topics: [...new Set(t)], language: lang, introDismissed: true });
+      await refresh(true);
+    },
+    async dismissIntro() {
+      await persist({ ...prefs(), introDismissed: true });
+    },
+    async setMixRandom(on) {
+      await persist({ ...prefs(), mixRandom: on });
+    },
+    async notInterested(id) {
+      const list = [...prefs().notInterested.filter((x) => x !== id), id].slice(-MAX_NOT_INTERESTED);
+      await persist({ ...prefs(), notInterested: list });
+    },
+    async hideTopic(topic) {
+      await persist({ ...prefs(), hiddenTopics: [...new Set([...prefs().hiddenTopics, topic])] });
+    },
+    refresh,
+    runSearch,
+    clearSearch: () => setSearch({ kind: "idle" }),
+    openCard,
+    subscribe,
+  };
+}
+
+/** The line for a failed search (UX spec section 7). */
+export function searchErrorText(err: unknown): string {
+  if (anonTokenQuotaExhausted(err) !== null) return COPY.rateLimited;
+  if (apiError.is(err) && err.status === 429) return COPY.rateLimited;
+  if (isAnonTokenNetworkFailure(err)) return COPY.unavailable;
+  return COPY.unavailable;
+}
+
+// ----- Views ---------------------------------------------------------------------
+
+/** One suggestion card. */
+export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly model: DiscoverModel }): JSX.Element {
+  const [busy, setBusy] = createSignal(false);
+  const c = (): DirectoryCard => props.card;
+  return (
+    <article class="lk-feed-item lk-discover-card" aria-label={`Suggested channel ${c().name}`}>
+      <div class="lk-discover-card-body">
+        <div class="lk-discover-card-head">
+          <span class="lk-discover-avatar" aria-hidden="true">
+            {c().name.trim().charAt(0).toUpperCase() || "#"}
+          </span>
+          <div class="lk-discover-card-title">
+            <strong>{c().name}</strong>
+            {/* The handle is the owner's (or a member's) claim until the
+                lookup before subscribing checks it: plain text, never a
+                link (ADR-0059 section 3). */}
+            <span class="lk-discover-handle">@{c().handle}</span>
+          </div>
+        </div>
+        <Show
+          when={c().description !== null}
+          fallback={
+            <button type="button" class="ghost lk-discover-more" onClick={() => void props.model.openCard(c())}>
+              Show description
+            </button>
+          }
+        >
+          <Show when={c().description !== ""}>
+            <p class="lk-discover-description">{c().description}</p>
+          </Show>
+        </Show>
+        <div class="lk-discover-facts">
+          <Show when={c().topic !== null}>
+            <span>{props.model.topicName(c().topic as number)}</span>
+          </Show>
+          <Show when={c().language !== null && c().language !== ""}>
+            <span>{languageLabel(c().language as string)}</span>
+          </Show>
+          <Show when={c().band !== null}>
+            <span>{c().band} subscribers</span>
+          </Show>
+        </div>
+        <div class="lk-feed-why">{reasonLine(c(), (id) => props.model.topicName(id))}</div>
+      </div>
+      <div class="lk-discover-actions">
+        <button
+          type="button"
+          class="primary"
+          disabled={busy()}
+          onClick={() => {
+            setBusy(true);
+            void props.model.subscribe(c()).finally(() => setBusy(false));
+          }}
+        >
+          Subscribe
+        </button>
+        <button type="button" class="ghost" onClick={() => void props.model.notInterested(c().channelIdHex)}>
+          Not interested
+        </button>
+        <Show when={c().topic !== null}>
+          <button type="button" class="ghost" onClick={() => void props.model.hideTopic(c().topic as number)}>
+            Hide this topic
+          </button>
+        </Show>
+      </div>
+    </article>
+  );
+}
+
+/** The pick-topics card (first open, and "Edit topics"). */
+function PickTopics(props: { readonly model: DiscoverModel; readonly onDone: () => void; readonly first: boolean }): JSX.Element {
+  const m = props.model;
+  const [chosen, setChosen] = createSignal<ReadonlySet<number>>(new Set(m.prefs().topics));
+  const [lang, setLang] = createSignal(m.language());
+  const toggle = (id: number): void => {
+    const next = new Set(chosen());
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setChosen(next);
+  };
+  return (
+    <section class="lk-card lk-discover-pick" aria-label="Pick topics">
+      <h2>{COPY.pickTitle}</h2>
+      <p class="lk-card-desc">{COPY.pickBody}</p>
+      <div class="lk-discover-chips">
+        <For each={m.topics()}>
+          {(t) => (
+            <button
+              type="button"
+              class="lk-feed-chip"
+              aria-pressed={chosen().has(t.id)}
+              aria-selected={chosen().has(t.id)}
+              onClick={() => toggle(t.id)}
+            >
+              {t.name}
+            </button>
+          )}
+        </For>
+      </div>
+      <label>
+        Language
+        <select
+          value={lang()}
+          onChange={(e): void => {
+            setLang(e.currentTarget.value);
+          }}
+        >
+          <For each={languageOptions(lang())}>{(code) => <option value={code}>{languageLabel(code)}</option>}</For>
+        </select>
+      </label>
+      <div class="lk-actions lk-row-end">
+        <button
+          type="button"
+          class="ghost"
+          onClick={() => {
+            if (props.first) void m.dismissIntro();
+            props.onDone();
+          }}
+        >
+          {props.first ? "Not now" : "Cancel"}
+        </button>
+        <button
+          type="button"
+          class="primary"
+          onClick={() => {
+            void m.savePicks([...chosen()], lang());
+            props.onDone();
+          }}
+        >
+          Save
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/** The Discover preset of the Feed. */
+export function DiscoverView(props: { readonly model: DiscoverModel }): JSX.Element {
+  const m = props.model;
+  const [editing, setEditing] = createSignal(false);
+  const [query, setQuery] = createSignal("");
+  onMount(() => {
+    void m.refresh();
+  });
+  const showIntro = (): boolean =>
+    m.loaded() && (editing() || (m.prefs().topics.length === 0 && !m.prefs().introDismissed));
+
+  return (
+    <div class="lk-discover">
+      <form
+        class="lk-discover-search"
+        role="search"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void m.runSearch(query());
+        }}
+      >
+        <input
+          type="search"
+          placeholder="Search channels"
+          aria-label="Search channels"
+          value={query()}
+          maxLength={64}
+          disabled={m.unavailable()}
+          onInput={(e) => {
+            setQuery(e.currentTarget.value);
+            if (e.currentTarget.value === "") m.clearSearch();
+          }}
+        />
+        <button type="submit" class="ghost" disabled={m.unavailable() || m.search().kind === "busy"}>
+          Search
+        </button>
+      </form>
+      <p class="lk-feed-hint">{m.unavailable() ? COPY.unavailable : COPY.searchHelper}</p>
+
+      <Show when={m.notice()}>
+        {(msg) => (
+          <div class="lk-feed-banner" role="status">
+            <span>{msg()}</span>
+          </div>
+        )}
+      </Show>
+
+      <Show
+        when={m.search().kind === "idle"}
+        fallback={
+          <Show when={m.search()} keyed>
+            {(s) => (
+              <Show
+                when={s.kind === "done" ? s : null}
+                fallback={
+                  <p class="lk-feed-hint" role="status">
+                    {s.kind === "busy" ? "Searching..." : s.kind === "error" ? s.message : ""}
+                  </p>
+                }
+              >
+                {(done) => (
+                  <Show when={done().cards.length > 0} fallback={<div class="lk-empty">{COPY.noResults}</div>}>
+                    <For each={done().cards}>{(c) => <DiscoverCardView card={c} model={m} />}</For>
+                  </Show>
+                )}
+              </Show>
+            )}
+          </Show>
+        }
+      >
+        <Show when={showIntro()}>
+          <PickTopics model={m} first={!editing()} onDone={() => setEditing(false)} />
+        </Show>
+        <Show when={!showIntro()}>
+          <details class="lk-discover-menu">
+            <summary>Discover settings</summary>
+            <button type="button" class="ghost" onClick={() => setEditing(true)}>
+              Edit topics
+            </button>
+            <label class="lk-row">
+              <input
+                type="checkbox"
+                role="switch"
+                checked={m.prefs().mixRandom}
+                onChange={(e) => void m.setMixRandom(e.currentTarget.checked)}
+              />
+              <span>{COPY.mixLabel}</span>
+            </label>
+            <p class="lk-feed-hint">{COPY.mixOffLine}</p>
+          </details>
+        </Show>
+        <Show when={m.refreshing() && m.cards().length === 0}>
+          <div class="lk-feed-skeleton" aria-busy="true" aria-label="Loading">
+            <div />
+            <div />
+          </div>
+        </Show>
+        <Show
+          when={m.cards().length > 0}
+          fallback={
+            <Show when={!m.refreshing() && !showIntro()}>
+              <div class="lk-empty">{m.unavailable() ? COPY.unavailable : COPY.nothingYet}</div>
+            </Show>
+          }
+        >
+          <For each={m.cards()}>{(c) => <DiscoverCardView card={c} model={m} />}</For>
+        </Show>
+      </Show>
+    </div>
+  );
+}

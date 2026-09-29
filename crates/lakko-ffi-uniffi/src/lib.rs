@@ -499,6 +499,15 @@ pub enum FfiError {
     /// `unknownVersion`) followed by `": "` and the reason.
     #[error("{0}")]
     ChannelListing(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0059 co-publisher keys — appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// A co-publisher binding did not decode or its signature did not
+    /// verify. The message starts with a code (`wrongDomain`, `badLength`,
+    /// `unknownVersion`, `badSignature`) followed by `": "` and the reason.
+    #[error("{0}")]
+    ChannelCoPublisherBinding(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

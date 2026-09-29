@@ -24,8 +24,12 @@
  * fragment plus a `.lakkofeed` file; both leave out specific conversations.
  * Saved feeds live on this device (`feed/feed-store.ts`).
  *
- * Not yet here: the "New" divider, unpinning a preset, the item menu, and
- * Discover (ADR-0059).
+ * Discover (ADR-0059, UX spec section 6) is the fourth chip: channel
+ * suggestions instead of items (`discover/Discover.tsx`). A saved feed whose
+ * rule asks for suggestions ("rarely" / "sometimes") mixes the same cards
+ * in between its items (`discover/cards.ts` `mixSuggestions`).
+ *
+ * Not yet here: the "New" divider, unpinning a preset, and the item menu.
  */
 
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
@@ -82,6 +86,9 @@ import { recordFeedSeen } from "../feed/feed-seen-writer";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { Icon } from "../ui/icons";
+import { mixSuggestions } from "../discover/cards";
+import { createDiscoverModel, DiscoverCardView, DiscoverView } from "../discover/Discover";
+import { useSharedChannels } from "../discover/SharedChannelsContext";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
 
@@ -108,8 +115,9 @@ function writeStorage(key: string, value: string): void {
   }
 }
 
-/** The selected feed: a preset key, or `custom:<id>` for a saved feed. */
-type Selection = FeedPresetKey | `custom:${string}`;
+/** The selected feed: a preset key, Discover (ADR-0059), or `custom:<id>`
+ *  for a saved feed. */
+type Selection = FeedPresetKey | "discover" | `custom:${string}`;
 
 /** Where a new saved feed asks to be selected (the import route sets it). */
 export const FEED_SELECTION_STORAGE_KEY = PRESET_STORAGE_KEY;
@@ -117,6 +125,7 @@ export const FEED_SELECTION_STORAGE_KEY = PRESET_STORAGE_KEY;
 function initialSelection(): Selection {
   const stored = readStorage(PRESET_STORAGE_KEY);
   if (stored !== null && stored.startsWith("custom:")) return stored as Selection;
+  if (stored === "discover") return "discover";
   return FEED_PRESETS.some((p) => p.key === stored) ? (stored as FeedPresetKey) : "latest";
 }
 
@@ -199,6 +208,7 @@ export default function Feed(): JSX.Element {
    *  reactions reads like Popular, anything else like Latest. */
   const whyPreset = (): FeedPresetKey => {
     const sel = selection();
+    if (sel === "discover") return "latest";
     if (!sel.startsWith("custom:")) return sel as FeedPresetKey;
     return (selectedSaved()?.draft.weights.reactions ?? 0) > 0 ? "popular" : "latest";
   };
@@ -357,6 +367,31 @@ export default function Feed(): JSX.Element {
     return [...groups, ...channels];
   });
 
+  // ----- Discover (ADR-0059) -----------------------------------------------
+
+  const sharedChannels = useSharedChannels();
+  const discover = createDiscoverModel({
+    liveGroups: () => new Set(chats.groups().filter(isGroup).map((g) => g.groupIdB64)),
+    groupTitle: (groupIdB64) => {
+      const g = chats.get(groupIdB64);
+      return g === undefined ? "a group" : titleOf(g);
+    },
+    contactName: (key) => {
+      contactVersion();
+      if (!loadAccepted().some((a) => a.signaturePubkeyB64 === key)) return null;
+      return memberNameOf(profiles.resolve(key));
+    },
+    ownKeyB64: () => ownPersonKeyB64(chats.identity()),
+    sharedRow: () => sharedChannels.row(),
+  });
+
+  /** How often the selected feed mixes suggestions in: its rule's field for a
+   *  saved feed; the presets never do (their rules say never). */
+  const suggestionRate = (): "never" | "rarely" | "sometimes" => selectedSaved()?.draft.suggestions ?? "never";
+  createEffect(() => {
+    if (suggestionRate() !== "never" && discover.loaded()) void discover.refresh();
+  });
+
   const input = createMemo(() => {
     const c = core();
     const l = log();
@@ -382,6 +417,7 @@ export default function Feed(): JSX.Element {
     const i = input();
     if (c === null || i === null) return null;
     const sel = selection();
+    if (sel === "discover") return [];
     const custom = selectedSaved();
     let rule;
     if (custom !== null) {
@@ -408,6 +444,19 @@ export default function Feed(): JSX.Element {
   let listEl: HTMLDivElement | undefined;
   const [shown, setShown] = createSignal<RankedItem[] | null>(null);
   const [pending, setPending] = createSignal<RankedItem[] | null>(null);
+  /** Item index -> the card shown after it, for a feed that mixes cards in. */
+  const cardAfter = createMemo((): ReadonlyMap<number, number> => {
+    const rate = suggestionRate();
+    const items = shown();
+    const out = new Map<number, number>();
+    if (rate === "never" || items === null) return out;
+    let last = -1;
+    for (const slot of mixSuggestions(items.length, discover.cards().length, rate)) {
+      if (slot.kind === "item") last = slot.index;
+      else out.set(last, slot.index);
+    }
+    return out;
+  });
   let shownPreset: Selection | null = null;
   const nearTop = (): boolean => (listEl?.scrollTop ?? 0) <= TOP_SLACK_PX;
   createEffect(() => {
@@ -699,6 +748,15 @@ export default function Feed(): JSX.Element {
               </button>
             )}
           </For>
+          <button
+            type="button"
+            role="tab"
+            class="lk-feed-chip"
+            aria-selected={selection() === "discover"}
+            onClick={() => choose("discover")}
+          >
+            Discover
+          </button>
           <For each={saved()}>
             {(v) => (
               <button
@@ -751,7 +809,7 @@ export default function Feed(): JSX.Element {
         </Show>
       </header>
 
-      <Show when={!bannerDismissed() && (input()?.candidates.length ?? 0) > 0}>
+      <Show when={selection() !== "discover" && !bannerDismissed() && (input()?.candidates.length ?? 0) > 0}>
         <div class="lk-feed-banner" role="note">
           <Icon name="info" size={18} />
           <span>Your feed shows messages this device has received.</span>
@@ -768,13 +826,17 @@ export default function Feed(): JSX.Element {
         </div>
       </Show>
 
-      <Show when={newCount() > 0}>
+      <Show when={selection() !== "discover" && newCount() > 0}>
         <button type="button" class="lk-feed-new-pill" onClick={showPending}>
           Show {newCount()} new
         </button>
       </Show>
 
       <div class="lk-feed-list" ref={(el) => (listEl = el)} onScroll={onScroll}>
+        <Show when={selection() === "discover"}>
+          <DiscoverView model={discover} />
+        </Show>
+        <Show when={selection() !== "discover"}>
         <Show
           when={shown()}
           fallback={
@@ -795,8 +857,8 @@ export default function Feed(): JSX.Element {
                     fallback={
                       <>
                         <span>Your feed fills up from your groups and channels.</span>
-                        <button type="button" class="primary" onClick={() => navigate(paths.home)}>
-                          Go to chats
+                        <button type="button" class="primary" onClick={() => choose("discover")}>
+                          Discover channels
                         </button>
                       </>
                     }
@@ -828,10 +890,14 @@ export default function Feed(): JSX.Element {
               }
             >
               <For each={items()}>
-                {(item) => {
+                {(item, index) => {
                   const key = itemKey(item);
                   const why = (): string | null => whyLine(item.ref, whyPreset());
+                  // A saved feed that asks for suggestions shows a channel
+                  // card after some items (ADR-0059, UX spec 4.1 section 4).
+                  const suggestion = (): number | undefined => cardAfter().get(index());
                   return (
+                    <>
                     <article class="lk-feed-item" ref={(el) => watchSeen(el, item.ref)}>
                       <button type="button" class="lk-feed-open" onClick={() => open(item.ref)}>
                         <div class="lk-feed-meta">
@@ -905,12 +971,17 @@ export default function Feed(): JSX.Element {
                         </Show>
                       </Show>
                     </article>
+                    <Show when={suggestion() !== undefined ? discover.cards()[suggestion() as number] : undefined}>
+                      {(card) => <DiscoverCardView card={card()} model={discover} />}
+                    </Show>
+                    </>
                   );
                 }}
               </For>
               <div class="lk-feed-end">You're up to date.</div>
             </Show>
           )}
+        </Show>
         </Show>
       </div>
 

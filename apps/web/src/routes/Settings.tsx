@@ -16,6 +16,7 @@ import { useAuth } from "../auth/AuthContext";
 import PasskeysSection from "../auth/PasskeysSection";
 import { AccountCard, ExportDataCard } from "../auth/AccountSections";
 import { ContactEnrollView, TotpEnrollView } from "../auth/RecoveryFactors";
+import { ChannelsIShareCard } from "../discover/ChannelsIShare";
 import { autoplayVideoNotes, setAutoplayVideoNotes } from "../media/media-prefs";
 import { useProfiles } from "../profile/ProfileContext";
 import { appLicense, appVersion } from "../ui/app-version";
@@ -142,6 +143,7 @@ function SecuritySection(): JSX.Element {
         <p>How you sign in, which devices can read your messages, and how you get back in.</p>
       </div>
       <PasskeysSection />
+      <ChannelsIShareCard />
       <section class="lk-card">
         <h2>Devices and recovery</h2>
         <div class="lk-card-row">

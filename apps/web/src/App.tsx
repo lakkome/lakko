@@ -45,6 +45,7 @@ import { OneToOneContactAdoption } from "./contacts/OneToOneContactAdoption";
 import { ProfileProvider } from "./profile/ProfileContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
 import { PinProvider } from "./chat/PinContext";
+import { SharedChannelsProvider } from "./discover/SharedChannelsContext";
 import { ReadWatermarkProvider } from "./chat/ReadWatermarkContext";
 import { CallLogProvider } from "./calls/CallLogContext";
 import { WakeNavigator } from "./push/WakeNavigator";
@@ -111,6 +112,11 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     store of shared and personal pins, the role-gated receive and the
  *     growth re-send. Beside the group-name provider, for the same reasons.
  *
+ *   <SharedChannelsProvider> — ADR-0059 section 6: the channels members
+ *     share inside a group, the per-group "Share my channels" switch and its
+ *     send, receive and growth re-send. Beside the pin provider, for the
+ *     same reasons (both receive paths feed it).
+ *
  *   <MailboxProvider> — the identity-mailbox receive loop (contact
  *     requests, acks, Welcomes) for the whole signed-in session, and
  *     the pending-request list the Contacts route renders. Inside
@@ -145,6 +151,7 @@ const App: Component = () => (
         <ProfileProvider>
         <GroupNameProvider>
         <PinProvider>
+        <SharedChannelsProvider>
         <ReadWatermarkProvider>
         <CallLogProvider>
         <MailboxProvider>
@@ -201,6 +208,7 @@ const App: Component = () => (
         </MailboxProvider>
         </CallLogProvider>
         </ReadWatermarkProvider>
+        </SharedChannelsProvider>
         </PinProvider>
         </GroupNameProvider>
         </ProfileProvider>

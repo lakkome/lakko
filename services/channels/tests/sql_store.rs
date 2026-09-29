@@ -238,3 +238,33 @@ async fn candidates_carry_counts_and_recent_registrations() {
     assert!(hit("100% of things_").await);
     assert!(!hit(&format!("zeta%{lang}")).await);
 }
+
+#[tokio::test]
+async fn copublisher_keys_are_appointed_bounded_and_revoked() {
+    let Some(s) = store("copublisher_keys_are_appointed_bounded_and_revoked").await else {
+        return;
+    };
+    let c = channel();
+    let key: [u8; 32] = random();
+    assert!(matches!(
+        s.appoint_copublisher(c, key, 2, now_ms()).await,
+        Err(StorageError::UnknownChannel)
+    ));
+    s.create(c, random()).await.unwrap();
+    assert!(!s.is_copublisher(c, key).await.unwrap());
+    s.appoint_copublisher(c, key, 2, now_ms()).await.unwrap();
+    s.appoint_copublisher(c, key, 2, now_ms()).await.unwrap();
+    assert!(s.is_copublisher(c, key).await.unwrap());
+    s.appoint_copublisher(c, random(), 2, now_ms())
+        .await
+        .unwrap();
+    assert!(matches!(
+        s.appoint_copublisher(c, random(), 2, now_ms()).await,
+        Err(StorageError::TooManyCoPublishers)
+    ));
+    // Another channel's appointments are its own.
+    assert!(!s.is_copublisher(channel(), key).await.unwrap());
+    assert!(s.revoke_copublisher(c, key).await.unwrap());
+    assert!(!s.revoke_copublisher(c, key).await.unwrap());
+    assert!(!s.is_copublisher(c, key).await.unwrap());
+}

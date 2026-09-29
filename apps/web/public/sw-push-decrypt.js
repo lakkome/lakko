@@ -210,6 +210,12 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   well-formed pin; `wrongDomain` is the only "not a pin" answer. Used ONLY
  *   to classify the row out of the preview path — the SW never stores a
  *   received pin (C-59). Optional so an older deps object still loads.
+ * @property {(bytes: Uint8Array) => any} [decodeSharedChannelsEnvelope]
+ *   ADR-0059 section 6 — the fail-closed shared-channels codec. THROWS an
+ *   `Error` carrying a `sharedChannelsError` code when the bytes are not a
+ *   well-formed list; `wrongDomain` is the only "not a list" answer. Used
+ *   ONLY to classify the row out of the preview path — the SW never stores
+ *   a received list (C-59). Optional so an older deps object still loads.
  * @property {(bytes: Uint8Array) => any} [parseCallSignaling]
  *   Phase 3a3 — the prost `CallSignalingPayload` codec. THROWS on bytes that
  *   are not one. Used to tell an OFFER (ring) and an END (stop ringing) apart
@@ -823,7 +829,45 @@ function isServiceEnvelope(wasm, bytes) {
   if (isProfileRequestEnvelope(wasm, bytes)) return true;
   // 7. Shared pin (ADR-0052 decision 3).
   if (isPinEnvelope(wasm, bytes)) return true;
+  // 8. Shared channels (ADR-0059 section 6).
+  if (isSharedChannelsEnvelope(wasm, bytes)) return true;
   return false;
+}
+
+/**
+ * First byte of the ADR-0059 shared-channels domain separator (`'l'` of
+ * `"lakko/shared-channels/v1\0"`). Its own constant, like the ones below.
+ */
+const SHARED_CHANNELS_FIRST_BYTE = 0x6c;
+
+/**
+ * Arm 8 of {@link isServiceEnvelope} — the ADR-0059 shared-channels list.
+ *
+ * Unfiltered, it would be previewed as a notification body reading the
+ * domain string and the channel names. Same verdict rule as the pin arm: a
+ * decode that succeeds is a list; a throw with any `sharedChannelsError`
+ * code but `wrongDomain` is a domain match refused as a whole, suppressed
+ * here too; `wrongDomain` or a code-less throw falls through.
+ *
+ * The list is never kept: classification ONLY (C-59).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isSharedChannelsEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== SHARED_CHANNELS_FIRST_BYTE) return false;
+  if (typeof wasm.decodeSharedChannelsEnvelope !== "function") return false;
+  let decoded;
+  try {
+    decoded = wasm.decodeSharedChannelsEnvelope(bytes);
+  } catch (err) {
+    const code =
+      err !== null && typeof err === "object" ? /** @type {any} */ (err).sharedChannelsError : undefined;
+    return typeof code === "string" && code !== "wrongDomain";
+  }
+  freeQuietly(decoded);
+  return true;
 }
 
 /**

@@ -187,9 +187,9 @@ public class RotationCron(
         val newServerEpoch = currentEpoch + 1u
 
         // 3. Walk the subscriber list + seal new envelopes.
-        val subscribers = ChannelsClient.ownerSigner(identity, channelIdHex).use {
-            channelsClient.listSubscribers(channelIdHex, it)
-        }
+        //    Owner-signed, or co-publisher-signed when this account is a
+        //    co-publisher the owner appointed (ADR-0059 section 1).
+        val subscribers = channelsClient.listSubscribersAsPublisher(channelIdHex, identity)
         val batch = ArrayList<RotateBatchEntry>(subscribers.size)
         for (subscriberHex in subscribers) {
             val subscriberBytes = hexToBytes(subscriberHex)

@@ -70,8 +70,8 @@ pub const OWNER_PROOF_WINDOW_MS: u64 = 120_000;
 /// Upper bound on the header's length; anything longer is refused unparsed.
 pub const OWNER_PROOF_MAX_HEADER_LEN: usize = 192;
 
-const ACCOUNT_SEED_LEN: usize = 32;
-const VERSION: &str = "v1";
+pub(crate) const ACCOUNT_SEED_LEN: usize = 32;
+pub(crate) const VERSION: &str = "v1";
 const SEP: u8 = 0;
 
 /// Derive the owner seed of `channel_id` from the owner's account seed.
@@ -137,9 +137,20 @@ pub fn owner_proof_canonical_bytes(
     unix_ms: u64,
     nonce: &[u8; OWNER_PROOF_NONCE_LEN],
 ) -> Vec<u8> {
+    proof_canonical_bytes(OWNER_PROOF_DOMAIN, req, unix_ms, nonce)
+}
+
+/// The canonical bytes of a request proof under `domain`: the owner proof
+/// and the co-publisher proof ([`crate::copublisher`]) differ only here.
+pub(crate) fn proof_canonical_bytes(
+    domain: &[u8],
+    req: &OwnerRequest<'_>,
+    unix_ms: u64,
+    nonce: &[u8; OWNER_PROOF_NONCE_LEN],
+) -> Vec<u8> {
     let digest = hash::blake3(req.body);
     let mut out = Vec::with_capacity(
-        OWNER_PROOF_DOMAIN.len()
+        domain.len()
             + req.method.len()
             + req.canonical_path.len()
             + req.query.len()
@@ -148,7 +159,7 @@ pub fn owner_proof_canonical_bytes(
             + 8
             + OWNER_PROOF_NONCE_LEN,
     );
-    out.extend_from_slice(OWNER_PROOF_DOMAIN);
+    out.extend_from_slice(domain);
     out.push(SEP);
     out.extend_from_slice(req.method.as_bytes());
     out.push(SEP);
@@ -219,6 +230,16 @@ impl OwnerProof {
         if version != VERSION {
             return Err(OwnerProofError::UnknownVersion);
         }
+        Self::from_fields(unix_ms, nonce, signature)
+    }
+
+    /// Parse the three fields every proof shape shares: a decimal time, a
+    /// 16-byte nonce and a 64-byte signature, base64url without padding.
+    pub(crate) fn from_fields(
+        unix_ms: &str,
+        nonce: &str,
+        signature: &str,
+    ) -> Result<Self, OwnerProofError> {
         if unix_ms.is_empty() || unix_ms.len() > 20 || !unix_ms.bytes().all(|b| b.is_ascii_digit())
         {
             return Err(OwnerProofError::Malformed);

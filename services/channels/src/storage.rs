@@ -308,6 +308,10 @@ pub enum StorageError {
     /// channel's owner key is fixed at creation (ADR-0059 section 1).
     #[error("channel exists with a different owner key")]
     OwnerMismatch,
+    /// Appointing one more co-publisher key would exceed the per-channel
+    /// cap (`lakko_channels::MAX_COPUBLISHERS`).
+    #[error("too many co-publisher keys for this channel")]
+    TooManyCoPublishers,
     /// A listing whose `updated_at_ms` is not newer than the stored one.
     #[error("listing is not newer than the stored one")]
     StaleListing,
@@ -360,6 +364,32 @@ pub trait ChannelStore: Send + Sync {
 
     /// Drop nonces recorded before `cutoff_ms`. Returns how many.
     async fn prune_owner_nonces_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError>;
+
+    /// Appoint a co-publisher key for `channel` (ADR-0059 section 1,
+    /// co-publisher keys). Idempotent for a key already appointed. Refused
+    /// with [`StorageError::UnknownChannel`] or, when `max` keys are already
+    /// appointed, [`StorageError::TooManyCoPublishers`].
+    async fn appoint_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+        max: usize,
+        now_ms: u64,
+    ) -> Result<(), StorageError>;
+
+    /// Revoke a co-publisher key. `Ok(false)` when it was not appointed.
+    async fn revoke_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError>;
+
+    /// Whether `key` is an appointed co-publisher key of `channel`.
+    async fn is_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError>;
 
     /// Store or replace the channel's listing. The first listing records
     /// `now_ms` as the first-listed time, which a later withdrawal keeps.
@@ -675,6 +705,8 @@ struct Inner {
     /// Channel id → (subscriber → first registration time). Kept across
     /// re-subscribes; feeds the directory's 7-day growth signal.
     registered_at: HashMap<ChannelId, HashMap<SubscriberId, u64>>,
+    /// Channel id → appointed co-publisher keys → when appointed.
+    copublishers: HashMap<ChannelId, HashMap<[u8; OWNER_PUBKEY_LEN], u64>>,
     /// Owner request-proof nonces → when seen.
     owner_nonces: HashMap<[u8; OWNER_NONCE_LEN], u64>,
     /// Channel id → its published listing.
@@ -1344,6 +1376,54 @@ impl ChannelStore for InMemoryChannelStore {
         let before = guard.owner_nonces.len();
         guard.owner_nonces.retain(|_, seen| *seen >= cutoff_ms);
         Ok((before - guard.owner_nonces.len()) as u64)
+    }
+
+    async fn appoint_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+        max: usize,
+        now_ms: u64,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.owners.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        let keys = guard.copublishers.entry(channel).or_default();
+        if keys.contains_key(&key) {
+            return Ok(());
+        }
+        if keys.len() >= max {
+            return Err(StorageError::TooManyCoPublishers);
+        }
+        keys.insert(key, now_ms);
+        Ok(())
+    }
+
+    async fn revoke_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError> {
+        let mut guard = self.inner.write().await;
+        Ok(guard
+            .copublishers
+            .get_mut(&channel)
+            .is_some_and(|keys| keys.remove(&key).is_some()))
+    }
+
+    async fn is_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .copublishers
+            .get(&channel)
+            .is_some_and(|keys| keys.contains_key(&key)))
     }
 
     async fn put_listing(

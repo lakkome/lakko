@@ -14,6 +14,11 @@ import { anonTokenQuotaExhausted, isAnonTokenNetworkFailure } from "./anon-token
 /** Search (a username or channel lookup). */
 export const LOOKUP_ALLOWANCE_USED =
   "You have looked up a lot of people today. Try again tomorrow.";
+/** Following a channel (ADR-0059 section 4, docs/ux/feed.md section 7). */
+export const SUBSCRIBE_ALLOWANCE_USED =
+  "You've subscribed to a lot of channels today. Try again tomorrow.";
+/** A Discover search (docs/ux/feed.md section 7). */
+export const SEARCH_ALLOWANCE_USED = "Too many searches. Try again in a minute.";
 /** An invite link, a group link, a channel name. */
 export const ACTION_ALLOWANCE_USED =
   "You have used today's allowance for this. Try again tomorrow.";
@@ -33,6 +38,10 @@ export function anonTokenMessage(err: unknown, networkCopy: string): string | nu
         return LOOKUP_ALLOWANCE_USED;
       case "push-register":
         return null;
+      case "channel-subscribe":
+        return SUBSCRIBE_ALLOWANCE_USED;
+      case "directory-search":
+        return SEARCH_ALLOWANCE_USED;
       default:
         return ACTION_ALLOWANCE_USED;
     }

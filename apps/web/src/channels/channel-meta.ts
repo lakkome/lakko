@@ -128,7 +128,14 @@ export function channelMetaErrorText(code: string | undefined): string {
  */
 export async function publishChannelMeta(
   channelIdHex: string,
-  input: { readonly name: string; readonly description: string },
+  input: {
+    readonly name: string;
+    readonly description: string;
+    /** ADR-0059 metadata v2; each absent field keeps what this device holds. */
+    readonly topic?: number;
+    readonly language?: string;
+    readonly listed?: boolean;
+  },
   stampMs: bigint = BigInt(Date.now()),
 ): Promise<ChannelSharedMeta> {
   const keys = channelsState.keysByChannel().get(channelIdHex);
@@ -139,14 +146,19 @@ export async function publishChannelMeta(
     throw Object.assign(new Error(CHANNEL_NEEDS_NAME), { channelMetaError: "name.empty" });
   }
   const wasm = await loadWasm();
-  // ADR-0059 metadata v2: topic "Other", language not set, not listed,
-  // until the Discover UI sets them.
-  const plaintext = wasm.composeChannelMeta(name, description, stampMs, 0, "", false);
+  // ADR-0059 metadata v2: the Discover fields the owner set, kept across a
+  // rename; a channel never listed is topic "Other", language unset, not
+  // listed.
+  const held = channelsState.metaByChannel().get(channelIdHex);
+  const topic = input.topic ?? held?.topic ?? 0;
+  const language = input.language ?? held?.language ?? "";
+  const listed = input.listed ?? held?.listed ?? false;
+  const plaintext = wasm.composeChannelMeta(name, description, stampMs, topic, language, listed);
   const epoch = channelsState.epochByChannel().get(channelIdHex) ?? 0;
   const counter = channelsActions.nextCounter(channelIdHex);
   const wire = await composePost(keys, channelIdHex, epoch, counter, plaintext);
   await publishPost(channelIdHex, wire);
-  const meta: ChannelSharedMeta = { name, description, updatedAtMs: stampMs };
+  const meta: ChannelSharedMeta = { name, description, updatedAtMs: stampMs, topic, language, listed };
   channelsActions.setSharedMeta(channelIdHex, meta);
   return meta;
 }

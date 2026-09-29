@@ -95,6 +95,7 @@ import {
 } from "./committer-beacon";
 import { useGroupNames } from "./GroupNameContext";
 import { usePins } from "./PinContext";
+import { useSharedChannels } from "../discover/SharedChannelsContext";
 import { useReadWatermarks } from "./ReadWatermarkContext";
 import { readIsActive } from "./membership-ended";
 import {
@@ -191,6 +192,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const profiles = useProfiles();
   const groupNames = useGroupNames();
   const pins = usePins();
+  const sharedChannels = useSharedChannels();
   const readWatermarks = useReadWatermarks();
   const callHost = useCallHost();
 
@@ -724,6 +726,13 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         console.warn("background receive: pin receive failed", err);
       });
     }
+    // ADR-0059 section 6 — members' shared channel lists, filed per member.
+    for (const l of plan.sharedChannels) {
+      void sharedChannels.receive(entry, l).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("background receive: shared channels receive failed", err);
+      });
+    }
     for (const secret of plan.pushSecrets) {
       void receivePushRoutingSecretGated(
         account,
@@ -780,6 +789,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       profiles.groupGrew(groupIdB64);
       groupNames.groupGrew(groupIdB64);
       pins.groupGrew(groupIdB64);
+      sharedChannels.groupGrew(groupIdB64);
     }
 
     // The chat view gets the rest, now or when it next mounts.

@@ -196,6 +196,8 @@ import { recordRemovedDevices } from "../chat/device-readmission";
 import { useProfiles } from "../profile/ProfileContext";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { usePins } from "../chat/PinContext";
+import { useSharedChannels } from "../discover/SharedChannelsContext";
+import { ShareChannelsSwitch } from "../discover/ShareChannelsSwitch";
 import { clampPinIndex, nextPinIndex, pinBarItems, type HeldForPin } from "../chat/pin-bar";
 import { pinRowDecision, type PinOption, type PinState } from "../chat/pin-sheet";
 import { PinList, PinnedBar, type PinBarEntry } from "../chat/PinnedBar";
@@ -516,6 +518,7 @@ function ChatView(props: {
   const profiles = useProfiles();
   const groupNames = useGroupNames();
   const pins = usePins();
+  const sharedChannels = useSharedChannels();
   // ADR-0024 — the durable read watermarks both receive paths feed.
   const readWatermarkStore = useReadWatermarks();
   const callLog = useCallLog();
@@ -1706,6 +1709,7 @@ function ChatView(props: {
       groupNames.groupGrew(props.entry.groupIdB64);
       // ADR-0052 decision 3 — and the room's shared pins, original stamps.
       pins.groupGrew(props.entry.groupIdB64);
+      sharedChannels.groupGrew(props.entry.groupIdB64);
     }
   });
 
@@ -3587,6 +3591,16 @@ function ChatView(props: {
         void pins.receive(props.entry, e).catch((err) => {
           // eslint-disable-next-line no-console
           console.warn("pin receive failed", err);
+        });
+        continue;
+      }
+      // ADR-0059 section 6 — a member's shared channels. Filed per member
+      // (account key resolved at receipt) under the per-group lock; never a
+      // timeline row.
+      if (e.kind === "shared-channels") {
+        void sharedChannels.receive(props.entry, e).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn("shared channels receive failed", err);
         });
         continue;
       }
@@ -6433,6 +6447,13 @@ function ChatView(props: {
               under the panel, which is now behind the dim and unreadable. */}
           <Show when={error()}>{(message) => <div class="form-error">{message()}</div>}</Show>
           <Show when={notice()}>{(message) => <div class="form-notice">{message()}</div>}</Show>
+          {/* ADR-0059 section 6 — share the listed channels this person
+              follows with this group. Not a block of the shared info rule
+              (`lakko-ui-rules`): it is shown in every group this device is
+              still a member of. */}
+          <Show when={!membershipEnded()}>
+            <ShareChannelsSwitch entry={props.entry} />
+          </Show>
           {/* 1.18g — the add-member form, reached from `Add member` in the
               header's overflow menu, which opens this info with the form
               ready. Submit drives
@@ -8368,6 +8389,12 @@ function timelineRowToPersisted(
     // ADR-0052 decision 3 — consumed by the pin gate, never a timeline row
     // (no "pinned a message" transcript row in this version). Never persist
     // it.
+    return null;
+  }
+  if (row.event.kind === "shared-channels") {
+    // ADR-0059 section 6 — consumed by the shared-channels store, never a
+    // timeline row. Never persist it: which channels a member follows is
+    // not part of the transcript.
     return null;
   }
   if (row.event.kind === "membershipProposal") {

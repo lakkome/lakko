@@ -12,7 +12,8 @@
  *   POST /v1/channels/:id/posts             (publish)
  *   GET  /v1/channels/:id/posts?after=&limit=
  *   POST /v1/channels/:id/subscribers       (register; one channel-subscribe token)
- *   GET  /v1/channels/:id/subscribers       (list, for fan-out; owner-signed)
+ *   GET  /v1/channels/:id/subscribers       (list, for fan-out; owner- or co-publisher-signed)
+ *   PUT/DELETE /v1/channels/:id/copublishers/:key (appoint / revoke; owner-signed)
  *   POST /v1/channels/:id/subscribers/:pk/envelope
  *   GET  /v1/channels/:id/subscribers/:pk/envelope
  *   POST /v1/channels/:id/rotate
@@ -350,10 +351,14 @@ export async function subscribe(
   return { subscriberId: body.subscriber_id };
 }
 
-/** List subscribers — used by the publisher to fan out HPKE seed
- *  envelopes. Owner-signed (ADR-0059 section 4): the proof is made with the
- *  owner key `accountIdentity` derives for this channel, over the service
- *  path (never the `/api/channels` prefix nginx strips). */
+/** List subscribers — used by a publisher to fan out HPKE seed envelopes.
+ *  Signed (ADR-0059 section 4) over the service path (never the
+ *  `/api/channels` prefix nginx strips): first with the owner key
+ *  `accountIdentity` derives for this channel; when the server refuses that
+ *  (this account is a co-publisher, not the owner), once more with this
+ *  account's co-publisher key, which the owner appointed after approving it
+ *  (ADR-0059 section 1, co-publisher keys). A co-publisher the owner has not
+ *  appointed yet still gets the 401. */
 export async function listSubscribers(
   channelIdHex: string,
   accountIdentity: Identity,
@@ -364,9 +369,62 @@ export async function listSubscribers(
   const signer = await ownerSigner(accountIdentity, channelIdHex);
   const proof = signer.sign("GET", path, "", new Uint8Array());
   signer.free();
+  try {
+    return await fetchJson<ChannelSubscribers>(`${base}${path}`, {
+      headers: { [wasm.channelOwnerProofHeaderName()]: proof },
+    });
+  } catch (err) {
+    if (!isChannelApiError(err) || err.status !== 401) throw err;
+  }
+  const copub = wasm.channelCoPublisherSigner(accountIdentity, hexToBytesStrict(channelIdHex));
+  const copubProof = copub.sign("GET", path, "", new Uint8Array());
+  copub.free();
   return fetchJson<ChannelSubscribers>(`${base}${path}`, {
+    headers: { [wasm.channelCoPublisherProofHeaderName()]: copubProof },
+  });
+}
+
+/** Appoint (`PUT`) or revoke (`DELETE`) a co-publisher key for a channel
+ *  (owner-signed, ADR-0059 section 1). Idempotent both ways; 409
+ *  `too-many-copublishers` past the cap. `copublisherKey` must come from a
+ *  binding verified against the joiner key the owner approved, never from
+ *  the server. */
+async function setCoPublisherAppointment(
+  method: "PUT" | "DELETE",
+  channelIdHex: string,
+  accountIdentity: Identity,
+  copublisherKey: Uint8Array,
+  base: string,
+): Promise<void> {
+  const wasm = await loadWasm();
+  const path = wasm.channelCoPublisherPath(hexToBytesStrict(channelIdHex), copublisherKey);
+  const signer = await ownerSigner(accountIdentity, channelIdHex);
+  const proof = signer.sign(method, path, "", new Uint8Array());
+  signer.free();
+  await fetchJson<void>(`${base}${path}`, {
+    method,
     headers: { [wasm.channelOwnerProofHeaderName()]: proof },
   });
+}
+
+/** Appoint a co-publisher key (owner only). */
+export async function appointCoPublisher(
+  channelIdHex: string,
+  accountIdentity: Identity,
+  copublisherKey: Uint8Array,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  await setCoPublisherAppointment("PUT", channelIdHex, accountIdentity, copublisherKey, base);
+}
+
+/** Revoke a co-publisher key (owner only). */
+export async function revokeCoPublisher(
+  channelIdHex: string,
+  accountIdentity: Identity,
+  copublisherKey: Uint8Array,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  await setCoPublisherAppointment("DELETE", channelIdHex, accountIdentity, copublisherKey, base);
 }
 
 /** Fetch the latest seed envelope delivered to `pubkey`.
@@ -613,4 +671,138 @@ export async function commitRotation(
     throw await parseError(resp);
   }
   return (await resp.json()) as ChannelEpoch;
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0059 — the directory (Discover)
+// ---------------------------------------------------------------------------
+
+/** One directory item as the server sends it (the listing bytes are the
+ *  owner's; decode them with the shared codec, never trust the server's
+ *  channel id over the listing's). */
+export interface DirectoryItem {
+  readonly channel_id: string;
+  readonly listing_b64: string;
+  /** A band: `<10`, `10+`, `100+`, `1k+`, `10k+`, `100k+`. */
+  readonly subscribers: string;
+}
+
+/** A directory read: no cookie, no referrer, no session, and cacheable (the
+ *  server answers every caller the same, ADR-0059 section 5). */
+const CACHEABLE_ANONYMOUS: RequestInit = { credentials: "omit", referrerPolicy: "no-referrer" };
+
+/** Whether this account holds the OWNER key of `channelIdHex` (not a
+ *  co-publisher's): an owner-signed read of the subscriber list is accepted
+ *  only under the key registered at creation. `null` when the server could
+ *  not answer (network, a 5xx). */
+export async function probeChannelOwner(
+  channelIdHex: string,
+  accountIdentity: Identity,
+  base: string = DEFAULT_BASE,
+): Promise<boolean | null> {
+  const path = `/v1/channels/${channelIdHex}/subscribers`;
+  const wasm = await loadWasm();
+  const signer = await ownerSigner(accountIdentity, channelIdHex);
+  const proof = signer.sign("GET", path, "", new Uint8Array());
+  signer.free();
+  try {
+    await fetchJson<ChannelSubscribers>(`${base}${path}`, {
+      headers: { [wasm.channelOwnerProofHeaderName()]: proof },
+    });
+    return true;
+  } catch (err) {
+    if (isChannelApiError(err) && err.status === 401) return false;
+    return null;
+  }
+}
+
+/** Store or replace the channel's listing (owner-signed). `listing` is the
+ *  canonical `composeChannelListing` bytes. */
+export async function putListing(
+  channelIdHex: string,
+  accountIdentity: Identity,
+  listing: Uint8Array,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  const path = `/v1/channels/${channelIdHex}/listing`;
+  const wasm = await loadWasm();
+  const signer = await ownerSigner(accountIdentity, channelIdHex);
+  const proof = signer.sign("PUT", path, "", listing);
+  signer.free();
+  await fetchJson<void>(`${base}${path}`, {
+    method: "PUT",
+    headers: {
+      "content-type": "application/octet-stream",
+      [wasm.channelOwnerProofHeaderName()]: proof,
+    },
+    body: new Blob(
+      [listing.buffer.slice(listing.byteOffset, listing.byteOffset + listing.byteLength) as ArrayBuffer],
+      { type: "application/octet-stream" },
+    ),
+  });
+}
+
+/** Withdraw the listing (owner-signed, idempotent). */
+export async function deleteListing(
+  channelIdHex: string,
+  accountIdentity: Identity,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  const path = `/v1/channels/${channelIdHex}/listing`;
+  const wasm = await loadWasm();
+  const signer = await ownerSigner(accountIdentity, channelIdHex);
+  const proof = signer.sign("DELETE", path, "", new Uint8Array());
+  signer.free();
+  await fetchJson<void>(`${base}${path}`, {
+    method: "DELETE",
+    headers: { [wasm.channelOwnerProofHeaderName()]: proof },
+  });
+}
+
+/** One channel's listing, or `null` when it is not listed (404). Tells the
+ *  server someone looked at this channel, as any card view does. */
+export async function fetchListing(
+  channelIdHex: string,
+  base: string = DEFAULT_BASE,
+): Promise<DirectoryItem | null> {
+  try {
+    return await fetchJson<DirectoryItem>(`${base}/v1/directory/listing/${channelIdHex}`, CACHEABLE_ANONYMOUS);
+  } catch (err) {
+    if (isChannelApiError(err) && err.status === 404) return null;
+    throw err;
+  }
+}
+
+/** The top listings of one (topic, language) bucket. No session, no token. */
+export async function fetchBucket(
+  topic: number,
+  language: string,
+  base: string = DEFAULT_BASE,
+): Promise<readonly DirectoryItem[]> {
+  const body = await fetchJson<{ items: DirectoryItem[] }>(
+    `${base}/v1/directory/bucket/${topic}/${encodeURIComponent(language)}`,
+    CACHEABLE_ANONYMOUS,
+  );
+  return Array.isArray(body.items) ? body.items : [];
+}
+
+/** Search the directory (one `directory-search` token; the query is sent). */
+export async function searchDirectory(
+  query: string,
+  base: string = DEFAULT_BASE,
+): Promise<readonly DirectoryItem[]> {
+  const url = `${base}/v1/directory/search?${new URLSearchParams({ q: query }).toString()}`;
+  let resp: Response;
+  try {
+    resp = await anonTokens.spend("directory-search", (headerName, headerValue) =>
+      fetch(url, anonymousFetchInit({ method: "GET", headers: { [headerName]: headerValue } })),
+    );
+  } catch (err) {
+    if (err instanceof TypeError) throw unreachable(0);
+    throw err;
+  }
+  if (!resp.ok) throw await parseError(resp);
+  if (!isJsonResponse(resp)) throw unreachable(resp.status);
+  const body = (await resp.json()) as { items?: DirectoryItem[] };
+  return Array.isArray(body.items) ? body.items : [];
 }
