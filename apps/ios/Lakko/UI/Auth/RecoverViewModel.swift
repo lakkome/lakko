@@ -57,7 +57,7 @@ public final class RecoverViewModel: ObservableObject {
             if mode != .contact {
                 contactStep = .request
             }
-            error = nil
+            errorText = nil
         }
     }
 
@@ -78,7 +78,9 @@ public final class RecoverViewModel: ObservableObject {
     // MARK: - Internal status
 
     @Published public private(set) var busy: Bool = false
-    @Published public private(set) var error: String?
+    /// Kept as ``UiText`` so a message on screen follows a live language switch.
+    @Published private var errorText: UiText?
+    public var error: String? { errorText?.text }
     /// ADR-0018 factor (c) — the 6-digit authenticator code field.
     @Published public var totpCode: String = ""
 
@@ -136,18 +138,18 @@ public final class RecoverViewModel: ObservableObject {
         guard !busy else { return } // ignore double-tap
 
         if password != confirm {
-            error = l10n.t("auth.password.error.mismatch")
+            errorText = .key("auth.password.error.mismatch")
             return
         }
         if password.count < Self.minPasswordLength {
-            error = l10n.t("auth.password.error.too_short", counts: ["count": UInt64(Self.minPasswordLength)])
+            errorText = .key("auth.password.error.too_short", counts: ["count": UInt64(Self.minPasswordLength)])
             return
         }
         // ADR-0017 / ADR-0054 S5 — on a fresh device (no cached account)
         // the username is required: the account is named by its handle.
         let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
         if cachedUsername == nil && trimmedUsername.isEmpty {
-            error = l10n.t("recovery.username_required")
+            errorText = .key("recovery.username_required")
             return
         }
 
@@ -161,23 +163,23 @@ public final class RecoverViewModel: ObservableObject {
             // ADR-0018 — the AnotherDevice mode never reaches the
             // OPAQUE submit: the RestoreViaDevicePanel drives
             // completeFromDeviceRestore directly. Defensive no-op.
-            error = l10n.t("recovery.error.generic")
+            errorText = .key("recovery.error.generic")
             return
         case .totp:
             // ADR-0018 factor (c) — the Authenticator mode submits
             // via `submitTotp` (no new password on that path).
             // Defensive no-op.
-            error = l10n.t("recovery.totp.error.enter_code")
+            errorText = .key("recovery.totp.error.enter_code")
             return
         case .contact:
             // ADR-0018 factor (d) — the Email/SMS mode submits via
             // `sendContactCode` / `submitContactCode` (no new password
             // on that path). Defensive no-op.
-            error = l10n.t("recovery.error.generic")
+            errorText = .key("recovery.error.generic")
             return
         case .phrase:
             if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                error = l10n.t("recovery_phrase.error.incomplete")
+                errorText = .key("recovery_phrase.error.incomplete")
                 return
             }
             phraseSnapshot = phrase
@@ -187,7 +189,7 @@ public final class RecoverViewModel: ObservableObject {
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
             if lines.count < 2 {
-                error = l10n.t("recovery.shares.error.too_few")
+                errorText = .key("recovery.shares.error.too_few")
                 return
             }
             do {
@@ -196,13 +198,13 @@ public final class RecoverViewModel: ObservableObject {
                 )
             } catch {
                 NSLog("[recover] WARN shares did not combine: \(error)")
-                self.error = l10n.t("recovery.shares.error.combine_failed")
+                self.errorText = .key("recovery.shares.error.combine_failed")
                 return
             }
         }
 
         busy = true
-        error = nil
+        errorText = nil
 
         let passwordBytes = Data(password.utf8)
 
@@ -221,7 +223,7 @@ public final class RecoverViewModel: ObservableObject {
                 // don't hold the phrase / password past the
                 // navigation.
                 busy = false
-                error = nil
+                errorText = nil
                 phrase = ""
                 sharesInput = ""
                 password = ""
@@ -230,7 +232,7 @@ public final class RecoverViewModel: ObservableObject {
                 // A bad phrase (unknown word or checksum) reads as one
                 // sentence; a wrong phrase and an unknown account too.
                 busy = false
-                self.error = AuthErrorCopy.recover(error)
+                self.errorText = UiText { AuthErrorCopy.recover(error) }
             }
         }
     }
@@ -254,9 +256,9 @@ public final class RecoverViewModel: ObservableObject {
                 username: name.canonical,
                 loginHandle: name.handle
             )
-            error = nil
+            errorText = nil
         } catch {
-            self.error = AuthErrorCopy.rule(error) ?? l10n.t("recovery.username_required")
+            self.errorText = UiText { AuthErrorCopy.rule(error) ?? Localization.text("recovery.username_required") }
         }
     }
 
@@ -319,15 +321,15 @@ public final class RecoverViewModel: ObservableObject {
         let user = (cachedUsername ?? username)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !user.isEmpty else {
-            error = l10n.t("recovery.username_required_to_recover")
+            errorText = .key("recovery.username_required_to_recover")
             return
         }
         guard let normalized = normalizeTotpCode(totpCode) else {
-            error = l10n.t("recovery.totp.error.enter_code")
+            errorText = .key("recovery.totp.error.enter_code")
             return
         }
         busy = true
-        error = nil
+        errorText = nil
         Task {
             do {
                 try await repository.recoverWithTotp(
@@ -337,11 +339,12 @@ public final class RecoverViewModel: ObservableObject {
                 // The repository flipped the auth state; wipe the
                 // form buffer before the router replaces this screen.
                 busy = false
-                error = nil
+                errorText = nil
                 totpCode = ""
             } catch {
                 busy = false
-                self.error = AuthErrorCopy.totp(error, typedUsername: cachedUsername == nil)
+                let typedUsername = cachedUsername == nil
+                self.errorText = UiText { AuthErrorCopy.totp(error, typedUsername: typedUsername) }
             }
         }
     }
@@ -358,19 +361,19 @@ public final class RecoverViewModel: ObservableObject {
         let user = (cachedUsername ?? username)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !user.isEmpty else {
-            error = l10n.t("recovery.username_required_to_recover")
+            errorText = .key("recovery.username_required_to_recover")
             return
         }
         // Light client-side shape check — saves a round trip on an
         // obviously-malformed contact. The server is authoritative.
         guard isPlausibleContact(kind: contactKind, contact: contact) else {
-            error = l10n.t(contactKind == .email
+            errorText = .key(contactKind == .email
                 ? "recovery.contact.error.invalid_email"
                 : "recovery.contact.error.invalid_phone")
             return
         }
         busy = true
-        error = nil
+        errorText = nil
         let kindSnapshot = contactKind
         let contactSnapshot = contact
         Task {
@@ -384,10 +387,10 @@ public final class RecoverViewModel: ObservableObject {
                 contactCode = ""
                 contactStep = .code
                 busy = false
-                error = nil
+                errorText = nil
             } catch {
                 busy = false
-                self.error = AuthErrorCopy.contact(error, sending: true)
+                self.errorText = UiText { AuthErrorCopy.contact(error, sending: true) }
             }
         }
     }
@@ -401,22 +404,22 @@ public final class RecoverViewModel: ObservableObject {
     public func submitContactCode() {
         guard !busy else { return }
         guard let normalized = normalizeTotpCode(contactCode) else {
-            error = l10n.t("recovery.contact.error.enter_code")
+            errorText = .key("recovery.contact.error.enter_code")
             return
         }
         busy = true
-        error = nil
+        errorText = nil
         Task {
             do {
                 try await repository.recoverWithContactFinish(code: normalized)
                 // The repository flipped the auth state; wipe the form
                 // buffer before the router replaces this screen.
                 busy = false
-                error = nil
+                errorText = nil
                 contactCode = ""
             } catch {
                 busy = false
-                self.error = AuthErrorCopy.contact(error, sending: false)
+                self.errorText = UiText { AuthErrorCopy.contact(error, sending: false) }
             }
         }
     }

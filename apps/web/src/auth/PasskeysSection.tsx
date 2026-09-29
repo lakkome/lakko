@@ -60,6 +60,7 @@ import {
 } from "./webauthn-client";
 import { useWebauthnClient } from "./use-webauthn-client";
 import { Icon } from "../ui/icons";
+import { currentLanguage, t, type L10nArgs } from "../l10n";
 
 const SUPPORTED = WebauthnClient.isWebauthnAvailable();
 
@@ -88,8 +89,10 @@ export default function PasskeysSection(): JSX.Element {
 
   const [nickname, setNickname] = createSignal("");
   const [busy, setBusy] = createSignal(false);
+  // The message is a catalog key, rendered at display time so it follows a
+  // language switch (ADR-0058).
   const [message, setMessage] = createSignal<
-    { readonly kind: "ok" | "error"; readonly text: string } | null
+    { readonly kind: "ok" | "error"; readonly key: string; readonly args?: L10nArgs } | null
   >(null);
 
   // Clear messages when the form input changes — keeps stale
@@ -105,11 +108,11 @@ export default function PasskeysSection(): JSX.Element {
     const name = username();
     const label = nickname().trim();
     if (c === null || name === null) {
-      setMessage({ kind: "error", text: "Session not ready." });
+      setMessage({ kind: "error", key: "common.error.session_not_ready" });
       return;
     }
     if (label.length === 0) {
-      setMessage({ kind: "error", text: "Give the passkey a name." });
+      setMessage({ kind: "error", key: "settings.passkeys.error.name_required" });
       return;
     }
     setBusy(true);
@@ -158,14 +161,11 @@ export default function PasskeysSection(): JSX.Element {
           }
         }
       }
-      setMessage({
-        kind: "ok",
-        text: `Passkey "${label}" added.`,
-      });
+      setMessage({ kind: "ok", key: "settings.passkeys.added", args: { name: label } });
       setNickname("");
       setRefreshTrigger((n) => n + 1);
     } catch (err) {
-      setMessage({ kind: "error", text: explainError(err) });
+      setMessage(errorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -174,7 +174,7 @@ export default function PasskeysSection(): JSX.Element {
   async function onDelete(cred: CredentialSummary): Promise<void> {
     const c = client();
     if (c === null) {
-      setMessage({ kind: "error", text: "Session not ready." });
+      setMessage({ kind: "error", key: "common.error.session_not_ready" });
       return;
     }
     // ADR-0045 UX §14 — an in-page dialog rather than the bare global
@@ -197,13 +197,10 @@ export default function PasskeysSection(): JSX.Element {
       );
       await c.assertAction(actionHashB64);
       await c.deleteCredential(cred.credential_id_b64);
-      setMessage({
-        kind: "ok",
-        text: `Removed "${cred.nickname}".`,
-      });
+      setMessage({ kind: "ok", key: "settings.passkeys.removed", args: { name: cred.nickname } });
       setRefreshTrigger((n) => n + 1);
     } catch (err) {
-      setMessage({ kind: "error", text: explainError(err) });
+      setMessage(errorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -211,25 +208,19 @@ export default function PasskeysSection(): JSX.Element {
 
   return (
     <section class="lk-card">
-      <h2>Passkeys</h2>
-      <p class="lk-card-desc">
-        Sign in with Touch ID, Face ID or a security key instead of your password.
-        Your recovery phrase always works too.
-      </p>
+      <h2>{t("settings.passkeys.title")}</h2>
+      <p class="lk-card-desc">{t("settings.passkeys.lede")}</p>
 
       <Show
         when={SUPPORTED}
         fallback={
-          <p class="form-error">
-            This browser cannot manage passkeys. Use a recent Safari, Chrome,
-            Firefox or Edge.
-          </p>
+          <p class="form-error">{t("settings.passkeys.unsupported_browser")}</p>
         }
       >
-        <Show when={credentials() !== undefined} fallback={<p class="form-info">Loading…</p>}>
+        <Show when={credentials() !== undefined} fallback={<p class="form-info">{t("common.loading")}</p>}>
           <Show
             when={(credentials() ?? []).length > 0}
-            fallback={<p class="form-info">No passkeys yet.</p>}
+            fallback={<p class="form-info">{t("settings.passkeys.empty")}</p>}
           >
             <div>
               <For each={credentials() ?? []}>
@@ -239,12 +230,16 @@ export default function PasskeysSection(): JSX.Element {
                       <Icon name="key" size={18} />
                     </span>
                     <div class="lk-card-row-body">
-                      <span class="lk-card-row-title">{cred.nickname || "Unnamed passkey"}</span>
+                      <span class="lk-card-row-title">{cred.nickname || t("settings.passkeys.unnamed")}</span>
                       <span class="lk-card-row-sub">
-                        Added {formatTimestamp(cred.created_at_ms)}
                         {cred.last_used_at_ms !== null
-                          ? ` · last used ${formatTimestamp(cred.last_used_at_ms)}`
-                          : " · never used"}
+                          ? t("settings.passkeys.added_last_used", {
+                              added: formatTimestamp(cred.created_at_ms),
+                              used: formatTimestamp(cred.last_used_at_ms),
+                            })
+                          : t("settings.passkeys.added_never_used", {
+                              added: formatTimestamp(cred.created_at_ms),
+                            })}
                       </span>
                     </div>
                     <button
@@ -254,7 +249,7 @@ export default function PasskeysSection(): JSX.Element {
                       disabled={busy()}
                       onClick={() => void onDelete(cred)}
                     >
-                      Remove
+                      {t("common.remove")}
                     </button>
                   </div>
                 )}
@@ -265,8 +260,8 @@ export default function PasskeysSection(): JSX.Element {
           <form onSubmit={onAdd} class="lk-actions" style={{ "flex-wrap": "nowrap" }}>
             <input
               type="text"
-              placeholder="Name this passkey (e.g. MacBook Touch ID)"
-              aria-label="Passkey name"
+              placeholder={t("settings.passkeys.name.placeholder")}
+              aria-label={t("settings.passkeys.name.label")}
               value={nickname()}
               onInput={(e) => setNickname(e.currentTarget.value)}
               disabled={busy()}
@@ -274,44 +269,60 @@ export default function PasskeysSection(): JSX.Element {
               style={{ flex: 1 }}
             />
             <button class="primary" type="submit" disabled={busy()}>
-              {busy() ? "Adding…" : "Add passkey"}
+              {busy() ? t("common.adding") : t("settings.passkeys.add")}
             </button>
           </form>
         </Show>
 
         <Show when={message()}>
-          {(m) => <div class={m().kind === "ok" ? "form-info" : "form-error"}>{m().text}</div>}
+          {(m) => <div class={m().kind === "ok" ? "form-info" : "form-error"}>{t(m().key, m().args)}</div>}
         </Show>
       </Show>
     </section>
   );
 }
 
+/** A timestamp in the interface language (`created_at_ms` is never null
+ *  on the wire; the null arm is defensive). */
 function formatTimestamp(ms: number | null): string {
-  if (ms === null) return "never";
-  const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) return "unknown";
-  return d.toLocaleString();
+  const d = ms === null ? null : new Date(ms);
+  if (d === null || Number.isNaN(d.getTime())) return t("common.unknown");
+  return d.toLocaleString(currentLanguage());
 }
 
+/** The catalog key for an error (ADR-0058 section 6: never the server's
+ *  or the browser's prose, which goes to the log). */
 function explainError(err: unknown): string {
   if (err instanceof WebauthnUserCancelledError) {
-    return "Cancelled. No passkey was created.";
+    return "settings.passkeys.error.cancelled";
   }
   if (err instanceof WebauthnUnsupportedError) {
-    return "This browser / device can't create passkeys right now.";
+    return "settings.passkeys.error.unsupported";
   }
   if (err instanceof WebauthnHttpError) {
     if (err.status === 503) {
-      return "Server hasn't enabled passkey support.";
+      return "auth.passkey.error.server_disabled";
     }
     if (err.status === 401) {
-      return "Session expired. Sign in again.";
+      return "common.error.session_expired";
     }
-    return `Server error (${err.status}). ${err.body}`;
+    console.warn("[passkeys] server error", err.status, err.body);
+    return "settings.passkeys.error.server_status";
   }
   if (err instanceof WebauthnNetworkError) {
-    return "Network error. Check your connection and retry.";
+    return "settings.passkeys.error.network";
   }
-  return err instanceof Error ? err.message : String(err);
+  console.warn("[passkeys] failed", err);
+  return "settings.passkeys.error.generic";
+}
+
+function errorMessage(err: unknown): {
+  readonly kind: "error";
+  readonly key: string;
+  readonly args?: L10nArgs;
+} {
+  const key = explainError(err);
+  return key === "settings.passkeys.error.server_status" && err instanceof WebauthnHttpError
+    ? { kind: "error", key, args: { status: String(err.status) } }
+    : { kind: "error", key };
 }

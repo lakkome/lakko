@@ -202,12 +202,124 @@
       "text": "यूज़रनेम",
       "status": "machine"
     },
+    "backup.rollback_refused.body": {
+      "text": "सर्वर ने बदला हुआ या पुराना बैकअप लौटाया। आपका खाता सुरक्षित है; हमने पुराना डेटा रीस्टोर किए बिना आगे बढ़ना जारी रखा।",
+      "status": "machine"
+    },
+    "backup.rollback_refused.title": {
+      "text": "बैकअप सुरक्षित रूप से रीस्टोर नहीं हो सका",
+      "status": "machine"
+    },
+    "backup.stale_restore.body": {
+      "text": "यह बैकअप उम्मीद से पुराना है ({reason})। {consequence}",
+      "status": "machine"
+    },
+    "backup.stale_restore.confirm": {
+      "text": "फिर भी रीस्टोर करें",
+      "status": "machine"
+    },
+    "backup.stale_restore.consequence": {
+      "text": "इसे रीस्टोर करने से आपका खाता पुरानी स्थिति में लौट जाएगा — पुराने मैसेज, और जिन डिवाइस को आपने हटाया था वे फिर से दिख सकते हैं।",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.anchor_unreadable": {
+      "text": "आपके आखिरी बैकअप का इस डिवाइस पर रखा रिकॉर्ड पढ़ा नहीं जा सकता या उससे छेड़छाड़ की गई है",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.below_floor": {
+      "text": "यह इस डिवाइस पर रीस्टोर किए गए आखिरी बैकअप से पुराना है",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.head_stripped": {
+      "text": "इसका सिग्नेचर हटा दिया गया है और यह इस डिवाइस को पता आखिरी बैकअप से अलग है",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.too_old": {
+      "text": "यह किसी मौजूदा बैकअप के मुकाबले काफ़ी पहले साइन किया गया था",
+      "status": "machine"
+    },
+    "backup.stale_restore.title": {
+      "text": "यह पुराना बैकअप रीस्टोर करें?",
+      "status": "machine"
+    },
+    "call.guest.default_name": {
+      "text": "मेहमान",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "आपको कॉल में जोड़ा जा रहा है...",
       "status": "machine"
     },
+    "call.link.connecting": {
+      "text": "कनेक्ट हो रहा है...",
+      "status": "machine"
+    },
+    "call.link.dead": {
+      "text": "यह कॉल खत्म हो चुकी है या सक्रिय नहीं है।",
+      "status": "machine"
+    },
+    "call.link.end_current": {
+      "text": "मौजूदा कॉल खत्म करें",
+      "status": "machine"
+    },
+    "call.link.ended": {
+      "text": "कॉल खत्म हो गई।",
+      "status": "machine"
+    },
+    "call.link.error.generic": {
+      "text": "कॉल विफल रही।",
+      "status": "machine"
+    },
+    "call.link.failed": {
+      "text": "विफल: {reason}",
+      "status": "machine"
+    },
+    "call.link.host": {
+      "text": "होस्ट: {name}",
+      "status": "machine"
+    },
+    "call.link.invalid": {
+      "text": "यह कॉल लिंक अमान्य है या इसकी समय-सीमा खत्म हो गई है।",
+      "status": "machine"
+    },
+    "call.link.join": {
+      "text": "कॉल में शामिल हों",
+      "status": "machine"
+    },
+    "call.link.live": {
+      "text": "आप इस कॉल में हैं।",
+      "status": "machine"
+    },
+    "call.link.loading": {
+      "text": "कॉल लिंक लोड हो रहा है...",
+      "status": "machine"
+    },
+    "call.link.start": {
+      "text": "कॉल शुरू करें",
+      "status": "machine"
+    },
+    "call.link.title_join": {
+      "text": "कॉल में शामिल हों",
+      "status": "machine"
+    },
+    "call.link.title_start": {
+      "text": "अपनी कॉल शुरू करें",
+      "status": "machine"
+    },
+    "call.link.waiting": {
+      "text": "होस्ट के आपको अंदर आने देने का इंतज़ार है...",
+      "status": "machine"
+    },
+    "call.link.waiting_hint": {
+      "text": "आप यह स्क्रीन छोड़ सकते हैं; अनुमति मिलते ही आप कॉल में शामिल हो जाएंगे।",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "मैसेज भेजने के लिए कोई चैट चुनें",
+      "status": "machine"
+    },
+    "common.adding": {
+      "text": "जोड़ा जा रहा है...",
       "status": "machine"
     },
     "common.back": {
@@ -226,8 +338,20 @@
       "text": "बंद करें",
       "status": "machine"
     },
+    "common.collapse": {
+      "text": "छोटा करें",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "पुष्टि करें",
+      "status": "machine"
+    },
+    "common.confirming": {
+      "text": "पुष्टि की जा रही है...",
+      "status": "machine"
+    },
+    "common.connecting": {
+      "text": "कनेक्ट हो रहा है...",
       "status": "machine"
     },
     "common.continue": {
@@ -262,8 +386,24 @@
       "text": "Lakko से कनेक्ट नहीं हो सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       "status": "machine"
     },
+    "common.error.qr_render": {
+      "text": "कोड दिखाया नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
     "common.error.server_unreachable": {
       "text": "सर्वर से कनेक्ट नहीं हो सका। अपना कनेक्शन जाँचें।",
+      "status": "machine"
+    },
+    "common.error.session_ended": {
+      "text": "आपका सेशन खत्म हो गया है। फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "common.error.session_expired": {
+      "text": "सेशन की समय-सीमा खत्म हो गई। फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "common.error.session_not_ready": {
+      "text": "सेशन अभी तैयार नहीं है।",
       "status": "machine"
     },
     "common.error.too_many_attempts": {
@@ -278,6 +418,10 @@
       "text": "यह अभी उपलब्ध नहीं है। बाद में फिर से कोशिश करें।",
       "status": "machine"
     },
+    "common.expand": {
+      "text": "बड़ा करें",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "लोड हो रहा है...",
       "status": "machine"
@@ -286,8 +430,24 @@
       "text": "खोजा जा रहा है...",
       "status": "machine"
     },
+    "common.manage": {
+      "text": "प्रबंधित करें",
+      "status": "machine"
+    },
     "common.more_options": {
       "text": "और विकल्प",
+      "status": "machine"
+    },
+    "common.off": {
+      "text": "बंद",
+      "status": "machine"
+    },
+    "common.on": {
+      "text": "चालू",
+      "status": "machine"
+    },
+    "common.open_lakko": {
+      "text": "Lakko खोलें",
       "status": "machine"
     },
     "common.optional": {
@@ -306,12 +466,36 @@
       "text": "तैयार किया जा रहा है...",
       "status": "machine"
     },
+    "common.remove": {
+      "text": "हटाएँ",
+      "status": "machine"
+    },
+    "common.removing": {
+      "text": "हटाया जा रहा है...",
+      "status": "machine"
+    },
+    "common.save": {
+      "text": "सेव करें",
+      "status": "machine"
+    },
+    "common.saving": {
+      "text": "सेव हो रहा है...",
+      "status": "machine"
+    },
     "common.sending": {
       "text": "भेजा जा रहा है...",
       "status": "machine"
     },
+    "common.set_up": {
+      "text": "सेट अप करें",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "फिर से कोशिश करें",
+      "status": "machine"
+    },
+    "common.unknown": {
+      "text": "अज्ञात",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -1122,8 +1306,168 @@
       "text": "आपके अकाउंट की सुरक्षा कुंजी बदल दी गई है।",
       "status": "machine"
     },
+    "settings.about.lede_web": {
+      "text": "वेब पर Lakko।",
+      "status": "machine"
+    },
+    "settings.about.licence": {
+      "text": "लाइसेंस",
+      "status": "machine"
+    },
+    "settings.about.licence_body": {
+      "text": "{licence}। सोर्स कोड पढ़ने, इस्तेमाल करने और बेहतर बनाने के लिए मुफ़्त है।",
+      "status": "machine"
+    },
+    "settings.about.protection.body": {
+      "text": "मैसेज, कॉल और संपर्क अनुरोध एंड-टू-एंड एन्क्रिप्टेड हैं: उन्हें सिर्फ़ बातचीत में शामिल लोग पढ़ सकते हैं, Lakko के सर्वर कभी नहीं। आपका पासवर्ड कभी आपके डिवाइस से बाहर नहीं जाता, और हर संपर्क का एक सुरक्षा नंबर होता है जिसे आप आमने-सामने मिलाकर देख सकते हैं।",
+      "status": "machine"
+    },
+    "settings.about.protection.title": {
+      "text": "Lakko आपकी सुरक्षा कैसे करता है",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "अनुवाद अपडेट किए गए {date}",
+      "status": "machine"
+    },
+    "settings.about.version": {
+      "text": "वर्शन",
+      "status": "machine"
+    },
+    "settings.account.danger_zone.footer": {
+      "text": "\"लॉग आउट करें\" आपका डेटा इस डिवाइस पर रखता है। \"इस डिवाइस को भूल जाएँ\" उसे हटा देता है; आप सिर्फ़ अपने रिकवरी फ़्रेज़ या साइन इन किए हुए दूसरे डिवाइस से ही वापस आ सकते हैं। \"खाता मिटाएँ\" सर्वर पर खाता मिटा देता है और इस डिवाइस को साफ़ कर देता है; इसे पहले जैसा नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "settings.account.delete.body": {
+      "text": "इससे सर्वर पर आपकी पहचान — यूज़रनेम, कुंजियाँ, रिकवरी के तरीके और बैकअप — मिट जाती है और आप हर जगह से साइन आउट हो जाते हैं। इस डिवाइस से आपके लोकल मैसेज भी मिटा दिए जाते हैं। इसे पहले जैसा नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "settings.account.delete.confirm": {
+      "text": "खाता मिटाएँ",
+      "status": "machine"
+    },
+    "settings.account.delete.error.cancelled": {
+      "text": "रद्द किया गया। आपका खाता नहीं मिटाया गया।",
+      "status": "machine"
+    },
+    "settings.account.delete.error.generic": {
+      "text": "आपका खाता मिटाया नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.account.delete.sub": {
+      "text": "आपके खाते और उसकी हर चीज़ को हमेशा के लिए मिटा देता है, और इस डिवाइस को साफ़ कर देता है। इसे पहले जैसा नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "settings.account.delete.title": {
+      "text": "अपना खाता मिटाएँ?",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body": {
+      "text": "इस ब्राउज़र में सेव किया गया खाता हट जाएगा। वापस आने का एकमात्र तरीका वह 24 शब्दों वाला रिकवरी फ़्रेज़ है जो आपने साइन अप के समय लिखा था।",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body_device": {
+      "text": "इस डिवाइस पर सब कुछ हटा दिया जाता है और यह डिवाइस आपके खाते से बाहर हो जाता है। यहाँ यह खाता फिर से इस्तेमाल करने के लिए आपको रिकवरी फ़्रेज़ या साइन इन किए हुए दूसरे डिवाइस की ज़रूरत होगी।",
+      "status": "machine"
+    },
+    "settings.account.forget_device.confirm": {
+      "text": "डिवाइस भूल जाएँ",
+      "status": "machine"
+    },
+    "settings.account.forget_device.label": {
+      "text": "इस डिवाइस को भूल जाएँ",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub": {
+      "text": "इस ब्राउज़र से आपके खाते का डेटा हटा देता है। आपके मैसेज आपके दूसरे डिवाइस पर रहते हैं; यहाँ वापस आने के लिए आपको रिकवरी फ़्रेज़ या दूसरे डिवाइस की ज़रूरत होगी।",
+      "status": "machine"
+    },
+    "settings.account.forget_device.title": {
+      "text": "इस डिवाइस को भूल जाएँ?",
+      "status": "machine"
+    },
+    "settings.account.lede": {
+      "text": "आपका डेटा, साइन आउट, यह डिवाइस और खाता मिटाना।",
+      "status": "machine"
+    },
+    "settings.account.log_out": {
+      "text": "लॉग आउट करें",
+      "status": "machine"
+    },
+    "settings.account.log_out.body": {
+      "text": "आपके मैसेज इस डिवाइस पर रहते हैं। अपने पासवर्ड या पासकी से फिर से लॉग इन करें।",
+      "status": "machine"
+    },
+    "settings.account.log_out.sub": {
+      "text": "इस डिवाइस पर आपको साइन आउट करता है। आपका डेटा अगले लॉग इन के लिए यहीं रहता है।",
+      "status": "machine"
+    },
+    "settings.account.log_out.title": {
+      "text": "Lakko से लॉग आउट करें?",
+      "status": "machine"
+    },
+    "settings.account.vault.not_set_up": {
+      "text": "तीन शब्दों से रिकवरी: इस खाते पर अभी सेट अप नहीं है। अगली बार जब आप ऐसे डिवाइस पर साइन इन करेंगे जिसमें आपका फ़्रेज़ है, तब यह सेट अप हो जाएगी।",
+      "status": "machine"
+    },
+    "settings.account.vault.on": {
+      "text": "तीन शब्दों से रिकवरी: चालू (शब्द {positions})। साइन इन किया हुआ दूसरा डिवाइस और आपका 24 शब्दों वाला फ़्रेज़ भी काम करते हैं।",
+      "status": "machine"
+    },
+    "settings.account.vault.unavailable": {
+      "text": "तीन शब्दों से रिकवरी: इस सर्वर पर उपलब्ध नहीं है। आपका 24 शब्दों वाला फ़्रेज़ और आपके दूसरे डिवाइस अब भी काम करते हैं।",
+      "status": "machine"
+    },
+    "settings.anti_censorship.footer": {
+      "text": "चालू होने पर Lakko ऐसे तरीके से कनेक्ट होता है जिसे कोई नेटवर्क आसानी से पहचानकर ब्लॉक नहीं कर पाता। आपके मैसेज हर हाल में एंड-टू-एंड एन्क्रिप्टेड रहते हैं।",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status": {
+      "text": "स्थिति",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active": {
+      "text": "सक्रिय",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active.sub": {
+      "text": "कनेक्शन नेटवर्क ब्लॉकिंग से छिपे हुए हैं।",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.connecting.sub": {
+      "text": "छिपा हुआ कनेक्शन सेट अप हो रहा है।",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.direct": {
+      "text": "सीधा कनेक्शन",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable": {
+      "text": "उपलब्ध नहीं",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable.sub": {
+      "text": "छिपा हुआ कनेक्शन सेट अप नहीं हो सका। अपना नेटवर्क जाँचें, फिर दोबारा कोशिश करने के लिए स्विच बंद करके चालू करें।",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured": {
+      "text": "इस बिल्ड में उपलब्ध नहीं",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured.sub": {
+      "text": "यह बिल्ड इस सेटिंग के बिना बनाया गया था।",
+      "status": "machine"
+    },
+    "settings.anti_censorship.title": {
+      "text": "सेंसरशिप से बचाव",
+      "status": "machine"
+    },
+    "settings.anti_censorship.toggle": {
+      "text": "Lakko को नेटवर्क ब्लॉकिंग से छिपाएँ",
+      "status": "machine"
+    },
+    "settings.appearance.lede": {
+      "text": "इस डिवाइस पर थीम।",
       "status": "machine"
     },
     "settings.appearance.theme": {
@@ -1140,6 +1484,126 @@
     },
     "settings.appearance.theme.system": {
       "text": "सिस्टम",
+      "status": "machine"
+    },
+    "settings.data.downloaded": {
+      "text": "{file} डाउनलोड हो गई।",
+      "status": "machine"
+    },
+    "settings.data.error.generic": {
+      "text": "आपका डेटा एक्सपोर्ट नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.data.export": {
+      "text": "मेरा डेटा एक्सपोर्ट करें",
+      "status": "machine"
+    },
+    "settings.data.export_note": {
+      "text": "आपके मैसेज, संपर्क और ग्रुप की स्थिति एंड-टू-एंड एन्क्रिप्टेड हैं और सिर्फ़ आपके डिवाइस पर रहते हैं।",
+      "status": "machine"
+    },
+    "settings.data.lede": {
+      "text": "Lakko के सर्वर आपके खाते के बारे में जो रखते हैं, उसकी एक कॉपी डाउनलोड करें। आपके मैसेज और संपर्क एंड-टू-एंड एन्क्रिप्टेड हैं और आपके डिवाइस पर रहते हैं, इसलिए वे इस फ़ाइल में शामिल नहीं हैं।",
+      "status": "machine"
+    },
+    "settings.data.ready": {
+      "text": "एक्सपोर्ट तैयार है। इसे सेव करने के लिए शेयर करें पर टैप करें।",
+      "status": "machine"
+    },
+    "settings.data.share": {
+      "text": "एक्सपोर्ट शेयर करें",
+      "status": "machine"
+    },
+    "settings.data.title": {
+      "text": "आपका डेटा",
+      "status": "machine"
+    },
+    "settings.devices.add.lede": {
+      "text": "पहले नए डिवाइस पर Lakko में साइन इन करें। फिर चुनें कि दोनों में से कौन-सा कोड दिखा रहा है।",
+      "status": "machine"
+    },
+    "settings.devices.add.no_camera": {
+      "text": "किसी भी डिवाइस में कैमरा नहीं है? नए डिवाइस पर साइन इन करें और \"{method}\" चुनें: यहाँ मिलान के लिए एक कोड के साथ \"{prompt}\" संदेश दिखेगा।",
+      "status": "machine"
+    },
+    "settings.devices.device_n": {
+      "text": "डिवाइस {number}",
+      "status": "machine"
+    },
+    "settings.devices.error.load": {
+      "text": "आपके डिवाइस लोड नहीं हो सके। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key": {
+      "text": "यह ब्राउज़र आपके खाते के लिए सेट अप नहीं है। फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "settings.devices.error.remove": {
+      "text": "डिवाइस हटाया नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.devices.error.scan": {
+      "text": "डिवाइस जोड़ा नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.devices.lede": {
+      "text": "आपके खाते में साइन इन किए हुए फ़ोन, टैबलेट और कंप्यूटर। डिवाइस जोड़ना एंड-टू-एंड एन्क्रिप्टेड है; Lakko के सर्वर इसे पढ़ नहीं सकते।",
+      "status": "machine"
+    },
+    "settings.devices.list.lede": {
+      "text": "हटाया गया डिवाइस उसी पल से आपके मैसेज तक पहुँच खो देता है। डिवाइस हटाने पर आपकी पासकी माँगी जा सकती है।",
+      "status": "machine"
+    },
+    "settings.devices.list.title": {
+      "text": "आपके डिवाइस",
+      "status": "machine"
+    },
+    "settings.devices.remove.body": {
+      "text": "यह डिवाइस उसी पल से आपके मैसेज तक पहुँच खो देगा। आपसे आपकी पासकी माँगी जा सकती है।",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm_named": {
+      "text": "{device} हटाएँ",
+      "status": "machine"
+    },
+    "settings.devices.remove.title": {
+      "text": "{device} हटाएँ?",
+      "status": "machine"
+    },
+    "settings.devices.scan.done": {
+      "text": "डिवाइस जुड़ गया। शामिल होने की प्रक्रिया पूरी होते ही यह सूची में दिखेगा।",
+      "status": "machine"
+    },
+    "settings.devices.scan.opening": {
+      "text": "कैमरा खुल रहा है...",
+      "status": "machine"
+    },
+    "settings.devices.show.error.timeout": {
+      "text": "दूसरे डिवाइस ने समय पर स्कैन नहीं किया। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.devices.show.lede": {
+      "text": "इस कोड को ऐसे डिवाइस से स्कैन करें जिस पर पहले से साइन इन है। उसके पुष्टि करते ही यह डिवाइस आपके खाते से जुड़ जाएगा।",
+      "status": "machine"
+    },
+    "settings.devices.show.start": {
+      "text": "कोड दिखाएँ",
+      "status": "machine"
+    },
+    "settings.devices.sign_in_first": {
+      "text": "डिवाइस प्रबंधित करने के लिए पहले साइन इन करें।",
+      "status": "machine"
+    },
+    "settings.devices.this_device": {
+      "text": "यह डिवाइस",
+      "status": "machine"
+    },
+    "settings.devices.this_device.sub": {
+      "text": "वह डिवाइस जिसे आप अभी इस्तेमाल कर रहे हैं।",
+      "status": "machine"
+    },
+    "settings.devices.title": {
+      "text": "डिवाइस",
       "status": "machine"
     },
     "settings.language.load_failed": {
@@ -1166,6 +1630,266 @@
       "text": "भाषा",
       "status": "machine"
     },
+    "settings.me.guest": {
+      "text": "मेहमान",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.sub": {
+      "text": "आने वाले वीडियो नोट स्क्रीन पर आते ही बिना आवाज़ के चलने लगते हैं। डिफ़ॉल्ट रूप से बंद है, क्योंकि ऑटोप्ले मीडिया डाउनलोड करता है।",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.title": {
+      "text": "वीडियो नोट ऑटोप्ले करें",
+      "status": "machine"
+    },
+    "settings.media.lede": {
+      "text": "इस डिवाइस पर प्लेबैक।",
+      "status": "machine"
+    },
+    "settings.notifications.off.body": {
+      "text": "नोटिफ़िकेशन बंद हैं, इसलिए Lakko सिर्फ़ खुला होने पर ही रिंग कर सकता है। इन्हें चालू करें ताकि ऐप बंद होने पर भी कॉल और मैसेज आप तक पहुँचें।",
+      "status": "machine"
+    },
+    "settings.notifications.off.title": {
+      "text": "नोटिफ़िकेशन चालू करें",
+      "status": "machine"
+    },
+    "settings.passkeys.add": {
+      "text": "पासकी जोड़ें",
+      "status": "machine"
+    },
+    "settings.passkeys.added": {
+      "text": "पासकी \"{name}\" जोड़ी गई।",
+      "status": "machine"
+    },
+    "settings.passkeys.added_last_used": {
+      "text": "जोड़ी गई {added} · आखिरी इस्तेमाल {used}",
+      "status": "machine"
+    },
+    "settings.passkeys.added_never_used": {
+      "text": "जोड़ी गई {added} · कभी इस्तेमाल नहीं हुई",
+      "status": "machine"
+    },
+    "settings.passkeys.empty": {
+      "text": "अभी कोई पासकी नहीं है।",
+      "status": "machine"
+    },
+    "settings.passkeys.error.cancelled": {
+      "text": "रद्द किया गया। कोई पासकी नहीं बनी।",
+      "status": "machine"
+    },
+    "settings.passkeys.error.generic": {
+      "text": "आपकी पासकी अपडेट नहीं हो सकीं। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.passkeys.error.name_required": {
+      "text": "पासकी को एक नाम दें।",
+      "status": "machine"
+    },
+    "settings.passkeys.error.network": {
+      "text": "नेटवर्क की गड़बड़ी। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.passkeys.error.server_status": {
+      "text": "सर्वर की गड़बड़ी ({status})।",
+      "status": "machine"
+    },
+    "settings.passkeys.error.unsupported": {
+      "text": "यह ब्राउज़र / डिवाइस अभी पासकी नहीं बना सकता।",
+      "status": "machine"
+    },
+    "settings.passkeys.lede": {
+      "text": "पासवर्ड की जगह Touch ID, Face ID या सिक्योरिटी की से साइन इन करें। आपका रिकवरी फ़्रेज़ भी हमेशा काम करता है।",
+      "status": "machine"
+    },
+    "settings.passkeys.lede_device": {
+      "text": "पासवर्ड की जगह अपने फ़िंगरप्रिंट, चेहरे या स्क्रीन लॉक से, या सिक्योरिटी की से साइन इन करें। आपका रिकवरी फ़्रेज़ भी हमेशा काम करता है।",
+      "status": "machine"
+    },
+    "settings.passkeys.name.label": {
+      "text": "पासकी का नाम",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder": {
+      "text": "इस पासकी को नाम दें (जैसे MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.body": {
+      "text": "जिस डिवाइस के पास इससे मेल खाने वाली निजी कुंजी है, वह अब इससे साइन इन नहीं कर पाएगा। इसे पहले जैसा नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm": {
+      "text": "हटाएँ",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm_named": {
+      "text": "{name} हटाएँ",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.error.cancelled": {
+      "text": "रद्द किया गया। पासकी नहीं हटाई गई।",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.title": {
+      "text": "यह पासकी हटाएँ?",
+      "status": "machine"
+    },
+    "settings.passkeys.removed": {
+      "text": "\"{name}\" हटाई गई।",
+      "status": "machine"
+    },
+    "settings.passkeys.title": {
+      "text": "पासकी",
+      "status": "machine"
+    },
+    "settings.passkeys.unnamed": {
+      "text": "बिना नाम की पासकी",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_browser": {
+      "text": "यह ब्राउज़र पासकी प्रबंधित नहीं कर सकता। Safari, Chrome, Firefox या Edge का नया वर्शन इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "settings.profile.error.generic": {
+      "text": "आपका नाम सेव नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.profile.lede": {
+      "text": "आप अपने संपर्कों को कैसे दिखते हैं।",
+      "status": "machine"
+    },
+    "settings.profile.name.hint": {
+      "text": "यह उन लोगों को दिखता है जिनसे आप बात करते हैं। यूनीक होना ज़रूरी नहीं, ज़्यादा से ज़्यादा {count, plural, one {# अक्षर} other {# अक्षर}}।",
+      "status": "machine"
+    },
+    "settings.profile.name.label": {
+      "text": "आपका नाम",
+      "status": "machine"
+    },
+    "settings.profile.preview.label": {
+      "text": "दूसरे आपको कैसे देखते हैं",
+      "status": "machine"
+    },
+    "settings.profile.preview.no_name": {
+      "text": "जब तक आप नाम सेट नहीं करते, दूसरे आपकी कुंजी का फ़िंगरप्रिंट देखते हैं।",
+      "status": "machine"
+    },
+    "settings.profile.saved": {
+      "text": "आपके संपर्कों के लिए आपका नाम अपडेट हो जाएगा।",
+      "status": "machine"
+    },
+    "settings.profile.username.none": {
+      "text": "कोई नहीं",
+      "status": "machine"
+    },
+    "settings.recovery.contact.already_enabled": {
+      "text": "इस खाते के लिए पहले से एक ईमेल या फ़ोन सेट है। उसे बदलने के लिए, पहले अपने रिकवरी फ़्रेज़ से या दूसरे डिवाइस से फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "settings.recovery.contact.done": {
+      "text": "हो गया। वहाँ भेजा गया कोड अब आपको अपने खाते में वापस ला सकता है।",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.bad_contact": {
+      "text": "यह सही नहीं लग रहा। जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.generic": {
+      "text": "ईमेल या फ़ोन सेट अप नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.recovery.contact.lede": {
+      "text": "पासवर्ड खो जाने पर आपके ईमेल या फ़ोन पर भेजा गया एक बार का कोड आपको फिर से साइन इन करने देता है।",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_email": {
+      "text": "हमने {contact} पर ईमेल से छह अंकों का कोड भेजा है। उसे नीचे डालें।",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_phone": {
+      "text": "हमने {contact} पर SMS से छह अंकों का कोड भेजा है। उसे नीचे डालें।",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sub": {
+      "text": "आपके ईमेल या फ़ोन पर भेजा गया एक बार का कोड।",
+      "status": "machine"
+    },
+    "settings.recovery.contact.unavailable": {
+      "text": "ईमेल और फ़ोन से रिकवरी अभी उपलब्ध नहीं है।",
+      "status": "machine"
+    },
+    "settings.recovery.lede": {
+      "text": "आपका रिकवरी फ़्रेज़ सब कुछ वापस ला देता है। पासवर्ड खो जाने पर ये आपको खाते में वापस लाते हैं; आपके मैसेज फिर फ़्रेज़ से या आपके किसी दूसरे डिवाइस से आते हैं।",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.not_saved_here": {
+      "text": "इस डिवाइस पर सेव नहीं है। अपनी लिखी हुई कॉपी सुरक्षित रखें।",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.saved_here": {
+      "text": "इस डिवाइस पर सेव है।",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.sub": {
+      "text": "साइन अप के समय लिखे गए 24 शब्द नए डिवाइस पर आपकी पहचान, संपर्क और मैसेज वापस ले आते हैं।",
+      "status": "machine"
+    },
+    "settings.recovery.section.access": {
+      "text": "एक्सेस",
+      "status": "machine"
+    },
+    "settings.recovery.section.identity": {
+      "text": "पहचान",
+      "status": "machine"
+    },
+    "settings.recovery.sign_in_first": {
+      "text": "रिकवरी प्रबंधित करने के लिए पहले साइन इन करें।",
+      "status": "machine"
+    },
+    "settings.recovery.title": {
+      "text": "रिकवरी",
+      "status": "machine"
+    },
+    "settings.recovery.totp.already_enabled": {
+      "text": "इस खाते के लिए पहले से एक ऑथेंटिकेटर सेट अप है। उसे बदलने के लिए, पहले अपने रिकवरी फ़्रेज़ से या दूसरे डिवाइस से फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "settings.recovery.totp.done": {
+      "text": "ऑथेंटिकेटर सेट अप हो गया। ऐप का कोड अब आपको अपने खाते में वापस ला सकता है।",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.generic": {
+      "text": "ऑथेंटिकेटर सेट अप नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.wrong": {
+      "text": "यह कोड काम नहीं आया। ऐप में अगले कोड का इंतज़ार करें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.recovery.totp.key": {
+      "text": "कुंजी: {key}",
+      "status": "machine"
+    },
+    "settings.recovery.totp.lede": {
+      "text": "पासवर्ड खो जाने पर ऑथेंटिकेटर ऐप का छह अंकों का कोड आपको फिर से साइन इन करने देता है।",
+      "status": "machine"
+    },
+    "settings.recovery.totp.scan": {
+      "text": "इस कोड को अपने ऑथेंटिकेटर ऐप से स्कैन करें, या कुंजी हाथ से टाइप करें, फिर ऐप में दिखने वाला छह अंकों का कोड डालें।",
+      "status": "machine"
+    },
+    "settings.recovery.totp.set_up": {
+      "text": "ऑथेंटिकेटर सेट अप करें",
+      "status": "machine"
+    },
+    "settings.recovery.totp.title": {
+      "text": "ऑथेंटिकेटर ऐप",
+      "status": "machine"
+    },
+    "settings.recovery.totp.unavailable": {
+      "text": "ऑथेंटिकेटर सेट अप अभी उपलब्ध नहीं है।",
+      "status": "machine"
+    },
     "settings.section.about": {
       "text": "जानकारी",
       "status": "machine"
@@ -1178,12 +1902,20 @@
       "text": "रूप-रंग",
       "status": "machine"
     },
+    "settings.section.danger_zone": {
+      "text": "जोखिम वाला क्षेत्र",
+      "status": "machine"
+    },
     "settings.section.data": {
       "text": "डेटा",
       "status": "machine"
     },
     "settings.section.media": {
       "text": "मीडिया",
+      "status": "machine"
+    },
+    "settings.section.network": {
+      "text": "नेटवर्क",
       "status": "machine"
     },
     "settings.section.notifications": {
@@ -1196,6 +1928,30 @@
     },
     "settings.section.security": {
       "text": "सुरक्षा",
+      "status": "machine"
+    },
+    "settings.security.devices.sub": {
+      "text": "इस खाते के डिवाइस देखें, जोड़ें और हटाएँ।",
+      "status": "machine"
+    },
+    "settings.security.devices_and_recovery": {
+      "text": "डिवाइस और रिकवरी",
+      "status": "machine"
+    },
+    "settings.security.lede": {
+      "text": "आप कैसे साइन इन करते हैं, कौन-से डिवाइस आपके मैसेज पढ़ सकते हैं, और आप वापस कैसे आते हैं।",
+      "status": "machine"
+    },
+    "settings.security.recovery.sub": {
+      "text": "ऑथेंटिकेटर ऐप, ईमेल पता या फ़ोन नंबर जो आपको वापस लाता है।",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.sub": {
+      "text": "हर संपर्क का एक सुरक्षा नंबर होता है। इसे आमने-सामने या कॉल पर मिलाएँ; नंबर मेल खाते हैं तो बीच में कोई नहीं है। यह संपर्क की जानकारी में मिलता है।",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.title": {
+      "text": "सुरक्षा नंबर",
       "status": "machine"
     },
     "username.a11y_hint": {

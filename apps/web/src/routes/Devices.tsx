@@ -48,10 +48,38 @@ import {
   removeDeviceAt,
   type DeviceListItem,
 } from "../devices/remove";
-import { PAIRING_NEEDS_USERNAME, ownPairingHandle } from "../devices/pairing";
+import { ownPairingHandle } from "../devices/pairing";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 import { paths } from "./paths";
+import { t } from "../l10n";
+import { screenText } from "../auth/auth-error-copy";
+
+/**
+ * The text a failure shows (ADR-0058 section 6): a sentence written for a
+ * screen (a keyed error, a pairing sentence) in the current language,
+ * otherwise the flow's generic key. The diagnostic goes to the log. Returned
+ * as a function so it renders in the language current when it is shown.
+ */
+function failureText(err: unknown, genericKey: string): () => string {
+  console.warn("[devices] failed", err);
+  return () => screenText(err) ?? t(genericKey);
+}
+
+const noDeviceKey = (): string => t("settings.devices.error.no_device_key");
+
+/** The camera error, by the `getUserMedia` failure name. */
+function cameraFailure(err: unknown): () => string {
+  console.warn("[devices] camera failed", err);
+  const name = err instanceof DOMException ? err.name : "";
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return () => t("devices.scan.error.camera_denied");
+  }
+  if (name === "NotFoundError" || name === "OverconstrainedError") {
+    return () => t("devices.scan.error.no_camera");
+  }
+  return () => t("devices.scan.error.camera_failed");
+}
 
 type AddMode = "closed" | "pick" | "show" | "scan";
 
@@ -83,18 +111,15 @@ export default function Devices(): JSX.Element {
       <div class="lk-page lk-stack">
         <A href={paths.settingsSection("security")} class="ghost small" style={{ "align-self": "flex-start" }}>
           <Icon name="back" size={16} />
-          Security
+          {t("settings.section.security")}
         </A>
         <div class="lk-page-head">
-          <h1>Devices</h1>
-          <p>
-            The phones, tablets and computers signed in to your account. Adding one is
-            end-to-end encrypted; Lakko's servers cannot read it.
-          </p>
+          <h1>{t("settings.devices.title")}</h1>
+          <p>{t("settings.devices.lede")}</p>
         </div>
         <Show
           when={session() !== null}
-          fallback={<p class="form-error">Sign in first to manage devices.</p>}
+          fallback={<p class="form-error">{t("settings.devices.sign_in_first")}</p>}
         >
           <section class="lk-card">
             <DevicesListView
@@ -110,37 +135,36 @@ export default function Devices(): JSX.Element {
                 onClick={() => setAdd(add() === "closed" ? "pick" : "closed")}
               >
                 <Icon name="plus" size={18} />
-                Add a device
+                {t("devices.add.title")}
               </button>
             </div>
             <Show when={!hasUsername()}>
-              <p class="lk-meta" style={{ margin: 0 }}>{PAIRING_NEEDS_USERNAME}</p>
+              <p class="lk-meta" style={{ margin: 0 }}>{t("device_link.pairing.needs_username")}</p>
             </Show>
           </section>
           <Show when={add() !== "closed" && hasUsername()}>
-            <section class="lk-card" aria-label="Add a device">
+            <section class="lk-card" aria-label={t("devices.add.title")}>
               <Switch>
                 <Match when={add() === "pick"}>
-                  <h2>Add a device</h2>
-                  <p class="lk-card-desc">
-                    Sign in to Lakko on the new device first. Then pick which of the two
-                    is showing a code.
-                  </p>
+                  <h2>{t("devices.add.title")}</h2>
+                  <p class="lk-card-desc">{t("settings.devices.add.lede")}</p>
                   <div class="lk-device-add">
                     <button type="button" class="lk-option-card" onClick={() => setAdd("scan")}>
                       <Icon name="qr" size={22} />
-                      <strong>Scan a code</strong>
-                      <span>The new device shows a code; scan it with this one.</span>
+                      <strong>{t("devices.add.side.scan")}</strong>
+                      <span>{t("devices.add.side.scan_detail")}</span>
                     </button>
                     <button type="button" class="lk-option-card" onClick={() => setAdd("show")}>
                       <Icon name="devices" size={22} />
-                      <strong>Show a code</strong>
-                      <span>This device is the new one; another device scans its code.</span>
+                      <strong>{t("devices.add.side.show")}</strong>
+                      <span>{t("devices.add.side.show_detail")}</span>
                     </button>
                   </div>
                   <p class="lk-meta" style={{ margin: 0 }}>
-                    No camera on either device? Sign in on the new one and choose "Another
-                    device": an "Is this you?" prompt with a code to compare appears here.
+                    {t("settings.devices.add.no_camera", {
+                      method: t("recovery.method.device.title"),
+                      prompt: t("device_link.request.title"),
+                    })}
                   </p>
                 </Match>
                 <Match when={add() === "show"}>
@@ -175,7 +199,7 @@ export default function Devices(): JSX.Element {
  * Never a key prefix or an internal index (docs/ux section 6).
  */
 export function deviceRowLabel(index: number, isSelf: boolean): string {
-  return isSelf ? "This device" : `Device ${index + 1}`;
+  return isSelf ? t("settings.devices.this_device") : t("settings.devices.device_n", { number: index + 1 });
 }
 
 // ---- Your devices (list + remove) -------------------------------
@@ -193,7 +217,7 @@ function DevicesListView(props: {
     | { kind: "loading" }
     | { kind: "ready"; devices: readonly DeviceListItem[] }
     | { kind: "removing"; leafIndex: number; devices: readonly DeviceListItem[] }
-    | { kind: "error"; message: string };
+    | { kind: "error"; message: () => string };
   const [state, setState] = createSignal<State>({ kind: "loading" });
 
   async function load(): Promise<void> {
@@ -201,10 +225,7 @@ function DevicesListView(props: {
     try {
       const deviceKey = await getDeviceKey(props.accountIdB64);
       if (deviceKey === null) {
-        setState({
-          kind: "error",
-          message: "This browser is not set up for your account. Sign in again.",
-        });
+        setState({ kind: "error", message: noDeviceKey });
         return;
       }
       const list = await listDevices({
@@ -214,10 +235,7 @@ function DevicesListView(props: {
       });
       setState({ kind: "ready", devices: list.devices });
     } catch (err) {
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setState({ kind: "error", message: failureText(err, "settings.devices.error.load") });
     }
   }
 
@@ -231,10 +249,7 @@ function DevicesListView(props: {
     try {
       const deviceKey = await getDeviceKey(props.accountIdB64);
       if (deviceKey === null) {
-        setState({
-          kind: "error",
-          message: "This browser is not set up for your account. Sign in again.",
-        });
+        setState({ kind: "error", message: noDeviceKey });
         return;
       }
 
@@ -287,10 +302,7 @@ function DevicesListView(props: {
       // Re-fetch — the new epoch has its own leaf numbering.
       await load();
     } catch (err) {
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setState({ kind: "error", message: failureText(err, "settings.devices.error.remove") });
     }
   }
 
@@ -300,14 +312,11 @@ function DevicesListView(props: {
 
   return (
     <div class="lk-stack" style={{ gap: "8px" }}>
-      <h2>Your devices</h2>
-      <p class="lk-card-desc">
-        A removed device loses access to your messages from that moment on. Removing one may
-        ask for your passkey.
-      </p>
+      <h2>{t("settings.devices.list.title")}</h2>
+      <p class="lk-card-desc">{t("settings.devices.list.lede")}</p>
       <Switch>
         <Match when={state().kind === "loading"}>
-          <p class="lk-muted">Loading...</p>
+          <p class="lk-muted">{t("common.loading")}</p>
         </Match>
         <Match when={state().kind === "ready" || state().kind === "removing"}>
           {(_) => {
@@ -317,7 +326,7 @@ function DevicesListView(props: {
             const removingLeaf =
               s.kind === "removing" ? s.leafIndex : null;
             return (
-              <ul class="lk-list tight" aria-label="Devices">
+              <ul class="lk-list tight" aria-label={t("settings.devices.title")}>
                 <For each={devices}>
                   {(device, i) => (
                     <li class="lk-card-row">
@@ -329,7 +338,7 @@ function DevicesListView(props: {
                           {deviceRowLabel(i(), device.isSelf)}
                         </span>
                         <Show when={device.isSelf}>
-                          <span class="lk-card-row-sub">The device you are using now.</span>
+                          <span class="lk-card-row-sub">{t("settings.devices.this_device.sub")}</span>
                         </Show>
                       </div>
                       <Show when={!device.isSelf} fallback={<span />}>
@@ -340,7 +349,7 @@ function DevicesListView(props: {
                           disabled={removingLeaf !== null}
                           onClick={() => void remove(device.leafIndex)}
                         >
-                          {removingLeaf === device.leafIndex ? "Removing..." : "Remove"}
+                          {removingLeaf === device.leafIndex ? t("common.removing") : t("common.remove")}
                         </button>
                       </Show>
                     </li>
@@ -353,12 +362,12 @@ function DevicesListView(props: {
         <Match when={state().kind === "error"}>
           {(_) => {
             const s = state();
-            const message = s.kind === "error" ? s.message : "Something went wrong.";
+            const message = s.kind === "error" ? s.message() : "";
             return (
               <div>
                 <p class="form-error">{message}</p>
                 <button type="button" onClick={() => void load()}>
-                  Try again
+                  {t("common.try_again")}
                 </button>
               </div>
             );
@@ -383,7 +392,7 @@ function PairView(props: {
     | { kind: "waiting"; session: JoinSession; abort: AbortController }
     | { kind: "joining" }
     | { kind: "done" }
-    | { kind: "error"; message: string };
+    | { kind: "error"; message: () => string };
   const [state, setState] = createSignal<State>({ kind: "idle" });
   const [canvasRef, setCanvasRef] = createSignal<HTMLCanvasElement | null>(null);
 
@@ -392,10 +401,7 @@ function PairView(props: {
     try {
       const deviceKey = await getDeviceKey(props.accountIdB64);
       if (deviceKey === null) {
-        setState({
-          kind: "error",
-          message: "This browser is not set up for your account. Sign in again.",
-        });
+        setState({ kind: "error", message: noDeviceKey });
         return;
       }
       const sess = await prepareJoinFlow({
@@ -436,10 +442,7 @@ function PairView(props: {
             setState({ kind: "done" });
           } else if (outcome.kind === "timeout") {
             sess.dispose();
-            setState({
-              kind: "error",
-              message: "The other device did not scan in time. Try again.",
-            });
+            setState({ kind: "error", message: () => t("settings.devices.show.error.timeout") });
           } else {
             // cancelled — silent (user closed the form).
             sess.dispose();
@@ -449,15 +452,12 @@ function PairView(props: {
           sess.dispose();
           setState({
             kind: "error",
-            message: err instanceof Error ? err.message : String(err),
+            message: failureText(err, "devices.add.error.generic"),
           });
         }
       })();
     } catch (err) {
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setState({ kind: "error", message: failureText(err, "devices.add.error.generic") });
     }
   }
 
@@ -479,43 +479,40 @@ function PairView(props: {
     <div class="lk-stack" style={{ gap: "10px" }}>
       <button type="button" class="ghost small" style={{ "align-self": "flex-start" }} onClick={props.onBack}>
         <Icon name="back" size={16} />
-        Add a device
+        {t("devices.add.title")}
       </button>
-      <h2>Show a code</h2>
-      <p class="lk-card-desc">
-        Scan this code with a device that is already signed in. Once it confirms, this
-        device joins your account.
-      </p>
+      <h2>{t("devices.add.side.show")}</h2>
+      <p class="lk-card-desc">{t("settings.devices.show.lede")}</p>
       <Switch>
         <Match when={state().kind === "idle"}>
           <div class="lk-actions">
             <button class="primary" type="button" onClick={() => void start()}>
-              Show the code
+              {t("settings.devices.show.start")}
             </button>
           </div>
         </Match>
         <Match when={state().kind === "preparing"}>
-          <p class="lk-muted">Preparing...</p>
+          <p class="lk-muted">{t("common.preparing")}</p>
         </Match>
         <Match when={state().kind === "waiting"}>
           <div class="lk-center">
             <canvas class="lk-qr" ref={(el) => setCanvasRef(el)} />
-            <p class="lk-muted">Waiting for the other device to scan this code...</p>
+            <p class="lk-muted">{t("device_link.qr.waiting")}</p>
             <button type="button" onClick={cancel}>
-              Cancel
+              {t("common.cancel")}
             </button>
           </div>
         </Match>
         <Match when={state().kind === "joining"}>
-          <p class="lk-muted">Joining your account...</p>
+          <p class="lk-muted">{t("devices.add.joining")}</p>
         </Match>
         <Match when={state().kind === "done"}>
-          <p class="form-info">Done. This device is now on your account.</p>
+          <p class="form-info">{t("devices.add.linked")}</p>
         </Match>
         <Match when={state().kind === "error"}>
           {(_) => {
             const s = state();
-            const message = s.kind === "error" ? s.message : "Something went wrong.";
+            const message = s.kind === "error" ? s.message() : "";
             return (
               <div>
                 <p class="form-error">{message}</p>
@@ -523,7 +520,7 @@ function PairView(props: {
                   type="button"
                   onClick={() => setState({ kind: "idle" })}
                 >
-                  Try again
+                  {t("common.try_again")}
                 </button>
               </div>
             );
@@ -559,7 +556,7 @@ function ScanView(props: {
     | { kind: "confirm"; scannedBytes: Uint8Array }
     | { kind: "processing" }
     | { kind: "done" }
-    | { kind: "error"; message: string };
+    | { kind: "error"; message: () => string };
   const [state, setState] = createSignal<State>({ kind: "idle" });
   const [videoRef, setVideoRef] = createSignal<HTMLVideoElement | null>(null);
   let stream: MediaStream | null = null;
@@ -588,10 +585,7 @@ function ScanView(props: {
     try {
       const deviceKey = await getDeviceKey(props.accountIdB64);
       if (deviceKey === null) {
-        setState({
-          kind: "error",
-          message: "This browser is not set up for your account. Sign in again.",
-        });
+        setState({ kind: "error", message: noDeviceKey });
         return;
       }
       // ADR-0018 factor (a): pass the recovery half when the live
@@ -627,10 +621,7 @@ function ScanView(props: {
       });
       setState({ kind: "done" });
     } catch (err) {
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setState({ kind: "error", message: failureText(err, "settings.devices.error.scan") });
     }
   }
 
@@ -644,19 +635,14 @@ function ScanView(props: {
     } catch (err) {
       setState({
         kind: "error",
-        message:
-          "The camera is not available. " +
-          (err instanceof Error ? err.message : String(err)),
+        message: cameraFailure(err),
       });
       return;
     }
     const video = videoRef();
     if (video === null) {
       stopCamera();
-      setState({
-        kind: "error",
-        message: "The camera view could not be opened.",
-      });
+      setState({ kind: "error", message: () => t("devices.scan.error.camera_failed") });
       return;
     }
     video.srcObject = stream;
@@ -666,10 +652,7 @@ function ScanView(props: {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (ctx === null) {
-      setState({
-        kind: "error",
-        message: "The camera view could not be opened.",
-      });
+      setState({ kind: "error", message: () => t("devices.scan.error.camera_failed") });
       return;
     }
     const loop = (): void => {
@@ -710,28 +693,26 @@ function ScanView(props: {
     <div class="lk-stack" style={{ gap: "10px" }}>
       <button type="button" class="ghost small" style={{ "align-self": "flex-start" }} onClick={props.onBack}>
         <Icon name="back" size={16} />
-        Add a device
+        {t("devices.add.title")}
       </button>
-      <h2>Scan a code</h2>
-      <p class="lk-card-desc">
-        Point the camera at the code your new device is showing.
-      </p>
+      <h2>{t("devices.add.side.scan")}</h2>
+      <p class="lk-card-desc">{t("devices.scan.intro")}</p>
       <Switch>
         <Match when={state().kind === "idle"}>
           <div class="lk-actions">
             <button class="primary" type="button" onClick={() => void start()}>
-              Open camera
+              {t("devices.scan.open_camera")}
             </button>
           </div>
         </Match>
         <Match when={state().kind === "opening"}>
-          <p class="lk-muted">Opening the camera...</p>
+          <p class="lk-muted">{t("settings.devices.scan.opening")}</p>
         </Match>
         <Match when={state().kind === "scanning"}>
           <div class="lk-center">
             <video class="lk-camera" ref={(el) => setVideoRef(el)} playsinline muted />
             <button type="button" onClick={reset}>
-              Cancel
+              {t("common.cancel")}
             </button>
           </div>
         </Match>
@@ -742,12 +723,9 @@ function ScanView(props: {
             return (
               <div>
                 <p>
-                  <strong>Add this device?</strong>
+                  <strong>{t("devices.scan.confirm.title")}</strong>
                 </p>
-                <p>
-                  It gets full access to your account: your messages, your contacts and
-                  your identity. Continue only if the code is on your own new device.
-                </p>
+                <p>{t("devices.scan.confirm.body")}</p>
                 <div class="lk-actions">
                   <button
                     class="primary"
@@ -756,10 +734,10 @@ function ScanView(props: {
                       if (scanned !== null) void handleDecoded(scanned);
                     }}
                   >
-                    Add device
+                    {t("devices.scan.confirm.submit")}
                   </button>
                   <button type="button" onClick={reset}>
-                    Cancel
+                    {t("common.cancel")}
                   </button>
                 </div>
               </div>
@@ -767,22 +745,20 @@ function ScanView(props: {
           }}
         </Match>
         <Match when={state().kind === "processing"}>
-          <p class="lk-muted">Adding the device...</p>
+          <p class="lk-muted">{t("device_link.request.adding")}</p>
         </Match>
         <Match when={state().kind === "done"}>
-          <p class="form-info">
-            Device added. It will appear in the list once it has finished joining.
-          </p>
+          <p class="form-info">{t("settings.devices.scan.done")}</p>
         </Match>
         <Match when={state().kind === "error"}>
           {(_) => {
             const s = state();
-            const message = s.kind === "error" ? s.message : "Something went wrong.";
+            const message = s.kind === "error" ? s.message() : "";
             return (
               <div>
                 <p class="form-error">{message}</p>
                 <button type="button" onClick={reset}>
-                  Try again
+                  {t("common.try_again")}
                 </button>
               </div>
             );

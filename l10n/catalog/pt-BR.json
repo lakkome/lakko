@@ -202,12 +202,124 @@
       "text": "Nome de usuário",
       "status": "machine"
     },
+    "backup.rollback_refused.body": {
+      "text": "O servidor devolveu um backup alterado ou desatualizado. Sua conta está segura; continuamos sem restaurar os dados antigos.",
+      "status": "machine"
+    },
+    "backup.rollback_refused.title": {
+      "text": "Não foi possível restaurar o backup com segurança",
+      "status": "machine"
+    },
+    "backup.stale_restore.body": {
+      "text": "Este backup é mais antigo do que o esperado ({reason}). {consequence}",
+      "status": "machine"
+    },
+    "backup.stale_restore.confirm": {
+      "text": "Restaurar mesmo assim",
+      "status": "machine"
+    },
+    "backup.stale_restore.consequence": {
+      "text": "Restaurá-lo vai voltar sua conta a um estado anterior: mensagens mais antigas, e os dispositivos que você removeu podem reaparecer.",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.anchor_unreadable": {
+      "text": "o registro deste dispositivo sobre seu último backup está ilegível ou foi adulterado",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.below_floor": {
+      "text": "é mais antigo que o último backup restaurado neste dispositivo",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.head_stripped": {
+      "text": "a assinatura foi removida e ele é diferente do último backup que este dispositivo conhecia",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.too_old": {
+      "text": "foi assinado há mais tempo do que um backup atual seria",
+      "status": "machine"
+    },
+    "backup.stale_restore.title": {
+      "text": "Restaurar este backup mais antigo?",
+      "status": "machine"
+    },
+    "call.guest.default_name": {
+      "text": "Convidado",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "Colocando você na chamada...",
       "status": "machine"
     },
+    "call.link.connecting": {
+      "text": "Conectando...",
+      "status": "machine"
+    },
+    "call.link.dead": {
+      "text": "Esta chamada terminou ou não está ativa.",
+      "status": "machine"
+    },
+    "call.link.end_current": {
+      "text": "Encerrar a chamada atual",
+      "status": "machine"
+    },
+    "call.link.ended": {
+      "text": "A chamada terminou.",
+      "status": "machine"
+    },
+    "call.link.error.generic": {
+      "text": "A chamada falhou.",
+      "status": "machine"
+    },
+    "call.link.failed": {
+      "text": "Falha: {reason}",
+      "status": "machine"
+    },
+    "call.link.host": {
+      "text": "Anfitrião: {name}",
+      "status": "machine"
+    },
+    "call.link.invalid": {
+      "text": "Este link de chamada é inválido ou expirou.",
+      "status": "machine"
+    },
+    "call.link.join": {
+      "text": "Entrar na chamada",
+      "status": "machine"
+    },
+    "call.link.live": {
+      "text": "Você está nesta chamada.",
+      "status": "machine"
+    },
+    "call.link.loading": {
+      "text": "Carregando o link da chamada...",
+      "status": "machine"
+    },
+    "call.link.start": {
+      "text": "Iniciar chamada",
+      "status": "machine"
+    },
+    "call.link.title_join": {
+      "text": "Entrar em uma chamada",
+      "status": "machine"
+    },
+    "call.link.title_start": {
+      "text": "Inicie sua chamada",
+      "status": "machine"
+    },
+    "call.link.waiting": {
+      "text": "Aguardando o anfitrião permitir sua entrada...",
+      "status": "machine"
+    },
+    "call.link.waiting_hint": {
+      "text": "Você pode sair desta tela; você vai entrar assim que sua entrada for liberada.",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "Selecione uma conversa para começar",
+      "status": "machine"
+    },
+    "common.adding": {
+      "text": "Adicionando...",
       "status": "machine"
     },
     "common.back": {
@@ -226,8 +338,20 @@
       "text": "Fechar",
       "status": "machine"
     },
+    "common.collapse": {
+      "text": "Recolher",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "Confirmar",
+      "status": "machine"
+    },
+    "common.confirming": {
+      "text": "Confirmando...",
+      "status": "machine"
+    },
+    "common.connecting": {
+      "text": "Conectando...",
       "status": "machine"
     },
     "common.continue": {
@@ -262,8 +386,24 @@
       "text": "Não foi possível conectar ao Lakko. Verifique sua conexão e tente novamente.",
       "status": "machine"
     },
+    "common.error.qr_render": {
+      "text": "Não foi possível exibir o código. Tente novamente.",
+      "status": "machine"
+    },
     "common.error.server_unreachable": {
       "text": "Não foi possível conectar ao servidor. Verifique sua conexão.",
+      "status": "machine"
+    },
+    "common.error.session_ended": {
+      "text": "Sua sessão terminou. Entre novamente.",
+      "status": "machine"
+    },
+    "common.error.session_expired": {
+      "text": "Sessão expirada. Entre novamente.",
+      "status": "machine"
+    },
+    "common.error.session_not_ready": {
+      "text": "A sessão ainda não está pronta.",
       "status": "machine"
     },
     "common.error.too_many_attempts": {
@@ -278,6 +418,10 @@
       "text": "Isso não está disponível no momento. Tente novamente mais tarde.",
       "status": "machine"
     },
+    "common.expand": {
+      "text": "Expandir",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "Carregando...",
       "status": "machine"
@@ -286,8 +430,24 @@
       "text": "Procurando...",
       "status": "machine"
     },
+    "common.manage": {
+      "text": "Gerenciar",
+      "status": "machine"
+    },
     "common.more_options": {
       "text": "Mais opções",
+      "status": "machine"
+    },
+    "common.off": {
+      "text": "Desativado",
+      "status": "machine"
+    },
+    "common.on": {
+      "text": "Ativado",
+      "status": "machine"
+    },
+    "common.open_lakko": {
+      "text": "Abrir o Lakko",
       "status": "machine"
     },
     "common.optional": {
@@ -306,12 +466,36 @@
       "text": "Preparando...",
       "status": "machine"
     },
+    "common.remove": {
+      "text": "Remover",
+      "status": "machine"
+    },
+    "common.removing": {
+      "text": "Removendo...",
+      "status": "machine"
+    },
+    "common.save": {
+      "text": "Salvar",
+      "status": "machine"
+    },
+    "common.saving": {
+      "text": "Salvando...",
+      "status": "machine"
+    },
     "common.sending": {
       "text": "Enviando...",
       "status": "machine"
     },
+    "common.set_up": {
+      "text": "Configurar",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "Tentar novamente",
+      "status": "machine"
+    },
+    "common.unknown": {
+      "text": "desconhecido",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -1122,8 +1306,168 @@
       "text": "A chave de segurança da sua conta foi alterada.",
       "status": "machine"
     },
+    "settings.about.lede_web": {
+      "text": "Lakko na web.",
+      "status": "machine"
+    },
+    "settings.about.licence": {
+      "text": "Licença",
+      "status": "machine"
+    },
+    "settings.about.licence_body": {
+      "text": "{licence}. O código-fonte pode ser lido, usado e melhorado livremente.",
+      "status": "machine"
+    },
+    "settings.about.protection.body": {
+      "text": "Mensagens, chamadas e solicitações de contato têm criptografia de ponta a ponta: só as pessoas da conversa podem lê-las, nunca os servidores do Lakko. Sua senha nunca sai do seu dispositivo, e cada contato tem um número de segurança que você pode comparar pessoalmente.",
+      "status": "machine"
+    },
+    "settings.about.protection.title": {
+      "text": "Como o Lakko protege você",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Traduções atualizadas em {date}",
+      "status": "machine"
+    },
+    "settings.about.version": {
+      "text": "Versão",
+      "status": "machine"
+    },
+    "settings.account.danger_zone.footer": {
+      "text": "Sair mantém seus dados neste dispositivo. Esquecer este dispositivo os remove; você só consegue voltar com sua frase de recuperação ou outro dispositivo conectado. Excluir conta apaga a conta no servidor e limpa este dispositivo; não é possível desfazer.",
+      "status": "machine"
+    },
+    "settings.account.delete.body": {
+      "text": "Isso apaga sua identidade no servidor — nome de usuário, chaves, fatores de recuperação e backup — e encerra sua sessão em todos os lugares. Suas mensagens locais também são apagadas deste dispositivo. Não é possível desfazer.",
+      "status": "machine"
+    },
+    "settings.account.delete.confirm": {
+      "text": "Excluir conta",
+      "status": "machine"
+    },
+    "settings.account.delete.error.cancelled": {
+      "text": "Cancelado. Sua conta não foi excluída.",
+      "status": "machine"
+    },
+    "settings.account.delete.error.generic": {
+      "text": "Não foi possível excluir sua conta. Tente novamente.",
+      "status": "machine"
+    },
+    "settings.account.delete.sub": {
+      "text": "Apaga permanentemente sua conta e tudo o que há nela, e limpa este dispositivo. Não é possível desfazer.",
+      "status": "machine"
+    },
+    "settings.account.delete.title": {
+      "text": "Excluir sua conta?",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body": {
+      "text": "Você vai perder a conta salva neste navegador. A única forma de voltar é a frase de recuperação de 24 palavras que você anotou no cadastro.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body_device": {
+      "text": "Tudo neste dispositivo é removido e o dispositivo sai da sua conta. Você vai precisar da sua frase de recuperação ou de outro dispositivo conectado para usar esta conta aqui novamente.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.confirm": {
+      "text": "Esquecer dispositivo",
+      "status": "machine"
+    },
+    "settings.account.forget_device.label": {
+      "text": "Esquecer este dispositivo",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub": {
+      "text": "Remove os dados da sua conta deste navegador. Suas mensagens continuam nos seus outros dispositivos; para voltar aqui, você vai precisar da frase de recuperação ou de outro dispositivo.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.title": {
+      "text": "Esquecer este dispositivo?",
+      "status": "machine"
+    },
+    "settings.account.lede": {
+      "text": "Seus dados, sair, este dispositivo e excluir sua conta.",
+      "status": "machine"
+    },
+    "settings.account.log_out": {
+      "text": "Sair",
+      "status": "machine"
+    },
+    "settings.account.log_out.body": {
+      "text": "Suas mensagens ficam neste dispositivo. Entre novamente com sua senha ou chave de acesso.",
+      "status": "machine"
+    },
+    "settings.account.log_out.sub": {
+      "text": "Encerra a sessão neste dispositivo. Seus dados ficam aqui para o próximo login.",
+      "status": "machine"
+    },
+    "settings.account.log_out.title": {
+      "text": "Sair do Lakko?",
+      "status": "machine"
+    },
+    "settings.account.vault.not_set_up": {
+      "text": "Recuperação com três palavras: ainda não configurada nesta conta. Ela é configurada na próxima vez que você entrar em um dispositivo que tenha sua frase.",
+      "status": "machine"
+    },
+    "settings.account.vault.on": {
+      "text": "Recuperação com três palavras: ativada (palavras {positions}). Outro dispositivo conectado e sua frase de 24 palavras também funcionam.",
+      "status": "machine"
+    },
+    "settings.account.vault.unavailable": {
+      "text": "Recuperação com três palavras: indisponível neste servidor. Sua frase de 24 palavras e seus outros dispositivos continuam funcionando.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.footer": {
+      "text": "Quando ativado, o Lakko se conecta de um jeito mais difícil de detectar e bloquear pela rede. Suas mensagens continuam com criptografia de ponta a ponta de qualquer forma.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status": {
+      "text": "Status",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active": {
+      "text": "Ativo",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active.sub": {
+      "text": "As conexões estão ocultas dos bloqueios de rede.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.connecting.sub": {
+      "text": "Configurando a conexão oculta.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.direct": {
+      "text": "Conexão direta",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable": {
+      "text": "Indisponível",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable.sub": {
+      "text": "Não foi possível configurar a conexão oculta. Verifique sua rede e depois desative e ative o botão para tentar novamente.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured": {
+      "text": "Indisponível nesta versão",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured.sub": {
+      "text": "Esta versão foi feita sem essa configuração.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.title": {
+      "text": "Anticensura",
+      "status": "machine"
+    },
+    "settings.anti_censorship.toggle": {
+      "text": "Ocultar o Lakko dos bloqueios de rede",
+      "status": "machine"
+    },
+    "settings.appearance.lede": {
+      "text": "O tema neste dispositivo.",
       "status": "machine"
     },
     "settings.appearance.theme": {
@@ -1140,6 +1484,126 @@
     },
     "settings.appearance.theme.system": {
       "text": "Sistema",
+      "status": "machine"
+    },
+    "settings.data.downloaded": {
+      "text": "{file} baixado.",
+      "status": "machine"
+    },
+    "settings.data.error.generic": {
+      "text": "Não foi possível exportar seus dados. Tente novamente.",
+      "status": "machine"
+    },
+    "settings.data.export": {
+      "text": "Exportar meus dados",
+      "status": "machine"
+    },
+    "settings.data.export_note": {
+      "text": "Suas mensagens, contatos e o estado dos grupos têm criptografia de ponta a ponta e ficam apenas nos seus dispositivos.",
+      "status": "machine"
+    },
+    "settings.data.lede": {
+      "text": "Baixe uma cópia do que os servidores do Lakko guardam sobre sua conta. Suas mensagens e contatos têm criptografia de ponta a ponta e ficam nos seus dispositivos, por isso não fazem parte deste arquivo.",
+      "status": "machine"
+    },
+    "settings.data.ready": {
+      "text": "Exportação pronta. Toque em Compartilhar para salvá-la.",
+      "status": "machine"
+    },
+    "settings.data.share": {
+      "text": "Compartilhar exportação",
+      "status": "machine"
+    },
+    "settings.data.title": {
+      "text": "Seus dados",
+      "status": "machine"
+    },
+    "settings.devices.add.lede": {
+      "text": "Primeiro entre no Lakko no novo dispositivo. Depois escolha qual dos dois está mostrando um código.",
+      "status": "machine"
+    },
+    "settings.devices.add.no_camera": {
+      "text": "Nenhum dos dispositivos tem câmera? Entre no novo e escolha \"{method}\": um aviso \"{prompt}\" com um código para comparar vai aparecer aqui.",
+      "status": "machine"
+    },
+    "settings.devices.device_n": {
+      "text": "Dispositivo {number}",
+      "status": "machine"
+    },
+    "settings.devices.error.load": {
+      "text": "Não foi possível carregar seus dispositivos. Tente novamente.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key": {
+      "text": "Este navegador não está configurado para sua conta. Entre novamente.",
+      "status": "machine"
+    },
+    "settings.devices.error.remove": {
+      "text": "Não foi possível remover o dispositivo. Tente novamente.",
+      "status": "machine"
+    },
+    "settings.devices.error.scan": {
+      "text": "Não foi possível adicionar o dispositivo. Tente novamente.",
+      "status": "machine"
+    },
+    "settings.devices.lede": {
+      "text": "Os celulares, tablets e computadores conectados à sua conta. Adicionar um tem criptografia de ponta a ponta; os servidores do Lakko não conseguem ler.",
+      "status": "machine"
+    },
+    "settings.devices.list.lede": {
+      "text": "Um dispositivo removido perde o acesso às suas mensagens a partir desse momento. Remover um pode pedir sua chave de acesso.",
+      "status": "machine"
+    },
+    "settings.devices.list.title": {
+      "text": "Seus dispositivos",
+      "status": "machine"
+    },
+    "settings.devices.remove.body": {
+      "text": "Este dispositivo vai perder o acesso às suas mensagens a partir desse momento. Sua chave de acesso pode ser solicitada.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm_named": {
+      "text": "Remover {device}",
+      "status": "machine"
+    },
+    "settings.devices.remove.title": {
+      "text": "Remover {device}?",
+      "status": "machine"
+    },
+    "settings.devices.scan.done": {
+      "text": "Dispositivo adicionado. Ele vai aparecer na lista quando terminar de entrar.",
+      "status": "machine"
+    },
+    "settings.devices.scan.opening": {
+      "text": "Abrindo a câmera...",
+      "status": "machine"
+    },
+    "settings.devices.show.error.timeout": {
+      "text": "O outro dispositivo não escaneou a tempo. Tente novamente.",
+      "status": "machine"
+    },
+    "settings.devices.show.lede": {
+      "text": "Escaneie este código com um dispositivo que já esteja conectado. Quando ele confirmar, este dispositivo entra na sua conta.",
+      "status": "machine"
+    },
+    "settings.devices.show.start": {
+      "text": "Mostrar o código",
+      "status": "machine"
+    },
+    "settings.devices.sign_in_first": {
+      "text": "Entre primeiro para gerenciar dispositivos.",
+      "status": "machine"
+    },
+    "settings.devices.this_device": {
+      "text": "Este dispositivo",
+      "status": "machine"
+    },
+    "settings.devices.this_device.sub": {
+      "text": "O dispositivo que você está usando agora.",
+      "status": "machine"
+    },
+    "settings.devices.title": {
+      "text": "Dispositivos",
       "status": "machine"
     },
     "settings.language.load_failed": {
@@ -1166,6 +1630,266 @@
       "text": "Idioma",
       "status": "machine"
     },
+    "settings.me.guest": {
+      "text": "Convidado",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.sub": {
+      "text": "As mensagens de vídeo recebidas começam a tocar, sem som, ao aparecer na tela. Desativado por padrão porque a reprodução automática baixa mídia.",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.title": {
+      "text": "Reproduzir mensagens de vídeo automaticamente",
+      "status": "machine"
+    },
+    "settings.media.lede": {
+      "text": "Reprodução neste dispositivo.",
+      "status": "machine"
+    },
+    "settings.notifications.off.body": {
+      "text": "As notificações estão desativadas, então o Lakko só pode tocar enquanto está aberto. Ative-as para que chamadas e mensagens cheguem até você quando ele não estiver.",
+      "status": "machine"
+    },
+    "settings.notifications.off.title": {
+      "text": "Ative as notificações",
+      "status": "machine"
+    },
+    "settings.passkeys.add": {
+      "text": "Adicionar chave de acesso",
+      "status": "machine"
+    },
+    "settings.passkeys.added": {
+      "text": "Chave de acesso \"{name}\" adicionada.",
+      "status": "machine"
+    },
+    "settings.passkeys.added_last_used": {
+      "text": "Adicionada {added} · último uso {used}",
+      "status": "machine"
+    },
+    "settings.passkeys.added_never_used": {
+      "text": "Adicionada {added} · nunca usada",
+      "status": "machine"
+    },
+    "settings.passkeys.empty": {
+      "text": "Nenhuma chave de acesso ainda.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.cancelled": {
+      "text": "Cancelado. Nenhuma chave de acesso foi criada.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.generic": {
+      "text": "Não foi possível atualizar suas chaves de acesso. Tente novamente.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.name_required": {
+      "text": "Dê um nome à chave de acesso.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.network": {
+      "text": "Erro de rede. Verifique sua conexão e tente de novo.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.server_status": {
+      "text": "Erro do servidor ({status}).",
+      "status": "machine"
+    },
+    "settings.passkeys.error.unsupported": {
+      "text": "Este navegador ou dispositivo não consegue criar chaves de acesso agora.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede": {
+      "text": "Entre com Touch ID, Face ID ou uma chave de segurança em vez da senha. Sua frase de recuperação também sempre funciona.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede_device": {
+      "text": "Entre com sua digital, rosto ou bloqueio de tela, ou com uma chave de segurança, em vez da senha. Sua frase de recuperação também sempre funciona.",
+      "status": "machine"
+    },
+    "settings.passkeys.name.label": {
+      "text": "Nome da chave de acesso",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder": {
+      "text": "Dê um nome a esta chave de acesso (ex.: MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.body": {
+      "text": "O dispositivo que tem a chave privada correspondente não vai mais conseguir entrar com ela. Não é possível desfazer.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm": {
+      "text": "Remover",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm_named": {
+      "text": "Remover {name}",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.error.cancelled": {
+      "text": "Cancelado. A chave de acesso não foi removida.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.title": {
+      "text": "Remover esta chave de acesso?",
+      "status": "machine"
+    },
+    "settings.passkeys.removed": {
+      "text": "\"{name}\" removida.",
+      "status": "machine"
+    },
+    "settings.passkeys.title": {
+      "text": "Chaves de acesso",
+      "status": "machine"
+    },
+    "settings.passkeys.unnamed": {
+      "text": "Chave de acesso sem nome",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_browser": {
+      "text": "Este navegador não consegue gerenciar chaves de acesso. Use uma versão recente do Safari, Chrome, Firefox ou Edge.",
+      "status": "machine"
+    },
+    "settings.profile.error.generic": {
+      "text": "Não foi possível salvar seu nome. Tente novamente.",
+      "status": "machine"
+    },
+    "settings.profile.lede": {
+      "text": "Como seus contatos veem você.",
+      "status": "machine"
+    },
+    "settings.profile.name.hint": {
+      "text": "Aparece para as pessoas com quem você conversa. Não precisa ser único, no máximo {count, plural, one {# caractere} other {# caracteres}}.",
+      "status": "machine"
+    },
+    "settings.profile.name.label": {
+      "text": "Seu nome",
+      "status": "machine"
+    },
+    "settings.profile.preview.label": {
+      "text": "Como os outros veem você",
+      "status": "machine"
+    },
+    "settings.profile.preview.no_name": {
+      "text": "Os outros veem a impressão digital da sua chave até você definir um nome.",
+      "status": "machine"
+    },
+    "settings.profile.saved": {
+      "text": "Seu nome vai ser atualizado para seus contatos.",
+      "status": "machine"
+    },
+    "settings.profile.username.none": {
+      "text": "Nenhum",
+      "status": "machine"
+    },
+    "settings.recovery.contact.already_enabled": {
+      "text": "Esta conta já tem um e-mail ou telefone. Para substituí-lo, entre novamente com sua frase de recuperação ou por outro dispositivo primeiro.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.done": {
+      "text": "Pronto. Um código enviado para lá agora pode devolver o acesso à sua conta.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.bad_contact": {
+      "text": "Isso não parece correto. Verifique e tente novamente.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.generic": {
+      "text": "Não foi possível configurar o e-mail ou telefone. Tente novamente.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.lede": {
+      "text": "Um código de uso único enviado ao seu e-mail ou telefone permite entrar de novo se você perder sua senha.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_email": {
+      "text": "Enviamos um código de seis dígitos para {contact} por e-mail. Digite-o abaixo.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_phone": {
+      "text": "Enviamos um código de seis dígitos para {contact} por SMS. Digite-o abaixo.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sub": {
+      "text": "Um código de uso único enviado ao seu e-mail ou telefone.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.unavailable": {
+      "text": "A recuperação por e-mail e telefone não está disponível agora.",
+      "status": "machine"
+    },
+    "settings.recovery.lede": {
+      "text": "Sua frase de recuperação restaura tudo. Estas opções devolvem o acesso à conta quando você perde a senha; suas mensagens então vêm da frase ou de outro dispositivo seu.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.not_saved_here": {
+      "text": "Não está salva neste dispositivo. Guarde bem sua cópia escrita.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.saved_here": {
+      "text": "Salva neste dispositivo.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.sub": {
+      "text": "As 24 palavras que você anotou no cadastro restauram sua identidade, contatos e mensagens em um novo dispositivo.",
+      "status": "machine"
+    },
+    "settings.recovery.section.access": {
+      "text": "Acesso",
+      "status": "machine"
+    },
+    "settings.recovery.section.identity": {
+      "text": "Identidade",
+      "status": "machine"
+    },
+    "settings.recovery.sign_in_first": {
+      "text": "Entre primeiro para gerenciar a recuperação.",
+      "status": "machine"
+    },
+    "settings.recovery.title": {
+      "text": "Recuperação",
+      "status": "machine"
+    },
+    "settings.recovery.totp.already_enabled": {
+      "text": "Esta conta já tem um autenticador configurado. Para substituí-lo, entre novamente com sua frase de recuperação ou por outro dispositivo primeiro.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.done": {
+      "text": "Autenticador configurado. Um código do app agora pode devolver o acesso à sua conta.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.generic": {
+      "text": "Não foi possível configurar o autenticador. Tente novamente.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.wrong": {
+      "text": "Esse código não funcionou. Aguarde o próximo código no app e tente novamente.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.key": {
+      "text": "Chave: {key}",
+      "status": "machine"
+    },
+    "settings.recovery.totp.lede": {
+      "text": "Um código de seis dígitos de um app autenticador permite entrar de novo se você perder sua senha.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.scan": {
+      "text": "Escaneie este código com seu app autenticador, ou digite a chave manualmente, e depois insira o código de seis dígitos que o app mostra.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.set_up": {
+      "text": "Configurar autenticador",
+      "status": "machine"
+    },
+    "settings.recovery.totp.title": {
+      "text": "App autenticador",
+      "status": "machine"
+    },
+    "settings.recovery.totp.unavailable": {
+      "text": "A configuração do autenticador não está disponível agora.",
+      "status": "machine"
+    },
     "settings.section.about": {
       "text": "Sobre",
       "status": "machine"
@@ -1178,12 +1902,20 @@
       "text": "Aparência",
       "status": "machine"
     },
+    "settings.section.danger_zone": {
+      "text": "Zona de perigo",
+      "status": "machine"
+    },
     "settings.section.data": {
       "text": "Dados",
       "status": "machine"
     },
     "settings.section.media": {
       "text": "Mídia",
+      "status": "machine"
+    },
+    "settings.section.network": {
+      "text": "Rede",
       "status": "machine"
     },
     "settings.section.notifications": {
@@ -1196,6 +1928,30 @@
     },
     "settings.section.security": {
       "text": "Segurança",
+      "status": "machine"
+    },
+    "settings.security.devices.sub": {
+      "text": "Veja, adicione e remova os dispositivos desta conta.",
+      "status": "machine"
+    },
+    "settings.security.devices_and_recovery": {
+      "text": "Dispositivos e recuperação",
+      "status": "machine"
+    },
+    "settings.security.lede": {
+      "text": "Como você entra, quais dispositivos podem ler suas mensagens e como voltar para a conta.",
+      "status": "machine"
+    },
+    "settings.security.recovery.sub": {
+      "text": "Um app autenticador, um endereço de e-mail ou um número de telefone que devolve seu acesso.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.sub": {
+      "text": "Cada contato tem um número de segurança. Compare pessoalmente ou em uma chamada; números iguais significam que ninguém está no meio. Ele fica nos detalhes do contato.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.title": {
+      "text": "Números de segurança",
       "status": "machine"
     },
     "username.a11y_hint": {

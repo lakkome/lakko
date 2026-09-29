@@ -58,20 +58,19 @@ public fun applyOwnNameChange(
  * The Settings -> Profile live preview of how others see this account
  * (UX §4): `Alice Petrova · @alice`, `@alice` with no name, the name alone for
  * a guest. A name the rule refuses previews as no name — it will not be sent.
+ * `null` when there is neither: the screen then shows the catalog's
+ * `settings.profile.preview.no_name` (ADR-0058).
  */
-public fun ownProfilePreview(nameCheck: DisplayNameCheck, username: String?): String {
+public fun ownProfilePreview(nameCheck: DisplayNameCheck, username: String?): String? {
     val name = (nameCheck as? DisplayNameCheck.Valid)?.normalized
     val user = username?.takeIf { it.isNotBlank() }
     return when {
         name != null && user != null -> "$name · @$user"
         name != null -> name
         user != null -> "@$user"
-        else -> "Your key fingerprint"
+        else -> null
     }
 }
-
-/** Copy shown after saving a profile name (UX §4). */
-public const val PROFILE_SAVED_COPY: String = "Your name will update for your contacts."
 
 /**
  * The wire form of this profile for the core's composer.

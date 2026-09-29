@@ -166,4 +166,56 @@ final class LocalizationTests: XCTestCase {
             t("restore_identity.error.not_published"))
         XCTAssertEqual(AuthErrorCopy.deviceRestore(DeviceRestoreNotLetIn()), t("device_link.error.not_let_in"))
     }
+
+    // MARK: - Batch 2
+
+    /// An error on screen is kept as the way to render it, so each read
+    /// renders again (in the language of that moment), and a fresh value is
+    /// never equal to an older one, so setting it always publishes.
+    func testUiTextRendersOnEveryReadAndIsEqualOnlyToItself() {
+        var calls = 0
+        let text = UiText {
+            calls += 1
+            return "rendered \(calls)"
+        }
+        XCTAssertEqual(text.text, "rendered 1")
+        XCTAssertEqual(text.text, "rendered 2")
+        XCTAssertEqual(text, text)
+        XCTAssertNotEqual(UiText.key("common.cancel"), UiText.key("common.cancel"))
+        XCTAssertEqual(UiText.key("common.cancel").text, Localization.text("common.cancel"))
+    }
+
+    /// A message split around an argument keeps no bidi isolate on either
+    /// side, so a copied value (an authenticator key) types in cleanly.
+    func testPartsSplitAroundAnArgumentWithoutIsolates() {
+        let l10n = make(system: ["en-US"])
+        let parts = l10n.parts("settings.recovery.totp.key", around: "key")
+        XCTAssertEqual(parts.lead, "Key: ")
+        XCTAssertEqual(parts.trail, "")
+        let sent = l10n.parts(
+            "settings.recovery.contact.sent_email", around: "contact")
+        XCTAssertEqual(sent.lead, "We sent a six-digit code to ")
+        XCTAssertEqual(sent.trail, " by email. Enter it below.")
+        let isolates = CharacterSet(charactersIn: "\u{2066}\u{2067}\u{2068}\u{2069}")
+        for piece in [parts.lead, parts.trail, sent.lead, sent.trail] {
+            XCTAssertNil(piece.rangeOfCharacter(from: isolates))
+        }
+    }
+
+    /// The Settings copy the iOS screens read resolves from the bundled
+    /// catalog (a missing key would render as itself).
+    func testSettingsKeysResolve() {
+        let l10n = make(system: ["en-US"])
+        for key in [
+            "settings.section.network", "settings.section.danger_zone",
+            "settings.anti_censorship.title", "settings.account.forget_device.body_device",
+            "settings.recovery.phrase.saved_here", "backup.rollback_refused.title",
+            "settings.passkeys.remove.error.cancelled", "call.link.error.generic",
+        ] {
+            XCTAssertNotEqual(l10n.t(key), key, key)
+        }
+        XCTAssertEqual(
+            l10n.t("settings.profile.name.hint", counts: ["count": 64]),
+            "Shown to the people you talk to. Not unique, at most 64 characters.")
+    }
 }

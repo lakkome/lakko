@@ -13,7 +13,7 @@ struct SocialRecoverySharesPanel: View {
     @State private var expanded = false
     @State private var shares: [String] = []
     @State private var busy = false
-    @State private var error: String?
+    @State private var error: UiText?
     @State private var copiedIndex: Int?
     @ObservedObject private var l10n = Localization.shared
 
@@ -83,7 +83,7 @@ struct SocialRecoverySharesPanel: View {
             }
 
             if let error {
-                AuthHint(text: error, isError: true)
+                AuthHint(text: error.text, isError: true)
             }
         }
     }
@@ -101,7 +101,7 @@ struct SocialRecoverySharesPanel: View {
                 )
             } catch {
                 NSLog("[recovery] WARN shares not made: \(error)")
-                self.error = l10n.t("recovery.shares.error.generic")
+                self.error = .key("recovery.shares.error.generic")
             }
         }
     }

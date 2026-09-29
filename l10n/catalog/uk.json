@@ -202,12 +202,124 @@
       "text": "Ім’я користувача",
       "status": "machine"
     },
+    "backup.rollback_refused.body": {
+      "text": "Сервер повернув змінену або застарілу резервну копію. Ваш обліковий запис у безпеці: ми продовжили, не відновлюючи старих даних.",
+      "status": "machine"
+    },
+    "backup.rollback_refused.title": {
+      "text": "Не вдалося безпечно відновити резервну копію",
+      "status": "machine"
+    },
+    "backup.stale_restore.body": {
+      "text": "Ця резервна копія старша, ніж очікувалося ({reason}). {consequence}",
+      "status": "machine"
+    },
+    "backup.stale_restore.confirm": {
+      "text": "Усе одно відновити",
+      "status": "machine"
+    },
+    "backup.stale_restore.consequence": {
+      "text": "Відновлення поверне ваш обліковий запис до старішого стану: повідомлення будуть застарілими, а видалені вами пристрої можуть з’явитися знову.",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.anchor_unreadable": {
+      "text": "запис цього пристрою про вашу останню резервну копію не читається або його підроблено",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.below_floor": {
+      "text": "вона старша за останню копію, відновлену на цьому пристрої",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.head_stripped": {
+      "text": "з неї знято підпис, і вона відрізняється від останньої копії, відомої цьому пристрою",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.too_old": {
+      "text": "її підписано раніше, ніж могло б бути підписано актуальну копію",
+      "status": "machine"
+    },
+    "backup.stale_restore.title": {
+      "text": "Відновити цю старішу резервну копію?",
+      "status": "machine"
+    },
+    "call.guest.default_name": {
+      "text": "Гість",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "Підключаємо вас до дзвінка...",
       "status": "machine"
     },
+    "call.link.connecting": {
+      "text": "Підключення...",
+      "status": "machine"
+    },
+    "call.link.dead": {
+      "text": "Цей дзвінок завершено або він неактивний.",
+      "status": "machine"
+    },
+    "call.link.end_current": {
+      "text": "Завершити поточний дзвінок",
+      "status": "machine"
+    },
+    "call.link.ended": {
+      "text": "Дзвінок завершено.",
+      "status": "machine"
+    },
+    "call.link.error.generic": {
+      "text": "Дзвінок не вдався.",
+      "status": "machine"
+    },
+    "call.link.failed": {
+      "text": "Помилка: {reason}",
+      "status": "machine"
+    },
+    "call.link.host": {
+      "text": "Організатор: {name}",
+      "status": "machine"
+    },
+    "call.link.invalid": {
+      "text": "Це посилання на дзвінок недійсне або застаріле.",
+      "status": "machine"
+    },
+    "call.link.join": {
+      "text": "Приєднатися",
+      "status": "machine"
+    },
+    "call.link.live": {
+      "text": "Ви в цьому дзвінку.",
+      "status": "machine"
+    },
+    "call.link.loading": {
+      "text": "Завантаження посилання на дзвінок...",
+      "status": "machine"
+    },
+    "call.link.start": {
+      "text": "Почати дзвінок",
+      "status": "machine"
+    },
+    "call.link.title_join": {
+      "text": "Приєднатися до дзвінка",
+      "status": "machine"
+    },
+    "call.link.title_start": {
+      "text": "Почніть свій дзвінок",
+      "status": "machine"
+    },
+    "call.link.waiting": {
+      "text": "Чекаємо, поки організатор вас впустить...",
+      "status": "machine"
+    },
+    "call.link.waiting_hint": {
+      "text": "Можна піти з цього екрана: ви приєднаєтеся, щойно вас впустять.",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "Виберіть чат, щоб почати спілкування",
+      "status": "machine"
+    },
+    "common.adding": {
+      "text": "Додавання...",
       "status": "machine"
     },
     "common.back": {
@@ -226,8 +338,20 @@
       "text": "Закрити",
       "status": "machine"
     },
+    "common.collapse": {
+      "text": "Згорнути",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "Підтвердити",
+      "status": "machine"
+    },
+    "common.confirming": {
+      "text": "Підтвердження...",
+      "status": "machine"
+    },
+    "common.connecting": {
+      "text": "Підключення...",
       "status": "machine"
     },
     "common.continue": {
@@ -262,8 +386,24 @@
       "text": "Не вдалося з’єднатися з Lakko. Перевірте з’єднання та спробуйте ще раз.",
       "status": "machine"
     },
+    "common.error.qr_render": {
+      "text": "Не вдалося показати код. Спробуйте ще раз.",
+      "status": "machine"
+    },
     "common.error.server_unreachable": {
       "text": "Не вдалося з’єднатися із сервером. Перевірте з’єднання.",
+      "status": "machine"
+    },
+    "common.error.session_ended": {
+      "text": "Сеанс завершено. Увійдіть знову.",
+      "status": "machine"
+    },
+    "common.error.session_expired": {
+      "text": "Сеанс закінчився. Увійдіть знову.",
+      "status": "machine"
+    },
+    "common.error.session_not_ready": {
+      "text": "Сеанс ще не готовий.",
       "status": "machine"
     },
     "common.error.too_many_attempts": {
@@ -278,6 +418,10 @@
       "text": "Зараз це недоступно. Спробуйте пізніше.",
       "status": "machine"
     },
+    "common.expand": {
+      "text": "Розгорнути",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "Завантаження...",
       "status": "machine"
@@ -286,8 +430,24 @@
       "text": "Пошук...",
       "status": "machine"
     },
+    "common.manage": {
+      "text": "Керувати",
+      "status": "machine"
+    },
     "common.more_options": {
       "text": "Інші варіанти",
+      "status": "machine"
+    },
+    "common.off": {
+      "text": "Вимк.",
+      "status": "machine"
+    },
+    "common.on": {
+      "text": "Увімк.",
+      "status": "machine"
+    },
+    "common.open_lakko": {
+      "text": "Відкрити Lakko",
       "status": "machine"
     },
     "common.optional": {
@@ -306,12 +466,36 @@
       "text": "Підготовка...",
       "status": "machine"
     },
+    "common.remove": {
+      "text": "Видалити",
+      "status": "machine"
+    },
+    "common.removing": {
+      "text": "Видалення...",
+      "status": "machine"
+    },
+    "common.save": {
+      "text": "Зберегти",
+      "status": "machine"
+    },
+    "common.saving": {
+      "text": "Збереження...",
+      "status": "machine"
+    },
     "common.sending": {
       "text": "Надсилання...",
       "status": "machine"
     },
+    "common.set_up": {
+      "text": "Налаштувати",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "Спробувати ще раз",
+      "status": "machine"
+    },
+    "common.unknown": {
+      "text": "невідомо",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -1122,8 +1306,168 @@
       "text": "Ключ безпеки вашого облікового запису змінено.",
       "status": "machine"
     },
+    "settings.about.lede_web": {
+      "text": "Lakko у браузері.",
+      "status": "machine"
+    },
+    "settings.about.licence": {
+      "text": "Ліцензія",
+      "status": "machine"
+    },
+    "settings.about.licence_body": {
+      "text": "{licence}. Вихідний код можна вільно читати, використовувати та покращувати.",
+      "status": "machine"
+    },
+    "settings.about.protection.body": {
+      "text": "Повідомлення, дзвінки та запити на додавання в контакти захищені наскрізним шифруванням: прочитати їх можуть лише учасники розмови, але не сервери Lakko. Ваш пароль ніколи не залишає пристрій, а кожен контакт має код безпеки, який можна звірити під час зустрічі.",
+      "status": "machine"
+    },
+    "settings.about.protection.title": {
+      "text": "Як Lakko вас захищає",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Переклади оновлено {date}",
+      "status": "machine"
+    },
+    "settings.about.version": {
+      "text": "Версія",
+      "status": "machine"
+    },
+    "settings.account.danger_zone.footer": {
+      "text": "«Вийти» залишає ваші дані на цьому пристрої. «Забути цей пристрій» видаляє їх; повернутися можна лише з фразою відновлення або з іншого пристрою, на якому виконано вхід. «Видалити обліковий запис» стирає обліковий запис на сервері й очищає цей пристрій; цю дію неможливо скасувати.",
+      "status": "machine"
+    },
+    "settings.account.delete.body": {
+      "text": "Буде стерто ваші дані на сервері — ім’я користувача, ключі, способи відновлення та резервну копію, — і ви вийдете на всіх пристроях. Локальні повідомлення на цьому пристрої теж буде видалено. Цю дію неможливо скасувати.",
+      "status": "machine"
+    },
+    "settings.account.delete.confirm": {
+      "text": "Видалити обліковий запис",
+      "status": "machine"
+    },
+    "settings.account.delete.error.cancelled": {
+      "text": "Скасовано. Обліковий запис не видалено.",
+      "status": "machine"
+    },
+    "settings.account.delete.error.generic": {
+      "text": "Не вдалося видалити обліковий запис. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.account.delete.sub": {
+      "text": "Остаточно видаляє обліковий запис з усім вмістом і очищає цей пристрій. Цю дію неможливо скасувати.",
+      "status": "machine"
+    },
+    "settings.account.delete.title": {
+      "text": "Видалити обліковий запис?",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body": {
+      "text": "Збережений обліковий запис у цьому браузері буде втрачено. Повернутися можна лише за допомогою фрази відновлення з 24 слів, яку ви записали під час реєстрації.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body_device": {
+      "text": "Усе на цьому пристрої буде видалено, і він вийде з вашого облікового запису. Щоб знову користуватися цим обліковим записом тут, знадобиться фраза відновлення або інший пристрій, на якому виконано вхід.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.confirm": {
+      "text": "Забути пристрій",
+      "status": "machine"
+    },
+    "settings.account.forget_device.label": {
+      "text": "Забути цей пристрій",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub": {
+      "text": "Видаляє дані облікового запису з цього браузера. Повідомлення залишаться на інших ваших пристроях; щоб повернутися сюди, знадобиться фраза відновлення або інший пристрій.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.title": {
+      "text": "Забути цей пристрій?",
+      "status": "machine"
+    },
+    "settings.account.lede": {
+      "text": "Ваші дані, вихід, цей пристрій і видалення облікового запису.",
+      "status": "machine"
+    },
+    "settings.account.log_out": {
+      "text": "Вийти",
+      "status": "machine"
+    },
+    "settings.account.log_out.body": {
+      "text": "Ваші повідомлення залишаться на цьому пристрої. Увійдіть знову з паролем або ключем доступу.",
+      "status": "machine"
+    },
+    "settings.account.log_out.sub": {
+      "text": "Вихід на цьому пристрої. Дані залишаться тут до наступного входу.",
+      "status": "machine"
+    },
+    "settings.account.log_out.title": {
+      "text": "Вийти з Lakko?",
+      "status": "machine"
+    },
+    "settings.account.vault.not_set_up": {
+      "text": "Відновлення за трьома словами: для цього облікового запису ще не налаштовано. Його буде налаштовано під час наступного входу на пристрої, де зберігається ваша фраза.",
+      "status": "machine"
+    },
+    "settings.account.vault.on": {
+      "text": "Відновлення за трьома словами: увімкнено (слова {positions}). Інший пристрій, на якому виконано вхід, і фраза з 24 слів теж підійдуть.",
+      "status": "machine"
+    },
+    "settings.account.vault.unavailable": {
+      "text": "Відновлення за трьома словами: недоступне на цьому сервері. Фраза з 24 слів та інші ваші пристрої, як і раніше, працюють.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.footer": {
+      "text": "Якщо увімкнено, Lakko підключається так, що мережі важче виявити й заблокувати з’єднання. Повідомлення в будь-якому разі залишаються захищеними наскрізним шифруванням.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status": {
+      "text": "Стан",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active": {
+      "text": "Активно",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active.sub": {
+      "text": "З’єднання приховано від мережевих блокувань.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.connecting.sub": {
+      "text": "Встановлюється приховане з’єднання.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.direct": {
+      "text": "Пряме з’єднання",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable": {
+      "text": "Недоступно",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable.sub": {
+      "text": "Не вдалося встановити приховане з’єднання. Перевірте мережу, потім вимкніть і знову увімкніть перемикач.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured": {
+      "text": "Недоступно в цій збірці",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured.sub": {
+      "text": "Цю збірку створено без цього налаштування.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.title": {
+      "text": "Обхід блокувань",
+      "status": "machine"
+    },
+    "settings.anti_censorship.toggle": {
+      "text": "Приховувати Lakko від мережевих блокувань",
+      "status": "machine"
+    },
+    "settings.appearance.lede": {
+      "text": "Тема на цьому пристрої.",
       "status": "machine"
     },
     "settings.appearance.theme": {
@@ -1140,6 +1484,126 @@
     },
     "settings.appearance.theme.system": {
       "text": "Системна",
+      "status": "machine"
+    },
+    "settings.data.downloaded": {
+      "text": "Завантажено файл {file}.",
+      "status": "machine"
+    },
+    "settings.data.error.generic": {
+      "text": "Не вдалося експортувати дані. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.data.export": {
+      "text": "Експортувати мої дані",
+      "status": "machine"
+    },
+    "settings.data.export_note": {
+      "text": "Ваші повідомлення, контакти та стан груп захищені наскрізним шифруванням і зберігаються лише на ваших пристроях.",
+      "status": "machine"
+    },
+    "settings.data.lede": {
+      "text": "Завантажте копію того, що сервери Lakko зберігають про ваш обліковий запис. Повідомлення й контакти захищені наскрізним шифруванням і залишаються на ваших пристроях, тому до цього файлу вони не входять.",
+      "status": "machine"
+    },
+    "settings.data.ready": {
+      "text": "Експорт готовий. Натисніть «Поділитися», щоб зберегти його.",
+      "status": "machine"
+    },
+    "settings.data.share": {
+      "text": "Поділитися експортом",
+      "status": "machine"
+    },
+    "settings.data.title": {
+      "text": "Ваші дані",
+      "status": "machine"
+    },
+    "settings.devices.add.lede": {
+      "text": "Спершу увійдіть у Lakko на новому пристрої. Потім виберіть, на якому з двох показано код.",
+      "status": "machine"
+    },
+    "settings.devices.add.no_camera": {
+      "text": "Немає камери на жодному з пристроїв? Увійдіть на новому й виберіть «{method}»: тут з’явиться запит «{prompt}» з кодом для звірки.",
+      "status": "machine"
+    },
+    "settings.devices.device_n": {
+      "text": "Пристрій {number}",
+      "status": "machine"
+    },
+    "settings.devices.error.load": {
+      "text": "Не вдалося завантажити список пристроїв. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key": {
+      "text": "Цей браузер не налаштовано для вашого облікового запису. Увійдіть знову.",
+      "status": "machine"
+    },
+    "settings.devices.error.remove": {
+      "text": "Не вдалося видалити пристрій. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.devices.error.scan": {
+      "text": "Не вдалося додати пристрій. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.devices.lede": {
+      "text": "Телефони, планшети й комп’ютери, на яких виконано вхід у ваш обліковий запис. Додавання пристрою захищене наскрізним шифруванням; сервери Lakko не можуть його прочитати.",
+      "status": "machine"
+    },
+    "settings.devices.list.lede": {
+      "text": "Видалений пристрій одразу втрачає доступ до ваших повідомлень. Під час видалення може знадобитися ключ доступу.",
+      "status": "machine"
+    },
+    "settings.devices.list.title": {
+      "text": "Ваші пристрої",
+      "status": "machine"
+    },
+    "settings.devices.remove.body": {
+      "text": "З цього моменту пристрій втратить доступ до ваших повідомлень. Може знадобитися ключ доступу.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm_named": {
+      "text": "Видалити: {device}",
+      "status": "machine"
+    },
+    "settings.devices.remove.title": {
+      "text": "Видалити: {device}?",
+      "status": "machine"
+    },
+    "settings.devices.scan.done": {
+      "text": "Пристрій додано. Він з’явиться у списку, коли завершить підключення.",
+      "status": "machine"
+    },
+    "settings.devices.scan.opening": {
+      "text": "Відкриваємо камеру...",
+      "status": "machine"
+    },
+    "settings.devices.show.error.timeout": {
+      "text": "Інший пристрій не встиг відсканувати код. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.devices.show.lede": {
+      "text": "Відскануйте цей код пристроєм, на якому вже виконано вхід. Після підтвердження цей пристрій приєднається до вашого облікового запису.",
+      "status": "machine"
+    },
+    "settings.devices.show.start": {
+      "text": "Показати код",
+      "status": "machine"
+    },
+    "settings.devices.sign_in_first": {
+      "text": "Щоб керувати пристроями, спершу увійдіть.",
+      "status": "machine"
+    },
+    "settings.devices.this_device": {
+      "text": "Цей пристрій",
+      "status": "machine"
+    },
+    "settings.devices.this_device.sub": {
+      "text": "Пристрій, яким ви зараз користуєтеся.",
+      "status": "machine"
+    },
+    "settings.devices.title": {
+      "text": "Пристрої",
       "status": "machine"
     },
     "settings.language.load_failed": {
@@ -1166,6 +1630,266 @@
       "text": "Мова",
       "status": "machine"
     },
+    "settings.me.guest": {
+      "text": "Гість",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.sub": {
+      "text": "Вхідні відеоповідомлення починають відтворюватися без звуку, коли з’являються на екрані. Типово вимкнено, бо автовідтворення завантажує медіа.",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.title": {
+      "text": "Автовідтворення відеоповідомлень",
+      "status": "machine"
+    },
+    "settings.media.lede": {
+      "text": "Відтворення на цьому пристрої.",
+      "status": "machine"
+    },
+    "settings.notifications.off.body": {
+      "text": "Сповіщення вимкнено, тому Lakko може дзвонити лише тоді, коли відкритий. Увімкніть їх, щоб дзвінки й повідомлення доходили до вас і тоді, коли застосунок закритий.",
+      "status": "machine"
+    },
+    "settings.notifications.off.title": {
+      "text": "Увімкніть сповіщення",
+      "status": "machine"
+    },
+    "settings.passkeys.add": {
+      "text": "Додати ключ доступу",
+      "status": "machine"
+    },
+    "settings.passkeys.added": {
+      "text": "Ключ доступу «{name}» додано.",
+      "status": "machine"
+    },
+    "settings.passkeys.added_last_used": {
+      "text": "Додано {added} · використано {used}",
+      "status": "machine"
+    },
+    "settings.passkeys.added_never_used": {
+      "text": "Додано {added} · не використовувався",
+      "status": "machine"
+    },
+    "settings.passkeys.empty": {
+      "text": "Ключів доступу ще немає.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.cancelled": {
+      "text": "Скасовано. Ключ доступу не створено.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.generic": {
+      "text": "Не вдалося оновити ключі доступу. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.name_required": {
+      "text": "Дайте ключу доступу назву.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.network": {
+      "text": "Помилка мережі. Перевірте з’єднання та повторіть.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.server_status": {
+      "text": "Помилка сервера ({status}).",
+      "status": "machine"
+    },
+    "settings.passkeys.error.unsupported": {
+      "text": "Цей браузер або пристрій зараз не може створити ключ доступу.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede": {
+      "text": "Входьте за допомогою Touch ID, Face ID або апаратного ключа замість пароля. Фраза відновлення теж завжди працює.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede_device": {
+      "text": "Входьте за відбитком пальця, обличчям чи блокуванням екрана або з апаратним ключем замість пароля. Фраза відновлення теж завжди працює.",
+      "status": "machine"
+    },
+    "settings.passkeys.name.label": {
+      "text": "Назва ключа доступу",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder": {
+      "text": "Назвіть ключ доступу (напр., MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.body": {
+      "text": "Пристрій, на якому зберігається відповідний закритий ключ, більше не зможе входити з його допомогою. Цю дію неможливо скасувати.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm": {
+      "text": "Видалити",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm_named": {
+      "text": "Видалити {name}",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.error.cancelled": {
+      "text": "Скасовано. Ключ доступу не видалено.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.title": {
+      "text": "Видалити цей ключ доступу?",
+      "status": "machine"
+    },
+    "settings.passkeys.removed": {
+      "text": "Ключ доступу «{name}» видалено.",
+      "status": "machine"
+    },
+    "settings.passkeys.title": {
+      "text": "Ключі доступу",
+      "status": "machine"
+    },
+    "settings.passkeys.unnamed": {
+      "text": "Ключ доступу без назви",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_browser": {
+      "text": "Цей браузер не може керувати ключами доступу. Використовуйте свіжу версію Safari, Chrome, Firefox або Edge.",
+      "status": "machine"
+    },
+    "settings.profile.error.generic": {
+      "text": "Не вдалося зберегти ім’я. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.profile.lede": {
+      "text": "Як вас бачать ваші контакти.",
+      "status": "machine"
+    },
+    "settings.profile.name.hint": {
+      "text": "Його бачать ваші співрозмовники. Не обов’язково унікальне, не більше {count, plural, one {# символу} few {# символів} many {# символів} other {# символу}}.",
+      "status": "machine"
+    },
+    "settings.profile.name.label": {
+      "text": "Ваше ім’я",
+      "status": "machine"
+    },
+    "settings.profile.preview.label": {
+      "text": "Як вас бачать інші",
+      "status": "machine"
+    },
+    "settings.profile.preview.no_name": {
+      "text": "Доки ви не вкажете ім’я, інші бачать відбиток вашого ключа.",
+      "status": "machine"
+    },
+    "settings.profile.saved": {
+      "text": "Ваше ім’я оновиться у ваших контактів.",
+      "status": "machine"
+    },
+    "settings.profile.username.none": {
+      "text": "Немає",
+      "status": "machine"
+    },
+    "settings.recovery.contact.already_enabled": {
+      "text": "Для цього облікового запису вже вказано ел. пошту чи телефон. Щоб замінити їх, спершу увійдіть знову з фразою відновлення або з іншого пристрою.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.done": {
+      "text": "Готово. Код, надісланий туди, допоможе повернутися в обліковий запис.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.bad_contact": {
+      "text": "Схоже, тут помилка. Перевірте й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.generic": {
+      "text": "Не вдалося налаштувати ел. пошту чи телефон. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.lede": {
+      "text": "Одноразовий код на ел. пошту чи телефон дасть змогу знову увійти, якщо ви забудете пароль.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_email": {
+      "text": "Ми надіслали шестизначний код на ел. пошту {contact}. Введіть його нижче.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_phone": {
+      "text": "Ми надіслали шестизначний код у SMS на номер {contact}. Введіть його нижче.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sub": {
+      "text": "Одноразовий код на ел. пошту чи телефон.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.unavailable": {
+      "text": "Відновлення через ел. пошту й телефон зараз недоступне.",
+      "status": "machine"
+    },
+    "settings.recovery.lede": {
+      "text": "Фраза відновлення повертає все. Ці способи допоможуть повернутися в обліковий запис, якщо ви забули пароль; повідомлення потім відновляться з фрази або з іншого вашого пристрою.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.not_saved_here": {
+      "text": "На цьому пристрої не збережено. Зберігайте записану копію в надійному місці.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.saved_here": {
+      "text": "Збережено на цьому пристрої.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.sub": {
+      "text": "24 слова, які ви записали під час реєстрації, відновлюють вашу ідентичність, контакти й повідомлення на новому пристрої.",
+      "status": "machine"
+    },
+    "settings.recovery.section.access": {
+      "text": "Доступ",
+      "status": "machine"
+    },
+    "settings.recovery.section.identity": {
+      "text": "Ідентичність",
+      "status": "machine"
+    },
+    "settings.recovery.sign_in_first": {
+      "text": "Щоб керувати відновленням, спершу увійдіть.",
+      "status": "machine"
+    },
+    "settings.recovery.title": {
+      "text": "Відновлення",
+      "status": "machine"
+    },
+    "settings.recovery.totp.already_enabled": {
+      "text": "Для цього облікового запису вже налаштовано автентифікатор. Щоб замінити його, спершу увійдіть знову з фразою відновлення або з іншого пристрою.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.done": {
+      "text": "Автентифікатор налаштовано. Код із застосунку допоможе повернутися в обліковий запис.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.generic": {
+      "text": "Не вдалося налаштувати автентифікатор. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.wrong": {
+      "text": "Код не підійшов. Дочекайтеся наступного коду в застосунку й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.key": {
+      "text": "Ключ: {key}",
+      "status": "machine"
+    },
+    "settings.recovery.totp.lede": {
+      "text": "Шестизначний код із застосунку-автентифікатора дасть змогу знову увійти, якщо ви забудете пароль.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.scan": {
+      "text": "Відскануйте цей код застосунком-автентифікатором або введіть ключ вручну, потім введіть шестизначний код із застосунку.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.set_up": {
+      "text": "Налаштувати автентифікатор",
+      "status": "machine"
+    },
+    "settings.recovery.totp.title": {
+      "text": "Застосунок-автентифікатор",
+      "status": "machine"
+    },
+    "settings.recovery.totp.unavailable": {
+      "text": "Налаштування автентифікатора зараз недоступне.",
+      "status": "machine"
+    },
     "settings.section.about": {
       "text": "Про застосунок",
       "status": "machine"
@@ -1178,12 +1902,20 @@
       "text": "Оформлення",
       "status": "machine"
     },
+    "settings.section.danger_zone": {
+      "text": "Небезпечна зона",
+      "status": "machine"
+    },
     "settings.section.data": {
       "text": "Дані",
       "status": "machine"
     },
     "settings.section.media": {
       "text": "Медіа",
+      "status": "machine"
+    },
+    "settings.section.network": {
+      "text": "Мережа",
       "status": "machine"
     },
     "settings.section.notifications": {
@@ -1196,6 +1928,30 @@
     },
     "settings.section.security": {
       "text": "Безпека",
+      "status": "machine"
+    },
+    "settings.security.devices.sub": {
+      "text": "Перегляд, додавання та видалення пристроїв цього облікового запису.",
+      "status": "machine"
+    },
+    "settings.security.devices_and_recovery": {
+      "text": "Пристрої та відновлення",
+      "status": "machine"
+    },
+    "settings.security.lede": {
+      "text": "Як ви входите, які пристрої можуть читати ваші повідомлення і як повернутися в обліковий запис.",
+      "status": "machine"
+    },
+    "settings.security.recovery.sub": {
+      "text": "Застосунок-автентифікатор, ел. пошта чи номер телефону, які допоможуть повернутися в обліковий запис.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.sub": {
+      "text": "Кожен контакт має код безпеки. Звірте його під час зустрічі або дзвінка: однакові коди означають, що між вами нікого немає. Він є в даних контакту.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.title": {
+      "text": "Коди безпеки",
       "status": "machine"
     },
     "username.a11y_hint": {

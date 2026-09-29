@@ -202,12 +202,124 @@
       "text": "שם משתמש",
       "status": "machine"
     },
+    "backup.rollback_refused.body": {
+      "text": "השרת החזיר גיבוי ששונה או שאינו עדכני. החשבון שלכם בטוח; המשכנו בלי לשחזר את הנתונים הישנים.",
+      "status": "machine"
+    },
+    "backup.rollback_refused.title": {
+      "text": "לא ניתן היה לשחזר את הגיבוי בבטחה",
+      "status": "machine"
+    },
+    "backup.stale_restore.body": {
+      "text": "הגיבוי הזה ישן מהצפוי ({reason}). {consequence}",
+      "status": "machine"
+    },
+    "backup.stale_restore.confirm": {
+      "text": "לשחזר בכל זאת",
+      "status": "machine"
+    },
+    "backup.stale_restore.consequence": {
+      "text": "שחזור שלו יחזיר את החשבון למצב ישן יותר — הודעות ישנות יותר, ומכשירים שהסרתם עלולים להופיע שוב.",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.anchor_unreadable": {
+      "text": "הרישום של המכשיר הזה לגבי הגיבוי האחרון שלכם לא קריא או שבוצעה בו התעסקות",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.below_floor": {
+      "text": "הוא ישן מהגיבוי האחרון ששוחזר במכשיר הזה",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.head_stripped": {
+      "text": "החתימה שלו הוסרה והוא שונה מהגיבוי האחרון שהמכשיר הזה הכיר",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.too_old": {
+      "text": "הוא נחתם לפני זמן רב יותר ממה שמתאים לגיבוי עדכני",
+      "status": "machine"
+    },
+    "backup.stale_restore.title": {
+      "text": "לשחזר את הגיבוי הישן הזה?",
+      "status": "machine"
+    },
+    "call.guest.default_name": {
+      "text": "אורח",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "מכניסים אתכם לשיחה...",
       "status": "machine"
     },
+    "call.link.connecting": {
+      "text": "מתחבר...",
+      "status": "machine"
+    },
+    "call.link.dead": {
+      "text": "השיחה הזו הסתיימה או שאינה פעילה.",
+      "status": "machine"
+    },
+    "call.link.end_current": {
+      "text": "סיום השיחה הנוכחית",
+      "status": "machine"
+    },
+    "call.link.ended": {
+      "text": "השיחה הסתיימה.",
+      "status": "machine"
+    },
+    "call.link.error.generic": {
+      "text": "השיחה נכשלה.",
+      "status": "machine"
+    },
+    "call.link.failed": {
+      "text": "נכשל: {reason}",
+      "status": "machine"
+    },
+    "call.link.host": {
+      "text": "מארח/ת: {name}",
+      "status": "machine"
+    },
+    "call.link.invalid": {
+      "text": "קישור השיחה הזה לא תקף או שפג תוקפו.",
+      "status": "machine"
+    },
+    "call.link.join": {
+      "text": "הצטרפות לשיחה",
+      "status": "machine"
+    },
+    "call.link.live": {
+      "text": "אתם בשיחה הזו.",
+      "status": "machine"
+    },
+    "call.link.loading": {
+      "text": "טוען את קישור השיחה...",
+      "status": "machine"
+    },
+    "call.link.start": {
+      "text": "התחלת שיחה",
+      "status": "machine"
+    },
+    "call.link.title_join": {
+      "text": "הצטרפות לשיחה",
+      "status": "machine"
+    },
+    "call.link.title_start": {
+      "text": "התחילו את השיחה שלכם",
+      "status": "machine"
+    },
+    "call.link.waiting": {
+      "text": "ממתינים שהבעלים יכניסו אתכם...",
+      "status": "machine"
+    },
+    "call.link.waiting_hint": {
+      "text": "אפשר לצאת מהמסך הזה; תצטרפו ברגע שתאושרו.",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "בחרו צ׳אט כדי להתחיל לשלוח הודעות",
+      "status": "machine"
+    },
+    "common.adding": {
+      "text": "מוסיף...",
       "status": "machine"
     },
     "common.back": {
@@ -226,8 +338,20 @@
       "text": "סגירה",
       "status": "machine"
     },
+    "common.collapse": {
+      "text": "כיווץ",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "אישור",
+      "status": "machine"
+    },
+    "common.confirming": {
+      "text": "מאשר...",
+      "status": "machine"
+    },
+    "common.connecting": {
+      "text": "מתחבר...",
       "status": "machine"
     },
     "common.continue": {
@@ -262,8 +386,24 @@
       "text": "לא ניתן היה להתחבר ל-Lakko. בדקו את החיבור ונסו שוב.",
       "status": "machine"
     },
+    "common.error.qr_render": {
+      "text": "לא ניתן היה להציג את הקוד. נסו שוב.",
+      "status": "machine"
+    },
     "common.error.server_unreachable": {
       "text": "לא ניתן היה להתחבר לשרת. בדקו את החיבור.",
+      "status": "machine"
+    },
+    "common.error.session_ended": {
+      "text": "ההתחברות שלכם הסתיימה. התחברו שוב.",
+      "status": "machine"
+    },
+    "common.error.session_expired": {
+      "text": "פג תוקף ההתחברות. התחברו שוב.",
+      "status": "machine"
+    },
+    "common.error.session_not_ready": {
+      "text": "ההתחברות עדיין לא מוכנה.",
       "status": "machine"
     },
     "common.error.too_many_attempts": {
@@ -278,6 +418,10 @@
       "text": "האפשרות הזו לא זמינה כרגע. נסו שוב מאוחר יותר.",
       "status": "machine"
     },
+    "common.expand": {
+      "text": "הרחבה",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "טוען...",
       "status": "machine"
@@ -286,8 +430,24 @@
       "text": "מחפשים...",
       "status": "machine"
     },
+    "common.manage": {
+      "text": "ניהול",
+      "status": "machine"
+    },
     "common.more_options": {
       "text": "אפשרויות נוספות",
+      "status": "machine"
+    },
+    "common.off": {
+      "text": "כבוי",
+      "status": "machine"
+    },
+    "common.on": {
+      "text": "פועל",
+      "status": "machine"
+    },
+    "common.open_lakko": {
+      "text": "פתיחת Lakko",
       "status": "machine"
     },
     "common.optional": {
@@ -306,12 +466,36 @@
       "text": "מכינים...",
       "status": "machine"
     },
+    "common.remove": {
+      "text": "הסרה",
+      "status": "machine"
+    },
+    "common.removing": {
+      "text": "מסיר...",
+      "status": "machine"
+    },
+    "common.save": {
+      "text": "שמירה",
+      "status": "machine"
+    },
+    "common.saving": {
+      "text": "שומר...",
+      "status": "machine"
+    },
     "common.sending": {
       "text": "שולחים...",
       "status": "machine"
     },
+    "common.set_up": {
+      "text": "הגדרה",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "ניסיון חוזר",
+      "status": "machine"
+    },
+    "common.unknown": {
+      "text": "לא ידוע",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -1122,8 +1306,168 @@
       "text": "מפתח האבטחה של החשבון שלכם שונה.",
       "status": "machine"
     },
+    "settings.about.lede_web": {
+      "text": "Lakko בדפדפן.",
+      "status": "machine"
+    },
+    "settings.about.licence": {
+      "text": "רישיון",
+      "status": "machine"
+    },
+    "settings.about.licence_body": {
+      "text": "{licence}. קוד המקור פתוח לקריאה, לשימוש ולשיפור באופן חופשי.",
+      "status": "machine"
+    },
+    "settings.about.protection.body": {
+      "text": "הודעות, שיחות ובקשות קשר מוצפנות מקצה לקצה: רק האנשים בשיחה יכולים לקרוא אותן, אף פעם לא השרתים של Lakko. הסיסמה שלכם אף פעם לא יוצאת מהמכשיר, ולכל איש קשר יש מספר בטיחות שאפשר להשוות פנים אל פנים.",
+      "status": "machine"
+    },
+    "settings.about.protection.title": {
+      "text": "איך Lakko מגנה עליכם",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "התרגומים עודכנו {date}",
+      "status": "machine"
+    },
+    "settings.about.version": {
+      "text": "גרסה",
+      "status": "machine"
+    },
+    "settings.account.danger_zone.footer": {
+      "text": "„התנתקות” משאירה את הנתונים במכשיר הזה. „שכחת המכשיר הזה” מסירה אותם; אפשר לחזור רק עם ביטוי השחזור או ממכשיר מחובר אחר. „מחיקת החשבון” מוחקת את החשבון בשרת ומנקה את המכשיר הזה; אי אפשר לבטל את הפעולה.",
+      "status": "machine"
+    },
+    "settings.account.delete.body": {
+      "text": "הפעולה מוחקת את הזהות שלכם בשרת — שם משתמש, מפתחות, אמצעי שחזור וגיבוי — ומנתקת אתכם בכל מקום. גם ההודעות המקומיות נמחקות מהמכשיר הזה. אי אפשר לבטל את הפעולה.",
+      "status": "machine"
+    },
+    "settings.account.delete.confirm": {
+      "text": "מחיקת החשבון",
+      "status": "machine"
+    },
+    "settings.account.delete.error.cancelled": {
+      "text": "בוטל. החשבון לא נמחק.",
+      "status": "machine"
+    },
+    "settings.account.delete.error.generic": {
+      "text": "לא ניתן היה למחוק את החשבון. נסו שוב.",
+      "status": "machine"
+    },
+    "settings.account.delete.sub": {
+      "text": "מוחק לצמיתות את החשבון ואת כל מה שבו, ומנקה את המכשיר הזה. אי אפשר לבטל את הפעולה.",
+      "status": "machine"
+    },
+    "settings.account.delete.title": {
+      "text": "למחוק את החשבון?",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body": {
+      "text": "החשבון השמור בדפדפן הזה יאבד. הדרך היחידה לחזור היא ביטוי השחזור בן 24 המילים שרשמתם בהרשמה.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body_device": {
+      "text": "כל מה שבמכשיר הזה יוסר והמכשיר יצא מהחשבון. כדי להשתמש שוב בחשבון הזה כאן תצטרכו את ביטוי השחזור או מכשיר מחובר אחר.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.confirm": {
+      "text": "שכחת המכשיר",
+      "status": "machine"
+    },
+    "settings.account.forget_device.label": {
+      "text": "שכחת המכשיר הזה",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub": {
+      "text": "מסיר את נתוני החשבון מהדפדפן הזה. ההודעות נשארות במכשירים האחרים שלכם; כדי לחזור לכאן תצטרכו את ביטוי השחזור או מכשיר אחר.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.title": {
+      "text": "לשכוח את המכשיר הזה?",
+      "status": "machine"
+    },
+    "settings.account.lede": {
+      "text": "הנתונים שלכם, התנתקות, המכשיר הזה ומחיקת החשבון.",
+      "status": "machine"
+    },
+    "settings.account.log_out": {
+      "text": "התנתקות",
+      "status": "machine"
+    },
+    "settings.account.log_out.body": {
+      "text": "ההודעות נשארות במכשיר הזה. התחברו שוב עם הסיסמה או מפתח הגישה.",
+      "status": "machine"
+    },
+    "settings.account.log_out.sub": {
+      "text": "מנתק אתכם במכשיר הזה. הנתונים נשארים כאן להתחברות הבאה.",
+      "status": "machine"
+    },
+    "settings.account.log_out.title": {
+      "text": "להתנתק מ-Lakko?",
+      "status": "machine"
+    },
+    "settings.account.vault.not_set_up": {
+      "text": "שחזור בשלוש מילים: עדיין לא הוגדר בחשבון הזה. הוא יוגדר בפעם הבאה שתתחברו במכשיר שמחזיק את הביטוי שלכם.",
+      "status": "machine"
+    },
+    "settings.account.vault.on": {
+      "text": "שחזור בשלוש מילים: פועל (מילים {positions}). גם מכשיר אחר מחובר וגם ביטוי 24 המילים שלכם עובדים.",
+      "status": "machine"
+    },
+    "settings.account.vault.unavailable": {
+      "text": "שחזור בשלוש מילים: לא זמין בשרת הזה. ביטוי 24 המילים והמכשירים האחרים שלכם עדיין עובדים.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.footer": {
+      "text": "כשהאפשרות פועלת, Lakko מתחברת בדרך שקשה יותר לרשת לזהות ולחסום. ההודעות שלכם נשארות מוצפנות מקצה לקצה בכל מקרה.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status": {
+      "text": "מצב",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active": {
+      "text": "פעיל",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active.sub": {
+      "text": "החיבורים מוסתרים מחסימות רשת.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.connecting.sub": {
+      "text": "מקים את החיבור המוסתר.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.direct": {
+      "text": "חיבור ישיר",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable": {
+      "text": "לא זמין",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable.sub": {
+      "text": "לא ניתן היה להקים את החיבור המוסתר. בדקו את הרשת, ואז כבו והפעילו שוב את המתג כדי לנסות שוב.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured": {
+      "text": "לא זמין בגרסה הזו",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured.sub": {
+      "text": "הגרסה הזו נבנתה בלי ההגדרה הזו.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.title": {
+      "text": "עקיפת צנזורה",
+      "status": "machine"
+    },
+    "settings.anti_censorship.toggle": {
+      "text": "הסתרת Lakko מחסימות רשת",
+      "status": "machine"
+    },
+    "settings.appearance.lede": {
+      "text": "ערכת הנושא במכשיר הזה.",
       "status": "machine"
     },
     "settings.appearance.theme": {
@@ -1140,6 +1484,126 @@
     },
     "settings.appearance.theme.system": {
       "text": "מערכת",
+      "status": "machine"
+    },
+    "settings.data.downloaded": {
+      "text": "{file} הורד.",
+      "status": "machine"
+    },
+    "settings.data.error.generic": {
+      "text": "לא ניתן היה לייצא את הנתונים. נסו שוב.",
+      "status": "machine"
+    },
+    "settings.data.export": {
+      "text": "ייצוא הנתונים שלי",
+      "status": "machine"
+    },
+    "settings.data.export_note": {
+      "text": "ההודעות, אנשי הקשר ומצב הקבוצות שלכם מוצפנים מקצה לקצה ונמצאים רק במכשירים שלכם.",
+      "status": "machine"
+    },
+    "settings.data.lede": {
+      "text": "הורידו עותק של מה שהשרתים של Lakko שומרים על החשבון שלכם. ההודעות ואנשי הקשר מוצפנים מקצה לקצה ונשארים במכשירים שלכם, ולכן אינם חלק מהקובץ הזה.",
+      "status": "machine"
+    },
+    "settings.data.ready": {
+      "text": "הייצוא מוכן. הקישו על „שיתוף” כדי לשמור אותו.",
+      "status": "machine"
+    },
+    "settings.data.share": {
+      "text": "שיתוף הייצוא",
+      "status": "machine"
+    },
+    "settings.data.title": {
+      "text": "הנתונים שלכם",
+      "status": "machine"
+    },
+    "settings.devices.add.lede": {
+      "text": "קודם התחברו ל-Lakko במכשיר החדש. אחר כך בחרו איזה משני המכשירים מציג קוד.",
+      "status": "machine"
+    },
+    "settings.devices.add.no_camera": {
+      "text": "אין מצלמה באף אחד מהמכשירים? התחברו במכשיר החדש ובחרו „{method}”: כאן תופיע בקשת „{prompt}” עם קוד להשוואה.",
+      "status": "machine"
+    },
+    "settings.devices.device_n": {
+      "text": "מכשיר {number}",
+      "status": "machine"
+    },
+    "settings.devices.error.load": {
+      "text": "לא ניתן היה לטעון את המכשירים. נסו שוב.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key": {
+      "text": "הדפדפן הזה לא מוגדר עבור החשבון שלכם. התחברו שוב.",
+      "status": "machine"
+    },
+    "settings.devices.error.remove": {
+      "text": "לא ניתן היה להסיר את המכשיר. נסו שוב.",
+      "status": "machine"
+    },
+    "settings.devices.error.scan": {
+      "text": "לא ניתן היה להוסיף את המכשיר. נסו שוב.",
+      "status": "machine"
+    },
+    "settings.devices.lede": {
+      "text": "הטלפונים, הטאבלטים והמחשבים המחוברים לחשבון שלכם. הוספת מכשיר מוצפנת מקצה לקצה; השרתים של Lakko לא יכולים לקרוא אותה.",
+      "status": "machine"
+    },
+    "settings.devices.list.lede": {
+      "text": "מכשיר שהוסר מאבד גישה להודעות שלכם מאותו רגע. הסרה עשויה לבקש את מפתח הגישה שלכם.",
+      "status": "machine"
+    },
+    "settings.devices.list.title": {
+      "text": "המכשירים שלכם",
+      "status": "machine"
+    },
+    "settings.devices.remove.body": {
+      "text": "המכשיר הזה יאבד גישה להודעות שלכם מאותו רגע. ייתכן שתתבקשו להזין את מפתח הגישה.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm_named": {
+      "text": "הסרת {device}",
+      "status": "machine"
+    },
+    "settings.devices.remove.title": {
+      "text": "להסיר את {device}?",
+      "status": "machine"
+    },
+    "settings.devices.scan.done": {
+      "text": "המכשיר נוסף. הוא יופיע ברשימה כשיסיים להצטרף.",
+      "status": "machine"
+    },
+    "settings.devices.scan.opening": {
+      "text": "פותח את המצלמה...",
+      "status": "machine"
+    },
+    "settings.devices.show.error.timeout": {
+      "text": "המכשיר השני לא סרק בזמן. נסו שוב.",
+      "status": "machine"
+    },
+    "settings.devices.show.lede": {
+      "text": "סרקו את הקוד הזה במכשיר שכבר מחובר. אחרי שהוא יאשר, המכשיר הזה יצטרף לחשבון שלכם.",
+      "status": "machine"
+    },
+    "settings.devices.show.start": {
+      "text": "הצגת הקוד",
+      "status": "machine"
+    },
+    "settings.devices.sign_in_first": {
+      "text": "כדי לנהל מכשירים, התחברו קודם.",
+      "status": "machine"
+    },
+    "settings.devices.this_device": {
+      "text": "המכשיר הזה",
+      "status": "machine"
+    },
+    "settings.devices.this_device.sub": {
+      "text": "המכשיר שבו אתם משתמשים עכשיו.",
+      "status": "machine"
+    },
+    "settings.devices.title": {
+      "text": "מכשירים",
       "status": "machine"
     },
     "settings.language.load_failed": {
@@ -1166,6 +1630,266 @@
       "text": "שפה",
       "status": "machine"
     },
+    "settings.me.guest": {
+      "text": "אורח",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.sub": {
+      "text": "הודעות וידאו נכנסות מתחילות להתנגן, מושתקות, כשהן נגללות לתצוגה. כבוי כברירת מחדל כי ניגון אוטומטי מוריד מדיה.",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.title": {
+      "text": "ניגון אוטומטי של הודעות וידאו",
+      "status": "machine"
+    },
+    "settings.media.lede": {
+      "text": "ניגון במכשיר הזה.",
+      "status": "machine"
+    },
+    "settings.notifications.off.body": {
+      "text": "ההתראות כבויות, ולכן Lakko יכולה לצלצל רק כשהיא פתוחה. הפעילו אותן כדי ששיחות והודעות יגיעו אליכם גם כשהיא סגורה.",
+      "status": "machine"
+    },
+    "settings.notifications.off.title": {
+      "text": "הפעלת התראות",
+      "status": "machine"
+    },
+    "settings.passkeys.add": {
+      "text": "הוספת מפתח גישה",
+      "status": "machine"
+    },
+    "settings.passkeys.added": {
+      "text": "מפתח הגישה „{name}” נוסף.",
+      "status": "machine"
+    },
+    "settings.passkeys.added_last_used": {
+      "text": "נוסף {added} · שימוש אחרון {used}",
+      "status": "machine"
+    },
+    "settings.passkeys.added_never_used": {
+      "text": "נוסף {added} · לא נעשה בו שימוש",
+      "status": "machine"
+    },
+    "settings.passkeys.empty": {
+      "text": "עדיין אין מפתחות גישה.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.cancelled": {
+      "text": "בוטל. לא נוצר מפתח גישה.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.generic": {
+      "text": "לא ניתן היה לעדכן את מפתחות הגישה. נסו שוב.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.name_required": {
+      "text": "תנו שם למפתח הגישה.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.network": {
+      "text": "שגיאת רשת. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.server_status": {
+      "text": "שגיאת שרת ({status}).",
+      "status": "machine"
+    },
+    "settings.passkeys.error.unsupported": {
+      "text": "הדפדפן או המכשיר הזה לא יכולים ליצור מפתחות גישה כרגע.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede": {
+      "text": "התחברו עם Touch ID, Face ID או מפתח אבטחה במקום הסיסמה. ביטוי השחזור שלכם תמיד עובד גם הוא.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede_device": {
+      "text": "התחברו עם טביעת אצבע, זיהוי פנים או נעילת מסך, או עם מפתח אבטחה, במקום הסיסמה. ביטוי השחזור שלכם תמיד עובד גם הוא.",
+      "status": "machine"
+    },
+    "settings.passkeys.name.label": {
+      "text": "שם מפתח הגישה",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder": {
+      "text": "תנו שם למפתח הגישה (למשל MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.body": {
+      "text": "המכשיר שמחזיק את המפתח הפרטי התואם לא יוכל עוד להתחבר איתו. אי אפשר לבטל את הפעולה.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm": {
+      "text": "הסרה",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm_named": {
+      "text": "הסרת {name}",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.error.cancelled": {
+      "text": "בוטל. מפתח הגישה לא הוסר.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.title": {
+      "text": "להסיר את מפתח הגישה הזה?",
+      "status": "machine"
+    },
+    "settings.passkeys.removed": {
+      "text": "„{name}” הוסר.",
+      "status": "machine"
+    },
+    "settings.passkeys.title": {
+      "text": "מפתחות גישה",
+      "status": "machine"
+    },
+    "settings.passkeys.unnamed": {
+      "text": "מפתח גישה ללא שם",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_browser": {
+      "text": "הדפדפן הזה לא יכול לנהל מפתחות גישה. השתמשו בגרסה עדכנית של Safari, Chrome, Firefox או Edge.",
+      "status": "machine"
+    },
+    "settings.profile.error.generic": {
+      "text": "לא ניתן היה לשמור את השם. נסו שוב.",
+      "status": "machine"
+    },
+    "settings.profile.lede": {
+      "text": "איך אנשי הקשר שלכם רואים אתכם.",
+      "status": "machine"
+    },
+    "settings.profile.name.hint": {
+      "text": "מוצג לאנשים שאתם מדברים איתם. לא חייב להיות ייחודי, עד {count, plural, one {תו אחד} two {שני תווים} other {# תווים}}.",
+      "status": "machine"
+    },
+    "settings.profile.name.label": {
+      "text": "השם שלכם",
+      "status": "machine"
+    },
+    "settings.profile.preview.label": {
+      "text": "איך אחרים רואים אתכם",
+      "status": "machine"
+    },
+    "settings.profile.preview.no_name": {
+      "text": "עד שתגדירו שם, אחרים רואים את טביעת האצבע של המפתח שלכם.",
+      "status": "machine"
+    },
+    "settings.profile.saved": {
+      "text": "השם שלכם יתעדכן אצל אנשי הקשר.",
+      "status": "machine"
+    },
+    "settings.profile.username.none": {
+      "text": "אין",
+      "status": "machine"
+    },
+    "settings.recovery.contact.already_enabled": {
+      "text": "לחשבון הזה כבר מוגדרים דוא״ל או טלפון. כדי להחליף אותם, קודם התחברו שוב עם ביטוי השחזור או ממכשיר אחר.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.done": {
+      "text": "בוצע. קוד שיישלח לשם יוכל עכשיו להחזיר אתכם לחשבון.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.bad_contact": {
+      "text": "זה לא נראה תקין. בדקו ונסו שוב.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.generic": {
+      "text": "לא ניתן היה להגדיר את הדוא״ל או הטלפון. נסו שוב.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.lede": {
+      "text": "קוד חד-פעמי שנשלח לדוא״ל או לטלפון שלכם מאפשר להתחבר שוב אם שכחתם את הסיסמה.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_email": {
+      "text": "שלחנו קוד בן שש ספרות אל {contact} בדוא״ל. הזינו אותו למטה.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_phone": {
+      "text": "שלחנו קוד בן שש ספרות אל {contact} בהודעת SMS. הזינו אותו למטה.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sub": {
+      "text": "קוד חד-פעמי שנשלח לדוא״ל או לטלפון שלכם.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.unavailable": {
+      "text": "שחזור באמצעות דוא״ל וטלפון לא זמין כרגע.",
+      "status": "machine"
+    },
+    "settings.recovery.lede": {
+      "text": "ביטוי השחזור משחזר הכול. האמצעים האלה מחזירים אתכם לחשבון אם איבדתם את הסיסמה; ההודעות מגיעות אחר כך מהביטוי או ממכשיר אחר שלכם.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.not_saved_here": {
+      "text": "לא שמור במכשיר הזה. שמרו היטב את העותק הכתוב.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.saved_here": {
+      "text": "שמור במכשיר הזה.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.sub": {
+      "text": "24 המילים שרשמתם בהרשמה משחזרות את הזהות, אנשי הקשר וההודעות שלכם במכשיר חדש.",
+      "status": "machine"
+    },
+    "settings.recovery.section.access": {
+      "text": "גישה",
+      "status": "machine"
+    },
+    "settings.recovery.section.identity": {
+      "text": "זהות",
+      "status": "machine"
+    },
+    "settings.recovery.sign_in_first": {
+      "text": "כדי לנהל את השחזור, התחברו קודם.",
+      "status": "machine"
+    },
+    "settings.recovery.title": {
+      "text": "שחזור",
+      "status": "machine"
+    },
+    "settings.recovery.totp.already_enabled": {
+      "text": "לחשבון הזה כבר מוגדרת אפליקציית אימות. כדי להחליף אותה, קודם התחברו שוב עם ביטוי השחזור או ממכשיר אחר.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.done": {
+      "text": "אפליקציית האימות הוגדרה. קוד מהאפליקציה יוכל עכשיו להחזיר אתכם לחשבון.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.generic": {
+      "text": "לא ניתן היה להגדיר את אפליקציית האימות. נסו שוב.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.wrong": {
+      "text": "הקוד הזה לא עבד. חכו לקוד הבא באפליקציה ונסו שוב.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.key": {
+      "text": "מפתח: {key}",
+      "status": "machine"
+    },
+    "settings.recovery.totp.lede": {
+      "text": "קוד בן שש ספרות מאפליקציית אימות מאפשר להתחבר שוב אם שכחתם את הסיסמה.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.scan": {
+      "text": "סרקו את הקוד הזה באפליקציית האימות, או הקלידו את המפתח ידנית, ואז הזינו את הקוד בן שש הספרות שהאפליקציה מציגה.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.set_up": {
+      "text": "הגדרת אפליקציית אימות",
+      "status": "machine"
+    },
+    "settings.recovery.totp.title": {
+      "text": "אפליקציית אימות",
+      "status": "machine"
+    },
+    "settings.recovery.totp.unavailable": {
+      "text": "הגדרת אפליקציית אימות לא זמינה כרגע.",
+      "status": "machine"
+    },
     "settings.section.about": {
       "text": "אודות",
       "status": "machine"
@@ -1178,12 +1902,20 @@
       "text": "מראה",
       "status": "machine"
     },
+    "settings.section.danger_zone": {
+      "text": "אזור מסוכן",
+      "status": "machine"
+    },
     "settings.section.data": {
       "text": "נתונים",
       "status": "machine"
     },
     "settings.section.media": {
       "text": "מדיה",
+      "status": "machine"
+    },
+    "settings.section.network": {
+      "text": "רשת",
       "status": "machine"
     },
     "settings.section.notifications": {
@@ -1196,6 +1928,30 @@
     },
     "settings.section.security": {
       "text": "אבטחה",
+      "status": "machine"
+    },
+    "settings.security.devices.sub": {
+      "text": "צפייה, הוספה והסרה של המכשירים בחשבון הזה.",
+      "status": "machine"
+    },
+    "settings.security.devices_and_recovery": {
+      "text": "מכשירים ושחזור",
+      "status": "machine"
+    },
+    "settings.security.lede": {
+      "text": "איך אתם מתחברים, אילו מכשירים יכולים לקרוא את ההודעות שלכם ואיך חוזרים לחשבון.",
+      "status": "machine"
+    },
+    "settings.security.recovery.sub": {
+      "text": "אפליקציית אימות, כתובת דוא״ל או מספר טלפון שמחזירים אתכם לחשבון.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.sub": {
+      "text": "לכל איש קשר יש מספר בטיחות. השוו אותו פנים אל פנים או בשיחה; מספרים תואמים פירושם שאין אף אחד באמצע. תמצאו אותו בפרטי איש הקשר.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.title": {
+      "text": "מספרי בטיחות",
       "status": "machine"
     },
     "username.a11y_hint": {

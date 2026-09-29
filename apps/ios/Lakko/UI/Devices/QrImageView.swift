@@ -18,6 +18,7 @@ public struct QrImageView: View {
 
     public let payload: Data
     public let size: CGFloat
+    @ObservedObject private var l10n = Localization.shared
 
     public init(payload: Data, size: CGFloat = 256) {
         self.payload = payload
@@ -32,7 +33,7 @@ public struct QrImageView: View {
                 .resizable()
                 .frame(width: size, height: size)
         } else {
-            Text("Failed to render QR.")
+            Text(l10n.t("common.error.qr_render"))
                 .foregroundStyle(.red)
                 .font(.footnote)
         }
@@ -81,6 +82,7 @@ public struct QrTextImageView: View {
 
     public let text: String
     public let size: CGFloat
+    @ObservedObject private var l10n = Localization.shared
 
     public init(text: String, size: CGFloat = 256) {
         self.text = text
@@ -94,7 +96,7 @@ public struct QrTextImageView: View {
                 .resizable()
                 .frame(width: size, height: size)
         } else {
-            Text("Failed to render QR.")
+            Text(l10n.t("common.error.qr_render"))
                 .foregroundStyle(.red)
                 .font(.footnote)
         }

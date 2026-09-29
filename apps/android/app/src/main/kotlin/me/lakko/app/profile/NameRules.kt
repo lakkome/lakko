@@ -35,7 +35,7 @@ import uniffi.lakko_ffi_uniffi.FfiException
 /**
  * Why a username fails the ADR-0048 §4 rule. [text] is what a screen shows
  * (ADR-0058: the catalog key, rendered in the current language); [copy] is
- * the English sentence, kept for screens not yet moved to the catalog.
+ * the English sentence for logs and exception messages only, never a screen.
  */
 public enum class UsernameProblem(public val copy: String, public val text: UiText) {
     EMPTY("Enter a username", UiText("username.error.empty")),
@@ -82,27 +82,10 @@ public fun checkUsername(
     }
 
 /**
- * The as-you-type line under a username field: `null` while the field is
- * blank (nothing typed is not an error to shout about) or the name passes;
- * otherwise the reason copy.
- */
-public fun usernameFieldError(check: UsernameCheck, input: String): String? {
-    if (input.isBlank()) return null
-    return (check as? UsernameCheck.Invalid)?.problem?.copy
-}
-
-/**
  * The as-you-type hint shown when the name passes but is not typed in its
  * canonical form (uppercase is accepted and shown lowercased): `@alice` for
  * `Alice`. `null` otherwise.
  */
-public fun usernameCanonicalHint(check: UsernameCheck, input: String): String? {
-    val valid = check as? UsernameCheck.Valid ?: return null
-    val typed = input.trim().removePrefix("@")
-    return if (typed == valid.normalized) null else "Shown as @${valid.normalized}"
-}
-
-/** [usernameCanonicalHint] as a catalog message. */
 public fun usernameCanonicalHintText(check: UsernameCheck, input: String): UiText? {
     val valid = check as? UsernameCheck.Valid ?: return null
     val typed = input.trim().removePrefix("@")
@@ -113,7 +96,11 @@ public fun usernameCanonicalHintText(check: UsernameCheck, input: String): UiTex
     }
 }
 
-/** [usernameFieldError] as a catalog message. */
+/**
+ * The as-you-type line under a username field: `null` while the field is
+ * blank (nothing typed is not an error to shout about) or the name passes;
+ * otherwise the reason.
+ */
 public fun usernameFieldErrorText(check: UsernameCheck, input: String): UiText? {
     if (input.isBlank()) return null
     return (check as? UsernameCheck.Invalid)?.problem?.text
@@ -129,8 +116,8 @@ public sealed interface SearchDecision {
     /** Send the lookup for [normalized]. */
     public data class Lookup(val normalized: String) : SearchDecision
 
-    /** Do not send anything; show [text] ([message] is its English form). */
-    public data class Refuse(val message: String, val text: UiText = UiText("username.error.unknown")) : SearchDecision
+    /** Do not send anything; show [text]. */
+    public data class Refuse(val text: UiText) : SearchDecision
 }
 
 /** Decide a search field's action for [input]. */
@@ -139,11 +126,11 @@ public fun searchDecision(
     validate: (String) -> String = { uniffi.lakko_ffi_uniffi.validateUsername(it) },
 ): SearchDecision = when (val check = checkUsername(input, validate)) {
     is UsernameCheck.Valid -> SearchDecision.Lookup(check.normalized)
-    is UsernameCheck.Invalid -> SearchDecision.Refuse(check.problem.copy, check.problem.text)
+    is UsernameCheck.Invalid -> SearchDecision.Refuse(check.problem.text)
 }
 
 /** Why a profile name fails the ADR-0048 §1 rule; [text] and [copy] as for
- *  [UsernameProblem]. */
+ *  [UsernameProblem] (only [text] reaches a screen). */
 public enum class DisplayNameProblem(public val copy: String, public val text: UiText) {
     LINE_BREAK("One line only", UiText("display_name.error.line_break")),
     CONTROL_OR_FORMAT("Remove invisible or text-direction characters", UiText("display_name.error.control")),

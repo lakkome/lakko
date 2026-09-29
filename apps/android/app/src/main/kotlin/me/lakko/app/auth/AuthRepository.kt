@@ -1839,7 +1839,7 @@ public class AuthRepository(
      * silent default: with no UI wired the deferred never completes, so the
      * restore stays blocked rather than auto-accepting (invariant #4).
      */
-    private suspend fun awaitStaleOverride(reason: String): Boolean {
+    private suspend fun awaitStaleOverride(reason: me.lakko.app.backup.RestoreReason): Boolean {
         val deferred = CompletableDeferred<Boolean>()
         staleOverrideDeferred.set(deferred)
         mutableStaleOverridePrompt.value = StaleOverridePrompt(reason)
@@ -2758,14 +2758,14 @@ public class AuthRepository(
                         // backup applied). Raise the dismissible security banner.
                         Log.e(
                             "lakko-auth",
-                            "backup restore ($context): ROLLBACK BLOCKED (hard) - ${outcome.reason}",
+                            "backup restore ($context): ROLLBACK BLOCKED (hard) - ${outcome.reason.diagnostic}",
                         )
                         mutableRollbackAlert.value = BackupRollbackAlert(outcome.reason)
                     } else {
                         // Stale head the user DECLINED to override.
                         Log.w(
                             "lakko-auth",
-                            "backup restore ($context): stale head override declined - ${outcome.reason}",
+                            "backup restore ($context): stale head override declined - ${outcome.reason.diagnostic}",
                         )
                     }
                     return RestoredBackup(ByteArray(0), emptyList())
@@ -3160,8 +3160,8 @@ public enum class IdentityAlert {
  * user's decision; resolved via [AuthRepository.resolveStaleOverride].
  */
 public data class StaleOverridePrompt(
-    /** Human-readable reason the head was flagged stale, shown in the dialog. */
-    val reason: String,
+    /** Why the head was flagged stale; the dialog shows its catalog phrase. */
+    val reason: me.lakko.app.backup.RestoreReason,
 )
 
 /**
@@ -3171,8 +3171,8 @@ public data class StaleOverridePrompt(
  * backup was applied.
  */
 public data class BackupRollbackAlert(
-    /** Human-readable reason the head was rejected, shown in the banner. */
-    val reason: String,
+    /** Why the head was rejected; the banner shows its catalog phrase. */
+    val reason: me.lakko.app.backup.RestoreReason,
 )
 
 /** Account record exposed to the UI when a session is active.

@@ -202,12 +202,124 @@
       "text": "نام کاربری",
       "status": "machine"
     },
+    "backup.rollback_refused.body": {
+      "text": "سرور یک نسخه پشتیبان تغییریافته یا قدیمی برگرداند. حساب شما امن است؛ بدون بازیابی داده‌های قدیمی‌تر ادامه دادیم.",
+      "status": "machine"
+    },
+    "backup.rollback_refused.title": {
+      "text": "بازیابی امن نسخه پشتیبان ممکن نشد",
+      "status": "machine"
+    },
+    "backup.stale_restore.body": {
+      "text": "این نسخه پشتیبان قدیمی‌تر از حد انتظار است ({reason}). {consequence}",
+      "status": "machine"
+    },
+    "backup.stale_restore.confirm": {
+      "text": "در هر صورت بازیابی شود",
+      "status": "machine"
+    },
+    "backup.stale_restore.consequence": {
+      "text": "بازیابی آن حساب شما را به وضعیتی قدیمی‌تر برمی‌گرداند؛ پیام‌ها قدیمی‌تر می‌شوند و دستگاه‌هایی که حذف کرده‌اید ممکن است دوباره ظاهر شوند.",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.anchor_unreadable": {
+      "text": "سابقه این دستگاه از آخرین نسخه پشتیبان شما خوانا نیست یا دستکاری شده است",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.below_floor": {
+      "text": "قدیمی‌تر از آخرین نسخه‌ای است که روی این دستگاه بازیابی شده",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.head_stripped": {
+      "text": "امضای آن حذف شده و با آخرین نسخه‌ای که این دستگاه می‌شناخت فرق دارد",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.too_old": {
+      "text": "زودتر از آنچه برای یک نسخه به‌روز انتظار می‌رود امضا شده است",
+      "status": "machine"
+    },
+    "backup.stale_restore.title": {
+      "text": "این نسخه پشتیبان قدیمی‌تر بازیابی شود؟",
+      "status": "machine"
+    },
+    "call.guest.default_name": {
+      "text": "مهمان",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "در حال ورود شما به تماس...",
       "status": "machine"
     },
+    "call.link.connecting": {
+      "text": "در حال اتصال...",
+      "status": "machine"
+    },
+    "call.link.dead": {
+      "text": "این تماس پایان یافته یا فعال نیست.",
+      "status": "machine"
+    },
+    "call.link.end_current": {
+      "text": "پایان تماس فعلی",
+      "status": "machine"
+    },
+    "call.link.ended": {
+      "text": "تماس پایان یافت.",
+      "status": "machine"
+    },
+    "call.link.error.generic": {
+      "text": "تماس ناموفق بود.",
+      "status": "machine"
+    },
+    "call.link.failed": {
+      "text": "ناموفق: {reason}",
+      "status": "machine"
+    },
+    "call.link.host": {
+      "text": "میزبان: {name}",
+      "status": "machine"
+    },
+    "call.link.invalid": {
+      "text": "این پیوند تماس نامعتبر است یا منقضی شده است.",
+      "status": "machine"
+    },
+    "call.link.join": {
+      "text": "پیوستن به تماس",
+      "status": "machine"
+    },
+    "call.link.live": {
+      "text": "شما در این تماس هستید.",
+      "status": "machine"
+    },
+    "call.link.loading": {
+      "text": "در حال بارگیری پیوند تماس...",
+      "status": "machine"
+    },
+    "call.link.start": {
+      "text": "شروع تماس",
+      "status": "machine"
+    },
+    "call.link.title_join": {
+      "text": "پیوستن به یک تماس",
+      "status": "machine"
+    },
+    "call.link.title_start": {
+      "text": "تماس خود را شروع کنید",
+      "status": "machine"
+    },
+    "call.link.waiting": {
+      "text": "در انتظار پذیرش شما از سوی میزبان...",
+      "status": "machine"
+    },
+    "call.link.waiting_hint": {
+      "text": "می‌توانید این صفحه را ترک کنید؛ پس از پذیرش به تماس می‌پیوندید.",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "برای شروع پیام‌رسانی یک گفتگو را انتخاب کنید",
+      "status": "machine"
+    },
+    "common.adding": {
+      "text": "در حال افزودن...",
       "status": "machine"
     },
     "common.back": {
@@ -226,8 +338,20 @@
       "text": "بستن",
       "status": "machine"
     },
+    "common.collapse": {
+      "text": "جمع کردن",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "تأیید",
+      "status": "machine"
+    },
+    "common.confirming": {
+      "text": "در حال تأیید...",
+      "status": "machine"
+    },
+    "common.connecting": {
+      "text": "در حال اتصال...",
       "status": "machine"
     },
     "common.continue": {
@@ -262,8 +386,24 @@
       "text": "دسترسی به Lakko ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
       "status": "machine"
     },
+    "common.error.qr_render": {
+      "text": "نمایش کد ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
     "common.error.server_unreachable": {
       "text": "دسترسی به سرور ممکن نشد. اتصال خود را بررسی کنید.",
+      "status": "machine"
+    },
+    "common.error.session_ended": {
+      "text": "نشست شما پایان یافته است. دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "common.error.session_expired": {
+      "text": "نشست منقضی شده است. دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "common.error.session_not_ready": {
+      "text": "نشست هنوز آماده نیست.",
       "status": "machine"
     },
     "common.error.too_many_attempts": {
@@ -278,6 +418,10 @@
       "text": "این مورد اکنون در دسترس نیست. بعداً دوباره تلاش کنید.",
       "status": "machine"
     },
+    "common.expand": {
+      "text": "باز کردن",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "در حال بارگیری...",
       "status": "machine"
@@ -286,8 +430,24 @@
       "text": "در حال جستجو...",
       "status": "machine"
     },
+    "common.manage": {
+      "text": "مدیریت",
+      "status": "machine"
+    },
     "common.more_options": {
       "text": "گزینه‌های بیشتر",
+      "status": "machine"
+    },
+    "common.off": {
+      "text": "خاموش",
+      "status": "machine"
+    },
+    "common.on": {
+      "text": "روشن",
+      "status": "machine"
+    },
+    "common.open_lakko": {
+      "text": "باز کردن Lakko",
       "status": "machine"
     },
     "common.optional": {
@@ -306,12 +466,36 @@
       "text": "در حال آماده‌سازی...",
       "status": "machine"
     },
+    "common.remove": {
+      "text": "حذف",
+      "status": "machine"
+    },
+    "common.removing": {
+      "text": "در حال حذف...",
+      "status": "machine"
+    },
+    "common.save": {
+      "text": "ذخیره",
+      "status": "machine"
+    },
+    "common.saving": {
+      "text": "در حال ذخیره...",
+      "status": "machine"
+    },
     "common.sending": {
       "text": "در حال ارسال...",
       "status": "machine"
     },
+    "common.set_up": {
+      "text": "راه‌اندازی",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "تلاش دوباره",
+      "status": "machine"
+    },
+    "common.unknown": {
+      "text": "نامشخص",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -1122,8 +1306,168 @@
       "text": "کلید امنیتی حساب شما تغییر کرد.",
       "status": "machine"
     },
+    "settings.about.lede_web": {
+      "text": "Lakko در وب.",
+      "status": "machine"
+    },
+    "settings.about.licence": {
+      "text": "مجوز",
+      "status": "machine"
+    },
+    "settings.about.licence_body": {
+      "text": "{licence}. خواندن، استفاده و بهبود کد منبع آزاد است.",
+      "status": "machine"
+    },
+    "settings.about.protection.body": {
+      "text": "پیام‌ها، تماس‌ها و درخواست‌های مخاطب رمزگذاری سرتاسری دارند: فقط افراد حاضر در گفتگو می‌توانند آن‌ها را بخوانند و سرورهای Lakko هرگز نمی‌توانند. رمز عبور شما هرگز از دستگاهتان خارج نمی‌شود و هر مخاطب یک شماره امنیتی دارد که می‌توانید حضوری مقایسه کنید.",
+      "status": "machine"
+    },
+    "settings.about.protection.title": {
+      "text": "Lakko چگونه از شما محافظت می‌کند",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "ترجمه‌ها به‌روز شد {date}",
+      "status": "machine"
+    },
+    "settings.about.version": {
+      "text": "نسخه",
+      "status": "machine"
+    },
+    "settings.account.danger_zone.footer": {
+      "text": "«خروج» داده‌های شما را روی این دستگاه نگه می‌دارد. «فراموش کردن این دستگاه» آن‌ها را حذف می‌کند؛ فقط با عبارت بازیابی یا دستگاه دیگری که در آن وارد شده‌اید می‌توانید برگردید. «حذف حساب» حساب را روی سرور پاک و این دستگاه را پاک‌سازی می‌کند؛ این کار برگشت‌پذیر نیست.",
+      "status": "machine"
+    },
+    "settings.account.delete.body": {
+      "text": "این کار هویت شما روی سرور را پاک می‌کند (نام کاربری، کلیدها، روش‌های بازیابی و نسخه پشتیبان) و شما را از همه‌جا خارج می‌کند. پیام‌های محلی شما هم از این دستگاه پاک می‌شوند. این کار برگشت‌پذیر نیست.",
+      "status": "machine"
+    },
+    "settings.account.delete.confirm": {
+      "text": "حذف حساب",
+      "status": "machine"
+    },
+    "settings.account.delete.error.cancelled": {
+      "text": "لغو شد. حساب شما حذف نشد.",
+      "status": "machine"
+    },
+    "settings.account.delete.error.generic": {
+      "text": "حذف حساب شما ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.account.delete.sub": {
+      "text": "حساب شما و هر آنچه در آن است را برای همیشه پاک می‌کند و این دستگاه را پاک‌سازی می‌کند. این کار برگشت‌پذیر نیست.",
+      "status": "machine"
+    },
+    "settings.account.delete.title": {
+      "text": "حساب شما حذف شود؟",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body": {
+      "text": "حساب ذخیره‌شده در این مرورگر را از دست می‌دهید. تنها راه بازگشت، عبارت بازیابی بیست‌وچهار کلمه‌ای است که هنگام ثبت‌نام یادداشت کردید.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body_device": {
+      "text": "همه‌چیز روی این دستگاه حذف می‌شود و دستگاه از حساب شما خارج می‌شود. برای استفاده دوباره از این حساب در اینجا به عبارت بازیابی یا دستگاه دیگری که در آن وارد شده‌اید نیاز دارید.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.confirm": {
+      "text": "فراموش کردن دستگاه",
+      "status": "machine"
+    },
+    "settings.account.forget_device.label": {
+      "text": "فراموش کردن این دستگاه",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub": {
+      "text": "داده‌های حساب شما را از این مرورگر حذف می‌کند. پیام‌هایتان روی دستگاه‌های دیگرتان می‌مانند؛ برای بازگشت به اینجا به عبارت بازیابی یا دستگاه دیگری نیاز دارید.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.title": {
+      "text": "این دستگاه فراموش شود؟",
+      "status": "machine"
+    },
+    "settings.account.lede": {
+      "text": "داده‌های شما، خروج، این دستگاه و حذف حساب.",
+      "status": "machine"
+    },
+    "settings.account.log_out": {
+      "text": "خروج",
+      "status": "machine"
+    },
+    "settings.account.log_out.body": {
+      "text": "پیام‌هایتان روی این دستگاه می‌مانند. با رمز عبور یا کلید عبور دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "settings.account.log_out.sub": {
+      "text": "شما را در این دستگاه خارج می‌کند. داده‌هایتان برای ورود بعدی همین‌جا می‌مانند.",
+      "status": "machine"
+    },
+    "settings.account.log_out.title": {
+      "text": "از Lakko خارج می‌شوید؟",
+      "status": "machine"
+    },
+    "settings.account.vault.not_set_up": {
+      "text": "بازیابی با سه کلمه: هنوز روی این حساب راه‌اندازی نشده است. دفعه بعد که روی دستگاهی که عبارت شما را دارد وارد شوید، راه‌اندازی می‌شود.",
+      "status": "machine"
+    },
+    "settings.account.vault.on": {
+      "text": "بازیابی با سه کلمه: روشن (کلمه‌های {positions}). دستگاه دیگری که در آن وارد شده‌اید و عبارت بیست‌وچهار کلمه‌ای شما هم کار می‌کنند.",
+      "status": "machine"
+    },
+    "settings.account.vault.unavailable": {
+      "text": "بازیابی با سه کلمه: روی این سرور در دسترس نیست. عبارت بیست‌وچهار کلمه‌ای و دستگاه‌های دیگرتان همچنان کار می‌کنند.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.footer": {
+      "text": "وقتی روشن باشد، Lakko به روشی وصل می‌شود که شناسایی و مسدود کردن آن برای شبکه دشوارتر است. پیام‌هایتان در هر حال رمزگذاری سرتاسری دارند.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status": {
+      "text": "وضعیت",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active": {
+      "text": "فعال",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active.sub": {
+      "text": "اتصال‌ها از مسدودسازی شبکه پنهان هستند.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.connecting.sub": {
+      "text": "در حال برقراری اتصال پنهان.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.direct": {
+      "text": "اتصال مستقیم",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable": {
+      "text": "در دسترس نیست",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable.sub": {
+      "text": "برقراری اتصال پنهان ممکن نشد. شبکه خود را بررسی کنید، سپس برای تلاش دوباره کلید را خاموش و روشن کنید.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured": {
+      "text": "در این نسخه در دسترس نیست",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured.sub": {
+      "text": "این نسخه بدون این تنظیم ساخته شده است.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.title": {
+      "text": "ضدسانسور",
+      "status": "machine"
+    },
+    "settings.anti_censorship.toggle": {
+      "text": "پنهان کردن Lakko از مسدودسازی شبکه",
+      "status": "machine"
+    },
+    "settings.appearance.lede": {
+      "text": "پوسته در این دستگاه.",
       "status": "machine"
     },
     "settings.appearance.theme": {
@@ -1140,6 +1484,126 @@
     },
     "settings.appearance.theme.system": {
       "text": "سیستم",
+      "status": "machine"
+    },
+    "settings.data.downloaded": {
+      "text": "{file} بارگیری شد.",
+      "status": "machine"
+    },
+    "settings.data.error.generic": {
+      "text": "برون‌بری داده‌هایتان ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.data.export": {
+      "text": "برون‌بری داده‌های من",
+      "status": "machine"
+    },
+    "settings.data.export_note": {
+      "text": "پیام‌ها، مخاطبان و وضعیت گروه‌های شما رمزگذاری سرتاسری دارند و فقط روی دستگاه‌های شما هستند.",
+      "status": "machine"
+    },
+    "settings.data.lede": {
+      "text": "یک نسخه از آنچه سرورهای Lakko درباره حساب شما نگه می‌دارند بارگیری کنید. پیام‌ها و مخاطبان شما رمزگذاری سرتاسری دارند و روی دستگاه‌هایتان می‌مانند، بنابراین بخشی از این فایل نیستند.",
+      "status": "machine"
+    },
+    "settings.data.ready": {
+      "text": "برون‌بری آماده است. برای ذخیره، روی «اشتراک‌گذاری» بزنید.",
+      "status": "machine"
+    },
+    "settings.data.share": {
+      "text": "اشتراک‌گذاری برون‌بری",
+      "status": "machine"
+    },
+    "settings.data.title": {
+      "text": "داده‌های شما",
+      "status": "machine"
+    },
+    "settings.devices.add.lede": {
+      "text": "ابتدا روی دستگاه جدید وارد Lakko شوید. سپس انتخاب کنید کدام‌یک از دو دستگاه کد را نشان می‌دهد.",
+      "status": "machine"
+    },
+    "settings.devices.add.no_camera": {
+      "text": "هیچ‌کدام از دستگاه‌ها دوربین ندارد؟ روی دستگاه جدید وارد شوید و «{method}» را انتخاب کنید: پیام «{prompt}» با یک کد برای مقایسه اینجا ظاهر می‌شود.",
+      "status": "machine"
+    },
+    "settings.devices.device_n": {
+      "text": "دستگاه {number}",
+      "status": "machine"
+    },
+    "settings.devices.error.load": {
+      "text": "بارگیری دستگاه‌های شما ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key": {
+      "text": "این مرورگر برای حساب شما تنظیم نشده است. دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "settings.devices.error.remove": {
+      "text": "حذف دستگاه ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.devices.error.scan": {
+      "text": "افزودن دستگاه ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.devices.lede": {
+      "text": "تلفن‌ها، تبلت‌ها و رایانه‌هایی که با حساب شما وارد شده‌اند. افزودن دستگاه رمزگذاری سرتاسری دارد؛ سرورهای Lakko نمی‌توانند آن را بخوانند.",
+      "status": "machine"
+    },
+    "settings.devices.list.lede": {
+      "text": "دستگاه حذف‌شده از همان لحظه دسترسی به پیام‌های شما را از دست می‌دهد. حذف دستگاه ممکن است کلید عبور شما را بخواهد.",
+      "status": "machine"
+    },
+    "settings.devices.list.title": {
+      "text": "دستگاه‌های شما",
+      "status": "machine"
+    },
+    "settings.devices.remove.body": {
+      "text": "این دستگاه از همان لحظه دسترسی به پیام‌های شما را از دست می‌دهد. ممکن است کلید عبور شما خواسته شود.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm_named": {
+      "text": "حذف {device}",
+      "status": "machine"
+    },
+    "settings.devices.remove.title": {
+      "text": "{device} حذف شود؟",
+      "status": "machine"
+    },
+    "settings.devices.scan.done": {
+      "text": "دستگاه افزوده شد. پس از پایان پیوستن در فهرست نمایش داده می‌شود.",
+      "status": "machine"
+    },
+    "settings.devices.scan.opening": {
+      "text": "در حال باز کردن دوربین...",
+      "status": "machine"
+    },
+    "settings.devices.show.error.timeout": {
+      "text": "دستگاه دیگر کد را به‌موقع اسکن نکرد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.devices.show.lede": {
+      "text": "این کد را با دستگاهی که از قبل وارد شده است اسکن کنید. پس از تأیید آن، این دستگاه به حساب شما می‌پیوندد.",
+      "status": "machine"
+    },
+    "settings.devices.show.start": {
+      "text": "نمایش کد",
+      "status": "machine"
+    },
+    "settings.devices.sign_in_first": {
+      "text": "برای مدیریت دستگاه‌ها ابتدا وارد شوید.",
+      "status": "machine"
+    },
+    "settings.devices.this_device": {
+      "text": "این دستگاه",
+      "status": "machine"
+    },
+    "settings.devices.this_device.sub": {
+      "text": "دستگاهی که اکنون از آن استفاده می‌کنید.",
+      "status": "machine"
+    },
+    "settings.devices.title": {
+      "text": "دستگاه‌ها",
       "status": "machine"
     },
     "settings.language.load_failed": {
@@ -1166,6 +1630,266 @@
       "text": "زبان",
       "status": "machine"
     },
+    "settings.me.guest": {
+      "text": "مهمان",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.sub": {
+      "text": "یادداشت‌های ویدیویی دریافتی هنگام نمایان شدن روی صفحه، بی‌صدا پخش می‌شوند. به‌طور پیش‌فرض خاموش است چون پخش خودکار رسانه بارگیری می‌کند.",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.title": {
+      "text": "پخش خودکار یادداشت‌های ویدیویی",
+      "status": "machine"
+    },
+    "settings.media.lede": {
+      "text": "پخش در این دستگاه.",
+      "status": "machine"
+    },
+    "settings.notifications.off.body": {
+      "text": "اعلان‌ها خاموش است، بنابراین Lakko فقط وقتی باز است می‌تواند زنگ بزند. آن‌ها را روشن کنید تا تماس‌ها و پیام‌ها وقتی برنامه باز نیست هم به شما برسند.",
+      "status": "machine"
+    },
+    "settings.notifications.off.title": {
+      "text": "اعلان‌ها را روشن کنید",
+      "status": "machine"
+    },
+    "settings.passkeys.add": {
+      "text": "افزودن کلید عبور",
+      "status": "machine"
+    },
+    "settings.passkeys.added": {
+      "text": "کلید عبور «{name}» افزوده شد.",
+      "status": "machine"
+    },
+    "settings.passkeys.added_last_used": {
+      "text": "افزوده‌شده {added} · آخرین استفاده {used}",
+      "status": "machine"
+    },
+    "settings.passkeys.added_never_used": {
+      "text": "افزوده‌شده {added} · هرگز استفاده نشده",
+      "status": "machine"
+    },
+    "settings.passkeys.empty": {
+      "text": "هنوز کلید عبوری وجود ندارد.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.cancelled": {
+      "text": "لغو شد. هیچ کلید عبوری ساخته نشد.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.generic": {
+      "text": "به‌روزرسانی کلیدهای عبور ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.name_required": {
+      "text": "برای کلید عبور یک نام بگذارید.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.network": {
+      "text": "خطای شبکه. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.server_status": {
+      "text": "خطای سرور ({status}).",
+      "status": "machine"
+    },
+    "settings.passkeys.error.unsupported": {
+      "text": "این مرورگر یا دستگاه اکنون نمی‌تواند کلید عبور بسازد.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede": {
+      "text": "به‌جای رمز عبور با Touch ID، Face ID یا یک کلید امنیتی وارد شوید. عبارت بازیابی شما هم همیشه کار می‌کند.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede_device": {
+      "text": "به‌جای رمز عبور با اثر انگشت، چهره یا قفل صفحه، یا با یک کلید امنیتی وارد شوید. عبارت بازیابی شما هم همیشه کار می‌کند.",
+      "status": "machine"
+    },
+    "settings.passkeys.name.label": {
+      "text": "نام کلید عبور",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder": {
+      "text": "برای این کلید عبور نام بگذارید (مثلاً MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.body": {
+      "text": "دستگاهی که کلید خصوصی متناظر را دارد دیگر نمی‌تواند با آن وارد شود. این کار برگشت‌پذیر نیست.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm": {
+      "text": "حذف",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm_named": {
+      "text": "حذف {name}",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.error.cancelled": {
+      "text": "لغو شد. کلید عبور حذف نشد.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.title": {
+      "text": "این کلید عبور حذف شود؟",
+      "status": "machine"
+    },
+    "settings.passkeys.removed": {
+      "text": "«{name}» حذف شد.",
+      "status": "machine"
+    },
+    "settings.passkeys.title": {
+      "text": "کلیدهای عبور",
+      "status": "machine"
+    },
+    "settings.passkeys.unnamed": {
+      "text": "کلید عبور بی‌نام",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_browser": {
+      "text": "این مرورگر نمی‌تواند کلیدهای عبور را مدیریت کند. از نسخه جدید Safari، Chrome، Firefox یا Edge استفاده کنید.",
+      "status": "machine"
+    },
+    "settings.profile.error.generic": {
+      "text": "ذخیره نام شما ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.profile.lede": {
+      "text": "مخاطبانتان شما را چگونه می‌بینند.",
+      "status": "machine"
+    },
+    "settings.profile.name.hint": {
+      "text": "به کسانی که با آن‌ها گفتگو می‌کنید نشان داده می‌شود. لازم نیست یکتا باشد، حداکثر {count, plural, one {# نویسه} other {# نویسه}}.",
+      "status": "machine"
+    },
+    "settings.profile.name.label": {
+      "text": "نام شما",
+      "status": "machine"
+    },
+    "settings.profile.preview.label": {
+      "text": "دیگران شما را چگونه می‌بینند",
+      "status": "machine"
+    },
+    "settings.profile.preview.no_name": {
+      "text": "تا زمانی که نامی تعیین نکنید، دیگران اثر انگشت کلید شما را می‌بینند.",
+      "status": "machine"
+    },
+    "settings.profile.saved": {
+      "text": "نام شما برای مخاطبانتان به‌روز می‌شود.",
+      "status": "machine"
+    },
+    "settings.profile.username.none": {
+      "text": "ندارد",
+      "status": "machine"
+    },
+    "settings.recovery.contact.already_enabled": {
+      "text": "برای این حساب از قبل ایمیل یا تلفنی تعیین شده است. برای جایگزین کردن آن، ابتدا با عبارت بازیابی یا از دستگاه دیگری دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.done": {
+      "text": "انجام شد. اکنون کدی که به آنجا فرستاده شود می‌تواند شما را به حسابتان برگرداند.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.bad_contact": {
+      "text": "به نظر درست نمی‌آید. بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.generic": {
+      "text": "راه‌اندازی ایمیل یا تلفن ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.lede": {
+      "text": "یک کد یک‌بارمصرف که به ایمیل یا تلفن شما فرستاده می‌شود، اگر رمز عبورتان را گم کنید امکان ورود دوباره را می‌دهد.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_email": {
+      "text": "یک کد شش‌رقمی از طریق ایمیل به {contact} فرستادیم. آن را در زیر وارد کنید.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_phone": {
+      "text": "یک کد شش‌رقمی از طریق پیامک به {contact} فرستادیم. آن را در زیر وارد کنید.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sub": {
+      "text": "یک کد یک‌بارمصرف که به ایمیل یا تلفن شما فرستاده می‌شود.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.unavailable": {
+      "text": "بازیابی با ایمیل و تلفن اکنون در دسترس نیست.",
+      "status": "machine"
+    },
+    "settings.recovery.lede": {
+      "text": "عبارت بازیابی همه‌چیز را برمی‌گرداند. این روش‌ها وقتی رمز عبورتان را گم کرده‌اید شما را به حساب برمی‌گردانند؛ پیام‌هایتان سپس از عبارت یا از دستگاه دیگری از دستگاه‌هایتان می‌آیند.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.not_saved_here": {
+      "text": "روی این دستگاه ذخیره نشده است. نسخه نوشته‌شده خود را امن نگه دارید.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.saved_here": {
+      "text": "روی این دستگاه ذخیره شده است.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.sub": {
+      "text": "بیست‌وچهار کلمه‌ای که هنگام ثبت‌نام یادداشت کردید، هویت، مخاطبان و پیام‌های شما را روی دستگاه جدید بازیابی می‌کنند.",
+      "status": "machine"
+    },
+    "settings.recovery.section.access": {
+      "text": "دسترسی",
+      "status": "machine"
+    },
+    "settings.recovery.section.identity": {
+      "text": "هویت",
+      "status": "machine"
+    },
+    "settings.recovery.sign_in_first": {
+      "text": "برای مدیریت بازیابی ابتدا وارد شوید.",
+      "status": "machine"
+    },
+    "settings.recovery.title": {
+      "text": "بازیابی",
+      "status": "machine"
+    },
+    "settings.recovery.totp.already_enabled": {
+      "text": "برای این حساب از قبل یک برنامه احراز هویت راه‌اندازی شده است. برای جایگزین کردن آن، ابتدا با عبارت بازیابی یا از دستگاه دیگری دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.done": {
+      "text": "برنامه احراز هویت راه‌اندازی شد. اکنون کدی از برنامه می‌تواند شما را به حسابتان برگرداند.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.generic": {
+      "text": "راه‌اندازی برنامه احراز هویت ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.wrong": {
+      "text": "این کد کار نکرد. منتظر کد بعدی در برنامه بمانید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.key": {
+      "text": "کلید: {key}",
+      "status": "machine"
+    },
+    "settings.recovery.totp.lede": {
+      "text": "یک کد شش‌رقمی از برنامه احراز هویت، اگر رمز عبورتان را گم کنید امکان ورود دوباره را می‌دهد.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.scan": {
+      "text": "این کد را با برنامه احراز هویت خود اسکن کنید یا کلید را دستی وارد کنید، سپس کد شش‌رقمی‌ای را که برنامه نشان می‌دهد وارد کنید.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.set_up": {
+      "text": "راه‌اندازی برنامه احراز هویت",
+      "status": "machine"
+    },
+    "settings.recovery.totp.title": {
+      "text": "برنامه احراز هویت",
+      "status": "machine"
+    },
+    "settings.recovery.totp.unavailable": {
+      "text": "راه‌اندازی برنامه احراز هویت اکنون در دسترس نیست.",
+      "status": "machine"
+    },
     "settings.section.about": {
       "text": "درباره",
       "status": "machine"
@@ -1178,12 +1902,20 @@
       "text": "ظاهر",
       "status": "machine"
     },
+    "settings.section.danger_zone": {
+      "text": "منطقه خطر",
+      "status": "machine"
+    },
     "settings.section.data": {
       "text": "داده‌ها",
       "status": "machine"
     },
     "settings.section.media": {
       "text": "رسانه",
+      "status": "machine"
+    },
+    "settings.section.network": {
+      "text": "شبکه",
       "status": "machine"
     },
     "settings.section.notifications": {
@@ -1196,6 +1928,30 @@
     },
     "settings.section.security": {
       "text": "امنیت",
+      "status": "machine"
+    },
+    "settings.security.devices.sub": {
+      "text": "دستگاه‌های این حساب را ببینید، اضافه یا حذف کنید.",
+      "status": "machine"
+    },
+    "settings.security.devices_and_recovery": {
+      "text": "دستگاه‌ها و بازیابی",
+      "status": "machine"
+    },
+    "settings.security.lede": {
+      "text": "چگونه وارد می‌شوید، کدام دستگاه‌ها می‌توانند پیام‌هایتان را بخوانند و چگونه دوباره وارد حساب می‌شوید.",
+      "status": "machine"
+    },
+    "settings.security.recovery.sub": {
+      "text": "یک برنامه احراز هویت، نشانی ایمیل یا شماره تلفن که شما را به حساب برمی‌گرداند.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.sub": {
+      "text": "هر مخاطب یک شماره امنیتی دارد. آن را حضوری یا در یک تماس مقایسه کنید؛ یکسان بودن شماره‌ها یعنی کسی میان شما نیست. آن را در جزئیات مخاطب پیدا می‌کنید.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.title": {
+      "text": "شماره‌های امنیتی",
       "status": "machine"
     },
     "username.a11y_hint": {

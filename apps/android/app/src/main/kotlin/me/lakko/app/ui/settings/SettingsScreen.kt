@@ -60,8 +60,8 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.l10n.t
-import me.lakko.app.push.NOTIFICATIONS_OFF_NOTICE
-import me.lakko.app.push.NOTIFICATIONS_OFF_TITLE
+import me.lakko.app.push.NOTIFICATIONS_OFF_NOTICE_KEY
+import me.lakko.app.push.NOTIFICATIONS_OFF_TITLE_KEY
 import me.lakko.app.ui.chat.AutoplayVideoNotesSetting
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.theme.ThemeMode
@@ -107,7 +107,7 @@ public fun SettingsScreen(
     var confirmingForget by remember { mutableStateOf(false) }
     val headerName = displayName?.takeIf { it.isNotBlank() }
         ?: username?.let { "@$it" }
-        ?: "Guest"
+        ?: t("settings.me.guest")
 
     Scaffold(
         modifier = modifier,
@@ -155,10 +155,10 @@ public fun SettingsScreen(
             if (!notificationsEnabled) {
                 SectionLabel(t("settings.section.notifications"))
                 SettingsRow(
-                    title = NOTIFICATIONS_OFF_TITLE,
+                    title = t(NOTIFICATIONS_OFF_TITLE_KEY),
                     icon = Icons.Filled.NotificationsOff,
                     onClick = { openAppNotificationSettings(context) },
-                    supporting = NOTIFICATIONS_OFF_NOTICE,
+                    supporting = t(NOTIFICATIONS_OFF_NOTICE_KEY),
                 )
             }
 
@@ -166,13 +166,18 @@ public fun SettingsScreen(
             SettingsRow(t("settings.section.profile"), Icons.Filled.Person, onOpenProfile)
 
             SectionLabel(t("settings.section.security"))
-            SettingsRow("Passkeys", Icons.Filled.Key, onOpenPasskeys)
-            SettingsRow("Devices", Icons.Filled.Devices, onOpenDevices)
+            SettingsRow(t("settings.passkeys.title"), Icons.Filled.Key, onOpenPasskeys)
             SettingsRow(
-                "Recovery",
+                t("settings.devices.title"),
+                Icons.Filled.Devices,
+                onOpenDevices,
+                supporting = t("settings.security.devices.sub"),
+            )
+            SettingsRow(
+                t("settings.recovery.title"),
                 Icons.Filled.Restore,
                 onOpenRecovery,
-                supporting = "Recovery phrase, authenticator, email or phone",
+                supporting = t("settings.security.recovery.sub"),
             )
 
             SectionLabel(t("settings.section.appearance"))
@@ -228,32 +233,41 @@ public fun SettingsScreen(
                 AutoplayVideoNotesSetting(modifier = Modifier.weight(1f))
             }
 
-            SectionLabel("Network")
-            SettingsRow("Anti-censorship", Icons.Filled.Shield, onOpenAntiCensorship)
+            SectionLabel(t("settings.section.network"))
+            SettingsRow(t("settings.anti_censorship.title"), Icons.Filled.Shield, onOpenAntiCensorship)
 
             SectionLabel(t("settings.section.about"))
             InfoRow(
-                title = "Version",
+                title = t("settings.about.version"),
                 value = "${me.lakko.app.BuildConfig.VERSION_NAME} (${me.lakko.app.BuildConfig.VERSION_CODE})",
                 icon = Icons.Filled.Info,
             )
-            InfoRow(title = "Licence", value = "AGPL-3.0-or-later", icon = Icons.Filled.Gavel)
+            InfoRow(
+                title = t("settings.about.licence"),
+                value = t("settings.about.licence_body", mapOf("licence" to "AGPL-3.0-or-later")),
+                icon = Icons.Filled.Gavel,
+            )
 
             Spacer(Modifier.height(16.dp))
             HorizontalDivider()
-            SectionLabel("Danger zone", danger = true)
+            SectionLabel(t("settings.section.danger_zone"), danger = true)
             SettingsRow(
-                title = "Log out",
+                title = t("settings.account.log_out"),
                 icon = Icons.AutoMirrored.Filled.Logout,
                 onClick = { confirmingLogout = true },
                 danger = true,
             )
             SettingsRow(
-                title = "Forget this device",
+                title = t("settings.account.forget_device.label"),
                 icon = Icons.Filled.DeleteForever,
                 onClick = { confirmingForget = true },
                 danger = true,
-                supporting = "Removes your account data from this phone. You will need your recovery phrase to come back.",
+            )
+            Text(
+                t("settings.account.danger_zone.footer"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
             Spacer(Modifier.height(24.dp))
         }
@@ -262,33 +276,28 @@ public fun SettingsScreen(
     if (confirmingLogout) {
         AlertDialog(
             onDismissRequest = { confirmingLogout = false },
-            title = { Text("Log out?") },
-            text = { Text("You can log back in with your password.") },
+            title = { Text(t("settings.account.log_out.title")) },
+            text = { Text(t("settings.account.log_out.body")) },
             confirmButton = {
-                TextButton(onClick = { confirmingLogout = false; onLogout() }) { Text("Log out") }
+                TextButton(onClick = { confirmingLogout = false; onLogout() }) { Text(t("settings.account.log_out")) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmingLogout = false }) { Text("Cancel") }
+                TextButton(onClick = { confirmingLogout = false }) { Text(t("common.cancel")) }
             },
         )
     }
     if (confirmingForget) {
         AlertDialog(
             onDismissRequest = { confirmingForget = false },
-            title = { Text("Forget this device?") },
-            text = {
-                Text(
-                    "Your messages and keys are removed from this phone. " +
-                        "The only way back is your recovery phrase or another device.",
-                )
-            },
+            title = { Text(t("settings.account.forget_device.title")) },
+            text = { Text(t("settings.account.forget_device.body_device")) },
             confirmButton = {
                 TextButton(onClick = { confirmingForget = false; onForgetDevice() }) {
-                    Text("Forget device", color = MaterialTheme.colorScheme.error)
+                    Text(t("settings.account.forget_device.confirm"), color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { confirmingForget = false }) { Text("Cancel") }
+                TextButton(onClick = { confirmingForget = false }) { Text(t("common.cancel")) }
             },
         )
     }

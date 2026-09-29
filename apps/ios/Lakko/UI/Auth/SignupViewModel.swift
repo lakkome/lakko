@@ -37,7 +37,9 @@ public final class SignupViewModel: ObservableObject {
     // MARK: - Internal status
 
     @Published public private(set) var busy: Bool = false
-    @Published public private(set) var error: String?
+    /// Kept as ``UiText`` so a message on screen follows a live language switch.
+    @Published private var errorText: UiText?
+    public var error: String? { errorText?.text }
     /// ADR-0054 S4 — the last attempt was refused by the sign-up limit
     /// (`429 signup-rate-limited`): the screen offers `Try again`, the form
     /// keeps its contents.
@@ -93,30 +95,30 @@ public final class SignupViewModel: ObservableObject {
         // here, before anything reaches the auth service.
         switch checkUsername(username) {
         case .empty:
-            error = l10n.t("auth.signup.error.enter_username")
+            errorText = .key("auth.signup.error.enter_username")
             return
         case .invalid(let reason):
-            error = reason.message
+            errorText = UiText { reason.message }
             return
         case .valid:
             break
         }
         if displayNameError != nil {
-            error = l10n.t("auth.signup.error.fix_name")
+            errorText = .key("auth.signup.error.fix_name")
             return
         }
         if password != confirm {
-            error = l10n.t("auth.password.error.mismatch")
+            errorText = .key("auth.password.error.mismatch")
             return
         }
         if password.count < Self.minPasswordLength {
-            error = l10n.t("auth.password.error.too_short", counts: ["count": UInt64(Self.minPasswordLength)])
+            errorText = .key("auth.password.error.too_short", counts: ["count": UInt64(Self.minPasswordLength)])
             return
         }
 
         busy = true
         cancellable = true
-        error = nil
+        errorText = nil
         rateLimited = false
 
         let usernameSnapshot = username
@@ -136,7 +138,7 @@ public final class SignupViewModel: ObservableObject {
                 )
                 cancellable = false
                 busy = false
-                error = nil
+                errorText = nil
                 password = ""
                 confirm = ""
                 saveDisplayName(displayNameSnapshot)
@@ -159,7 +161,7 @@ public final class SignupViewModel: ObservableObject {
                    refusal.code == AuthRateLimit.signupRateLimited {
                     rateLimited = true
                 }
-                self.error = AuthErrorCopy.signup(error)
+                self.errorText = UiText { AuthErrorCopy.signup(error) }
             }
         }
     }
@@ -174,7 +176,7 @@ public final class SignupViewModel: ObservableObject {
         signupTask = nil
         cancellable = false
         busy = false
-        error = nil
+        errorText = nil
     }
 
     /// `Try again` after the sign-up limit: the same form, submitted again.

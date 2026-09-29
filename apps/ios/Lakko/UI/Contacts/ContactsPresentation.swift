@@ -251,9 +251,12 @@ enum InviteLinkRows {
 
 /// The row title of a device (docs/ux/client-redesign.md section 5.5): no
 /// platform, model or user-set name reaches the client yet, so a device is
-/// "This device" or "Device N" — never its key.
+/// "This device" or "Device N" — never its key. Read from the catalog in the
+/// interface language of the call (ADR-0058); `N` stays in Latin digits.
 enum DeviceRowPresentation {
     static func title(isSelf: Bool, position: Int) -> String {
-        isSelf ? "This device" : "Device \(position)"
+        isSelf
+            ? Localization.text("settings.devices.this_device")
+            : Localization.text("settings.devices.device_n", texts: ["number": String(position)])
     }
 }

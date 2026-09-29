@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.transport.AntiCensorshipManager
 import me.lakko.app.transport.AntiCensorshipState
+import me.lakko.app.l10n.t
 
 /**
  * ADR-0026 Phase 4 — the anti-censorship settings surface (the Kotlin twin of
@@ -54,10 +55,10 @@ public fun AntiCensorshipSettingsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Anti-censorship") },
+                title = { Text(t("settings.anti_censorship.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -75,7 +76,7 @@ public fun AntiCensorshipSettingsScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Hide Lakko traffic from network blocking")
+            Text(t("settings.anti_censorship.toggle"), modifier = Modifier.weight(1f))
             Switch(
                 checked = enabled,
                 onCheckedChange = { on ->
@@ -86,9 +87,7 @@ public fun AntiCensorshipSettingsScreen(
         }
 
         Text(
-            "When on, Lakko connects through a disguised route that a network "
-                + "blocking Lakko cannot recognise. Your messages stay end-to-end "
-                + "encrypted either way.",
+            t("settings.anti_censorship.footer"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -104,22 +103,36 @@ public fun AntiCensorshipSettingsScreen(
 private fun StatusRow(state: AntiCensorshipState) {
     val (title, subtitle, color) = when (state) {
         AntiCensorshipState.Disabled ->
-            Triple("Off", "Direct connection", MaterialTheme.colorScheme.onSurfaceVariant)
+            Triple(t("common.off"), t("settings.anti_censorship.status.direct"), MaterialTheme.colorScheme.onSurfaceVariant)
         AntiCensorshipState.Unconfigured ->
             Triple(
-                "Not available in this build",
-                "This build cannot use the disguised route",
+                t("settings.anti_censorship.status.unconfigured"),
+                t("settings.anti_censorship.status.unconfigured.sub"),
                 me.lakko.app.ui.theme.LakkoLight.warning,
             )
         AntiCensorshipState.Arming ->
-            Triple("Connecting...", "Checking the route", MaterialTheme.colorScheme.onSurfaceVariant)
+            Triple(
+                t("common.connecting"),
+                t("settings.anti_censorship.status.connecting.sub"),
+                MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         AntiCensorshipState.Armed ->
-            Triple("Active", "Connected through the disguised route", me.lakko.app.ui.theme.LakkoLight.success)
+            Triple(
+                t("settings.anti_censorship.status.active"),
+                t("settings.anti_censorship.status.active.sub"),
+                me.lakko.app.ui.theme.LakkoLight.success,
+            )
+        // The failure's own message is diagnostic prose; it goes to the log
+        // (AntiCensorshipManager), never to the screen (ADR-0058).
         is AntiCensorshipState.Unavailable ->
-            Triple("Unavailable", state.reason, MaterialTheme.colorScheme.error)
+            Triple(
+                t("settings.anti_censorship.status.unavailable"),
+                t("settings.anti_censorship.status.unavailable.sub"),
+                MaterialTheme.colorScheme.error,
+            )
     }
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text("Status", style = MaterialTheme.typography.labelMedium)
+        Text(t("settings.anti_censorship.status"), style = MaterialTheme.typography.labelMedium)
         Text(title, color = color)
         Text(
             subtitle,

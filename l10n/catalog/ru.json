@@ -202,12 +202,124 @@
       "text": "Имя пользователя",
       "status": "machine"
     },
+    "backup.rollback_refused.body": {
+      "text": "Сервер вернул изменённую или устаревшую резервную копию. Ваш аккаунт в безопасности: мы продолжили, не восстанавливая старые данные.",
+      "status": "machine"
+    },
+    "backup.rollback_refused.title": {
+      "text": "Не удалось безопасно восстановить резервную копию",
+      "status": "machine"
+    },
+    "backup.stale_restore.body": {
+      "text": "Эта резервная копия старше ожидаемого ({reason}). {consequence}",
+      "status": "machine"
+    },
+    "backup.stale_restore.confirm": {
+      "text": "Всё равно восстановить",
+      "status": "machine"
+    },
+    "backup.stale_restore.consequence": {
+      "text": "Восстановление вернёт ваш аккаунт к более старому состоянию: сообщения будут устаревшими, а удалённые вами устройства могут появиться снова.",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.anchor_unreadable": {
+      "text": "запись этого устройства о вашей последней резервной копии не читается или была подделана",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.below_floor": {
+      "text": "она старше последней копии, восстановленной на этом устройстве",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.head_stripped": {
+      "text": "с неё снята подпись, и она отличается от последней копии, известной этому устройству",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.too_old": {
+      "text": "она подписана раньше, чем могла бы быть подписана актуальная копия",
+      "status": "machine"
+    },
+    "backup.stale_restore.title": {
+      "text": "Восстановить эту старую резервную копию?",
+      "status": "machine"
+    },
+    "call.guest.default_name": {
+      "text": "Гость",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "Подключаем вас к звонку...",
       "status": "machine"
     },
+    "call.link.connecting": {
+      "text": "Подключение...",
+      "status": "machine"
+    },
+    "call.link.dead": {
+      "text": "Этот звонок завершён или неактивен.",
+      "status": "machine"
+    },
+    "call.link.end_current": {
+      "text": "Завершить текущий звонок",
+      "status": "machine"
+    },
+    "call.link.ended": {
+      "text": "Звонок завершён.",
+      "status": "machine"
+    },
+    "call.link.error.generic": {
+      "text": "Звонок не удался.",
+      "status": "machine"
+    },
+    "call.link.failed": {
+      "text": "Ошибка: {reason}",
+      "status": "machine"
+    },
+    "call.link.host": {
+      "text": "Организатор: {name}",
+      "status": "machine"
+    },
+    "call.link.invalid": {
+      "text": "Эта ссылка на звонок недействительна или истекла.",
+      "status": "machine"
+    },
+    "call.link.join": {
+      "text": "Присоединиться",
+      "status": "machine"
+    },
+    "call.link.live": {
+      "text": "Вы в этом звонке.",
+      "status": "machine"
+    },
+    "call.link.loading": {
+      "text": "Загрузка ссылки на звонок...",
+      "status": "machine"
+    },
+    "call.link.start": {
+      "text": "Начать звонок",
+      "status": "machine"
+    },
+    "call.link.title_join": {
+      "text": "Присоединиться к звонку",
+      "status": "machine"
+    },
+    "call.link.title_start": {
+      "text": "Начните свой звонок",
+      "status": "machine"
+    },
+    "call.link.waiting": {
+      "text": "Ждём, пока организатор впустит вас...",
+      "status": "machine"
+    },
+    "call.link.waiting_hint": {
+      "text": "Можно уйти с этого экрана: вы присоединитесь, как только вас впустят.",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "Выберите чат, чтобы начать общение",
+      "status": "machine"
+    },
+    "common.adding": {
+      "text": "Добавление...",
       "status": "machine"
     },
     "common.back": {
@@ -226,8 +338,20 @@
       "text": "Закрыть",
       "status": "machine"
     },
+    "common.collapse": {
+      "text": "Свернуть",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "Подтвердить",
+      "status": "machine"
+    },
+    "common.confirming": {
+      "text": "Подтверждение...",
+      "status": "machine"
+    },
+    "common.connecting": {
+      "text": "Подключение...",
       "status": "machine"
     },
     "common.continue": {
@@ -262,8 +386,24 @@
       "text": "Не удалось связаться с Lakko. Проверьте подключение и попробуйте ещё раз.",
       "status": "machine"
     },
+    "common.error.qr_render": {
+      "text": "Не удалось отобразить код. Попробуйте ещё раз.",
+      "status": "machine"
+    },
     "common.error.server_unreachable": {
       "text": "Не удалось связаться с сервером. Проверьте подключение.",
+      "status": "machine"
+    },
+    "common.error.session_ended": {
+      "text": "Сеанс завершён. Войдите снова.",
+      "status": "machine"
+    },
+    "common.error.session_expired": {
+      "text": "Сеанс истёк. Войдите снова.",
+      "status": "machine"
+    },
+    "common.error.session_not_ready": {
+      "text": "Сеанс ещё не готов.",
       "status": "machine"
     },
     "common.error.too_many_attempts": {
@@ -278,6 +418,10 @@
       "text": "Сейчас это недоступно. Попробуйте позже.",
       "status": "machine"
     },
+    "common.expand": {
+      "text": "Развернуть",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "Загрузка...",
       "status": "machine"
@@ -286,8 +430,24 @@
       "text": "Поиск...",
       "status": "machine"
     },
+    "common.manage": {
+      "text": "Управлять",
+      "status": "machine"
+    },
     "common.more_options": {
       "text": "Другие варианты",
+      "status": "machine"
+    },
+    "common.off": {
+      "text": "Выкл.",
+      "status": "machine"
+    },
+    "common.on": {
+      "text": "Вкл.",
+      "status": "machine"
+    },
+    "common.open_lakko": {
+      "text": "Открыть Lakko",
       "status": "machine"
     },
     "common.optional": {
@@ -306,12 +466,36 @@
       "text": "Подготовка...",
       "status": "machine"
     },
+    "common.remove": {
+      "text": "Удалить",
+      "status": "machine"
+    },
+    "common.removing": {
+      "text": "Удаление...",
+      "status": "machine"
+    },
+    "common.save": {
+      "text": "Сохранить",
+      "status": "machine"
+    },
+    "common.saving": {
+      "text": "Сохранение...",
+      "status": "machine"
+    },
     "common.sending": {
       "text": "Отправка...",
       "status": "machine"
     },
+    "common.set_up": {
+      "text": "Настроить",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "Повторить",
+      "status": "machine"
+    },
+    "common.unknown": {
+      "text": "неизвестно",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -1122,8 +1306,168 @@
       "text": "Ключ безопасности вашего аккаунта изменён.",
       "status": "machine"
     },
+    "settings.about.lede_web": {
+      "text": "Lakko в браузере.",
+      "status": "machine"
+    },
+    "settings.about.licence": {
+      "text": "Лицензия",
+      "status": "machine"
+    },
+    "settings.about.licence_body": {
+      "text": "{licence}. Исходный код можно свободно читать, использовать и улучшать.",
+      "status": "machine"
+    },
+    "settings.about.protection.body": {
+      "text": "Сообщения, звонки и запросы на добавление в контакты защищены сквозным шифрованием: прочитать их могут только участники разговора, но не серверы Lakko. Ваш пароль никогда не покидает устройство, а у каждого контакта есть код безопасности, который можно сверить при встрече.",
+      "status": "machine"
+    },
+    "settings.about.protection.title": {
+      "text": "Как Lakko вас защищает",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Переводы обновлены {date}",
+      "status": "machine"
+    },
+    "settings.about.version": {
+      "text": "Версия",
+      "status": "machine"
+    },
+    "settings.account.danger_zone.footer": {
+      "text": "«Выйти» оставляет ваши данные на этом устройстве. «Забыть это устройство» удаляет их; вернуться можно только с фразой восстановления или с другого устройства, на котором выполнен вход. «Удалить аккаунт» стирает аккаунт на сервере и очищает это устройство; это действие нельзя отменить.",
+      "status": "machine"
+    },
+    "settings.account.delete.body": {
+      "text": "Будут стёрты ваши данные на сервере — имя пользователя, ключи, способы восстановления и резервная копия, — и вы выйдете на всех устройствах. Локальные сообщения на этом устройстве тоже будут удалены. Это действие нельзя отменить.",
+      "status": "machine"
+    },
+    "settings.account.delete.confirm": {
+      "text": "Удалить аккаунт",
+      "status": "machine"
+    },
+    "settings.account.delete.error.cancelled": {
+      "text": "Отменено. Аккаунт не удалён.",
+      "status": "machine"
+    },
+    "settings.account.delete.error.generic": {
+      "text": "Не удалось удалить аккаунт. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.account.delete.sub": {
+      "text": "Безвозвратно удаляет аккаунт со всем содержимым и очищает это устройство. Это действие нельзя отменить.",
+      "status": "machine"
+    },
+    "settings.account.delete.title": {
+      "text": "Удалить аккаунт?",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body": {
+      "text": "Сохранённый аккаунт в этом браузере будет потерян. Вернуться можно только с помощью фразы восстановления из 24 слов, которую вы записали при регистрации.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body_device": {
+      "text": "Всё на этом устройстве будет удалено, и оно покинет ваш аккаунт. Чтобы снова пользоваться этим аккаунтом здесь, понадобится фраза восстановления или другое устройство, на котором выполнен вход.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.confirm": {
+      "text": "Забыть устройство",
+      "status": "machine"
+    },
+    "settings.account.forget_device.label": {
+      "text": "Забыть это устройство",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub": {
+      "text": "Удаляет данные аккаунта из этого браузера. Сообщения останутся на других ваших устройствах; чтобы вернуться сюда, понадобится фраза восстановления или другое устройство.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.title": {
+      "text": "Забыть это устройство?",
+      "status": "machine"
+    },
+    "settings.account.lede": {
+      "text": "Ваши данные, выход, это устройство и удаление аккаунта.",
+      "status": "machine"
+    },
+    "settings.account.log_out": {
+      "text": "Выйти",
+      "status": "machine"
+    },
+    "settings.account.log_out.body": {
+      "text": "Ваши сообщения останутся на этом устройстве. Войдите снова с паролем или ключом доступа.",
+      "status": "machine"
+    },
+    "settings.account.log_out.sub": {
+      "text": "Выход на этом устройстве. Данные останутся здесь до следующего входа.",
+      "status": "machine"
+    },
+    "settings.account.log_out.title": {
+      "text": "Выйти из Lakko?",
+      "status": "machine"
+    },
+    "settings.account.vault.not_set_up": {
+      "text": "Восстановление по трём словам: в этом аккаунте пока не настроено. Оно настроится при следующем входе на устройстве, где хранится ваша фраза.",
+      "status": "machine"
+    },
+    "settings.account.vault.on": {
+      "text": "Восстановление по трём словам: включено (слова {positions}). Другое устройство, на котором выполнен вход, и фраза из 24 слов тоже подойдут.",
+      "status": "machine"
+    },
+    "settings.account.vault.unavailable": {
+      "text": "Восстановление по трём словам: недоступно на этом сервере. Фраза из 24 слов и другие ваши устройства по-прежнему работают.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.footer": {
+      "text": "Если включено, Lakko подключается так, что сети сложнее обнаружить и заблокировать соединение. Сообщения в любом случае остаются защищены сквозным шифрованием.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status": {
+      "text": "Состояние",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active": {
+      "text": "Активно",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active.sub": {
+      "text": "Соединения скрыты от сетевых блокировок.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.connecting.sub": {
+      "text": "Устанавливается скрытое соединение.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.direct": {
+      "text": "Прямое соединение",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable": {
+      "text": "Недоступно",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable.sub": {
+      "text": "Не удалось установить скрытое соединение. Проверьте сеть, затем выключите и снова включите переключатель.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured": {
+      "text": "Недоступно в этой сборке",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured.sub": {
+      "text": "Эта сборка сделана без этой настройки.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.title": {
+      "text": "Обход блокировок",
+      "status": "machine"
+    },
+    "settings.anti_censorship.toggle": {
+      "text": "Скрывать Lakko от сетевых блокировок",
+      "status": "machine"
+    },
+    "settings.appearance.lede": {
+      "text": "Тема на этом устройстве.",
       "status": "machine"
     },
     "settings.appearance.theme": {
@@ -1140,6 +1484,126 @@
     },
     "settings.appearance.theme.system": {
       "text": "Системная",
+      "status": "machine"
+    },
+    "settings.data.downloaded": {
+      "text": "Скачан файл {file}.",
+      "status": "machine"
+    },
+    "settings.data.error.generic": {
+      "text": "Не удалось экспортировать данные. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.data.export": {
+      "text": "Экспортировать мои данные",
+      "status": "machine"
+    },
+    "settings.data.export_note": {
+      "text": "Ваши сообщения, контакты и состояние групп защищены сквозным шифрованием и хранятся только на ваших устройствах.",
+      "status": "machine"
+    },
+    "settings.data.lede": {
+      "text": "Скачайте копию того, что хранится о вашем аккаунте на серверах Lakko. Сообщения и контакты защищены сквозным шифрованием и остаются на ваших устройствах, поэтому в этот файл они не входят.",
+      "status": "machine"
+    },
+    "settings.data.ready": {
+      "text": "Экспорт готов. Нажмите «Поделиться», чтобы сохранить его.",
+      "status": "machine"
+    },
+    "settings.data.share": {
+      "text": "Поделиться экспортом",
+      "status": "machine"
+    },
+    "settings.data.title": {
+      "text": "Ваши данные",
+      "status": "machine"
+    },
+    "settings.devices.add.lede": {
+      "text": "Сначала войдите в Lakko на новом устройстве. Затем выберите, на каком из двух показан код.",
+      "status": "machine"
+    },
+    "settings.devices.add.no_camera": {
+      "text": "Нет камеры ни на одном из устройств? Войдите на новом и выберите «{method}»: здесь появится запрос «{prompt}» с кодом для сверки.",
+      "status": "machine"
+    },
+    "settings.devices.device_n": {
+      "text": "Устройство {number}",
+      "status": "machine"
+    },
+    "settings.devices.error.load": {
+      "text": "Не удалось загрузить список устройств. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key": {
+      "text": "Этот браузер не настроен для вашего аккаунта. Войдите снова.",
+      "status": "machine"
+    },
+    "settings.devices.error.remove": {
+      "text": "Не удалось удалить устройство. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.devices.error.scan": {
+      "text": "Не удалось добавить устройство. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.devices.lede": {
+      "text": "Телефоны, планшеты и компьютеры, на которых выполнен вход в ваш аккаунт. Добавление устройства защищено сквозным шифрованием; серверы Lakko не могут его прочитать.",
+      "status": "machine"
+    },
+    "settings.devices.list.lede": {
+      "text": "Удалённое устройство сразу теряет доступ к вашим сообщениям. При удалении может потребоваться ключ доступа.",
+      "status": "machine"
+    },
+    "settings.devices.list.title": {
+      "text": "Ваши устройства",
+      "status": "machine"
+    },
+    "settings.devices.remove.body": {
+      "text": "С этого момента устройство потеряет доступ к вашим сообщениям. Может потребоваться ключ доступа.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm_named": {
+      "text": "Удалить: {device}",
+      "status": "machine"
+    },
+    "settings.devices.remove.title": {
+      "text": "Удалить: {device}?",
+      "status": "machine"
+    },
+    "settings.devices.scan.done": {
+      "text": "Устройство добавлено. Оно появится в списке, когда закончит подключение.",
+      "status": "machine"
+    },
+    "settings.devices.scan.opening": {
+      "text": "Открываем камеру...",
+      "status": "machine"
+    },
+    "settings.devices.show.error.timeout": {
+      "text": "Другое устройство не отсканировало код вовремя. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.devices.show.lede": {
+      "text": "Отсканируйте этот код устройством, на котором уже выполнен вход. После подтверждения это устройство подключится к вашему аккаунту.",
+      "status": "machine"
+    },
+    "settings.devices.show.start": {
+      "text": "Показать код",
+      "status": "machine"
+    },
+    "settings.devices.sign_in_first": {
+      "text": "Чтобы управлять устройствами, сначала войдите.",
+      "status": "machine"
+    },
+    "settings.devices.this_device": {
+      "text": "Это устройство",
+      "status": "machine"
+    },
+    "settings.devices.this_device.sub": {
+      "text": "Устройство, которым вы сейчас пользуетесь.",
+      "status": "machine"
+    },
+    "settings.devices.title": {
+      "text": "Устройства",
       "status": "machine"
     },
     "settings.language.load_failed": {
@@ -1166,6 +1630,266 @@
       "text": "Язык",
       "status": "machine"
     },
+    "settings.me.guest": {
+      "text": "Гость",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.sub": {
+      "text": "Входящие видеосообщения начинают воспроизводиться без звука, когда появляются на экране. По умолчанию выключено, потому что автовоспроизведение скачивает медиа.",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.title": {
+      "text": "Автовоспроизведение видеосообщений",
+      "status": "machine"
+    },
+    "settings.media.lede": {
+      "text": "Воспроизведение на этом устройстве.",
+      "status": "machine"
+    },
+    "settings.notifications.off.body": {
+      "text": "Уведомления выключены, поэтому Lakko может звонить только когда открыт. Включите их, чтобы звонки и сообщения доходили до вас и когда приложение закрыто.",
+      "status": "machine"
+    },
+    "settings.notifications.off.title": {
+      "text": "Включите уведомления",
+      "status": "machine"
+    },
+    "settings.passkeys.add": {
+      "text": "Добавить ключ доступа",
+      "status": "machine"
+    },
+    "settings.passkeys.added": {
+      "text": "Ключ доступа «{name}» добавлен.",
+      "status": "machine"
+    },
+    "settings.passkeys.added_last_used": {
+      "text": "Добавлен {added} · использован {used}",
+      "status": "machine"
+    },
+    "settings.passkeys.added_never_used": {
+      "text": "Добавлен {added} · не использовался",
+      "status": "machine"
+    },
+    "settings.passkeys.empty": {
+      "text": "Ключей доступа пока нет.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.cancelled": {
+      "text": "Отменено. Ключ доступа не создан.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.generic": {
+      "text": "Не удалось обновить ключи доступа. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.name_required": {
+      "text": "Дайте ключу доступа имя.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.network": {
+      "text": "Ошибка сети. Проверьте подключение и повторите.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.server_status": {
+      "text": "Ошибка сервера ({status}).",
+      "status": "machine"
+    },
+    "settings.passkeys.error.unsupported": {
+      "text": "Этот браузер или устройство сейчас не может создать ключ доступа.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede": {
+      "text": "Входите с Touch ID, Face ID или аппаратным ключом вместо пароля. Фраза восстановления тоже всегда работает.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede_device": {
+      "text": "Входите по отпечатку пальца, лицу или блокировке экрана либо с аппаратным ключом вместо пароля. Фраза восстановления тоже всегда работает.",
+      "status": "machine"
+    },
+    "settings.passkeys.name.label": {
+      "text": "Имя ключа доступа",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder": {
+      "text": "Назовите ключ доступа (например, MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.body": {
+      "text": "Устройство, на котором хранится соответствующий закрытый ключ, больше не сможет входить с его помощью. Это действие нельзя отменить.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm": {
+      "text": "Удалить",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm_named": {
+      "text": "Удалить {name}",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.error.cancelled": {
+      "text": "Отменено. Ключ доступа не удалён.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.title": {
+      "text": "Удалить этот ключ доступа?",
+      "status": "machine"
+    },
+    "settings.passkeys.removed": {
+      "text": "Ключ доступа «{name}» удалён.",
+      "status": "machine"
+    },
+    "settings.passkeys.title": {
+      "text": "Ключи доступа",
+      "status": "machine"
+    },
+    "settings.passkeys.unnamed": {
+      "text": "Ключ доступа без имени",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_browser": {
+      "text": "Этот браузер не умеет управлять ключами доступа. Используйте свежую версию Safari, Chrome, Firefox или Edge.",
+      "status": "machine"
+    },
+    "settings.profile.error.generic": {
+      "text": "Не удалось сохранить имя. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.profile.lede": {
+      "text": "Как вас видят ваши контакты.",
+      "status": "machine"
+    },
+    "settings.profile.name.hint": {
+      "text": "Его видят ваши собеседники. Не обязательно уникальное, не более {count, plural, one {# символа} few {# символов} many {# символов} other {# символа}}.",
+      "status": "machine"
+    },
+    "settings.profile.name.label": {
+      "text": "Ваше имя",
+      "status": "machine"
+    },
+    "settings.profile.preview.label": {
+      "text": "Как вас видят другие",
+      "status": "machine"
+    },
+    "settings.profile.preview.no_name": {
+      "text": "Пока вы не укажете имя, другие видят отпечаток вашего ключа.",
+      "status": "machine"
+    },
+    "settings.profile.saved": {
+      "text": "Ваше имя обновится у ваших контактов.",
+      "status": "machine"
+    },
+    "settings.profile.username.none": {
+      "text": "Нет",
+      "status": "machine"
+    },
+    "settings.recovery.contact.already_enabled": {
+      "text": "Для этого аккаунта уже указана почта или телефон. Чтобы заменить их, сначала войдите снова с фразой восстановления или с другого устройства.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.done": {
+      "text": "Готово. Код, отправленный туда, поможет вернуться в аккаунт.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.bad_contact": {
+      "text": "Похоже, здесь ошибка. Проверьте и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.generic": {
+      "text": "Не удалось настроить почту или телефон. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.lede": {
+      "text": "Одноразовый код на почту или телефон позволит снова войти, если вы забудете пароль.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_email": {
+      "text": "Мы отправили шестизначный код на почту {contact}. Введите его ниже.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_phone": {
+      "text": "Мы отправили шестизначный код в SMS на номер {contact}. Введите его ниже.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sub": {
+      "text": "Одноразовый код на почту или телефон.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.unavailable": {
+      "text": "Восстановление по почте и телефону сейчас недоступно.",
+      "status": "machine"
+    },
+    "settings.recovery.lede": {
+      "text": "Фраза восстановления возвращает всё. Эти способы помогут вернуться в аккаунт, если вы забыли пароль; сообщения затем восстановятся из фразы или с другого вашего устройства.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.not_saved_here": {
+      "text": "На этом устройстве не сохранена. Храните записанную копию в надёжном месте.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.saved_here": {
+      "text": "Сохранена на этом устройстве.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.sub": {
+      "text": "24 слова, записанные при регистрации, восстанавливают ваши ключи аккаунта, контакты и сообщения на новом устройстве.",
+      "status": "machine"
+    },
+    "settings.recovery.section.access": {
+      "text": "Доступ",
+      "status": "machine"
+    },
+    "settings.recovery.section.identity": {
+      "text": "Ключи аккаунта",
+      "status": "machine"
+    },
+    "settings.recovery.sign_in_first": {
+      "text": "Чтобы управлять восстановлением, сначала войдите.",
+      "status": "machine"
+    },
+    "settings.recovery.title": {
+      "text": "Восстановление",
+      "status": "machine"
+    },
+    "settings.recovery.totp.already_enabled": {
+      "text": "Для этого аккаунта уже настроен аутентификатор. Чтобы заменить его, сначала войдите снова с фразой восстановления или с другого устройства.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.done": {
+      "text": "Аутентификатор настроен. Код из приложения поможет вернуться в аккаунт.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.generic": {
+      "text": "Не удалось настроить аутентификатор. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.wrong": {
+      "text": "Код не подошёл. Дождитесь следующего кода в приложении и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.key": {
+      "text": "Ключ: {key}",
+      "status": "machine"
+    },
+    "settings.recovery.totp.lede": {
+      "text": "Шестизначный код из приложения-аутентификатора позволит снова войти, если вы забудете пароль.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.scan": {
+      "text": "Отсканируйте этот код приложением-аутентификатором или введите ключ вручную, затем введите шестизначный код из приложения.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.set_up": {
+      "text": "Настроить аутентификатор",
+      "status": "machine"
+    },
+    "settings.recovery.totp.title": {
+      "text": "Приложение-аутентификатор",
+      "status": "machine"
+    },
+    "settings.recovery.totp.unavailable": {
+      "text": "Настройка аутентификатора сейчас недоступна.",
+      "status": "machine"
+    },
     "settings.section.about": {
       "text": "О приложении",
       "status": "machine"
@@ -1178,12 +1902,20 @@
       "text": "Оформление",
       "status": "machine"
     },
+    "settings.section.danger_zone": {
+      "text": "Опасная зона",
+      "status": "machine"
+    },
     "settings.section.data": {
       "text": "Данные",
       "status": "machine"
     },
     "settings.section.media": {
       "text": "Медиа",
+      "status": "machine"
+    },
+    "settings.section.network": {
+      "text": "Сеть",
       "status": "machine"
     },
     "settings.section.notifications": {
@@ -1196,6 +1928,30 @@
     },
     "settings.section.security": {
       "text": "Безопасность",
+      "status": "machine"
+    },
+    "settings.security.devices.sub": {
+      "text": "Просмотр, добавление и удаление устройств этого аккаунта.",
+      "status": "machine"
+    },
+    "settings.security.devices_and_recovery": {
+      "text": "Устройства и восстановление",
+      "status": "machine"
+    },
+    "settings.security.lede": {
+      "text": "Как вы входите, какие устройства могут читать ваши сообщения и как вернуться в аккаунт.",
+      "status": "machine"
+    },
+    "settings.security.recovery.sub": {
+      "text": "Приложение-аутентификатор, почта или номер телефона, которые помогут вернуться в аккаунт.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.sub": {
+      "text": "У каждого контакта есть код безопасности. Сверьте его при встрече или во время звонка: совпадающие коды означают, что между вами никого нет. Он находится в сведениях о контакте.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.title": {
+      "text": "Коды безопасности",
       "status": "machine"
     },
     "username.a11y_hint": {

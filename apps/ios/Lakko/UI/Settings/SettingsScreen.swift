@@ -48,7 +48,8 @@ struct SettingsScreen: View {
     @State private var confirmingForget = false
     @State private var confirmingDelete = false
 
-    /// "1.2 (34)" from the bundle; "Unknown" when the bundle carries none.
+    /// "1.2 (34)" from the bundle; the catalog's "unknown" when the bundle
+    /// carries none.
     private var versionLabel: String {
         let info = Bundle.main.infoDictionary ?? [:]
         let short = (info["CFBundleShortVersionString"] as? String)?
@@ -59,7 +60,7 @@ struct SettingsScreen: View {
         case (false, false): return short == build ? short : "\(short) (\(build))"
         case (false, true): return short
         case (true, false): return build
-        case (true, true): return "Unknown"
+        case (true, true): return l10n.t("common.unknown")
         }
     }
 
@@ -75,7 +76,7 @@ struct SettingsScreen: View {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !name.isEmpty { return name }
         if !account.username.isEmpty { return account.username }
-        return "Guest"
+        return l10n.t("settings.me.guest")
     }
 
     var body: some View {
@@ -114,9 +115,11 @@ struct SettingsScreen: View {
             }
 
             Section(l10n.t("settings.section.security")) {
-                row("Passkeys", systemImage: "person.badge.key") { onOpen(.passkeys) }
-                row("Devices", systemImage: "laptopcomputer.and.iphone") { onOpen(.devices) }
-                row("Recovery", systemImage: "lifepreserver") { onOpen(.recoveryFactors) }
+                row(l10n.t("settings.passkeys.title"), systemImage: "person.badge.key") { onOpen(.passkeys) }
+                row(l10n.t("settings.devices.title"), systemImage: "laptopcomputer.and.iphone") {
+                    onOpen(.devices)
+                }
+                row(l10n.t("settings.recovery.title"), systemImage: "lifepreserver") { onOpen(.recoveryFactors) }
             }
 
             Section(l10n.t("settings.section.appearance")) {
@@ -148,28 +151,32 @@ struct SettingsScreen: View {
                 .buttonStyle(.plain)
             }
 
-            Section(l10n.t("settings.section.media")) {
+            Section {
                 Toggle(isOn: $autoplayVideoNotes) {
-                    Label("Autoplay video notes", systemImage: "play.circle")
+                    Label(l10n.t("settings.media.autoplay_video_notes.title"), systemImage: "play.circle")
                 }
+            } header: {
+                Text(l10n.t("settings.section.media"))
+            } footer: {
+                Text(l10n.t("settings.media.autoplay_video_notes.sub"))
             }
 
-            Section("Network") {
-                row("Anti-censorship", systemImage: "network.badge.shield.half.filled") {
+            Section(l10n.t("settings.section.network")) {
+                row(l10n.t("settings.anti_censorship.title"), systemImage: "network.badge.shield.half.filled") {
                     onOpen(.antiCensorship)
                 }
             }
 
             Section(l10n.t("settings.section.about")) {
                 HStack {
-                    Label("Version", systemImage: "info.circle")
+                    Label(l10n.t("settings.about.version"), systemImage: "info.circle")
                         .foregroundStyle(Color.lakkoText)
                     Spacer()
                     Text(versionLabel)
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
                 HStack {
-                    Label("Licence", systemImage: "doc.text")
+                    Label(l10n.t("settings.about.licence"), systemImage: "doc.text")
                         .foregroundStyle(Color.lakkoText)
                     Spacer()
                     Text("AGPL-3.0-or-later")
@@ -181,20 +188,20 @@ struct SettingsScreen: View {
                 Button(role: .destructive) {
                     confirmingLogout = true
                 } label: {
-                    Label("Log out", systemImage: "rectangle.portrait.and.arrow.right")
+                    Label(l10n.t("settings.account.log_out"), systemImage: "rectangle.portrait.and.arrow.right")
                 }
                 .disabled(accountDeletion.isBusy)
                 Button(role: .destructive) {
                     confirmingForget = true
                 } label: {
-                    Label("Forget this device", systemImage: "trash")
+                    Label(l10n.t("settings.account.forget_device.label"), systemImage: "trash")
                 }
                 .disabled(accountDeletion.isBusy)
                 Button(role: .destructive) {
                     confirmingDelete = true
                 } label: {
                     HStack {
-                        Label("Delete account", systemImage: "person.crop.circle.badge.xmark")
+                        Label(l10n.t("settings.account.delete.confirm"), systemImage: "person.crop.circle.badge.xmark")
                         if accountDeletion.isBusy {
                             Spacer()
                             ProgressView().controlSize(.small)
@@ -203,19 +210,14 @@ struct SettingsScreen: View {
                 }
                 .disabled(accountDeletion.isBusy)
                 if case .error(let text) = accountDeletion.message {
-                    Text(text)
+                    Text(text.text)
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoDanger)
                 }
             } header: {
-                Text("Danger zone")
+                Text(l10n.t("settings.section.danger_zone"))
             } footer: {
-                Text(
-                    "Log out keeps your data on this device. Forget this device "
-                        + "removes it; you can only come back with your recovery phrase "
-                        + "or another signed-in device. Delete account erases the account "
-                        + "on the server and wipes this device; this cannot be undone."
-                )
+                Text(l10n.t("settings.account.danger_zone.footer"))
             }
         }
         .listStyle(.insetGrouped)
@@ -226,43 +228,36 @@ struct SettingsScreen: View {
         .navigationTitle(l10n.t("nav.settings"))
         .navigationBarTitleDisplayMode(.large)
         .confirmationDialog(
-            "Log out of Lakko?",
+            l10n.t("settings.account.log_out.title"),
             isPresented: $confirmingLogout,
             titleVisibility: .visible
         ) {
-            Button("Log out", role: .destructive, action: onLogout)
-            Button("Cancel", role: .cancel) {}
+            Button(l10n.t("settings.account.log_out"), role: .destructive, action: onLogout)
+            Button(l10n.t("common.cancel"), role: .cancel) {}
         } message: {
-            Text("Your messages stay on this device. Log back in with your password or passkey.")
+            Text(l10n.t("settings.account.log_out.body"))
         }
         .confirmationDialog(
-            "Forget this device?",
+            l10n.t("settings.account.forget_device.title"),
             isPresented: $confirmingForget,
             titleVisibility: .visible
         ) {
-            Button("Forget this device", role: .destructive, action: onForgetDevice)
-            Button("Cancel", role: .cancel) {}
+            Button(l10n.t("settings.account.forget_device.confirm"), role: .destructive, action: onForgetDevice)
+            Button(l10n.t("common.cancel"), role: .cancel) {}
         } message: {
-            Text(
-                "Everything on this device is removed and the device leaves your "
-                    + "account. You will need your recovery phrase or another "
-                    + "signed-in device to use this account here again."
-            )
+            Text(l10n.t("settings.account.forget_device.body_device"))
         }
         .confirmationDialog(
-            "Delete your account permanently?",
+            l10n.t("settings.account.delete.title"),
             isPresented: $confirmingDelete,
             titleVisibility: .visible
         ) {
-            Button("Delete my account", role: .destructive) {
+            Button(l10n.t("settings.account.delete.confirm"), role: .destructive) {
                 Task { await accountDeletion.deleteAccount() }
             }
-            Button("Cancel", role: .cancel) {}
+            Button(l10n.t("common.cancel"), role: .cancel) {}
         } message: {
-            Text(
-                "Your account is erased from the server (username, keys, recovery "
-                    + "factors, backup) and this device is wiped. This cannot be undone."
-            )
+            Text(l10n.t("settings.account.delete.body"))
         }
     }
 

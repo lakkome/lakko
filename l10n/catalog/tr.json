@@ -202,12 +202,124 @@
       "text": "Kullanıcı adı",
       "status": "machine"
     },
+    "backup.rollback_refused.body": {
+      "text": "Sunucu değiştirilmiş veya eskimiş bir yedek döndürdü. Hesabınız güvende; eski verileri geri yüklemeden devam ettik.",
+      "status": "machine"
+    },
+    "backup.rollback_refused.title": {
+      "text": "Yedek güvenli şekilde geri yüklenemedi",
+      "status": "machine"
+    },
+    "backup.stale_restore.body": {
+      "text": "Bu yedek beklenenden eski ({reason}). {consequence}",
+      "status": "machine"
+    },
+    "backup.stale_restore.confirm": {
+      "text": "Yine de geri yükle",
+      "status": "machine"
+    },
+    "backup.stale_restore.consequence": {
+      "text": "Bunu geri yüklemek hesabınızı daha eski bir duruma döndürür: mesajlar eskir ve kaldırdığınız cihazlar yeniden görünebilir.",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.anchor_unreadable": {
+      "text": "bu cihazın son yedeğinize ilişkin kaydı okunamıyor veya kurcalanmış",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.below_floor": {
+      "text": "bu cihazda geri yüklenen son yedekten daha eski",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.head_stripped": {
+      "text": "imzası kaldırılmış ve bu cihazın bildiği son yedekten farklı",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.too_old": {
+      "text": "güncel bir yedeğin olabileceğinden daha önce imzalanmış",
+      "status": "machine"
+    },
+    "backup.stale_restore.title": {
+      "text": "Bu eski yedek geri yüklensin mi?",
+      "status": "machine"
+    },
+    "call.guest.default_name": {
+      "text": "Misafir",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "Aramaya bağlanıyorsunuz...",
       "status": "machine"
     },
+    "call.link.connecting": {
+      "text": "Bağlanıyor...",
+      "status": "machine"
+    },
+    "call.link.dead": {
+      "text": "Bu arama sona erdi veya etkin değil.",
+      "status": "machine"
+    },
+    "call.link.end_current": {
+      "text": "Mevcut aramayı bitir",
+      "status": "machine"
+    },
+    "call.link.ended": {
+      "text": "Arama sona erdi.",
+      "status": "machine"
+    },
+    "call.link.error.generic": {
+      "text": "Arama başarısız oldu.",
+      "status": "machine"
+    },
+    "call.link.failed": {
+      "text": "Başarısız: {reason}",
+      "status": "machine"
+    },
+    "call.link.host": {
+      "text": "Ev sahibi: {name}",
+      "status": "machine"
+    },
+    "call.link.invalid": {
+      "text": "Bu arama bağlantısı geçersiz veya süresi dolmuş.",
+      "status": "machine"
+    },
+    "call.link.join": {
+      "text": "Aramaya katıl",
+      "status": "machine"
+    },
+    "call.link.live": {
+      "text": "Bu aramadasınız.",
+      "status": "machine"
+    },
+    "call.link.loading": {
+      "text": "Arama bağlantısı yükleniyor...",
+      "status": "machine"
+    },
+    "call.link.start": {
+      "text": "Aramayı başlat",
+      "status": "machine"
+    },
+    "call.link.title_join": {
+      "text": "Bir aramaya katılın",
+      "status": "machine"
+    },
+    "call.link.title_start": {
+      "text": "Aramanızı başlatın",
+      "status": "machine"
+    },
+    "call.link.waiting": {
+      "text": "Sahibinin sizi kabul etmesi bekleniyor...",
+      "status": "machine"
+    },
+    "call.link.waiting_hint": {
+      "text": "Bu ekrandan ayrılabilirsiniz; kabul edildiğinizde aramaya katılırsınız.",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "Mesajlaşmaya başlamak için bir sohbet seçin",
+      "status": "machine"
+    },
+    "common.adding": {
+      "text": "Ekleniyor...",
       "status": "machine"
     },
     "common.back": {
@@ -226,8 +338,20 @@
       "text": "Kapat",
       "status": "machine"
     },
+    "common.collapse": {
+      "text": "Daralt",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "Onayla",
+      "status": "machine"
+    },
+    "common.confirming": {
+      "text": "Onaylanıyor...",
+      "status": "machine"
+    },
+    "common.connecting": {
+      "text": "Bağlanıyor...",
       "status": "machine"
     },
     "common.continue": {
@@ -262,8 +386,24 @@
       "text": "Lakko'ya ulaşılamadı. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
     },
+    "common.error.qr_render": {
+      "text": "Kod çizilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
     "common.error.server_unreachable": {
       "text": "Sunucuya ulaşılamadı. Bağlantınızı kontrol edin.",
+      "status": "machine"
+    },
+    "common.error.session_ended": {
+      "text": "Oturumunuz sona erdi. Tekrar giriş yapın.",
+      "status": "machine"
+    },
+    "common.error.session_expired": {
+      "text": "Oturumun süresi doldu. Tekrar giriş yapın.",
+      "status": "machine"
+    },
+    "common.error.session_not_ready": {
+      "text": "Oturum henüz hazır değil.",
       "status": "machine"
     },
     "common.error.too_many_attempts": {
@@ -278,6 +418,10 @@
       "text": "Bu şu anda kullanılamıyor. Daha sonra tekrar deneyin.",
       "status": "machine"
     },
+    "common.expand": {
+      "text": "Genişlet",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "Yükleniyor...",
       "status": "machine"
@@ -286,8 +430,24 @@
       "text": "Aranıyor...",
       "status": "machine"
     },
+    "common.manage": {
+      "text": "Yönet",
+      "status": "machine"
+    },
     "common.more_options": {
       "text": "Diğer seçenekler",
+      "status": "machine"
+    },
+    "common.off": {
+      "text": "Kapalı",
+      "status": "machine"
+    },
+    "common.on": {
+      "text": "Açık",
+      "status": "machine"
+    },
+    "common.open_lakko": {
+      "text": "Lakko'yu aç",
       "status": "machine"
     },
     "common.optional": {
@@ -306,12 +466,36 @@
       "text": "Hazırlanıyor...",
       "status": "machine"
     },
+    "common.remove": {
+      "text": "Kaldır",
+      "status": "machine"
+    },
+    "common.removing": {
+      "text": "Kaldırılıyor...",
+      "status": "machine"
+    },
+    "common.save": {
+      "text": "Kaydet",
+      "status": "machine"
+    },
+    "common.saving": {
+      "text": "Kaydediliyor...",
+      "status": "machine"
+    },
     "common.sending": {
       "text": "Gönderiliyor...",
       "status": "machine"
     },
+    "common.set_up": {
+      "text": "Kur",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "Tekrar dene",
+      "status": "machine"
+    },
+    "common.unknown": {
+      "text": "bilinmiyor",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -1122,8 +1306,168 @@
       "text": "Hesabınızın güvenlik anahtarı değiştirildi.",
       "status": "machine"
     },
+    "settings.about.lede_web": {
+      "text": "Web'de Lakko.",
+      "status": "machine"
+    },
+    "settings.about.licence": {
+      "text": "Lisans",
+      "status": "machine"
+    },
+    "settings.about.licence_body": {
+      "text": "{licence}. Kaynak kodu serbestçe okunabilir, kullanılabilir ve geliştirilebilir.",
+      "status": "machine"
+    },
+    "settings.about.protection.body": {
+      "text": "Mesajlar, aramalar ve kişi istekleri uçtan uca şifrelenir: onları yalnızca sohbetteki kişiler okuyabilir, Lakko'nun sunucuları asla okuyamaz. Parolanız cihazınızdan hiç çıkmaz ve her kişinin yüz yüze karşılaştırabileceğiniz bir güvenlik numarası vardır.",
+      "status": "machine"
+    },
+    "settings.about.protection.title": {
+      "text": "Lakko sizi nasıl korur",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Çeviriler güncellendi: {date}",
+      "status": "machine"
+    },
+    "settings.about.version": {
+      "text": "Sürüm",
+      "status": "machine"
+    },
+    "settings.account.danger_zone.footer": {
+      "text": "Oturumu kapat, verilerinizi bu cihazda tutar. Bu cihazı unut, onları kaldırır; yalnızca kurtarma ifadenizle veya oturum açık başka bir cihazla geri dönebilirsiniz. Hesabı sil, hesabı sunucudan siler ve bu cihazı temizler; bu işlem geri alınamaz.",
+      "status": "machine"
+    },
+    "settings.account.delete.body": {
+      "text": "Bu işlem sunucudaki kimliğinizi — kullanıcı adı, anahtarlar, kurtarma yöntemleri ve yedek — siler ve her yerde oturumunuzu kapatır. Bu cihazdaki yerel mesajlarınız da silinir. Bu işlem geri alınamaz.",
+      "status": "machine"
+    },
+    "settings.account.delete.confirm": {
+      "text": "Hesabı sil",
+      "status": "machine"
+    },
+    "settings.account.delete.error.cancelled": {
+      "text": "İptal edildi. Hesabınız silinmedi.",
+      "status": "machine"
+    },
+    "settings.account.delete.error.generic": {
+      "text": "Hesabınız silinemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.account.delete.sub": {
+      "text": "Hesabınızı ve içindeki her şeyi kalıcı olarak siler ve bu cihazı temizler. Bu işlem geri alınamaz.",
+      "status": "machine"
+    },
+    "settings.account.delete.title": {
+      "text": "Hesabınız silinsin mi?",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body": {
+      "text": "Bu tarayıcıda kayıtlı hesabı kaybedeceksiniz. Geri dönmenin tek yolu, kayıt olurken yazdığınız 24 kelimelik kurtarma ifadesidir.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body_device": {
+      "text": "Bu cihazdaki her şey kaldırılır ve cihaz hesabınızdan çıkar. Bu hesabı burada yeniden kullanmak için kurtarma ifadenize veya oturum açık başka bir cihaza ihtiyacınız olacak.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.confirm": {
+      "text": "Cihazı unut",
+      "status": "machine"
+    },
+    "settings.account.forget_device.label": {
+      "text": "Bu cihazı unut",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub": {
+      "text": "Hesap verilerinizi bu tarayıcıdan kaldırır. Mesajlarınız diğer cihazlarınızda kalır; buraya geri dönmek için kurtarma ifadenize veya başka bir cihaza ihtiyacınız olacak.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.title": {
+      "text": "Bu cihaz unutulsun mu?",
+      "status": "machine"
+    },
+    "settings.account.lede": {
+      "text": "Verileriniz, oturumu kapatma, bu cihaz ve hesabınızı silme.",
+      "status": "machine"
+    },
+    "settings.account.log_out": {
+      "text": "Oturumu kapat",
+      "status": "machine"
+    },
+    "settings.account.log_out.body": {
+      "text": "Mesajlarınız bu cihazda kalır. Parolanızla veya geçiş anahtarınızla tekrar giriş yapın.",
+      "status": "machine"
+    },
+    "settings.account.log_out.sub": {
+      "text": "Bu cihazda oturumunuzu kapatır. Verileriniz bir sonraki giriş için burada kalır.",
+      "status": "machine"
+    },
+    "settings.account.log_out.title": {
+      "text": "Lakko'dan çıkış yapılsın mı?",
+      "status": "machine"
+    },
+    "settings.account.vault.not_set_up": {
+      "text": "Üç kelimeyle kurtarma: bu hesapta henüz kurulmadı. İfadenizi barındıran bir cihazda bir sonraki girişinizde kurulur.",
+      "status": "machine"
+    },
+    "settings.account.vault.on": {
+      "text": "Üç kelimeyle kurtarma: açık (kelimeler: {positions}). Oturum açık başka bir cihaz ve 24 kelimelik ifadeniz de işe yarar.",
+      "status": "machine"
+    },
+    "settings.account.vault.unavailable": {
+      "text": "Üç kelimeyle kurtarma: bu sunucuda kullanılamıyor. 24 kelimelik ifadeniz ve diğer cihazlarınız çalışmaya devam eder.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.footer": {
+      "text": "Açık olduğunda Lakko, bir ağın tespit edip engellemesini zorlaştıran bir yolla bağlanır. Mesajlarınız her durumda uçtan uca şifreli kalır.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status": {
+      "text": "Durum",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active": {
+      "text": "Etkin",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active.sub": {
+      "text": "Bağlantılar ağ engellemesinden gizleniyor.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.connecting.sub": {
+      "text": "Gizli bağlantı kuruluyor.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.direct": {
+      "text": "Doğrudan bağlantı",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable": {
+      "text": "Kullanılamıyor",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable.sub": {
+      "text": "Gizli bağlantı kurulamadı. Ağınızı kontrol edin, ardından tekrar denemek için anahtarı kapatıp açın.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured": {
+      "text": "Bu sürümde kullanılamıyor",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured.sub": {
+      "text": "Bu sürüm bu ayar olmadan derlendi.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.title": {
+      "text": "Sansürü aşma",
+      "status": "machine"
+    },
+    "settings.anti_censorship.toggle": {
+      "text": "Lakko'yu ağ engellemesinden gizle",
+      "status": "machine"
+    },
+    "settings.appearance.lede": {
+      "text": "Bu cihazdaki tema.",
       "status": "machine"
     },
     "settings.appearance.theme": {
@@ -1140,6 +1484,126 @@
     },
     "settings.appearance.theme.system": {
       "text": "Sistem",
+      "status": "machine"
+    },
+    "settings.data.downloaded": {
+      "text": "İndirildi: {file}",
+      "status": "machine"
+    },
+    "settings.data.error.generic": {
+      "text": "Verileriniz dışa aktarılamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.data.export": {
+      "text": "Verilerimi dışa aktar",
+      "status": "machine"
+    },
+    "settings.data.export_note": {
+      "text": "Mesajlarınız, kişileriniz ve grup durumunuz uçtan uca şifrelenir ve yalnızca cihazlarınızda bulunur.",
+      "status": "machine"
+    },
+    "settings.data.lede": {
+      "text": "Lakko'nun sunucularının hesabınız hakkında tuttuklarının bir kopyasını indirin. Mesajlarınız ve kişileriniz uçtan uca şifrelenir ve cihazlarınızda kalır, bu yüzden bu dosyada yer almaz.",
+      "status": "machine"
+    },
+    "settings.data.ready": {
+      "text": "Dışa aktarma hazır. Kaydetmek için Paylaş'a dokunun.",
+      "status": "machine"
+    },
+    "settings.data.share": {
+      "text": "Dışa aktarmayı paylaş",
+      "status": "machine"
+    },
+    "settings.data.title": {
+      "text": "Verileriniz",
+      "status": "machine"
+    },
+    "settings.devices.add.lede": {
+      "text": "Önce yeni cihazda Lakko'ya giriş yapın. Ardından ikisinden hangisinin kod gösterdiğini seçin.",
+      "status": "machine"
+    },
+    "settings.devices.add.no_camera": {
+      "text": "İki cihazda da kamera yok mu? Yenisinde giriş yapın ve \"{method}\" seçeneğini seçin: burada karşılaştırılacak bir kodla \"{prompt}\" istemi görünür.",
+      "status": "machine"
+    },
+    "settings.devices.device_n": {
+      "text": "Cihaz {number}",
+      "status": "machine"
+    },
+    "settings.devices.error.load": {
+      "text": "Cihazlarınız yüklenemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key": {
+      "text": "Bu tarayıcı hesabınız için ayarlanmamış. Tekrar giriş yapın.",
+      "status": "machine"
+    },
+    "settings.devices.error.remove": {
+      "text": "Cihaz kaldırılamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.devices.error.scan": {
+      "text": "Cihaz eklenemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.devices.lede": {
+      "text": "Hesabınızda oturum açık olan telefonlar, tabletler ve bilgisayarlar. Cihaz eklemek uçtan uca şifrelidir; Lakko'nun sunucuları bunu okuyamaz.",
+      "status": "machine"
+    },
+    "settings.devices.list.lede": {
+      "text": "Kaldırılan bir cihaz o andan itibaren mesajlarınıza erişimini kaybeder. Kaldırma işlemi geçiş anahtarınızı isteyebilir.",
+      "status": "machine"
+    },
+    "settings.devices.list.title": {
+      "text": "Cihazlarınız",
+      "status": "machine"
+    },
+    "settings.devices.remove.body": {
+      "text": "Bu cihaz o andan itibaren mesajlarınıza erişimini kaybeder. Geçiş anahtarınız istenebilir.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm_named": {
+      "text": "Kaldır: {device}",
+      "status": "machine"
+    },
+    "settings.devices.remove.title": {
+      "text": "{device} kaldırılsın mı?",
+      "status": "machine"
+    },
+    "settings.devices.scan.done": {
+      "text": "Cihaz eklendi. Katılımı tamamlandığında listede görünecek.",
+      "status": "machine"
+    },
+    "settings.devices.scan.opening": {
+      "text": "Kamera açılıyor...",
+      "status": "machine"
+    },
+    "settings.devices.show.error.timeout": {
+      "text": "Diğer cihaz kodu zamanında taramadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.devices.show.lede": {
+      "text": "Bu kodu zaten oturum açmış bir cihazla tarayın. Onayladığında bu cihaz hesabınıza katılır.",
+      "status": "machine"
+    },
+    "settings.devices.show.start": {
+      "text": "Kodu göster",
+      "status": "machine"
+    },
+    "settings.devices.sign_in_first": {
+      "text": "Cihazları yönetmek için önce giriş yapın.",
+      "status": "machine"
+    },
+    "settings.devices.this_device": {
+      "text": "Bu cihaz",
+      "status": "machine"
+    },
+    "settings.devices.this_device.sub": {
+      "text": "Şu anda kullandığınız cihaz.",
+      "status": "machine"
+    },
+    "settings.devices.title": {
+      "text": "Cihazlar",
       "status": "machine"
     },
     "settings.language.load_failed": {
@@ -1166,6 +1630,266 @@
       "text": "Dil",
       "status": "machine"
     },
+    "settings.me.guest": {
+      "text": "Misafir",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.sub": {
+      "text": "Gelen görüntülü notlar ekranda göründükçe sessiz olarak oynatılmaya başlar. Otomatik oynatma medya indirdiği için varsayılan olarak kapalıdır.",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.title": {
+      "text": "Görüntülü notları otomatik oynat",
+      "status": "machine"
+    },
+    "settings.media.lede": {
+      "text": "Bu cihazda oynatma.",
+      "status": "machine"
+    },
+    "settings.notifications.off.body": {
+      "text": "Bildirimler kapalı, bu yüzden Lakko yalnızca açıkken çalabilir. Kapalıyken de aramalar ve mesajlar size ulaşsın diye bildirimleri açın.",
+      "status": "machine"
+    },
+    "settings.notifications.off.title": {
+      "text": "Bildirimleri açın",
+      "status": "machine"
+    },
+    "settings.passkeys.add": {
+      "text": "Geçiş anahtarı ekle",
+      "status": "machine"
+    },
+    "settings.passkeys.added": {
+      "text": "\"{name}\" geçiş anahtarı eklendi.",
+      "status": "machine"
+    },
+    "settings.passkeys.added_last_used": {
+      "text": "Eklenme: {added} · son kullanım: {used}",
+      "status": "machine"
+    },
+    "settings.passkeys.added_never_used": {
+      "text": "Eklenme: {added} · hiç kullanılmadı",
+      "status": "machine"
+    },
+    "settings.passkeys.empty": {
+      "text": "Henüz geçiş anahtarı yok.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.cancelled": {
+      "text": "İptal edildi. Geçiş anahtarı oluşturulmadı.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.generic": {
+      "text": "Geçiş anahtarlarınız güncellenemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.name_required": {
+      "text": "Geçiş anahtarına bir ad verin.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.network": {
+      "text": "Ağ hatası. Bağlantınızı kontrol edip yeniden deneyin.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.server_status": {
+      "text": "Sunucu hatası ({status}).",
+      "status": "machine"
+    },
+    "settings.passkeys.error.unsupported": {
+      "text": "Bu tarayıcı / cihaz şu anda geçiş anahtarı oluşturamıyor.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede": {
+      "text": "Parolanız yerine Touch ID, Face ID veya bir güvenlik anahtarıyla giriş yapın. Kurtarma ifadeniz de her zaman işe yarar.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede_device": {
+      "text": "Parolanız yerine parmak iziniz, yüzünüz veya ekran kilidinizle ya da bir güvenlik anahtarıyla giriş yapın. Kurtarma ifadeniz de her zaman işe yarar.",
+      "status": "machine"
+    },
+    "settings.passkeys.name.label": {
+      "text": "Geçiş anahtarı adı",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder": {
+      "text": "Bu geçiş anahtarına ad verin (ör. MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.body": {
+      "text": "Eşleşen özel anahtarı barındıran cihaz artık bununla giriş yapamayacak. Bu işlem geri alınamaz.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm": {
+      "text": "Kaldır",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm_named": {
+      "text": "Kaldır: {name}",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.error.cancelled": {
+      "text": "İptal edildi. Geçiş anahtarı kaldırılmadı.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.title": {
+      "text": "Bu geçiş anahtarı kaldırılsın mı?",
+      "status": "machine"
+    },
+    "settings.passkeys.removed": {
+      "text": "Kaldırıldı: \"{name}\".",
+      "status": "machine"
+    },
+    "settings.passkeys.title": {
+      "text": "Geçiş anahtarları",
+      "status": "machine"
+    },
+    "settings.passkeys.unnamed": {
+      "text": "Adsız geçiş anahtarı",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_browser": {
+      "text": "Bu tarayıcı geçiş anahtarlarını yönetemiyor. Güncel bir Safari, Chrome, Firefox veya Edge kullanın.",
+      "status": "machine"
+    },
+    "settings.profile.error.generic": {
+      "text": "Adınız kaydedilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.profile.lede": {
+      "text": "Kişilerinize nasıl göründüğünüz.",
+      "status": "machine"
+    },
+    "settings.profile.name.hint": {
+      "text": "Konuştuğunuz kişilere gösterilir. Benzersiz olması gerekmez, en fazla {count, plural, one {# karakter} other {# karakter}}.",
+      "status": "machine"
+    },
+    "settings.profile.name.label": {
+      "text": "Adınız",
+      "status": "machine"
+    },
+    "settings.profile.preview.label": {
+      "text": "Başkaları sizi nasıl görür",
+      "status": "machine"
+    },
+    "settings.profile.preview.no_name": {
+      "text": "Bir ad belirleyene kadar başkaları anahtar parmak izinizi görür.",
+      "status": "machine"
+    },
+    "settings.profile.saved": {
+      "text": "Adınız kişileriniz için güncellenecek.",
+      "status": "machine"
+    },
+    "settings.profile.username.none": {
+      "text": "Yok",
+      "status": "machine"
+    },
+    "settings.recovery.contact.already_enabled": {
+      "text": "Bu hesap için zaten bir e-posta veya telefon ayarlanmış. Değiştirmek için önce kurtarma ifadenizle veya başka bir cihazdan tekrar giriş yapın.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.done": {
+      "text": "Tamam. Oraya gönderilen bir kod artık hesabınıza geri dönmenizi sağlayabilir.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.bad_contact": {
+      "text": "Bu doğru görünmüyor. Kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.generic": {
+      "text": "E-posta veya telefon ayarlanamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.lede": {
+      "text": "E-postanıza veya telefonunuza gönderilen tek kullanımlık bir kod, parolanızı kaybederseniz yeniden giriş yapmanızı sağlar.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_email": {
+      "text": "Altı haneli bir kodu e-postayla gönderdik: {contact}. Aşağıya girin.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_phone": {
+      "text": "Altı haneli bir kodu SMS ile gönderdik: {contact}. Aşağıya girin.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sub": {
+      "text": "E-postanıza veya telefonunuza gönderilen tek kullanımlık bir kod.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.unavailable": {
+      "text": "E-posta ve telefonla kurtarma şu anda kullanılamıyor.",
+      "status": "machine"
+    },
+    "settings.recovery.lede": {
+      "text": "Kurtarma ifadeniz her şeyi geri yükler. Bunlar parolanızı kaybettiğinizde hesaba geri dönmenizi sağlar; mesajlarınız ise ifadeden veya diğer cihazlarınızdan birinden gelir.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.not_saved_here": {
+      "text": "Bu cihazda kayıtlı değil. Yazılı kopyanızı güvende tutun.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.saved_here": {
+      "text": "Bu cihazda kayıtlı.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.sub": {
+      "text": "Kayıt olurken yazdığınız 24 kelime, yeni bir cihazda kimliğinizi, kişilerinizi ve mesajlarınızı geri yükler.",
+      "status": "machine"
+    },
+    "settings.recovery.section.access": {
+      "text": "Erişim",
+      "status": "machine"
+    },
+    "settings.recovery.section.identity": {
+      "text": "Kimlik",
+      "status": "machine"
+    },
+    "settings.recovery.sign_in_first": {
+      "text": "Kurtarmayı yönetmek için önce giriş yapın.",
+      "status": "machine"
+    },
+    "settings.recovery.title": {
+      "text": "Kurtarma",
+      "status": "machine"
+    },
+    "settings.recovery.totp.already_enabled": {
+      "text": "Bu hesap için zaten bir kimlik doğrulayıcı kurulmuş. Değiştirmek için önce kurtarma ifadenizle veya başka bir cihazdan tekrar giriş yapın.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.done": {
+      "text": "Kimlik doğrulayıcı kuruldu. Uygulamadaki bir kod artık hesabınıza geri dönmenizi sağlayabilir.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.generic": {
+      "text": "Kimlik doğrulayıcı kurulamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.wrong": {
+      "text": "Bu kod işe yaramadı. Uygulamadaki bir sonraki kodu bekleyip tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.key": {
+      "text": "Anahtar: {key}",
+      "status": "machine"
+    },
+    "settings.recovery.totp.lede": {
+      "text": "Bir kimlik doğrulayıcı uygulamasından alınan altı haneli kod, parolanızı kaybederseniz yeniden giriş yapmanızı sağlar.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.scan": {
+      "text": "Bu kodu kimlik doğrulayıcı uygulamanızla tarayın veya anahtarı elle yazın, ardından uygulamanın gösterdiği altı haneli kodu girin.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.set_up": {
+      "text": "Kimlik doğrulayıcıyı kur",
+      "status": "machine"
+    },
+    "settings.recovery.totp.title": {
+      "text": "Kimlik doğrulayıcı uygulaması",
+      "status": "machine"
+    },
+    "settings.recovery.totp.unavailable": {
+      "text": "Kimlik doğrulayıcı kurulumu şu anda kullanılamıyor.",
+      "status": "machine"
+    },
     "settings.section.about": {
       "text": "Hakkında",
       "status": "machine"
@@ -1178,12 +1902,20 @@
       "text": "Görünüm",
       "status": "machine"
     },
+    "settings.section.danger_zone": {
+      "text": "Tehlikeli bölge",
+      "status": "machine"
+    },
     "settings.section.data": {
       "text": "Veriler",
       "status": "machine"
     },
     "settings.section.media": {
       "text": "Medya",
+      "status": "machine"
+    },
+    "settings.section.network": {
+      "text": "Ağ",
       "status": "machine"
     },
     "settings.section.notifications": {
@@ -1196,6 +1928,30 @@
     },
     "settings.section.security": {
       "text": "Güvenlik",
+      "status": "machine"
+    },
+    "settings.security.devices.sub": {
+      "text": "Bu hesaptaki cihazları görün, ekleyin ve kaldırın.",
+      "status": "machine"
+    },
+    "settings.security.devices_and_recovery": {
+      "text": "Cihazlar ve kurtarma",
+      "status": "machine"
+    },
+    "settings.security.lede": {
+      "text": "Nasıl giriş yaptığınız, hangi cihazların mesajlarınızı okuyabildiği ve nasıl geri döneceğiniz.",
+      "status": "machine"
+    },
+    "settings.security.recovery.sub": {
+      "text": "Sizi hesaba geri döndüren bir kimlik doğrulayıcı uygulaması, e-posta adresi veya telefon numarası.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.sub": {
+      "text": "Her kişinin bir güvenlik numarası vardır. Yüz yüze veya bir aramada karşılaştırın; numaralar eşleşiyorsa aranızda kimse yok demektir. Kişinin ayrıntılarında bulabilirsiniz.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.title": {
+      "text": "Güvenlik numaraları",
       "status": "machine"
     },
     "username.a11y_hint": {

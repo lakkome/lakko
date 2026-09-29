@@ -202,12 +202,124 @@
       "text": "用户名",
       "status": "machine"
     },
+    "backup.rollback_refused.body": {
+      "text": "服务器返回了被篡改或过期的备份。你的账号是安全的；我们没有恢复旧数据，直接继续了。",
+      "status": "machine"
+    },
+    "backup.rollback_refused.title": {
+      "text": "无法安全地恢复备份",
+      "status": "machine"
+    },
+    "backup.stale_restore.body": {
+      "text": "此备份比预期的旧（{reason}）。{consequence}",
+      "status": "machine"
+    },
+    "backup.stale_restore.confirm": {
+      "text": "仍要恢复",
+      "status": "machine"
+    },
+    "backup.stale_restore.consequence": {
+      "text": "恢复它会让你的账号回到较旧的状态——消息会是旧的，你已移除的设备可能会重新出现。",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.anchor_unreadable": {
+      "text": "此设备上关于你最近一次备份的记录无法读取或已被篡改",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.below_floor": {
+      "text": "它比此设备上最近恢复的备份更旧",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.head_stripped": {
+      "text": "它的签名已被移除，并且与此设备所知的最近一次备份不同",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.too_old": {
+      "text": "它的签名时间早于当前备份应有的时间",
+      "status": "machine"
+    },
+    "backup.stale_restore.title": {
+      "text": "恢复这个较旧的备份？",
+      "status": "machine"
+    },
+    "call.guest.default_name": {
+      "text": "访客",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "正在让你加入通话…",
       "status": "machine"
     },
+    "call.link.connecting": {
+      "text": "正在连接…",
+      "status": "machine"
+    },
+    "call.link.dead": {
+      "text": "此通话已结束或未在进行。",
+      "status": "machine"
+    },
+    "call.link.end_current": {
+      "text": "结束当前通话",
+      "status": "machine"
+    },
+    "call.link.ended": {
+      "text": "通话已结束。",
+      "status": "machine"
+    },
+    "call.link.error.generic": {
+      "text": "通话失败。",
+      "status": "machine"
+    },
+    "call.link.failed": {
+      "text": "失败：{reason}",
+      "status": "machine"
+    },
+    "call.link.host": {
+      "text": "发起人：{name}",
+      "status": "machine"
+    },
+    "call.link.invalid": {
+      "text": "此通话链接无效或已过期。",
+      "status": "machine"
+    },
+    "call.link.join": {
+      "text": "加入通话",
+      "status": "machine"
+    },
+    "call.link.live": {
+      "text": "你已在此通话中。",
+      "status": "machine"
+    },
+    "call.link.loading": {
+      "text": "正在加载通话链接…",
+      "status": "machine"
+    },
+    "call.link.start": {
+      "text": "开始通话",
+      "status": "machine"
+    },
+    "call.link.title_join": {
+      "text": "加入通话",
+      "status": "machine"
+    },
+    "call.link.title_start": {
+      "text": "开始你的通话",
+      "status": "machine"
+    },
+    "call.link.waiting": {
+      "text": "正在等待发起人允许你加入…",
+      "status": "machine"
+    },
+    "call.link.waiting_hint": {
+      "text": "你可以离开此界面；获准后你会自动加入。",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "选择一个聊天开始发消息",
+      "status": "machine"
+    },
+    "common.adding": {
+      "text": "正在添加…",
       "status": "machine"
     },
     "common.back": {
@@ -226,8 +338,20 @@
       "text": "关闭",
       "status": "machine"
     },
+    "common.collapse": {
+      "text": "收起",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "确认",
+      "status": "machine"
+    },
+    "common.confirming": {
+      "text": "正在确认…",
+      "status": "machine"
+    },
+    "common.connecting": {
+      "text": "正在连接…",
       "status": "machine"
     },
     "common.continue": {
@@ -262,8 +386,24 @@
       "text": "无法连接到 Lakko。请检查网络连接后重试。",
       "status": "machine"
     },
+    "common.error.qr_render": {
+      "text": "无法显示代码。请重试。",
+      "status": "machine"
+    },
     "common.error.server_unreachable": {
       "text": "无法连接到服务器。请检查网络连接。",
+      "status": "machine"
+    },
+    "common.error.session_ended": {
+      "text": "你的会话已结束。请重新登录。",
+      "status": "machine"
+    },
+    "common.error.session_expired": {
+      "text": "会话已过期。请重新登录。",
+      "status": "machine"
+    },
+    "common.error.session_not_ready": {
+      "text": "会话尚未就绪。",
       "status": "machine"
     },
     "common.error.too_many_attempts": {
@@ -278,6 +418,10 @@
       "text": "该功能暂时不可用。请稍后再试。",
       "status": "machine"
     },
+    "common.expand": {
+      "text": "展开",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "正在加载…",
       "status": "machine"
@@ -286,8 +430,24 @@
       "text": "正在查找…",
       "status": "machine"
     },
+    "common.manage": {
+      "text": "管理",
+      "status": "machine"
+    },
     "common.more_options": {
       "text": "更多选项",
+      "status": "machine"
+    },
+    "common.off": {
+      "text": "关",
+      "status": "machine"
+    },
+    "common.on": {
+      "text": "开",
+      "status": "machine"
+    },
+    "common.open_lakko": {
+      "text": "打开 Lakko",
       "status": "machine"
     },
     "common.optional": {
@@ -306,12 +466,36 @@
       "text": "正在准备…",
       "status": "machine"
     },
+    "common.remove": {
+      "text": "移除",
+      "status": "machine"
+    },
+    "common.removing": {
+      "text": "正在移除…",
+      "status": "machine"
+    },
+    "common.save": {
+      "text": "保存",
+      "status": "machine"
+    },
+    "common.saving": {
+      "text": "正在保存…",
+      "status": "machine"
+    },
     "common.sending": {
       "text": "正在发送…",
       "status": "machine"
     },
+    "common.set_up": {
+      "text": "设置",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "重试",
+      "status": "machine"
+    },
+    "common.unknown": {
+      "text": "未知",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -1122,8 +1306,168 @@
       "text": "你账号的安全密钥已被更改。",
       "status": "machine"
     },
+    "settings.about.lede_web": {
+      "text": "网页版 Lakko。",
+      "status": "machine"
+    },
+    "settings.about.licence": {
+      "text": "许可证",
+      "status": "machine"
+    },
+    "settings.about.licence_body": {
+      "text": "{licence}。源代码可自由阅读、使用和改进。",
+      "status": "machine"
+    },
+    "settings.about.protection.body": {
+      "text": "消息、通话和联系人请求均为端到端加密：只有对话中的人能读取，Lakko 的服务器永远无法读取。你的密码从不离开你的设备，每位联系人都有一个安全码，你可以当面核对。",
+      "status": "machine"
+    },
+    "settings.about.protection.title": {
+      "text": "Lakko 如何保护你",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "翻译已更新 {date}",
+      "status": "machine"
+    },
+    "settings.about.version": {
+      "text": "版本",
+      "status": "machine"
+    },
+    "settings.account.danger_zone.footer": {
+      "text": "“退出登录”会将你的数据保留在此设备上。“忘记此设备”会移除这些数据；之后只能通过恢复短语或另一台已登录的设备回来。“删除账号”会清除服务器上的账号并清空此设备；此操作无法撤销。",
+      "status": "machine"
+    },
+    "settings.account.delete.body": {
+      "text": "这会清除你在服务器上的身份信息——用户名、密钥、恢复方式和备份——并在所有设备上退出登录。此设备上的本地消息也会被清除。此操作无法撤销。",
+      "status": "machine"
+    },
+    "settings.account.delete.confirm": {
+      "text": "删除账号",
+      "status": "machine"
+    },
+    "settings.account.delete.error.cancelled": {
+      "text": "已取消。你的账号未被删除。",
+      "status": "machine"
+    },
+    "settings.account.delete.error.generic": {
+      "text": "无法删除你的账号。请重试。",
+      "status": "machine"
+    },
+    "settings.account.delete.sub": {
+      "text": "永久清除你的账号及其中的所有内容，并清空此设备。此操作无法撤销。",
+      "status": "machine"
+    },
+    "settings.account.delete.title": {
+      "text": "删除你的账号？",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body": {
+      "text": "你将失去此浏览器中缓存的账号。唯一的恢复方式是你注册时记下的 24 词恢复短语。",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body_device": {
+      "text": "此设备上的所有内容都会被移除，此设备也会退出你的账号。要在这里再次使用此账号，你需要恢复短语或另一台已登录的设备。",
+      "status": "machine"
+    },
+    "settings.account.forget_device.confirm": {
+      "text": "忘记设备",
+      "status": "machine"
+    },
+    "settings.account.forget_device.label": {
+      "text": "忘记此设备",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub": {
+      "text": "从此浏览器中移除你的账号数据。你的消息仍保留在你的其他设备上；要回到这里，你需要恢复短语或另一台设备。",
+      "status": "machine"
+    },
+    "settings.account.forget_device.title": {
+      "text": "忘记此设备？",
+      "status": "machine"
+    },
+    "settings.account.lede": {
+      "text": "你的数据、退出登录、此设备以及删除账号。",
+      "status": "machine"
+    },
+    "settings.account.log_out": {
+      "text": "退出登录",
+      "status": "machine"
+    },
+    "settings.account.log_out.body": {
+      "text": "你的消息会保留在此设备上。使用密码或通行密钥重新登录。",
+      "status": "machine"
+    },
+    "settings.account.log_out.sub": {
+      "text": "在此设备上退出登录。你的数据会保留在这里，供下次登录使用。",
+      "status": "machine"
+    },
+    "settings.account.log_out.title": {
+      "text": "退出 Lakko？",
+      "status": "machine"
+    },
+    "settings.account.vault.not_set_up": {
+      "text": "三词恢复：此账号尚未设置。下次你在保存有恢复短语的设备上登录时会自动设置。",
+      "status": "machine"
+    },
+    "settings.account.vault.on": {
+      "text": "三词恢复：已开启（第 {positions} 个词）。另一台已登录的设备和你的 24 词短语同样可用。",
+      "status": "machine"
+    },
+    "settings.account.vault.unavailable": {
+      "text": "三词恢复：此服务器不支持。你的 24 词短语和其他设备仍然可用。",
+      "status": "machine"
+    },
+    "settings.anti_censorship.footer": {
+      "text": "开启后，Lakko 会以一种网络更难检测和封锁的方式连接。无论如何，你的消息都保持端到端加密。",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status": {
+      "text": "状态",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active": {
+      "text": "已启用",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active.sub": {
+      "text": "连接已对网络封锁隐藏。",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.connecting.sub": {
+      "text": "正在建立隐藏连接。",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.direct": {
+      "text": "直接连接",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable": {
+      "text": "不可用",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable.sub": {
+      "text": "无法建立隐藏连接。请检查网络，然后关闭再打开开关重试。",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured": {
+      "text": "此版本不可用",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured.sub": {
+      "text": "此版本在构建时未包含该设置。",
+      "status": "machine"
+    },
+    "settings.anti_censorship.title": {
+      "text": "反审查",
+      "status": "machine"
+    },
+    "settings.anti_censorship.toggle": {
+      "text": "对网络封锁隐藏 Lakko",
+      "status": "machine"
+    },
+    "settings.appearance.lede": {
+      "text": "此设备上的主题。",
       "status": "machine"
     },
     "settings.appearance.theme": {
@@ -1140,6 +1484,126 @@
     },
     "settings.appearance.theme.system": {
       "text": "跟随系统",
+      "status": "machine"
+    },
+    "settings.data.downloaded": {
+      "text": "已下载 {file}。",
+      "status": "machine"
+    },
+    "settings.data.error.generic": {
+      "text": "无法导出你的数据。请重试。",
+      "status": "machine"
+    },
+    "settings.data.export": {
+      "text": "导出我的数据",
+      "status": "machine"
+    },
+    "settings.data.export_note": {
+      "text": "你的消息、联系人和群组状态均为端到端加密，只保存在你的设备上。",
+      "status": "machine"
+    },
+    "settings.data.lede": {
+      "text": "下载 Lakko 服务器上关于你账号的数据副本。你的消息和联系人是端到端加密的，保存在你的设备上，因此不包含在此文件中。",
+      "status": "machine"
+    },
+    "settings.data.ready": {
+      "text": "导出已就绪。轻点“分享”以保存。",
+      "status": "machine"
+    },
+    "settings.data.share": {
+      "text": "分享导出文件",
+      "status": "machine"
+    },
+    "settings.data.title": {
+      "text": "你的数据",
+      "status": "machine"
+    },
+    "settings.devices.add.lede": {
+      "text": "先在新设备上登录 Lakko。然后选择两台设备中哪一台正在显示代码。",
+      "status": "machine"
+    },
+    "settings.devices.add.no_camera": {
+      "text": "两台设备都没有摄像头？在新设备上登录并选择“{method}”：这里会出现带有核对代码的“{prompt}”提示。",
+      "status": "machine"
+    },
+    "settings.devices.device_n": {
+      "text": "设备 {number}",
+      "status": "machine"
+    },
+    "settings.devices.error.load": {
+      "text": "无法加载你的设备。请重试。",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key": {
+      "text": "此浏览器未为你的账号设置。请重新登录。",
+      "status": "machine"
+    },
+    "settings.devices.error.remove": {
+      "text": "无法移除该设备。请重试。",
+      "status": "machine"
+    },
+    "settings.devices.error.scan": {
+      "text": "无法添加该设备。请重试。",
+      "status": "machine"
+    },
+    "settings.devices.lede": {
+      "text": "已登录你账号的手机、平板和电脑。添加设备的过程是端到端加密的，Lakko 的服务器无法读取。",
+      "status": "machine"
+    },
+    "settings.devices.list.lede": {
+      "text": "被移除的设备从那一刻起将无法访问你的消息。移除设备可能需要你的通行密钥。",
+      "status": "machine"
+    },
+    "settings.devices.list.title": {
+      "text": "你的设备",
+      "status": "machine"
+    },
+    "settings.devices.remove.body": {
+      "text": "从那一刻起，此设备将无法访问你的消息。可能会要求你使用通行密钥。",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm_named": {
+      "text": "移除{device}",
+      "status": "machine"
+    },
+    "settings.devices.remove.title": {
+      "text": "移除{device}？",
+      "status": "machine"
+    },
+    "settings.devices.scan.done": {
+      "text": "设备已添加。完成加入后会出现在列表中。",
+      "status": "machine"
+    },
+    "settings.devices.scan.opening": {
+      "text": "正在打开摄像头…",
+      "status": "machine"
+    },
+    "settings.devices.show.error.timeout": {
+      "text": "另一台设备未能及时扫描。请重试。",
+      "status": "machine"
+    },
+    "settings.devices.show.lede": {
+      "text": "用一台已登录的设备扫描此代码。对方确认后，此设备将加入你的账号。",
+      "status": "machine"
+    },
+    "settings.devices.show.start": {
+      "text": "显示代码",
+      "status": "machine"
+    },
+    "settings.devices.sign_in_first": {
+      "text": "请先登录再管理设备。",
+      "status": "machine"
+    },
+    "settings.devices.this_device": {
+      "text": "此设备",
+      "status": "machine"
+    },
+    "settings.devices.this_device.sub": {
+      "text": "你正在使用的设备。",
+      "status": "machine"
+    },
+    "settings.devices.title": {
+      "text": "设备",
       "status": "machine"
     },
     "settings.language.load_failed": {
@@ -1166,6 +1630,266 @@
       "text": "语言",
       "status": "machine"
     },
+    "settings.me.guest": {
+      "text": "访客",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.sub": {
+      "text": "收到的视频消息滚动到屏幕上时会静音自动播放。默认关闭，因为自动播放会下载媒体。",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.title": {
+      "text": "自动播放视频消息",
+      "status": "machine"
+    },
+    "settings.media.lede": {
+      "text": "此设备上的播放。",
+      "status": "machine"
+    },
+    "settings.notifications.off.body": {
+      "text": "通知已关闭，因此 Lakko 只能在打开时响铃。开启通知，这样即使 Lakko 未打开，通话和消息也能送达。",
+      "status": "machine"
+    },
+    "settings.notifications.off.title": {
+      "text": "开启通知",
+      "status": "machine"
+    },
+    "settings.passkeys.add": {
+      "text": "添加通行密钥",
+      "status": "machine"
+    },
+    "settings.passkeys.added": {
+      "text": "已添加通行密钥“{name}”。",
+      "status": "machine"
+    },
+    "settings.passkeys.added_last_used": {
+      "text": "添加于 {added} · 上次使用 {used}",
+      "status": "machine"
+    },
+    "settings.passkeys.added_never_used": {
+      "text": "添加于 {added} · 从未使用",
+      "status": "machine"
+    },
+    "settings.passkeys.empty": {
+      "text": "还没有通行密钥。",
+      "status": "machine"
+    },
+    "settings.passkeys.error.cancelled": {
+      "text": "已取消。未创建通行密钥。",
+      "status": "machine"
+    },
+    "settings.passkeys.error.generic": {
+      "text": "无法更新你的通行密钥。请重试。",
+      "status": "machine"
+    },
+    "settings.passkeys.error.name_required": {
+      "text": "请为通行密钥命名。",
+      "status": "machine"
+    },
+    "settings.passkeys.error.network": {
+      "text": "网络错误。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "settings.passkeys.error.server_status": {
+      "text": "服务器错误（{status}）。",
+      "status": "machine"
+    },
+    "settings.passkeys.error.unsupported": {
+      "text": "此浏览器/设备目前无法创建通行密钥。",
+      "status": "machine"
+    },
+    "settings.passkeys.lede": {
+      "text": "使用触控 ID、面容 ID 或安全密钥代替密码登录。你的恢复短语也始终可用。",
+      "status": "machine"
+    },
+    "settings.passkeys.lede_device": {
+      "text": "使用指纹、面部或屏幕锁，或安全密钥代替密码登录。你的恢复短语也始终可用。",
+      "status": "machine"
+    },
+    "settings.passkeys.name.label": {
+      "text": "通行密钥名称",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder": {
+      "text": "为此通行密钥命名（例如 MacBook Touch ID）",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.body": {
+      "text": "持有对应私钥的设备将无法再用它登录。此操作无法撤销。",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm": {
+      "text": "移除",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm_named": {
+      "text": "移除 {name}",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.error.cancelled": {
+      "text": "已取消。通行密钥未被移除。",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.title": {
+      "text": "移除此通行密钥？",
+      "status": "machine"
+    },
+    "settings.passkeys.removed": {
+      "text": "已移除“{name}”。",
+      "status": "machine"
+    },
+    "settings.passkeys.title": {
+      "text": "通行密钥",
+      "status": "machine"
+    },
+    "settings.passkeys.unnamed": {
+      "text": "未命名的通行密钥",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_browser": {
+      "text": "此浏览器无法管理通行密钥。请使用较新版本的 Safari、Chrome、Firefox 或 Edge。",
+      "status": "machine"
+    },
+    "settings.profile.error.generic": {
+      "text": "无法保存你的名字。请重试。",
+      "status": "machine"
+    },
+    "settings.profile.lede": {
+      "text": "你在联系人眼中的样子。",
+      "status": "machine"
+    },
+    "settings.profile.name.hint": {
+      "text": "会显示给与你聊天的人。不必唯一，最多 {count, plural, other {# 个字符}}。",
+      "status": "machine"
+    },
+    "settings.profile.name.label": {
+      "text": "你的名字",
+      "status": "machine"
+    },
+    "settings.profile.preview.label": {
+      "text": "别人看到的你",
+      "status": "machine"
+    },
+    "settings.profile.preview.no_name": {
+      "text": "在你设置名字之前，别人看到的是你的密钥指纹。",
+      "status": "machine"
+    },
+    "settings.profile.saved": {
+      "text": "你的联系人将看到更新后的名字。",
+      "status": "machine"
+    },
+    "settings.profile.username.none": {
+      "text": "无",
+      "status": "machine"
+    },
+    "settings.recovery.contact.already_enabled": {
+      "text": "此账号已设置了邮箱或手机。要更换，请先用恢复短语或从另一台设备重新登录。",
+      "status": "machine"
+    },
+    "settings.recovery.contact.done": {
+      "text": "完成。发送到那里的验证码现在可以帮你找回账号。",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.bad_contact": {
+      "text": "这看起来不正确。请检查后重试。",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.generic": {
+      "text": "无法设置邮箱或手机。请重试。",
+      "status": "machine"
+    },
+    "settings.recovery.contact.lede": {
+      "text": "如果你忘记了密码，发送到你邮箱或手机的一次性验证码可以让你重新登录。",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_email": {
+      "text": "我们已通过邮件向 {contact} 发送了六位数验证码。请在下方输入。",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_phone": {
+      "text": "我们已通过短信向 {contact} 发送了六位数验证码。请在下方输入。",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sub": {
+      "text": "发送到你邮箱或手机的一次性验证码。",
+      "status": "machine"
+    },
+    "settings.recovery.contact.unavailable": {
+      "text": "邮箱和手机恢复目前不可用。",
+      "status": "machine"
+    },
+    "settings.recovery.lede": {
+      "text": "你的恢复短语可以恢复一切。以下方式可在你丢失密码时帮你找回账号；之后你的消息来自恢复短语或你的另一台设备。",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.not_saved_here": {
+      "text": "未保存在此设备上。请妥善保管你的书面副本。",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.saved_here": {
+      "text": "已保存在此设备上。",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.sub": {
+      "text": "你注册时记下的 24 个词可在新设备上恢复你的身份、联系人和消息。",
+      "status": "machine"
+    },
+    "settings.recovery.section.access": {
+      "text": "访问",
+      "status": "machine"
+    },
+    "settings.recovery.section.identity": {
+      "text": "身份",
+      "status": "machine"
+    },
+    "settings.recovery.sign_in_first": {
+      "text": "请先登录再管理恢复方式。",
+      "status": "machine"
+    },
+    "settings.recovery.title": {
+      "text": "恢复",
+      "status": "machine"
+    },
+    "settings.recovery.totp.already_enabled": {
+      "text": "此账号已设置了身份验证器。要更换，请先用恢复短语或从另一台设备重新登录。",
+      "status": "machine"
+    },
+    "settings.recovery.totp.done": {
+      "text": "身份验证器已设置。应用中的验证码现在可以帮你找回账号。",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.generic": {
+      "text": "无法设置身份验证器。请重试。",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.wrong": {
+      "text": "该验证码无效。请等待应用中的下一个验证码后重试。",
+      "status": "machine"
+    },
+    "settings.recovery.totp.key": {
+      "text": "密钥：{key}",
+      "status": "machine"
+    },
+    "settings.recovery.totp.lede": {
+      "text": "如果你忘记了密码，身份验证器应用中的六位数验证码可以让你重新登录。",
+      "status": "machine"
+    },
+    "settings.recovery.totp.scan": {
+      "text": "用你的身份验证器应用扫描此二维码，或手动输入密钥，然后输入应用显示的六位数验证码。",
+      "status": "machine"
+    },
+    "settings.recovery.totp.set_up": {
+      "text": "设置身份验证器",
+      "status": "machine"
+    },
+    "settings.recovery.totp.title": {
+      "text": "身份验证器应用",
+      "status": "machine"
+    },
+    "settings.recovery.totp.unavailable": {
+      "text": "身份验证器设置目前不可用。",
+      "status": "machine"
+    },
     "settings.section.about": {
       "text": "关于",
       "status": "machine"
@@ -1178,12 +1902,20 @@
       "text": "外观",
       "status": "machine"
     },
+    "settings.section.danger_zone": {
+      "text": "危险区域",
+      "status": "machine"
+    },
     "settings.section.data": {
       "text": "数据",
       "status": "machine"
     },
     "settings.section.media": {
       "text": "媒体",
+      "status": "machine"
+    },
+    "settings.section.network": {
+      "text": "网络",
       "status": "machine"
     },
     "settings.section.notifications": {
@@ -1196,6 +1928,30 @@
     },
     "settings.section.security": {
       "text": "安全",
+      "status": "machine"
+    },
+    "settings.security.devices.sub": {
+      "text": "查看、添加和移除此账号上的设备。",
+      "status": "machine"
+    },
+    "settings.security.devices_and_recovery": {
+      "text": "设备与恢复",
+      "status": "machine"
+    },
+    "settings.security.lede": {
+      "text": "你如何登录、哪些设备可以读取你的消息，以及如何找回账号。",
+      "status": "machine"
+    },
+    "settings.security.recovery.sub": {
+      "text": "可帮你找回账号的身份验证器应用、邮箱地址或手机号码。",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.sub": {
+      "text": "每位联系人都有一个安全码。当面或在通话中核对；安全码一致，说明中间没有其他人。可在联系人详情中找到。",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.title": {
+      "text": "安全码",
       "status": "machine"
     },
     "username.a11y_hint": {

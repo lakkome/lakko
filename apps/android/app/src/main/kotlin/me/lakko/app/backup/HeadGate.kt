@@ -41,6 +41,36 @@ import me.lakko.app.BuildConfig
  * defend.
  */
 
+/**
+ * Why a restore verdict was reached. [diagnostic] is what the log records;
+ * [staleKey] is the catalog phrase the stale-backup dialog puts in its
+ * `{reason}` (ADR-0058: a screen never shows the English diagnostic). Only
+ * the reasons that can reach [RestoreVerdict.StaleOverride] carry one: a hard
+ * refusal's dialog says no reason (`backup.rollback_refused.*`), and a
+ * fail-open shows nothing.
+ */
+public enum class RestoreReason(public val diagnostic: String, public val staleKey: String? = null) {
+    HEAD_CORRUPT("backup head is present but truncated or corrupt"),
+    ANCHOR_UNREADABLE(
+        "the local rollback anchor is unreadable or was tampered",
+        "backup.stale_restore.reason.anchor_unreadable",
+    ),
+    NO_HEAD("no backup head (legacy blob or head stripped), no anchor"),
+    HEAD_STRIPPED(
+        "backup head stripped and the envelope differs from the last known one",
+        "backup.stale_restore.reason.head_stripped",
+    ),
+    BINDING_INVALID("backup head signature or account binding failed"),
+    HASH_MISMATCH("backup head does not commit the served envelope"),
+    BELOW_FLOOR(
+        "backup is older than the last one restored on this device",
+        "backup.stale_restore.reason.below_floor",
+    ),
+    FRESH_INVALID("backup head signature, account binding, or envelope hash failed"),
+    FRESH_STALE("backup is older than the freshness window", "backup.stale_restore.reason.too_old"),
+    ATTEST_KEY_UNAVAILABLE("attest key unavailable - cannot verify the backup head"),
+}
+
 /** The four terminal restore verdicts (ADR-0037 §6). Mirror of the web
  *  `RestoreVerdict` discriminated union. */
 public sealed interface RestoreVerdict {
@@ -48,14 +78,14 @@ public sealed interface RestoreVerdict {
     public data object Proceed : RestoreVerdict
 
     /** No head present (legacy / stripped) — restore proceeds, warn. */
-    public data class FailOpen(val reason: String) : RestoreVerdict
+    public data class FailOpen(val reason: RestoreReason) : RestoreVerdict
 
     /** Active tamper / corruption — refuse with no escape hatch. */
-    public data class HardFail(val reason: String) : RestoreVerdict
+    public data class HardFail(val reason: RestoreReason) : RestoreVerdict
 
     /** Indistinguishable from a rollback replay — refuse unless the user
      *  explicitly acknowledges a deliberate downgrade. */
-    public data class StaleOverride(val reason: String) : RestoreVerdict
+    public data class StaleOverride(val reason: RestoreReason) : RestoreVerdict
 }
 
 /**
@@ -118,18 +148,14 @@ public data class RestoreGateFacts(
  */
 public fun restoreVerdict(facts: RestoreGateFacts): RestoreVerdict {
     if (facts.parseError) {
-        return RestoreVerdict.HardFail(
-            "backup head is present but truncated or corrupt",
-        )
+        return RestoreVerdict.HardFail(RestoreReason.HEAD_CORRUPT)
     }
     if (facts.floorCorrupt) {
         // F5a: the persisted anchor exists but could not be decrypted / parsed.
         // It once anchored this device, so a genuine floor-below rollback and a
         // maliciously-corrupted floor are indistinguishable here — never silently
         // fall to the weaker fresh path; require an explicit acknowledgement.
-        return RestoreVerdict.StaleOverride(
-            "the local rollback anchor is unreadable or was tampered",
-        )
+        return RestoreVerdict.StaleOverride(RestoreReason.ANCHOR_UNREADABLE)
     }
     if (!facts.framed) {
         // F4: an absent head is only a benign legacy / stripped-in-transit case
@@ -137,46 +163,32 @@ public fun restoreVerdict(facts: RestoreGateFacts): RestoreVerdict {
         // refuses a head-stripping downgrade unless the headless envelope is
         // byte-identical to the last known one.
         if (!facts.hasFloor) {
-            return RestoreVerdict.FailOpen(
-                "no backup head (legacy blob or head stripped), no anchor",
-            )
+            return RestoreVerdict.FailOpen(RestoreReason.NO_HEAD)
         }
         if (facts.absentHashMatchesFloor) {
             return RestoreVerdict.Proceed
         }
-        return RestoreVerdict.StaleOverride(
-            "backup head stripped and the envelope differs from the last known one",
-        )
+        return RestoreVerdict.StaleOverride(RestoreReason.HEAD_STRIPPED)
     }
     if (facts.hasFloor) {
         // Returning client — hard monotonic floor, no freshness window involved.
         if (facts.bindingInvalid) {
-            return RestoreVerdict.HardFail(
-                "backup head signature or account binding failed",
-            )
+            return RestoreVerdict.HardFail(RestoreReason.BINDING_INVALID)
         }
         if (facts.hashMismatch) {
-            return RestoreVerdict.HardFail(
-                "backup head does not commit the served envelope",
-            )
+            return RestoreVerdict.HardFail(RestoreReason.HASH_MISMATCH)
         }
         if (facts.versionBelowFloor) {
-            return RestoreVerdict.StaleOverride(
-                "backup is older than the last one restored on this device",
-            )
+            return RestoreVerdict.StaleOverride(RestoreReason.BELOW_FLOOR)
         }
         return RestoreVerdict.Proceed
     }
     // Fresh install — zero anchor, freshness window applies.
     if (facts.freshInvalid) {
-        return RestoreVerdict.HardFail(
-            "backup head signature, account binding, or envelope hash failed",
-        )
+        return RestoreVerdict.HardFail(RestoreReason.FRESH_INVALID)
     }
     if (facts.freshStale) {
-        return RestoreVerdict.StaleOverride(
-            "backup is older than the freshness window",
-        )
+        return RestoreVerdict.StaleOverride(RestoreReason.FRESH_STALE)
     }
     return RestoreVerdict.Proceed
 }

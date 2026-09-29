@@ -28,7 +28,9 @@ public final class LoginViewModel: ObservableObject {
     // MARK: - Internal status
 
     @Published public private(set) var busy: Bool = false
-    @Published public private(set) var error: String?
+    /// Kept as ``UiText`` so a message on screen follows a live language switch.
+    @Published private var errorText: UiText?
+    public var error: String? { errorText?.text }
 
     // MARK: - Wiring
 
@@ -54,7 +56,7 @@ public final class LoginViewModel: ObservableObject {
         guard !busy else { return } // ignore double-tap
 
         busy = true
-        error = nil
+        errorText = nil
 
         let usernameSnapshot = username
         let passwordBytes = Data(password.utf8)
@@ -71,11 +73,11 @@ public final class LoginViewModel: ObservableObject {
                 // the TextField buffer doesn't hold it past the
                 // navigation.
                 busy = false
-                error = nil
+                errorText = nil
                 password = ""
             } catch {
                 busy = false
-                self.error = AuthErrorCopy.login(error)
+                self.errorText = UiText { AuthErrorCopy.login(error) }
             }
         }
     }
@@ -89,15 +91,15 @@ public final class LoginViewModel: ObservableObject {
     public func onPasskeyLogin() {
         guard !busy else { return }
         busy = true
-        error = nil
+        errorText = nil
         Task {
             do {
                 try await repository.loginWithPasskey()
                 busy = false
-                error = nil
+                errorText = nil
             } catch {
                 busy = false
-                self.error = AuthErrorCopy.passkey(error)
+                self.errorText = UiText { AuthErrorCopy.passkey(error) }
             }
         }
     }

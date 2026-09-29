@@ -925,9 +925,9 @@ public fun AutoplayVideoNotesSetting(modifier: Modifier = Modifier) {
         modifier = modifier.fillMaxWidth(),
     ) {
         Column(Modifier.weight(1f)) {
-            Text("Autoplay video notes", style = MaterialTheme.typography.bodyLarge)
+            Text(me.lakko.app.l10n.t("settings.media.autoplay_video_notes.title"), style = MaterialTheme.typography.bodyLarge)
             Text(
-                "Plays incoming video messages muted as you scroll. Downloads media.",
+                me.lakko.app.l10n.t("settings.media.autoplay_video_notes.sub"),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

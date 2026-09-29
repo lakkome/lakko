@@ -318,7 +318,7 @@ public class RestoreGateContext(
      *  `true` only when the user explicitly acknowledges the deliberate
      *  downgrade; a decline / no-UI path returns `false` (fail-closed — never a
      *  silent downgrade). */
-    val confirmStaleOverride: suspend (reason: String) -> Boolean,
+    val confirmStaleOverride: suspend (reason: RestoreReason) -> Boolean,
 )
 
 /** Discriminated outcome of the gated [BackupClient.restore] (ADR-0037 §6). */
@@ -336,7 +336,7 @@ public sealed interface GatedRestoreOutcome {
      *  unambiguous tamper / corruption (no override); `hard = false` = a stale
      *  head the user was offered and DECLINED. Either way no restore happened —
      *  the caller alarms (hard) or notes (declined). */
-    public data class RollbackBlocked(val hard: Boolean, val reason: String) : GatedRestoreOutcome
+    public data class RollbackBlocked(val hard: Boolean, val reason: RestoreReason) : GatedRestoreOutcome
 
     /** Transport failure fetching the blob. */
     public data class TransportFailed(val cause: Throwable) : GatedRestoreOutcome

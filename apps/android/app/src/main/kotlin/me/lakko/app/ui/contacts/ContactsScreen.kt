@@ -70,6 +70,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.contacts.GeneratedInvite
+import me.lakko.app.l10n.text
 import me.lakko.app.contacts.INVITE_URL_PREFIX
 import me.lakko.app.contacts.IncomingContactRequest
 import me.lakko.app.contacts.SentContactRequest
@@ -604,7 +605,7 @@ private fun AddByUsernameSheet(
                 singleLine = true,
                 enabled = !state.sending,
                 isError = state.usernameError != null,
-                supportingText = state.usernameError?.let { reason -> { Text(reason) } },
+                supportingText = state.usernameError?.let { reason -> { Text(reason.text()) } },
                 keyboardOptions = KeyboardOptions(
                     capitalization = KeyboardCapitalization.None,
                     autoCorrectEnabled = false,

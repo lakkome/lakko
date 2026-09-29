@@ -238,12 +238,23 @@ final class Localization: ObservableObject {
     /// the link and the text after it, so a view can put a tappable title
     /// between them while the translator still sees one sentence.
     func linkParts(_ key: String, texts: [String: String] = [:]) -> (lead: String, trail: String) {
-        let marker = "\u{E000}link\u{E001}"
+        parts(key, around: "link", texts: texts)
+    }
+
+    /// A message split around its `{arg}` part, for a view that renders that
+    /// part as its own element (bold, a code font, a link). The bidi isolates
+    /// the formatter puts around the argument stay with it, so none leaks
+    /// into the text around it or into a copied value.
+    func parts(
+        _ key: String,
+        around arg: String,
+        texts: [String: String] = [:]
+    ) -> (lead: String, trail: String) {
+        let marker = "\u{E000}\(arg)\u{E001}"
         var args = texts
-        args["link"] = marker
+        args[arg] = marker
         let whole = t(key, texts: args)
         guard let range = whole.range(of: marker) else { return (whole, "") }
-        // The isolates the formatter puts around the argument stay with it.
         let isolates = CharacterSet(charactersIn: "\u{2066}\u{2067}\u{2068}\u{2069}")
         let lead = String(whole[..<range.lowerBound])
             .trimmingCharacters(in: isolates)
@@ -302,6 +313,39 @@ final class CatalogSnapshot: @unchecked Sendable {
         catalog = Localization.buildCatalog(source: source, bundle: .main, code: code)
         strings = catalog?.plainStrings() ?? [:]
     }
+}
+
+/// A message kept as the way to render it rather than as rendered text, so
+/// an error or notice already on screen follows a live language switch
+/// (the Android `UiText` counterpart).
+///
+/// A view that shows one observes ``Localization/shared`` (it re-renders on
+/// a switch) and reads ``text``, which renders in the language of that
+/// moment. Two values are equal only when they are the same value, so
+/// setting a fresh one always publishes.
+public struct UiText: Equatable {
+    private let id = UUID()
+    private let make: () -> String
+
+    /// Text produced by `make` at every render, e.g. a copy function over an
+    /// error: `UiText { AuthErrorCopy.login(error) }`.
+    public init(_ make: @escaping () -> String) {
+        self.make = make
+    }
+
+    /// A catalog message with its arguments.
+    public static func key(
+        _ key: String,
+        texts: [String: String] = [:],
+        counts: [String: UInt64] = [:]
+    ) -> UiText {
+        UiText { Localization.text(key, texts: texts, counts: counts) }
+    }
+
+    /// The text in the current interface language.
+    public var text: String { make() }
+
+    public static func == (lhs: UiText, rhs: UiText) -> Bool { lhs.id == rhs.id }
 }
 
 /// Injects the current language into the environment of everything below

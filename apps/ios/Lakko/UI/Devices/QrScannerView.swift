@@ -27,6 +27,8 @@ import UIKit
 public struct QrScannerView: UIViewControllerRepresentable {
 
     public var onDetected: (String) -> Void
+    /// Called with the catalog key of the failure (ADR-0058): the caller
+    /// renders it, so the message follows a live language switch.
     public var onError: (String) -> Void
 
     public init(
@@ -82,6 +84,7 @@ public struct QrScannerView: UIViewControllerRepresentable {
 
 public protocol ScannerViewControllerDelegate: AnyObject {
     func scanner(_ vc: ScannerViewController, didDetect text: String)
+    /// `message` is a catalog key (ADR-0058), rendered by the receiver.
     func scanner(_ vc: ScannerViewController, didFail message: String)
 }
 
@@ -141,7 +144,7 @@ public final class ScannerViewController: UIViewController,
             )
         else {
             session.commitConfiguration()
-            delegate?.scanner(self, didFail: Localization.text("devices.scan.error.no_camera"))
+            delegate?.scanner(self, didFail: "devices.scan.error.no_camera")
             return
         }
 
@@ -151,12 +154,12 @@ public final class ScannerViewController: UIViewController,
         } catch {
             session.commitConfiguration()
             NSLog("[pairing] WARN camera input failed: \(error)")
-            delegate?.scanner(self, didFail: Localization.text("devices.scan.error.camera_denied"))
+            delegate?.scanner(self, didFail: "devices.scan.error.camera_denied")
             return
         }
         guard session.canAddInput(input) else {
             session.commitConfiguration()
-            delegate?.scanner(self, didFail: Localization.text("devices.scan.error.camera_failed"))
+            delegate?.scanner(self, didFail: "devices.scan.error.camera_failed")
             return
         }
         session.addInput(input)
@@ -164,7 +167,7 @@ public final class ScannerViewController: UIViewController,
         let output = AVCaptureMetadataOutput()
         guard session.canAddOutput(output) else {
             session.commitConfiguration()
-            delegate?.scanner(self, didFail: Localization.text("devices.scan.error.camera_failed"))
+            delegate?.scanner(self, didFail: "devices.scan.error.camera_failed")
             return
         }
         session.addOutput(output)

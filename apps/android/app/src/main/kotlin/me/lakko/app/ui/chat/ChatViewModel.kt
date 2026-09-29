@@ -1842,7 +1842,7 @@ public class ChatViewModel(
         // ADR-0048 §4 — a name failing the rule is never looked up.
         val username = when (val decision = me.lakko.app.profile.searchDecision(typed, validateUsername)) {
             is me.lakko.app.profile.SearchDecision.Refuse -> {
-                mutableMembershipError.value = decision.message
+                mutableMembershipError.value = decision.text.render()
                 return
             }
             is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized

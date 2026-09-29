@@ -206,13 +206,135 @@
       "text": "Username",
       "comment": "Label of the username field on the sign-in, sign-up and recovery forms."
     },
+    "backup.rollback_refused.body": {
+      "text": "The server returned an altered or outdated backup. Your account is safe; we continued without restoring the older data.",
+      "comment": "Body of the alert shown when a restore refused a backup the server returned rolled back or altered (ADR-0037). Nothing older was loaded.",
+      "security_critical": true
+    },
+    "backup.rollback_refused.title": {
+      "text": "Backup could not be restored safely",
+      "comment": "Title of the alert shown when a restore refused a rolled-back or altered backup from the server.",
+      "security_critical": true
+    },
+    "backup.stale_restore.body": {
+      "text": "This backup is older than expected ({reason}). {consequence}",
+      "comment": "Dialog body; {reason} says why it was judged old (e.g. how long ago it was signed); {consequence} is the consequence sentence, passed already translated.",
+      "security_critical": true
+    },
+    "backup.stale_restore.confirm": {
+      "text": "Restore anyway",
+      "comment": "Destructive button: proceeds past the warning.",
+      "security_critical": true
+    },
+    "backup.stale_restore.consequence": {
+      "text": "Restoring it will roll your account back to older state — older messages, and devices you removed may reappear.",
+      "comment": "What restoring an older backup does; \"devices you removed may reappear\" is the security consequence and must stay explicit.",
+      "security_critical": true
+    },
+    "backup.stale_restore.reason.anchor_unreadable": {
+      "text": "this device's record of your last backup is unreadable or was tampered with",
+      "comment": "Phrase inside the parentheses of backup.stale_restore.body: the local record of the last backup could not be read.",
+      "security_critical": true
+    },
+    "backup.stale_restore.reason.below_floor": {
+      "text": "older than the last backup restored on this device",
+      "comment": "Phrase inside the parentheses of backup.stale_restore.body: the backup is older than one this device already restored.",
+      "security_critical": true
+    },
+    "backup.stale_restore.reason.head_stripped": {
+      "text": "its signature was removed and it differs from the last backup this device knew",
+      "comment": "Phrase inside the parentheses of backup.stale_restore.body: the backup came without its signed header and does not match the last known backup.",
+      "security_critical": true
+    },
+    "backup.stale_restore.reason.too_old": {
+      "text": "it was signed longer ago than a current backup would be",
+      "comment": "Phrase inside the parentheses of backup.stale_restore.body: on a new device, the backup's signature is older than the allowed window.",
+      "security_critical": true
+    },
+    "backup.stale_restore.title": {
+      "text": "Restore this older backup?",
+      "comment": "Confirmation dialog title when the backup found is older than the newest one this account has made (a possible rollback).",
+      "security_critical": true
+    },
+    "call.guest.default_name": {
+      "text": "Guest",
+      "comment": "Name prefilled for a visitor without an account who joins a call from a link; it becomes the new account's profile name."
+    },
     "call.guest.working.title": {
       "text": "Getting you into the call...",
       "comment": "Busy row while a guest account is created to join a call from a link."
     },
+    "call.link.connecting": {
+      "text": "Connecting...",
+      "comment": "Shown while the call connects."
+    },
+    "call.link.dead": {
+      "text": "This call has ended or is not active.",
+      "comment": "The call is not running."
+    },
+    "call.link.end_current": {
+      "text": "End current call",
+      "comment": "Button shown when another call is already in progress."
+    },
+    "call.link.ended": {
+      "text": "The call has ended.",
+      "comment": "The call ended while the page was open."
+    },
+    "call.link.error.generic": {
+      "text": "The call failed.",
+      "comment": "Call-link page: the call failed and no more specific reason is known."
+    },
+    "call.link.failed": {
+      "text": "Failed: {reason}",
+      "comment": "Joining failed; {reason} is a sentence explaining why."
+    },
+    "call.link.host": {
+      "text": "Host: {name}",
+      "comment": "Who invited you; {name} is a contact or profile name."
+    },
+    "call.link.invalid": {
+      "text": "This call link is invalid or has expired.",
+      "comment": "The call link cannot be used."
+    },
+    "call.link.join": {
+      "text": "Join call",
+      "comment": "Button for anyone joining from the link."
+    },
+    "call.link.live": {
+      "text": "You are in this call.",
+      "comment": "The joiner is in the call."
+    },
+    "call.link.loading": {
+      "text": "Loading call link...",
+      "comment": "Shown while the call link is read."
+    },
+    "call.link.start": {
+      "text": "Start call",
+      "comment": "Button for the owner of the call link."
+    },
+    "call.link.title_join": {
+      "text": "Join a call",
+      "comment": "Title of the call-link page for anyone else."
+    },
+    "call.link.title_start": {
+      "text": "Start your call",
+      "comment": "Title of the call-link page for the call's owner."
+    },
+    "call.link.waiting": {
+      "text": "Waiting for the owner to admit you...",
+      "comment": "The owner must let the joiner in."
+    },
+    "call.link.waiting_hint": {
+      "text": "You can leave this screen; you will join when you are admitted.",
+      "comment": "Hint under the waiting line."
+    },
     "chats.empty.select": {
       "text": "Select a chat to start messaging",
       "comment": "Hint in the empty main pane when no chat is open."
+    },
+    "common.adding": {
+      "text": "Adding...",
+      "comment": "Add button while the item is being added."
     },
     "common.back": {
       "text": "Back",
@@ -230,9 +352,21 @@
       "text": "Close",
       "comment": "Accessibility label of a button that closes a sheet or dialog, e.g. the language list opened from the sign-in screen."
     },
+    "common.collapse": {
+      "text": "Collapse",
+      "comment": "Accessibility label of the arrow that closes an expanded row."
+    },
     "common.confirm": {
       "text": "Confirm",
       "comment": "Button that confirms what the screen asks for."
+    },
+    "common.confirming": {
+      "text": "Confirming...",
+      "comment": "Confirm button while the confirmation is being sent."
+    },
+    "common.connecting": {
+      "text": "Connecting...",
+      "comment": "Progress label while a connection is being set up."
     },
     "common.continue": {
       "text": "Continue",
@@ -266,9 +400,25 @@
       "text": "Could not reach Lakko. Check your connection and try again.",
       "comment": "Error when the device could not reach the server at all."
     },
+    "common.error.qr_render": {
+      "text": "Could not draw the code. Try again.",
+      "comment": "A QR code (a pairing code or an authenticator setup code) could not be drawn on screen."
+    },
     "common.error.server_unreachable": {
       "text": "Could not reach the server. Check your connection.",
       "comment": "Error when the server could not be reached."
+    },
+    "common.error.session_ended": {
+      "text": "Your session has ended. Sign in again.",
+      "comment": "The signed-in session is gone; the action needs a new sign-in."
+    },
+    "common.error.session_expired": {
+      "text": "Session expired. Sign in again.",
+      "comment": "The server no longer accepts this session."
+    },
+    "common.error.session_not_ready": {
+      "text": "Session not ready.",
+      "comment": "An action was tried before the signed-in session finished loading."
     },
     "common.error.too_many_attempts": {
       "text": "Too many attempts. Wait a moment, then try again.",
@@ -282,6 +432,10 @@
       "text": "That is not available right now. Try again later.",
       "comment": "Error when the server refused because a service is temporarily down."
     },
+    "common.expand": {
+      "text": "Expand",
+      "comment": "Accessibility label of the arrow that opens a collapsed row."
+    },
     "common.loading": {
       "text": "Loading...",
       "comment": "Shown while a screen is still loading."
@@ -290,9 +444,25 @@
       "text": "Looking up...",
       "comment": "Busy label of a button while an account is looked up."
     },
+    "common.manage": {
+      "text": "Manage",
+      "comment": "Row action that opens a page where something is managed (devices, passkeys)."
+    },
     "common.more_options": {
       "text": "More options",
       "comment": "Title of a collapsed section with less common choices."
+    },
+    "common.off": {
+      "text": "Off",
+      "comment": "State of a switch that is off."
+    },
+    "common.on": {
+      "text": "On",
+      "comment": "State of a switch that is on."
+    },
+    "common.open_lakko": {
+      "text": "Open Lakko",
+      "comment": "Link from a public page (call or invite link) into the app."
     },
     "common.optional": {
       "text": "Optional",
@@ -310,13 +480,37 @@
       "text": "Preparing...",
       "comment": "Shown while something is being set up."
     },
+    "common.remove": {
+      "text": "Remove",
+      "comment": "Button that removes an item from a list (a passkey, a device, a recovery factor)."
+    },
+    "common.removing": {
+      "text": "Removing...",
+      "comment": "Remove button while the item is being removed."
+    },
+    "common.save": {
+      "text": "Save",
+      "comment": "Button that saves a change."
+    },
+    "common.saving": {
+      "text": "Saving...",
+      "comment": "Save button while the change is being saved."
+    },
     "common.sending": {
       "text": "Sending...",
       "comment": "Busy label of a button while a code is being sent."
     },
+    "common.set_up": {
+      "text": "Set up",
+      "comment": "Row action that opens a page where something is set up for the first time."
+    },
     "common.try_again": {
       "text": "Try again",
       "comment": "Button that repeats an operation that failed."
+    },
+    "common.unknown": {
+      "text": "unknown",
+      "comment": "Shown in place of a date or value that could not be read."
     },
     "device_link.compare_hint": {
       "text": "Make sure the other device shows the same code.",
@@ -1198,9 +1392,189 @@
       "comment": "Bold first sentence of the alert shown when the account's identity key changed.",
       "security_critical": true
     },
+    "settings.about.lede_web": {
+      "text": "Lakko on the web.",
+      "comment": "Line under the About title in Settings, web client."
+    },
+    "settings.about.licence": {
+      "text": "Licence",
+      "comment": "Row title: the software licence."
+    },
+    "settings.about.licence_body": {
+      "text": "{licence}. The source code is free to read, use and improve.",
+      "comment": "{licence} is the licence name, e.g. AGPL-3.0-or-later; keep it untranslated."
+    },
+    "settings.about.protection.body": {
+      "text": "Messages, calls and contact requests are end-to-end encrypted: only the people in a conversation can read them, never Lakko's servers. Your password never leaves your device, and each contact has a safety number you can compare in person.",
+      "comment": "Explains end-to-end encryption and safety numbers.",
+      "security_critical": true
+    },
+    "settings.about.protection.title": {
+      "text": "How Lakko protects you",
+      "comment": "Row title in About.",
+      "security_critical": true
+    },
     "settings.about.translations_updated": {
       "text": "Translations updated {date}",
       "comment": "Settings > About, shown when a signed translation update is active. {date} is a date formatted for the locale."
+    },
+    "settings.about.version": {
+      "text": "Version",
+      "comment": "Row title: the app version."
+    },
+    "settings.account.danger_zone.footer": {
+      "text": "Log out keeps your data on this device. Forget this device removes it; you can only come back with your recovery phrase or another signed-in device. Delete account erases the account on the server and wipes this device; this cannot be undone.",
+      "comment": "Note under the Log out / Forget this device / Delete account rows in Settings. The three action names are the row labels, keep them recognisable.",
+      "security_critical": true
+    },
+    "settings.account.delete.body": {
+      "text": "This erases your server-side identity — username, keys, recovery factors and backup — and signs you out everywhere. Your local messages are wiped from this device too. This cannot be undone.",
+      "comment": "Confirmation dialog body; lists exactly what is erased.",
+      "security_critical": true
+    },
+    "settings.account.delete.confirm": {
+      "text": "Delete account",
+      "comment": "Row title, row button and destructive button of the confirmation dialog.",
+      "security_critical": true
+    },
+    "settings.account.delete.error.cancelled": {
+      "text": "Cancelled. Your account was not deleted.",
+      "comment": "The person dismissed the passkey prompt that confirms deleting the account; nothing was deleted.",
+      "security_critical": true
+    },
+    "settings.account.delete.error.generic": {
+      "text": "Could not delete your account. Try again.",
+      "comment": "Account deletion failed."
+    },
+    "settings.account.delete.sub": {
+      "text": "Permanently erases your account and everything in it, and wipes this device. This cannot be undone.",
+      "comment": "Row subtitle in Settings > Account.",
+      "security_critical": true
+    },
+    "settings.account.delete.title": {
+      "text": "Delete your account?",
+      "comment": "Confirmation dialog title.",
+      "security_critical": true
+    },
+    "settings.account.forget_device.body": {
+      "text": "You'll lose the cached account on this browser. The only way back is the 24-word recovery passphrase you wrote down at signup.",
+      "comment": "Confirmation dialog body: the one fact that decides whether to press the button.",
+      "security_critical": true
+    },
+    "settings.account.forget_device.body_device": {
+      "text": "Everything on this device is removed and the device leaves your account. You will need your recovery phrase or another signed-in device to use this account here again.",
+      "comment": "Body of the Forget this device confirmation in the phone apps (the web wording speaks of a browser).",
+      "security_critical": true
+    },
+    "settings.account.forget_device.confirm": {
+      "text": "Forget device",
+      "comment": "Row button and destructive button of the confirmation dialog.",
+      "security_critical": true
+    },
+    "settings.account.forget_device.label": {
+      "text": "Forget this device",
+      "comment": "Row title in Settings > Account.",
+      "security_critical": true
+    },
+    "settings.account.forget_device.sub": {
+      "text": "Removes your account data from this browser. Your messages stay on your other devices; to come back here you will need your recovery phrase or another device.",
+      "comment": "What forgetting this device removes and how to come back.",
+      "security_critical": true
+    },
+    "settings.account.forget_device.title": {
+      "text": "Forget this device?",
+      "comment": "Confirmation dialog title.",
+      "security_critical": true
+    },
+    "settings.account.lede": {
+      "text": "Your data, signing out, this device, and deleting your account.",
+      "comment": "Line under the Account title in Settings."
+    },
+    "settings.account.log_out": {
+      "text": "Log out",
+      "comment": "Row title and button that signs out on this device."
+    },
+    "settings.account.log_out.body": {
+      "text": "Your messages stay on this device. Log back in with your password or passkey.",
+      "comment": "Body of the Log out confirmation.",
+      "security_critical": true
+    },
+    "settings.account.log_out.sub": {
+      "text": "Signs you out on this device. Your data stays here for the next login.",
+      "comment": "What logging out does and keeps.",
+      "security_critical": true
+    },
+    "settings.account.log_out.title": {
+      "text": "Log out of Lakko?",
+      "comment": "Title of the Log out confirmation."
+    },
+    "settings.account.vault.not_set_up": {
+      "text": "Three-word recovery: not set up on this account yet. It is set up the next time you sign in on a device that holds your phrase.",
+      "comment": "Recovery row when the three-word shortcut is not set up yet.",
+      "security_critical": true
+    },
+    "settings.account.vault.on": {
+      "text": "Three-word recovery: on (words {positions}). Another signed-in device and your 24-word phrase work too.",
+      "comment": "Recovery row when the three-word shortcut is set up; {positions} is a list of word positions in Latin digits, joined by the list formatter.",
+      "security_critical": true
+    },
+    "settings.account.vault.unavailable": {
+      "text": "Three-word recovery: not available on this server. Your 24-word phrase and your other devices still work.",
+      "comment": "Recovery row in Settings > Account when the server has no three-word vault.",
+      "security_critical": true
+    },
+    "settings.anti_censorship.footer": {
+      "text": "When on, Lakko connects in a way that is harder for a network to detect and block. Your messages stay end-to-end encrypted either way.",
+      "comment": "Explanation under the anti-censorship switch (ADR-0026).",
+      "security_critical": true
+    },
+    "settings.anti_censorship.status": {
+      "text": "Status",
+      "comment": "Heading above the current anti-censorship state."
+    },
+    "settings.anti_censorship.status.active": {
+      "text": "Active",
+      "comment": "Anti-censorship state: on and working."
+    },
+    "settings.anti_censorship.status.active.sub": {
+      "text": "Connections are hidden from network blocking.",
+      "comment": "Line under the Active anti-censorship state."
+    },
+    "settings.anti_censorship.status.connecting.sub": {
+      "text": "Setting up the hidden connection.",
+      "comment": "Line under Connecting... in the anti-censorship state, while the hidden connection is being set up."
+    },
+    "settings.anti_censorship.status.direct": {
+      "text": "Direct connection",
+      "comment": "Line under Off in the anti-censorship state: the app connects directly."
+    },
+    "settings.anti_censorship.status.unavailable": {
+      "text": "Unavailable",
+      "comment": "Anti-censorship state: switched on, but the hidden connection could not be set up."
+    },
+    "settings.anti_censorship.status.unavailable.sub": {
+      "text": "Could not set up the hidden connection. Check your network, then turn the switch off and on to try again.",
+      "comment": "Line under the Unavailable anti-censorship state. The technical reason goes to the log only."
+    },
+    "settings.anti_censorship.status.unconfigured": {
+      "text": "Not available in this build",
+      "comment": "Anti-censorship state: this build of the app has no configuration for it."
+    },
+    "settings.anti_censorship.status.unconfigured.sub": {
+      "text": "This build was made without the setting.",
+      "comment": "Line under Not available in this build."
+    },
+    "settings.anti_censorship.title": {
+      "text": "Anti-censorship",
+      "comment": "Settings row and screen title for hiding the app's connections from network blocking."
+    },
+    "settings.anti_censorship.toggle": {
+      "text": "Hide Lakko from network blocking",
+      "comment": "Label of the anti-censorship switch."
+    },
+    "settings.appearance.lede": {
+      "text": "The theme on this device.",
+      "comment": "Line under the Appearance title in Settings."
     },
     "settings.appearance.theme": {
       "text": "Theme",
@@ -1217,6 +1591,134 @@
     "settings.appearance.theme.system": {
       "text": "System",
       "comment": "Theme option: follow the device's light or dark setting."
+    },
+    "settings.data.downloaded": {
+      "text": "Downloaded {file}.",
+      "comment": "Confirmation after the export; {file} is the file name, keep it as is."
+    },
+    "settings.data.error.generic": {
+      "text": "Could not export your data. Try again.",
+      "comment": "The export failed."
+    },
+    "settings.data.export": {
+      "text": "Export my data",
+      "comment": "Button that downloads the account export."
+    },
+    "settings.data.export_note": {
+      "text": "Your messages, contacts, and group state are end-to-end encrypted and live only on your devices.",
+      "comment": "A note written inside the exported file."
+    },
+    "settings.data.lede": {
+      "text": "Download a copy of what Lakko's servers hold about your account. Your messages and contacts are end-to-end encrypted and stay on your devices, so they are not part of this file.",
+      "comment": "Explains what the export contains and why messages are not in it."
+    },
+    "settings.data.ready": {
+      "text": "Export ready. Tap Share to save it.",
+      "comment": "Shown after the data export file was prepared; a Share button appears below."
+    },
+    "settings.data.share": {
+      "text": "Share export",
+      "comment": "Button that opens the share sheet for the prepared data export file."
+    },
+    "settings.data.title": {
+      "text": "Your data",
+      "comment": "Card heading in Settings > Account: the data export."
+    },
+    "settings.devices.add.lede": {
+      "text": "Sign in to Lakko on the new device first. Then pick which of the two is showing a code.",
+      "comment": "Text of the Add a device panel before choosing a side."
+    },
+    "settings.devices.add.no_camera": {
+      "text": "No camera on either device? Sign in on the new one and choose \"{method}\": an \"{prompt}\" prompt with a code to compare appears here.",
+      "comment": "{method} is the recovery method name \"Another device\"; {prompt} is the prompt title \"Is this you?\". Both are passed already translated.",
+      "security_critical": true
+    },
+    "settings.devices.device_n": {
+      "text": "Device {number}",
+      "comment": "Row label of another device, by its order in the list; {number} is a number."
+    },
+    "settings.devices.error.load": {
+      "text": "Could not load your devices. Try again.",
+      "comment": "Loading the device list failed."
+    },
+    "settings.devices.error.no_device_key": {
+      "text": "This browser is not set up for your account. Sign in again.",
+      "comment": "Web: this browser holds no device key for the account."
+    },
+    "settings.devices.error.remove": {
+      "text": "Could not remove the device. Try again.",
+      "comment": "Removing a device failed or its passkey confirmation was cancelled.",
+      "security_critical": true
+    },
+    "settings.devices.error.scan": {
+      "text": "Could not add the device. Try again.",
+      "comment": "Adding a scanned device failed."
+    },
+    "settings.devices.lede": {
+      "text": "The phones, tablets and computers signed in to your account. Adding one is end-to-end encrypted; Lakko's servers cannot read it.",
+      "comment": "Line under the Devices title.",
+      "security_critical": true
+    },
+    "settings.devices.list.lede": {
+      "text": "A removed device loses access to your messages from that moment on. Removing one may ask for your passkey.",
+      "comment": "What removing a device does.",
+      "security_critical": true
+    },
+    "settings.devices.list.title": {
+      "text": "Your devices",
+      "comment": "Heading of the device list."
+    },
+    "settings.devices.remove.body": {
+      "text": "This device will lose access to your messages from that moment on. You may be asked for your passkey.",
+      "comment": "Body of the confirmation before removing one of the account's devices.",
+      "security_critical": true
+    },
+    "settings.devices.remove.confirm_named": {
+      "text": "Remove {device}",
+      "comment": "Destructive button of the device removal confirmation; {device} is the row label (This device / Device 2).",
+      "security_critical": true
+    },
+    "settings.devices.remove.title": {
+      "text": "Remove {device}?",
+      "comment": "Title of the confirmation before removing one of the account's devices; {device} is the row label, e.g. Device 2.",
+      "security_critical": true
+    },
+    "settings.devices.scan.done": {
+      "text": "Device added. It will appear in the list once it has finished joining.",
+      "comment": "The scanned device was let in."
+    },
+    "settings.devices.scan.opening": {
+      "text": "Opening the camera...",
+      "comment": "Shown while the camera starts."
+    },
+    "settings.devices.show.error.timeout": {
+      "text": "The other device did not scan in time. Try again.",
+      "comment": "Nobody scanned the code before it expired."
+    },
+    "settings.devices.show.lede": {
+      "text": "Scan this code with a device that is already signed in. Once it confirms, this device joins your account.",
+      "comment": "Text above the code this device shows.",
+      "security_critical": true
+    },
+    "settings.devices.show.start": {
+      "text": "Show the code",
+      "comment": "Button that shows this device's pairing code."
+    },
+    "settings.devices.sign_in_first": {
+      "text": "Sign in first to manage devices.",
+      "comment": "Devices page without a signed-in session."
+    },
+    "settings.devices.this_device": {
+      "text": "This device",
+      "comment": "Row label of the device the person is using."
+    },
+    "settings.devices.this_device.sub": {
+      "text": "The device you are using now.",
+      "comment": "Subtitle of the This device row."
+    },
+    "settings.devices.title": {
+      "text": "Devices",
+      "comment": "Title of the devices row and of the Devices page."
     },
     "settings.language.load_failed": {
       "text": "Couldn't load this language. Check your connection and try again.",
@@ -1242,6 +1744,278 @@
       "text": "Language",
       "comment": "Title of the Settings screen that picks the interface language, and of the Settings row that opens it."
     },
+    "settings.me.guest": {
+      "text": "Guest",
+      "comment": "Name at the top of Settings for an account that has neither a name nor a username (a guest account from a call link)."
+    },
+    "settings.media.autoplay_video_notes.sub": {
+      "text": "Incoming video notes start playing, muted, as they scroll into view. Off by default because autoplay downloads media.",
+      "comment": "Subtitle of the autoplay switch."
+    },
+    "settings.media.autoplay_video_notes.title": {
+      "text": "Autoplay video notes",
+      "comment": "Switch row in Settings > Media."
+    },
+    "settings.media.lede": {
+      "text": "Playback on this device.",
+      "comment": "Line under the Media title in Settings."
+    },
+    "settings.notifications.off.body": {
+      "text": "Notifications are off, so Lakko can only ring while it is open. Turn them on so calls and messages reach you when it is not.",
+      "comment": "Shown in Settings only when the system has notifications turned off for Lakko; the row opens the system notification settings."
+    },
+    "settings.notifications.off.title": {
+      "text": "Turn on notifications",
+      "comment": "Settings row shown when notifications are off for Lakko; opens the system notification settings."
+    },
+    "settings.passkeys.add": {
+      "text": "Add passkey",
+      "comment": "Button that creates a new passkey."
+    },
+    "settings.passkeys.added": {
+      "text": "Passkey \"{name}\" added.",
+      "comment": "Confirmation after a passkey is created; {name} is the name the person gave it."
+    },
+    "settings.passkeys.added_last_used": {
+      "text": "Added {added} · last used {used}",
+      "comment": "Passkey row subtitle; {added} and {used} are dates and times formatted for the locale."
+    },
+    "settings.passkeys.added_never_used": {
+      "text": "Added {added} · never used",
+      "comment": "Passkey row subtitle for a passkey never used to sign in; {added} is a date and time."
+    },
+    "settings.passkeys.empty": {
+      "text": "No passkeys yet.",
+      "comment": "Empty passkey list."
+    },
+    "settings.passkeys.error.cancelled": {
+      "text": "Cancelled. No passkey was created.",
+      "comment": "The person dismissed the browser or system passkey sheet."
+    },
+    "settings.passkeys.error.generic": {
+      "text": "Could not update your passkeys. Try again.",
+      "comment": "Fallback for any other passkey failure."
+    },
+    "settings.passkeys.error.name_required": {
+      "text": "Give the passkey a name.",
+      "comment": "The name field was empty."
+    },
+    "settings.passkeys.error.network": {
+      "text": "Network error. Check your connection and retry.",
+      "comment": "The passkey request could not reach the server."
+    },
+    "settings.passkeys.error.server_status": {
+      "text": "Server error ({status}).",
+      "comment": "Passkey request failed; {status} is an HTTP status code in Latin digits."
+    },
+    "settings.passkeys.error.unsupported": {
+      "text": "This browser / device can't create passkeys right now.",
+      "comment": "The platform refused to create a passkey."
+    },
+    "settings.passkeys.lede": {
+      "text": "Sign in with Touch ID, Face ID or a security key instead of your password. Your recovery phrase always works too.",
+      "comment": "Text under the Passkeys heading."
+    },
+    "settings.passkeys.lede_device": {
+      "text": "Sign in with your fingerprint, face or screen lock, or a security key, instead of your password. Your recovery phrase always works too.",
+      "comment": "Text at the top of the Passkeys page on a phone (Android); settings.passkeys.lede names Apple's Touch ID and Face ID."
+    },
+    "settings.passkeys.name.label": {
+      "text": "Passkey name",
+      "comment": "Accessibility label of the field that names a new passkey."
+    },
+    "settings.passkeys.name.placeholder": {
+      "text": "Name this passkey (e.g. MacBook Touch ID)",
+      "comment": "Placeholder of the field that names a new passkey."
+    },
+    "settings.passkeys.remove.body": {
+      "text": "The device that owns the matching private key will no longer be able to sign in with it. This cannot be undone.",
+      "comment": "Confirmation dialog body before removing a passkey.",
+      "security_critical": true
+    },
+    "settings.passkeys.remove.confirm": {
+      "text": "Remove",
+      "comment": "Destructive button of the remove-passkey dialog when the passkey has no name.",
+      "security_critical": true
+    },
+    "settings.passkeys.remove.confirm_named": {
+      "text": "Remove {name}",
+      "comment": "Destructive button of the remove-passkey dialog; {name} is the passkey name, the accessible name at the point of no return.",
+      "security_critical": true
+    },
+    "settings.passkeys.remove.error.cancelled": {
+      "text": "Cancelled. The passkey was not removed.",
+      "comment": "The person dismissed the passkey prompt that confirms removing a passkey; it was kept.",
+      "security_critical": true
+    },
+    "settings.passkeys.remove.title": {
+      "text": "Remove this passkey?",
+      "comment": "Confirmation dialog title before removing a passkey.",
+      "security_critical": true
+    },
+    "settings.passkeys.removed": {
+      "text": "Removed \"{name}\".",
+      "comment": "Confirmation after a passkey is removed; {name} is its name.",
+      "security_critical": true
+    },
+    "settings.passkeys.title": {
+      "text": "Passkeys",
+      "comment": "Card heading in Settings > Security."
+    },
+    "settings.passkeys.unnamed": {
+      "text": "Unnamed passkey",
+      "comment": "Row title of a passkey that has no name."
+    },
+    "settings.passkeys.unsupported_browser": {
+      "text": "This browser cannot manage passkeys. Use a recent Safari, Chrome, Firefox or Edge.",
+      "comment": "Web only: the browser has no WebAuthn support."
+    },
+    "settings.profile.error.generic": {
+      "text": "Could not save your name. Try again.",
+      "comment": "Saving the display name failed."
+    },
+    "settings.profile.lede": {
+      "text": "How you appear to your contacts.",
+      "comment": "Line under the Profile title in Settings."
+    },
+    "settings.profile.name.hint": {
+      "text": "Shown to the people you talk to. Not unique, at most {count, plural, one {# character} other {# characters}}.",
+      "comment": "Note under the name field in Settings, Profile."
+    },
+    "settings.profile.name.label": {
+      "text": "Your name",
+      "comment": "Label of the display-name field in Settings > Profile."
+    },
+    "settings.profile.preview.label": {
+      "text": "How others see you",
+      "comment": "Caption above the live preview of the name and username as contacts see them."
+    },
+    "settings.profile.preview.no_name": {
+      "text": "Others see your key fingerprint until you set a name.",
+      "comment": "Preview text when the person has neither a name nor a username."
+    },
+    "settings.profile.saved": {
+      "text": "Your name will update for your contacts.",
+      "comment": "Confirmation after the name is saved; contacts see it on their next message."
+    },
+    "settings.profile.username.none": {
+      "text": "None",
+      "comment": "Shown in place of the username when the account has none."
+    },
+    "settings.recovery.contact.already_enabled": {
+      "text": "An email or phone is already set for this account. To replace it, sign in again with your recovery phrase or from another device first.",
+      "comment": "The account already has a recovery email or phone."
+    },
+    "settings.recovery.contact.done": {
+      "text": "Done. A code sent there can now get you back into your account.",
+      "comment": "Enrolment finished."
+    },
+    "settings.recovery.contact.error.bad_contact": {
+      "text": "That does not look right. Check it and try again.",
+      "comment": "The server rejected the email address or phone number."
+    },
+    "settings.recovery.contact.error.generic": {
+      "text": "Could not set up the email or phone. Try again.",
+      "comment": "Fallback for any other enrolment failure."
+    },
+    "settings.recovery.contact.lede": {
+      "text": "A one-time code sent to your email or phone lets you sign in again if you lose your password.",
+      "comment": "Text under the Email or phone heading."
+    },
+    "settings.recovery.contact.sent_email": {
+      "text": "We sent a six-digit code to {contact} by email. Enter it below.",
+      "comment": "{contact} is the email address, shown bold (rendered as an element)."
+    },
+    "settings.recovery.contact.sent_phone": {
+      "text": "We sent a six-digit code to {contact} by text message. Enter it below.",
+      "comment": "{contact} is the phone number, shown bold (rendered as an element)."
+    },
+    "settings.recovery.contact.sub": {
+      "text": "A one-time code sent to your email or phone.",
+      "comment": "Line under Email or phone on the Recovery page, before the row is opened."
+    },
+    "settings.recovery.contact.unavailable": {
+      "text": "Email and phone recovery are not available right now.",
+      "comment": "The server has email and phone recovery switched off."
+    },
+    "settings.recovery.lede": {
+      "text": "Your recovery phrase restores everything. These get you back into the account when you have lost your password; your messages then come from the phrase or from another of your devices.",
+      "comment": "Line under the Recovery title: what the authenticator and email/phone factors do and do not restore.",
+      "security_critical": true
+    },
+    "settings.recovery.phrase.not_saved_here": {
+      "text": "Not saved on this device. Keep your written copy safe.",
+      "comment": "Recovery page: this device keeps no copy of the recovery phrase.",
+      "security_critical": true
+    },
+    "settings.recovery.phrase.saved_here": {
+      "text": "Saved on this device.",
+      "comment": "Recovery page: this device keeps a copy of the recovery phrase in its secure storage.",
+      "security_critical": true
+    },
+    "settings.recovery.phrase.sub": {
+      "text": "The 24 words you wrote down at signup restore your identity, contacts and messages on a new device.",
+      "comment": "Recovery page: what the recovery phrase restores.",
+      "security_critical": true
+    },
+    "settings.recovery.section.access": {
+      "text": "Access",
+      "comment": "Section heading on the Recovery page above the authenticator and email / phone rows: ways to get back into the account."
+    },
+    "settings.recovery.section.identity": {
+      "text": "Identity",
+      "comment": "Section heading on the Recovery page above the recovery phrase row: what restores who you are."
+    },
+    "settings.recovery.sign_in_first": {
+      "text": "Sign in first to manage recovery.",
+      "comment": "Recovery page opened without a ready session."
+    },
+    "settings.recovery.title": {
+      "text": "Recovery",
+      "comment": "Title of the Recovery row in Security and of the Recovery page (authenticator, email or phone)."
+    },
+    "settings.recovery.totp.already_enabled": {
+      "text": "An authenticator is already set up for this account. To replace it, sign in again with your recovery phrase or from another device first.",
+      "comment": "The account already has an authenticator; the server refuses a silent swap."
+    },
+    "settings.recovery.totp.done": {
+      "text": "Authenticator set up. A code from the app can now get you back into your account.",
+      "comment": "Enrolment finished."
+    },
+    "settings.recovery.totp.error.generic": {
+      "text": "Could not set up the authenticator. Try again.",
+      "comment": "Fallback for any other enrolment failure."
+    },
+    "settings.recovery.totp.error.wrong": {
+      "text": "That code did not work. Wait for the next code in the app and try again.",
+      "comment": "The enrolment code was wrong or expired."
+    },
+    "settings.recovery.totp.key": {
+      "text": "Key: {key}",
+      "comment": "Line under the QR code; {key} is the secret key in a code font (rendered as an element), for typing it in by hand.",
+      "security_critical": true
+    },
+    "settings.recovery.totp.lede": {
+      "text": "A six-digit code from an authenticator app lets you sign in again if you lose your password.",
+      "comment": "Text under the Authenticator app heading."
+    },
+    "settings.recovery.totp.scan": {
+      "text": "Scan this code with your authenticator app, or type the key in by hand, then enter the six-digit code the app shows.",
+      "comment": "Instruction above the enrolment QR code.",
+      "security_critical": true
+    },
+    "settings.recovery.totp.set_up": {
+      "text": "Set up authenticator",
+      "comment": "Button that starts authenticator enrolment."
+    },
+    "settings.recovery.totp.title": {
+      "text": "Authenticator app",
+      "comment": "Card heading for the authenticator-app recovery factor."
+    },
+    "settings.recovery.totp.unavailable": {
+      "text": "Authenticator setup is not available right now.",
+      "comment": "The server has authenticator recovery switched off."
+    },
     "settings.section.about": {
       "text": "About",
       "comment": "Settings section: version, licences, privacy."
@@ -1254,6 +2028,10 @@
       "text": "Appearance",
       "comment": "Settings section: theme and text size."
     },
+    "settings.section.danger_zone": {
+      "text": "Danger zone",
+      "comment": "Settings section heading above Log out, Forget this device and Delete account."
+    },
     "settings.section.data": {
       "text": "Data",
       "comment": "Settings section: backup and storage."
@@ -1261,6 +2039,10 @@
     "settings.section.media": {
       "text": "Media",
       "comment": "Settings section: camera, microphone and media options."
+    },
+    "settings.section.network": {
+      "text": "Network",
+      "comment": "Settings section heading above the anti-censorship row."
     },
     "settings.section.notifications": {
       "text": "Notifications",
@@ -1273,6 +2055,32 @@
     "settings.section.security": {
       "text": "Security",
       "comment": "Settings section: passkeys, devices, recovery."
+    },
+    "settings.security.devices.sub": {
+      "text": "See, add and remove the devices on this account.",
+      "comment": "Subtitle of the Devices row in Settings > Security."
+    },
+    "settings.security.devices_and_recovery": {
+      "text": "Devices and recovery",
+      "comment": "Card heading in Settings > Security."
+    },
+    "settings.security.lede": {
+      "text": "How you sign in, which devices can read your messages, and how you get back in.",
+      "comment": "Line under the Security title in Settings."
+    },
+    "settings.security.recovery.sub": {
+      "text": "An authenticator app, an email address or a phone number that gets you back in.",
+      "comment": "Subtitle of the Recovery row in Settings > Security."
+    },
+    "settings.security.safety_numbers.sub": {
+      "text": "Each contact has a safety number. Compare it in person or on a call; matching numbers mean nobody is in between. Find it in the contact's details.",
+      "comment": "Explains what a safety number is and how to compare it.",
+      "security_critical": true
+    },
+    "settings.security.safety_numbers.title": {
+      "text": "Safety numbers",
+      "comment": "Row title in Settings > Security explaining safety numbers.",
+      "security_critical": true
     },
     "username.a11y_hint": {
       "text": "Username: {message}",

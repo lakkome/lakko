@@ -53,7 +53,7 @@ public struct RestoreViaDevicePanel: View {
         case waiting(qrPayload: Data)
         case joining
         case done
-        case error(String)
+        case error(UiText)
     }
 
     public init(
@@ -101,7 +101,7 @@ public struct RestoreViaDevicePanel: View {
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                    Label(message.text, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
                         .font(.footnote)
                     Button(l10n.t("common.try_again"), action: { ui = .idle })
@@ -143,25 +143,25 @@ public struct RestoreViaDevicePanel: View {
                             recovery: true
                         )
                         guard let recovery else {
-                            ui = .error(l10n.t("device_link.error.no_identity"))
+                            ui = .error(.key("device_link.error.no_identity"))
                             return
                         }
                         try await onRecovered(recovery)
                         ui = .done
                     case .timeout:
-                        ui = .error(l10n.t("device_link.error.timeout"))
+                        ui = .error(.key("device_link.error.timeout"))
                     case .cancelled:
                         ui = .idle
                     }
                 } catch {
                     if Task.isCancelled { return }
                     NSLog("[pairing] WARN restore from another device failed: \(error)")
-                    ui = .error(AuthErrorCopy.deviceRestore(error))
+                    ui = .error(UiText { AuthErrorCopy.deviceRestore(error) })
                 }
             }
         } catch {
             NSLog("[pairing] WARN pairing code not prepared: \(error)")
-            ui = .error(l10n.t("device_link.error.generic"))
+            ui = .error(.key("device_link.error.generic"))
         }
     }
 

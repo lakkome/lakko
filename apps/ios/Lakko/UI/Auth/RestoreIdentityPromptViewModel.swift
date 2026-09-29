@@ -25,7 +25,9 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
 
     @Published public var phrase: String = ""
     @Published public private(set) var busy: Bool = false
-    @Published public private(set) var error: String?
+    /// Kept as ``UiText`` so a message on screen follows a live language switch.
+    @Published private var errorText: UiText?
+    public var error: String? { errorText?.text }
 
     /// Username for the account being restored, surfaced in the
     /// "...for @alice" line.
@@ -80,11 +82,11 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     public func onSubmit() {
         guard !busy else { return } // ignore double-tap
         if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            error = l10n.t("recovery_phrase.error.incomplete")
+            errorText = .key("recovery_phrase.error.incomplete")
             return
         }
         busy = true
-        error = nil
+        errorText = nil
         let phraseSnapshot = phrase
         Task {
             do {
@@ -92,11 +94,11 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
                     mnemonicPhrase: phraseSnapshot
                 )
                 busy = false
-                error = nil
+                errorText = nil
                 phrase = ""
             } catch {
                 busy = false
-                self.error = AuthErrorCopy.identityRestore(error)
+                self.errorText = UiText { AuthErrorCopy.identityRestore(error) }
             }
         }
     }
@@ -109,17 +111,17 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     public func startFresh() {
         guard !busy else { return }
         busy = true
-        error = nil
+        errorText = nil
         Task {
             do {
                 _ = try await repository.mintFreshIdentity()
                 // Repository flipped to .saveFreshPhrase — clear busy.
                 busy = false
-                error = nil
+                errorText = nil
             } catch {
                 busy = false
                 NSLog("[restore] WARN fresh identity failed: \(error)")
-                self.error = l10n.t("restore_identity.lost.error.generic")
+                self.errorText = .key("restore_identity.lost.error.generic")
             }
         }
     }
@@ -132,6 +134,6 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
 
     /// Drop a stale inline error (the screen switches method).
     public func clearError() {
-        error = nil
+        errorText = nil
     }
 }

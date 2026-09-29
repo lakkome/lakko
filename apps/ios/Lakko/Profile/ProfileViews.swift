@@ -48,8 +48,10 @@ func ownProfilePreview(displayName: String?, username: String?) -> String? {
 final class ProfileSettingsViewModel: ObservableObject {
     @Published var draftName: String
     @Published private(set) var saving = false
-    @Published private(set) var savedNotice: String?
-    @Published private(set) var saveError: String?
+    /// Kept as ``UiText`` so a notice on screen follows a live language
+    /// switch (ADR-0058).
+    @Published private(set) var savedNotice: UiText?
+    @Published private(set) var saveError: UiText?
 
     let username: String?
     private let directory: ProfileDirectory
@@ -72,7 +74,8 @@ final class ProfileSettingsViewModel: ObservableObject {
             _ = try checkDisplayName(draftName)
             return nil
         } catch {
-            return (error as? LocalizedError)?.errorDescription ?? "That name cannot be used."
+            return (error as? LocalizedError)?.errorDescription
+                ?? Localization.text("display_name.error.unknown")
         }
     }
 
@@ -101,11 +104,14 @@ final class ProfileSettingsViewModel: ObservableObject {
             try directory.setOwnDisplayName(draftName)
         } catch {
             saving = false
-            saveError = (error as? LocalizedError)?.errorDescription ?? "Could not save your name."
+            NSLog("[profile] WARN name not saved: \(error)")
+            saveError = UiText {
+                AuthErrorCopy.rule(error) ?? Localization.text("settings.profile.error.generic")
+            }
             return
         }
         draftName = directory.ownProfile?.displayName ?? ""
-        savedNotice = "Your name will update for your contacts."
+        savedNotice = .key("settings.profile.saved")
         Task {
             await publishToAllGroups()
             saving = false
@@ -119,6 +125,7 @@ final class ProfileSettingsViewModel: ObservableObject {
 struct ProfileSettingsScreen: View {
     /// Owned here so a parent re-render never discards a draft being typed.
     @StateObject private var viewModel: ProfileSettingsViewModel
+    @ObservedObject private var l10n = Localization.shared
 
     init(viewModel: @autoclosure @escaping () -> ProfileSettingsViewModel) {
         self._viewModel = StateObject(wrappedValue: viewModel())
@@ -127,7 +134,7 @@ struct ProfileSettingsScreen: View {
     var body: some View {
             Form {
                 Section {
-                    TextField("Your name", text: $viewModel.draftName)
+                    TextField(l10n.t("settings.profile.name.label"), text: $viewModel.draftName)
                         .textInputAutocapitalization(.words)
                         .submitLabel(.done)
                         .onSubmit { viewModel.save() }
@@ -138,27 +145,27 @@ struct ProfileSettingsScreen: View {
                             .foregroundStyle(.red)
                     }
                 } header: {
-                    Text("Name")
+                    Text(l10n.t("settings.profile.name.label"))
                 } footer: {
-                    Text("Shown to the people you talk to. Not unique, at most 64 characters.")
+                    Text(l10n.t("settings.profile.name.hint", counts: ["count": 64]))
                 }
 
-                Section("How others see you") {
+                Section(l10n.t("settings.profile.preview.label")) {
                     if let preview = viewModel.preview {
                         Text(preview)
                     } else {
-                        Text("Nothing yet. Set a name so people recognise you.")
+                        Text(l10n.t("settings.profile.preview.no_name"))
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                Section("Username") {
+                Section(l10n.t("auth.username.label")) {
                     if let username = viewModel.username {
                         Text("@\(username)")
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                     } else {
-                        Text("No username")
+                        Text(l10n.t("settings.profile.username.none"))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -169,23 +176,23 @@ struct ProfileSettingsScreen: View {
                     } label: {
                         HStack {
                             if viewModel.saving { ProgressView().controlSize(.small) }
-                            Text("Save")
+                            Text(l10n.t("common.save"))
                         }
                     }
                     .disabled(!viewModel.canSave)
                     if let notice = viewModel.savedNotice {
-                        Text(notice)
+                        Text(notice.text)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
                     if let error = viewModel.saveError {
-                        Text(error)
+                        Text(error.text)
                             .font(.footnote)
                             .foregroundStyle(.red)
                     }
                 }
             }
-            .navigationTitle("Profile")
+            .navigationTitle(l10n.t("settings.section.profile"))
             .navigationBarTitleDisplayMode(.inline)
     }
 }

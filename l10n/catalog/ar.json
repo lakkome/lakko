@@ -202,12 +202,124 @@
       "text": "اسم المستخدم",
       "status": "machine"
     },
+    "backup.rollback_refused.body": {
+      "text": "أعاد الخادم نسخة احتياطية معدّلة أو قديمة. حسابك آمن؛ تابعنا دون استعادة البيانات الأقدم.",
+      "status": "machine"
+    },
+    "backup.rollback_refused.title": {
+      "text": "تعذّرت استعادة النسخة الاحتياطية بأمان",
+      "status": "machine"
+    },
+    "backup.stale_restore.body": {
+      "text": "هذه النسخة الاحتياطية أقدم من المتوقع ({reason}). {consequence}",
+      "status": "machine"
+    },
+    "backup.stale_restore.confirm": {
+      "text": "الاستعادة على أي حال",
+      "status": "machine"
+    },
+    "backup.stale_restore.consequence": {
+      "text": "ستعيد استعادتها حسابك إلى حالة أقدم: رسائل أقدم، وقد تظهر مجددًا الأجهزة التي أزلتها.",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.anchor_unreadable": {
+      "text": "سجلّ هذا الجهاز لآخر نسخة احتياطية لديك غير قابل للقراءة أو تم العبث به",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.below_floor": {
+      "text": "أقدم من آخر نسخة احتياطية استُعيدت على هذا الجهاز",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.head_stripped": {
+      "text": "أُزيل توقيعها وهي تختلف عن آخر نسخة احتياطية يعرفها هذا الجهاز",
+      "status": "machine"
+    },
+    "backup.stale_restore.reason.too_old": {
+      "text": "وُقّعت منذ مدة أطول مما تكون عليه نسخة حديثة",
+      "status": "machine"
+    },
+    "backup.stale_restore.title": {
+      "text": "هل تريد استعادة هذه النسخة الاحتياطية الأقدم؟",
+      "status": "machine"
+    },
+    "call.guest.default_name": {
+      "text": "ضيف",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "جارٍ إدخالك إلى المكالمة...",
       "status": "machine"
     },
+    "call.link.connecting": {
+      "text": "جارٍ الاتصال...",
+      "status": "machine"
+    },
+    "call.link.dead": {
+      "text": "انتهت هذه المكالمة أو أنها غير نشطة.",
+      "status": "machine"
+    },
+    "call.link.end_current": {
+      "text": "إنهاء المكالمة الحالية",
+      "status": "machine"
+    },
+    "call.link.ended": {
+      "text": "انتهت المكالمة.",
+      "status": "machine"
+    },
+    "call.link.error.generic": {
+      "text": "فشلت المكالمة.",
+      "status": "machine"
+    },
+    "call.link.failed": {
+      "text": "فشل: {reason}",
+      "status": "machine"
+    },
+    "call.link.host": {
+      "text": "المضيف: {name}",
+      "status": "machine"
+    },
+    "call.link.invalid": {
+      "text": "رابط المكالمة هذا غير صالح أو منتهي الصلاحية.",
+      "status": "machine"
+    },
+    "call.link.join": {
+      "text": "الانضمام إلى المكالمة",
+      "status": "machine"
+    },
+    "call.link.live": {
+      "text": "أنت في هذه المكالمة.",
+      "status": "machine"
+    },
+    "call.link.loading": {
+      "text": "جارٍ تحميل رابط المكالمة...",
+      "status": "machine"
+    },
+    "call.link.start": {
+      "text": "بدء المكالمة",
+      "status": "machine"
+    },
+    "call.link.title_join": {
+      "text": "الانضمام إلى مكالمة",
+      "status": "machine"
+    },
+    "call.link.title_start": {
+      "text": "ابدأ مكالمتك",
+      "status": "machine"
+    },
+    "call.link.waiting": {
+      "text": "بانتظار أن يسمح لك المالك بالدخول...",
+      "status": "machine"
+    },
+    "call.link.waiting_hint": {
+      "text": "يمكنك مغادرة هذه الشاشة؛ ستنضم عند السماح لك بالدخول.",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "اختر دردشة لبدء المراسلة",
+      "status": "machine"
+    },
+    "common.adding": {
+      "text": "جارٍ الإضافة...",
       "status": "machine"
     },
     "common.back": {
@@ -226,8 +338,20 @@
       "text": "إغلاق",
       "status": "machine"
     },
+    "common.collapse": {
+      "text": "طيّ",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "تأكيد",
+      "status": "machine"
+    },
+    "common.confirming": {
+      "text": "جارٍ التأكيد...",
+      "status": "machine"
+    },
+    "common.connecting": {
+      "text": "جارٍ الاتصال...",
       "status": "machine"
     },
     "common.continue": {
@@ -262,8 +386,24 @@
       "text": "تعذّر الوصول إلى Lakko. تحقّق من اتصالك وحاول مجددًا.",
       "status": "machine"
     },
+    "common.error.qr_render": {
+      "text": "تعذّر عرض الرمز. حاول مجددًا.",
+      "status": "machine"
+    },
     "common.error.server_unreachable": {
       "text": "تعذّر الوصول إلى الخادم. تحقّق من اتصالك.",
+      "status": "machine"
+    },
+    "common.error.session_ended": {
+      "text": "انتهت جلستك. سجّل الدخول مجددًا.",
+      "status": "machine"
+    },
+    "common.error.session_expired": {
+      "text": "انتهت صلاحية الجلسة. سجّل الدخول مجددًا.",
+      "status": "machine"
+    },
+    "common.error.session_not_ready": {
+      "text": "الجلسة ليست جاهزة بعد.",
       "status": "machine"
     },
     "common.error.too_many_attempts": {
@@ -278,6 +418,10 @@
       "text": "هذا غير متاح حاليًا. حاول لاحقًا.",
       "status": "machine"
     },
+    "common.expand": {
+      "text": "توسيع",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "جارٍ التحميل...",
       "status": "machine"
@@ -286,8 +430,24 @@
       "text": "جارٍ البحث...",
       "status": "machine"
     },
+    "common.manage": {
+      "text": "إدارة",
+      "status": "machine"
+    },
     "common.more_options": {
       "text": "خيارات أخرى",
+      "status": "machine"
+    },
+    "common.off": {
+      "text": "إيقاف",
+      "status": "machine"
+    },
+    "common.on": {
+      "text": "تشغيل",
+      "status": "machine"
+    },
+    "common.open_lakko": {
+      "text": "فتح Lakko",
       "status": "machine"
     },
     "common.optional": {
@@ -306,12 +466,36 @@
       "text": "جارٍ التحضير...",
       "status": "machine"
     },
+    "common.remove": {
+      "text": "إزالة",
+      "status": "machine"
+    },
+    "common.removing": {
+      "text": "جارٍ الإزالة...",
+      "status": "machine"
+    },
+    "common.save": {
+      "text": "حفظ",
+      "status": "machine"
+    },
+    "common.saving": {
+      "text": "جارٍ الحفظ...",
+      "status": "machine"
+    },
     "common.sending": {
       "text": "جارٍ الإرسال...",
       "status": "machine"
     },
+    "common.set_up": {
+      "text": "إعداد",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "حاول مجددًا",
+      "status": "machine"
+    },
+    "common.unknown": {
+      "text": "غير معروف",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -1122,8 +1306,168 @@
       "text": "تم تغيير مفتاح الأمان الخاص بحسابك.",
       "status": "machine"
     },
+    "settings.about.lede_web": {
+      "text": "Lakko على الويب.",
+      "status": "machine"
+    },
+    "settings.about.licence": {
+      "text": "الترخيص",
+      "status": "machine"
+    },
+    "settings.about.licence_body": {
+      "text": "{licence}. الشيفرة المصدرية متاحة للقراءة والاستخدام والتحسين بحرية.",
+      "status": "machine"
+    },
+    "settings.about.protection.body": {
+      "text": "الرسائل والمكالمات وطلبات الاتصال مشفّرة تشفيرًا تامًا بين الطرفين: لا يستطيع قراءتها إلا الأشخاص في المحادثة، ولا تستطيع خوادم Lakko ذلك أبدًا. لا تغادر كلمة مرورك جهازك أبدًا، ولكل جهة اتصال رقم أمان يمكنك مقارنته وجهًا لوجه.",
+      "status": "machine"
+    },
+    "settings.about.protection.title": {
+      "text": "كيف يحميك Lakko",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "تم تحديث الترجمات {date}",
+      "status": "machine"
+    },
+    "settings.about.version": {
+      "text": "الإصدار",
+      "status": "machine"
+    },
+    "settings.account.danger_zone.footer": {
+      "text": "«تسجيل الخروج» يُبقي بياناتك على هذا الجهاز. «نسيان هذا الجهاز» يزيلها؛ ولا يمكنك العودة إلا بعبارة الاسترداد أو بجهاز آخر مسجّل الدخول. «حذف الحساب» يمحو الحساب على الخادم ويمسح هذا الجهاز؛ ولا يمكن التراجع عن ذلك.",
+      "status": "machine"
+    },
+    "settings.account.delete.body": {
+      "text": "يؤدي هذا إلى محو هويتك على الخادم — اسم المستخدم والمفاتيح وعوامل الاسترداد والنسخة الاحتياطية — وتسجيل خروجك من كل مكان. تُمحى رسائلك المحلية من هذا الجهاز أيضًا. لا يمكن التراجع عن ذلك.",
+      "status": "machine"
+    },
+    "settings.account.delete.confirm": {
+      "text": "حذف الحساب",
+      "status": "machine"
+    },
+    "settings.account.delete.error.cancelled": {
+      "text": "أُلغي. لم يُحذف حسابك.",
+      "status": "machine"
+    },
+    "settings.account.delete.error.generic": {
+      "text": "تعذّر حذف حسابك. حاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.account.delete.sub": {
+      "text": "يمحو حسابك وكل ما فيه نهائيًا، ويمسح هذا الجهاز. لا يمكن التراجع عن ذلك.",
+      "status": "machine"
+    },
+    "settings.account.delete.title": {
+      "text": "هل تريد حذف حسابك؟",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body": {
+      "text": "ستفقد الحساب المحفوظ في هذا المتصفح. الطريقة الوحيدة للعودة هي عبارة الاسترداد المكوّنة من 24 كلمة التي دوّنتها عند التسجيل.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.body_device": {
+      "text": "يُزال كل ما على هذا الجهاز ويغادر الجهاز حسابك. ستحتاج إلى عبارة الاسترداد أو جهاز آخر مسجّل الدخول لاستخدام هذا الحساب هنا مجددًا.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.confirm": {
+      "text": "نسيان الجهاز",
+      "status": "machine"
+    },
+    "settings.account.forget_device.label": {
+      "text": "نسيان هذا الجهاز",
+      "status": "machine"
+    },
+    "settings.account.forget_device.sub": {
+      "text": "يزيل بيانات حسابك من هذا المتصفح. تبقى رسائلك على أجهزتك الأخرى؛ وللعودة إلى هنا ستحتاج إلى عبارة الاسترداد أو جهاز آخر.",
+      "status": "machine"
+    },
+    "settings.account.forget_device.title": {
+      "text": "هل تريد نسيان هذا الجهاز؟",
+      "status": "machine"
+    },
+    "settings.account.lede": {
+      "text": "بياناتك، وتسجيل الخروج، وهذا الجهاز، وحذف حسابك.",
+      "status": "machine"
+    },
+    "settings.account.log_out": {
+      "text": "تسجيل الخروج",
+      "status": "machine"
+    },
+    "settings.account.log_out.body": {
+      "text": "تبقى رسائلك على هذا الجهاز. سجّل الدخول مجددًا بكلمة المرور أو مفتاح المرور.",
+      "status": "machine"
+    },
+    "settings.account.log_out.sub": {
+      "text": "يسجّل خروجك على هذا الجهاز. تبقى بياناتك هنا لتسجيل الدخول التالي.",
+      "status": "machine"
+    },
+    "settings.account.log_out.title": {
+      "text": "هل تريد تسجيل الخروج من Lakko؟",
+      "status": "machine"
+    },
+    "settings.account.vault.not_set_up": {
+      "text": "الاسترداد بثلاث كلمات: لم يُعدّ على هذا الحساب بعد. سيُعدّ في المرة القادمة التي تسجّل فيها الدخول على جهاز يحتفظ بعبارتك.",
+      "status": "machine"
+    },
+    "settings.account.vault.on": {
+      "text": "الاسترداد بثلاث كلمات: مفعّل (الكلمات {positions}). يصلح أيضًا جهاز آخر مسجّل الدخول وعبارتك المكوّنة من 24 كلمة.",
+      "status": "machine"
+    },
+    "settings.account.vault.unavailable": {
+      "text": "الاسترداد بثلاث كلمات: غير متاح على هذا الخادم. لا تزال عبارتك المكوّنة من 24 كلمة وأجهزتك الأخرى تعمل.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.footer": {
+      "text": "عند التشغيل، يتصل Lakko بطريقة يصعب على الشبكة اكتشافها وحظرها. تبقى رسائلك مشفّرة تشفيرًا تامًا بين الطرفين في كل الأحوال.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status": {
+      "text": "الحالة",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active": {
+      "text": "نشط",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.active.sub": {
+      "text": "الاتصالات مخفية عن حظر الشبكة.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.connecting.sub": {
+      "text": "جارٍ إعداد الاتصال المخفي.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.direct": {
+      "text": "اتصال مباشر",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable": {
+      "text": "غير متاح",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unavailable.sub": {
+      "text": "تعذّر إعداد الاتصال المخفي. تحقّق من شبكتك، ثم أوقف المفتاح وشغّله مجددًا للمحاولة من جديد.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured": {
+      "text": "غير متاح في هذا الإصدار",
+      "status": "machine"
+    },
+    "settings.anti_censorship.status.unconfigured.sub": {
+      "text": "بُني هذا الإصدار دون هذا الإعداد.",
+      "status": "machine"
+    },
+    "settings.anti_censorship.title": {
+      "text": "تجاوز الرقابة",
+      "status": "machine"
+    },
+    "settings.anti_censorship.toggle": {
+      "text": "إخفاء Lakko عن حظر الشبكة",
+      "status": "machine"
+    },
+    "settings.appearance.lede": {
+      "text": "السمة على هذا الجهاز.",
       "status": "machine"
     },
     "settings.appearance.theme": {
@@ -1140,6 +1484,126 @@
     },
     "settings.appearance.theme.system": {
       "text": "النظام",
+      "status": "machine"
+    },
+    "settings.data.downloaded": {
+      "text": "تم تنزيل {file}.",
+      "status": "machine"
+    },
+    "settings.data.error.generic": {
+      "text": "تعذّر تصدير بياناتك. حاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.data.export": {
+      "text": "تصدير بياناتي",
+      "status": "machine"
+    },
+    "settings.data.export_note": {
+      "text": "رسائلك وجهات اتصالك وحالة مجموعاتك مشفّرة تشفيرًا تامًا بين الطرفين، ولا توجد إلا على أجهزتك.",
+      "status": "machine"
+    },
+    "settings.data.lede": {
+      "text": "نزّل نسخة مما تحتفظ به خوادم Lakko عن حسابك. رسائلك وجهات اتصالك مشفّرة تشفيرًا تامًا بين الطرفين وتبقى على أجهزتك، لذا فهي ليست جزءًا من هذا الملف.",
+      "status": "machine"
+    },
+    "settings.data.ready": {
+      "text": "التصدير جاهز. اضغط «مشاركة» لحفظه.",
+      "status": "machine"
+    },
+    "settings.data.share": {
+      "text": "مشاركة التصدير",
+      "status": "machine"
+    },
+    "settings.data.title": {
+      "text": "بياناتك",
+      "status": "machine"
+    },
+    "settings.devices.add.lede": {
+      "text": "سجّل الدخول إلى Lakko على الجهاز الجديد أولًا. ثم اختر أيّ الجهازين يعرض رمزًا.",
+      "status": "machine"
+    },
+    "settings.devices.add.no_camera": {
+      "text": "لا توجد كاميرا على أيّ من الجهازين؟ سجّل الدخول على الجهاز الجديد واختر «{method}»: ستظهر هنا رسالة «{prompt}» مع رمز للمقارنة.",
+      "status": "machine"
+    },
+    "settings.devices.device_n": {
+      "text": "الجهاز {number}",
+      "status": "machine"
+    },
+    "settings.devices.error.load": {
+      "text": "تعذّر تحميل أجهزتك. حاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.devices.error.no_device_key": {
+      "text": "هذا المتصفح غير مُعدّ لحسابك. سجّل الدخول مجددًا.",
+      "status": "machine"
+    },
+    "settings.devices.error.remove": {
+      "text": "تعذّرت إزالة الجهاز. حاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.devices.error.scan": {
+      "text": "تعذّرت إضافة الجهاز. حاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.devices.lede": {
+      "text": "الهواتف والأجهزة اللوحية والحواسيب المسجّل دخولها إلى حسابك. إضافة جهاز مشفّرة تشفيرًا تامًا بين الطرفين؛ ولا تستطيع خوادم Lakko قراءتها.",
+      "status": "machine"
+    },
+    "settings.devices.list.lede": {
+      "text": "يفقد الجهاز الذي تُزيله الوصول إلى رسائلك من تلك اللحظة. قد تتطلب إزالة جهاز مفتاح المرور الخاص بك.",
+      "status": "machine"
+    },
+    "settings.devices.list.title": {
+      "text": "أجهزتك",
+      "status": "machine"
+    },
+    "settings.devices.remove.body": {
+      "text": "سيفقد هذا الجهاز الوصول إلى رسائلك من تلك اللحظة. قد يُطلب منك مفتاح المرور.",
+      "status": "machine"
+    },
+    "settings.devices.remove.confirm_named": {
+      "text": "إزالة {device}",
+      "status": "machine"
+    },
+    "settings.devices.remove.title": {
+      "text": "هل تريد إزالة {device}؟",
+      "status": "machine"
+    },
+    "settings.devices.scan.done": {
+      "text": "أُضيف الجهاز. سيظهر في القائمة بعد أن يكتمل انضمامه.",
+      "status": "machine"
+    },
+    "settings.devices.scan.opening": {
+      "text": "جارٍ فتح الكاميرا...",
+      "status": "machine"
+    },
+    "settings.devices.show.error.timeout": {
+      "text": "لم يمسح الجهاز الآخر الرمز في الوقت المحدد. حاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.devices.show.lede": {
+      "text": "امسح هذا الرمز بجهاز مسجّل الدخول بالفعل. بمجرد أن يؤكد، ينضم هذا الجهاز إلى حسابك.",
+      "status": "machine"
+    },
+    "settings.devices.show.start": {
+      "text": "عرض الرمز",
+      "status": "machine"
+    },
+    "settings.devices.sign_in_first": {
+      "text": "سجّل الدخول أولًا لإدارة الأجهزة.",
+      "status": "machine"
+    },
+    "settings.devices.this_device": {
+      "text": "هذا الجهاز",
+      "status": "machine"
+    },
+    "settings.devices.this_device.sub": {
+      "text": "الجهاز الذي تستخدمه الآن.",
+      "status": "machine"
+    },
+    "settings.devices.title": {
+      "text": "الأجهزة",
       "status": "machine"
     },
     "settings.language.load_failed": {
@@ -1166,6 +1630,266 @@
       "text": "اللغة",
       "status": "machine"
     },
+    "settings.me.guest": {
+      "text": "ضيف",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.sub": {
+      "text": "تبدأ ملاحظات الفيديو الواردة بالتشغيل دون صوت عند ظهورها على الشاشة. متوقف افتراضيًا لأن التشغيل التلقائي ينزّل الوسائط.",
+      "status": "machine"
+    },
+    "settings.media.autoplay_video_notes.title": {
+      "text": "التشغيل التلقائي لملاحظات الفيديو",
+      "status": "machine"
+    },
+    "settings.media.lede": {
+      "text": "التشغيل على هذا الجهاز.",
+      "status": "machine"
+    },
+    "settings.notifications.off.body": {
+      "text": "الإشعارات متوقفة، لذا لا يستطيع Lakko الرنين إلا وهو مفتوح. شغّلها لتصلك المكالمات والرسائل عندما لا يكون مفتوحًا.",
+      "status": "machine"
+    },
+    "settings.notifications.off.title": {
+      "text": "تشغيل الإشعارات",
+      "status": "machine"
+    },
+    "settings.passkeys.add": {
+      "text": "إضافة مفتاح مرور",
+      "status": "machine"
+    },
+    "settings.passkeys.added": {
+      "text": "تمت إضافة مفتاح المرور «{name}».",
+      "status": "machine"
+    },
+    "settings.passkeys.added_last_used": {
+      "text": "أُضيف {added} · آخر استخدام {used}",
+      "status": "machine"
+    },
+    "settings.passkeys.added_never_used": {
+      "text": "أُضيف {added} · لم يُستخدم قط",
+      "status": "machine"
+    },
+    "settings.passkeys.empty": {
+      "text": "لا توجد مفاتيح مرور بعد.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.cancelled": {
+      "text": "أُلغي. لم يُنشأ أي مفتاح مرور.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.generic": {
+      "text": "تعذّر تحديث مفاتيح المرور. حاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.name_required": {
+      "text": "أعطِ مفتاح المرور اسمًا.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.network": {
+      "text": "خطأ في الشبكة. تحقّق من اتصالك وأعد المحاولة.",
+      "status": "machine"
+    },
+    "settings.passkeys.error.server_status": {
+      "text": "خطأ في الخادم ({status}).",
+      "status": "machine"
+    },
+    "settings.passkeys.error.unsupported": {
+      "text": "لا يستطيع هذا المتصفح أو الجهاز إنشاء مفاتيح مرور الآن.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede": {
+      "text": "سجّل الدخول باستخدام Touch ID أو Face ID أو مفتاح أمان بدلًا من كلمة المرور. تعمل عبارة الاسترداد دائمًا أيضًا.",
+      "status": "machine"
+    },
+    "settings.passkeys.lede_device": {
+      "text": "سجّل الدخول ببصمة إصبعك أو وجهك أو قفل الشاشة، أو بمفتاح أمان، بدلًا من كلمة المرور. تعمل عبارة الاسترداد دائمًا أيضًا.",
+      "status": "machine"
+    },
+    "settings.passkeys.name.label": {
+      "text": "اسم مفتاح المرور",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder": {
+      "text": "سمِّ مفتاح المرور هذا (مثل MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.body": {
+      "text": "لن يتمكن الجهاز الذي يحمل المفتاح الخاص المطابق من تسجيل الدخول به بعد الآن. لا يمكن التراجع عن ذلك.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm": {
+      "text": "إزالة",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.confirm_named": {
+      "text": "إزالة {name}",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.error.cancelled": {
+      "text": "أُلغي. لم يُزل مفتاح المرور.",
+      "status": "machine"
+    },
+    "settings.passkeys.remove.title": {
+      "text": "هل تريد إزالة مفتاح المرور هذا؟",
+      "status": "machine"
+    },
+    "settings.passkeys.removed": {
+      "text": "تمت إزالة «{name}».",
+      "status": "machine"
+    },
+    "settings.passkeys.title": {
+      "text": "مفاتيح المرور",
+      "status": "machine"
+    },
+    "settings.passkeys.unnamed": {
+      "text": "مفتاح مرور بلا اسم",
+      "status": "machine"
+    },
+    "settings.passkeys.unsupported_browser": {
+      "text": "لا يستطيع هذا المتصفح إدارة مفاتيح المرور. استخدم إصدارًا حديثًا من Safari أو Chrome أو Firefox أو Edge.",
+      "status": "machine"
+    },
+    "settings.profile.error.generic": {
+      "text": "تعذّر حفظ اسمك. حاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.profile.lede": {
+      "text": "كيف تظهر لجهات اتصالك.",
+      "status": "machine"
+    },
+    "settings.profile.name.hint": {
+      "text": "يظهر للأشخاص الذين تتحدث معهم. ليس فريدًا، وبحد أقصى {count, plural, zero {# حرف} one {حرف واحد} two {حرفان} few {# أحرف} many {# حرفًا} other {# حرف}}.",
+      "status": "machine"
+    },
+    "settings.profile.name.label": {
+      "text": "اسمك",
+      "status": "machine"
+    },
+    "settings.profile.preview.label": {
+      "text": "كيف يراك الآخرون",
+      "status": "machine"
+    },
+    "settings.profile.preview.no_name": {
+      "text": "يرى الآخرون بصمة مفتاحك إلى أن تضع اسمًا.",
+      "status": "machine"
+    },
+    "settings.profile.saved": {
+      "text": "سيتحدّث اسمك لدى جهات اتصالك.",
+      "status": "machine"
+    },
+    "settings.profile.username.none": {
+      "text": "لا يوجد",
+      "status": "machine"
+    },
+    "settings.recovery.contact.already_enabled": {
+      "text": "تم تعيين بريد إلكتروني أو هاتف لهذا الحساب بالفعل. لاستبداله، سجّل الدخول مجددًا بعبارة الاسترداد أو من جهاز آخر أولًا.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.done": {
+      "text": "تم. يمكن الآن لرمز يُرسل إليه أن يعيدك إلى حسابك.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.bad_contact": {
+      "text": "يبدو أن هذا غير صحيح. تحقّق منه وحاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.error.generic": {
+      "text": "تعذّر إعداد البريد الإلكتروني أو الهاتف. حاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.lede": {
+      "text": "رمز لمرة واحدة يُرسل إلى بريدك الإلكتروني أو هاتفك يتيح لك تسجيل الدخول مجددًا إذا فقدت كلمة المرور.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_email": {
+      "text": "أرسلنا رمزًا من ستة أرقام إلى {contact} عبر البريد الإلكتروني. أدخله أدناه.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sent_phone": {
+      "text": "أرسلنا رمزًا من ستة أرقام إلى {contact} عبر رسالة نصية. أدخله أدناه.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.sub": {
+      "text": "رمز لمرة واحدة يُرسل إلى بريدك الإلكتروني أو هاتفك.",
+      "status": "machine"
+    },
+    "settings.recovery.contact.unavailable": {
+      "text": "الاسترداد عبر البريد الإلكتروني والهاتف غير متاح الآن.",
+      "status": "machine"
+    },
+    "settings.recovery.lede": {
+      "text": "عبارة الاسترداد تستعيد كل شيء. أما هذه فتعيدك إلى الحساب إذا فقدت كلمة المرور؛ وتأتي رسائلك بعدها من العبارة أو من جهاز آخر من أجهزتك.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.not_saved_here": {
+      "text": "غير محفوظة على هذا الجهاز. احتفظ بنسختك المكتوبة في مكان آمن.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.saved_here": {
+      "text": "محفوظة على هذا الجهاز.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.sub": {
+      "text": "الكلمات الـ 24 التي دوّنتها عند التسجيل تستعيد هويتك وجهات اتصالك ورسائلك على جهاز جديد.",
+      "status": "machine"
+    },
+    "settings.recovery.section.access": {
+      "text": "الوصول",
+      "status": "machine"
+    },
+    "settings.recovery.section.identity": {
+      "text": "الهوية",
+      "status": "machine"
+    },
+    "settings.recovery.sign_in_first": {
+      "text": "سجّل الدخول أولًا لإدارة الاسترداد.",
+      "status": "machine"
+    },
+    "settings.recovery.title": {
+      "text": "الاسترداد",
+      "status": "machine"
+    },
+    "settings.recovery.totp.already_enabled": {
+      "text": "تم إعداد تطبيق مصادقة لهذا الحساب بالفعل. لاستبداله، سجّل الدخول مجددًا بعبارة الاسترداد أو من جهاز آخر أولًا.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.done": {
+      "text": "تم إعداد تطبيق المصادقة. يمكن الآن لرمز من التطبيق أن يعيدك إلى حسابك.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.generic": {
+      "text": "تعذّر إعداد تطبيق المصادقة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.error.wrong": {
+      "text": "لم ينجح هذا الرمز. انتظر الرمز التالي في التطبيق وحاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.key": {
+      "text": "المفتاح: {key}",
+      "status": "machine"
+    },
+    "settings.recovery.totp.lede": {
+      "text": "رمز من ستة أرقام من تطبيق مصادقة يتيح لك تسجيل الدخول مجددًا إذا فقدت كلمة المرور.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.scan": {
+      "text": "امسح هذا الرمز بتطبيق المصادقة، أو اكتب المفتاح يدويًا، ثم أدخل الرمز المكوّن من ستة أرقام الذي يعرضه التطبيق.",
+      "status": "machine"
+    },
+    "settings.recovery.totp.set_up": {
+      "text": "إعداد تطبيق المصادقة",
+      "status": "machine"
+    },
+    "settings.recovery.totp.title": {
+      "text": "تطبيق المصادقة",
+      "status": "machine"
+    },
+    "settings.recovery.totp.unavailable": {
+      "text": "إعداد تطبيق المصادقة غير متاح الآن.",
+      "status": "machine"
+    },
     "settings.section.about": {
       "text": "حول",
       "status": "machine"
@@ -1178,12 +1902,20 @@
       "text": "المظهر",
       "status": "machine"
     },
+    "settings.section.danger_zone": {
+      "text": "منطقة الخطر",
+      "status": "machine"
+    },
     "settings.section.data": {
       "text": "البيانات",
       "status": "machine"
     },
     "settings.section.media": {
       "text": "الوسائط",
+      "status": "machine"
+    },
+    "settings.section.network": {
+      "text": "الشبكة",
       "status": "machine"
     },
     "settings.section.notifications": {
@@ -1196,6 +1928,30 @@
     },
     "settings.section.security": {
       "text": "الأمان",
+      "status": "machine"
+    },
+    "settings.security.devices.sub": {
+      "text": "اعرض الأجهزة على هذا الحساب وأضفها وأزلها.",
+      "status": "machine"
+    },
+    "settings.security.devices_and_recovery": {
+      "text": "الأجهزة والاسترداد",
+      "status": "machine"
+    },
+    "settings.security.lede": {
+      "text": "كيف تسجّل الدخول، وأيّ الأجهزة يمكنها قراءة رسائلك، وكيف تعود إلى حسابك.",
+      "status": "machine"
+    },
+    "settings.security.recovery.sub": {
+      "text": "تطبيق مصادقة أو عنوان بريد إلكتروني أو رقم هاتف يعيدك إلى حسابك.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.sub": {
+      "text": "لكل جهة اتصال رقم أمان. قارنه وجهًا لوجه أو في مكالمة؛ تطابق الأرقام يعني أن لا أحد بينكما. تجده في تفاصيل جهة الاتصال.",
+      "status": "machine"
+    },
+    "settings.security.safety_numbers.title": {
+      "text": "أرقام الأمان",
       "status": "machine"
     },
     "username.a11y_hint": {

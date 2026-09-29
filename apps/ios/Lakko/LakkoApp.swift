@@ -342,6 +342,9 @@ struct AppRoot: View, Equatable {
     let services: AppServices
     @ObservedObject private var authRepository: AuthRepository
     @ObservedObject private var inviteIntake: InviteIntake
+    /// ADR-0058 — the two backup alarms below read the catalog, so they
+    /// follow a language switch (a rare event; nothing else here re-renders).
+    @ObservedObject private var l10n = Localization.shared
 
     nonisolated static func == (lhs: AppRoot, rhs: AppRoot) -> Bool {
         lhs.services === rhs.services
@@ -398,28 +401,24 @@ struct AppRoot: View, Equatable {
             // at restore. User-visible alarm; the served (older / altered) state
             // was NOT loaded.
             .alert(
-                "Backup could not be restored safely",
+                l10n.t("backup.rollback_refused.title"),
                 isPresented: Binding(
                     get: { authRepository.backupRollbackAlarm != nil },
                     set: { if !$0 { authRepository.dismissBackupRollbackAlarm() } }
                 ),
                 presenting: authRepository.backupRollbackAlarm
             ) { _ in
-                Button("OK", role: .cancel) {
+                Button(l10n.t("common.dismiss"), role: .cancel) {
                     authRepository.dismissBackupRollbackAlarm()
                 }
             } message: { _ in
-                Text(
-                    "The server returned an altered or outdated backup. Your "
-                    + "account is safe; we continued without restoring the older "
-                    + "data."
-                )
+                Text(l10n.t("backup.rollback_refused.body"))
             }
             // ADR-0037 §6 (G-11) — a stale but authentic backup needs an
             // explicit override. The restore flow suspends until the user
             // decides; Cancel (or dismiss) aborts the restore (fail-closed).
             .confirmationDialog(
-                "Restore an older backup?",
+                l10n.t("backup.stale_restore.title"),
                 isPresented: Binding(
                     get: { authRepository.pendingStaleBackupOverride != nil },
                     set: { if !$0 { authRepository.resolveStaleBackupOverride(false) } }
@@ -427,18 +426,17 @@ struct AppRoot: View, Equatable {
                 titleVisibility: .visible,
                 presenting: authRepository.pendingStaleBackupOverride
             ) { _ in
-                Button("Restore anyway", role: .destructive) {
+                Button(l10n.t("backup.stale_restore.confirm"), role: .destructive) {
                     authRepository.resolveStaleBackupOverride(true)
                 }
-                Button("Cancel", role: .cancel) {
+                Button(l10n.t("common.cancel"), role: .cancel) {
                     authRepository.resolveStaleBackupOverride(false)
                 }
             } message: { request in
-                Text(
-                    "This backup is older than expected (\(request.reason)). "
-                    + "Restoring it will roll your account back to older state — "
-                    + "older messages, and devices you removed may reappear."
-                )
+                Text(l10n.t("backup.stale_restore.body", texts: [
+                    "reason": request.reason,
+                    "consequence": l10n.t("backup.stale_restore.consequence"),
+                ]))
             }
     }
 

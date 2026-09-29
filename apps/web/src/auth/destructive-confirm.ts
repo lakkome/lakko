@@ -40,24 +40,26 @@
  * this module wrote rather than copy it inherited.
  */
 
-import { type ConfirmRequest, namedAction } from "../ui/confirm-dialog";
+import { type ConfirmRequest } from "../ui/confirm-dialog";
+import { t } from "../l10n";
+
+// The copy lives in the catalog (ADR-0058) and is rendered when the dialog
+// is requested, so it is in the language current at that moment.
 
 // ---------------------------------------------------------------------------
 // Remove a passkey
 // ---------------------------------------------------------------------------
 
 /** Generic per §6's shape — the passkey is named on the button, not here. */
-export const REMOVE_PASSKEY_TITLE = "Remove this passkey?";
+export const REMOVE_PASSKEY_TITLE_KEY = "settings.passkeys.remove.title";
 
 /** Carried over from the string this replaced, with the irreversibility
  *  sentence moved to the end. */
-export const REMOVE_PASSKEY_BODY =
-  "The device that owns the matching private key will no longer be able " +
-  "to sign in with it. This cannot be undone.";
+export const REMOVE_PASSKEY_BODY_KEY = "settings.passkeys.remove.body";
 
-/** The destructive action's verb; the nickname is appended by
- *  {@link namedAction}. */
-export const REMOVE_PASSKEY_CONFIRM_LABEL = "Remove";
+/** The destructive action: the bare verb, or the verb naming the passkey. */
+export const REMOVE_PASSKEY_CONFIRM_KEY = "settings.passkeys.remove.confirm";
+export const REMOVE_PASSKEY_CONFIRM_NAMED_KEY = "settings.passkeys.remove.confirm_named";
 
 /**
  * The confirmation for removing one passkey credential.
@@ -71,11 +73,15 @@ export function removePasskeyConfirmation(input: {
   /** The credential's user-chosen nickname, or `null` when it has none. */
   readonly nickname: string | null | undefined;
 }): ConfirmRequest {
+  const nickname = typeof input.nickname === "string" ? input.nickname.trim() : "";
   return {
-    title: REMOVE_PASSKEY_TITLE,
-    body: REMOVE_PASSKEY_BODY,
-    confirmLabel: namedAction(REMOVE_PASSKEY_CONFIRM_LABEL, input.nickname),
-    cancelLabel: "Cancel",
+    title: t(REMOVE_PASSKEY_TITLE_KEY),
+    body: t(REMOVE_PASSKEY_BODY_KEY),
+    confirmLabel:
+      nickname.length === 0
+        ? t(REMOVE_PASSKEY_CONFIRM_KEY)
+        : t(REMOVE_PASSKEY_CONFIRM_NAMED_KEY, { name: nickname }),
+    cancelLabel: t("common.cancel"),
     tone: "danger",
   };
 }
@@ -85,13 +91,11 @@ export function removePasskeyConfirmation(input: {
 // ---------------------------------------------------------------------------
 
 /** The question. */
-export const FORGET_DEVICE_TITLE = "Forget this device?";
+export const FORGET_DEVICE_TITLE_KEY = "settings.account.forget_device.title";
 
 /** Carried over verbatim. The second sentence is the one fact that decides
  *  whether to press the button, so it is not summarised. */
-export const FORGET_DEVICE_BODY =
-  "You'll lose the cached account on this browser. The only way back is " +
-  "the 24-word recovery passphrase you wrote down at signup.";
+export const FORGET_DEVICE_BODY_KEY = "settings.account.forget_device.body";
 
 /**
  * The action.
@@ -101,15 +105,15 @@ export const FORGET_DEVICE_BODY =
  * is that the button says what it acts on; `Forget device` does, `Forget`
  * alone does not.
  */
-export const FORGET_DEVICE_CONFIRM_LABEL = "Forget device";
+export const FORGET_DEVICE_CONFIRM_KEY = "settings.account.forget_device.confirm";
 
 /** The confirmation for wiping this browser's cached account. */
 export function forgetDeviceConfirmation(): ConfirmRequest {
   return {
-    title: FORGET_DEVICE_TITLE,
-    body: FORGET_DEVICE_BODY,
-    confirmLabel: FORGET_DEVICE_CONFIRM_LABEL,
-    cancelLabel: "Cancel",
+    title: t(FORGET_DEVICE_TITLE_KEY),
+    body: t(FORGET_DEVICE_BODY_KEY),
+    confirmLabel: t(FORGET_DEVICE_CONFIRM_KEY),
+    cancelLabel: t("common.cancel"),
     tone: "danger",
   };
 }
@@ -119,7 +123,7 @@ export function forgetDeviceConfirmation(): ConfirmRequest {
 // ---------------------------------------------------------------------------
 
 /** The question. */
-export const DELETE_ACCOUNT_TITLE = "Delete your account?";
+export const DELETE_ACCOUNT_TITLE_KEY = "settings.account.delete.title";
 
 /**
  * The body — enumerated rather than sweeping, on §6.2.4's rule: the user
@@ -128,22 +132,19 @@ export const DELETE_ACCOUNT_TITLE = "Delete your account?";
  * says so, because "delete your account" alone would not tell the user their
  * local messages go too.
  */
-export const DELETE_ACCOUNT_BODY =
-  "This erases your server-side identity — username, keys, recovery " +
-  "factors and backup — and signs you out everywhere. Your local messages " +
-  "are wiped from this device too. This cannot be undone.";
+export const DELETE_ACCOUNT_BODY_KEY = "settings.account.delete.body";
 
 /** The action. A singleton, named by its noun for the same reason as
- *  {@link FORGET_DEVICE_CONFIRM_LABEL}. */
-export const DELETE_ACCOUNT_CONFIRM_LABEL = "Delete account";
+ *  {@link FORGET_DEVICE_CONFIRM_KEY}. */
+export const DELETE_ACCOUNT_CONFIRM_KEY = "settings.account.delete.confirm";
 
 /** The confirmation for the A3 (GDPR right-to-erasure) account deletion. */
 export function deleteAccountConfirmation(): ConfirmRequest {
   return {
-    title: DELETE_ACCOUNT_TITLE,
-    body: DELETE_ACCOUNT_BODY,
-    confirmLabel: DELETE_ACCOUNT_CONFIRM_LABEL,
-    cancelLabel: "Cancel",
+    title: t(DELETE_ACCOUNT_TITLE_KEY),
+    body: t(DELETE_ACCOUNT_BODY_KEY),
+    confirmLabel: t(DELETE_ACCOUNT_CONFIRM_KEY),
+    cancelLabel: t("common.cancel"),
     tone: "danger",
   };
 }

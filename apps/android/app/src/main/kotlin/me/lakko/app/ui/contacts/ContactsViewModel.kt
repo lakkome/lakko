@@ -164,7 +164,7 @@ public class ContactsViewModel(
         mutableUi.update {
             it.copy(
                 usernameInput = value,
-                usernameError = me.lakko.app.profile.usernameFieldError(check, value),
+                usernameError = me.lakko.app.profile.usernameFieldErrorText(check, value),
             )
         }
     }
@@ -187,7 +187,7 @@ public class ContactsViewModel(
             val decision = me.lakko.app.profile.searchDecision(snapshot.usernameInput, validateUsername)
         ) {
             is me.lakko.app.profile.SearchDecision.Refuse -> {
-                mutableUi.update { it.copy(sendError = decision.message) }
+                mutableUi.update { it.copy(sendError = decision.text.render()) }
                 return
             }
             is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized
@@ -545,7 +545,7 @@ public class ContactsViewModel(
      *  in the repository. */
     private data class UiSlice(
         val usernameInput: String = "",
-        val usernameError: String? = null,
+        val usernameError: me.lakko.app.l10n.UiText? = null,
         val introInput: String = "",
         val sending: Boolean = false,
         val sendError: String? = null,
@@ -573,8 +573,9 @@ public class ContactsViewModel(
 /** Combined snapshot the [ContactsScreen] renders. */
 public data class ContactsUiState(
     val usernameInput: String,
-    /** ADR-0048 §4 — the reason the typed username fails, or `null`. */
-    val usernameError: String? = null,
+    /** ADR-0048 §4 — the reason the typed username fails, or `null`
+     *  (ADR-0058: a catalog message the screen renders). */
+    val usernameError: me.lakko.app.l10n.UiText? = null,
     val introInput: String,
     val sending: Boolean,
     val sendError: String?,

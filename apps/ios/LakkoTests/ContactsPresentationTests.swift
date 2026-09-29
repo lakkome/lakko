@@ -170,7 +170,13 @@ final class ContactsPresentationTests: XCTestCase {
     // MARK: - Devices
 
     func testDeviceRowTitleNeverShowsAKey() {
+        // ADR-0058: the title comes from the catalog, the number passed as
+        // text (so the formatter isolates it).
+        let isolates = CharacterSet(charactersIn: "\u{2066}\u{2067}\u{2068}\u{2069}")
+        func plain(_ text: String) -> String {
+            String(text.unicodeScalars.filter { !isolates.contains($0) })
+        }
         XCTAssertEqual(DeviceRowPresentation.title(isSelf: true, position: 1), "This device")
-        XCTAssertEqual(DeviceRowPresentation.title(isSelf: false, position: 3), "Device 3")
+        XCTAssertEqual(plain(DeviceRowPresentation.title(isSelf: false, position: 3)), "Device 3")
     }
 }

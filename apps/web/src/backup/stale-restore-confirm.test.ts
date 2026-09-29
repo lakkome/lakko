@@ -19,10 +19,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  STALE_RESTORE_BODY,
-  STALE_RESTORE_CANCEL_LABEL,
-  STALE_RESTORE_CONFIRM_LABEL,
-  STALE_RESTORE_TITLE,
+  staleRestoreConsequence,
+  staleRestoreCancelLabel,
+  staleRestoreConfirmLabel,
+  staleRestoreTitle,
   staleRestoreConfirmation,
 } from "./stale-restore-confirm";
 
@@ -33,15 +33,15 @@ describe("the stale-backup restore confirmation", () => {
     // weigh the override without it.
     const c = staleRestoreConfirmation({ reason: "signed 45 days ago" });
     expect(c.body).toContain("signed 45 days ago");
-    expect(c.body).toContain(STALE_RESTORE_BODY);
+    expect(c.body).toContain(staleRestoreConsequence());
   });
 
   it("states what a rollback costs, in the terms ADR-0037 names", () => {
     // Older messages, and devices the user removed reappearing — the second
     // is the one with a security consequence, so it is named explicitly
     // rather than folded into "older state".
-    expect(STALE_RESTORE_BODY).toContain("older messages");
-    expect(STALE_RESTORE_BODY).toContain("devices you removed may reappear");
+    expect(staleRestoreConsequence()).toContain("older messages");
+    expect(staleRestoreConsequence()).toContain("devices you removed may reappear");
   });
 
   it("labels the action as the override it is", () => {
@@ -50,14 +50,14 @@ describe("the stale-backup restore confirmation", () => {
     // (the restore) and marks it as the override in the same breath.
     const c = staleRestoreConfirmation({ reason: "r" });
     expect(c.confirmLabel).toBe("Restore anyway");
-    expect(STALE_RESTORE_CONFIRM_LABEL).toBe("Restore anyway");
+    expect(staleRestoreConfirmLabel()).toBe("Restore anyway");
     expect(c.cancelLabel).toBe("Cancel");
-    expect(STALE_RESTORE_CANCEL_LABEL).toBe("Cancel");
+    expect(staleRestoreCancelLabel()).toBe("Cancel");
   });
 
   it("asks a question rather than announcing a fact", () => {
     const c = staleRestoreConfirmation({ reason: "r" });
-    expect(c.title).toBe(STALE_RESTORE_TITLE);
+    expect(c.title).toBe(staleRestoreTitle());
     expect(c.title).toBe("Restore this older backup?");
   });
 

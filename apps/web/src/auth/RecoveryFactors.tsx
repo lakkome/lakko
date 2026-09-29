@@ -17,6 +17,21 @@ import { AuthClient, AuthHttpError } from "./client";
 import { isPlausibleContact } from "./contact-shape";
 import { normalizeTotpCode } from "./totp-code";
 import { ContactKind } from "./wire";
+import { authLimitMessage, isOffline } from "./auth-error-copy";
+import { t } from "../l10n";
+import { tRich } from "../l10n/rich";
+
+/**
+ * The text a failed enrolment shows (ADR-0058 section 6: from the kind of
+ * failure, never the server's prose, which goes to the log). Returned as a
+ * function so it renders in the language current when it is shown.
+ */
+function failureText(err: unknown, genericKey: string): () => string {
+  console.warn("[recovery-factors] enrolment failed", err);
+  return () => authLimitMessage(err) ?? (isOffline(err) ? t("common.error.offline") : t(genericKey));
+}
+
+const sessionEnded = (): string => t("common.error.session_ended");
 
 // ---- Authenticator (TOTP) enrollment — ADR-0018 factor (c) ------
 
@@ -31,7 +46,7 @@ export function TotpEnrollView(): JSX.Element {
     | { kind: "done" }
     | { kind: "already-enabled" }
     | { kind: "unavailable" }
-    | { kind: "error"; message: string };
+    | { kind: "error"; message: () => string };
   const [state, setState] = createSignal<State>({ kind: "idle" });
   const [code, setCode] = createSignal("");
   const [confirmError, setConfirmError] = createSignal<string | null>(null);
@@ -66,10 +81,7 @@ export function TotpEnrollView(): JSX.Element {
   async function start(): Promise<void> {
     const token = sessionToken();
     if (token === null) {
-      setState({
-        kind: "error",
-        message: "Your session has ended. Sign in again.",
-      });
+      setState({ kind: "error", message: sessionEnded });
       return;
     }
     setState({ kind: "starting" });
@@ -93,10 +105,7 @@ export function TotpEnrollView(): JSX.Element {
         setState({ kind: "unavailable" });
         return;
       }
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setState({ kind: "error", message: failureText(err, "settings.recovery.totp.error.generic") });
     }
   }
 
@@ -107,15 +116,12 @@ export function TotpEnrollView(): JSX.Element {
     setConfirmError(null);
     const normalized = normalizeTotpCode(code());
     if (normalized === null) {
-      setConfirmError("Enter the 6-digit code from your authenticator app.");
+      setConfirmError(t("recovery.totp.error.enter_code"));
       return;
     }
     const token = sessionToken();
     if (token === null) {
-      setState({
-        kind: "error",
-        message: "Your session has ended. Sign in again.",
-      });
+      setState({ kind: "error", message: sessionEnded });
       return;
     }
     setState({
@@ -131,9 +137,7 @@ export function TotpEnrollView(): JSX.Element {
       if (err instanceof AuthHttpError && err.status === 401) {
         // Wrong / stale code — the pending enrollment survives, so
         // just let the user retry with the next code.
-        setConfirmError(
-          "That code did not work. Wait for the next code in the app and try again.",
-        );
+        setConfirmError(t("settings.recovery.totp.error.wrong"));
         setState({
           kind: "confirm",
           otpauthUri: s.otpauthUri,
@@ -149,19 +153,13 @@ export function TotpEnrollView(): JSX.Element {
         setState({ kind: "unavailable" });
         return;
       }
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setState({ kind: "error", message: failureText(err, "settings.recovery.totp.error.generic") });
     }
   }
 
   return (
     <div>
-      <p class="lk-card-desc">
-        A six-digit code from an authenticator app lets you sign in again if you lose
-        your password.
-      </p>
+      <p class="lk-card-desc">{t("settings.recovery.totp.lede")}</p>
       <Switch>
         <Match when={state().kind === "idle"}>
           {/* HONESTY NOTE: the server has no TOTP "status" endpoint,
@@ -170,11 +168,11 @@ export function TotpEnrollView(): JSX.Element {
               409 from /totp/enroll/start flips this card to
               "already enabled". */}
           <button class="primary" type="button" onClick={() => void start()}>
-            Set up authenticator
+            {t("settings.recovery.totp.set_up")}
           </button>
         </Match>
         <Match when={state().kind === "starting"}>
-          <p class="lk-muted">Preparing...</p>
+          <p class="lk-muted">{t("common.preparing")}</p>
         </Match>
         <Match
           when={state().kind === "confirm" || state().kind === "finishing"}
@@ -188,17 +186,16 @@ export function TotpEnrollView(): JSX.Element {
             const busy = s.kind === "finishing";
             return (
               <div>
-                <p>
-                  Scan this code with your authenticator app, or type the key in by hand,
-                  then enter the six-digit code the app shows.
-                </p>
+                <p>{t("settings.recovery.totp.scan")}</p>
                 <canvas class="lk-qr" ref={(el) => setCanvasRef(el)} />
                 <p class="lk-meta">
-                  Key: <code style={{ "user-select": "all" }}>{secretB32}</code>
+                  {tRich("settings.recovery.totp.key", {
+                    key: <code style={{ "user-select": "all" }}>{secretB32}</code>,
+                  })}
                 </p>
                 <form onSubmit={(e) => void finish(e)}>
                   <label>
-                    Code from the app
+                    {t("recovery.totp.code_label")}
                     <input
                       type="text"
                       inputmode="numeric"
@@ -221,14 +218,14 @@ export function TotpEnrollView(): JSX.Element {
                     <p class="form-error">{confirmError()}</p>
                   </Show>
                   <button class="primary" type="submit" disabled={busy}>
-                    {busy ? "Confirming..." : "Confirm"}
+                    {busy ? t("common.confirming") : t("common.confirm")}
                   </button>{" "}
                   <button
                     type="button"
                     disabled={busy}
                     onClick={() => setState({ kind: "idle" })}
                   >
-                    Cancel
+                    {t("common.cancel")}
                   </button>
                 </form>
               </div>
@@ -236,25 +233,18 @@ export function TotpEnrollView(): JSX.Element {
           }}
         </Match>
         <Match when={state().kind === "done"}>
-          <p class="form-info">
-            Authenticator set up. A code from the app can now get you back into your account.
-          </p>
+          <p class="form-info">{t("settings.recovery.totp.done")}</p>
         </Match>
         <Match when={state().kind === "already-enabled"}>
-          <p class="form-info">
-            An authenticator is already set up for this account. To replace it, sign in
-            again with your recovery phrase or from another device first.
-          </p>
+          <p class="form-info">{t("settings.recovery.totp.already_enabled")}</p>
         </Match>
         <Match when={state().kind === "unavailable"}>
-          <p class="form-error">
-            Authenticator setup is not available right now.
-          </p>
+          <p class="form-error">{t("settings.recovery.totp.unavailable")}</p>
         </Match>
         <Match when={state().kind === "error"}>
           {(_) => {
             const s = state();
-            const message = s.kind === "error" ? s.message : "Unknown error.";
+            const message = s.kind === "error" ? s.message() : "";
             return (
               <div>
                 <p class="form-error">{message}</p>
@@ -262,7 +252,7 @@ export function TotpEnrollView(): JSX.Element {
                   type="button"
                   onClick={() => setState({ kind: "idle" })}
                 >
-                  Try again
+                  {t("common.try_again")}
                 </button>
               </div>
             );
@@ -286,7 +276,7 @@ export function ContactEnrollView(): JSX.Element {
     | { kind: "done" }
     | { kind: "already-enabled" }
     | { kind: "unavailable" }
-    | { kind: "error"; message: string };
+    | { kind: "error"; message: () => string };
   const [state, setState] = createSignal<State>({ kind: "idle" });
   const [contactKind, setContactKind] = createSignal<ContactKind>(
     ContactKind.Email,
@@ -308,17 +298,14 @@ export function ContactEnrollView(): JSX.Element {
     if (!isPlausibleContact(k, contact())) {
       setRequestError(
         k === ContactKind.Email
-          ? "Enter a valid email address."
-          : "Enter a phone number in international format (e.g. +15551234567).",
+          ? t("recovery.contact.error.invalid_email")
+          : t("recovery.contact.error.invalid_phone"),
       );
       return;
     }
     const token = sessionToken();
     if (token === null) {
-      setState({
-        kind: "error",
-        message: "Your session has ended. Sign in again.",
-      });
+      setState({ kind: "error", message: sessionEnded });
       return;
     }
     setState({ kind: "starting" });
@@ -341,14 +328,11 @@ export function ContactEnrollView(): JSX.Element {
       // A 400 (malformed contact) bounces back to the request step so
       // the user can correct it.
       if (err instanceof AuthHttpError && err.status === 400) {
-        setRequestError("That does not look right. Check it and try again.");
+        setRequestError(t("settings.recovery.contact.error.bad_contact"));
         setState({ kind: "idle" });
         return;
       }
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setState({ kind: "error", message: failureText(err, "settings.recovery.contact.error.generic") });
     }
   }
 
@@ -359,15 +343,12 @@ export function ContactEnrollView(): JSX.Element {
     setConfirmError(null);
     const normalized = normalizeTotpCode(code());
     if (normalized === null) {
-      setConfirmError("Enter the 6-digit code we sent.");
+      setConfirmError(t("recovery.contact.error.enter_code"));
       return;
     }
     const token = sessionToken();
     if (token === null) {
-      setState({
-        kind: "error",
-        message: "Your session has ended. Sign in again.",
-      });
+      setState({ kind: "error", message: sessionEnded });
       return;
     }
     setState({
@@ -387,9 +368,7 @@ export function ContactEnrollView(): JSX.Element {
       if (err instanceof AuthHttpError && err.status === 401) {
         // Wrong / stale code — the pending challenge survives, so just
         // let the user retry with the code (or re-send one).
-        setConfirmError(
-          "That code did not work. Check the code we sent and try again.",
-        );
+        setConfirmError(t("recovery.contact.error.wrong"));
         setState({ kind: "confirm", contactKind: s.contactKind, contact: s.contact });
         return;
       }
@@ -401,19 +380,13 @@ export function ContactEnrollView(): JSX.Element {
         setState({ kind: "unavailable" });
         return;
       }
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setState({ kind: "error", message: failureText(err, "settings.recovery.contact.error.generic") });
     }
   }
 
   return (
     <div>
-      <p class="lk-card-desc">
-        A one-time code sent to your email or phone lets you sign in again if you lose
-        your password.
-      </p>
+      <p class="lk-card-desc">{t("settings.recovery.contact.lede")}</p>
       <Switch>
         <Match when={state().kind === "idle" || state().kind === "starting"}>
           {/* HONESTY NOTE: the server exposes no recovery-contact
@@ -438,7 +411,7 @@ export function ContactEnrollView(): JSX.Element {
                     class={contactKind() === ContactKind.Email ? "primary" : ""}
                     onClick={() => setContactKind(ContactKind.Email)}
                   >
-                    Email
+                    {t("common.email")}
                   </button>
                   <button
                     type="button"
@@ -448,11 +421,11 @@ export function ContactEnrollView(): JSX.Element {
                     class={contactKind() === ContactKind.Phone ? "primary" : ""}
                     onClick={() => setContactKind(ContactKind.Phone)}
                   >
-                    Phone
+                    {t("common.phone")}
                   </button>
                 </div>
                 <label>
-                  {contactKind() === ContactKind.Email ? "Email" : "Phone number"}
+                  {contactKind() === ContactKind.Email ? t("common.email") : t("recovery.contact.phone_label")}
                   <input
                     type={contactKind() === ContactKind.Email ? "email" : "tel"}
                     autocomplete={
@@ -473,7 +446,7 @@ export function ContactEnrollView(): JSX.Element {
                   <p class="form-error">{requestError()}</p>
                 </Show>
                 <button class="primary" type="submit" disabled={busy}>
-                  {busy ? "Sending..." : "Send code"}
+                  {busy ? t("common.sending") : t("recovery.contact.send")}
                 </button>
               </form>
             );
@@ -494,12 +467,16 @@ export function ContactEnrollView(): JSX.Element {
             return (
               <div>
                 <p>
-                  We sent a six-digit code to <strong>{to}</strong>
-                  {k === ContactKind.Email ? " by email" : " by text message"}. Enter it below.
+                  {tRich(
+                    k === ContactKind.Email
+                      ? "settings.recovery.contact.sent_email"
+                      : "settings.recovery.contact.sent_phone",
+                    { contact: <strong>{to}</strong> },
+                  )}
                 </p>
                 <form onSubmit={(e) => void finish(e)}>
                   <label>
-                    Code we sent
+                    {t("recovery.contact.code_label")}
                     <input
                       type="text"
                       inputmode="numeric"
@@ -522,14 +499,14 @@ export function ContactEnrollView(): JSX.Element {
                     <p class="form-error">{confirmError()}</p>
                   </Show>
                   <button class="primary" type="submit" disabled={busy}>
-                    {busy ? "Confirming..." : "Confirm"}
+                    {busy ? t("common.confirming") : t("common.confirm")}
                   </button>{" "}
                   <button
                     type="button"
                     disabled={busy}
                     onClick={() => setState({ kind: "idle" })}
                   >
-                    Cancel
+                    {t("common.cancel")}
                   </button>
                 </form>
               </div>
@@ -537,25 +514,18 @@ export function ContactEnrollView(): JSX.Element {
           }}
         </Match>
         <Match when={state().kind === "done"}>
-          <p class="form-info">
-            Done. A code sent there can now get you back into your account.
-          </p>
+          <p class="form-info">{t("settings.recovery.contact.done")}</p>
         </Match>
         <Match when={state().kind === "already-enabled"}>
-          <p class="form-info">
-            An email or phone is already set for this account. To replace it, sign in again
-            with your recovery phrase or from another device first.
-          </p>
+          <p class="form-info">{t("settings.recovery.contact.already_enabled")}</p>
         </Match>
         <Match when={state().kind === "unavailable"}>
-          <p class="form-error">
-            Email and phone recovery are not available right now.
-          </p>
+          <p class="form-error">{t("settings.recovery.contact.unavailable")}</p>
         </Match>
         <Match when={state().kind === "error"}>
           {(_) => {
             const s = state();
-            const message = s.kind === "error" ? s.message : "Unknown error.";
+            const message = s.kind === "error" ? s.message() : "";
             return (
               <div>
                 <p class="form-error">{message}</p>
@@ -563,7 +533,7 @@ export function ContactEnrollView(): JSX.Element {
                   type="button"
                   onClick={() => setState({ kind: "idle" })}
                 >
-                  Try again
+                  {t("common.try_again")}
                 </button>
               </div>
             );

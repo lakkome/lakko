@@ -86,7 +86,7 @@ export default function Settings(): JSX.Element {
           />
           <div>
             <div class="lk-settings-me-name">
-              {displayName().length > 0 ? displayName() : username().length > 0 ? `@${username()}` : "Guest"}
+              {displayName().length > 0 ? displayName() : username().length > 0 ? `@${username()}` : t("settings.me.guest")}
             </div>
             <Show when={displayName().length > 0 && username().length > 0}>
               <div class="lk-settings-me-user">@{username()}</div>
@@ -140,7 +140,7 @@ export default function Settings(): JSX.Element {
           <Show when={shown() === "account"}>
             <div class="lk-page-head">
               <h1>{t("settings.section.account")}</h1>
-              <p>Your data, signing out, this device, and deleting your account.</p>
+              <p>{t("settings.account.lede")}</p>
             </div>
             <ExportDataCard />
             <AccountCard />
@@ -156,21 +156,21 @@ function SecuritySection(): JSX.Element {
     <>
       <div class="lk-page-head">
         <h1>{t("settings.section.security")}</h1>
-        <p>How you sign in, which devices can read your messages, and how you get back in.</p>
+        <p>{t("settings.security.lede")}</p>
       </div>
       <PasskeysSection />
       <section class="lk-card">
-        <h2>Devices and recovery</h2>
+        <h2>{t("settings.security.devices_and_recovery")}</h2>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
             <Icon name="devices" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Devices</span>
-            <span class="lk-card-row-sub">See, add and remove the devices on this account.</span>
+            <span class="lk-card-row-title">{t("settings.devices.title")}</span>
+            <span class="lk-card-row-sub">{t("settings.security.devices.sub")}</span>
           </div>
           <A href={paths.devices} class="lk-card-row-action">
-            Manage
+            {t("common.manage")}
           </A>
         </div>
         <div class="lk-card-row">
@@ -178,13 +178,11 @@ function SecuritySection(): JSX.Element {
             <Icon name="lock" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Recovery</span>
-            <span class="lk-card-row-sub">
-              An authenticator app, an email address or a phone number that gets you back in.
-            </span>
+            <span class="lk-card-row-title">{t("settings.recovery.title")}</span>
+            <span class="lk-card-row-sub">{t("settings.security.recovery.sub")}</span>
           </div>
           <A href={paths.settingsSection("recovery")} class="lk-card-row-action">
-            Set up
+            {t("common.set_up")}
           </A>
         </div>
         <div class="lk-card-row">
@@ -192,11 +190,8 @@ function SecuritySection(): JSX.Element {
             <Icon name="shield" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Safety numbers</span>
-            <span class="lk-card-row-sub">
-              Each contact has a safety number. Compare it in person or on a call; matching
-              numbers mean nobody is in between. Find it in the contact's details.
-            </span>
+            <span class="lk-card-row-title">{t("settings.security.safety_numbers.title")}</span>
+            <span class="lk-card-row-sub">{t("settings.security.safety_numbers.sub")}</span>
           </div>
         </div>
       </section>
@@ -212,19 +207,15 @@ function RecoverySection(): JSX.Element {
         {t("settings.section.security")}
       </A>
       <div class="lk-page-head">
-        <h1>Recovery</h1>
-        <p>
-          Your recovery phrase restores everything. These get you back into the account when
-          you have lost your password; your messages then come from the phrase or from another
-          of your devices.
-        </p>
+        <h1>{t("settings.recovery.title")}</h1>
+        <p>{t("settings.recovery.lede")}</p>
       </div>
       <section class="lk-card">
-        <h2>Authenticator app</h2>
+        <h2>{t("settings.recovery.totp.title")}</h2>
         <TotpEnrollView />
       </section>
       <section class="lk-card">
-        <h2>Email or phone</h2>
+        <h2>{t("recovery.method.contact.title")}</h2>
         <ContactEnrollView />
       </section>
     </>
@@ -241,7 +232,7 @@ function AppearanceSection(): JSX.Element {
     <>
       <div class="lk-page-head">
         <h1>{t("settings.section.appearance")}</h1>
-        <p>The theme on this device.</p>
+        <p>{t("settings.appearance.lede")}</p>
       </div>
       <section class="lk-card">
         <h2>{t("settings.appearance.theme")}</h2>
@@ -283,7 +274,7 @@ function AboutSection(): JSX.Element {
     <>
       <div class="lk-page-head">
         <h1>{t("settings.section.about")}</h1>
-        <p>Lakko on the web.</p>
+        <p>{t("settings.about.lede_web")}</p>
       </div>
       <section class="lk-card">
         <div class="lk-card-row">
@@ -291,7 +282,7 @@ function AboutSection(): JSX.Element {
             <Icon name="info" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Version</span>
+            <span class="lk-card-row-title">{t("settings.about.version")}</span>
             <span class="lk-card-row-sub">{appVersion()}</span>
           </div>
         </div>
@@ -300,10 +291,8 @@ function AboutSection(): JSX.Element {
             <Icon name="db" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Licence</span>
-            <span class="lk-card-row-sub">
-              {appLicense}. The source code is free to read, use and improve.
-            </span>
+            <span class="lk-card-row-title">{t("settings.about.licence")}</span>
+            <span class="lk-card-row-sub">{t("settings.about.licence_body", { licence: appLicense })}</span>
           </div>
         </div>
         <div class="lk-card-row">
@@ -311,12 +300,8 @@ function AboutSection(): JSX.Element {
             <Icon name="lock" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">How Lakko protects you</span>
-            <span class="lk-card-row-sub">
-              Messages, calls and contact requests are end-to-end encrypted: only the people in a
-              conversation can read them, never Lakko's servers. Your password never leaves your
-              device, and each contact has a safety number you can compare in person.
-            </span>
+            <span class="lk-card-row-title">{t("settings.about.protection.title")}</span>
+            <span class="lk-card-row-sub">{t("settings.about.protection.body")}</span>
           </div>
         </div>
       </section>
@@ -329,7 +314,7 @@ function MediaSection(): JSX.Element {
     <>
       <div class="lk-page-head">
         <h1>{t("settings.section.media")}</h1>
-        <p>Playback on this device.</p>
+        <p>{t("settings.media.lede")}</p>
       </div>
       <section class="lk-card">
         <div class="lk-card-row">
@@ -337,11 +322,8 @@ function MediaSection(): JSX.Element {
             <Icon name="video" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Autoplay video notes</span>
-            <span class="lk-card-row-sub">
-              Incoming video notes start playing, muted, as they scroll into view.
-              Off by default because autoplay downloads media.
-            </span>
+            <span class="lk-card-row-title">{t("settings.media.autoplay_video_notes.title")}</span>
+            <span class="lk-card-row-sub">{t("settings.media.autoplay_video_notes.sub")}</span>
           </div>
           <button
             type="button"
@@ -351,7 +333,7 @@ function MediaSection(): JSX.Element {
             classList={{ primary: autoplayVideoNotes() }}
             onClick={() => setAutoplayVideoNotes(!autoplayVideoNotes())}
           >
-            {autoplayVideoNotes() ? "On" : "Off"}
+            {autoplayVideoNotes() ? t("common.on") : t("common.off")}
           </button>
         </div>
       </section>
