@@ -11,7 +11,9 @@ import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.parameter
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -193,6 +195,30 @@ public class ChannelsClient(
             throw decodeError(response, "subscribe")
         }
         return response.body<SubscribeResp>().subscriber_id
+    }
+
+    /**
+     * `DELETE /v1/channels/:id/subscribers/:pk` — leave the channel
+     * (ADR-0060 §3): the server drops the subscriber row, its seed envelopes
+     * and its member card. Authenticated by [signatureHeaderName]
+     * (`unsubscribeSigHeaderName()`) carrying [signatureHeaderValue]
+     * (`ChannelSubscriberKeypair.unsubscribeRequestHeader`), signed by the
+     * subscriber key the path names. A `404` (channel or subscriber already
+     * gone) counts as done; any other non-2xx throws.
+     */
+    public suspend fun unsubscribe(
+        channelIdHex: String,
+        subscriberPubkeyHex: String,
+        signatureHeaderName: String,
+        signatureHeaderValue: String,
+    ) {
+        val response: HttpResponse = client.delete(
+            "$baseUrl/v1/channels/$channelIdHex/subscribers/$subscriberPubkeyHex"
+        ) {
+            header(signatureHeaderName, signatureHeaderValue)
+        }
+        if (response.status.isSuccess() || response.status.value == 404) return
+        throw decodeError(response, "unsubscribe")
     }
 
     /** `GET /v1/channels/:id/subscribers` — list registered

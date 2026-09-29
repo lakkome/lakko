@@ -38,10 +38,14 @@ public enum ReachApplyStatus: Equatable {
 /// - **The grants received** from other people, filed under the account key
 ///   resolved at receipt, used to sign writes to their mailbox.
 ///
-/// Not synced across the account's devices yet: the DeviceGroup FFI carries
-/// only its typed bodies (read cursor, draft, flags, order), so the setting and
-/// the reach state live on each device. The residual is stated in the S5
-/// report.
+/// **Carried between the account's devices** (ADR-0060 section 7): a local
+/// change of the setting or of a reach-key version hands its envelope to
+/// ``onDeviceEnvelope`` (the app shell sends it as a DeviceGroup
+/// `ServiceEnvelope`); a received one comes back through
+/// ``adoptDeviceEnvelope(_:)``: a setting replaces what is kept only when
+/// strictly newer, reach-key counters are merged by the core
+/// (`mergeReachState`). Envelopes are kept and re-sent as they are, so a
+/// re-send carries its original stamp.
 @MainActor
 public final class ReachCenter: ObservableObject {
     public static let shared = ReachCenter()
@@ -83,6 +87,11 @@ public final class ReachCenter: ObservableObject {
     /// Called after a setting change or a rotation so profiles are republished
     /// with the new grants (set by the chat layer).
     public var onGrantsChanged: (() -> Void)?
+    /// ADR-0060 section 7 — called with the Visibility or ReachState envelope
+    /// a LOCAL change produced, so the account's other devices get it over
+    /// the DeviceGroup (set by the app shell). Never called for an envelope
+    /// adopted from another device: that one is already on the journal.
+    public var onDeviceEnvelope: ((Data) -> Void)?
     private var syncTask: Task<Void, Never>?
     private var syncAgain = false
 
@@ -110,9 +119,14 @@ public final class ReachCenter: ObservableObject {
             setting = decoded
         } else {
             // A new account (or a device that has never stored one): the
-            // default of UX section 1, stamped so it is a real setting.
-            var fresh = defaultVisibilitySetting()
-            fresh.updatedAtMs = Self.nowMs()
+            // default of UX section 1 at stamp 0, the core's own default and
+            // what web and Android keep. It must NOT carry this device's
+            // clock: a device newly admitted to the account would then hold a
+            // default stamped later than the setting the person actually chose
+            // on their first device, and refuse it when the DeviceGroup
+            // delivers it (ADR-0060 section 7). Any change the person makes is
+            // stamped by ``updateSetting(_:)`` and beats it.
+            let fresh = defaultVisibilitySetting()
             setting = fresh
             record.settingEnvelopeB64 = (try? composeVisibilityEnvelope(setting: fresh))?
                 .base64EncodedString()
@@ -247,20 +261,123 @@ public final class ReachCenter: ObservableObject {
         grantRevision &+= 1
         sync()
         onGrantsChanged?()
+        onDeviceEnvelope?(envelope)
     }
 
-    /// Accept a setting another of this account's devices sent, when newer.
-    public func adoptSetting(envelope: Data) {
+    /// Accept a setting another of this account's devices sent, when strictly
+    /// newer. Kept verbatim (its own stamp), then acted on exactly as a local
+    /// change is: keys registered or removed, Everyone published or
+    /// unpublished (``sync()``), profiles republished and introductions sent
+    /// (``onGrantsChanged``). Not handed back to ``onDeviceEnvelope``.
+    @discardableResult
+    public func adoptSetting(envelope: Data) -> Bool {
         guard isActive, let incoming = try? decodeVisibilityEnvelope(plaintext: envelope),
               visibilityIsNewer(
                   incomingUpdatedAtMs: incoming.updatedAtMs,
-                  storedUpdatedAtMs: setting.updatedAtMs) else { return }
+                  storedUpdatedAtMs: setting.updatedAtMs) else { return false }
         setting = incoming
         record.settingEnvelopeB64 = envelope.base64EncodedString()
         persist()
         grantRevision &+= 1
         sync()
         onGrantsChanged?()
+        return true
+    }
+
+    /// Fold reach-key version counters another of this account's devices
+    /// sent into the stored ones, by the core's one rule (`mergeReachState`,
+    /// ADR-0060 section 7): counters by maximum per `(class, scope)`, never a
+    /// whole-state replace, which would lose a rotation two devices made at
+    /// the same time. When the core says `store`, the state it returns is kept
+    /// exactly as returned (its stamp included) and acted on as a local change
+    /// is (keys registered, profiles republished); when it says `send`, that
+    /// same state goes to the other devices as returned, never re-stamped
+    /// here. A merge the core refuses leaves the stored state as it was.
+    @discardableResult
+    public func adoptReachState(envelope: Data) -> DeviceEnvelopeOutcome {
+        guard isActive else { return .inactive }
+        guard let incoming = try? decodeReachStateEnvelope(plaintext: envelope) else { return .foreign }
+        let merge: FfiReachStateMerge
+        do {
+            merge = try mergeReachState(stored: reachState, incoming: incoming, nowMs: Self.nowMs())
+        } catch {
+            NSLog("ADR-0060: a reach state from another device was not merged: \(error)")
+            return .notNewer
+        }
+        guard merge.store || merge.send else { return .notNewer }
+        guard let composed = try? composeReachStateEnvelope(state: merge.state) else {
+            NSLog("ADR-0060: a merged reach state could not be composed")
+            return .notNewer
+        }
+        if merge.store {
+            reachState = merge.state
+            record.reachStateEnvelopeB64 = composed.base64EncodedString()
+            persist()
+            grantRevision &+= 1
+            sync()
+            onGrantsChanged?()
+        }
+        if merge.send {
+            onDeviceEnvelope?(composed)
+            return .mergedReachState
+        }
+        return .adoptedReachState
+    }
+
+    /// What ``adoptDeviceEnvelope(_:)`` did with a DeviceGroup `ServiceEnvelope`.
+    public enum DeviceEnvelopeOutcome: Equatable {
+        case adoptedSetting
+        /// The incoming reach state was adopted as it came.
+        case adoptedReachState
+        /// The two devices each held a version the other lacked (or this one
+        /// held one the incoming state would overwrite): the merge is kept
+        /// and sent back to the other devices.
+        case mergedReachState
+        /// A Visibility or ReachState no newer than what is kept.
+        case notNewer
+        /// Anything else, or bytes the dispatcher refuses: dropped.
+        case foreign
+        /// No account is active.
+        case inactive
+    }
+
+    /// ADR-0060 section 7 — the receiving end of the DeviceGroup
+    /// `ServiceEnvelope`: dispatch the carried bytes and keep only a
+    /// Visibility or a ReachState, each only when strictly newer by its own
+    /// stamp. Every other envelope kind is dropped.
+    @discardableResult
+    public func adoptDeviceEnvelope(_ envelope: Data) -> DeviceEnvelopeOutcome {
+        guard isActive else { return .inactive }
+        guard let dispatched = try? dispatchIncomingEnvelope(plaintext: envelope) else {
+            return .foreign
+        }
+        switch dispatched.kind {
+        case .visibility:
+            return adoptSetting(envelope: envelope) ? .adoptedSetting : .notNewer
+        case .reachState:
+            return adoptReachState(envelope: envelope)
+        default:
+            return .foreign
+        }
+    }
+
+    /// The Visibility and ReachState envelopes kept for `accountIdB64`,
+    /// verbatim, for a device this one has just admitted to the DeviceGroup.
+    /// Empty when another account (or none) is active. One still at stamp 0
+    /// (the untouched default, nothing rotated) is left out: the new device
+    /// holds the same at the same stamp and would refuse it.
+    public func deviceEnvelopes(accountIdB64: String) -> [Data] {
+        guard isActive, self.accountIdB64 == accountIdB64 else { return [] }
+        var out: [Data] = []
+        if setting.updatedAtMs > 0, let b64 = record.settingEnvelopeB64,
+           let bytes = Data(base64Encoded: b64) {
+            out.append(bytes)
+        }
+        if reachState.updatedAtMs > 0, let b64 = record.reachStateEnvelopeB64,
+           let bytes = Data(base64Encoded: b64) {
+            out.append(bytes)
+        }
+        return out
     }
 
     /// UX section 5 — the `Members can find me` switch of one group or
@@ -294,12 +411,13 @@ public final class ReachCenter: ObservableObject {
     public func rotate(_ reachClass: FfiReachClass, scope: Data = Data()) {
         guard isActive else { return }
         reachState = ReachRules.bumping(reachClass, scope: scope, in: reachState, nowMs: Self.nowMs())
-        record.reachStateEnvelopeB64 = (try? composeReachStateEnvelope(state: reachState))?
-            .base64EncodedString()
+        let envelope = try? composeReachStateEnvelope(state: reachState)
+        record.reachStateEnvelopeB64 = envelope?.base64EncodedString()
         persist()
         grantRevision &+= 1
         sync()
         onGrantsChanged?()
+        if let envelope { onDeviceEnvelope?(envelope) }
     }
 
     /// A group lost a member: rotate this account's `group` and `member` keys
@@ -309,12 +427,13 @@ public final class ReachCenter: ObservableObject {
         let now = Self.nowMs()
         reachState = ReachRules.bumping(.group, scope: groupId, in: reachState, nowMs: now)
         reachState = ReachRules.bumping(.member, scope: groupId, in: reachState, nowMs: now)
-        record.reachStateEnvelopeB64 = (try? composeReachStateEnvelope(state: reachState))?
-            .base64EncodedString()
+        let envelope = try? composeReachStateEnvelope(state: reachState)
+        record.reachStateEnvelopeB64 = envelope?.base64EncodedString()
         persist()
         grantRevision &+= 1
         sync()
         onGrantsChanged?()
+        if let envelope { onDeviceEnvelope?(envelope) }
     }
 
     // MARK: - Channel member card (ADR-0060 section 3)

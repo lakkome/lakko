@@ -95,8 +95,13 @@ internal data class ReachDoc(
     val publishedPublic: Boolean? = null,
     /** The username certificate discovery signed for this account, hex. */
     val usernameCertHex: String? = null,
-    /** The display name the Everyone name terms were published for. */
-    val publishedName: String? = null,
+    /** What the Everyone publication was last sent for
+     *  ([everyonePublishKey]: name, username and certificate). */
+    val publishedKey: String? = null,
+    /** The ReachState envelope (`composeReachStateEnvelope`) in force, hex:
+     *  composed here on a rotation, or accepted verbatim from another of the
+     *  account's devices. Carries its stamp, so a re-send keeps it. */
+    val reachStateHex: String? = null,
 )
 
 /** Where the documents live. An interface so the manager is testable. */

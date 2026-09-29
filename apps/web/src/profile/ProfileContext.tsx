@@ -63,7 +63,7 @@ import {
 } from "./profile-request";
 import { journalHex } from "../ds/access";
 import { rosterOf } from "../chat/client";
-import { reachSession, reachSessionSignal } from "../reach/reach-service";
+import { reachSession, reachSessionSignal, reachVersionsTick } from "../reach/reach-service";
 import { foldProfileGrants } from "../reach/grant-intake";
 import { ScopedDiscoveryClient, usernameCertKey } from "../reach/scoped-discovery";
 import { visibilitySetting } from "../reach/visibility-store";
@@ -411,6 +411,8 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     const setting = visibilitySetting();
     const session = reachSessionSignal();
     const groups = chats.groups();
+    // A key version changed here or on another device (ADR-0060 section 7).
+    reachVersionsTick();
     untrack(() => {
       const account = accountId();
       if (setting === null || session === null || account === null) return;

@@ -18,15 +18,20 @@
  * that fails leaves the book untouched (the next one retries the same diff),
  * so the registered set on this device never claims more than the DS holds.
  *
- * The version counters are device-local. ADR-0060 section 7 asks for them in
- * the ReachState envelope on the DeviceGroup, but the wasm DeviceGroup has no
- * way to carry an arbitrary application envelope (it composes only its four
- * typed payloads), so that sync is not built on web - see the sprint report.
+ * The version counters are shared by the account's devices (ADR-0060
+ * section 7): every local change of a counter moves the book's
+ * `stateUpdatedAtMs` forward and marks the ReachState envelope dirty in
+ * `service-envelope-outbox.ts`, which sends it over the DeviceGroup body
+ * `ServiceEnvelope`; {@link ReachSession.receiveReachState} folds a state
+ * from another device by the core's `mergeReachState` rule. Without that, two devices writing one
+ * mailbox's key set would each keep re-registering the key the other rotated
+ * away.
  */
 import { createSignal, type Accessor } from "solid-js";
 
 import type {
   ReachGrant as WasmReachGrant,
+  ReachState as WasmReachState,
   VisibilitySetting as WasmVisibilitySetting,
 } from "../../wasm/lakko_ffi_wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
@@ -39,6 +44,7 @@ import {
   addLink,
   addReply,
   applyAcceptedDiff,
+  adoptReachState,
   bumpVersion,
   decodeReachBook,
   desiredReachKeys,
@@ -50,11 +56,14 @@ import {
   isAccountWideClass,
   isEmptyDiff,
   pruneExpired,
+  reachClassName,
+  reachStateEntries,
   raiseVersion,
   reachDiff,
   rotateFof,
   versionOf,
   type ReachBook,
+  type ReachStateEntryModel,
   type ReachClassName,
   type ReplyRecord,
   type ResolvedReachKey,
@@ -66,6 +75,8 @@ import {
   type ReceivedGrants,
 } from "./received-grants";
 import { loadReachRow, saveReachRow } from "./reach-store";
+import { markServiceEnvelopeDirty, setServiceEnvelopeComposer } from "./service-envelope-outbox";
+import { nextStamp } from "./visibility-store";
 
 /** The scopes the account is in, as the sync reads them. */
 export interface ReachScopes {
@@ -79,6 +90,12 @@ export type ReachApplyStatus = "idle" | "applying" | "applied" | "offline" | "fa
 const [applyStatus, setApplyStatus] = createSignal<ReachApplyStatus>("idle");
 /** Reactive: the state of the last sync, for the settings screen. */
 export const reachApplyStatus: Accessor<ReachApplyStatus> = applyStatus;
+
+const [versionsTick, setVersionsTick] = createSignal(0);
+/** Reactive: moves whenever a reach key version counter changed, here or on
+ *  another device of the account. What a profile or an introduction record
+ *  carries depends on the counters, so their publishers re-check on it. */
+export const reachVersionsTick: Accessor<number> = versionsTick;
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
@@ -345,22 +362,30 @@ export class ReachSession {
    */
   async rotateOnShrink(groupId: Uint8Array): Promise<void> {
     const hex = journalHex(groupId);
-    this.book = bumpVersion(bumpVersion(this.book, "group", hex), "member", hex);
+    this.book = this.restamp(bumpVersion(bumpVersion(this.book, "group", hex), "member", hex));
     await this.persistBook();
+    this.versionsChanged(true);
     await this.syncNow(false);
   }
 
   /** A contact was removed: new `contact` and `fof` versions. */
   async rotateOnContactRemoved(): Promise<void> {
-    this.book = bumpVersion(bumpVersion(this.book, "contact", ""), "fof", "");
+    this.book = this.restamp(bumpVersion(bumpVersion(this.book, "contact", ""), "fof", ""));
     await this.persistBook();
+    this.versionsChanged(true);
     await this.syncNow(false);
   }
 
   /** The channel moved to a new seed epoch: its key follows. */
   async channelEpoch(channelId: Uint8Array, epoch: number): Promise<void> {
-    this.book = raiseVersion(this.book, "channel", journalHex(channelId), epoch);
+    const next = raiseVersion(this.book, "channel", journalHex(channelId), epoch);
+    if (next === this.book) {
+      this.requestSync();
+      return;
+    }
+    this.book = this.restamp(next);
     await this.persistBook();
+    this.versionsChanged(true);
     this.requestSync();
   }
 
@@ -437,7 +462,11 @@ export class ReachSession {
     if (this.stopped) return;
     const now = this.now();
     let book = pruneExpired(this.book, now);
-    if (fofRotationDue(book, now)) book = rotateFof(book, now);
+    let rotated = false;
+    if (fofRotationDue(book, now)) {
+      book = this.restamp(rotateFof(book, now));
+      rotated = true;
+    }
     const setting = this.setting();
     const scopes = this.scopes();
     const everyone =
@@ -461,6 +490,7 @@ export class ReachSession {
       this.book = book;
       await this.persistBook();
     }
+    if (rotated) this.versionsChanged(true);
     if (isEmptyDiff(diff)) {
       setApplyStatus("applied");
       return;
@@ -484,6 +514,131 @@ export class ReachSession {
     this.book = applyAcceptedDiff(this.book, diff);
     await this.persistBook();
     setApplyStatus("applied");
+  }
+
+  // ---------------------------------------------------------------------
+  // The counters shared with the account's other devices (section 7)
+  // ---------------------------------------------------------------------
+
+  /** The book with its counters stamped as changed now, strictly after the
+   *  previous stamp. */
+  private restamp(book: ReachBook): ReachBook {
+    const stamp = nextStamp(BigInt(book.stateUpdatedAtMs), this.now());
+    return { ...book, stateUpdatedAtMs: Number(stamp) };
+  }
+
+  /** A counter changed: let the publishers re-check, and (for a change made
+   *  or merged here) send the state on to the other devices. */
+  private versionsChanged(send: boolean): void {
+    setVersionsTick((t) => t + 1);
+    if (send) markServiceEnvelopeDirty("reachState");
+  }
+
+  /** The stamp of the counters as this device holds them. */
+  reachStateUpdatedAtMs(): bigint {
+    return BigInt(this.book.stateUpdatedAtMs);
+  }
+
+  /** The counters as a wasm `ReachState`, under the stamp of the last
+   *  change (never re-stamped). The caller frees it. */
+  private reachState(): WasmReachState {
+    const entries = reachStateEntries(this.book).map(
+      (e) =>
+        new this.wasm.ReachStateEntry(
+          wasmClass(this.wasm, e.cls),
+          isAccountWideClass(e.cls) ? new Uint8Array(0) : hexToBytes(e.scopeHex),
+          e.version,
+        ),
+    );
+    const max = this.wasm.maxReachStateEntries();
+    if (entries.length > max) {
+      // eslint-disable-next-line no-console
+      console.warn("[reach] more version counters than one ReachState carries; the rest stay on this device");
+      for (const e of entries.slice(max)) e.free();
+      entries.length = max;
+    }
+    return new this.wasm.ReachState(entries, BigInt(this.book.stateUpdatedAtMs));
+  }
+
+  /** The ReachState envelope: every counter, under the stamp of the last
+   *  change. Composed as the state is, never re-stamped. `null` when it does
+   *  not compose (logged). */
+  reachStateEnvelope(): Uint8Array | null {
+    const state = this.reachState();
+    try {
+      return this.wasm.composeReachStateEnvelope(state);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[reach] the ReachState envelope did not compose", err instanceof Error ? err.message : "");
+      return null;
+    } finally {
+      state.free();
+    }
+  }
+
+  /**
+   * A ReachState from another device of this account, folded by the core's
+   * one rule, `mergeReachState(stored, incoming, now)` (ADR-0060 section 7):
+   * this device never decides the merge itself. When the result says
+   * `store`, the returned state is kept exactly as returned (its counters
+   * and its stamp) and everything a local change triggers runs: the keys are
+   * re-synced and the publishers re-check. When it says `send`, the state
+   * goes to the other devices as it is (the outbox composes the book, which
+   * now equals it, under the returned stamp). Returns whether it was stored.
+   */
+  async receiveReachState(incoming: WasmReachState): Promise<boolean> {
+    if (this.stopped) return false;
+    const stored = this.reachState();
+    let merge: ReturnType<Wasm["mergeReachState"]>;
+    try {
+      merge = this.wasm.mergeReachState(stored, incoming, BigInt(Math.floor(this.now())));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[reach] a ReachState from another device did not merge", err instanceof Error ? err.message : "");
+      return false;
+    } finally {
+      stored.free();
+    }
+    try {
+      if (!merge.store) return false;
+      const state = merge.state;
+      const entries: ReachStateEntryModel[] = [];
+      let stamp: bigint;
+      try {
+        stamp = state.updatedAtMs;
+        for (const e of state.entries) {
+          try {
+            const cls = reachClassName(e.class);
+            if (cls !== null) {
+              entries.push({
+                cls,
+                scopeHex: isAccountWideClass(cls) ? "" : journalHex(e.scopeId),
+                version: e.version,
+              });
+            }
+          } finally {
+            e.free();
+          }
+        }
+      } finally {
+        state.free();
+      }
+      const fofBefore = versionOf(this.book, "fof", "");
+      let book = adoptReachState(this.book, entries, Number(stamp));
+      // The scheduled `fof` rotation happened on the other device: this one
+      // starts its own schedule from here instead of rotating a second time.
+      // Client-local bookkeeping, not part of the shared state.
+      if (versionOf(book, "fof", "") > fofBefore) {
+        book = { ...book, fofRotatedAtMs: Math.max(book.fofRotatedAtMs, this.now()) };
+      }
+      this.book = book;
+      await this.persistBook();
+      this.versionsChanged(merge.send);
+      this.requestSync();
+      return true;
+    } finally {
+      merge.free();
+    }
   }
 
   private async persistBook(): Promise<void> {
@@ -530,6 +685,9 @@ export async function startReachSession(
   setSessionSignal(session);
   return session;
 }
+
+// The ReachState envelope the other devices get: the running session's.
+setServiceEnvelopeComposer("reachState", () => Promise.resolve(current?.reachStateEnvelope() ?? null));
 
 /** Sign-out: stop the session and forget its seed. */
 export function stopReachSession(): void {

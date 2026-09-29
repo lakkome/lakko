@@ -4026,39 +4026,70 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0060 §5 — enter or leave Everyone on discovery: in Everyone, the
-     * discovery lookup key of every `nameSearchTerms(displayName)` term (one lookup token
-     * each), republished on every name change; outside it, `public: false`
-     * and no terms. Idempotent, and skipped when the server already holds it.
+     * ADR-0060 §5 — enter or leave Everyone on discovery. In Everyone: the
+     * lookup key of every `nameSearchTerms(displayName)` term, and the public
+     * record composed over the OPRF OUTPUTS of those terms plus the username
+     * (only a username this account holds a certificate for); republished
+     * whenever the name, the username or the certificate changes. Outside it:
+     * `public: false`, no terms, no record. Skipped when the server already
+     * holds it; with neither a name nor a certified username nothing is sent
+     * (the server refuses Everyone without a record).
      */
     private fun refreshEveryoneBestEffort() {
-        val token = keyPackageAccount.get()?.sessionToken ?: return
+        val account = keyPackageAccount.get() ?: return
         reachScope.launch {
             try {
                 val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
                 val setting = reach.currentVisibility() ?: return@launch
                 val everyone = setting.mode == uniffi.lakko_ffi_uniffi.FfiVisibilityMode.EVERYONE
-                val name = ownDisplayName()?.takeIf { it.isNotBlank() }
-                val (published, publishedName) = reach.publishedEveryone()
-                if (everyone && published == true && publishedName == name) return@launch
-                if (!everyone && published == false) return@launch
-                if (!everyone && published == null) {
-                    // Never published: nothing to withdraw beyond the default.
-                    reach.notePublishedEveryone(false, null)
-                    return@launch
-                }
-                keyPackageDiscoveryFactory().use { client ->
-                    client.setSessionToken(token)
-                    // ADR-0060 §5: the server gets each term's lookup key,
-                    // never its OPRF output.
-                    val lookupKeys = if (everyone && name != null) {
-                        uniffi.lakko_ffi_uniffi.nameSearchTerms(name).map { term -> client.oprfNameTerm(term).lookupKey }
-                    } else {
-                        emptyList()
+                val own = me.lakko.app.profile.OwnProfileStore.load(applicationContext, account.accountId)
+                val name = own?.displayName?.takeIf { it.isNotBlank() }
+                val certificate = own?.username?.let { reach.usernameCertificate() }
+                val key = me.lakko.app.reach.everyonePublishKey(name, own?.username, certificate)
+                val (published, publishedKey) = reach.publishedEveryone()
+                when (me.lakko.app.reach.everyoneAction(everyone, published, publishedKey, key)) {
+                    me.lakko.app.reach.EveryoneAction.NONE -> return@launch
+                    me.lakko.app.reach.EveryoneAction.NOTE_WITHDRAWN -> {
+                        // Never published: nothing to withdraw beyond the default.
+                        reach.notePublishedEveryone(false, null)
+                        return@launch
                     }
-                    client.putVisibility(public = everyone, nameTermLookupKeys = lookupKeys)
+                    me.lakko.app.reach.EveryoneAction.PUT -> Unit
                 }
-                reach.notePublishedEveryone(everyone, if (everyone) name else null)
+                val outcome = keyPackageDiscoveryFactory().use { client ->
+                    client.setSessionToken(account.sessionToken)
+                    me.lakko.app.reach.publishEveryone(
+                        wantPublic = everyone,
+                        who = me.lakko.app.reach.EveryoneIdentity(
+                            displayName = name,
+                            username = own?.username,
+                            certificate = certificate,
+                            identityPk = reach.ownAccountKey(),
+                            accountId = account.accountId,
+                        ),
+                        ops = me.lakko.app.reach.EveryoneOps(
+                            nameSearchTerms = { uniffi.lakko_ffi_uniffi.nameSearchTerms(it) },
+                            oprfNameTerm = { client.oprfNameTerm(it) },
+                            oprfUsername = { client.oprfUsername(it) },
+                            composePublicRecord = { payload, outputs, issuedAt ->
+                                uniffi.lakko_ffi_uniffi.composePublicRecord(payload, outputs, issuedAt)
+                            },
+                            putVisibility = { public, lookupKeys, record ->
+                                client.putVisibility(public, lookupKeys, record)
+                            },
+                        ),
+                        nowMs = System.currentTimeMillis(),
+                    )
+                }
+                when (outcome) {
+                    me.lakko.app.reach.EveryoneOutcome.PUBLISHED -> reach.notePublishedEveryone(true, key)
+                    me.lakko.app.reach.EveryoneOutcome.WITHDRAWN -> reach.notePublishedEveryone(false, null)
+                    me.lakko.app.reach.EveryoneOutcome.NOTHING_TO_PUBLISH ->
+                        android.util.Log.i(
+                            "ChatRepository",
+                            "ADR-0060 Everyone not published: no name, no certified username or no identity",
+                        )
+                }
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {

@@ -60,7 +60,7 @@ use lakko_contacts::reach::{
 use lakko_contacts::visibility::{
     compose_reach_state as rust_compose_reach_state, compose_visibility as rust_compose_visibility,
     decode_reach_state as rust_decode_reach_state, decode_visibility as rust_decode_visibility,
-    reach_state_is_newer as rust_reach_state_is_newer,
+    merge_reach_state as rust_merge_reach_state, reach_state_is_newer as rust_reach_state_is_newer,
     visibility_is_newer as rust_visibility_is_newer, GroupsForm as RustGroupsForm,
     ReachState as RustReachState, ReachStateEntry as RustReachStateEntry, ScopeId as RustScopeId,
     ScopeKind as RustScopeKind, VisibilityError, VisibilityMode as RustVisibilityMode,
@@ -1352,6 +1352,67 @@ pub fn decode_reach_state_envelope(plaintext: &[u8]) -> Result<ReachState, JsVal
 #[must_use]
 pub fn reach_state_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
     rust_reach_state_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
+}
+
+/// What `mergeReachState` tells the receiving device to do.
+#[wasm_bindgen]
+#[derive(Clone, Debug)]
+pub struct ReachStateMerge {
+    state: ReachState,
+    store: bool,
+    send: bool,
+}
+
+#[wasm_bindgen]
+impl ReachStateMerge {
+    /// The state this device holds after the merge.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn state(&self) -> ReachState {
+        self.state.clone()
+    }
+
+    /// Persist `state` and re-derive the keys: it differs from what was
+    /// stored.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn store(&self) -> bool {
+        self.store
+    }
+
+    /// Send `state` to the account's other devices, as it is (never
+    /// re-stamped).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn send(&self) -> bool {
+        self.send
+    }
+}
+
+/// Fold a reach state received from another of the owner's devices into the
+/// stored one (ADR-0060 section 7): counters by maximum per slot, never a
+/// whole-state replace, and the core decides whether to persist and whether
+/// to send the result on. Every client uses this rule; none re-implements it.
+///
+/// # Errors
+///
+/// Throws with `visibilityError` when the merged state breaks a bound; keep
+/// what was stored.
+#[wasm_bindgen(js_name = mergeReachState)]
+pub fn merge_reach_state(
+    stored: &ReachState,
+    incoming: &ReachState,
+    now_ms: u64,
+) -> Result<ReachStateMerge, JsValue> {
+    js(
+        rust_merge_reach_state(&stored.inner, &incoming.inner, now_ms)
+            .map(|m| ReachStateMerge {
+                state: ReachState::from_rust(m.state),
+                store: m.store,
+                send: m.send,
+            })
+            .map_err(Refusal::from),
+    )
 }
 
 /// The version of `(class, scopeId)` in `state`, or `undefined`.

@@ -24,6 +24,8 @@ import { channelsState } from "../state/channels-state";
 import { reachSession, startReachSession, stopReachSession } from "./reach-service";
 import { clearVisibility, loadVisibility, visibilitySetting } from "./visibility-store";
 import { clearJoinReplies } from "./join-replies";
+import { applyHeldServiceEnvelopes, clearHeldServiceEnvelopes } from "./service-envelope-intake";
+import { resetServiceEnvelopeOutbox } from "./service-envelope-outbox";
 
 export function ReachProvider(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
@@ -46,6 +48,8 @@ export function ReachProvider(props: { children: JSX.Element }): JSX.Element {
         stopReachSession();
         clearVisibility();
         clearJoinReplies();
+        clearHeldServiceEnvelopes();
+        resetServiceEnvelopeOutbox();
         return;
       }
       const seed = identity.ed25519Seed;
@@ -64,6 +68,9 @@ export function ReachProvider(props: { children: JSX.Element }): JSX.Element {
           })),
         }));
         session.requestSync();
+        // A setting or key versions another device sent before this one
+        // was loaded (ADR-0060 section 7).
+        await applyHeldServiceEnvelopes();
       })().catch((err: unknown) => {
         // eslint-disable-next-line no-console
         console.warn("[reach] session start failed", err);

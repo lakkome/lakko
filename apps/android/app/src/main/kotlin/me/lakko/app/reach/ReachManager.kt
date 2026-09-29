@@ -27,7 +27,6 @@ import me.lakko.app.ds.reachSigner
 import uniffi.lakko_ffi_uniffi.FfiReachClass
 import uniffi.lakko_ffi_uniffi.FfiReachGrant
 import uniffi.lakko_ffi_uniffi.FfiReachState
-import uniffi.lakko_ffi_uniffi.FfiReachStateEntry
 import uniffi.lakko_ffi_uniffi.FfiScopeId
 import uniffi.lakko_ffi_uniffi.FfiScopeKind
 import uniffi.lakko_ffi_uniffi.FfiVisibilityMode
@@ -62,11 +61,11 @@ public enum class ReachApplyStatus {
  *   mailbox is signed with ([reachAuthFor]).
  * - Holds the "who can find me" setting.
  *
- * Not synced between the account's devices yet: the Visibility and ReachState
- * envelopes ride the DeviceGroup, and the DeviceGroup FFI carries only its four
- * typed bodies (no raw application message), so each device keeps its own copy
- * (see the S5 report). Every device derives the same keys at the same
- * versions until one rotates.
+ * The setting and the version counters are shared with the account's other
+ * devices (ADR-0060 §7): a local change goes out through [deviceSyncPublisher]
+ * as a DeviceGroup service envelope, and one received from a sibling is kept
+ * by [adoptDeviceSync] when strictly newer. A device admitting a new one sends
+ * it [deviceSyncEnvelopes], each with its original stamp.
  */
 public class ReachManager internal constructor(
     private val store: ReachDocStore,
@@ -107,6 +106,17 @@ public class ReachManager internal constructor(
     @Volatile
     public var onVisibilityChanged: (suspend (FfiVisibilitySetting) -> Unit)? = null
 
+    /** Sends one `lakko-contacts` envelope to the account's other devices over
+     *  the DeviceGroup (ADR-0060 §7). Installed by the DeviceGroup sync
+     *  runtime; `null` while none runs, when a change stays on this device
+     *  until [deviceSyncEnvelopes] is next sent. */
+    @Volatile
+    public var deviceSyncPublisher: ((ByteArray) -> Unit)? = null
+
+    /** Envelopes a sibling sent before a session bound here, applied on
+     *  [bind] (the newest of each kind wins there by the usual rule). */
+    private val pendingDeviceSync = java.util.concurrent.ConcurrentLinkedQueue<ByteArray>()
+
     // -----------------------------------------------------------------
     // Session
     // -----------------------------------------------------------------
@@ -130,6 +140,10 @@ public class ReachManager internal constructor(
         doc = store.load(accountIdB64)
         mutableVisibility.value = decodeVisibility(doc.visibilityHex)
         launchSync()
+        while (true) {
+            val pending = pendingDeviceSync.poll() ?: break
+            adoptDeviceSync(pending)
+        }
     }
 
     /** Forget the session (sign-out, forget device). The stored document stays
@@ -138,6 +152,7 @@ public class ReachManager internal constructor(
         val old = binding.getAndSet(null)
         if (forget && old != null) store.delete(old.accountIdB64)
         old?.accountSeed?.fill(0)
+        pendingDeviceSync.clear()
         doc = ReachDoc()
         mutableVisibility.value = null
         mutableStatus.value = ReachApplyStatus.APPLIED
@@ -281,14 +296,149 @@ public class ReachManager internal constructor(
     public suspend fun rotate(kind: ReachKind, scopeHex: String = "") {
         val b = binding.get() ?: return
         val slot = ReachSlot(kind, if (kind.scopeless) "" else scopeHex.lowercase())
-        lock.withLock {
+        val envelope = lock.withLock {
             val next = versionOf(doc, slot) + 1
             doc = doc.copy(
                 versions = doc.versions.filterNot { it.kind == kind.name && it.scopeHex == slot.scopeHex } +
                     StoredVersion(kind.name, slot.scopeHex, next),
             )
+            val envelope = stampReachStateLocked()
             store.save(b.accountIdB64, doc)
             syncLocked(b, System.currentTimeMillis())
+            envelope
+        }
+        envelope?.let(::publishToDevices)
+    }
+
+    /** Compose the counters now held as a ReachState stamped strictly after
+     *  the last one, and keep it as the state in force. Under [lock]. */
+    private fun stampReachStateLocked(): ByteArray? {
+        val previous = storedReachStateStamp()
+        val state = FfiReachState(
+            entries = reachStateEntries(versionsOf(doc)),
+            updatedAtMs = nextSyncStamp(System.currentTimeMillis(), previous),
+        )
+        val envelope = try {
+            uniffi.lakko_ffi_uniffi.composeReachStateEnvelope(state)
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "reach state not composed: ${cause.javaClass.simpleName}")
+            return null
+        }
+        doc = doc.copy(reachStateHex = reachHex(envelope))
+        return envelope
+    }
+
+    private fun storedReachStateStamp(): ULong? = doc.reachStateHex?.let(::reachUnhex)?.let { wire ->
+        runCatching { uniffi.lakko_ffi_uniffi.decodeReachStateEnvelope(wire).updatedAtMs }.getOrNull()
+    }
+
+    private fun versionsOf(doc: ReachDoc): Map<ReachSlot, Int> = doc.versions.mapNotNull { v ->
+        val kind = runCatching { ReachKind.valueOf(v.kind) }.getOrNull() ?: return@mapNotNull null
+        ReachSlot(kind, v.scopeHex) to v.version
+    }.toMap()
+
+    private fun publishToDevices(envelope: ByteArray) {
+        val publisher = deviceSyncPublisher
+        if (publisher == null) {
+            Log.i(LOG_TAG, "device sync not running: change kept on this device")
+            return
+        }
+        try {
+            publisher(envelope)
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "device sync send failed: ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /** The Visibility and ReachState envelopes in force here, verbatim with
+     *  their original stamps: what this device sends a device it admits to
+     *  the DeviceGroup (ADR-0060 §7). Empty for what was never set. */
+    public fun deviceSyncEnvelopes(): List<ByteArray> =
+        if (binding.get() == null) emptyList() else deviceSyncEnvelopesToSend(doc.visibilityHex, doc.reachStateHex)
+
+    /**
+     * A DeviceGroup service envelope from another of the account's devices
+     * (ADR-0060 §7). Kept only when it is a Visibility or a ReachState
+     * STRICTLY newer than the one held; anything else is dropped. On
+     * acceptance the mailbox is reconciled and [onVisibilityChanged] re-runs
+     * what a local change would have (profiles, Everyone, introductions).
+     * Before a session binds, it waits for [bind].
+     */
+    public fun adoptDeviceSync(envelope: ByteArray) {
+        val b = binding.get()
+        if (b == null) {
+            pendingDeviceSync.add(envelope.copyOf())
+            return
+        }
+        when (val received = classifyDeviceSync(envelope) { uniffi.lakko_ffi_uniffi.dispatchIncomingEnvelope(it) }) {
+            is ReceivedDeviceSync.Visibility -> scope.launch { adoptVisibility(b, received) }
+            is ReceivedDeviceSync.ReachState -> scope.launch { adoptReachState(b, received) }
+            ReceivedDeviceSync.Foreign -> Log.i(LOG_TAG, "device sync: foreign envelope dropped")
+        }
+    }
+
+    private suspend fun adoptVisibility(b: Binding, received: ReceivedDeviceSync.Visibility) {
+        val accepted = lock.withLock {
+            if (binding.get() !== b) return
+            val held = currentVisibility()?.updatedAtMs
+            if (!keepsIncoming(received.setting.updatedAtMs, held) { i, s ->
+                    uniffi.lakko_ffi_uniffi.visibilityIsNewer(i, s)
+                }
+            ) {
+                return
+            }
+            // Kept verbatim: a later re-send carries the original stamp.
+            doc = doc.copy(visibilityHex = reachHex(received.wire))
+            mutableVisibility.value = received.setting
+            store.save(b.accountIdB64, doc)
+            syncLocked(b, System.currentTimeMillis())
+            received.setting
+        }
+        rerunAfterAdopt(accepted)
+    }
+
+    private suspend fun adoptReachState(b: Binding, received: ReceivedDeviceSync.ReachState) {
+        val adoption = lock.withLock {
+            if (binding.get() !== b) return
+            val decided = adoptReachStateMerge(
+                stored = storedReachState(),
+                incoming = received.state,
+                nowMs = System.currentTimeMillis(),
+                merge = { stored, incoming, now -> uniffi.lakko_ffi_uniffi.mergeReachState(stored, incoming, now) },
+                compose = { uniffi.lakko_ffi_uniffi.composeReachStateEnvelope(it) },
+            )
+            val versions = decided.versions
+            val wire = decided.storeWire
+            if (versions != null && wire != null) {
+                // Persisted exactly as the core returned it, stamp included.
+                doc = doc.copy(
+                    versions = versions.map { (slot, v) -> StoredVersion(slot.kind.name, slot.scopeHex, v) },
+                    reachStateHex = reachHex(wire),
+                )
+                store.save(b.accountIdB64, doc)
+                syncLocked(b, System.currentTimeMillis())
+            }
+            decided
+        }
+        // Sent as returned, never re-stamped here.
+        adoption.sendWire?.let(::publishToDevices)
+        if (adoption.storeWire != null) currentVisibility()?.let { rerunAfterAdopt(it) }
+    }
+
+    /** The ReachState in force here: the stored envelope, or (never set) the
+     *  counters held at stamp 0. */
+    private fun storedReachState(): FfiReachState =
+        doc.reachStateHex?.let(::reachUnhex)?.let { wire ->
+            runCatching { uniffi.lakko_ffi_uniffi.decodeReachStateEnvelope(wire) }.getOrNull()
+        } ?: FfiReachState(entries = reachStateEntries(versionsOf(doc)), updatedAtMs = 0uL)
+
+    private suspend fun rerunAfterAdopt(setting: FfiVisibilitySetting) {
+        try {
+            onVisibilityChanged?.invoke(setting)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "applying a synced change failed: ${cause.javaClass.simpleName}")
         }
     }
 
@@ -304,13 +454,11 @@ public class ReachManager internal constructor(
         return lock.withLock { syncLocked(b, System.currentTimeMillis()) }
     }
 
-    /** The version counters, as the ReachState envelope carries them. */
+    /** The version counters, as the ReachState envelope carries them, with
+     *  the stamp of the state in force (0 before any rotation). */
     public fun reachState(): FfiReachState = FfiReachState(
-        entries = doc.versions.mapNotNull { v ->
-            val kind = runCatching { ReachKind.valueOf(v.kind) }.getOrNull() ?: return@mapNotNull null
-            FfiReachStateEntry(kind.toFfi(), reachUnhex(v.scopeHex) ?: ByteArray(0), v.version.toUInt())
-        },
-        updatedAtMs = System.currentTimeMillis().toULong(),
+        entries = reachStateEntries(versionsOf(doc)),
+        updatedAtMs = storedReachStateStamp() ?: 0uL,
     )
 
     private suspend fun syncLocked(b: Binding, nowMs: Long): Boolean {
@@ -426,6 +574,8 @@ public class ReachManager internal constructor(
             store.save(b.accountIdB64, doc)
             syncLocked(b, System.currentTimeMillis())
         }
+        // ADR-0060 §7 — the account's other devices take the same setting.
+        publishToDevices(envelope)
         try {
             onVisibilityChanged?.invoke(stamped)
         } catch (cancellation: CancellationException) {
@@ -509,16 +659,18 @@ public class ReachManager internal constructor(
         return true
     }
 
-    /** Whether the name terms were last published as Everyone, and for which
-     *  display name (the Everyone publication, ADR-0060 §5). */
-    public fun publishedEveryone(): Pair<Boolean?, String?> = doc.publishedPublic to doc.publishedName
+    /** Whether the Everyone publication was last sent as public, and for
+     *  which [everyonePublishKey] (ADR-0060 §5). */
+    public fun publishedEveryone(): Pair<Boolean?, String?> = doc.publishedPublic to doc.publishedKey
 
-    /** Record what the Everyone publication now holds. */
-    public fun notePublishedEveryone(public: Boolean, name: String?) {
+    /** Record what the Everyone publication now holds ([key] is `null` when
+     *  not public). */
+    public fun notePublishedEveryone(public: Boolean, key: String?) {
         val b = binding.get() ?: return
+        doc = doc.copy(publishedPublic = public, publishedKey = key)
         scope.launch {
             lock.withLock {
-                doc = doc.copy(publishedPublic = public, publishedName = name)
+                doc = doc.copy(publishedPublic = public, publishedKey = key)
                 store.save(b.accountIdB64, doc)
             }
         }

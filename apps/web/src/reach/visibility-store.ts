@@ -13,11 +13,15 @@
  * form another device would receive. After a change the reach session syncs:
  * keys are registered or removed and `open` is set.
  *
- * Cross-device sync of the envelope over the DeviceGroup is NOT built on web:
- * the wasm DeviceGroup composes only its four typed payloads and has no way
- * to carry the Visibility envelope. {@link receiveVisibility} is the intake a
- * carrier would call; it applies the ADR-0044 recency rule
- * (`visibilityIsNewer`).
+ * The account's other devices get the setting over the DeviceGroup body
+ * `ServiceEnvelope` (ADR-0060 section 7): a local change marks the
+ * Visibility envelope dirty in `service-envelope-outbox.ts`, which sends the
+ * current envelope with its own stamp; {@link receiveVisibility} is the
+ * intake (`service-envelope-intake.ts` calls it) and keeps an incoming
+ * setting only when `visibilityIsNewer`. An accepted setting lands in the
+ * same signal a local change does, so everything a change here triggers
+ * (reach keys, the Everyone publication, introduction offers, profiles and
+ * member cards) runs for it too.
  */
 import { createSignal, type Accessor } from "solid-js";
 
@@ -25,12 +29,25 @@ import type { VisibilitySetting } from "../../wasm/lakko_ffi_wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { loadWasm } from "../wasm";
 import { loadReachRow, saveReachRow } from "./reach-store";
+import { markServiceEnvelopeDirty, setServiceEnvelopeComposer } from "./service-envelope-outbox";
 
 const [setting, setSetting] = createSignal<VisibilitySetting | null>(null, { equals: false });
 let boundAccount: string | null = null;
 
 /** Reactive: the current setting, `null` while signed out or loading. */
 export const visibilitySetting: Accessor<VisibilitySetting | null> = setting;
+
+/** Whether an account's setting is loaded (an incoming one can be compared). */
+export function isVisibilityLoaded(): boolean {
+  return boundAccount !== null && setting() !== null;
+}
+
+// The envelope the other devices get: the current setting with its own stamp.
+setServiceEnvelopeComposer("visibility", async () => {
+  const current = setting();
+  if (boundAccount === null || current === null) return null;
+  return (await loadWasm()).composeVisibilityEnvelope(current);
+});
 
 /** The stamp a change gets: strictly after the previous one even when the
  *  clock stands still or went backwards. */
@@ -87,25 +104,29 @@ export async function updateVisibility(
   moved.free();
   setSetting(stamped);
   await persist(account, stamped);
+  markServiceEnvelopeDirty("visibility");
   return stamped;
 }
 
 /**
  * A Visibility envelope from another device of this account. Kept only when
- * strictly newer than the held setting. Returns whether it was kept.
+ * strictly newer than the held setting, and never re-stamped: it is stored
+ * and published exactly as it came. Returns whether it was kept; `false`
+ * too while no setting is loaded (the intake holds it until one is).
  */
 export async function receiveVisibility(plaintext: Uint8Array): Promise<boolean> {
+  const wasm = await loadWasm();
+  // Read after the await: a change that landed meanwhile is what to compare.
   const account = boundAccount;
   const current = setting();
-  if (account === null) return false;
-  const wasm = await loadWasm();
+  if (account === null || current === null) return false;
   let incoming: VisibilitySetting;
   try {
     incoming = wasm.decodeVisibilityEnvelope(plaintext);
   } catch {
     return false;
   }
-  if (current !== null && !wasm.visibilityIsNewer(incoming.updatedAtMs, current.updatedAtMs)) {
+  if (!wasm.visibilityIsNewer(incoming.updatedAtMs, current.updatedAtMs)) {
     incoming.free();
     return false;
   }

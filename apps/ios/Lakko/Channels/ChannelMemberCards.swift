@@ -7,7 +7,8 @@ import LakkoCore
 /// ADR-0060 section 3 — channels show their members: each subscriber uploads
 /// a member card (its profile v3, sealed under the channel's current epoch
 /// seed) signed by its Ed25519 subscriber key, re-uploads it after every epoch
-/// rotation, and deletes it on unsubscribe. A card carries the `channel` grant
+/// rotation; the server drops it with the subscription on unsubscribe
+/// (``ChannelUnsubscribe``). A card carries the `channel` grant
 /// only where the setting lets that channel's members find the owner.
 @MainActor
 enum ChannelMemberCards {
@@ -52,19 +53,11 @@ enum ChannelMemberCards {
         }
     }
 
-    /// Delete this subscriber's card (unsubscribe). Call BEFORE the keys are
-    /// forgotten. Best effort.
-    static func delete(keys: ChannelSubscriberKeys, channelId: String) async {
-        guard let channelIdBytes = CoPublisher.hexToData(channelId) else { return }
-        do {
-            let kp = try ChannelSubscriberKeypair.fromSecret(secret: keys.secret)
-            let sig = try kp.memberCardRequestSignature(channelId: channelIdBytes, card: Data())
-            try await ChannelsClient().deleteMemberCard(
-                channelIdHex: channelId,
-                subscriberPubHex: ChannelsComposer.bytesToHex(kp.`public`()), sigHeader: sig)
-        } catch {
-            NSLog("ADR-0060: member card not deleted: \(error)")
-        }
+    /// Forget which epochs were uploaded for `channelId` (the subscriber
+    /// left; the server dropped the card with the subscription), so a later
+    /// re-subscribe in this process uploads again.
+    static func forgetUploads(channelId: String) {
+        uploaded = uploaded.filter { !$0.hasPrefix("\(channelId)|") }
     }
 
     /// Read the channel's member cards, open each with the seed of its epoch,

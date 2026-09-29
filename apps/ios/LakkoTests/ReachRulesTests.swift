@@ -212,13 +212,16 @@ final class ReachRulesTests: XCTestCase {
         return c
     }
 
-    /// A new account starts at the default of UX section 1, stamped.
+    /// A new account starts at the default of UX section 1, at stamp 0: a
+    /// device newly admitted to the account must not hold a default stamped
+    /// later than the setting its first device carries over the DeviceGroup
+    /// (ADR-0060 section 7), or it would refuse it.
     func testANewAccountStartsAtTheDefaultSetting() throws {
         let c = try center()
         XCTAssertEqual(c.setting.mode, .some)
         XCTAssertTrue(c.setting.contactsOfContacts)
         XCTAssertEqual(c.setting.groups, .all)
-        XCTAssertGreaterThan(c.setting.updatedAtMs, 0)
+        XCTAssertEqual(c.setting.updatedAtMs, 0)
     }
 
     /// A one-to-one profile carries `contact` + `member`; a group profile

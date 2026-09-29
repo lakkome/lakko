@@ -444,6 +444,38 @@ public final class ChannelsClient {
     /// The member-card signature header (`x-lakko-member-card-sig`).
     static let memberCardSigHeader = "x-lakko-member-card-sig"
 
+    /// The unsubscribe signature header (`x-lakko-unsubscribe-sig`), the
+    /// core's `unsubscribeSigHeaderName()`; a unit test pins the two equal.
+    static let unsubscribeSigHeader = "x-lakko-unsubscribe-sig"
+
+    /// The `DELETE /v1/channels/:id/subscribers/:pubkey_hex` request that
+    /// leaves a channel (ADR-0060 section 3): the server drops the subscriber
+    /// row, its seed envelopes and its member card. `sigHeader` is the
+    /// subscriber key's `unsubscribeRequestHeader(channelId:issuedAtMs:)`.
+    func unsubscribeRequest(
+        channelIdHex: String, subscriberPubHex: String, sigHeader: String
+    ) throws -> URLRequest {
+        let url = try buildURL(endpoint: "/v1/channels/\(channelIdHex)/subscribers/\(subscriberPubHex)")
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue(sigHeader, forHTTPHeaderField: Self.unsubscribeSigHeader)
+        return request
+    }
+
+    /// Leave a channel on the server. Idempotent: a `404` (the subscriber, or
+    /// the channel, is already gone) counts as done.
+    public func unsubscribe(
+        channelIdHex: String, subscriberPubHex: String, sigHeader: String
+    ) async throws {
+        let request = try unsubscribeRequest(
+            channelIdHex: channelIdHex, subscriberPubHex: subscriberPubHex, sigHeader: sigHeader)
+        do {
+            try await executeNoContent(request: request)
+        } catch let error as ChannelsApiError where error.status == 404 {
+            return
+        }
+    }
+
     private func executeNoContent(request: URLRequest) async throws {
         let (_, response) = try await AntiCensorshipTransport.perform(
             request, session: session, config: .current)

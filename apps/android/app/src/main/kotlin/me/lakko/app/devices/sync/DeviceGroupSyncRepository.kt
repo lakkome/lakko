@@ -112,6 +112,10 @@ public class DeviceGroupSyncRepository(
     @Volatile private var rootSigner: me.lakko.app.ds.DsStatementSigning? = null
     @Volatile private var pollJob: Job? = null
 
+    /** The publisher this runtime installed on the reach manager, so a
+     *  teardown removes only its own. */
+    @Volatile private var reachPublisher: ((ByteArray) -> Unit)? = null
+
     /** The debounced snapshot writer, cancelled with the poll loop. */
     @Volatile private var persistJob: Job? = null
 
@@ -199,6 +203,7 @@ public class DeviceGroupSyncRepository(
         // on every later open an idempotent re-send.
         rootSigner = me.lakko.app.devices.DeviceGroupJournalAccess.rootOfSeed(secrets.accountIdentitySeed, groupId)
         installJournalSigner(groupId)
+        installReachPublisher()
         pollJob = scope.launch {
             claimJournalBestEffort(groupId, refounded = true)
             runPollLoop(
@@ -555,13 +560,55 @@ public class DeviceGroupSyncRepository(
                 }
             }
             is DeviceGroupBody.ServiceEnvelope -> {
-                // ADR-0060 section 7 carrier for the Visibility setting and
-                // the ReachState counters. Not consumed on Android yet: the
-                // setting and reach-key versions stay per device here, so
-                // the envelope is dropped, which is what happened to it
-                // before the variant existed.
+                // ADR-0060 section 7 — the Visibility setting and the
+                // ReachState counters from another of this account's devices.
+                // The reach manager dispatches the envelope, keeps it only
+                // when strictly newer, and drops any other kind.
+                me.lakko.app.reach.ReachManager.get(applicationContext).adoptDeviceSync(body.envelope)
             }
         }
+    }
+
+    /**
+     * ADR-0060 section 7 — send one `lakko-contacts` envelope (Visibility or
+     * ReachState, stamped by the reach manager and never re-stamped here) to
+     * the account's other devices as a DeviceGroup `ServiceEnvelope` body.
+     * The snapshot is persisted before the publish, so a crash in between
+     * never lets a later handle reuse this message's ratchet position.
+     */
+    private suspend fun sendServiceEnvelope(envelope: ByteArray) {
+        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+        val accountIdB64 = activeAccountIdB64.get()
+            ?: error("DeviceGroupSync not bootstrapped")
+        val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
+        DeviceGroupLifecycle.persistSnapshot(
+            context = applicationContext,
+            identity = id,
+            accountIdB64 = accountIdB64,
+        )
+        DsClient().use { ds ->
+            ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null))
+        }
+    }
+
+    /** Route the reach manager's outgoing sync envelopes through this
+     *  runtime's DeviceGroup handle. */
+    private fun installReachPublisher() {
+        val publisher: (ByteArray) -> Unit = { envelope ->
+            val copy = envelope.copyOf()
+            scope.launch {
+                try {
+                    sendServiceEnvelope(copy)
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (cause: Throwable) {
+                    Log.w(LOG_TAG, "reach sync envelope not sent: ${cause.javaClass.simpleName}")
+                }
+            }
+        }
+        reachPublisher = publisher
+        me.lakko.app.reach.ReachManager.get(applicationContext).deviceSyncPublisher = publisher
     }
 
     /** ADR-0053 — install the DeviceGroup journal's signer source: derived
@@ -651,6 +698,12 @@ public class DeviceGroupSyncRepository(
         identity.set(null)
         group.set(null)
         rootSigner = null
+        reachPublisher?.let { installed ->
+            me.lakko.app.reach.ReachManager.peek()?.let { reach ->
+                if (reach.deviceSyncPublisher === installed) reach.deviceSyncPublisher = null
+            }
+        }
+        reachPublisher = null
         DsSignerRegistry.shared.clearOwner(DeviceGroupJournalAccess.REGISTRY_OWNER)
     }
 

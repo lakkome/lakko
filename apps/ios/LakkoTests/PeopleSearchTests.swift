@@ -147,27 +147,67 @@ final class PeopleSearchTests: XCTestCase {
     func testANameHitIsNamedFromItsPublicRecord() async throws {
         let record = try annaPublicRecord()
         let hit = PublicAccountHit(accountId: annaAccount, publicRecord: record)
+        let key = annaKey.signaturePublicKey()
+        let bundle: (Data) async throws -> Data? = { $0 == self.annaAccount ? key : nil }
         let outcome = await PeopleSearch.network(
             query: "anna web", records: [], knownProfiles: [:],
-            ports: ports(nameLookup: { _ in [hit] }))
+            ports: ports(identityKey: bundle, nameLookup: { _ in [hit] }))
         guard case .found(let people) = outcome else { return XCTFail("\(outcome)") }
-        XCTAssertEqual(people.map(\.accountKey), [annaKey.signaturePublicKey()])
+        XCTAssertEqual(people.map(\.accountKey), [key])
         XCTAssertEqual(people.first?.displayName, "Anna Weber")
         XCTAssertNil(people.first?.writeSeed, "a public person's mailbox is open")
 
         let narrowed = await PeopleSearch.network(
             query: "anna x", records: [], knownProfiles: [:],
-            ports: ports(nameLookup: { _ in [hit] }))
+            ports: ports(identityKey: bundle, nameLookup: { _ in [hit] }))
         XCTAssertEqual(narrowed, .notFound)
+    }
+
+    /// A public record naming the right account but another identity key than
+    /// the one the identity bundle serves is not trusted: the hit is not
+    /// named from it (the rule web applies).
+    func testAPublicRecordWithAnotherIdentityKeyIsIgnored() async throws {
+        let record = try annaPublicRecord()
+        let hit = PublicAccountHit(accountId: annaAccount, publicRecord: record)
+        let other = try Identity.fromSeed(seed: Data(repeating: 0x52, count: 32)).signaturePublicKey()
+        let outcome = await PeopleSearch.network(
+            query: "anna", records: [], knownProfiles: [:],
+            ports: ports(identityKey: { _ in other }, nameLookup: { _ in [hit] }))
+        XCTAssertEqual(outcome, .notFound)
+    }
+
+    /// A name hit whose account has no verified identity key is dropped, even
+    /// when its public record opens.
+    func testANameHitWithoutAnIdentityKeyIsDropped() async throws {
+        let hit = PublicAccountHit(accountId: annaAccount, publicRecord: try annaPublicRecord())
+        let outcome = await PeopleSearch.network(
+            query: "anna", records: [], knownProfiles: [:],
+            ports: ports(nameLookup: { _ in [hit] }))
+        XCTAssertEqual(outcome, .notFound)
+    }
+
+    /// A profile this device holds for the served key names the hit.
+    func testANameHitIsNamedFromAProfileHeldForItsKey() async throws {
+        let key = annaKey.signaturePublicKey()
+        let hit = PublicAccountHit(accountId: annaAccount, publicRecord: nil)
+        let outcome = await PeopleSearch.network(
+            query: "anna", records: [],
+            knownProfiles: [key.base64EncodedString(): ProfileClaim(
+                displayName: "Anna W", username: nil, updatedAtMs: 1)],
+            ports: ports(identityKey: { _ in key }, nameLookup: { _ in [hit] }))
+        guard case .found(let people) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertEqual(people.map(\.accountKey), [key])
+        XCTAssertEqual(people.first?.displayName, "Anna W")
     }
 
     /// A public record served beside another account id is not trusted.
     func testAPublicRecordForAnotherAccountIsIgnored() async throws {
         let record = try annaPublicRecord()
         let hit = PublicAccountHit(accountId: Data(repeating: 0x01, count: 16), publicRecord: record)
+        let key = annaKey.signaturePublicKey()
         let outcome = await PeopleSearch.network(
             query: "anna", records: [], knownProfiles: [:],
-            ports: ports(nameLookup: { _ in [hit] }))
+            ports: ports(identityKey: { _ in key }, nameLookup: { _ in [hit] }))
         XCTAssertEqual(outcome, .notFound)
     }
 

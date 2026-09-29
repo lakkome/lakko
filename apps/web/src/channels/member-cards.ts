@@ -201,6 +201,13 @@ async function uploadOwnCard(input: OwnCardInput): Promise<OwnCardOutcome> {
   }
 }
 
+/** Forget the card this session uploaded for `(channel, key)`: the server
+ *  removed it with the subscription (ADR-0060 section 3), so a later
+ *  subscription under the same key uploads afresh. */
+export function forgetUploadedCard(channelIdHex: string, keys: ChannelSubscriberKeys): void {
+  uploaded.delete(`${channelIdHex}|${bytesToHex(keys.public)}`);
+}
+
 /** Remove this device's member card (stop following). Best effort: the
  *  server's 90-day subscriber prune removes it anyway. */
 export async function deleteOwnMemberCard(

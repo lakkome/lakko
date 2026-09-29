@@ -17,6 +17,7 @@ import { base64Decode } from "../auth/account-id";
 import { useAuth } from "../auth/AuthContext";
 import { useProfiles } from "../profile/ProfileContext";
 import { visibilitySetting } from "../reach/visibility-store";
+import { reachVersionsTick } from "../reach/reach-service";
 import { subscribe } from "./api";
 import { bytesToHex, type ChannelSubscriberKeys } from "./composer";
 import { ensureOwnMemberCard } from "./member-cards";
@@ -62,6 +63,7 @@ export function useOwnMemberCard(source: OwnCardSource): void {
           profiles.ownProfile(),
           profiles.ownUsername(),
           visibilitySetting(),
+          reachVersionsTick(),
         ] as const,
       ([enabled, channelIdHex, keys, epoch, seed, own, username]) => {
         if (!enabled || keys === undefined || epoch === undefined || seed === undefined) return;

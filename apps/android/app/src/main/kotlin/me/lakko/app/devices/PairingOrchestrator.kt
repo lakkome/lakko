@@ -831,6 +831,44 @@ public object PairingOrchestrator {
                 }
             }
 
+            // ADR-0060 section 7 — the admitted device takes this account's
+            // "who can find me" setting and reach-key versions. Sent at the
+            // post-add epoch, after the commit, so the new device can open
+            // them; each envelope carries its ORIGINAL stamp (never
+            // re-stamped here). Persisted before the publish so no later
+            // handle reuses a ratchet position. Best-effort.
+            try {
+                val envelopes = me.lakko.app.reach.ReachManager.get(context).deviceSyncEnvelopes()
+                if (envelopes.isNotEmpty()) {
+                    val rows = envelopes.map { envelope ->
+                        ensured.group.createServiceEnvelopeMessage(
+                            ensured.identity,
+                            envelope,
+                            me.lakko.app.devices.sync.Hlc.mint(),
+                        )
+                    }
+                    DeviceGroupLifecycle.persistSnapshot(
+                        context = context,
+                        identity = ensured.identity,
+                        accountIdB64 = accountIdB64,
+                    )
+                    val signer = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity)
+                    DsClient().use { ds ->
+                        for (row in rows) {
+                            ds.publishGroup(
+                                groupId = ensured.group.groupId(),
+                                payload = DeviceGroupJournalEnvelope.encode(row, null),
+                                signer = signer,
+                            )
+                        }
+                    }
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("PairingOrchestrator", "reach setting not sent to the new device", cause)
+            }
+
             return ScanResult(
                 memberCount = if (ensured.bootstrapped) 2 else 0,
                 newDeviceKey = uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(decoded.keyPackage),

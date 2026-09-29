@@ -333,8 +333,17 @@ S4/S5): a DeviceGroup body `ServiceEnvelope { bytes envelope }` at field 20 of
 branch's), carrying a `lakko-contacts` envelope verbatim; the receiver
 dispatches it and keeps only Visibility and ReachState from it, ordered by
 their own stamps. A device that joins the DeviceGroup is sent the current
-Visibility and ReachState by the device that admits it. Ordered by a strictly
-increasing stamp (the ADR-0044 lesson: a re-send carries its original stamp).
+Visibility and ReachState by the device that admits it. Visibility is ordered
+by a strictly increasing stamp (the ADR-0044 lesson: a re-send carries its
+original stamp). ReachState is **merged, not replaced** (decided 2026-09-29,
+after the three clients had each written a different rule): a key version
+never goes back, so `lakko_contacts::visibility::merge_reach_state` keeps the
+maximum per `(class, scope)` and tells the receiver whether to store and
+whether to send the result on - adopt a newer state verbatim when it already
+knows every version, otherwise re-stamp strictly after both and send.
+Replacing the whole state would drop a rotation two devices make at once.
+Every client calls the core rule (`mergeReachState` on both FFI surfaces);
+none re-implements it.
 The UI transition rules of UX section 11 live in `lakko_ui_rules`.
 
 ## Alternatives

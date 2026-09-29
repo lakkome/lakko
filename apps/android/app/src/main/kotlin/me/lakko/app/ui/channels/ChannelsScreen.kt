@@ -494,14 +494,13 @@ public fun ChannelDetailScreen(
                 onManage()
             },
             onStopFollowing = {
-                // Local by design AND by what exists: forget the reader
-                // keypair and the seeds it recovered, then drop the channel
-                // from this device's list. Nothing here tells the server —
-                // no channels route retires a subscriber — which is why the
-                // copy only ever speaks for this device.
+                // ADR-0060 §3 — forget the reader keypair, the seeds it
+                // recovered and the channel on this device at once, and tell
+                // the server with a DELETE signed by the subscriber key (in
+                // the background; a failure is logged, the local state is
+                // gone either way).
                 infoOpen = false
-                state.clearSubscriberKeys(channelId)
-                state.removeChannel(channelId)
+                me.lakko.app.channels.ChannelUnsubscribe.leave(state, channelId, client.baseUrl)
                 // The channel this screen is about is gone from the list, so
                 // staying on it would show an empty reader for something no
                 // longer followed.
@@ -889,10 +888,8 @@ private fun PostList(
  * it for a subscriber and not for a publisher, because a publisher reads its
  * own channel from its own keys and has no subscription to end.
  *
- * This comment used to say the client had no unsubscribe at all. That was
- * wrong for as long as it stood: `ChannelsUiState.clearSubscriberKeys` and
- * `removeChannel` both existed and were simply never called from anywhere, so
- * a person who followed a channel could not stop.
+ * `Unsubscribe` drops the channel on this device and, since ADR-0060 §3, also
+ * retires the subscriber on the server (`ChannelUnsubscribe.leave`).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1031,10 +1028,10 @@ private fun ChannelInfoSheet(
     }
 }
 
-// docs/ux/conversation-info.md section 2.3 — the copy is deliberately about
-// THIS DEVICE. No channels route retires a subscriber, so the registration on
-// the server outlives the act; wording that claimed the channel had been told
-// would be false. The web client says the same words for the same reason.
+// docs/ux/conversation-info.md section 2.3 — the copy speaks for THIS DEVICE.
+// Since ADR-0060 §3 the server is told too (a signed DELETE), but that request
+// is best-effort and may not land, so the words still promise only what
+// happens here. The web client says the same words.
 
 /** The control, and the confirming button of its dialog. */
 private const val STOP_FOLLOWING_CONTROL: String = "Stop following"

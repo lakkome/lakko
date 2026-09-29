@@ -78,7 +78,8 @@ import { uiRules } from "../chat/ui-rules";
 import { foldChannelMeta, publishChannelMeta } from "../channels/channel-meta";
 import { ManagePanel } from "../channels/ManagePanel";
 import { MembersPanel } from "../channels/MembersPanel";
-import { deleteOwnMemberCard } from "../channels/member-cards";
+import { forgetUploadedCard } from "../channels/member-cards";
+import { leaveChannelOnServer } from "../channels/unsubscribe";
 import { useOwnMemberCard } from "../channels/own-member-card";
 import { isHiddenPostDecode, PostCard, toPostDecode, type PostDecode } from "../channels/PostCard";
 import { PublishComposer } from "../channels/PublishComposer";
@@ -353,14 +354,15 @@ function PostList(props: {
 }
 
 /**
- * Stop following a channel on this device: remove its member card, forget the
- * reader keypair and the seeds it recovered, and drop the channel from the
- * local list.
+ * Stop following a channel on this device: leave it on the server (ADR-0060
+ * section 3 - the signed `DELETE` removes the subscriber row, its seed
+ * envelopes and its member card), then forget the reader keypair and the
+ * seeds it recovered, and drop the channel from the local list.
  *
- * Otherwise local - `services/channels` has no route that retires a
- * subscriber, so nothing here can claim the publisher was told.
- * The copy says what actually happens: the channel leaves the list and this
- * device stops reading it.
+ * The local half happens whatever the server said: a request that never
+ * arrived or was refused is logged, and the row it leaves behind goes with
+ * the 90-day subscriber prune. The copy says what the person sees: the
+ * channel leaves the list and this device stops reading it.
  */
 async function confirmStopFollowing(channelIdHex: string, name: string): Promise<boolean> {
   const ok = await requestConfirm({
@@ -373,10 +375,18 @@ async function confirmStopFollowing(channelIdHex: string, name: string): Promise
     tone: "danger",
   });
   if (!ok) return false;
-  // ADR-0060 section 3: the member card goes with the subscription (signed
-  // DELETE, best effort - the 90-day subscriber prune removes it anyway).
   const keys = channelsState.subscriberKeysByChannel().get(channelIdHex);
-  if (keys !== undefined) void deleteOwnMemberCard(channelIdHex, keys);
+  if (keys !== undefined) {
+    const outcome = await leaveChannelOnServer(channelIdHex, keys);
+    forgetUploadedCard(channelIdHex, keys);
+    if (outcome.kind !== "left") {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[channels] leaving on the server failed; dropped locally",
+        outcome.kind === "refused" ? `${outcome.status} ${outcome.code}` : outcome.kind,
+      );
+    }
+  }
   channelsActions.clearSubscriberKeys(channelIdHex);
   channelsActions.removeChannel(channelIdHex);
   return true;

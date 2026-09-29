@@ -36,7 +36,7 @@ import {
   termsToEvaluate,
   type PublicationState,
 } from "./publication-model";
-import { reachSession, reachSessionSignal } from "./reach-service";
+import { reachSession, reachSessionSignal, reachVersionsTick } from "./reach-service";
 import { loadReachRow, saveReachRow } from "./reach-store";
 import { ScopedDiscoveryClient } from "./scoped-discovery";
 import type { OprfPair } from "../discovery/oprf-pair";
@@ -240,6 +240,7 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
   createEffect(() => {
     // Re-run on what the steps depend on.
     reachSessionSignal();
+    reachVersionsTick();
     visibilitySetting();
     profiles.ownProfile();
     profiles.ownUsername();

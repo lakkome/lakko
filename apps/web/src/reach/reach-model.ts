@@ -89,6 +89,11 @@ export interface ReachBook {
   readonly open: boolean | null;
   /** When the `fof` key last rotated on its schedule. */
   readonly fofRotatedAtMs: number;
+  /** The stamp of the version counters (the ReachState envelope's
+   *  `updatedAtMs`, ADR-0060 section 7): moved forward by every local change
+   *  of a version, adopted from a newer state another device of the account
+   *  sent. `0` = never changed. */
+  readonly stateUpdatedAtMs: number;
 }
 
 export const EMPTY_REACH_BOOK: ReachBook = {
@@ -98,6 +103,7 @@ export const EMPTY_REACH_BOOK: ReachBook = {
   registered: {},
   open: null,
   fofRotatedAtMs: 0,
+  stateUpdatedAtMs: 0,
 };
 
 function versionKey(cls: ReachClassName, scopeHex: string): string {
@@ -291,6 +297,76 @@ export function rotateFof(book: ReachBook, nowMs: number): ReachBook {
 }
 
 // ----------------------------------------------------------------------------
+// The version counters shared by the account's devices (ADR-0060 section 7)
+// ----------------------------------------------------------------------------
+
+/** One version counter as the ReachState envelope carries it. */
+export interface ReachStateEntryModel {
+  readonly cls: ReachClassName;
+  /** Hex scope id; `""` for the account-wide classes. */
+  readonly scopeHex: string;
+  readonly version: number;
+}
+
+/** Longest scope id a reach key is derived over, as hex (64 bytes). */
+const MAX_SCOPE_HEX_LEN = 128;
+
+function shapeFits(cls: ReachClassName, scopeHex: string): boolean {
+  if (cls === "reply") return false;
+  if (isAccountWideClass(cls)) return scopeHex === "";
+  return scopeHex.length > 0 && scopeHex.length <= MAX_SCOPE_HEX_LEN && scopeHex.length % 2 === 0;
+}
+
+/** Every version counter the book holds: the bumped ones, and any a merged
+ *  state set (an explicit 0 included, so the book composes back to exactly
+ *  the state it adopted; an absent counter is version 0 on every device).
+ *  `reply` keys have no version. In the core's canonical order, so the
+ *  envelope is the same bytes for the same book. */
+export function reachStateEntries(book: ReachBook): ReachStateEntryModel[] {
+  const out: ReachStateEntryModel[] = [];
+  for (const [key, version] of Object.entries(book.versions)) {
+    const at = key.indexOf(":");
+    if (at < 0 || !Number.isInteger(version) || version < 0) continue;
+    const cls = key.slice(0, at) as ReachClassName;
+    const scopeHex = key.slice(at + 1);
+    if (!(cls in REACH_CLASS_BYTE) || !shapeFits(cls, scopeHex)) continue;
+    out.push({ cls, scopeHex, version });
+  }
+  // The core's canonical order: class byte, then scope bytes (lowercase hex
+  // compares like the bytes it spells).
+  out.sort((a, b) =>
+    a.cls === b.cls
+      ? a.scopeHex < b.scopeHex
+        ? -1
+        : a.scopeHex > b.scopeHex
+          ? 1
+          : 0
+      : REACH_CLASS_BYTE[a.cls] - REACH_CLASS_BYTE[b.cls],
+  );
+  return out;
+}
+
+/**
+ * The book holding a reach state exactly as the core's `mergeReachState`
+ * returned it: every carried counter set to the state's value and the
+ * state's stamp adopted as is. The merge rule itself (maximum per counter,
+ * who re-stamps, who re-sends) is the core's, never re-derived here; a
+ * counter the state does not carry stays as it was.
+ */
+export function adoptReachState(
+  book: ReachBook,
+  entries: readonly ReachStateEntryModel[],
+  updatedAtMs: number,
+): ReachBook {
+  const versions: Record<string, number> = { ...book.versions };
+  for (const e of entries) {
+    if (!shapeFits(e.cls, e.scopeHex)) continue;
+    versions[versionKey(e.cls, e.scopeHex)] = e.version;
+  }
+  return { ...book, versions, stateUpdatedAtMs: updatedAtMs };
+}
+
+// ----------------------------------------------------------------------------
 // Persistence form
 // ----------------------------------------------------------------------------
 
@@ -313,6 +389,7 @@ export function decodeReachBook(json: string | null | undefined): ReachBook {
       registered: typeof raw.registered === "object" && raw.registered !== null ? raw.registered : {},
       open: typeof raw.open === "boolean" ? raw.open : null,
       fofRotatedAtMs: typeof raw.fofRotatedAtMs === "number" ? raw.fofRotatedAtMs : 0,
+      stateUpdatedAtMs: typeof raw.stateUpdatedAtMs === "number" ? raw.stateUpdatedAtMs : 0,
     };
   } catch {
     return EMPTY_REACH_BOOK;

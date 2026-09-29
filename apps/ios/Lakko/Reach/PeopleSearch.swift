@@ -180,12 +180,11 @@ public enum PeopleSearch {
                 if let hit = try await ports.lookupUsername(oprf.lookupKey),
                    let key = try await ports.identityKey(hit.accountId) {
                     let claim = knownProfiles[key.base64EncodedString()]
-                    let opened = hit.publicRecord.flatMap {
-                        Self.openPublic($0, output: oprf.output, accountId: hit.accountId)
-                    }
                     // The public record's name counts only when it names the
-                    // key the verified identity bundle serves.
-                    let publicName = opened?.identityPk == key ? opened?.displayName : nil
+                    // account and the key the verified identity bundle serves.
+                    let publicName = hit.publicRecord.flatMap {
+                        Self.openPublic($0, output: oprf.output, accountId: hit.accountId, identityKey: key)
+                    }?.displayName
                     found.append(FoundPerson(
                         accountKey: key, accountId: hit.accountId,
                         displayName: claim?.displayName ?? publicName,
@@ -203,25 +202,23 @@ public enum PeopleSearch {
                 let oprf = try await ports.nameTermOprf(term)
                 nameOprf = oprf
                 for hit in try await ports.nameLookup(oprf.lookupKey) {
-                    // Named from a profile this device holds, else from the
-                    // public record, opened with the term's OPRF output (the
-                    // server keeps no names).
-                    if let known = knownProfiles.first(where: { $0.value.accountId == hit.accountId }),
-                       let name = known.value.displayName,
-                       let key = Data(base64Encoded: known.key) {
-                        guard nameMatchesQuery(displayName: name, query: query) else { continue }
-                        found.append(FoundPerson(
-                            accountKey: key, accountId: hit.accountId, displayName: name,
-                            username: nil, writeSeed: nil))
+                    // The person is the key the verified identity bundle
+                    // serves for the hit's account; a hit without one is
+                    // dropped. Named from a profile this device holds for that
+                    // key, else from the public record, opened with the term's
+                    // OPRF output (the server keeps no names) and accepted
+                    // only when it names that same account AND that same key
+                    // (the rule web applies).
+                    guard let key = try await ports.identityKey(hit.accountId), key.count == 32 else {
                         continue
                     }
-                    guard let record = hit.publicRecord,
-                          let payload = Self.openPublic(
-                              record, output: oprf.output, accountId: hit.accountId),
-                          let name = payload.displayName,
+                    let published = hit.publicRecord.flatMap {
+                        Self.openPublic($0, output: oprf.output, accountId: hit.accountId, identityKey: key)
+                    }?.displayName
+                    guard let name = knownProfiles[key.base64EncodedString()]?.displayName ?? published,
                           nameMatchesQuery(displayName: name, query: query) else { continue }
                     found.append(FoundPerson(
-                        accountKey: payload.identityPk, accountId: hit.accountId, displayName: name,
+                        accountKey: key, accountId: hit.accountId, displayName: name,
                         username: nil, writeSeed: nil))
                 }
             } catch {
@@ -260,11 +257,14 @@ public enum PeopleSearch {
     }
 
     /// A public record served beside `accountId`, opened with the OPRF
-    /// `output` of the searched term; `nil` when it does not open or names
-    /// another account.
-    static func openPublic(_ record: Data, output: Data, accountId: Data) -> FfiIntroductionPayload? {
+    /// `output` of the searched term; `nil` when it does not open, names
+    /// another account, or carries another identity key than `identityKey`,
+    /// the key the verified identity bundle serves for that account.
+    static func openPublic(
+        _ record: Data, output: Data, accountId: Data, identityKey: Data
+    ) -> FfiIntroductionPayload? {
         guard let payload = try? openPublicRecord(record: record, oprfOutput: output),
-              payload.accountId == accountId else { return nil }
+              payload.accountId == accountId, payload.identityPk == identityKey else { return nil }
         return payload
     }
 

@@ -27,7 +27,7 @@ import { ScopedDiscoveryClient, usernameCertKey } from "../reach/scoped-discover
 import type { Wasm } from "../wasm";
 import { openMatchingIntroductions, recordsOf } from "./introductions";
 import { searchNormalizer, toHex, type LocalCandidate, type Normalize } from "./people";
-import type { KnownPerson, PeopleSearchDeps } from "./people-search";
+import type { KnownPerson, OpenedPublicRecord, PeopleSearchDeps } from "./people-search";
 import type { SendDeps } from "./send-request";
 
 /** The core's search normaliser, with the short-input fallback. */
@@ -123,6 +123,31 @@ export function canonicalUsernameOf(wasm: Wasm, typed: string): string | null {
   }
 }
 
+/** `openPublicRecord`, reduced to the fields the search reads and freed.
+ *  `null` when the record does not open (or opens with a grant). */
+export function openPublicRecordWith(
+  wasm: Wasm,
+  record: Uint8Array,
+  oprfOutput: Uint8Array,
+): OpenedPublicRecord | null {
+  let payload: ReturnType<Wasm["openPublicRecord"]>;
+  try {
+    payload = wasm.openPublicRecord(record, oprfOutput);
+  } catch {
+    return null;
+  }
+  if (payload === undefined) return null;
+  try {
+    return {
+      identityPk: payload.identityPk,
+      accountId: payload.accountId,
+      displayName: payload.displayName ?? null,
+    };
+  } finally {
+    payload.free();
+  }
+}
+
 /** The DS reach check of a person's account mailbox with a kept grant wire. */
 async function reachCheckWith(identityPk: Uint8Array, grantWireB64: string): Promise<boolean> {
   const signer = await reachSignerForGrantWire(grantWireB64);
@@ -157,11 +182,20 @@ export function peopleSearchDeps(args: {
     usernameOprf: (username) => scoped.usernameOprf(username),
     accountOfUsernameLookupKey: async (lookupKey) => {
       const res = await discovery.lookupRaw({ oprf_hash: base64Encode(lookupKey) });
-      return res === null ? null : base64Decode(res.account_id);
+      if (res === null) return null;
+      let publicRecord: Uint8Array | null = null;
+      if (res.public_record_b64 !== undefined) {
+        try {
+          publicRecord = base64Decode(res.public_record_b64);
+        } catch {
+          publicRecord = null;
+        }
+      }
+      return { accountId: base64Decode(res.account_id), publicRecord };
     },
     nameTermOprf: (term) => scoped.nameTermOprf(term),
-    accountsOfNameTermLookupKey: async (lookupKey) =>
-      (await scoped.nameLookup(lookupKey)).map((hit) => hit.accountId),
+    accountsOfNameTermLookupKey: (lookupKey) => scoped.nameLookup(lookupKey),
+    openPublicRecord: (record, oprfOutput) => openPublicRecordWith(wasm, record, oprfOutput),
     identityKeyOf: async (accountId) => {
       const bundle = await discovery.identityFetch(accountId);
       return bundle === null ? null : base64Decode(bundle.signature_pubkey);

@@ -29,6 +29,9 @@ const round = (prefix: string, text: string) => ({
   output: new TextEncoder().encode(`out:${prefix}:${text}`),
 });
 
+/** A lookup hit with no public record unless one is given. */
+const hit = (accountId: Uint8Array, publicRecord: Uint8Array | null = null) => ({ accountId, publicRecord });
+
 const NOBODY: KnownPerson = { name: null, verifiedUsername: null, isContact: false, keptGrantWireB64: null };
 
 function deps(over: Partial<PeopleSearchDeps> = {}, known: Record<string, KnownPerson> = {}): PeopleSearchDeps {
@@ -62,6 +65,7 @@ function deps(over: Partial<PeopleSearchDeps> = {}, known: Record<string, KnownP
     identityKeyOf: async (acc) => bundles.get(toHex(acc)) ?? null,
     known: (keyB64) => known[keyB64] ?? NOBODY,
     openIntroductions: async () => [],
+    openPublicRecord: () => null,
     verifyUsername: async () => false,
     reachCheck: async () => true,
     encodeGrant: (wire) => `W:${toHex(wire)}`,
@@ -86,7 +90,7 @@ describe("searchPeople: the username", () => {
     const out = await searchPeople(
       "anna",
       deps(
-        { accountOfUsernameLookupKey: async () => ANNA_ACC },
+        { accountOfUsernameLookupKey: async () => hit(ANNA_ACC) },
         { [base64Encode(ANNA_KEY)]: { ...NOBODY, name: "Anna Weber" } },
       ),
     );
@@ -102,7 +106,7 @@ describe("searchPeople: the username", () => {
   });
 
   it("names someone it holds no profile for by the username itself", async () => {
-    const out = await searchPeople("anna", deps({ accountOfUsernameLookupKey: async () => ANNA_ACC }));
+    const out = await searchPeople("anna", deps({ accountOfUsernameLookupKey: async () => hit(ANNA_ACC) }));
     expect(out.people[0]).toMatchObject({ name: "@anna", username: "anna" });
   });
 
@@ -180,7 +184,7 @@ describe("searchPeople: names in Everyone", () => {
     const out = await searchPeople(
       "anna w",
       deps(
-        { accountsOfNameTermLookupKey: async () => [ANNA_ACC, BO_ACC] },
+        { accountsOfNameTermLookupKey: async () => [hit(ANNA_ACC), hit(BO_ACC)] },
         { [base64Encode(ANNA_KEY)]: { ...NOBODY, name: "Anna Weber" } },
       ),
     );
@@ -192,7 +196,7 @@ describe("searchPeople: names in Everyone", () => {
     const out = await searchPeople(
       "anna x",
       deps(
-        { accountsOfNameTermLookupKey: async () => [ANNA_ACC] },
+        { accountsOfNameTermLookupKey: async () => [hit(ANNA_ACC)] },
         { [base64Encode(ANNA_KEY)]: { ...NOBODY, name: "Anna Weber" } },
       ),
     );
@@ -283,7 +287,7 @@ describe("searchPeople: one list", () => {
     const out = await searchPeople(
       "bolind",
       deps({
-        accountOfUsernameLookupKey: async () => BO_ACC,
+        accountOfUsernameLookupKey: async () => hit(BO_ACC),
         openIntroductions: async () => [intro({ via: "username", username: "bolind" })],
         reachCheck,
       }),
@@ -309,7 +313,7 @@ describe("searchPeople: one list", () => {
   it("never lists the viewer", async () => {
     const out = await searchPeople(
       "anna",
-      deps({ accountOfUsernameLookupKey: async () => ANNA_ACC, ownKeyHex: toHex(ANNA_KEY) }),
+      deps({ accountOfUsernameLookupKey: async () => hit(ANNA_ACC), ownKeyHex: toHex(ANNA_KEY) }),
     );
     expect(out.people).toEqual([]);
   });

@@ -510,6 +510,127 @@ pub const fn reach_state_is_newer(incoming_updated_at_ms: u64, stored_updated_at
     incoming_updated_at_ms > stored_updated_at_ms
 }
 
+/// What [`merge_reach_state`] tells the receiving device to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReachStateMerge {
+    /// The state this device holds after the merge.
+    pub state: ReachState,
+    /// `true` when `state` differs from what was stored (counters or stamp),
+    /// so the caller must persist it and re-derive its keys.
+    pub store: bool,
+    /// `true` when this device must send `state` to its other devices,
+    /// because the incoming state would otherwise overwrite a version the
+    /// incoming sender did not know about.
+    pub send: bool,
+}
+
+/// Fold a reach state received from another of the owner's devices into the
+/// stored one — the one rule every client applies (ADR-0060 section 7).
+///
+/// A key version never goes backwards, so the counters merge by maximum per
+/// `(class, scope)`, never by replacing the whole state; replacing would
+/// drop a rotation two devices made at the same time. The stamp then decides
+/// who re-sends:
+///
+/// * the merged counters equal the incoming ones and the incoming stamp is
+///   strictly newer: adopt the incoming state verbatim (its stamp kept, the
+///   ADR-0044 rule), nothing to send;
+/// * the merged counters equal the stored ones: keep the stored state; if the
+///   incoming stamp is not older than the stored one, devices that adopt the
+///   incoming state would lose a version this device holds, so re-stamp
+///   strictly after both and send;
+/// * otherwise both sides held something the other lacked: keep the merge,
+///   stamped strictly after both, and send.
+///
+/// Converges: once two devices hold the same counters, a received state is
+/// either adopted verbatim or kept without a send. Entries are kept in a
+/// canonical order (class byte, then scope bytes), so equal counters compare
+/// equal whatever order the two sides produced.
+///
+/// # Errors
+///
+/// Exactly what [`ReachState::validate`] returns for the merged state (a
+/// union that exceeds [`MAX_REACH_STATE_ENTRIES`], or an invalid entry in
+/// either input); the caller keeps what it stored.
+pub fn merge_reach_state(
+    stored: &ReachState,
+    incoming: &ReachState,
+    now_ms: u64,
+) -> CoreResult<ReachStateMerge, VisibilityError> {
+    stored.validate()?;
+    incoming.validate()?;
+    let mut merged: std::collections::BTreeMap<(u8, Vec<u8>), (ReachClass, u32)> =
+        std::collections::BTreeMap::new();
+    for entry in stored.entries.iter().chain(&incoming.entries) {
+        let slot = merged
+            .entry((entry.class.to_byte(), entry.scope_id.clone()))
+            .or_insert((entry.class, entry.version));
+        slot.1 = slot.1.max(entry.version);
+    }
+    let merged: Vec<ReachStateEntry> = merged
+        .into_iter()
+        .map(|((_, scope_id), (class, version))| ReachStateEntry {
+            class,
+            scope_id,
+            version,
+        })
+        .collect();
+    let equals_incoming = same_counters(&merged, &incoming.entries);
+    let equals_stored = same_counters(&merged, &stored.entries);
+    let after_both = now_ms
+        .max(stored.updated_at_ms.saturating_add(1))
+        .max(incoming.updated_at_ms.saturating_add(1));
+
+    let outcome =
+        if equals_incoming && reach_state_is_newer(incoming.updated_at_ms, stored.updated_at_ms) {
+            ReachStateMerge {
+                state: incoming.clone(),
+                store: true,
+                send: false,
+            }
+        } else if equals_stored {
+            if equals_incoming || incoming.updated_at_ms < stored.updated_at_ms {
+                ReachStateMerge {
+                    state: stored.clone(),
+                    store: false,
+                    send: false,
+                }
+            } else {
+                ReachStateMerge {
+                    state: ReachState {
+                        entries: merged,
+                        updated_at_ms: after_both,
+                    },
+                    store: true,
+                    send: true,
+                }
+            }
+        } else {
+            ReachStateMerge {
+                state: ReachState {
+                    entries: merged,
+                    updated_at_ms: after_both,
+                },
+                store: true,
+                send: true,
+            }
+        };
+    outcome.state.validate()?;
+    Ok(outcome)
+}
+
+/// `true` when two entry lists hold the same counter for every
+/// `(class, scope)`, in whatever order.
+fn same_counters(a: &[ReachStateEntry], b: &[ReachStateEntry]) -> bool {
+    let key = |entries: &[ReachStateEntry]| {
+        entries
+            .iter()
+            .map(|e| (e.class.to_byte(), e.scope_id.clone(), e.version))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    a.len() == b.len() && key(a) == key(b)
+}
+
 /// Compose the reach-state envelope.
 ///
 /// # Errors
@@ -1003,6 +1124,178 @@ mod tests {
             out.extend_from_slice(&e.version.to_be_bytes());
         }
         out
+    }
+
+    fn rs(entries: Vec<ReachStateEntry>, updated_at_ms: u64) -> ReachState {
+        ReachState {
+            entries,
+            updated_at_ms,
+        }
+    }
+
+    #[test]
+    fn a_newer_state_that_knows_everything_is_adopted_verbatim() {
+        let stored = rs(vec![entry(ReachClass::Contact, b"", 1)], 10);
+        let incoming = rs(
+            vec![
+                entry(ReachClass::Fof, b"", 4),
+                entry(ReachClass::Contact, b"", 2),
+            ],
+            20,
+        );
+        let m = merge_reach_state(&stored, &incoming, 1_000).unwrap();
+        assert_eq!(m.state, incoming, "verbatim, order and stamp kept");
+        assert!(m.store);
+        assert!(!m.send);
+    }
+
+    #[test]
+    fn two_rotations_made_at_once_are_both_kept() {
+        let stored = rs(
+            vec![
+                entry(ReachClass::Contact, b"", 2),
+                entry(ReachClass::Fof, b"", 1),
+            ],
+            10,
+        );
+        let incoming = rs(
+            vec![
+                entry(ReachClass::Contact, b"", 1),
+                entry(ReachClass::Fof, b"", 2),
+            ],
+            20,
+        );
+        let m = merge_reach_state(&stored, &incoming, 5).unwrap();
+        assert_eq!(m.state.version_of(ReachClass::Contact, b""), Some(2));
+        assert_eq!(m.state.version_of(ReachClass::Fof, b""), Some(2));
+        assert_eq!(
+            m.state.updated_at_ms, 21,
+            "strictly after both, clock behind"
+        );
+        assert!(m.store && m.send);
+    }
+
+    #[test]
+    fn a_newer_state_missing_our_rotation_is_answered_not_adopted() {
+        let stored = rs(vec![entry(ReachClass::Contact, b"", 3)], 10);
+        let incoming = rs(vec![entry(ReachClass::Contact, b"", 2)], 20);
+        let m = merge_reach_state(&stored, &incoming, 50).unwrap();
+        assert_eq!(m.state.version_of(ReachClass::Contact, b""), Some(3));
+        assert_eq!(m.state.updated_at_ms, 50);
+        assert!(m.store && m.send);
+    }
+
+    #[test]
+    fn an_older_state_changes_nothing() {
+        let stored = rs(vec![entry(ReachClass::Contact, b"", 3)], 20);
+        for incoming in [
+            rs(vec![entry(ReachClass::Contact, b"", 2)], 10),
+            rs(vec![entry(ReachClass::Contact, b"", 3)], 10),
+            rs(vec![entry(ReachClass::Contact, b"", 3)], 20),
+        ] {
+            let m = merge_reach_state(&stored, &incoming, 99).unwrap();
+            assert_eq!(m.state, stored);
+            assert!(!m.store && !m.send);
+        }
+    }
+
+    #[test]
+    fn equal_counters_in_another_order_are_equal() {
+        let stored = rs(
+            vec![
+                entry(ReachClass::Fof, b"", 1),
+                entry(ReachClass::Contact, b"", 1),
+            ],
+            20,
+        );
+        let incoming = rs(
+            vec![
+                entry(ReachClass::Contact, b"", 1),
+                entry(ReachClass::Fof, b"", 1),
+            ],
+            20,
+        );
+        let m = merge_reach_state(&stored, &incoming, 99).unwrap();
+        assert!(!m.store && !m.send);
+    }
+
+    #[test]
+    fn a_merge_that_overflows_the_bound_is_refused() {
+        let a = rs(
+            (0..MAX_REACH_STATE_ENTRIES)
+                .map(|i| entry(ReachClass::Group, format!("a{i}").as_bytes(), 1))
+                .collect(),
+            1,
+        );
+        let b = rs(vec![entry(ReachClass::Group, b"extra", 1)], 2);
+        assert_eq!(
+            merge_reach_state(&a, &b, 3),
+            Err(VisibilityError::TooManyEntries {
+                count: MAX_REACH_STATE_ENTRIES + 1
+            })
+        );
+    }
+
+    /// Devices exchange whatever `merge_reach_state` tells them to send until
+    /// nobody sends; every device ends on the per-slot maximum, no counter
+    /// ever went down, and the exchange terminates.
+    #[test]
+    fn devices_converge_on_the_maximum_and_stop() {
+        let slots: [(ReachClass, &[u8]); 3] = [
+            (ReachClass::Contact, b""),
+            (ReachClass::Fof, b""),
+            (ReachClass::Group, b"g"),
+        ];
+        // Deterministic spread of starting states and clocks.
+        for seed in 0u64..200 {
+            let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut next = |m: u64| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x % m
+            };
+            let mut devices: Vec<ReachState> = Vec::new();
+            for _ in 0..3 {
+                let mut entries = Vec::new();
+                for (c, s) in slots {
+                    if next(3) != 0 {
+                        entries.push(entry(c, s, u32::try_from(next(5)).unwrap()));
+                    }
+                }
+                devices.push(rs(entries, next(50)));
+            }
+            let want: Vec<Option<u32>> = slots
+                .iter()
+                .map(|(c, s)| devices.iter().filter_map(|d| d.version_of(*c, s)).max())
+                .collect();
+            // Every device broadcasts its starting state once.
+            let mut outbox: Vec<(usize, ReachState)> =
+                devices.iter().cloned().enumerate().collect();
+            let mut rounds = 0;
+            while let Some((from, sent)) = (!outbox.is_empty()).then(|| outbox.remove(0)) {
+                rounds += 1;
+                assert!(rounds < 1_000, "seed {seed}: no convergence");
+                for (to, device) in devices.iter_mut().enumerate() {
+                    if to == from {
+                        continue;
+                    }
+                    let m = merge_reach_state(device, &sent, next(100)).unwrap();
+                    for (c, s) in slots {
+                        assert!(m.state.version_of(c, s) >= device.version_of(c, s));
+                    }
+                    *device = m.state.clone();
+                    if m.send {
+                        outbox.push((to, m.state));
+                    }
+                }
+            }
+            for d in &devices {
+                let got: Vec<Option<u32>> =
+                    slots.iter().map(|(c, s)| d.version_of(*c, s)).collect();
+                assert_eq!(got, want, "seed {seed}");
+            }
+        }
     }
 
     #[test]

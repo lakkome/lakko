@@ -631,6 +631,28 @@ export async function deleteMemberCard(
   if (!resp.ok) throw await parseError(resp);
 }
 
+/** `DELETE /v1/channels/:id/subscribers/:subscriber_pk_hex` — leave the
+ *  channel (ADR-0060 section 3): the server drops the subscriber row, its
+ *  seed envelopes and its member card. `signature` is the header the wasm
+ *  `ChannelSubscriberKeypair.unsubscribeRequestHeader` returns, sent under
+ *  the name `unsubscribeSigHeaderName()` returns. Idempotent `204`.
+ *
+ *  Throws `ChannelApiError` on a refusal (`bad-unsubscribe-signature` /
+ *  `stale-unsubscribe` 401, an unknown channel 404) and lets a network
+ *  failure (`fetch` rejecting) through as it came. */
+export async function unsubscribeSubscriber(
+  channelIdHex: string,
+  subscriberPubkeyHex: string,
+  signature: { readonly headerName: string; readonly value: string },
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  const resp = await fetch(
+    `${base}/v1/channels/${channelIdHex}/subscribers/${subscriberPubkeyHex}`,
+    { method: "DELETE", headers: { [signature.headerName]: signature.value } },
+  );
+  if (!resp.ok) throw await parseError(resp);
+}
+
 /** `GET /v1/channels/:id/members?after=&limit=` — one page of member cards,
  *  ascending by subscriber key. `after` is the previous page's `nextAfter`. */
 export async function listMemberCards(

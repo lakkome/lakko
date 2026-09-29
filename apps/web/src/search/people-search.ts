@@ -26,11 +26,16 @@
  * the person's mailbox. A check that says no drops the result silently: the
  * searcher must not be able to tell "hidden" from "does not exist".
  *
- * **What a person in Everyone is called.** No route returns a public
- * person's name: the name lookup gives account ids and the identity bundle
- * gives keys. So an Everyone result is shown only when this device can name
- * it from what it already holds (a contact, a profile from a shared group or
- * channel); an unnamed one is dropped. A username match names itself.
+ * **What a person in Everyone is called.** Both lookups return, beside each
+ * account id, the person's PUBLIC RECORD (ADR-0060 section 5), sealed under
+ * the OPRF outputs of their name terms and username. It is opened with the
+ * OUTPUT of the round that found the hit (never its lookup key) and counts
+ * only when it names both the hit's account id and the key the identity
+ * bundle serves for that account ({@link acceptPublicRecord}); a record that
+ * does not open or fails either check is ignored. A name this device already
+ * holds (a contact, a profile from a shared group or channel) wins over the
+ * record's. A name hit nothing names is dropped; a username match without a
+ * usable record is shown under its username.
  *
  * Every dependency is an argument, so the whole decision is testable.
  */
@@ -57,6 +62,20 @@ export interface KnownPerson {
   readonly keptGrantWireB64: string | null;
 }
 
+/** One lookup hit: an account in Everyone and its public record (standard
+ *  bytes; `null` when discovery sent none). */
+export interface LookupHit {
+  readonly accountId: Uint8Array;
+  readonly publicRecord: Uint8Array | null;
+}
+
+/** The fields of an opened public record the search reads. */
+export interface OpenedPublicRecord {
+  readonly identityPk: Uint8Array;
+  readonly accountId: Uint8Array;
+  readonly displayName: string | null;
+}
+
 export interface PeopleSearchDeps {
   /** The canonical username the text could be, or `null` (`looksLikeAName`
    *  + `bareName`). No username or channel question is asked without one. */
@@ -69,13 +88,17 @@ export interface PeopleSearchDeps {
   lookupChannel?(handle: string): Promise<string | null>;
   /** One OPRF round over a username (one anonymous token). */
   usernameOprf(username: string): Promise<OprfPair>;
-  /** `/discovery/lookup` by the username's LOOKUP KEY: the account id, or `null`. */
-  accountOfUsernameLookupKey(lookupKey: Uint8Array): Promise<Uint8Array | null>;
+  /** `/discovery/lookup` by the username's LOOKUP KEY: the account id and
+   *  its public record, or `null`. */
+  accountOfUsernameLookupKey(lookupKey: Uint8Array): Promise<LookupHit | null>;
   /** One OPRF round over a name term (one anonymous token). */
   nameTermOprf(term: string): Promise<OprfPair>;
-  /** `/discovery/name/lookup` by the term's LOOKUP KEY: account ids in
-   *  Everyone carrying the term. */
-  accountsOfNameTermLookupKey(lookupKey: Uint8Array): Promise<Uint8Array[]>;
+  /** `/discovery/name/lookup` by the term's LOOKUP KEY: accounts in
+   *  Everyone carrying the term, with their public records. */
+  accountsOfNameTermLookupKey(lookupKey: Uint8Array): Promise<LookupHit[]>;
+  /** `openPublicRecord(record, oprfOutput)`: the opened fields, or `null`
+   *  when it does not open. Never throws. */
+  openPublicRecord(record: Uint8Array, oprfOutput: Uint8Array): OpenedPublicRecord | null;
   /** The account key the identity bundle publishes, `null` for none. */
   identityKeyOf(accountId: Uint8Array): Promise<Uint8Array | null>;
   /** What this device knows about a person. */
@@ -103,6 +126,33 @@ export interface PeopleSearchOutcome {
  *  search beyond the typed one: each verification costs an OPRF evaluation,
  *  i.e. one anonymous token. The rest show their name without a username. */
 export const MAX_EXTRA_USERNAME_CHECKS = 3;
+
+/**
+ * The display name a public record gives a lookup hit, or `null`. The record
+ * is opened with the OPRF OUTPUT of the round that found the hit, and counts
+ * only when it names the hit's account id AND the key the identity bundle
+ * serves for that account: any person in Everyone can seal a record naming
+ * anyone, and discovery serves whatever the account published. Never throws.
+ */
+export function acceptPublicRecord(
+  deps: Pick<PeopleSearchDeps, "openPublicRecord">,
+  hit: LookupHit,
+  oprfOutput: Uint8Array,
+  bundleKey: Uint8Array,
+): string | null {
+  if (hit.publicRecord === null) return null;
+  let opened: OpenedPublicRecord | null;
+  try {
+    opened = deps.openPublicRecord(hit.publicRecord, oprfOutput);
+  } catch {
+    return null;
+  }
+  if (opened === null) return null;
+  if (toHex(opened.accountId) !== toHex(hit.accountId)) return null;
+  if (toHex(opened.identityPk) !== toHex(bundleKey)) return null;
+  const name = opened.displayName?.trim() ?? "";
+  return name.length === 0 ? null : name;
+}
 
 /** A result built from what is known locally, over a network finding. */
 function resultFor(
@@ -159,21 +209,32 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
       const round = await deps.usernameOprf(username);
       rounds.username = round;
       probes.push({ oprfOutput: round.output, via: "username" });
-      const account = await deps.accountOfUsernameLookupKey(round.lookupKey);
-      if (account === null) {
+      const hit = await deps.accountOfUsernameLookupKey(round.lookupKey);
+      if (hit === null) {
         legs.push("answered");
         return [];
       }
-      const accountIdHex = toHex(account);
+      const accountIdHex = toHex(hit.accountId);
       // The key comes from the identity bundle discovery serves for the
       // account, never from a profile's CLAIMED account id: any member of a
       // shared group could claim someone else's.
-      const key = await identityKeyB64(deps, account);
+      const key = await identityKeyB64(deps, hit.accountId);
       legs.push("answered");
       if (key === null) return [];
+      // The name the person published, when their record names this key.
+      const published = acceptPublicRecord(deps, hit, round.output, key.bytes);
       // Discovery itself resolved this username to this account: that is
       // the binding a certificate would prove, so the username shows.
-      const r = resultFor(deps, key.b64, key.hex, accountIdHex, "open", `@${username}`, username, null);
+      const r = resultFor(
+        deps,
+        key.b64,
+        key.hex,
+        accountIdHex,
+        "open",
+        published ?? `@${username}`,
+        username,
+        null,
+      );
       return r === null ? [] : [r];
     } catch (err) {
       legs.push(legOutcomeOf(err));
@@ -187,16 +248,18 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
     try {
       const round = await deps.nameTermOprf(term);
       probes.push({ oprfOutput: round.output, via: "term" });
-      const accounts = await deps.accountsOfNameTermLookupKey(round.lookupKey);
+      const hits = await deps.accountsOfNameTermLookupKey(round.lookupKey);
       const out: PersonResult[] = [];
-      for (const account of accounts) {
-        const accountIdHex = toHex(account);
-        const key = await identityKeyB64(deps, account);
+      for (const hit of hits) {
+        const accountIdHex = toHex(hit.accountId);
+        const key = await identityKeyB64(deps, hit.accountId);
         if (key === null) continue;
-        // Named only from what this device already holds (module docs).
-        const name = deps.known(key.b64).name;
+        // A name this device holds, else the one the person published
+        // (module docs); an unnamed hit is dropped.
+        const published = acceptPublicRecord(deps, hit, round.output, key.bytes);
+        const name = deps.known(key.b64).name ?? published;
         if (name === null || !deps.nameMatches(name, query)) continue;
-        const r = resultFor(deps, key.b64, key.hex, accountIdHex, "open", null, null, null);
+        const r = resultFor(deps, key.b64, key.hex, accountIdHex, "open", published, null, null);
         if (r !== null) out.push(r);
       }
       legs.push("answered");
@@ -300,8 +363,8 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
 async function identityKeyB64(
   deps: PeopleSearchDeps,
   accountId: Uint8Array,
-): Promise<{ b64: string; hex: string } | null> {
+): Promise<{ b64: string; hex: string; bytes: Uint8Array } | null> {
   const key = await deps.identityKeyOf(accountId);
   if (key === null || key.length !== 32) return null;
-  return { b64: keyB64Of(key), hex: toHex(key) };
+  return { b64: keyB64Of(key), hex: toHex(key), bytes: key };
 }

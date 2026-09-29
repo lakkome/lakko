@@ -187,6 +187,12 @@ struct LakkoApp: App {
             )
         )
         let sync = DeviceGroupSyncRepository()
+        // ADR-0060 section 7 — a local change of the "who can find me"
+        // setting or of a reach-key version goes to the account's other
+        // devices over the DeviceGroup.
+        ReachCenter.shared.onDeviceEnvelope = { [weak sync] envelope in
+            Task { @MainActor in await sync?.sendServiceEnvelope(envelope) }
+        }
         let intake = InviteIntake()
         self._deviceGroupSync = StateObject(wrappedValue: sync)
         self._inviteIntake = StateObject(wrappedValue: intake)

@@ -639,22 +639,23 @@ public class DiscoveryClient(
     /**
      * `PUT /discovery/visibility` (session-gated): enter Everyone with the
      * discovery lookup key of every name search term ([nameTermLookupKeys],
-     * 64 bytes each, `OprfResult.lookupKey` — never the OPRF output), or leave
-     * it ([public] `false`, no terms). Idempotent.
+     * 64 bytes each, `OprfResult.lookupKey` — never the OPRF output) and the
+     * [publicRecord] composed over the outputs (required by the server in
+     * Everyone), or leave it ([public] `false`, no terms, no record).
+     * Idempotent.
      */
-    public suspend fun putVisibility(public: Boolean, nameTermLookupKeys: List<ByteArray>) {
+    public suspend fun putVisibility(
+        public: Boolean,
+        nameTermLookupKeys: List<ByteArray>,
+        publicRecord: ByteArray? = null,
+    ) {
         val endpoint = "/discovery/visibility"
         val authHeader = sessionToken?.let { "Bearer $it" }
         val response: HttpResponse = try {
             client.put("$baseUrl$endpoint") {
                 if (authHeader != null) header(io.ktor.http.HttpHeaders.Authorization, authHeader)
                 contentType(ContentType.Application.Json)
-                setBody(
-                    VisibilityRequest(
-                        public = public,
-                        name_terms_b64 = if (public) nameTermLookupKeys.map(::base64Encode) else emptyList(),
-                    ),
-                )
+                setBody(visibilityRequest(public, nameTermLookupKeys, publicRecord))
             }
         } catch (cause: CancellationException) {
             throw cause

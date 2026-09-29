@@ -96,7 +96,30 @@ data class VisibilityRequest(
     /** base64 of each name search term's 64-byte lookup key
      *  (`OprfResult.lookupKey`), never an OPRF output. */
     val name_terms_b64: List<String> = emptyList(),
+    /** Standard base64 of the public record (`composePublicRecord`, sealed
+     *  under the OPRF outputs of the terms). Required when [public], refused
+     *  otherwise, so it is omitted (`null`) outside Everyone. */
+    val public_record_b64: String? = null,
 )
+
+/**
+ * The body of `PUT /discovery/visibility`: in Everyone, the lookup keys and
+ * the public record; outside it, `public: false` alone (the server refuses
+ * terms or a record there). Pure, so the wire shape is host-testable.
+ */
+internal fun visibilityRequest(
+    public: Boolean,
+    nameTermLookupKeys: List<ByteArray>,
+    publicRecord: ByteArray?,
+): VisibilityRequest = if (public) {
+    VisibilityRequest(
+        public = true,
+        name_terms_b64 = nameTermLookupKeys.map { me.lakko.app.auth.base64Encode(it) },
+        public_record_b64 = publicRecord?.let { me.lakko.app.auth.base64Encode(it) },
+    )
+} else {
+    VisibilityRequest(public = false)
+}
 
 /** Body of `POST /discovery/name/lookup` (ADR-0060 §5). */
 @Serializable
