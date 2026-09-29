@@ -6,6 +6,10 @@
       "text": "שינוי שפה",
       "status": "machine"
     },
+    "common.close": {
+      "text": "סגירה",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "ערבית",
       "status": "machine"

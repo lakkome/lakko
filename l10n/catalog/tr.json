@@ -6,6 +6,10 @@
       "text": "Dili değiştir",
       "status": "machine"
     },
+    "common.close": {
+      "text": "Kapat",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "Arapça",
       "status": "machine"

@@ -6,6 +6,10 @@
       "text": "Mudar idioma",
       "status": "machine"
     },
+    "common.close": {
+      "text": "Fechar",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "Árabe",
       "status": "machine"

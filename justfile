@@ -180,6 +180,9 @@ l10n-check:
     for dest in apps/web/src/l10n/catalog apps/ios/Lakko/Resources/L10n apps/android/app/src/main/assets/l10n; do
         diff -r -q "$out" "$dest" >/dev/null || { echo "stale: $dest (run just l10n-compile)"; rm -rf "$out"; exit 1; }
     done
+    cargo run -q -p lakko-l10n-tool -- android-locales --out "$out/locales_config.xml" >/dev/null
+    diff -q "$out/locales_config.xml" apps/android/app/src/main/res/xml/locales_config.xml >/dev/null \
+        || { echo "stale: locales_config.xml (run just l10n-compile)"; rm -rf "$out"; exit 1; }
     rm -rf "$out"
     echo "compiled catalogs up to date"
 
@@ -198,6 +201,7 @@ l10n-compile:
         rm -f "$dest/bundle-payload.json"
     done
     rm -rf "$out"
+    cargo run -q -p lakko-l10n-tool -- android-locales --out apps/android/app/src/main/res/xml/locales_config.xml >/dev/null
     echo "l10n compiled into the web, iOS and Android resources"
 
 # Audit-pack drift gate — every numbered invariant in

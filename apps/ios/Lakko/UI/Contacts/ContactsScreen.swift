@@ -125,6 +125,9 @@ public struct ContactsScreen: View {
                 }
             }
         }
+        // Rebuilt on a layout-direction flip: a UIKit-backed List keeps the
+        // mirroring it was built with (see SettingsScreen).
+        .id(l10n.layoutDirection)
         .searchable(text: $query, prompt: "Search contacts")
         .refreshable { await viewModel.pullToRefresh() }
         .navigationTitle(l10n.t("nav.contacts"))

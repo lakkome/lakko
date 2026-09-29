@@ -19,7 +19,27 @@ import "./styles.css";
 import { registerServiceWorker } from "./sw/register";
 import { runBootUpdateCheck } from "./update/release-check";
 import { bootstrapTheme } from "./ui/theme";
-import { bootstrapL10n } from "./l10n";
+import { bootstrapL10n, LANGUAGE_STORAGE_KEY } from "./l10n";
+
+/** Longest the first paint waits for a non-English catalog. Chosen, not measured. */
+const FIRST_PAINT_WAIT_MS = 2000;
+
+/**
+ * A cheap guess, before the core has loaded, whether the resolved language
+ * is not English. It only decides whether the first paint waits; the
+ * language itself is still resolved by the core.
+ */
+function likelyNonEnglish(): boolean {
+  let stored: string | null = null;
+  try {
+    stored = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+  } catch {
+    stored = null;
+  }
+  if (stored !== null && stored !== "") return stored !== "en";
+  const first = navigator.languages?.[0] ?? navigator.language ?? "en";
+  return !first.toLowerCase().startsWith("en");
+}
 
 const root = document.getElementById("root");
 if (root === null) {
@@ -35,12 +55,22 @@ if (root === null) {
 bootstrapTheme();
 
 // ADR-0058: resolve the interface language (stored choice, else the system
-// list, else English) and load its catalog. Not awaited: until the core has
-// loaded, every string renders from the English source, and the switch to the
-// resolved language then swaps the whole dictionary at once. Never rejects.
-void bootstrapL10n();
-
-render(() => <App />, root);
+// list, else English) and load its catalog. Until the core has loaded every
+// string renders from the English source. When the language is likely not
+// English, the first paint waits for the catalog so the screen does not show
+// English for a moment and then switch; the wait is capped so a slow or
+// failed load never keeps the app from rendering. Never rejects.
+const l10nReady = bootstrapL10n();
+const mount = (): void => {
+  render(() => <App />, root);
+};
+if (likelyNonEnglish()) {
+  void Promise.race([l10nReady, new Promise((done) => setTimeout(done, FIRST_PAINT_WAIT_MS))]).then(
+    mount,
+  );
+} else {
+  mount();
+}
 
 // Fire-and-forget — the helper logs and swallows its own errors.
 // Skipped in dev builds (Vite HMR + SW conflict) and in browsers

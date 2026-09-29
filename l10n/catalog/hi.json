@@ -6,6 +6,10 @@
       "text": "भाषा बदलें",
       "status": "machine"
     },
+    "common.close": {
+      "text": "बंद करें",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "अरबी",
       "status": "machine"

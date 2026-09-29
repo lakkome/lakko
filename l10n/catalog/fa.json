@@ -6,6 +6,10 @@
       "text": "تغییر زبان",
       "status": "machine"
     },
+    "common.close": {
+      "text": "بستن",
+      "status": "machine"
+    },
     "language.name.ar": {
       "text": "عربی",
       "status": "machine"

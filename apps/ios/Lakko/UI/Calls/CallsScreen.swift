@@ -132,6 +132,9 @@ struct CallsScreen: View {
                 }
             }
             .listStyle(.plain)
+            // Rebuilt on a layout-direction flip: a UIKit-backed List keeps the
+            // mirroring it was built with (see SettingsScreen).
+            .id(l10n.layoutDirection)
         }
     }
 
