@@ -362,7 +362,23 @@ same open question as the rest of per-device state.
   boundary and 88.2 ms is `rankFeed`. The native engine (release) ranks
   100k in 13.9-34.7 ms. A dev build of the wasm was about 4x slower, so
   numbers from `vite dev` do not describe the product.
-- **S4** iOS and Android, the same.
+- **S4** iOS and Android, the same. Built the same day on both, mirroring
+  the web states, flows and copy: Feed as the second of five tabs, the
+  channel-post log and its foreground sync (60 s and on resume, never in
+  the background), seen marks filing into the message log with the read
+  receipt and `ReadCursor` sent only when the watermark advances, own
+  feeds with the editor, share as a link and a `.lakkofeed` file, and
+  import from `/feed/import#...` or an in-app file picker. Both stores are
+  sealed under a device-bound key (Android Keystore, iOS Keychain wrap
+  key) and wiped on `forgetDevice`. Verified only in scratch copies,
+  because the worktree does not compile on either platform for an
+  unrelated reason (the sealed-invite-link bindings of `39dd75bd` are not
+  ported to the native clients): iOS `xcodebuild` succeeded and
+  `FeedTests` 20 passed; Android `:app:compileDebugKotlin` succeeded and
+  16 feed unit tests passed, with the core behind a fake since the host
+  JVM has no `.so`. Not run on a device or simulator UI. Not built:
+  opening a `.lakkofeed` from another app (no file-type registration),
+  the items listed as not built for S3d, and a phone measurement.
 - **S5** docs reconcile; ADR-0059 lands the Discover preset.
 
 ## Open questions
