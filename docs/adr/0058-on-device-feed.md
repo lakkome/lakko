@@ -108,7 +108,8 @@ fail-closed on any violation, canonical (`encode(decode(x)) == x`),
 `include` / `exclude` emptied and a flag set so the importer can say
 "Sources: all groups and channels"; the in-device store keeps the full
 rule in the same encoding. A shared file (`.lakkofeed`) and a link
-(`https://lakko.me/feed#<base64url>`, the fragment never reaches a server)
+(`https://<web origin>/feed/import#<base64url>`, as built at S3d; the
+fragment never reaches a server)
 carry the exported bytes. Fuzz target `feed_rule_decode`, asserting
 round-trip stability and that an exported rule never carries a
 conversation id.

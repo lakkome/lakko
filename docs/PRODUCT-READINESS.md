@@ -131,6 +131,7 @@ One thing the row understated: the 45-second ring window of section 2.1 **is** b
 | Accessibility | PARTIAL | ? | ? | Web: no live region on the message list, no keyboard handling in the chat at all |
 | Install from a store | n/a | NO | NO | Bundle id `me.lakko.dev` on both; no signing team, no keystore, no fastlane, no CI archive; **Release builds point at `http://localhost:8081`** (`project.yml:66-67`, `build.gradle.kts:340-341`); no app icon (the iOS asset catalogue added on 2026-09-16 has an empty icon set, Android uses the system default); `aps-environment: development` |
 | Install as PWA | OK | n/a | n/a | |
+| Feed: presets, own feeds, share and import, reading counts as read (ADR-0058) | ? | NO | NO | Built on 2026-09-29, never walked live on any platform. Web: `tsc` and 35 feed unit tests; the ranking runs in the core. iOS and Android: the feed compiled and its unit tests passed only in scratch copies of the apps, because on this branch neither native app compiles until the sealed invite-link bindings of `39dd75bd` are ported (`CallInviteComposer`, `ContactsRepository`, `ChatRepository`, `CoPublisher`); Android's feed tests run against a fake core. Not built anywhere: seen marks for channel posts, the "New" divider, the item menu, feed icons, opening a `.lakkofeed` from another app. A feed shows only what this device holds (no server-side history) |
 
 ## 3. Backend and operations
 

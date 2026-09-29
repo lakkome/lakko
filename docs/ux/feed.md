@@ -126,7 +126,7 @@ change things. Everything is optional; a blank feed is "Latest".
 
 Name and icon at the top; Save pins it to the switcher.
 
-**Share feed** writes the rules as a small file (and a `lakko.me/feed/…`
+**Share feed** writes the rules as a small file (and a `lakko.me/feed/import#…`
 link that carries the file in the URL fragment, never the path). Specific
 conversations are **stripped** on export: they mean nothing to someone
 else and naming them would leak what you are in. The importer sees a
