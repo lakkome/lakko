@@ -44,6 +44,7 @@ pub mod backup;
 pub mod channels;
 pub mod contacts;
 pub mod device_link;
+pub mod discover;
 pub mod discovery;
 pub mod ds_proof;
 pub mod feed;
@@ -487,6 +488,17 @@ pub enum FfiError {
     /// `": "` and the reason, so a client selects copy from the code.
     #[error("{0}")]
     FeedRule(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0059 channel directory — appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// A channel directory listing failed a bound or did not decode. The
+    /// message starts with the frozen
+    /// `lakko_channels::listing::ChannelListingError::code()` (for example
+    /// `handle.tooShort`, `name.empty`, `language.badLength`,
+    /// `unknownVersion`) followed by `": "` and the reason.
+    #[error("{0}")]
+    ChannelListing(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

@@ -51,8 +51,9 @@
 //!    [`crate::group_name::group_name_is_newer`] than the stored
 //!    stamp for that group. An empty name clears the name.
 //!    Then [`crate::profile_request`] (ADR-0048), [`crate::pin`]
-//!    (ADR-0052) and [`crate::registrar_seed`] (ADR-0057): service
-//!    envelopes the caller acts on and never renders.
+//!    (ADR-0052), [`crate::registrar_seed`] (ADR-0057) and
+//!    [`crate::shared_channels`] (ADR-0059): service envelopes the
+//!    caller acts on and never renders.
 //! 8. **Intro-message fallthrough** — plain free-text
 //!    `ContactRequest` (ADR-0005 scenario A; "add me as a
 //!    contact"). Caller renders the bytes as a UTF-8 intro
@@ -95,6 +96,7 @@ use crate::profile::{try_unwrap_profile, Profile, ProfileError};
 use crate::profile_request::{try_unwrap_profile_request, ProfileRequestError};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
 use crate::registrar_seed::{try_unwrap_registrar_seed, RegistrarSeedEnvelope, RegistrarSeedError};
+use crate::shared_channels::{try_unwrap_shared_channels, SharedChannels, SharedChannelsError};
 
 /// Discriminated dispatch result. Borrow-flavoured slice so
 /// the dispatcher itself is zero-copy; the caller decides
@@ -213,6 +215,15 @@ pub enum IncomingEnvelope<'a> {
     /// with its account X25519 secret and drops the envelope on a failed
     /// open. Every other member drops it unopened.
     RegistrarSeed(RegistrarSeedEnvelope),
+    /// The listed channels one member shares with the group (ADR-0059 §6),
+    /// already validated against every bound. Never a chat bubble. **The
+    /// caller stores it per member**, keyed on the sender's account key
+    /// resolved at receipt (C-68), keeps it only when
+    /// [`crate::shared_channels::shared_channels_is_newer`] than the list
+    /// stored for that member, under the per-group lock (C-62 sub-invariant
+    /// 5). Any member may send one; it speaks only for its sender. An empty
+    /// list means the sender stopped sharing.
+    SharedChannels(SharedChannels),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -265,6 +276,9 @@ pub enum DispatchError {
     /// The registrar-seed domain (ADR-0057) with a malformed payload.
     #[error(transparent)]
     RegistrarSeed(#[from] RegistrarSeedError),
+    /// The shared-channels domain (ADR-0059) with a malformed payload.
+    #[error(transparent)]
+    SharedChannels(#[from] SharedChannelsError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -331,6 +345,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     if let Some(envelope) = try_unwrap_registrar_seed(plaintext)? {
         return Ok(IncomingEnvelope::RegistrarSeed(envelope));
     }
+    // 7e. Shared channels — ADR-0059 §6.
+    if let Some(list) = try_unwrap_shared_channels(plaintext)? {
+        return Ok(IncomingEnvelope::SharedChannels(list));
+    }
     // 8. Plain intro message — ADR-0005 scenario A.
     Ok(IncomingEnvelope::IntroMessage(plaintext))
 }
@@ -369,6 +387,28 @@ mod tests {
         assert!(matches!(
             dispatch_incoming_envelope(&wire[..wire.len() - 1]),
             Err(DispatchError::RegistrarSeed(_))
+        ));
+    }
+
+    #[test]
+    fn dispatches_shared_channels_and_never_renders_them() {
+        use crate::shared_channels::{compose_shared_channels, SharedChannel, SharedChannels};
+        let list = SharedChannels {
+            updated_at_ms: 7,
+            channels: vec![SharedChannel {
+                channel_id: [3; 16],
+                handle: "lakko_news".to_string(),
+                name: "Lakko News".to_string(),
+            }],
+        };
+        let wire = compose_shared_channels(&list).unwrap();
+        assert_eq!(
+            dispatch_incoming_envelope(&wire).unwrap(),
+            IncomingEnvelope::SharedChannels(list)
+        );
+        assert!(matches!(
+            dispatch_incoming_envelope(&wire[..wire.len() - 1]),
+            Err(DispatchError::SharedChannels(_))
         ));
     }
 

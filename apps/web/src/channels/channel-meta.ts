@@ -139,7 +139,9 @@ export async function publishChannelMeta(
     throw Object.assign(new Error(CHANNEL_NEEDS_NAME), { channelMetaError: "name.empty" });
   }
   const wasm = await loadWasm();
-  const plaintext = wasm.composeChannelMeta(name, description, stampMs);
+  // ADR-0059 metadata v2: topic "Other", language not set, not listed,
+  // until the Discover UI sets them.
+  const plaintext = wasm.composeChannelMeta(name, description, stampMs, 0, "", false);
   const epoch = channelsState.epochByChannel().get(channelIdHex) ?? 0;
   const counter = channelsActions.nextCounter(channelIdHex);
   const wire = await composePost(keys, channelIdHex, epoch, counter, plaintext);

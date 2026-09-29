@@ -640,6 +640,9 @@ class MultiJoinerCall private constructor(
             // ADR-0057 — a registrar seed rides the GROUP JOURNAL, sealed to one
             // member's account key, never the SFU signal-relay; dropped.
             FfiIncomingEnvelopeKind.REGISTRAR_SEED -> Unit
+            // ADR-0059 - a shared-channels list rides the GROUP JOURNAL and
+            // speaks for its MLS sender, never the SFU signal-relay; dropped.
+            FfiIncomingEnvelopeKind.SHARED_CHANNELS -> Unit
         }
     }
 

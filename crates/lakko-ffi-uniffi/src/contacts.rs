@@ -116,6 +116,12 @@ use lakko_contacts::push_routing::{
     derive_push_gid as rust_derive_push_gid,
     push_routing_secret_is_newer as rust_push_routing_secret_is_newer, PUSH_ROUTING_SECRET_LEN,
 };
+use lakko_contacts::shared_channels::{
+    compose_shared_channels as rust_compose_shared_channels,
+    decode_shared_channels as rust_decode_shared_channels,
+    shared_channels_is_newer as rust_shared_channels_is_newer, SharedChannel as RustSharedChannel,
+    SharedChannels as RustSharedChannels, SHARED_CHANNEL_ID_LEN,
+};
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
     ContactError, ContactRequest as RustContactRequest, Direction as RustDirection,
@@ -760,6 +766,107 @@ pub fn decode_pin_envelope(plaintext: Vec<u8>) -> Result<FfiPinOp, FfiError> {
 #[must_use]
 pub fn pin_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
     rust_pin_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
+}
+
+// ============================================================================
+// Shared-channels envelope — ADR-0059 §6
+// ============================================================================
+
+/// One channel a member shares with a group (ADR-0059 §6). Mirror of
+/// [`lakko_contacts::shared_channels::SharedChannel`].
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiSharedChannel {
+    /// The channel's 16-byte id.
+    pub channel_id: Vec<u8>,
+    /// The channel's canonical handle. The sender's claim: resolve it through
+    /// the OPRF lookup to the same `channel_id` before subscribing.
+    pub handle: String,
+    /// The channel name, as the channel's own metadata stated it.
+    pub name: String,
+}
+
+/// The listed channels one member shares with one group (ADR-0059 §6).
+///
+/// **Speaks only for its sender.** Store it per member, keyed on the sender's
+/// account key resolved from the MLS sender leaf at receipt (C-68), and keep
+/// it only when [`shared_channels_is_newer`] than the list stored for that
+/// member, under the per-group lock. An empty list means the sender stopped
+/// sharing.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiSharedChannels {
+    /// Sender-clock UNIX milliseconds.
+    pub updated_at_ms: u64,
+    /// At most 32 channels, no id twice.
+    pub channels: Vec<FfiSharedChannel>,
+}
+
+impl From<RustSharedChannels> for FfiSharedChannels {
+    fn from(l: RustSharedChannels) -> Self {
+        Self {
+            updated_at_ms: l.updated_at_ms,
+            channels: l
+                .channels
+                .into_iter()
+                .map(|c| FfiSharedChannel {
+                    channel_id: c.channel_id.to_vec(),
+                    handle: c.handle,
+                    name: c.name,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Compose a shared-channels envelope — the inner plaintext handed to the
+/// MLS application-message send path on the group's journal.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] with the frozen reason code first (`handle.tooShort`,
+/// `name.empty`, `duplicateChannel`, `tooManyChannels`, ...), or when a
+/// `channel_id` is not 16 bytes.
+#[uniffi::export]
+pub fn compose_shared_channels_envelope(list: FfiSharedChannels) -> Result<Vec<u8>, FfiError> {
+    let mut channels = Vec::with_capacity(list.channels.len());
+    for c in list.channels {
+        let channel_id: [u8; SHARED_CHANNEL_ID_LEN] =
+            c.channel_id.as_slice().try_into().map_err(|_| {
+                FfiError::Contacts(format!(
+                    "channelId: channel_id must be {SHARED_CHANNEL_ID_LEN} bytes"
+                ))
+            })?;
+        channels.push(RustSharedChannel {
+            channel_id,
+            handle: c.handle,
+            name: c.name,
+        });
+    }
+    rust_compose_shared_channels(&RustSharedChannels {
+        updated_at_ms: list.updated_at_ms,
+        channels,
+    })
+    .map_err(|e| FfiError::Contacts(format!("{}: {e}", e.code())))
+}
+
+/// Strictly decode a shared-channels envelope. Fail-closed: any bound
+/// violation refuses the whole envelope.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] with the frozen reason code first.
+#[uniffi::export]
+pub fn decode_shared_channels_envelope(plaintext: Vec<u8>) -> Result<FfiSharedChannels, FfiError> {
+    rust_decode_shared_channels(&plaintext)
+        .map(Into::into)
+        .map_err(|e| FfiError::Contacts(format!("{}: {e}", e.code())))
+}
+
+/// `true` when a list stamped `incoming_updated_at_ms` must replace the list
+/// stored **for the same member**. Strictly greater; equal is not newer.
+#[uniffi::export]
+#[must_use]
+pub fn shared_channels_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
+    rust_shared_channels_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
 }
 
 // ============================================================================
@@ -1871,6 +1978,14 @@ pub enum FfiIncomingEnvelopeKind {
     /// ADR-0057 client wiring adds that; until then a client drops it.
     /// Appended last so every earlier variant keeps its ordinal.
     RegistrarSeed,
+    /// The listed channels one member shares with the group (ADR-0059 §6).
+    /// The decoded list rides the `shared_channels` field of
+    /// [`FfiIncomingEnvelope`]; `payload` is empty. Never render it as a chat
+    /// bubble. Appended last so every earlier variant keeps its ordinal.
+    ///
+    /// Store it per member, keyed on the sender's account key resolved at
+    /// receipt (C-68), only when [`shared_channels_is_newer`] for that member.
+    SharedChannels,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1911,6 +2026,10 @@ pub struct FfiIncomingEnvelope {
     /// Set only for `Pin` (ADR-0052): the decoded pin operation. `None` for
     /// every other kind.
     pub pin: Option<FfiPinOp>,
+    /// Set only for `SharedChannels` (ADR-0059): the decoded list. `None` for
+    /// every other kind. Defaults to `None` so existing initialisers compile.
+    #[uniffi(default = None)]
+    pub shared_channels: Option<FfiSharedChannels>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -1934,6 +2053,7 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
     let mut profile = None;
     let mut group_name = None;
     let mut pin = None;
+    let mut shared_channels = None;
     let (kind, payload, camera_on, mint_epoch) = match parsed {
         IncomingEnvelope::CallWelcome(p) => {
             (FfiIncomingEnvelopeKind::CallWelcome, p.to_vec(), None, None)
@@ -1986,6 +2106,15 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             None,
             None,
         ),
+        IncomingEnvelope::SharedChannels(list) => {
+            shared_channels = Some(list.into());
+            (
+                FfiIncomingEnvelopeKind::SharedChannels,
+                Vec::new(),
+                None,
+                None,
+            )
+        },
         IncomingEnvelope::IntroMessage(p) => (
             FfiIncomingEnvelopeKind::IntroMessage,
             p.to_vec(),
@@ -2001,6 +2130,7 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         profile,
         group_name,
         pin,
+        shared_channels,
     })
 }
 
@@ -4149,6 +4279,37 @@ mod tests {
         assert_eq!(group_invite_link_secret_url_len(), 16);
         assert_eq!(invite_link_secret_len(), 12);
         assert_eq!(invite_link_secret_url_len(), 16);
+    }
+
+    #[test]
+    fn shared_channels_envelope_round_trips_and_dispatches() {
+        let list = FfiSharedChannels {
+            updated_at_ms: 11,
+            channels: vec![FfiSharedChannel {
+                channel_id: vec![2; 16],
+                handle: "lakko_news".to_string(),
+                name: "Lakko News".to_string(),
+            }],
+        };
+        let wire = compose_shared_channels_envelope(list.clone()).unwrap();
+        assert_eq!(decode_shared_channels_envelope(wire.clone()).unwrap(), list);
+        let dispatched = dispatch_incoming_envelope(wire).unwrap();
+        assert_eq!(dispatched.kind, FfiIncomingEnvelopeKind::SharedChannels);
+        assert_eq!(dispatched.shared_channels, Some(list.clone()));
+        assert!(dispatched.payload.is_empty());
+        let bad = FfiSharedChannels {
+            channels: vec![FfiSharedChannel {
+                channel_id: vec![2; 15],
+                ..list.channels[0].clone()
+            }],
+            ..list
+        };
+        assert!(matches!(
+            compose_shared_channels_envelope(bad),
+            Err(FfiError::Contacts(_))
+        ));
+        assert!(shared_channels_is_newer(2, 1));
+        assert!(!shared_channels_is_newer(1, 1));
     }
 
     #[test]

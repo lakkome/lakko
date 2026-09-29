@@ -172,7 +172,8 @@ pub fn anon_token_header_name() -> String {
 }
 
 /// Every context name, in wire order: `discovery-lookup`,
-/// `discovery-register`, `invite-consume`, `ds-knock`, `push-register`.
+/// `discovery-register`, `invite-consume`, `ds-knock`, `push-register`,
+/// `channel-subscribe`, `directory-search`.
 #[uniffi::export]
 pub fn anon_token_contexts() -> Vec<String> {
     TokenContext::ALL
@@ -318,6 +319,6 @@ mod tests {
             Err(FfiError::AnonToken(m)) if m.starts_with("invalid-window: ")
         ));
         assert_eq!(anon_token_header_name(), "x-lakko-anon-token");
-        assert_eq!(anon_token_contexts().len(), 5);
+        assert_eq!(anon_token_contexts().len(), 7);
     }
 }

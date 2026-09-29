@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0059: Discover - an opt-in channel directory, topic buckets, search, and channels shared in groups
 
-- **Status:** Proposed
+- **Status:** Accepted 2026-09-29 (the maintainer chose to build it)
 - **Date:** 2026-09-28
 - **Context:** product completeness, the recommendation half of the Feed.
   UX spec: [`docs/ux/feed.md`](../ux/feed.md) section 6. The on-device feed
@@ -258,6 +258,37 @@ service envelopes.
 - **S1** core: owner key derivation, `lakko-channels::listing` (codec,
   topics), metadata v2, `lakko-contacts::shared_channels`, token contexts
   6 and 7, fuzz targets; both FFI surfaces.
+  **S1 built 2026-09-29; notes, including where it differs from the text:**
+  - *Owner proof.* A sibling of the ADR-0053 proof in
+    `lakko-channels::owner`, not a parameterised `lakko-ds-proof`: domain
+    `lakko/channels/owner-proof/v1`, header `x-lakko-channel-owner-proof:
+    v1.<unix_ms>.<nonce>.<sig>`, canonical bytes `domain ‖ 0 ‖ method ‖ 0 ‖
+    path ‖ 0 ‖ query ‖ 0 ‖ BLAKE3(body) ‖ unix_ms(8 BE) ‖ nonce(16)`, the
+    same 120 s window. It carries **no epoch** (an owner key does not
+    rotate); the channel is bound through the path. The owner seed takes the
+    account identity's 32-byte Ed25519 seed, the input ADR-0057 uses.
+    Derivation and canonical bytes are golden-pinned.
+  - *Metadata v2 layout.* The three fields are appended after the
+    description: `… ‖ description ‖ topic(1) ‖ language_len(1) ‖ language ‖
+    listed(1)`. **An unset language is an empty string** (`language_len` 0)
+    in the metadata record; a listing requires 2-3 letters. `listed` must be
+    `0x00` or `0x01`. Metadata and listing are not coupled: a record may say
+    `listed` with no language.
+  - *Topics.* The 24 entries include "Other" as id 0 (ids 0-23, dense).
+    Any topic byte decodes and is kept verbatim (canonical encoding); an
+    unknown id only *reads* as "Other" (`topic_name`).
+  - *One name rule.* The ADR-0051 channel name / description rules moved
+    from `lakko-channels::meta` to `lakko-contacts::channel_text` (re-exported
+    by `meta` under the old names, no input changed), because the
+    shared-channels envelope must refuse exactly what the channel's record
+    refuses and `lakko-contacts` cannot depend on `lakko-channels`.
+    `lakko-channels` now depends on `lakko-contacts` (and `base64`).
+  - *Shared channels.* The envelope refuses a `channel_id` listed twice.
+    The NSE extension surface returns no fields on decode (like the profile
+    arm): which channels a person follows is not the extension's to learn.
+  - *Token quotas.* `channel-subscribe` 20 and `directory-search` 30 per
+    account per epoch, chosen, not measured (open question 4).
+
 - **S2** `services/channels`: `owner_pubkey`, owner-signed listing and
   subscriber list, token-gated subscribe, directory tables, bucket ranking,
   search, internal moderation routes; DB-gated tests.

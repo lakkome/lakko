@@ -46,14 +46,37 @@
 //! lesson): re-stamping at send time would let a re-issue outrank a newer
 //! edit from a co-publisher.
 //!
-//! ## Wire shape
+//! ## Wire shape (schema version 2, ADR-0059 section 2)
 //!
 //! ```text
 //!   CHANNEL_META_DOMAIN_V1 || version || updated_at_ms || name_len || name || description_len || description
-//!   └── 22 bytes, ASCII ──┘ └─ 0x01 ─┘ └── 8 B, BE ───┘ └─ 1 B ──┘ └ .. ┘ └───── 2 B, BE ─────┘ └──── .. ────┘
+//!   └── 22 bytes, ASCII ──┘ └─ 0x02 ─┘ └── 8 B, BE ───┘ └─ 1 B ──┘ └ .. ┘ └───── 2 B, BE ─────┘ └──── .. ────┘
+//!
+//!     || topic || language_len || language || listed
+//!        └ 1 B ┘ └─── 1 B ────┘ └ 0/2/3 B ┘ └ 1 B ┘
 //!
 //!                     "lakko/channel-meta/v1\x00"
 //! ```
+//!
+//! Version 2 is a **flag day**: version `0x01` is refused like any other
+//! unknown version (no production data exists, ADR-0059 "Consequences").
+//!
+//! * `topic` — a [`crate::listing::TOPICS`] id. Any byte decodes; a byte
+//!   the reader does not know is shown as "Other"
+//!   ([`crate::listing::topic_name`]), so a later topic list stays readable
+//!   by an older client. The byte is kept verbatim, never rewritten, so the
+//!   encoding stays canonical.
+//! * `language` — **empty means "not set"**; otherwise an ISO 639 code of 2
+//!   or 3 ASCII lowercase letters ([`crate::listing::check_language`]). The
+//!   metadata record admits an unset language because a channel that is not
+//!   listed has no need to state one; the public listing
+//!   ([`crate::listing`]) requires it.
+//! * `listed` — `0x00` or `0x01`, any other byte refuses the record. It
+//!   tells every subscriber, end-to-end encrypted, whether the owner lists
+//!   the channel in the directory, which is what lets a member share only
+//!   listed channels in a group (ADR-0059 section 6). It is not coupled to
+//!   the language here: whether a listing exists is the directory's fact,
+//!   this flag is the owner's statement.
 //!
 //! Total length is between [`CHANNEL_META_MIN_LEN`] and
 //! [`CHANNEL_META_MAX_LEN`].
@@ -76,9 +99,12 @@
 //!
 //! ### The format-character table
 //!
-//! This crate depends on no Unicode-tables crate and, deliberately, not on
-//! `lakko-contacts` (whose profile module carries the full general-category
-//! `Cf` table). [`REFUSED_FORMAT_CHAR_RANGES`] lists the subset that can
+//! The field rules are defined once in `lakko_contacts::channel_text` and
+//! re-exported here under their historical names, because the directory
+//! listing and the group envelope that shares followed channels (ADR-0059)
+//! must refuse exactly what this record refuses. The rule is deliberately
+//! narrower than the profile display-name rule (the full general-category
+//! `Cf` table): [`REFUSED_FORMAT_CHAR_RANGES`] lists the subset that can
 //! mislead a reader — the bidi controls, which reorder how neighbouring text
 //! renders, and the invisible spacers (ZWSP, WORD JOINER and its siblings,
 //! BOM, SOFT HYPHEN) that no name needs. ZERO WIDTH NON-JOINER (U+200C) and
@@ -89,6 +115,14 @@ use core::result::Result as CoreResult;
 
 use thiserror::Error;
 
+use crate::listing::{check_language, LanguageError, LANGUAGE_MAX_LEN};
+
+pub use lakko_contacts::channel_text::{
+    check_description, check_name, is_refused_format_char,
+    ChannelTextError as ChannelMetaFieldError, DESCRIPTION_MAX_BYTES, DESCRIPTION_MAX_CHARS,
+    NAME_MAX_BYTES, NAME_MAX_CHARS, REFUSED_FORMAT_CHAR_RANGES,
+};
+
 /// 22-byte domain separator the record starts with.
 ///
 /// **Frozen.** The trailing `\x00` is what keeps a UTF-8 text post from
@@ -98,71 +132,25 @@ use thiserror::Error;
 pub const CHANNEL_META_DOMAIN_V1: &[u8] = b"lakko/channel-meta/v1\x00";
 
 /// Schema-version byte carried first after the separator. Today the sole
-/// accepted value.
-pub const CHANNEL_META_VERSION_V1: u8 = 0x01;
-
-/// Longest admissible name, in Unicode scalar values.
-pub const NAME_MAX_CHARS: usize = 64;
-
-/// Longest admissible name, in UTF-8 bytes — the one-byte `name_len`
-/// field's ceiling.
-pub const NAME_MAX_BYTES: usize = u8::MAX as usize;
-
-/// Longest admissible description, in Unicode scalar values.
-pub const DESCRIPTION_MAX_CHARS: usize = 300;
-
-/// Longest admissible description, in UTF-8 bytes. Below the two-byte
-/// `description_len` ceiling on purpose: 300 four-byte scalars would be
-/// 1200 bytes, so the byte cap can bite before the scalar cap.
-pub const DESCRIPTION_MAX_BYTES: usize = 1024;
+/// accepted value (ADR-0059 section 2; version `0x01` is refused).
+pub const CHANNEL_META_VERSION_V2: u8 = 0x02;
 
 /// Bytes after the separator that every record carries: version,
-/// `updated_at_ms`, `name_len`, `description_len`.
-const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 2;
+/// `updated_at_ms`, `name_len`, `description_len`, `topic`,
+/// `language_len`, `listed`.
+const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 2 + 1 + 1 + 1;
 
-/// Shortest well-formed record: a one-byte name, no description.
+/// Shortest well-formed record: a one-byte name, no description, no
+/// language.
 pub const CHANNEL_META_MIN_LEN: usize = CHANNEL_META_DOMAIN_V1.len() + FIXED_PAYLOAD_LEN + 1;
 
-/// Longest well-formed record: a maximal name and a maximal description.
-pub const CHANNEL_META_MAX_LEN: usize =
-    CHANNEL_META_DOMAIN_V1.len() + FIXED_PAYLOAD_LEN + NAME_MAX_BYTES + DESCRIPTION_MAX_BYTES;
-
-/// Format characters (general category `Cf`) refused in both fields, as
-/// inclusive code-point ranges. See the module docs for what is refused and
-/// why; [`PERMITTED_JOINERS`] carves ZWNJ and ZWJ back out of the second row.
-pub const REFUSED_FORMAT_CHAR_RANGES: &[(u32, u32)] = &[
-    (0x00AD, 0x00AD), // SOFT HYPHEN
-    (0x200B, 0x200F), // ZWSP, ZWNJ, ZWJ, LRM, RLM (ZWNJ + ZWJ permitted below)
-    (0x202A, 0x202E), // LRE, RLE, PDF, LRO, RLO
-    (0x2060, 0x2064), // WORD JOINER .. INVISIBLE PLUS
-    (0x2066, 0x2069), // LRI, RLI, FSI, PDI
-    (0xFEFF, 0xFEFF), // ZERO WIDTH NO-BREAK SPACE (BOM)
-];
-
-/// ZERO WIDTH NON-JOINER and ZERO WIDTH JOINER: admitted anywhere.
-const PERMITTED_JOINERS: [char; 2] = ['\u{200C}', '\u{200D}'];
-
-/// `true` for a format character this module refuses.
-#[must_use]
-pub fn is_refused_format_char(c: char) -> bool {
-    if PERMITTED_JOINERS.contains(&c) {
-        return false;
-    }
-    let cp = u32::from(c);
-    REFUSED_FORMAT_CHAR_RANGES
-        .iter()
-        .any(|&(lo, hi)| (lo..=hi).contains(&cp))
-}
-
-/// `true` for a character that breaks a line: every `Cc` line terminator
-/// (LF, VT, FF, CR, NEL) plus LINE SEPARATOR and PARAGRAPH SEPARATOR, which
-/// are not `Cc` and would otherwise slip past the control check.
-const fn is_line_break(c: char) -> bool {
-    matches!(
-        c,
-        '\n' | '\u{000B}' | '\u{000C}' | '\r' | '\u{0085}' | '\u{2028}' | '\u{2029}'
-    )
-}
+/// Longest well-formed record: a maximal name, a maximal description and a
+/// three-letter language.
+pub const CHANNEL_META_MAX_LEN: usize = CHANNEL_META_DOMAIN_V1.len()
+    + FIXED_PAYLOAD_LEN
+    + NAME_MAX_BYTES
+    + DESCRIPTION_MAX_BYTES
+    + LANGUAGE_MAX_LEN;
 
 /// A channel's name and description, as the publisher stated them.
 ///
@@ -179,6 +167,14 @@ pub struct ChannelMeta {
     /// Publisher-clock UNIX milliseconds at which this record was set.
     /// Orders records for one channel via [`channel_meta_is_newer`].
     pub updated_at_ms: u64,
+    /// The channel's topic, a [`crate::listing::TOPICS`] id. Any byte is
+    /// admissible; an unknown one reads as "Other".
+    pub topic: u8,
+    /// ISO 639 language code, 2 or 3 ASCII lowercase letters, or **empty
+    /// for "not set"**.
+    pub language: String,
+    /// Whether the owner lists the channel in the directory (ADR-0059).
+    pub listed: bool,
 }
 
 impl ChannelMeta {
@@ -190,65 +186,15 @@ impl ChannelMeta {
     /// * [`ChannelMetaError::Name`] — the name violates a bound.
     /// * [`ChannelMetaError::Description`] — the description violates a
     ///   bound.
+    /// * [`ChannelMetaError::Language`] — the language is neither empty nor
+    ///   2-3 ASCII lowercase letters.
     pub fn validate(&self) -> CoreResult<(), ChannelMetaError> {
         check_name(&self.name).map_err(ChannelMetaError::Name)?;
         check_description(&self.description).map_err(ChannelMetaError::Description)?;
-        Ok(())
-    }
-}
-
-/// Why a name or a description was refused.
-///
-/// A reason code: no variant carries the offending text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum ChannelMetaFieldError {
-    /// The name is empty. A channel needs a name; only the name can hit
-    /// this, a description may be empty.
-    #[error("field is empty")]
-    Empty,
-    /// Leading or trailing whitespace.
-    #[error("field has leading or trailing whitespace")]
-    NotTrimmed,
-    /// Contains a line break the field does not permit (every one for the
-    /// name; every one but LINE FEED for the description).
-    #[error("field contains a line break")]
-    LineBreak,
-    /// Contains a control character or a refused format character (the bidi
-    /// controls and the invisible spacers).
-    #[error("field contains a control or format character")]
-    ControlOrFormatCharacter,
-    /// More than the field's scalar-value cap.
-    #[error("field is longer than {max_chars} characters")]
-    TooLong {
-        /// The cap that applied ([`NAME_MAX_CHARS`] or
-        /// [`DESCRIPTION_MAX_CHARS`]).
-        max_chars: usize,
-    },
-    /// More than the field's UTF-8 byte cap.
-    #[error("field is longer than {max_bytes} bytes")]
-    TooManyBytes {
-        /// The cap that applied ([`NAME_MAX_BYTES`] or
-        /// [`DESCRIPTION_MAX_BYTES`]).
-        max_bytes: usize,
-    },
-    /// The wire bytes are not valid UTF-8. Decode-only.
-    #[error("field is not valid UTF-8")]
-    NotUtf8,
-}
-
-impl ChannelMetaFieldError {
-    /// Stable, language-neutral reason code for FFI surfaces. Frozen.
-    #[must_use]
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::Empty => "empty",
-            Self::NotTrimmed => "notTrimmed",
-            Self::LineBreak => "lineBreak",
-            Self::ControlOrFormatCharacter => "controlOrFormatCharacter",
-            Self::TooLong { .. } => "tooLong",
-            Self::TooManyBytes { .. } => "tooManyBytes",
-            Self::NotUtf8 => "notUtf8",
+        if !self.language.is_empty() {
+            check_language(&self.language).map_err(ChannelMetaError::Language)?;
         }
+        Ok(())
     }
 }
 
@@ -269,9 +215,15 @@ pub enum ChannelMetaError {
         /// How many bytes followed the description.
         count: usize,
     },
-    /// The version byte is not [`CHANNEL_META_VERSION_V1`].
+    /// The version byte is not [`CHANNEL_META_VERSION_V2`].
     #[error("channel-meta record carries unknown schema version {0:#04x}")]
     UnknownVersion(u8),
+    /// The `listed` byte is neither `0x00` nor `0x01`.
+    #[error("channel-meta record carries an invalid listed flag {0:#04x}")]
+    ListedFlag(u8),
+    /// The language is neither empty nor an ISO 639 code.
+    #[error("invalid channel language: {0}")]
+    Language(LanguageError),
     /// The name violates a bound.
     #[error("invalid channel name: {0}")]
     Name(ChannelMetaFieldError),
@@ -292,6 +244,8 @@ impl ChannelMetaError {
             Self::Truncated => "truncated".to_string(),
             Self::TrailingBytes { .. } => "trailingBytes".to_string(),
             Self::UnknownVersion(_) => "unknownVersion".to_string(),
+            Self::ListedFlag(_) => "listedFlag".to_string(),
+            Self::Language(e) => format!("language.{}", e.code()),
             Self::Name(e) => format!("name.{}", e.code()),
             Self::Description(e) => format!("description.{}", e.code()),
         }
@@ -308,65 +262,6 @@ pub enum PostContent<'a> {
     /// The domain separator matched but the record is malformed or out of
     /// bounds. The caller drops it and never renders it as text.
     Malformed(ChannelMetaError),
-}
-
-/// Check that `name` is an admissible channel name **as it stands** (no
-/// trimming is applied).
-///
-/// Reasons are tested in a fixed order: empty, untrimmed, line break,
-/// control / format character, then the two lengths.
-///
-/// # Errors
-///
-/// Returns the first [`ChannelMetaFieldError`] that applies.
-pub fn check_name(name: &str) -> CoreResult<(), ChannelMetaFieldError> {
-    if name.is_empty() {
-        return Err(ChannelMetaFieldError::Empty);
-    }
-    check_field(name, is_line_break, NAME_MAX_CHARS, NAME_MAX_BYTES)
-}
-
-/// Check that `description` is an admissible channel description **as it
-/// stands** (no trimming is applied). Empty is admissible; LINE FEED is
-/// admissible.
-///
-/// # Errors
-///
-/// Returns the first [`ChannelMetaFieldError`] that applies.
-pub fn check_description(description: &str) -> CoreResult<(), ChannelMetaFieldError> {
-    check_field(
-        description,
-        |c| c != '\n' && is_line_break(c),
-        DESCRIPTION_MAX_CHARS,
-        DESCRIPTION_MAX_BYTES,
-    )
-}
-
-fn check_field(
-    text: &str,
-    is_refused_break: impl Fn(char) -> bool,
-    max_chars: usize,
-    max_bytes: usize,
-) -> CoreResult<(), ChannelMetaFieldError> {
-    if text.trim() != text {
-        return Err(ChannelMetaFieldError::NotTrimmed);
-    }
-    if text.chars().any(&is_refused_break) {
-        return Err(ChannelMetaFieldError::LineBreak);
-    }
-    if text
-        .chars()
-        .any(|c| (c.is_control() && c != '\n') || is_refused_format_char(c))
-    {
-        return Err(ChannelMetaFieldError::ControlOrFormatCharacter);
-    }
-    if text.chars().count() > max_chars {
-        return Err(ChannelMetaFieldError::TooLong { max_chars });
-    }
-    if text.len() > max_bytes {
-        return Err(ChannelMetaFieldError::TooManyBytes { max_bytes });
-    }
-    Ok(())
 }
 
 /// `true` when a record stamped `incoming_updated_at_ms` must replace one
@@ -406,15 +301,28 @@ pub fn compose_channel_meta(meta: &ChannelMeta) -> CoreResult<Vec<u8>, ChannelMe
     })?;
 
     let mut out = Vec::with_capacity(
-        CHANNEL_META_DOMAIN_V1.len() + FIXED_PAYLOAD_LEN + name.len() + description.len(),
+        CHANNEL_META_DOMAIN_V1.len()
+            + FIXED_PAYLOAD_LEN
+            + name.len()
+            + description.len()
+            + meta.language.len(),
     );
     out.extend_from_slice(CHANNEL_META_DOMAIN_V1);
-    out.push(CHANNEL_META_VERSION_V1);
+    out.push(CHANNEL_META_VERSION_V2);
     out.extend_from_slice(&meta.updated_at_ms.to_be_bytes());
     out.push(name_len);
     out.extend_from_slice(name);
     out.extend_from_slice(&description_len.to_be_bytes());
     out.extend_from_slice(description);
+    out.push(meta.topic);
+    // `validate` bounded the language to 0, 2 or 3 bytes.
+    let language = meta.language.as_bytes();
+    out.push(
+        u8::try_from(language.len())
+            .map_err(|_| ChannelMetaError::Language(LanguageError::BadLength))?,
+    );
+    out.extend_from_slice(language);
+    out.push(u8::from(meta.listed));
     Ok(out)
 }
 
@@ -465,7 +373,7 @@ fn decode_payload(payload: &[u8]) -> CoreResult<ChannelMeta, ChannelMetaError> {
     let mut cur = payload;
 
     let version = take_u8(&mut cur)?;
-    if version != CHANNEL_META_VERSION_V1 {
+    if version != CHANNEL_META_VERSION_V2 {
         return Err(ChannelMetaError::UnknownVersion(version));
     }
     let updated_at_bytes: [u8; 8] = take(&mut cur, 8)?
@@ -480,6 +388,14 @@ fn decode_payload(payload: &[u8]) -> CoreResult<ChannelMeta, ChannelMetaError> {
         .map_err(|_| ChannelMetaError::Truncated)?;
     let description_len = usize::from(u16::from_be_bytes(description_len_bytes));
     let description_bytes = take(&mut cur, description_len)?;
+    let topic = take_u8(&mut cur)?;
+    let language_len = usize::from(take_u8(&mut cur)?);
+    let language_bytes = take(&mut cur, language_len)?;
+    let listed = match take_u8(&mut cur)? {
+        0 => false,
+        1 => true,
+        other => return Err(ChannelMetaError::ListedFlag(other)),
+    };
     if !cur.is_empty() {
         return Err(ChannelMetaError::TrailingBytes { count: cur.len() });
     }
@@ -489,10 +405,16 @@ fn decode_payload(payload: &[u8]) -> CoreResult<ChannelMeta, ChannelMetaError> {
     let description = core::str::from_utf8(description_bytes)
         .map_err(|_| ChannelMetaError::Description(ChannelMetaFieldError::NotUtf8))?;
 
+    let language = core::str::from_utf8(language_bytes)
+        .map_err(|_| ChannelMetaError::Language(LanguageError::NotLowercaseAscii))?;
+
     let meta = ChannelMeta {
         name: name.to_string(),
         description: description.to_string(),
         updated_at_ms,
+        topic,
+        language: language.to_string(),
+        listed,
     };
     meta.validate()?;
     Ok(meta)
@@ -526,6 +448,9 @@ mod tests {
             name: name.to_string(),
             description: description.to_string(),
             updated_at_ms: at,
+            topic: 0,
+            language: String::new(),
+            listed: false,
         }
     }
 
@@ -539,6 +464,8 @@ mod tests {
         out.extend_from_slice(name);
         out.extend_from_slice(&u16::try_from(description.len()).unwrap().to_be_bytes());
         out.extend_from_slice(description);
+        // topic, empty language, not listed
+        out.extend_from_slice(&[0, 0, 0]);
         out
     }
 
@@ -573,18 +500,69 @@ mod tests {
         let sep = CHANNEL_META_DOMAIN_V1.len();
         assert_eq!(sep, 22);
         assert_eq!(&wire[..sep], b"lakko/channel-meta/v1\x00");
-        assert_eq!(wire[sep], CHANNEL_META_VERSION_V1);
+        assert_eq!(wire[sep], CHANNEL_META_VERSION_V2);
         assert_eq!(&wire[sep + 1..sep + 9], &[1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(wire[sep + 9], 2);
         assert_eq!(&wire[sep + 10..sep + 12], b"Al");
         assert_eq!(&wire[sep + 12..sep + 14], &[0, 3]);
-        assert_eq!(&wire[sep + 14..], b"abc");
+        assert_eq!(&wire[sep + 14..sep + 17], b"abc");
+        assert_eq!(&wire[sep + 17..], &[0, 0, 0]);
+
+        let v2 = ChannelMeta {
+            topic: 9,
+            language: "fil".to_string(),
+            listed: true,
+            ..meta("Al", "", 0)
+        };
+        let wire = compose_channel_meta(&v2).unwrap();
+        assert_eq!(&wire[sep + 14..], &[9, 3, b'f', b'i', b'l', 1]);
+        assert_eq!(decode_channel_meta(&wire).unwrap(), v2);
+    }
+
+    #[test]
+    fn version_one_is_refused_after_the_flag_day() {
+        let wire = compose_channel_meta(&meta("Lakko", "", 1)).unwrap();
+        let mut v1 = wire;
+        v1[CHANNEL_META_DOMAIN_V1.len()] = 0x01;
+        assert_eq!(
+            decode_channel_meta(&v1),
+            Err(ChannelMetaError::UnknownVersion(0x01))
+        );
+    }
+
+    #[test]
+    fn listed_flag_and_language_are_bounded() {
+        let mut wire = compose_channel_meta(&meta("Lakko", "", 1)).unwrap();
+        let last = wire.len() - 1;
+        wire[last] = 2;
+        assert_eq!(
+            decode_channel_meta(&wire),
+            Err(ChannelMetaError::ListedFlag(2))
+        );
+        for (language, code) in [
+            ("e", "language.badLength"),
+            ("engl", "language.badLength"),
+            ("EN", "language.notLowercaseAscii"),
+        ] {
+            let bad = ChannelMeta {
+                language: language.to_string(),
+                ..meta("Lakko", "", 1)
+            };
+            assert_eq!(compose_channel_meta(&bad).unwrap_err().code(), code);
+        }
+        // An unknown topic byte is kept verbatim.
+        let unknown = ChannelMeta {
+            topic: 250,
+            ..meta("Lakko", "", 1)
+        };
+        let wire = compose_channel_meta(&unknown).unwrap();
+        assert_eq!(decode_channel_meta(&wire).unwrap().topic, 250);
     }
 
     #[test]
     fn length_bounds_are_the_documented_construction() {
-        assert_eq!(CHANNEL_META_MIN_LEN, 22 + 12 + 1);
-        assert_eq!(CHANNEL_META_MAX_LEN, 22 + 12 + 255 + 1024);
+        assert_eq!(CHANNEL_META_MIN_LEN, 22 + 15 + 1);
+        assert_eq!(CHANNEL_META_MAX_LEN, 22 + 15 + 255 + 1024 + 3);
         let min = compose_channel_meta(&meta("a", "", 0)).unwrap();
         assert_eq!(min.len(), CHANNEL_META_MIN_LEN);
         // A maximal record: 255 bytes of name in exactly 64 chars (63
@@ -595,7 +573,11 @@ mod tests {
         assert_eq!(name.chars().count(), NAME_MAX_CHARS);
         let description = "\u{1F600}".repeat(256);
         assert_eq!(description.len(), DESCRIPTION_MAX_BYTES);
-        let max = compose_channel_meta(&meta(&name, &description, 0)).unwrap();
+        let max = compose_channel_meta(&ChannelMeta {
+            language: "eng".to_string(),
+            ..meta(&name, &description, 0)
+        })
+        .unwrap();
         assert_eq!(max.len(), CHANNEL_META_MAX_LEN);
     }
 
@@ -646,7 +628,7 @@ mod tests {
 
     #[test]
     fn unknown_versions_are_refused() {
-        for v in [0x00, 0x02, 0xFF] {
+        for v in [0x00, 0x01, 0x03, 0xFF] {
             assert_eq!(
                 decode_channel_meta(&raw(v, 0, b"x", b"")),
                 Err(ChannelMetaError::UnknownVersion(v))
@@ -657,11 +639,11 @@ mod tests {
     #[test]
     fn non_utf8_fields_are_refused() {
         assert_eq!(
-            decode_channel_meta(&raw(1, 0, &[0xFF, 0xFE], b"")),
+            decode_channel_meta(&raw(2, 0, &[0xFF, 0xFE], b"")),
             Err(ChannelMetaError::Name(ChannelMetaFieldError::NotUtf8))
         );
         assert_eq!(
-            decode_channel_meta(&raw(1, 0, b"x", &[0xC3, 0x28])),
+            decode_channel_meta(&raw(2, 0, b"x", &[0xC3, 0x28])),
             Err(ChannelMetaError::Description(
                 ChannelMetaFieldError::NotUtf8
             ))
@@ -671,13 +653,13 @@ mod tests {
     #[test]
     fn an_out_of_bounds_field_rejects_the_whole_record() {
         assert_eq!(
-            decode_channel_meta(&raw(1, 0, "Lakko\u{202E}".as_bytes(), b"fine")),
+            decode_channel_meta(&raw(2, 0, "Lakko\u{202E}".as_bytes(), b"fine")),
             Err(ChannelMetaError::Name(
                 ChannelMetaFieldError::ControlOrFormatCharacter
             ))
         );
         assert_eq!(
-            decode_channel_meta(&raw(1, 0, b"Fine", "bad\u{202E}".as_bytes())),
+            decode_channel_meta(&raw(2, 0, b"Fine", "bad\u{202E}".as_bytes())),
             Err(ChannelMetaError::Description(
                 ChannelMetaFieldError::ControlOrFormatCharacter
             ))
@@ -707,19 +689,19 @@ mod tests {
         for &(name, description) in cases {
             let compose_err = compose_channel_meta(&meta(name, description, 0)).unwrap_err();
             let decode_err =
-                decode_channel_meta(&raw(1, 0, name.as_bytes(), description.as_bytes()))
+                decode_channel_meta(&raw(2, 0, name.as_bytes(), description.as_bytes()))
                     .unwrap_err();
             assert_eq!(compose_err, decode_err, "{name:?} / {description:?}");
         }
         let long_name = "a".repeat(NAME_MAX_CHARS + 1);
         assert_eq!(
             compose_channel_meta(&meta(&long_name, "", 0)).unwrap_err(),
-            decode_channel_meta(&raw(1, 0, long_name.as_bytes(), b"")).unwrap_err()
+            decode_channel_meta(&raw(2, 0, long_name.as_bytes(), b"")).unwrap_err()
         );
         let long_description = "a".repeat(DESCRIPTION_MAX_CHARS + 1);
         assert_eq!(
             compose_channel_meta(&meta("x", &long_description, 0)).unwrap_err(),
-            decode_channel_meta(&raw(1, 0, b"x", long_description.as_bytes())).unwrap_err()
+            decode_channel_meta(&raw(2, 0, b"x", long_description.as_bytes())).unwrap_err()
         );
     }
 
@@ -861,14 +843,14 @@ mod tests {
     #[test]
     fn classify_returns_malformed_for_a_matching_domain_out_of_bounds() {
         assert_eq!(
-            classify_post_plaintext(&raw(1, 0, b"", b"")),
+            classify_post_plaintext(&raw(2, 0, b"", b"")),
             PostContent::Malformed(ChannelMetaError::Name(ChannelMetaFieldError::Empty))
         );
         assert_eq!(
-            classify_post_plaintext(&raw(2, 0, b"x", b"")),
-            PostContent::Malformed(ChannelMetaError::UnknownVersion(2))
+            classify_post_plaintext(&raw(1, 0, b"x", b"")),
+            PostContent::Malformed(ChannelMetaError::UnknownVersion(1))
         );
-        let mut trailing = raw(1, 0, b"x", b"");
+        let mut trailing = raw(2, 0, b"x", b"");
         trailing.push(9);
         assert_eq!(
             classify_post_plaintext(&trailing),
@@ -917,7 +899,7 @@ mod tests {
     fn error_messages_never_echo_the_text() {
         let err = check_name("Secret\u{202E}Name").unwrap_err();
         assert!(!err.to_string().contains("Secret"));
-        let err = decode_channel_meta(&raw(1, 0, "Secret\u{202E}".as_bytes(), b"")).unwrap_err();
+        let err = decode_channel_meta(&raw(2, 0, "Secret\u{202E}".as_bytes(), b"")).unwrap_err();
         assert!(!err.to_string().contains("Secret"));
         assert!(!format!("{err:?}").contains("Secret"));
     }

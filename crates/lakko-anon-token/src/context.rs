@@ -44,16 +44,24 @@ pub enum TokenContext {
     /// `services/push-gw`: device register / unregister, group subscribe /
     /// unsubscribe.
     PushRegister = 5,
+    /// `services/channels`: registering as a channel subscriber (ADR-0059
+    /// section 4). Makes a subscriber count cost accounts rather than
+    /// nothing.
+    ChannelSubscribe = 6,
+    /// `services/channels`: one directory search (ADR-0059 section 5).
+    DirectorySearch = 7,
 }
 
 impl TokenContext {
     /// Every context, in wire order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::DiscoveryLookup,
         Self::DiscoveryRegister,
         Self::InviteConsume,
         Self::DsKnock,
         Self::PushRegister,
+        Self::ChannelSubscribe,
+        Self::DirectorySearch,
     ];
 
     /// The frozen wire byte.
@@ -74,6 +82,8 @@ impl TokenContext {
             3 => Ok(Self::InviteConsume),
             4 => Ok(Self::DsKnock),
             5 => Ok(Self::PushRegister),
+            6 => Ok(Self::ChannelSubscribe),
+            7 => Ok(Self::DirectorySearch),
             _ => Err(AnonTokenError::UnknownContext),
         }
     }
@@ -87,6 +97,8 @@ impl TokenContext {
             Self::InviteConsume => "invite-consume",
             Self::DsKnock => "ds-knock",
             Self::PushRegister => "push-register",
+            Self::ChannelSubscribe => "channel-subscribe",
+            Self::DirectorySearch => "directory-search",
         }
     }
 
@@ -137,7 +149,7 @@ mod tests {
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
-            TokenContext::from_u8(6),
+            TokenContext::from_u8(8),
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
@@ -153,6 +165,10 @@ mod tests {
         assert_eq!(TokenContext::InviteConsume.as_u8(), 3);
         assert_eq!(TokenContext::DsKnock.as_u8(), 4);
         assert_eq!(TokenContext::PushRegister.as_u8(), 5);
+        assert_eq!(TokenContext::ChannelSubscribe.as_u8(), 6);
+        assert_eq!(TokenContext::DirectorySearch.as_u8(), 7);
+        assert_eq!(TokenContext::ChannelSubscribe.name(), "channel-subscribe");
+        assert_eq!(TokenContext::DirectorySearch.name(), "directory-search");
     }
 
     #[test]

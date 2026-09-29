@@ -593,6 +593,19 @@ pub struct FfiChannelMeta {
     /// rotation, or for retention) MUST carry the stored value
     /// verbatim, never a fresh clock read.
     pub updated_at_ms: u64,
+    /// The channel's topic, a `channelTopics()` id (ADR-0059 §2). Any value
+    /// is admissible; an unknown one reads as "Other". Defaults to 0
+    /// ("Other") so existing Swift / Kotlin initialisers keep compiling.
+    #[uniffi(default = 0)]
+    pub topic: u8,
+    /// ISO 639 language code of 2 or 3 ASCII lowercase letters, or empty for
+    /// "not set" (the default).
+    #[uniffi(default = "")]
+    pub language: String,
+    /// Whether the owner lists the channel in the directory (ADR-0059 §2).
+    /// A member shares only listed channels in a group. Defaults to false.
+    #[uniffi(default = false)]
+    pub listed: bool,
 }
 
 impl From<ChannelMeta> for FfiChannelMeta {
@@ -601,6 +614,9 @@ impl From<ChannelMeta> for FfiChannelMeta {
             name: m.name,
             description: m.description,
             updated_at_ms: m.updated_at_ms,
+            topic: m.topic,
+            language: m.language,
+            listed: m.listed,
         }
     }
 }
@@ -611,6 +627,9 @@ impl From<FfiChannelMeta> for ChannelMeta {
             name: m.name,
             description: m.description,
             updated_at_ms: m.updated_at_ms,
+            topic: m.topic,
+            language: m.language,
+            listed: m.listed,
         }
     }
 }
@@ -984,6 +1003,9 @@ mod tests {
             name: name.to_string(),
             description: description.to_string(),
             updated_at_ms: at,
+            topic: 2,
+            language: "en".to_string(),
+            listed: true,
         }
     }
 

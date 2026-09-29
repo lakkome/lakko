@@ -549,6 +549,29 @@ impl WasmChannelPostContent {
         self.meta.as_ref().map(|m| m.updated_at_ms)
     }
 
+    /// The topic id (ADR-0059 §2) when `kind === "meta"`; an unknown id
+    /// reads as "Other" (`channelTopicName`).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn topic(&self) -> Option<u8> {
+        self.meta.as_ref().map(|m| m.topic)
+    }
+
+    /// The ISO 639 language when `kind === "meta"`; empty = not set.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn language(&self) -> Option<String> {
+        self.meta.as_ref().map(|m| m.language.clone())
+    }
+
+    /// Whether the owner lists the channel in the directory, when
+    /// `kind === "meta"`. A member shares only listed channels in a group.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn listed(&self) -> Option<bool> {
+        self.meta.as_ref().map(|m| m.listed)
+    }
+
     /// The frozen `ChannelMetaError::code()` when `kind === "malformed"`.
     #[wasm_bindgen(getter)]
     #[must_use]
@@ -566,17 +589,27 @@ impl WasmChannelPostContent {
 /// Throws an `Error` whose `channelMetaError` property is the frozen
 /// reason code (`name.empty`, `name.tooLong`, `name.lineBreak`,
 /// `name.controlOrFormatCharacter`, `name.tooManyBytes`,
-/// `name.notTrimmed`, and the same under `description.`).
+/// `name.notTrimmed`, and the same under `description.`, plus
+/// `language.badLength` / `language.notLowercaseAscii`).
+///
+/// `topic` (default 0, "Other"), `language` (default empty, "not set") and
+/// `listed` (default false) are the ADR-0059 §2 fields of schema version 2.
 #[wasm_bindgen(js_name = "composeChannelMeta")]
 pub fn compose_channel_meta(
     name: &str,
     description: &str,
     updated_at_ms: u64,
+    topic: Option<u8>,
+    language: Option<String>,
+    listed: Option<bool>,
 ) -> Result<Vec<u8>, JsValue> {
     let meta = ChannelMeta {
         name: name.to_string(),
         description: description.to_string(),
         updated_at_ms,
+        topic: topic.unwrap_or(0),
+        language: language.unwrap_or_default(),
+        listed: listed.unwrap_or(false),
     };
     inner_compose_channel_meta(&meta).map_err(channel_meta_error_value)
 }
@@ -984,8 +1017,15 @@ mod tests {
 
     #[test]
     fn channel_meta_compose_then_classify_round_trips_wasm_host() {
-        let wire =
-            compose_channel_meta("Lakko News", "Releases\nand outages", 1_700_000_000_000).unwrap();
+        let wire = compose_channel_meta(
+            "Lakko News",
+            "Releases\nand outages",
+            1_700_000_000_000,
+            Some(3),
+            Some("en".to_string()),
+            Some(true),
+        )
+        .unwrap();
         let content = classify_channel_post_plaintext(&wire);
         assert_eq!(content.kind(), "meta");
         assert_eq!(content.name().as_deref(), Some("Lakko News"));
@@ -994,6 +1034,9 @@ mod tests {
             Some("Releases\nand outages")
         );
         assert_eq!(content.updated_at_ms(), Some(1_700_000_000_000));
+        assert_eq!(content.topic(), Some(3));
+        assert_eq!(content.language().as_deref(), Some("en"));
+        assert_eq!(content.listed(), Some(true));
         assert!(content.text().is_none());
         assert!(content.error().is_none());
     }
@@ -1036,7 +1079,7 @@ mod tests {
         let signer = WasmChannelSigningKey::generate_js();
         let seed = new_channel_seed_for_test();
         let channel_id = [0x51u8; CHANNEL_ID_LEN];
-        let record = compose_channel_meta("Lakko News", "", 42).unwrap();
+        let record = compose_channel_meta("Lakko News", "", 42, None, None, None).unwrap();
         let wire = compose_channel_post(&seed, &channel_id, 1, &signer, 0, &record).unwrap();
         let post = decode_channel_post(&wire).unwrap();
         let plaintext = verify_and_decrypt_channel_post(&seed, &channel_id, &post).unwrap();

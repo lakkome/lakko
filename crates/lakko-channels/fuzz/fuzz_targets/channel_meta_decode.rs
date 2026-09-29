@@ -9,7 +9,9 @@
 //! signer is any publisher — a malicious co-publisher, or a publisher
 //! key that leaked — so the parser must treat them as hostile: the
 //! one-byte and two-byte length prefixes, the version byte and the
-//! UTF-8 / bound checks all run on attacker-chosen input.
+//! UTF-8 / bound checks all run on attacker-chosen input. Since schema
+//! version 2 (ADR-0059 §2) that includes the topic byte, the language
+//! length prefix and code, and the `listed` flag byte.
 //!
 //! Three properties are asserted, not merely exercised:
 //!
@@ -38,9 +40,15 @@ fuzz_target!(|data: &[u8]| {
                 data.len() >= CHANNEL_META_MIN_LEN && data.len() <= CHANNEL_META_MAX_LEN,
                 "a decoded record must lie within the documented length bounds"
             );
-            assert!(meta.validate().is_ok(), "a decoded record must pass validate");
-            let recomposed =
-                compose_channel_meta(&meta).expect("a decoded record must re-compose");
+            assert!(
+                meta.validate().is_ok(),
+                "a decoded record must pass validate"
+            );
+            assert!(
+                meta.language.is_empty() || (2..=3).contains(&meta.language.len()),
+                "a decoded language is unset or an ISO 639 code"
+            );
+            let recomposed = compose_channel_meta(&meta).expect("a decoded record must re-compose");
             assert_eq!(recomposed, data, "the encoding must be canonical");
         },
         PostContent::Malformed(_) => {},

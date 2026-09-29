@@ -152,3 +152,10 @@ path = "fuzz_targets/registrar_seed_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "shared_channels_decode"
+path = "fuzz_targets/shared_channels_decode.rs"
+test = false
+doc = false
+bench = false

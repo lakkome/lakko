@@ -64,13 +64,23 @@ use crate::AppState;
 /// "a handful of times a day" for each action, low enough that one account is
 /// not a meaningful source of tokens for a flood. A lookup may cost two tokens
 /// (OPRF evaluation + lookup) depending on how S3 spends them.
-const DEFAULT_QUOTAS: [(TokenContext, u32); 5] = [
+///
+/// `channel-subscribe` and `directory-search` (ADR-0059 sections 4 and 5)
+/// are chosen, not measured, too (ADR-0059 open question 4): a person
+/// subscribes to a few channels a day and searches the directory a few
+/// times; a count inflated by one account moves by at most its quota.
+const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::DiscoveryLookup, 100),
     (TokenContext::DiscoveryRegister, 10),
     (TokenContext::InviteConsume, 30),
     (TokenContext::DsKnock, 20),
     (TokenContext::PushRegister, 100),
+    (TokenContext::ChannelSubscribe, 20),
+    (TokenContext::DirectorySearch, 30),
 ];
+
+/// How many contexts exist; the quota table has one row per context.
+const CONTEXT_COUNT: usize = TokenContext::ALL.len();
 
 /// The env var carrying the quota for one context.
 fn quota_var(context: TokenContext) -> String {
@@ -84,7 +94,7 @@ fn quota_var(context: TokenContext) -> String {
 #[derive(Debug, Clone)]
 pub(crate) struct AnonTokenIssuer {
     pub(crate) server: AnonTokenServerConfig,
-    quotas: [(TokenContext, u32); 5],
+    quotas: [(TokenContext, u32); CONTEXT_COUNT],
 }
 
 impl AnonTokenIssuer {
@@ -92,7 +102,7 @@ impl AnonTokenIssuer {
     #[cfg(test)]
     pub(crate) const fn new(
         server: AnonTokenServerConfig,
-        quotas: [(TokenContext, u32); 5],
+        quotas: [(TokenContext, u32); CONTEXT_COUNT],
     ) -> Self {
         Self { server, quotas }
     }

@@ -92,6 +92,12 @@ use lakko_contacts::push_routing::{
     derive_push_gid as rust_derive_push_gid,
     push_routing_secret_is_newer as rust_push_routing_secret_is_newer, PUSH_ROUTING_SECRET_LEN,
 };
+use lakko_contacts::shared_channels::{
+    compose_shared_channels as rust_compose_shared_channels,
+    decode_shared_channels as rust_decode_shared_channels,
+    shared_channels_is_newer as rust_shared_channels_is_newer, SharedChannel as RustSharedChannel,
+    SharedChannels as RustSharedChannels, SharedChannelsError, SHARED_CHANNEL_ID_LEN,
+};
 use lakko_contacts::ACCOUNT_ID_LEN;
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
@@ -223,6 +229,13 @@ fn group_name_error_value(e: GroupNameError) -> JsValue {
 /// `"unknownAction"`.
 fn pin_error_value(e: PinError) -> JsValue {
     coded_error(&e.to_string(), "pinError", e.code())
+}
+
+/// Thrown for a shared-channels envelope refused by its bounds or its wire
+/// shape: an `Error` with a `sharedChannelsError` code — `"handle.tooShort"`,
+/// `"name.empty"`, `"duplicateChannel"`, `"tooManyChannels"`, `"truncated"`, …
+fn shared_channels_error_value(e: SharedChannelsError) -> JsValue {
+    coded_error(&e.to_string(), "sharedChannelsError", &e.code())
 }
 
 /// Turn caller-supplied fields into the canonical core profile: trim the
@@ -878,6 +891,141 @@ pub fn decode_pin_envelope(plaintext: &[u8]) -> Result<WasmPinOp, JsValue> {
 #[must_use]
 pub fn pin_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
     rust_pin_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
+}
+
+// ============================================================================
+// Shared-channels envelope — ADR-0059 §6
+// ============================================================================
+
+/// The listed channels one member shares with one group (ADR-0059 §6).
+/// Entry `i` is `channelIds[16*i .. 16*i+16]`, `handles[i]`, `names[i]`.
+///
+/// **Speaks only for its sender.** Store it per member, keyed on the sender's
+/// account key resolved from the MLS sender leaf at receipt (C-68), only when
+/// `sharedChannelsIsNewer` than the list stored for that member, under the
+/// per-group lock. Every handle is the sender's claim: resolve it through the
+/// OPRF lookup to the same channel id before subscribing. An empty list means
+/// the sender stopped sharing.
+#[wasm_bindgen(js_name = SharedChannels)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WasmSharedChannels {
+    updated_at_ms: u64,
+    channel_ids: Vec<u8>,
+    handles: Vec<String>,
+    names: Vec<String>,
+}
+
+impl From<RustSharedChannels> for WasmSharedChannels {
+    fn from(l: RustSharedChannels) -> Self {
+        let mut channel_ids = Vec::with_capacity(l.channels.len() * SHARED_CHANNEL_ID_LEN);
+        let mut handles = Vec::with_capacity(l.channels.len());
+        let mut names = Vec::with_capacity(l.channels.len());
+        for c in l.channels {
+            channel_ids.extend_from_slice(&c.channel_id);
+            handles.push(c.handle);
+            names.push(c.name);
+        }
+        Self {
+            updated_at_ms: l.updated_at_ms,
+            channel_ids,
+            handles,
+            names,
+        }
+    }
+}
+
+#[wasm_bindgen(js_class = SharedChannels)]
+impl WasmSharedChannels {
+    /// Sender-clock UNIX milliseconds, as a `bigint`.
+    #[wasm_bindgen(getter, js_name = updatedAtMs)]
+    pub fn updated_at_ms(&self) -> u64 {
+        self.updated_at_ms
+    }
+
+    /// How many channels the list carries.
+    #[wasm_bindgen(getter)]
+    pub fn count(&self) -> usize {
+        self.handles.len()
+    }
+
+    /// The channel ids, 16 bytes each, concatenated in list order.
+    #[wasm_bindgen(getter, js_name = channelIds)]
+    pub fn channel_ids(&self) -> Vec<u8> {
+        self.channel_ids.clone()
+    }
+
+    /// The handles, in list order.
+    #[wasm_bindgen(getter)]
+    pub fn handles(&self) -> Vec<String> {
+        self.handles.clone()
+    }
+
+    /// The names, in list order.
+    #[wasm_bindgen(getter)]
+    pub fn names(&self) -> Vec<String> {
+        self.names.clone()
+    }
+}
+
+/// Compose a shared-channels envelope (ADR-0059 §6) — the inner plaintext to
+/// publish as an MLS application message on the group's journal.
+/// `channelIds` is the 16-byte ids concatenated; `handles` and `names` are
+/// parallel to it.
+///
+/// # Errors
+///
+/// Throws an `Error` with a `sharedChannelsError` code, or a plain `Error`
+/// when the three lists do not line up.
+#[wasm_bindgen(js_name = composeSharedChannelsEnvelope)]
+pub fn compose_shared_channels_envelope(
+    updated_at_ms: u64,
+    channel_ids: &[u8],
+    handles: Vec<String>,
+    names: Vec<String>,
+) -> Result<Vec<u8>, JsValue> {
+    if channel_ids.len() != handles.len() * SHARED_CHANNEL_ID_LEN || handles.len() != names.len() {
+        return Err(JsValue::from_str(
+            "channelIds must be 16 bytes per handle, and handles and names must be parallel",
+        ));
+    }
+    let channels = channel_ids
+        .chunks_exact(SHARED_CHANNEL_ID_LEN)
+        .zip(handles.into_iter().zip(names))
+        .map(|(id, (handle, name))| {
+            let mut channel_id = [0u8; SHARED_CHANNEL_ID_LEN];
+            channel_id.copy_from_slice(id);
+            RustSharedChannel {
+                channel_id,
+                handle,
+                name,
+            }
+        })
+        .collect();
+    rust_compose_shared_channels(&RustSharedChannels {
+        updated_at_ms,
+        channels,
+    })
+    .map_err(shared_channels_error_value)
+}
+
+/// Strictly decode a shared-channels envelope. Fail-closed.
+///
+/// # Errors
+///
+/// Throws an `Error` with a `sharedChannelsError` code.
+#[wasm_bindgen(js_name = decodeSharedChannelsEnvelope)]
+pub fn decode_shared_channels_envelope(plaintext: &[u8]) -> Result<WasmSharedChannels, JsValue> {
+    rust_decode_shared_channels(plaintext)
+        .map(WasmSharedChannels::from)
+        .map_err(shared_channels_error_value)
+}
+
+/// `true` when a list stamped `incomingUpdatedAtMs` must replace the list
+/// stored **for the same member**. Strictly greater; equal is not newer.
+#[wasm_bindgen(js_name = sharedChannelsIsNewer)]
+#[must_use]
+pub fn shared_channels_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
+    rust_shared_channels_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
 }
 
 /// Prepare what a person typed as their display name: trim, `undefined` for
@@ -1815,6 +1963,11 @@ pub enum WasmIncomingEnvelopeKind {
     /// it as a chat bubble. This surface does not yet decode or open it: the
     /// ADR-0057 client wiring adds that; until then a client drops it.
     RegistrarSeed = 10,
+    /// The listed channels one member shares with the group (ADR-0059 §6).
+    /// The decoded list rides the `sharedChannels` getter; `payload` is
+    /// empty. Never render it as a chat bubble; store it per member only
+    /// when `sharedChannelsIsNewer`.
+    SharedChannels = 11,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -1830,6 +1983,7 @@ pub struct WasmIncomingEnvelope {
     profile: Option<WasmProfile>,
     group_name: Option<WasmGroupName>,
     pin: Option<WasmPinOp>,
+    shared_channels: Option<WasmSharedChannels>,
 }
 
 #[wasm_bindgen(js_class = IncomingEnvelope)]
@@ -1894,6 +2048,13 @@ impl WasmIncomingEnvelope {
     pub fn pin(&self) -> Option<WasmPinOp> {
         self.pin.clone()
     }
+
+    /// Set only for `SharedChannels` (ADR-0059): the decoded list.
+    /// `undefined` for every other kind.
+    #[wasm_bindgen(getter, js_name = sharedChannels)]
+    pub fn shared_channels(&self) -> Option<WasmSharedChannels> {
+        self.shared_channels.clone()
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -1925,6 +2086,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: None,
             pin: None,
+            shared_channels: None,
         },
         IncomingEnvelope::CallKeyPackage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::CallKeyPackage,
@@ -1934,6 +2096,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: None,
             pin: None,
+            shared_channels: None,
         },
         IncomingEnvelope::MediaState { camera_on } => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::MediaState,
@@ -1943,6 +2106,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: None,
             pin: None,
+            shared_channels: None,
         },
         IncomingEnvelope::PushRoutingSecret { mint_epoch, secret } => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::PushRoutingSecret,
@@ -1952,6 +2116,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: None,
             pin: None,
+            shared_channels: None,
         },
         IncomingEnvelope::CommitterBeacon => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::CommitterBeacon,
@@ -1961,6 +2126,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: None,
             pin: None,
+            shared_channels: None,
         },
         IncomingEnvelope::Profile(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::Profile,
@@ -1970,6 +2136,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: Some(p.into()),
             group_name: None,
             pin: None,
+            shared_channels: None,
         },
         IncomingEnvelope::GroupName(g) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::GroupName,
@@ -1979,6 +2146,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: Some(g.into()),
             pin: None,
+            shared_channels: None,
         },
         IncomingEnvelope::ProfileRequest => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::ProfileRequest,
@@ -1988,6 +2156,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: None,
             pin: None,
+            shared_channels: None,
         },
         IncomingEnvelope::Pin(op) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::Pin,
@@ -1997,6 +2166,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: None,
             pin: Some(op.into()),
+            shared_channels: None,
         },
         IncomingEnvelope::RegistrarSeed(_) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::RegistrarSeed,
@@ -2006,6 +2176,17 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: None,
             pin: None,
+            shared_channels: None,
+        },
+        IncomingEnvelope::SharedChannels(list) => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::SharedChannels,
+            payload: Vec::new(),
+            camera_on: None,
+            mint_epoch: None,
+            profile: None,
+            group_name: None,
+            pin: None,
+            shared_channels: Some(list.into()),
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::IntroMessage,
@@ -2015,6 +2196,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: None,
             pin: None,
+            shared_channels: None,
         },
     })
 }
@@ -3014,6 +3196,30 @@ impl GroupJoinAttribution {
 // API drift.
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_channels_round_trip_and_dispatch_wasm_host() {
+        let mut ids = vec![1u8; 16];
+        ids.extend_from_slice(&[2u8; 16]);
+        let wire = compose_shared_channels_envelope(
+            7,
+            &ids,
+            vec!["lakko_news".to_string(), "cooking".to_string()],
+            vec!["Lakko News".to_string(), "Cooking".to_string()],
+        )
+        .unwrap();
+        let list = decode_shared_channels_envelope(&wire).unwrap();
+        assert_eq!(list.count(), 2);
+        assert_eq!(list.channel_ids(), ids);
+        assert_eq!(list.handles()[1], "cooking");
+        assert_eq!(list.updated_at_ms(), 7);
+        let env = dispatch_incoming_envelope(&wire).unwrap();
+        assert_eq!(env.kind(), WasmIncomingEnvelopeKind::SharedChannels);
+        assert_eq!(env.shared_channels(), Some(list));
+        assert!(env.payload().is_empty());
+        assert!(shared_channels_is_newer(8, 7));
+        assert!(!shared_channels_is_newer(7, 7));
+    }
+
     use super::*;
     use lakko_crypto::signing::SigningKey as Ed25519;
 

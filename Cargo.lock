@@ -2577,7 +2577,9 @@ dependencies = [
 name = "lakko-channels"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "hex",
+ "lakko-contacts",
  "lakko-crypto",
  "thiserror 1.0.69",
  "tracing",

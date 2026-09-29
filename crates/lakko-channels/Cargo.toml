@@ -24,5 +24,16 @@ tracing.workspace = true
 # passes us the exporter output it derived from its PublisherGroup.
 lakko-crypto.workspace = true
 
+# The canonical username rule a directory listing's handle obeys
+# (`lakko_contacts::username`) and the channel-name character rules, shared
+# with the group envelope that carries followed channels
+# (`lakko_contacts::channel_text`, ADR-0059). `lakko-contacts` depends only
+# on `thiserror` and `lakko-crypto`, both already here.
+lakko-contacts.workspace = true
+
+# Base64url-no-pad for the owner request-proof header (ADR-0059 section 1),
+# the same version `lakko-ds-proof` already pins.
+base64 = "0.22"
+
 [dev-dependencies]
 hex = "0.4"

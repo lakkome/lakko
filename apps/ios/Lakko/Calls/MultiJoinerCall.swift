@@ -663,6 +663,11 @@ final class MultiJoinerCall {
             // one member's account key, never the SFU signal-relay. Out of
             // place here — drop.
             break
+        case .sharedChannels:
+            // ADR-0059 — a shared-channels list rides the GROUP JOURNAL and
+            // speaks for its MLS sender, never the SFU signal-relay. Out of
+            // place here — drop.
+            break
         }
     }
 

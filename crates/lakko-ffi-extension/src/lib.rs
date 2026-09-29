@@ -63,6 +63,12 @@
 //!   operation (to word a preview); nothing here composes, orders or persists
 //!   one (C-59).
 //!
+//! - [`shared_channels::decode_shared_channels_envelope`] +
+//!   [`shared_channels::shared_channels_envelope_min_len`] /
+//!   [`shared_channels::shared_channels_envelope_max_len`] — the same filter
+//!   question for the ADR-0059 shared-channels envelope. Decode returns no
+//!   fields: which channels a person follows is not the NSE's to learn (C-59).
+//!
 //! There is deliberately **no compose / send / call / channel / transport
 //! surface**: the NSE only reads and decrypts, then discards. It NEVER writes
 //! back the advanced snapshot or the cursor (ADR-0041 §Phase 3 read-only
@@ -87,6 +93,7 @@ pub mod pin;
 pub mod profile;
 pub mod profile_request;
 pub mod push_routing;
+pub mod shared_channels;
 
 uniffi::setup_scaffolding!();
 
