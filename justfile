@@ -171,7 +171,34 @@ fuzz-list:
 # translator comments). Prints per language what is missing and which
 # security-critical strings still wait for review.
 l10n-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo run -q -p lakko-l10n-tool -- check
+    out="$(mktemp -d)"
+    cargo run -q -p lakko-l10n-tool -- compile --out "$out" >/dev/null
+    rm -f "$out/bundle-payload.json"
+    for dest in apps/web/src/l10n/catalog apps/ios/Lakko/Resources/L10n apps/android/app/src/main/assets/l10n; do
+        diff -r -q "$out" "$dest" >/dev/null || { echo "stale: $dest (run just l10n-compile)"; rm -rf "$out"; exit 1; }
+    done
+    rm -rf "$out"
+    echo "compiled catalogs up to date"
+
+# ADR-0058: compile l10n/catalog into what each client embeds (source.json
+# + one compiled <lang>.json per translation). The outputs are committed so
+# Xcode, Gradle and Vite need no Rust step; run this after every catalog
+# edit (l10n-check fails when the committed outputs are stale).
+l10n-compile:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="$(mktemp -d)"
+    cargo run -q -p lakko-l10n-tool -- compile --out "$out"
+    for dest in apps/web/src/l10n/catalog apps/ios/Lakko/Resources/L10n apps/android/app/src/main/assets/l10n; do
+        rm -rf "$dest" && mkdir -p "$dest"
+        cp "$out"/*.json "$dest"/
+        rm -f "$dest/bundle-payload.json"
+    done
+    rm -rf "$out"
+    echo "l10n compiled into the web, iOS and Android resources"
 
 # Audit-pack drift gate — every numbered invariant in
 # docs/security/{calls,transport,mls-state-machine}.md

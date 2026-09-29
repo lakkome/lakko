@@ -1,0 +1,150 @@
+{
+  "format": 1,
+  "version": 1,
+  "messages": {
+    "auth.language.button": {
+      "text": "Change language",
+      "comment": "Accessibility label of the globe button on the sign-in and sign-up screens."
+    },
+    "language.name.ar": {
+      "text": "Arabic",
+      "comment": "Name of the Arabic language, shown under its own name in the language list."
+    },
+    "language.name.en": {
+      "text": "English",
+      "comment": "Name of the English language, shown under its own name in the language list."
+    },
+    "language.name.es": {
+      "text": "Spanish",
+      "comment": "Name of the Spanish language, shown under its own name in the language list."
+    },
+    "language.name.fa": {
+      "text": "Persian",
+      "comment": "Name of the Persian (Farsi) language, shown under its own name in the language list."
+    },
+    "language.name.he": {
+      "text": "Hebrew",
+      "comment": "Name of the Hebrew language, shown under its own name in the language list."
+    },
+    "language.name.hi": {
+      "text": "Hindi",
+      "comment": "Name of the Hindi language, shown under its own name in the language list."
+    },
+    "language.name.pt-br": {
+      "text": "Portuguese (Brazil)",
+      "comment": "Name of Brazilian Portuguese, shown under its own name in the language list."
+    },
+    "language.name.ru": {
+      "text": "Russian",
+      "comment": "Name of the Russian language, shown under its own name in the language list."
+    },
+    "language.name.tr": {
+      "text": "Turkish",
+      "comment": "Name of the Turkish language, shown under its own name in the language list."
+    },
+    "language.name.uk": {
+      "text": "Ukrainian",
+      "comment": "Name of the Ukrainian language, shown under its own name in the language list."
+    },
+    "language.name.zh-hans": {
+      "text": "Chinese (Simplified)",
+      "comment": "Name of Simplified Chinese, shown under its own name in the language list."
+    },
+    "nav.calls": {
+      "text": "Calls",
+      "comment": "Primary navigation: recent calls."
+    },
+    "nav.channels": {
+      "text": "Channels",
+      "comment": "Primary navigation: channels."
+    },
+    "nav.chats": {
+      "text": "Chats",
+      "comment": "Primary navigation: the conversation list."
+    },
+    "nav.contacts": {
+      "text": "Contacts",
+      "comment": "Primary navigation: contacts."
+    },
+    "nav.settings": {
+      "text": "Settings",
+      "comment": "Primary navigation: settings."
+    },
+    "settings.about.translations_updated": {
+      "text": "Translations updated {date}",
+      "comment": "Settings > About, shown when a signed translation update is active. {date} is a date formatted for the locale."
+    },
+    "settings.appearance.theme": {
+      "text": "Theme",
+      "comment": "Label of the light / dark theme choice."
+    },
+    "settings.appearance.theme.dark": {
+      "text": "Dark",
+      "comment": "Theme option: always dark."
+    },
+    "settings.appearance.theme.light": {
+      "text": "Light",
+      "comment": "Theme option: always light."
+    },
+    "settings.appearance.theme.system": {
+      "text": "System",
+      "comment": "Theme option: follow the device's light or dark setting."
+    },
+    "settings.language.load_failed": {
+      "text": "Couldn't load this language. Check your connection and try again.",
+      "comment": "Web only: the language file failed to download; the interface stays in the old language."
+    },
+    "settings.language.no_results": {
+      "text": "No languages found",
+      "comment": "Shown when the search matches no language."
+    },
+    "settings.language.same_as_system": {
+      "text": "Same as system",
+      "comment": "First row of the language list: follow the device's language."
+    },
+    "settings.language.same_as_system_detail": {
+      "text": "Same as system · {language}",
+      "comment": "Subtitle form of the first row. {language} is the resolved language written in itself, e.g. 'Deutsch'."
+    },
+    "settings.language.search": {
+      "text": "Search",
+      "comment": "Placeholder of the search field above the language list."
+    },
+    "settings.language.title": {
+      "text": "Language",
+      "comment": "Title of the Settings screen that picks the interface language, and of the Settings row that opens it."
+    },
+    "settings.section.about": {
+      "text": "About",
+      "comment": "Settings section: version, licences, privacy."
+    },
+    "settings.section.account": {
+      "text": "Account",
+      "comment": "Settings section: sign out, forget this device, delete account."
+    },
+    "settings.section.appearance": {
+      "text": "Appearance",
+      "comment": "Settings section: theme and text size."
+    },
+    "settings.section.data": {
+      "text": "Data",
+      "comment": "Settings section: backup and storage."
+    },
+    "settings.section.media": {
+      "text": "Media",
+      "comment": "Settings section: camera, microphone and media options."
+    },
+    "settings.section.notifications": {
+      "text": "Notifications",
+      "comment": "Settings section: notifications."
+    },
+    "settings.section.profile": {
+      "text": "Profile",
+      "comment": "Settings section: name, photo, username."
+    },
+    "settings.section.security": {
+      "text": "Security",
+      "comment": "Settings section: passkeys, devices, recovery."
+    }
+  }
+}

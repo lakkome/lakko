@@ -1,0 +1,150 @@
+{
+  "format": 1,
+  "language": "ar",
+  "messages": {
+    "auth.language.button": {
+      "text": "تغيير اللغة",
+      "status": "machine"
+    },
+    "language.name.ar": {
+      "text": "العربية",
+      "status": "machine"
+    },
+    "language.name.en": {
+      "text": "الإنجليزية",
+      "status": "machine"
+    },
+    "language.name.es": {
+      "text": "الإسبانية",
+      "status": "machine"
+    },
+    "language.name.fa": {
+      "text": "الفارسية",
+      "status": "machine"
+    },
+    "language.name.he": {
+      "text": "العبرية",
+      "status": "machine"
+    },
+    "language.name.hi": {
+      "text": "الهندية",
+      "status": "machine"
+    },
+    "language.name.pt-br": {
+      "text": "البرتغالية (البرازيل)",
+      "status": "machine"
+    },
+    "language.name.ru": {
+      "text": "الروسية",
+      "status": "machine"
+    },
+    "language.name.tr": {
+      "text": "التركية",
+      "status": "machine"
+    },
+    "language.name.uk": {
+      "text": "الأوكرانية",
+      "status": "machine"
+    },
+    "language.name.zh-hans": {
+      "text": "الصينية (المبسطة)",
+      "status": "machine"
+    },
+    "nav.calls": {
+      "text": "المكالمات",
+      "status": "machine"
+    },
+    "nav.channels": {
+      "text": "القنوات",
+      "status": "machine"
+    },
+    "nav.chats": {
+      "text": "الدردشات",
+      "status": "machine"
+    },
+    "nav.contacts": {
+      "text": "جهات الاتصال",
+      "status": "machine"
+    },
+    "nav.settings": {
+      "text": "الإعدادات",
+      "status": "machine"
+    },
+    "settings.about.translations_updated": {
+      "text": "تم تحديث الترجمات {date}",
+      "status": "machine"
+    },
+    "settings.appearance.theme": {
+      "text": "السمة",
+      "status": "machine"
+    },
+    "settings.appearance.theme.dark": {
+      "text": "داكن",
+      "status": "machine"
+    },
+    "settings.appearance.theme.light": {
+      "text": "فاتح",
+      "status": "machine"
+    },
+    "settings.appearance.theme.system": {
+      "text": "النظام",
+      "status": "machine"
+    },
+    "settings.language.load_failed": {
+      "text": "تعذّر تحميل هذه اللغة. تحقّق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "settings.language.no_results": {
+      "text": "لم يتم العثور على لغات",
+      "status": "machine"
+    },
+    "settings.language.same_as_system": {
+      "text": "مثل النظام",
+      "status": "machine"
+    },
+    "settings.language.same_as_system_detail": {
+      "text": "مثل النظام · {language}",
+      "status": "machine"
+    },
+    "settings.language.search": {
+      "text": "بحث",
+      "status": "machine"
+    },
+    "settings.language.title": {
+      "text": "اللغة",
+      "status": "machine"
+    },
+    "settings.section.about": {
+      "text": "حول",
+      "status": "machine"
+    },
+    "settings.section.account": {
+      "text": "الحساب",
+      "status": "machine"
+    },
+    "settings.section.appearance": {
+      "text": "المظهر",
+      "status": "machine"
+    },
+    "settings.section.data": {
+      "text": "البيانات",
+      "status": "machine"
+    },
+    "settings.section.media": {
+      "text": "الوسائط",
+      "status": "machine"
+    },
+    "settings.section.notifications": {
+      "text": "الإشعارات",
+      "status": "machine"
+    },
+    "settings.section.profile": {
+      "text": "الملف الشخصي",
+      "status": "machine"
+    },
+    "settings.section.security": {
+      "text": "الأمان",
+      "status": "machine"
+    }
+  }
+}

@@ -1929,6 +1929,14 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
     let mut group_name = None;
     let mut pin = None;
     let (kind, payload, camera_on, mint_epoch) = match parsed {
+        // ADR-0057 registrar seeds have no client consumer yet and no FFI
+        // composer, so no client sends one. Refused explicitly until the
+        // ADR-0057 client wiring gives them their own dispatch kind.
+        IncomingEnvelope::RegistrarSeed(_) => {
+            return Err(FfiError::Contacts(
+                "registrar-seed envelopes are not handled by this surface yet".into(),
+            ))
+        },
         IncomingEnvelope::CallWelcome(p) => {
             (FfiIncomingEnvelopeKind::CallWelcome, p.to_vec(), None, None)
         },

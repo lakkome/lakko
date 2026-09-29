@@ -1910,6 +1910,14 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
     let parsed =
         rust_dispatch_incoming_envelope(plaintext).map_err(|err| JsError::new(&err.to_string()))?;
     Ok(match parsed {
+        // ADR-0057 registrar seeds have no client consumer yet and no FFI
+        // composer, so no client sends one. Refused explicitly until the
+        // ADR-0057 client wiring gives them their own dispatch kind.
+        IncomingEnvelope::RegistrarSeed(_) => {
+            return Err(JsError::new(
+                "registrar-seed envelopes are not handled by this surface yet",
+            ))
+        },
         IncomingEnvelope::CallWelcome(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::CallWelcome,
             payload: p.to_vec(),

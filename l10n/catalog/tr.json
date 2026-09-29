@@ -1,0 +1,150 @@
+{
+  "format": 1,
+  "language": "tr",
+  "messages": {
+    "auth.language.button": {
+      "text": "Dili değiştir",
+      "status": "machine"
+    },
+    "language.name.ar": {
+      "text": "Arapça",
+      "status": "machine"
+    },
+    "language.name.en": {
+      "text": "İngilizce",
+      "status": "machine"
+    },
+    "language.name.es": {
+      "text": "İspanyolca",
+      "status": "machine"
+    },
+    "language.name.fa": {
+      "text": "Farsça",
+      "status": "machine"
+    },
+    "language.name.he": {
+      "text": "İbranice",
+      "status": "machine"
+    },
+    "language.name.hi": {
+      "text": "Hintçe",
+      "status": "machine"
+    },
+    "language.name.pt-br": {
+      "text": "Portekizce (Brezilya)",
+      "status": "machine"
+    },
+    "language.name.ru": {
+      "text": "Rusça",
+      "status": "machine"
+    },
+    "language.name.tr": {
+      "text": "Türkçe",
+      "status": "machine"
+    },
+    "language.name.uk": {
+      "text": "Ukraynaca",
+      "status": "machine"
+    },
+    "language.name.zh-hans": {
+      "text": "Çince (Basitleştirilmiş)",
+      "status": "machine"
+    },
+    "nav.calls": {
+      "text": "Aramalar",
+      "status": "machine"
+    },
+    "nav.channels": {
+      "text": "Kanallar",
+      "status": "machine"
+    },
+    "nav.chats": {
+      "text": "Sohbetler",
+      "status": "machine"
+    },
+    "nav.contacts": {
+      "text": "Kişiler",
+      "status": "machine"
+    },
+    "nav.settings": {
+      "text": "Ayarlar",
+      "status": "machine"
+    },
+    "settings.about.translations_updated": {
+      "text": "Çeviriler güncellendi: {date}",
+      "status": "machine"
+    },
+    "settings.appearance.theme": {
+      "text": "Tema",
+      "status": "machine"
+    },
+    "settings.appearance.theme.dark": {
+      "text": "Koyu",
+      "status": "machine"
+    },
+    "settings.appearance.theme.light": {
+      "text": "Açık",
+      "status": "machine"
+    },
+    "settings.appearance.theme.system": {
+      "text": "Sistem",
+      "status": "machine"
+    },
+    "settings.language.load_failed": {
+      "text": "Bu dil yüklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.language.no_results": {
+      "text": "Dil bulunamadı",
+      "status": "machine"
+    },
+    "settings.language.same_as_system": {
+      "text": "Sistemle aynı",
+      "status": "machine"
+    },
+    "settings.language.same_as_system_detail": {
+      "text": "Sistemle aynı · {language}",
+      "status": "machine"
+    },
+    "settings.language.search": {
+      "text": "Ara",
+      "status": "machine"
+    },
+    "settings.language.title": {
+      "text": "Dil",
+      "status": "machine"
+    },
+    "settings.section.about": {
+      "text": "Hakkında",
+      "status": "machine"
+    },
+    "settings.section.account": {
+      "text": "Hesap",
+      "status": "machine"
+    },
+    "settings.section.appearance": {
+      "text": "Görünüm",
+      "status": "machine"
+    },
+    "settings.section.data": {
+      "text": "Veriler",
+      "status": "machine"
+    },
+    "settings.section.media": {
+      "text": "Medya",
+      "status": "machine"
+    },
+    "settings.section.notifications": {
+      "text": "Bildirimler",
+      "status": "machine"
+    },
+    "settings.section.profile": {
+      "text": "Profil",
+      "status": "machine"
+    },
+    "settings.section.security": {
+      "text": "Güvenlik",
+      "status": "machine"
+    }
+  }
+}

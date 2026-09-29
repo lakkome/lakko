@@ -1,0 +1,150 @@
+{
+  "format": 1,
+  "language": "hi",
+  "messages": {
+    "auth.language.button": {
+      "text": "भाषा बदलें",
+      "status": "machine"
+    },
+    "language.name.ar": {
+      "text": "अरबी",
+      "status": "machine"
+    },
+    "language.name.en": {
+      "text": "अंग्रेज़ी",
+      "status": "machine"
+    },
+    "language.name.es": {
+      "text": "स्पेनिश",
+      "status": "machine"
+    },
+    "language.name.fa": {
+      "text": "फ़ारसी",
+      "status": "machine"
+    },
+    "language.name.he": {
+      "text": "हिब्रू",
+      "status": "machine"
+    },
+    "language.name.hi": {
+      "text": "हिंदी",
+      "status": "machine"
+    },
+    "language.name.pt-br": {
+      "text": "पुर्तगाली (ब्राज़ील)",
+      "status": "machine"
+    },
+    "language.name.ru": {
+      "text": "रूसी",
+      "status": "machine"
+    },
+    "language.name.tr": {
+      "text": "तुर्की",
+      "status": "machine"
+    },
+    "language.name.uk": {
+      "text": "यूक्रेनी",
+      "status": "machine"
+    },
+    "language.name.zh-hans": {
+      "text": "चीनी (सरलीकृत)",
+      "status": "machine"
+    },
+    "nav.calls": {
+      "text": "कॉल",
+      "status": "machine"
+    },
+    "nav.channels": {
+      "text": "चैनल",
+      "status": "machine"
+    },
+    "nav.chats": {
+      "text": "चैट",
+      "status": "machine"
+    },
+    "nav.contacts": {
+      "text": "संपर्क",
+      "status": "machine"
+    },
+    "nav.settings": {
+      "text": "सेटिंग्स",
+      "status": "machine"
+    },
+    "settings.about.translations_updated": {
+      "text": "अनुवाद अपडेट किए गए {date}",
+      "status": "machine"
+    },
+    "settings.appearance.theme": {
+      "text": "थीम",
+      "status": "machine"
+    },
+    "settings.appearance.theme.dark": {
+      "text": "गहरा",
+      "status": "machine"
+    },
+    "settings.appearance.theme.light": {
+      "text": "हल्का",
+      "status": "machine"
+    },
+    "settings.appearance.theme.system": {
+      "text": "सिस्टम",
+      "status": "machine"
+    },
+    "settings.language.load_failed": {
+      "text": "यह भाषा लोड नहीं हो सकी। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "settings.language.no_results": {
+      "text": "कोई भाषा नहीं मिली",
+      "status": "machine"
+    },
+    "settings.language.same_as_system": {
+      "text": "सिस्टम के अनुसार",
+      "status": "machine"
+    },
+    "settings.language.same_as_system_detail": {
+      "text": "सिस्टम के अनुसार · {language}",
+      "status": "machine"
+    },
+    "settings.language.search": {
+      "text": "खोजें",
+      "status": "machine"
+    },
+    "settings.language.title": {
+      "text": "भाषा",
+      "status": "machine"
+    },
+    "settings.section.about": {
+      "text": "जानकारी",
+      "status": "machine"
+    },
+    "settings.section.account": {
+      "text": "खाता",
+      "status": "machine"
+    },
+    "settings.section.appearance": {
+      "text": "रूप-रंग",
+      "status": "machine"
+    },
+    "settings.section.data": {
+      "text": "डेटा",
+      "status": "machine"
+    },
+    "settings.section.media": {
+      "text": "मीडिया",
+      "status": "machine"
+    },
+    "settings.section.notifications": {
+      "text": "सूचनाएँ",
+      "status": "machine"
+    },
+    "settings.section.profile": {
+      "text": "प्रोफ़ाइल",
+      "status": "machine"
+    },
+    "settings.section.security": {
+      "text": "सुरक्षा",
+      "status": "machine"
+    }
+  }
+}

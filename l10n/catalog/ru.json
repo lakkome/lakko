@@ -1,0 +1,150 @@
+{
+  "format": 1,
+  "language": "ru",
+  "messages": {
+    "auth.language.button": {
+      "text": "Сменить язык",
+      "status": "machine"
+    },
+    "language.name.ar": {
+      "text": "Арабский",
+      "status": "machine"
+    },
+    "language.name.en": {
+      "text": "Английский",
+      "status": "machine"
+    },
+    "language.name.es": {
+      "text": "Испанский",
+      "status": "machine"
+    },
+    "language.name.fa": {
+      "text": "Персидский",
+      "status": "machine"
+    },
+    "language.name.he": {
+      "text": "Иврит",
+      "status": "machine"
+    },
+    "language.name.hi": {
+      "text": "Хинди",
+      "status": "machine"
+    },
+    "language.name.pt-br": {
+      "text": "Португальский (Бразилия)",
+      "status": "machine"
+    },
+    "language.name.ru": {
+      "text": "Русский",
+      "status": "machine"
+    },
+    "language.name.tr": {
+      "text": "Турецкий",
+      "status": "machine"
+    },
+    "language.name.uk": {
+      "text": "Украинский",
+      "status": "machine"
+    },
+    "language.name.zh-hans": {
+      "text": "Китайский (упрощённый)",
+      "status": "machine"
+    },
+    "nav.calls": {
+      "text": "Звонки",
+      "status": "machine"
+    },
+    "nav.channels": {
+      "text": "Каналы",
+      "status": "machine"
+    },
+    "nav.chats": {
+      "text": "Чаты",
+      "status": "machine"
+    },
+    "nav.contacts": {
+      "text": "Контакты",
+      "status": "machine"
+    },
+    "nav.settings": {
+      "text": "Настройки",
+      "status": "machine"
+    },
+    "settings.about.translations_updated": {
+      "text": "Переводы обновлены {date}",
+      "status": "machine"
+    },
+    "settings.appearance.theme": {
+      "text": "Тема",
+      "status": "machine"
+    },
+    "settings.appearance.theme.dark": {
+      "text": "Тёмная",
+      "status": "machine"
+    },
+    "settings.appearance.theme.light": {
+      "text": "Светлая",
+      "status": "machine"
+    },
+    "settings.appearance.theme.system": {
+      "text": "Системная",
+      "status": "machine"
+    },
+    "settings.language.load_failed": {
+      "text": "Не удалось загрузить язык. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.language.no_results": {
+      "text": "Языки не найдены",
+      "status": "machine"
+    },
+    "settings.language.same_as_system": {
+      "text": "Как в системе",
+      "status": "machine"
+    },
+    "settings.language.same_as_system_detail": {
+      "text": "Как в системе · {language}",
+      "status": "machine"
+    },
+    "settings.language.search": {
+      "text": "Поиск",
+      "status": "machine"
+    },
+    "settings.language.title": {
+      "text": "Язык",
+      "status": "machine"
+    },
+    "settings.section.about": {
+      "text": "О приложении",
+      "status": "machine"
+    },
+    "settings.section.account": {
+      "text": "Аккаунт",
+      "status": "machine"
+    },
+    "settings.section.appearance": {
+      "text": "Оформление",
+      "status": "machine"
+    },
+    "settings.section.data": {
+      "text": "Данные",
+      "status": "machine"
+    },
+    "settings.section.media": {
+      "text": "Медиа",
+      "status": "machine"
+    },
+    "settings.section.notifications": {
+      "text": "Уведомления",
+      "status": "machine"
+    },
+    "settings.section.profile": {
+      "text": "Профиль",
+      "status": "machine"
+    },
+    "settings.section.security": {
+      "text": "Безопасность",
+      "status": "machine"
+    }
+  }
+}

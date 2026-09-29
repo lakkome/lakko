@@ -1,0 +1,150 @@
+{
+  "format": 1,
+  "language": "uk",
+  "messages": {
+    "auth.language.button": {
+      "text": "Змінити мову",
+      "status": "machine"
+    },
+    "language.name.ar": {
+      "text": "Арабська",
+      "status": "machine"
+    },
+    "language.name.en": {
+      "text": "Англійська",
+      "status": "machine"
+    },
+    "language.name.es": {
+      "text": "Іспанська",
+      "status": "machine"
+    },
+    "language.name.fa": {
+      "text": "Перська",
+      "status": "machine"
+    },
+    "language.name.he": {
+      "text": "Іврит",
+      "status": "machine"
+    },
+    "language.name.hi": {
+      "text": "Гінді",
+      "status": "machine"
+    },
+    "language.name.pt-br": {
+      "text": "Португальська (Бразилія)",
+      "status": "machine"
+    },
+    "language.name.ru": {
+      "text": "Російська",
+      "status": "machine"
+    },
+    "language.name.tr": {
+      "text": "Турецька",
+      "status": "machine"
+    },
+    "language.name.uk": {
+      "text": "Українська",
+      "status": "machine"
+    },
+    "language.name.zh-hans": {
+      "text": "Китайська (спрощена)",
+      "status": "machine"
+    },
+    "nav.calls": {
+      "text": "Дзвінки",
+      "status": "machine"
+    },
+    "nav.channels": {
+      "text": "Канали",
+      "status": "machine"
+    },
+    "nav.chats": {
+      "text": "Чати",
+      "status": "machine"
+    },
+    "nav.contacts": {
+      "text": "Контакти",
+      "status": "machine"
+    },
+    "nav.settings": {
+      "text": "Налаштування",
+      "status": "machine"
+    },
+    "settings.about.translations_updated": {
+      "text": "Переклади оновлено {date}",
+      "status": "machine"
+    },
+    "settings.appearance.theme": {
+      "text": "Тема",
+      "status": "machine"
+    },
+    "settings.appearance.theme.dark": {
+      "text": "Темна",
+      "status": "machine"
+    },
+    "settings.appearance.theme.light": {
+      "text": "Світла",
+      "status": "machine"
+    },
+    "settings.appearance.theme.system": {
+      "text": "Системна",
+      "status": "machine"
+    },
+    "settings.language.load_failed": {
+      "text": "Не вдалося завантажити мову. Перевірте з’єднання та спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.language.no_results": {
+      "text": "Мов не знайдено",
+      "status": "machine"
+    },
+    "settings.language.same_as_system": {
+      "text": "Як у системі",
+      "status": "machine"
+    },
+    "settings.language.same_as_system_detail": {
+      "text": "Як у системі · {language}",
+      "status": "machine"
+    },
+    "settings.language.search": {
+      "text": "Пошук",
+      "status": "machine"
+    },
+    "settings.language.title": {
+      "text": "Мова",
+      "status": "machine"
+    },
+    "settings.section.about": {
+      "text": "Про застосунок",
+      "status": "machine"
+    },
+    "settings.section.account": {
+      "text": "Обліковий запис",
+      "status": "machine"
+    },
+    "settings.section.appearance": {
+      "text": "Оформлення",
+      "status": "machine"
+    },
+    "settings.section.data": {
+      "text": "Дані",
+      "status": "machine"
+    },
+    "settings.section.media": {
+      "text": "Медіа",
+      "status": "machine"
+    },
+    "settings.section.notifications": {
+      "text": "Сповіщення",
+      "status": "machine"
+    },
+    "settings.section.profile": {
+      "text": "Профіль",
+      "status": "machine"
+    },
+    "settings.section.security": {
+      "text": "Безпека",
+      "status": "machine"
+    }
+  }
+}

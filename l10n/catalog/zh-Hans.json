@@ -1,0 +1,150 @@
+{
+  "format": 1,
+  "language": "zh-Hans",
+  "messages": {
+    "auth.language.button": {
+      "text": "更改语言",
+      "status": "machine"
+    },
+    "language.name.ar": {
+      "text": "阿拉伯语",
+      "status": "machine"
+    },
+    "language.name.en": {
+      "text": "英语",
+      "status": "machine"
+    },
+    "language.name.es": {
+      "text": "西班牙语",
+      "status": "machine"
+    },
+    "language.name.fa": {
+      "text": "波斯语",
+      "status": "machine"
+    },
+    "language.name.he": {
+      "text": "希伯来语",
+      "status": "machine"
+    },
+    "language.name.hi": {
+      "text": "印地语",
+      "status": "machine"
+    },
+    "language.name.pt-br": {
+      "text": "葡萄牙语（巴西）",
+      "status": "machine"
+    },
+    "language.name.ru": {
+      "text": "俄语",
+      "status": "machine"
+    },
+    "language.name.tr": {
+      "text": "土耳其语",
+      "status": "machine"
+    },
+    "language.name.uk": {
+      "text": "乌克兰语",
+      "status": "machine"
+    },
+    "language.name.zh-hans": {
+      "text": "中文（简体）",
+      "status": "machine"
+    },
+    "nav.calls": {
+      "text": "通话",
+      "status": "machine"
+    },
+    "nav.channels": {
+      "text": "频道",
+      "status": "machine"
+    },
+    "nav.chats": {
+      "text": "聊天",
+      "status": "machine"
+    },
+    "nav.contacts": {
+      "text": "联系人",
+      "status": "machine"
+    },
+    "nav.settings": {
+      "text": "设置",
+      "status": "machine"
+    },
+    "settings.about.translations_updated": {
+      "text": "翻译已更新 {date}",
+      "status": "machine"
+    },
+    "settings.appearance.theme": {
+      "text": "主题",
+      "status": "machine"
+    },
+    "settings.appearance.theme.dark": {
+      "text": "深色",
+      "status": "machine"
+    },
+    "settings.appearance.theme.light": {
+      "text": "浅色",
+      "status": "machine"
+    },
+    "settings.appearance.theme.system": {
+      "text": "跟随系统",
+      "status": "machine"
+    },
+    "settings.language.load_failed": {
+      "text": "无法加载此语言。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "settings.language.no_results": {
+      "text": "未找到语言",
+      "status": "machine"
+    },
+    "settings.language.same_as_system": {
+      "text": "跟随系统",
+      "status": "machine"
+    },
+    "settings.language.same_as_system_detail": {
+      "text": "跟随系统 · {language}",
+      "status": "machine"
+    },
+    "settings.language.search": {
+      "text": "搜索",
+      "status": "machine"
+    },
+    "settings.language.title": {
+      "text": "语言",
+      "status": "machine"
+    },
+    "settings.section.about": {
+      "text": "关于",
+      "status": "machine"
+    },
+    "settings.section.account": {
+      "text": "账户",
+      "status": "machine"
+    },
+    "settings.section.appearance": {
+      "text": "外观",
+      "status": "machine"
+    },
+    "settings.section.data": {
+      "text": "数据",
+      "status": "machine"
+    },
+    "settings.section.media": {
+      "text": "媒体",
+      "status": "machine"
+    },
+    "settings.section.notifications": {
+      "text": "通知",
+      "status": "machine"
+    },
+    "settings.section.profile": {
+      "text": "个人资料",
+      "status": "machine"
+    },
+    "settings.section.security": {
+      "text": "安全",
+      "status": "machine"
+    }
+  }
+}

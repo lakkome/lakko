@@ -1,0 +1,150 @@
+{
+  "format": 1,
+  "language": "fa",
+  "messages": {
+    "auth.language.button": {
+      "text": "تغییر زبان",
+      "status": "machine"
+    },
+    "language.name.ar": {
+      "text": "عربی",
+      "status": "machine"
+    },
+    "language.name.en": {
+      "text": "انگلیسی",
+      "status": "machine"
+    },
+    "language.name.es": {
+      "text": "اسپانیایی",
+      "status": "machine"
+    },
+    "language.name.fa": {
+      "text": "فارسی",
+      "status": "machine"
+    },
+    "language.name.he": {
+      "text": "عبری",
+      "status": "machine"
+    },
+    "language.name.hi": {
+      "text": "هندی",
+      "status": "machine"
+    },
+    "language.name.pt-br": {
+      "text": "پرتغالی (برزیل)",
+      "status": "machine"
+    },
+    "language.name.ru": {
+      "text": "روسی",
+      "status": "machine"
+    },
+    "language.name.tr": {
+      "text": "ترکی",
+      "status": "machine"
+    },
+    "language.name.uk": {
+      "text": "اوکراینی",
+      "status": "machine"
+    },
+    "language.name.zh-hans": {
+      "text": "چینی (ساده‌شده)",
+      "status": "machine"
+    },
+    "nav.calls": {
+      "text": "تماس‌ها",
+      "status": "machine"
+    },
+    "nav.channels": {
+      "text": "کانال‌ها",
+      "status": "machine"
+    },
+    "nav.chats": {
+      "text": "گفتگوها",
+      "status": "machine"
+    },
+    "nav.contacts": {
+      "text": "مخاطبان",
+      "status": "machine"
+    },
+    "nav.settings": {
+      "text": "تنظیمات",
+      "status": "machine"
+    },
+    "settings.about.translations_updated": {
+      "text": "ترجمه‌ها به‌روز شد {date}",
+      "status": "machine"
+    },
+    "settings.appearance.theme": {
+      "text": "پوسته",
+      "status": "machine"
+    },
+    "settings.appearance.theme.dark": {
+      "text": "تیره",
+      "status": "machine"
+    },
+    "settings.appearance.theme.light": {
+      "text": "روشن",
+      "status": "machine"
+    },
+    "settings.appearance.theme.system": {
+      "text": "سیستم",
+      "status": "machine"
+    },
+    "settings.language.load_failed": {
+      "text": "این زبان بارگیری نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.language.no_results": {
+      "text": "زبانی پیدا نشد",
+      "status": "machine"
+    },
+    "settings.language.same_as_system": {
+      "text": "مانند سیستم",
+      "status": "machine"
+    },
+    "settings.language.same_as_system_detail": {
+      "text": "مانند سیستم · {language}",
+      "status": "machine"
+    },
+    "settings.language.search": {
+      "text": "جستجو",
+      "status": "machine"
+    },
+    "settings.language.title": {
+      "text": "زبان",
+      "status": "machine"
+    },
+    "settings.section.about": {
+      "text": "درباره",
+      "status": "machine"
+    },
+    "settings.section.account": {
+      "text": "حساب",
+      "status": "machine"
+    },
+    "settings.section.appearance": {
+      "text": "ظاهر",
+      "status": "machine"
+    },
+    "settings.section.data": {
+      "text": "داده‌ها",
+      "status": "machine"
+    },
+    "settings.section.media": {
+      "text": "رسانه",
+      "status": "machine"
+    },
+    "settings.section.notifications": {
+      "text": "اعلان‌ها",
+      "status": "machine"
+    },
+    "settings.section.profile": {
+      "text": "نمایه",
+      "status": "machine"
+    },
+    "settings.section.security": {
+      "text": "امنیت",
+      "status": "machine"
+    }
+  }
+}

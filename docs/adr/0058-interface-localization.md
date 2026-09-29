@@ -101,7 +101,12 @@ and the display name, Android `res/xml/locales_config.xml` and
 `values-<lang>/strings.xml` for `app_name`) are added to `compile` in S3 /
 S4, when the clients that read them are wired.
 
-A CI check runs the validator (`just l10n-check`).
+`just l10n-compile` writes the compiled `source.json` and `<lang>.json`
+files into each client's resources (`apps/web/src/l10n/catalog`,
+`apps/ios/Lakko/Resources/L10n`, `apps/android/app/src/main/assets/l10n`).
+The outputs are committed, so Vite, Xcode and Gradle need no Rust step;
+`just l10n-check` validates the catalog and fails when a committed output
+differs from a fresh compile.
 
 ### 3. `lakko-l10n` crate (Rust, FFI-exposed)
 

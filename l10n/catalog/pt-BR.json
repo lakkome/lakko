@@ -1,0 +1,150 @@
+{
+  "format": 1,
+  "language": "pt-BR",
+  "messages": {
+    "auth.language.button": {
+      "text": "Mudar idioma",
+      "status": "machine"
+    },
+    "language.name.ar": {
+      "text": "Árabe",
+      "status": "machine"
+    },
+    "language.name.en": {
+      "text": "Inglês",
+      "status": "machine"
+    },
+    "language.name.es": {
+      "text": "Espanhol",
+      "status": "machine"
+    },
+    "language.name.fa": {
+      "text": "Persa",
+      "status": "machine"
+    },
+    "language.name.he": {
+      "text": "Hebraico",
+      "status": "machine"
+    },
+    "language.name.hi": {
+      "text": "Hindi",
+      "status": "machine"
+    },
+    "language.name.pt-br": {
+      "text": "Português (Brasil)",
+      "status": "machine"
+    },
+    "language.name.ru": {
+      "text": "Russo",
+      "status": "machine"
+    },
+    "language.name.tr": {
+      "text": "Turco",
+      "status": "machine"
+    },
+    "language.name.uk": {
+      "text": "Ucraniano",
+      "status": "machine"
+    },
+    "language.name.zh-hans": {
+      "text": "Chinês (simplificado)",
+      "status": "machine"
+    },
+    "nav.calls": {
+      "text": "Chamadas",
+      "status": "machine"
+    },
+    "nav.channels": {
+      "text": "Canais",
+      "status": "machine"
+    },
+    "nav.chats": {
+      "text": "Conversas",
+      "status": "machine"
+    },
+    "nav.contacts": {
+      "text": "Contatos",
+      "status": "machine"
+    },
+    "nav.settings": {
+      "text": "Configurações",
+      "status": "machine"
+    },
+    "settings.about.translations_updated": {
+      "text": "Traduções atualizadas em {date}",
+      "status": "machine"
+    },
+    "settings.appearance.theme": {
+      "text": "Tema",
+      "status": "machine"
+    },
+    "settings.appearance.theme.dark": {
+      "text": "Escuro",
+      "status": "machine"
+    },
+    "settings.appearance.theme.light": {
+      "text": "Claro",
+      "status": "machine"
+    },
+    "settings.appearance.theme.system": {
+      "text": "Sistema",
+      "status": "machine"
+    },
+    "settings.language.load_failed": {
+      "text": "Não foi possível carregar este idioma. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "settings.language.no_results": {
+      "text": "Nenhum idioma encontrado",
+      "status": "machine"
+    },
+    "settings.language.same_as_system": {
+      "text": "Igual ao sistema",
+      "status": "machine"
+    },
+    "settings.language.same_as_system_detail": {
+      "text": "Igual ao sistema · {language}",
+      "status": "machine"
+    },
+    "settings.language.search": {
+      "text": "Pesquisar",
+      "status": "machine"
+    },
+    "settings.language.title": {
+      "text": "Idioma",
+      "status": "machine"
+    },
+    "settings.section.about": {
+      "text": "Sobre",
+      "status": "machine"
+    },
+    "settings.section.account": {
+      "text": "Conta",
+      "status": "machine"
+    },
+    "settings.section.appearance": {
+      "text": "Aparência",
+      "status": "machine"
+    },
+    "settings.section.data": {
+      "text": "Dados",
+      "status": "machine"
+    },
+    "settings.section.media": {
+      "text": "Mídia",
+      "status": "machine"
+    },
+    "settings.section.notifications": {
+      "text": "Notificações",
+      "status": "machine"
+    },
+    "settings.section.profile": {
+      "text": "Perfil",
+      "status": "machine"
+    },
+    "settings.section.security": {
+      "text": "Segurança",
+      "status": "machine"
+    }
+  }
+}

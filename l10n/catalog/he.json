@@ -1,0 +1,150 @@
+{
+  "format": 1,
+  "language": "he",
+  "messages": {
+    "auth.language.button": {
+      "text": "שינוי שפה",
+      "status": "machine"
+    },
+    "language.name.ar": {
+      "text": "ערבית",
+      "status": "machine"
+    },
+    "language.name.en": {
+      "text": "אנגלית",
+      "status": "machine"
+    },
+    "language.name.es": {
+      "text": "ספרדית",
+      "status": "machine"
+    },
+    "language.name.fa": {
+      "text": "פרסית",
+      "status": "machine"
+    },
+    "language.name.he": {
+      "text": "עברית",
+      "status": "machine"
+    },
+    "language.name.hi": {
+      "text": "הינדי",
+      "status": "machine"
+    },
+    "language.name.pt-br": {
+      "text": "פורטוגזית (ברזיל)",
+      "status": "machine"
+    },
+    "language.name.ru": {
+      "text": "רוסית",
+      "status": "machine"
+    },
+    "language.name.tr": {
+      "text": "טורקית",
+      "status": "machine"
+    },
+    "language.name.uk": {
+      "text": "אוקראינית",
+      "status": "machine"
+    },
+    "language.name.zh-hans": {
+      "text": "סינית (מפושטת)",
+      "status": "machine"
+    },
+    "nav.calls": {
+      "text": "שיחות",
+      "status": "machine"
+    },
+    "nav.channels": {
+      "text": "ערוצים",
+      "status": "machine"
+    },
+    "nav.chats": {
+      "text": "צ׳אטים",
+      "status": "machine"
+    },
+    "nav.contacts": {
+      "text": "אנשי קשר",
+      "status": "machine"
+    },
+    "nav.settings": {
+      "text": "הגדרות",
+      "status": "machine"
+    },
+    "settings.about.translations_updated": {
+      "text": "התרגומים עודכנו {date}",
+      "status": "machine"
+    },
+    "settings.appearance.theme": {
+      "text": "ערכת נושא",
+      "status": "machine"
+    },
+    "settings.appearance.theme.dark": {
+      "text": "כהה",
+      "status": "machine"
+    },
+    "settings.appearance.theme.light": {
+      "text": "בהיר",
+      "status": "machine"
+    },
+    "settings.appearance.theme.system": {
+      "text": "מערכת",
+      "status": "machine"
+    },
+    "settings.language.load_failed": {
+      "text": "לא ניתן היה לטעון שפה זו. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "settings.language.no_results": {
+      "text": "לא נמצאו שפות",
+      "status": "machine"
+    },
+    "settings.language.same_as_system": {
+      "text": "כמו במערכת",
+      "status": "machine"
+    },
+    "settings.language.same_as_system_detail": {
+      "text": "כמו במערכת · {language}",
+      "status": "machine"
+    },
+    "settings.language.search": {
+      "text": "חיפוש",
+      "status": "machine"
+    },
+    "settings.language.title": {
+      "text": "שפה",
+      "status": "machine"
+    },
+    "settings.section.about": {
+      "text": "אודות",
+      "status": "machine"
+    },
+    "settings.section.account": {
+      "text": "חשבון",
+      "status": "machine"
+    },
+    "settings.section.appearance": {
+      "text": "מראה",
+      "status": "machine"
+    },
+    "settings.section.data": {
+      "text": "נתונים",
+      "status": "machine"
+    },
+    "settings.section.media": {
+      "text": "מדיה",
+      "status": "machine"
+    },
+    "settings.section.notifications": {
+      "text": "התראות",
+      "status": "machine"
+    },
+    "settings.section.profile": {
+      "text": "פרופיל",
+      "status": "machine"
+    },
+    "settings.section.security": {
+      "text": "אבטחה",
+      "status": "machine"
+    }
+  }
+}
