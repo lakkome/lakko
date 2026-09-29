@@ -194,7 +194,7 @@ export async function runRotationOnce(
   }
 
   // 3. Walk the subscriber list + seal new envelopes.
-  const subscribers = await listSubscribers(ctx.channelIdHex, ctx.apiBase);
+  const subscribers = await listSubscribers(ctx.channelIdHex, ctx.identity, ctx.apiBase);
   const batch: RotateBatchEntry[] = [];
   for (const subscriberHex of subscribers.subscribers) {
     const subscriberBytes = hexToBytes(subscriberHex);

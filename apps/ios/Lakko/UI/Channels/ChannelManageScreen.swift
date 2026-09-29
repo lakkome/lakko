@@ -24,7 +24,8 @@ struct ChannelManageScreen: View {
                 SubscribersPanel(
                     channelId: channelId,
                     state: state,
-                    client: client
+                    client: client,
+                    accountIdentitySeed: accountIdentitySeed
                 )
                 CoPublishersPanel(
                     channelId: channelId,

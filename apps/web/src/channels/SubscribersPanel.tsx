@@ -23,7 +23,7 @@ import {
   deliverEnvelope,
   listSubscribers,
 } from "./api";
-import { sealSubscriberSeedEnvelope } from "./composer";
+import { sealSubscriberSeedEnvelope, type WasmIdentity } from "./composer";
 import { subscriberCountLabel } from "./channel-row";
 import { rememberSubscriberCount } from "./ui-cache";
 import { channelsState } from "../state/channels-state";
@@ -33,7 +33,12 @@ const SUBSCRIBERS_POLL_INTERVAL_MS = 5_000;
 
 type DeliveryStatus = "delivered" | "auto" | "failed";
 
-export function SubscribersPanel(props: { readonly channelIdHex: string }): JSX.Element {
+export function SubscribersPanel(props: {
+  readonly channelIdHex: string;
+  /** The session-long account identity: the subscriber list is owner-signed
+   *  with the key it derives for this channel (ADR-0059 section 4). */
+  readonly identity: WasmIdentity | null;
+}): JSX.Element {
   const [subs, setSubs] = createSignal<ReadonlyArray<string> | null>(null);
   const [busyPk, setBusyPk] = createSignal<string | null>(null);
   const [error, setError] = createSignal<string | null>(null);
@@ -43,8 +48,10 @@ export function SubscribersPanel(props: { readonly channelIdHex: string }): JSX.
   const [statusByPk, setStatusByPk] = createSignal<ReadonlyMap<string, DeliveryStatus>>(new Map());
 
   async function refresh(): Promise<void> {
+    const identity = props.identity;
+    if (identity === null) return;
     try {
-      const list = await listSubscribers(props.channelIdHex);
+      const list = await listSubscribers(props.channelIdHex, identity);
       setSubs(list.subscribers);
       rememberSubscriberCount(props.channelIdHex, list.subscribers.length);
     } catch (err) {

@@ -17,14 +17,13 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+use lakko_anon_token_server::{AnonTokenServerConfig, TokenVerifier};
+use lakko_svc_channels::internal::{internal_router, load_internal_secret};
+use lakko_svc_channels::owner_auth::OWNER_NONCE_RETENTION_MS;
 use lakko_svc_channels::{
-    router, AppState, ChannelStore, Config, InMemoryChannelStore, SqlChannelStore, VERSION,
+    router, AppState, ChannelStore, Config, InMemoryChannelStore, SqlChannelStore, MIGRATIONS,
+    VERSION,
 };
-
-/// Migrations directory (relative to crate root). `sqlx::migrate!`
-/// reads it at compile time, so a missing file fails the build
-/// instead of erroring at boot.
-const MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -33,22 +32,40 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = Config::from_env()?;
     info!(bind = %cfg.bind, "lakko-svc-channels starting (v{})", VERSION);
+    let anon_config = AnonTokenServerConfig::from_env()?;
+    let internal_secret = load_internal_secret().map_err(anyhow::Error::msg)?;
 
-    let store: Arc<dyn ChannelStore + Send + Sync> = if let Some(url) = &cfg.database_url {
-        info!("storage: MariaDB (LAKKO_CHANNELS_DATABASE_URL set) — running migrations");
-        let pool = MySqlPoolOptions::new()
-            .max_connections(16)
-            .connect(url)
-            .await?;
-        MIGRATIONS.run(&pool).await?;
-        Arc::new(SqlChannelStore::new(pool).with_envelope_retention(cfg.envelope_retention_epochs))
-    } else {
-        warn!(
-            "storage: in-memory (no LAKKO_CHANNELS_DATABASE_URL) — \
+    let (store, anon_tokens): (Arc<dyn ChannelStore + Send + Sync>, TokenVerifier) =
+        if let Some(url) = &cfg.database_url {
+            info!("storage: MariaDB (LAKKO_CHANNELS_DATABASE_URL set) — running migrations");
+            let pool = MySqlPoolOptions::new()
+                .max_connections(16)
+                .connect(url)
+                .await?;
+            MIGRATIONS.run(&pool).await?;
+            let tokens = TokenVerifier::new(pool.clone(), anon_config);
+            (
+                Arc::new(
+                    SqlChannelStore::new(pool)
+                        .with_envelope_retention(cfg.envelope_retention_epochs),
+                ),
+                tokens,
+            )
+        } else {
+            warn!(
+                "storage: in-memory (no LAKKO_CHANNELS_DATABASE_URL) — \
                  state is lost on restart, set the env var for production"
-        );
-        Arc::new(InMemoryChannelStore::new().with_envelope_retention(cfg.envelope_retention_epochs))
-    };
+            );
+            (
+                Arc::new(
+                    InMemoryChannelStore::new()
+                        .with_envelope_retention(cfg.envelope_retention_epochs),
+                ),
+                TokenVerifier::in_memory(anon_config),
+            )
+        };
+    anon_tokens.log_startup("channels");
+    let _spent_pruner = anon_tokens.spawn_pruner();
     // Spawn the background prune loop before handing
     // `store` into AppState — both halves share the same
     // `Arc<dyn ChannelStore + Send + Sync>` clone. The
@@ -80,8 +97,24 @@ async fn main() -> anyhow::Result<()> {
         info!("prune: background loop disabled (LAKKO_CHANNELS_PRUNE_INTERVAL_SECS=0)");
     }
 
-    let state = AppState::new(cfg.clone(), store);
-    let app = router(state);
+    let state = AppState::new(cfg.clone(), store, anon_tokens);
+    let app = router(Arc::clone(&state));
+
+    if let Some(secret) = internal_secret {
+        let internal = internal_router(state, secret);
+        let internal_listener = TcpListener::bind(cfg.internal_bind).await?;
+        info!(bind = %cfg.internal_bind, "internal moderation listener started");
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(internal_listener, internal).await {
+                warn!(error = %e, "internal listener stopped");
+            }
+        });
+    } else {
+        warn!(
+            "internal moderation listener NOT started: LAKKO_CHANNELS_INTERNAL_SECRET is unset; \
+             listings cannot be removed or blocked by the operator"
+        );
+    }
 
     let listener = TcpListener::bind(cfg.bind).await?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
@@ -154,6 +187,17 @@ async fn run_prune_loop(
                 },
                 Err(e) => warn!(error = %e, "prune: posts tick failed"),
             }
+        }
+
+        // Owner request-proof nonces older than twice the proof window can
+        // never be replayed (the window refuses them), so they go.
+        match store
+            .prune_owner_nonces_older_than(now_ms.saturating_sub(OWNER_NONCE_RETENTION_MS))
+            .await
+        {
+            Ok(removed) if removed > 0 => info!(removed, "prune: owner nonces tick complete"),
+            Ok(_) => {},
+            Err(e) => warn!(error = %e, "prune: owner nonces tick failed"),
         }
 
         // Stale-subscriber retention — bulk DELETE +

@@ -17,6 +17,9 @@ struct SubscribersPanel: View {
     let channelId: String
     @ObservedObject var state: ChannelsUiState
     let client: ChannelsClient
+    /// The canonical AccountIdentity seed: the subscriber list is
+    /// owner-signed with the key it derives for this channel (ADR-0059).
+    let accountIdentitySeed: Data
 
     @State private var subscribers: [String]?
     @State private var busyPk: String?
@@ -104,7 +107,11 @@ struct SubscribersPanel: View {
 
     private func refresh() async {
         do {
-            let list = try await client.listSubscribers(channelIdHex: channelId)
+            let identity = try Identity.fromSeed(seed: accountIdentitySeed)
+            let list = try await client.listSubscribers(
+                channelIdHex: channelId,
+                accountIdentity: identity
+            )
             subscribers = list
             state.setSubscriberCount(channelId: channelId, count: list.count)
         } catch {

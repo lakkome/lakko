@@ -229,7 +229,7 @@ export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Eleme
   return (
     <div class="lk-stack lk-channel-manage-body">
       <ChannelDetailsPanel channelIdHex={props.channelIdHex} />
-      <SubscribersPanel channelIdHex={props.channelIdHex} />
+      <SubscribersPanel channelIdHex={props.channelIdHex} identity={identity()} />
       <Show
         when={group() !== null && identity() !== null}
         fallback={

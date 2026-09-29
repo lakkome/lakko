@@ -7,6 +7,18 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.request.header
+import io.ktor.client.request.request
+import io.ktor.http.HttpMethod
+import me.lakko.app.anon.AnonTokenContext
+import me.lakko.app.anon.AnonTokenSource
+import me.lakko.app.anon.AnonTokens
+import me.lakko.app.anon.AnonymousHttp
+import me.lakko.app.anon.sendWithToken
+import uniffi.lakko_ffi_uniffi.ChannelOwnerSigner
+import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.channelOwnerProofHeaderName
+import uniffi.lakko_ffi_uniffi.channelOwnerSigner
 import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
@@ -43,6 +55,11 @@ import kotlinx.serialization.json.Json
 public class ChannelsClient(
     public val baseUrl: String = DEFAULT_BASE_URL,
     engine: HttpClientEngine? = null,
+    /** Engine for subscribe (a token route). Production:
+     *  [AnonymousHttp.engine]; tests: `null` reuses [engine]. */
+    anonEngine: HttpClientEngine? = null,
+    /** Where subscribe draws its `channel-subscribe` token. */
+    private val anonTokens: AnonTokenSource = AnonTokens.shared,
 ) : AutoCloseable {
 
     private val jsonCodec = Json {
@@ -56,8 +73,15 @@ public class ChannelsClient(
         HttpClient(AntiCensorshipEngine(OkHttp.create {})) { install(ContentNegotiation) { json(jsonCodec) } }
     }
 
+    /** Subscribe's client: no session, its own pool. */
+    private val anonClient: HttpClient =
+        HttpClient(anonEngine ?: engine ?: AnonymousHttp.engine) {
+            install(ContentNegotiation) { json(jsonCodec) }
+        }
+
     override fun close() {
         client.close()
+        anonClient.close()
     }
 
     // -----------------------------------------------------------------
@@ -65,16 +89,20 @@ public class ChannelsClient(
     // -----------------------------------------------------------------
 
     @Serializable
-    private data class CreateReq(val channel_id: String)
+    private data class CreateReq(val channel_id: String, val owner_pubkey_hex: String)
 
     @Serializable
     private data class CreateResp(val channel_id: String)
 
-    /** `POST /v1/channels` — register a fresh channel. */
-    public suspend fun createChannel(channelIdHex: String): String {
+    /** `POST /v1/channels` — register a fresh channel under the owner key
+     *  [accountIdentity] derives for it (ADR-0059 section 1). The same key
+     *  again is idempotent; another key for an existing id is refused with
+     *  409 `channel-exists`. [owner] is [ownerSigner] of this channel. */
+    public suspend fun createChannel(channelIdHex: String, owner: ChannelOwnerSigner): String {
+        val ownerHex = owner.verifyingKey().joinToString("") { "%02x".format(it) }
         val response: HttpResponse = client.post("$baseUrl/v1/channels") {
             contentType(ContentType.Application.Json)
-            setBody(CreateReq(channelIdHex))
+            setBody(CreateReq(channelIdHex, ownerHex))
         }
         if (!response.status.isSuccess()) {
             throw decodeError(response, "create channel")
@@ -178,16 +206,21 @@ public class ChannelsClient(
     private data class EnvelopesResp(val envelopes: List<EnvelopeEntryJson>)
 
     /** `POST /v1/channels/:id/subscribers` — register a
-     *  subscriber's X25519 public key. */
+     *  subscriber's X25519 public key. Spends one `channel-subscribe`
+     *  anonymous token (ADR-0059 section 4) on the anonymous client; the
+     *  request carries no session. */
     public suspend fun subscribe(
         channelIdHex: String,
         subscriberPubkeyHex: String,
     ): String {
-        val response: HttpResponse = client.post(
-            "$baseUrl/v1/channels/$channelIdHex/subscribers"
-        ) {
-            contentType(ContentType.Application.Json)
-            setBody(SubscribeReq(subscriberPubkeyHex))
+        val url = "$baseUrl/v1/channels/$channelIdHex/subscribers"
+        val response: HttpResponse = anonTokens.sendWithToken(AnonTokenContext.CHANNEL_SUBSCRIBE) { name, value ->
+            anonClient.request(url) {
+                method = HttpMethod.Post
+                header(name, value)
+                contentType(ContentType.Application.Json)
+                setBody(SubscribeReq(subscriberPubkeyHex))
+            }
         }
         if (!response.status.isSuccess()) {
             throw decodeError(response, "subscribe")
@@ -197,11 +230,15 @@ public class ChannelsClient(
 
     /** `GET /v1/channels/:id/subscribers` — list registered
      *  subscriber pubkey-hex strings. Used by the publisher
-     *  to fan out HPKE-sealed seed envelopes. */
-    public suspend fun listSubscribers(channelIdHex: String): List<String> {
-        val response: HttpResponse = client.get(
-            "$baseUrl/v1/channels/$channelIdHex/subscribers"
-        )
+     *  to fan out HPKE-sealed seed envelopes. Owner-signed (ADR-0059
+     *  section 4) with [owner] ([ownerSigner] of this channel), over the
+     *  service path (never the `/channels` prefix nginx strips). */
+    public suspend fun listSubscribers(channelIdHex: String, owner: ChannelOwnerSigner): List<String> {
+        val path = "/v1/channels/$channelIdHex/subscribers"
+        val proof = owner.sign("GET", path, "", ByteArray(0))
+        val response: HttpResponse = client.get("$baseUrl$path") {
+            header(channelOwnerProofHeaderName(), proof)
+        }
         if (!response.status.isSuccess()) {
             throw decodeError(response, "list subscribers")
         }
@@ -450,6 +487,16 @@ public class ChannelsClient(
     }
 
     public companion object {
+        /** The owner signer of [channelIdHex] for the account identity
+         *  (ADR-0059 section 1). Only the account that created the channel
+         *  derives the key the server registered for it. Deriving it needs
+         *  only the identity's seed; the signer outlives the identity call. */
+        public fun ownerSigner(accountIdentity: Identity, channelIdHex: String): ChannelOwnerSigner {
+            require(channelIdHex.length == 32) { "channel id must be 32 hex chars" }
+            val id = ByteArray(16) { i -> channelIdHex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+            return channelOwnerSigner(accountIdentity, id)
+        }
+
         /** `<LAKKO_API_BASE_URL>/channels` ([ApiEndpoints]), or
          *  `http://10.0.2.2:8090` without an API base URL. */
         public val DEFAULT_BASE_URL: String

@@ -124,6 +124,11 @@ pub struct Config {
     /// is floored to 1 so a rotation cannot strand every
     /// subscriber.
     pub envelope_retention_epochs: usize,
+    /// Where the internal moderation listener binds (ADR-0059 section 7),
+    /// from `LAKKO_CHANNELS_INTERNAL_BIND`. The listener starts only when
+    /// `LAKKO_CHANNELS_INTERNAL_SECRET` is set; the secret is read by
+    /// `main` and never held here, so this struct's `Debug` cannot print it.
+    pub internal_bind: SocketAddr,
 }
 
 impl Config {
@@ -167,6 +172,10 @@ impl Config {
             DEFAULT_ENVELOPE_RETENTION_EPOCHS,
         )?
         .max(1);
+        let internal_bind = parse_socket(
+            "LAKKO_CHANNELS_INTERNAL_BIND",
+            crate::internal::DEFAULT_INTERNAL_BIND,
+        )?;
         Ok(Self {
             bind,
             max_post_bytes,
@@ -177,6 +186,7 @@ impl Config {
             subscriber_retention_secs,
             prune_interval_secs,
             envelope_retention_epochs,
+            internal_bind,
         })
     }
 }
@@ -228,6 +238,7 @@ mod tests {
             "LAKKO_CHANNELS_FETCH_LIMIT_DEFAULT",
             "LAKKO_CHANNELS_FETCH_LIMIT_MAX",
             "LAKKO_CHANNELS_ENVELOPE_RETENTION_EPOCHS",
+            "LAKKO_CHANNELS_INTERNAL_BIND",
         ] {
             env::remove_var(key);
         }
@@ -246,6 +257,7 @@ mod tests {
         with_env(&[], || {
             let cfg = Config::from_env().unwrap();
             assert_eq!(cfg.bind.to_string(), "127.0.0.1:8090");
+            assert_eq!(cfg.internal_bind.to_string(), "127.0.0.1:8093");
             assert_eq!(cfg.max_post_bytes, DEFAULT_MAX_POST_BYTES);
             assert_eq!(cfg.fetch_limit_default, DEFAULT_FETCH_LIMIT);
             assert_eq!(cfg.fetch_limit_max, DEFAULT_FETCH_LIMIT_MAX);

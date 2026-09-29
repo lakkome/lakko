@@ -192,7 +192,8 @@ public actor RotationCron {
 
         // 3. Walk the subscriber list + seal new envelopes.
         let subscribers = try await context.channelsClient.listSubscribers(
-            channelIdHex: context.channelIdHex
+            channelIdHex: context.channelIdHex,
+            accountIdentity: context.identity
         )
         var batch: [RotateBatchEntry] = []
         batch.reserveCapacity(subscribers.count)

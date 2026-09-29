@@ -428,7 +428,9 @@ public object CoPublisher {
             throw CoPublisherException.UnexpectedServerEpoch(currentEpoch)
         }
         val newServerEpoch = currentEpoch + 1u
-        val subscribers = channelsClient.listSubscribers(channelIdHex)
+        val subscribers = ChannelsClient.ownerSigner(identity, channelIdHex).use {
+            channelsClient.listSubscribers(channelIdHex, it)
+        }
         val batch = ArrayList<RotateBatchEntry>(subscribers.size)
         for (subscriberHex in subscribers) {
             val subscriberBytes = hexToBytes(subscriberHex)

@@ -30,14 +30,16 @@
 //! the master secret answers 503 to every token route whatever the request
 //! carries - it never degrades to accepting requests without a token.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use lakko_anon_token::{
-    decode_header_value, verify_token, AnonTokenError, TokenContext, VerifiedToken, TOKEN_HEADER,
+    decode_header_value, verify_token, AnonTokenError, SpendId, TokenContext, VerifiedToken,
+    TOKEN_HEADER,
 };
 use sqlx::MySqlPool;
 
@@ -122,12 +124,24 @@ impl IntoResponse for TokenRejection {
     }
 }
 
+/// Where a verifier records spent tokens.
+#[derive(Debug, Clone)]
+enum SpentSet {
+    /// The service's `anon_token_spent` table (production).
+    Db(MySqlPool),
+    /// A process-local set, for a service running without a database (the
+    /// channels service's in-memory store, dev and tests). Lost on restart,
+    /// so a token spent before a restart could be spent again after it; a
+    /// service that persists nothing else has nothing to protect across one.
+    Memory(Arc<Mutex<HashMap<(u8, SpendId), u64>>>),
+}
+
 /// A service's token verifier: its configuration (or none, when dormant) and
-/// the pool holding its spent-set. Cheap to clone.
+/// the store holding its spent-set. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct TokenVerifier {
     config: Option<Arc<AnonTokenServerConfig>>,
-    pool: MySqlPool,
+    spent: SpentSet,
 }
 
 impl TokenVerifier {
@@ -138,7 +152,19 @@ impl TokenVerifier {
     pub fn new(pool: MySqlPool, config: Option<AnonTokenServerConfig>) -> Self {
         Self {
             config: config.map(Arc::new),
-            pool,
+            spent: SpentSet::Db(pool),
+        }
+    }
+
+    /// Build with a process-local spent-set, for a service that runs without
+    /// a database. The same verification and refusals as [`Self::new`]; only
+    /// the spent-set lives in memory (and forgets across a restart), with
+    /// entries older than the previous epoch dropped on each spend.
+    #[must_use]
+    pub fn in_memory(config: Option<AnonTokenServerConfig>) -> Self {
+        Self {
+            config: config.map(Arc::new),
+            spent: SpentSet::Memory(Arc::new(Mutex::new(HashMap::new()))),
         }
     }
 
@@ -168,9 +194,12 @@ impl TokenVerifier {
     /// Spawn the hourly spent-set pruner when enabled.
     #[must_use]
     pub fn spawn_pruner(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let SpentSet::Db(pool) = &self.spent else {
+            return None;
+        };
         self.config
             .as_ref()
-            .map(|c| spawn_spent_pruner(self.pool.clone(), c.window_secs))
+            .map(|c| spawn_spent_pruner(pool.clone(), c.window_secs))
     }
 
     /// The middleware state for routes spending a `context` token.
@@ -213,14 +242,17 @@ impl TokenVerifier {
             config.window_secs,
         )
         .map_err(TokenRejection::from_verify)?;
-        match spend(
-            &self.pool,
-            verified.context,
-            &verified.spend_id,
-            verified.epoch,
-        )
-        .await
-        {
+        let recorded = match &self.spent {
+            SpentSet::Db(pool) => {
+                spend(pool, verified.context, &verified.spend_id, verified.epoch).await
+            },
+            SpentSet::Memory(set) => {
+                let current =
+                    lakko_anon_token::epoch_at(now_unix_secs, config.window_secs).unwrap_or(0);
+                spend_in_memory(set, &verified, current)
+            },
+        };
+        match recorded {
             Ok(()) => Ok(verified),
             Err(SpendError::AlreadySpent) => Err(TokenRejection::Spent),
             Err(SpendError::Db(e)) => {
@@ -243,6 +275,29 @@ impl TokenVerifier {
         self.spend_header_at(headers, context, now_unix_secs())
             .await
     }
+}
+
+/// Record `verified` in a process-local spent-set, dropping entries older
+/// than the previous epoch (they no longer verify, so they cannot be
+/// replayed). A poisoned lock is recovered: the set holds only spend
+/// identifiers, and dropping the whole set would let every token be spent
+/// again.
+fn spend_in_memory(
+    set: &Mutex<HashMap<(u8, SpendId), u64>>,
+    verified: &VerifiedToken,
+    current_epoch: u64,
+) -> Result<(), SpendError> {
+    let mut guard = set
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let floor = current_epoch.saturating_sub(1);
+    guard.retain(|_, epoch| *epoch >= floor);
+    let key = (verified.context.as_u8(), verified.spend_id);
+    if guard.contains_key(&key) {
+        return Err(SpendError::AlreadySpent);
+    }
+    guard.insert(key, verified.epoch);
+    Ok(())
 }
 
 /// Middleware state: one verifier bound to one context.

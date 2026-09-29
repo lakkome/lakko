@@ -403,6 +403,12 @@ const NewChannel: Component = () => {
       // (409) aborts cleanly without leaving a half-created channel. An
       // empty handle skips discovery entirely. The mapping is `@handle ->
       // channel_id`; the OPRF hash is all the server ever sees.
+      const identity = chats.accountIdentity();
+      if (identity === null) {
+        setError("Sign in again to create a channel.");
+        setBusy(false);
+        return;
+      }
       const wantedHandle = handle().trim().replace(/^@/, "");
       if (wantedHandle.length > 0) {
         try {
@@ -425,18 +431,15 @@ const NewChannel: Component = () => {
         }
       }
 
-      await createChannel(id);
+      // The channel is registered under the owner key this account derives
+      // for it (ADR-0059 section 1), so the identity is needed first.
+      await createChannel(id, identity);
       // Mint local publisher keys — the content-key seed comes from an MLS
       // PublisherGroup exporter (ADR-0010 Tier 1), the signing-key seed is a
       // fresh Ed25519 keypair seed. The group is created in the SESSION-LONG
       // account identity's provider (ADR-0017 canonical identity), which the
       // channel log snapshots — a throwaway `Identity.fromSeed` would take
       // the group, and the seed every subscriber holds, with it.
-      const identity = chats.accountIdentity();
-      if (identity === null) {
-        setError("Sign in again to create a channel.");
-        return;
-      }
       await awaitChannelsHydration();
       const keys = await freshPublisherKeys(
         identity,
@@ -1003,14 +1006,21 @@ const ChannelSubscribe: Component = () => {
 
   /** Drive the registration + catch-up dance. Idempotent — the server treats
    *  a re-register of the same pubkey as a no-op, and re-running the
-   *  catch-up re-opens whatever the retained set currently is. */
+   *  catch-up re-opens whatever the retained set currently is. A registration
+   *  spends a `channel-subscribe` token (ADR-0059 section 4), so a channel
+   *  this device already follows with a key it already holds is not
+   *  registered again on every open; the re-sync path below re-registers
+   *  when the current epoch's seed is missing. */
   async function bootstrap_(): Promise<void> {
     setBootstrap("registering");
     setBootstrapError(null);
     try {
+      const alreadyFollowing =
+        channelsState.channels().some((c) => c.id === params.id) &&
+        channelsState.subscriberKeysByChannel().has(params.id);
       const kp = await ensureKeypair();
       const pubHex = bytesToHex(kp.public);
-      await subscribe(params.id, pubHex);
+      if (!alreadyFollowing) await subscribe(params.id, pubHex);
       rememberSubscribed();
 
       setBootstrap("polling");
@@ -1022,8 +1032,14 @@ const ChannelSubscribe: Component = () => {
         setBootstrap("active");
       }
     } catch (err) {
+      const token = anonTokenMessage(
+        err,
+        "Could not follow the channel. Check your connection and try again.",
+      );
       if (apiError.is(err)) {
         setBootstrapError(channelErrorText(err));
+      } else if (token !== null) {
+        setBootstrapError(token);
       } else {
         setBootstrapError(String(err));
       }

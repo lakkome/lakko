@@ -124,7 +124,6 @@ struct NewChannelScreen: View {
                 }
             }
 
-            _ = try await client.createChannel(channelIdHex: id)
             // G-27: build a transient `Identity` from the canonical
             // AccountIdentity (phrase) seed (ADR-0017), hand it to the
             // composer so the channel content-key seed comes from a real MLS
@@ -132,7 +131,10 @@ struct NewChannelScreen: View {
             // `freshPublisherKeys` builds a throwaway `Group` from it for the
             // duration of the call. `Identity` releases its handle via ARC at
             // scope-exit — UniFFI's Swift surface has no explicit `close()`.
+            // The same identity derives the channel's owner key, which the
+            // channel is registered under (ADR-0059 section 1).
             let identity = try Identity.fromSeed(seed: accountIdentitySeed)
+            _ = try await client.createChannel(channelIdHex: id, accountIdentity: identity)
             let keys = try ChannelsComposer.freshPublisherKeys(
                 identity: identity,
                 channelIdHex: id,

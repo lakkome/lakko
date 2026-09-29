@@ -292,6 +292,68 @@ service envelopes.
 - **S2** `services/channels`: `owner_pubkey`, owner-signed listing and
   subscriber list, token-gated subscribe, directory tables, bucket ranking,
   search, internal moderation routes; DB-gated tests.
+  **S2 built 2026-09-29 (service + minimal client call sites); notes,
+  including where it differs from the text:**
+  - *Owner key on the wire.* `POST /v1/channels` takes
+    `{channel_id, owner_pubkey_hex}` (64 hex, must decode as an Ed25519
+    point, else `400 bad-owner-pubkey`). A second create with the same key is
+    idempotent; another key for an existing id is `409 channel-exists` and
+    changes nothing. Migration `0005` adds `channels.owner_pubkey` NOT NULL
+    (flag day, no back-fill).
+  - *Owner-signed routes* (`PUT` / `DELETE .../listing`, `GET
+    .../subscribers`) go through one gate (`src/owner_auth.rs`): parse the
+    header, look up the owner key, window + signature over the routed path,
+    then consume the nonce (`channel_owner_nonces`, keyed on the nonce,
+    pruned after twice the window by the existing prune loop). The nonce is
+    recorded only after the signature verified, so a stranger cannot fill the
+    table. Every failure, an unknown channel included, is one `401
+    owner-proof-required`; a store failure is a 500.
+  - *Listing wire.* `PUT` body = the canonical `lakko/channel-listing/v1`
+    bytes, `application/octet-stream`. Refused: codec failure `400
+    bad-listing`, another channel id `400 listing-channel-mismatch`, not
+    strictly newer `409 stale-listing`, blocked `403 listing-blocked`.
+    `DELETE` is idempotent (204). A topic id outside the list is filed under
+    Other (0) for bucketing; the stored bytes keep it verbatim. Directory
+    items are `{channel_id, listing_b64, subscribers}`, the band only;
+    clients decode the bytes with the shared codec.
+  - *Subscribe* checks the body and the channel's existence before spending
+    the `channel-subscribe` token, so a malformed or misdirected request
+    costs none. The SQL store now keeps a subscriber's first `registered_at`
+    across re-subscribes (the growth signal counts new subscribers).
+  - *Score (chosen, not measured):* subscriber band index x 100 + band index
+    of the last 7 days' registrations x 60 + a fresh-listing bonus of 150
+    decaying linearly to 0 over 14 days from the **first** listing
+    (`channels.first_listed_at_ms`, kept across a withdrawal so relisting
+    does not renew it). Ties: first-listed time, then channel id
+    (`src/directory.rs`). Bucket responses `Cache-Control: public,
+    max-age=3600`; a single listing `public, max-age=300` (chosen); search
+    `no-store`, 2-64 characters, a case-insensitive substring over name,
+    handle and description ranked by the same score. The SQL store reads
+    every listing of a bucket with two `COUNT(*)` subqueries each; fine at
+    test scale, not measured at directory scale.
+  - *Moderation:* `POST /internal/v1/channels/{id}/moderation` with
+    `{action: remove|block|unblock, reason}` on `LAKKO_CHANNELS_INTERNAL_BIND`
+    (default `127.0.0.1:8093`), secret `LAKKO_CHANNELS_INTERNAL_SECRET`
+    (base64, >= 16 bytes, constant-time); unset, the listener does not
+    start. A removal keeps a block in force; a block may name a channel not
+    created yet (`channel_moderation`, no foreign key).
+  - *Tokens without a database.* `lakko-anon-token-server` gained
+    `TokenVerifier::in_memory` so the service's in-memory mode (dev, tests)
+    spends through the same gate; the SQL mode uses the byte-identical
+    spent-set migration `0006`.
+  - *nginx* logs neither directory-search location (the query is in the
+    query string).
+  - **Finding: co-publishers lose the subscriber list.** The list is now
+    owner-signed and a co-publisher cannot derive the owner key, so a
+    co-publisher's rotation fanout gets `401`. The owner's own rotation and
+    the reseal-after-add (owner-side) are unaffected. Not decided here: an
+    owner-appointed co-publisher key, or leaving rotation to the owner.
+  - *Clients (minimal):* web, iOS and Android send `owner_pubkey_hex` at
+    creation, sign the subscriber list, and spend a `channel-subscribe`
+    token on subscribe; the three token pools know `channel-subscribe` and
+    `directory-search`. A reader screen no longer re-registers a channel this
+    device already follows on every open (it would spend a token each time);
+    the missing-seed re-sync still re-registers.
 - **S3** web: List in Discover, Discover preset, cards, picked topics,
   decoys, search, Share my channels.
 - **S4** iOS and Android, the same.
@@ -303,8 +365,10 @@ service envelopes.
    over many refreshes (for example a stable random set per device per
    month rather than a fresh one per day).
 2. A public report flow for listings, and who acts on reports.
-3. Whether the bucket score should also use listing age, to keep new
-   channels visible.
+3. ~~Whether the bucket score should also use listing age.~~ Yes
+   (maintainer, 2026-09-29): a temporary bonus for fresh listings so new
+   channels are not buried under large ones; its shape is chosen at S2,
+   not measured.
 4. The per-account daily quota for `ChannelSubscribe` and
    `DirectorySearch` tokens.
 

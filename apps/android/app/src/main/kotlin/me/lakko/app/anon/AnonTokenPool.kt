@@ -29,13 +29,16 @@ import kotlin.coroutines.cancellation.CancellationException
  * fail) run in a host JVM test with no native library.
  */
 
-/** The five rationed actions, in wire order (`anonTokenContexts()`). */
+/** The rationed actions, in wire order (`anonTokenContexts()`);
+ *  `channel-subscribe` and `directory-search` are ADR-0059. */
 public enum class AnonTokenContext(public val wire: String) {
     DISCOVERY_LOOKUP("discovery-lookup"),
     DISCOVERY_REGISTER("discovery-register"),
     INVITE_CONSUME("invite-consume"),
     DS_KNOCK("ds-knock"),
     PUSH_REGISTER("push-register"),
+    CHANNEL_SUBSCRIBE("channel-subscribe"),
+    DIRECTORY_SEARCH("directory-search"),
 }
 
 /**
@@ -52,14 +55,16 @@ public data class AnonBatchPolicy(
 )
 
 /** The per-context policy: `discovery-lookup` 8 (refill below 2),
- *  `push-register` 4, `invite-consume` 2, `ds-knock` 2, `discovery-register` 1
- *  (each refill when empty). */
+ *  `push-register` 4, `invite-consume` 2, `ds-knock` 2, `channel-subscribe` 2,
+ *  `discovery-register` 1, `directory-search` 1 (each refill when empty). */
 public fun anonBatchPolicyFor(context: AnonTokenContext): AnonBatchPolicy = when (context) {
     AnonTokenContext.DISCOVERY_LOOKUP -> AnonBatchPolicy(batch = 8, refillBelow = 2)
     AnonTokenContext.PUSH_REGISTER -> AnonBatchPolicy(batch = 4, refillBelow = 1)
     AnonTokenContext.INVITE_CONSUME -> AnonBatchPolicy(batch = 2, refillBelow = 1)
     AnonTokenContext.DS_KNOCK -> AnonBatchPolicy(batch = 2, refillBelow = 1)
     AnonTokenContext.DISCOVERY_REGISTER -> AnonBatchPolicy(batch = 1, refillBelow = 1)
+    AnonTokenContext.CHANNEL_SUBSCRIBE -> AnonBatchPolicy(batch = 2, refillBelow = 1)
+    AnonTokenContext.DIRECTORY_SEARCH -> AnonBatchPolicy(batch = 1, refillBelow = 1)
 }
 
 /** One finalized token, ready to spend in the `x-lakko-anon-token` header. */

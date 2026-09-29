@@ -448,7 +448,7 @@ async function resealSubscribers(
   if (!Number.isInteger(newServerEpoch) || newServerEpoch < 0) {
     throw new Error(`unexpected server epoch ${current.epoch}; cannot reseal`);
   }
-  const subs = await listSubscribers(channelIdHex, apiBase);
+  const subs = await listSubscribers(channelIdHex, identity, apiBase);
   const batch: RotateBatchEntry[] = [];
   for (const subscriberHex of subs.subscribers) {
     const subscriberBytes = hexToBytes(subscriberHex);

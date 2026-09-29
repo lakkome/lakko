@@ -63,13 +63,16 @@
 import { loadWasm } from "../wasm";
 import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
 
-/** The five token contexts, in wire order (`anonTokenContexts()`). */
+/** The token contexts, in wire order (`anonTokenContexts()`).
+ *  `channel-subscribe` and `directory-search` are ADR-0059. */
 export type AnonTokenContext =
   | "discovery-lookup"
   | "discovery-register"
   | "invite-consume"
   | "ds-knock"
-  | "push-register";
+  | "push-register"
+  | "channel-subscribe"
+  | "directory-search";
 
 /** Tokens asked for per refill, by how often each action happens. */
 export const REFILL_BATCH: Readonly<Record<AnonTokenContext, number>> = {
@@ -78,6 +81,8 @@ export const REFILL_BATCH: Readonly<Record<AnonTokenContext, number>> = {
   "invite-consume": 2,
   "ds-knock": 2,
   "discovery-register": 1,
+  "channel-subscribe": 2,
+  "directory-search": 1,
 };
 /** Refill a context when it holds fewer than this many tokens: lookups keep
  *  a spare, the rarer actions refill only once empty. */
@@ -87,6 +92,8 @@ export const LOW_WATER: Readonly<Record<AnonTokenContext, number>> = {
   "invite-consume": 1,
   "ds-knock": 1,
   "discovery-register": 1,
+  "channel-subscribe": 1,
+  "directory-search": 1,
 };
 
 /** The refill batch of `context`. */

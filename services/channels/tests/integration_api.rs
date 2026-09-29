@@ -11,10 +11,101 @@ use std::net::SocketAddr;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use lakko_anon_token::{MasterSecret, TokenContext, DEFAULT_WINDOW_SECS};
+use lakko_anon_token_server::{
+    current_epoch, testing::mint_header, AnonTokenServerConfig, TokenVerifier, TOKEN_HEADER,
+};
+use lakko_channels::owner::{ChannelOwnerSigner, OwnerRequest, OWNER_PROOF_HEADER_NAME};
 use lakko_svc_channels::{router, AppState, Config, InMemoryChannelStore};
 use serde_json::json;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
+
+/// The anonymous-token master secret every test server verifies under.
+const MASTER_HEX: &str = "0303030303030303030303030303030303030303030303030303030303030303";
+/// The owner's account seed; the owner key is derived from it per channel.
+const ACCOUNT_SEED: [u8; 32] = [5; 32];
+
+fn master() -> MasterSecret {
+    MasterSecret::from_bytes([3; 32])
+}
+
+fn token_verifier() -> TokenVerifier {
+    TokenVerifier::in_memory(AnonTokenServerConfig::from_values(Some(MASTER_HEX), None).unwrap())
+}
+
+/// A fresh spendable token of `context`.
+fn token(context: TokenContext) -> String {
+    mint_header(&master(), context, current_epoch(DEFAULT_WINDOW_SECS))
+}
+
+fn subscribe_token() -> String {
+    token(TokenContext::ChannelSubscribe)
+}
+
+fn owner_signer_for(channel_hex: &str) -> ChannelOwnerSigner {
+    let id: [u8; 16] = hex::decode(channel_hex).unwrap().try_into().unwrap();
+    ChannelOwnerSigner::from_account_seed(&ACCOUNT_SEED, &id)
+}
+
+fn create_body_for(channel_hex: &str) -> serde_json::Value {
+    json!({
+        "channel_id": channel_hex,
+        "owner_pubkey_hex": hex::encode(owner_signer_for(channel_hex).verifying_key().to_bytes()),
+    })
+}
+
+fn create_body() -> serde_json::Value {
+    create_body_for(CHANNEL_HEX)
+}
+
+fn now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
+
+/// A distinct nonce per proof in this test process.
+fn fresh_nonce() -> [u8; 16] {
+    static NEXT: AtomicU8 = AtomicU8::new(0);
+    let mut n = rand_bytes();
+    n[0] = NEXT.fetch_add(1, Ordering::Relaxed);
+    n
+}
+
+fn rand_bytes() -> [u8; 16] {
+    let mut out = [0u8; 16];
+    lakko_crypto::random::fill(&mut out);
+    out
+}
+
+/// The owner proof header for `CHANNEL_HEX`'s owner over one request.
+fn owner_proof(method: &str, path: &str, query: &str, body: &[u8]) -> String {
+    owner_proof_for(CHANNEL_HEX, method, path, query, body)
+}
+
+fn owner_proof_for(
+    channel_hex: &str,
+    method: &str,
+    path: &str,
+    query: &str,
+    body: &[u8],
+) -> String {
+    let req = OwnerRequest {
+        method,
+        canonical_path: path,
+        query,
+        body,
+    };
+    owner_signer_for(channel_hex)
+        .sign_at(&req, now_ms(), fresh_nonce())
+        .encode()
+}
 
 fn test_config() -> Config {
     Config {
@@ -32,6 +123,7 @@ fn test_config() -> Config {
         // Match the production default (ADR-0031) so the
         // retention tests below exercise the real window.
         envelope_retention_epochs: 4,
+        internal_bind: "127.0.0.1:0".parse().unwrap(),
     }
 }
 
@@ -40,7 +132,7 @@ async fn spawn() -> SocketAddr {
     let store = Arc::new(
         InMemoryChannelStore::new().with_envelope_retention(cfg.envelope_retention_epochs),
     );
-    let state = AppState::new(cfg, store);
+    let state = AppState::new(cfg, store, token_verifier());
     let app = router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -68,7 +160,7 @@ async fn create_channel_then_publish_then_fetch() {
     // 1. Create.
     let resp = client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -139,7 +231,7 @@ async fn publish_empty_post_is_400() {
     let client = reqwest::Client::new();
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -182,7 +274,7 @@ async fn fetch_respects_limit() {
     let client = reqwest::Client::new();
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -215,6 +307,7 @@ async fn subscribe_to_unknown_channel_is_404() {
         .post(format!(
             "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
         ))
+        .header(TOKEN_HEADER, subscribe_token())
         .json(&json!({ "subscriber_pubkey_hex": SUB_HEX }))
         .send()
         .await
@@ -231,7 +324,7 @@ async fn subscribe_then_list_then_deliver_then_fetch() {
     // Create.
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -240,6 +333,7 @@ async fn subscribe_then_list_then_deliver_then_fetch() {
         .post(format!(
             "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
         ))
+        .header(TOKEN_HEADER, subscribe_token())
         .json(&json!({ "subscriber_pubkey_hex": SUB_HEX }))
         .send()
         .await
@@ -247,11 +341,11 @@ async fn subscribe_then_list_then_deliver_then_fetch() {
     assert_eq!(resp.status(), 201);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["subscriber_id"].as_str().unwrap(), SUB_HEX);
-    // List.
+    // List — owner-signed.
+    let path = format!("/v1/channels/{CHANNEL_HEX}/subscribers");
     let resp = client
-        .get(format!(
-            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
-        ))
+        .get(format!("http://{addr}{path}"))
+        .header(OWNER_PROOF_HEADER_NAME, owner_proof("GET", &path, "", b""))
         .send()
         .await
         .unwrap();
@@ -303,7 +397,7 @@ async fn deliver_envelope_with_wrong_length_is_400() {
     let client = reqwest::Client::new();
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -311,6 +405,7 @@ async fn deliver_envelope_with_wrong_length_is_400() {
         .post(format!(
             "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
         ))
+        .header(TOKEN_HEADER, subscribe_token())
         .json(&json!({ "subscriber_pubkey_hex": SUB_HEX }))
         .send()
         .await
@@ -334,7 +429,7 @@ async fn deliver_to_unsubscribed_pubkey_is_404() {
     let client = reqwest::Client::new();
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -358,7 +453,7 @@ async fn bad_subscriber_id_is_400() {
     let client = reqwest::Client::new();
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -366,6 +461,7 @@ async fn bad_subscriber_id_is_400() {
         .post(format!(
             "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
         ))
+        .header(TOKEN_HEADER, subscribe_token())
         .json(&json!({ "subscriber_pubkey_hex": "shortie" }))
         .send()
         .await
@@ -387,7 +483,7 @@ const SUB_HEX_B: &str = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefa
 async fn create_channel_with_two_subs(client: &reqwest::Client, addr: SocketAddr) {
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -396,6 +492,7 @@ async fn create_channel_with_two_subs(client: &reqwest::Client, addr: SocketAddr
             .post(format!(
                 "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
             ))
+            .header(TOKEN_HEADER, subscribe_token())
             .json(&json!({ "subscriber_pubkey_hex": sub }))
             .send()
             .await
@@ -409,7 +506,7 @@ async fn genesis_epoch_is_zero() {
     let client = reqwest::Client::new();
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -519,7 +616,7 @@ async fn rotate_rejects_unsubscribed_recipient() {
     let client = reqwest::Client::new();
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -546,7 +643,7 @@ async fn rotate_empty_batch_still_bumps_epoch() {
     let client = reqwest::Client::new();
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -586,7 +683,7 @@ async fn payload_round_trips_byte_identical() {
     let client = reqwest::Client::new();
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -819,7 +916,7 @@ async fn stage_to_unsubscribed_recipient_is_409() {
     let client = reqwest::Client::new();
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -850,7 +947,7 @@ async fn stage_to_unsubscribed_recipient_is_409() {
 async fn create_channel_with_one_sub(client: &reqwest::Client, addr: SocketAddr) {
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -858,6 +955,7 @@ async fn create_channel_with_one_sub(client: &reqwest::Client, addr: SocketAddr)
         .post(format!(
             "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
         ))
+        .header(TOKEN_HEADER, subscribe_token())
         .json(&json!({ "subscriber_pubkey_hex": SUB_HEX }))
         .send()
         .await
@@ -944,7 +1042,7 @@ async fn fetch_envelopes_unknown_subscriber_is_404() {
     let client = reqwest::Client::new();
     client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&create_body())
         .send()
         .await
         .unwrap();
@@ -1021,4 +1119,510 @@ async fn deliver_with_future_epoch_is_409() {
     assert_eq!(resp.status(), 409);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["code"].as_str().unwrap(), "envelope-epoch-in-future");
+}
+
+// ---- ADR-0059 S2: owner key, token-gated subscribe, directory -------------
+
+use lakko_channels::listing::{compose_channel_listing, ChannelListing};
+
+const OTHER_CHANNEL_HEX: &str = "fedcba9876543210fedcba9876543210";
+const INTERNAL_SECRET: [u8; 16] = [9; 16];
+
+/// A server plus its internal moderation listener.
+async fn spawn_with_internal() -> (SocketAddr, SocketAddr) {
+    let cfg = test_config();
+    let store = Arc::new(InMemoryChannelStore::new());
+    let state = AppState::new(cfg, store, token_verifier());
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let internal = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (a, b) = (public.local_addr().unwrap(), internal.local_addr().unwrap());
+    let internal_app = lakko_svc_channels::internal::internal_router(
+        Arc::clone(&state),
+        Arc::new(INTERNAL_SECRET.to_vec()),
+    );
+    let app = router(state);
+    tokio::spawn(async move {
+        let _ = axum::serve(public, app).await;
+    });
+    tokio::spawn(async move {
+        let _ = axum::serve(internal, internal_app).await;
+    });
+    (a, b)
+}
+
+fn listing(
+    channel_hex: &str,
+    name: &str,
+    topic: u8,
+    language: &str,
+    updated_at_ms: u64,
+) -> Vec<u8> {
+    compose_channel_listing(&ChannelListing {
+        channel_id: hex::decode(channel_hex).unwrap().try_into().unwrap(),
+        handle: format!("h{}", &channel_hex[..8]),
+        name: name.to_string(),
+        description: "A channel about things".to_string(),
+        topic,
+        language: language.to_string(),
+        updated_at_ms,
+    })
+    .unwrap()
+}
+
+async fn create(client: &reqwest::Client, addr: SocketAddr, channel_hex: &str) {
+    let resp = client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&create_body_for(channel_hex))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+}
+
+async fn put_listing(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    channel_hex: &str,
+    body: Vec<u8>,
+) -> reqwest::Response {
+    let path = format!("/v1/channels/{channel_hex}/listing");
+    let proof = owner_proof_for(channel_hex, "PUT", &path, "", &body);
+    client
+        .put(format!("http://{addr}{path}"))
+        .header(OWNER_PROOF_HEADER_NAME, proof)
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn code_of(resp: reqwest::Response) -> String {
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["code"]
+        .as_str()
+        .or_else(|| body["error"].as_str())
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn the_owner_key_is_fixed_at_creation() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    // The same key again is idempotent.
+    create(&client, addr, CHANNEL_HEX).await;
+    // Another key cannot take the channel over.
+    let resp = client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({
+            "channel_id": CHANNEL_HEX,
+            "owner_pubkey_hex": hex::encode(
+                owner_signer_for(OTHER_CHANNEL_HEX).verifying_key().to_bytes()
+            ),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    assert_eq!(code_of(resp).await, "channel-exists");
+    // A missing or malformed key is refused.
+    for bad in [
+        json!({ "channel_id": CHANNEL_HEX }),
+        json!({ "channel_id": CHANNEL_HEX, "owner_pubkey_hex": "abcd" }),
+    ] {
+        let resp = client
+            .post(format!("http://{addr}/v1/channels"))
+            .json(&bad)
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_client_error());
+    }
+}
+
+#[tokio::test]
+async fn subscribing_spends_one_channel_subscribe_token() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    let url = format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers");
+    let body = json!({ "subscriber_pubkey_hex": SUB_HEX });
+
+    let resp = client.post(&url).json(&body).send().await.unwrap();
+    assert_eq!(resp.status(), 401);
+    assert_eq!(code_of(resp).await, "anon-token-required");
+
+    let wrong = token(TokenContext::DirectorySearch);
+    let resp = client
+        .post(&url)
+        .header(TOKEN_HEADER, &wrong)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    assert_eq!(code_of(resp).await, "anon-token-wrong-context");
+
+    let t = subscribe_token();
+    let resp = client
+        .post(&url)
+        .header(TOKEN_HEADER, &t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let resp = client
+        .post(&url)
+        .header(TOKEN_HEADER, &t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    assert_eq!(code_of(resp).await, "anon-token-spent");
+
+    // A malformed body costs no token: the same token still spends after.
+    let fresh = subscribe_token();
+    let resp = client
+        .post(&url)
+        .header(TOKEN_HEADER, &fresh)
+        .json(&json!({ "subscriber_pubkey_hex": "short" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let resp = client
+        .post(&url)
+        .header(TOKEN_HEADER, &fresh)
+        .json(&json!({ "subscriber_pubkey_hex": SUB_HEX_B }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+}
+
+#[tokio::test]
+async fn the_subscriber_list_is_owner_signed_and_a_proof_is_single_use() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    let path = format!("/v1/channels/{CHANNEL_HEX}/subscribers");
+    let url = format!("http://{addr}{path}");
+
+    let resp = client.get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 401);
+    assert_eq!(code_of(resp).await, "owner-proof-required");
+
+    // Another channel's owner key does not open this channel.
+    let foreign = owner_proof_for(OTHER_CHANNEL_HEX, "GET", &path, "", b"");
+    let resp = client
+        .get(&url)
+        .header(OWNER_PROOF_HEADER_NAME, foreign)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // A proof over another method does not either.
+    let wrong_method = owner_proof("DELETE", &path, "", b"");
+    let resp = client
+        .get(&url)
+        .header(OWNER_PROOF_HEADER_NAME, wrong_method)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let proof = owner_proof("GET", &path, "", b"");
+    let resp = client
+        .get(&url)
+        .header(OWNER_PROOF_HEADER_NAME, &proof)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    // The same proof again is a replay.
+    let resp = client
+        .get(&url)
+        .header(OWNER_PROOF_HEADER_NAME, &proof)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    assert_eq!(code_of(resp).await, "owner-proof-required");
+}
+
+#[tokio::test]
+async fn a_listing_is_stored_served_in_its_bucket_searched_and_withdrawn() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    let body = listing(CHANNEL_HEX, "Rust Weekly", 3, "en", 1_000);
+
+    // Without a proof, nothing is stored.
+    let resp = client
+        .put(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/listing"))
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let resp = put_listing(&client, addr, CHANNEL_HEX, body.clone()).await;
+    assert_eq!(resp.status(), 204);
+
+    // Single listing.
+    let resp = client
+        .get(format!("http://{addr}/v1/directory/listing/{CHANNEL_HEX}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["cache-control"], "public, max-age=300");
+    let item: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(item["channel_id"], CHANNEL_HEX);
+    assert_eq!(item["subscribers"], "<10");
+    assert_eq!(
+        URL_SAFE_NO_PAD
+            .decode(item["listing_b64"].as_str().unwrap())
+            .unwrap(),
+        body
+    );
+
+    // Bucket.
+    let resp = client
+        .get(format!("http://{addr}/v1/directory/bucket/3/en"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["cache-control"], "public, max-age=3600");
+    let bucket: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(bucket["items"].as_array().unwrap().len(), 1);
+    let resp = client
+        .get(format!("http://{addr}/v1/directory/bucket/3/de"))
+        .send()
+        .await
+        .unwrap();
+    let other: serde_json::Value = resp.json().await.unwrap();
+    assert!(other["items"].as_array().unwrap().is_empty());
+    for bad in ["200/en", "3/EN", "3/english", "x/en"] {
+        let resp = client
+            .get(format!("http://{addr}/v1/directory/bucket/{bad}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "{bad}");
+    }
+
+    // Search: needs a directory-search token; case-insensitive.
+    let search = format!("http://{addr}/v1/directory/search?q=WEEKLY");
+    let resp = client.get(&search).send().await.unwrap();
+    assert_eq!(resp.status(), 401);
+    let resp = client
+        .get(&search)
+        .header(TOKEN_HEADER, token(TokenContext::DirectorySearch))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let found: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(found["items"].as_array().unwrap().len(), 1);
+    let resp = client
+        .get(format!("http://{addr}/v1/directory/search?q=x"))
+        .header(TOKEN_HEADER, token(TokenContext::DirectorySearch))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Withdraw.
+    let path = format!("/v1/channels/{CHANNEL_HEX}/listing");
+    let resp = client
+        .delete(format!("http://{addr}{path}"))
+        .header(
+            OWNER_PROOF_HEADER_NAME,
+            owner_proof("DELETE", &path, "", b""),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let resp = client
+        .get(format!("http://{addr}/v1/directory/listing/{CHANNEL_HEX}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn items_carry_the_band_not_the_count_and_unknown_topics_file_under_other() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    for i in 0u8..12 {
+        let resp = client
+            .post(format!(
+                "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
+            ))
+            .header(TOKEN_HEADER, subscribe_token())
+            .json(&json!({ "subscriber_pubkey_hex": hex::encode([i; 32]) }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201);
+    }
+    // Topic 250 is not a known topic: it is listed under Other (0).
+    let resp = put_listing(
+        &client,
+        addr,
+        CHANNEL_HEX,
+        listing(CHANNEL_HEX, "Misc", 250, "fi", 1),
+    )
+    .await;
+    assert_eq!(resp.status(), 204);
+    let bucket: serde_json::Value = client
+        .get(format!("http://{addr}/v1/directory/bucket/0/fi"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let items = bucket["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["subscribers"], "10+");
+    assert!(items[0].get("count").is_none());
+}
+
+#[tokio::test]
+async fn moderation_runs_only_on_the_internal_listener() {
+    let (addr, internal) = spawn_with_internal().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    assert_eq!(
+        put_listing(
+            &client,
+            addr,
+            CHANNEL_HEX,
+            listing(CHANNEL_HEX, "Spam", 1, "en", 1)
+        )
+        .await
+        .status(),
+        204
+    );
+    let moderate = format!("http://{internal}/internal/v1/channels/{CHANNEL_HEX}/moderation");
+    let secret = base64::engine::general_purpose::STANDARD.encode(INTERNAL_SECRET);
+
+    // Not on the public router.
+    let resp = client
+        .post(format!(
+            "http://{addr}/internal/v1/channels/{CHANNEL_HEX}/moderation"
+        ))
+        .json(&json!({ "action": "block", "reason": "spam" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    // Without the secret, refused.
+    let resp = client
+        .post(&moderate)
+        .json(&json!({ "action": "block", "reason": "spam" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    // A bad reason code is refused.
+    let resp = client
+        .post(&moderate)
+        .header("x-lakko-internal-secret", &secret)
+        .json(&json!({ "action": "block", "reason": "Not A Code" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    let resp = client
+        .post(&moderate)
+        .header("x-lakko-internal-secret", &secret)
+        .json(&json!({ "action": "block", "reason": "spam" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let resp = client
+        .get(format!("http://{addr}/v1/directory/listing/{CHANNEL_HEX}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let resp = put_listing(
+        &client,
+        addr,
+        CHANNEL_HEX,
+        listing(CHANNEL_HEX, "Spam", 1, "en", 2),
+    )
+    .await;
+    assert_eq!(resp.status(), 403);
+    assert_eq!(code_of(resp).await, "listing-blocked");
+
+    let resp = client
+        .post(&moderate)
+        .header("x-lakko-internal-secret", &secret)
+        .json(&json!({ "action": "unblock", "reason": "appeal-granted" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let resp = put_listing(
+        &client,
+        addr,
+        CHANNEL_HEX,
+        listing(CHANNEL_HEX, "Fine", 1, "en", 3),
+    )
+    .await;
+    assert_eq!(resp.status(), 204);
+}
+
+#[tokio::test]
+async fn a_stale_misdirected_or_malformed_listing_is_refused() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create(&client, addr, CHANNEL_HEX).await;
+    let resp = put_listing(
+        &client,
+        addr,
+        CHANNEL_HEX,
+        listing(CHANNEL_HEX, "New", 3, "en", 1_000),
+    )
+    .await;
+    assert_eq!(resp.status(), 204);
+    // A listing not newer than the stored one is refused.
+    let resp = put_listing(
+        &client,
+        addr,
+        CHANNEL_HEX,
+        listing(CHANNEL_HEX, "Old", 3, "en", 1_000),
+    )
+    .await;
+    assert_eq!(resp.status(), 409);
+    assert_eq!(code_of(resp).await, "stale-listing");
+    // A listing naming another channel is refused.
+    let resp = put_listing(
+        &client,
+        addr,
+        CHANNEL_HEX,
+        listing(OTHER_CHANNEL_HEX, "X", 3, "en", 2_000),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    assert_eq!(code_of(resp).await, "listing-channel-mismatch");
+    // Bytes the codec refuses are refused.
+    let resp = put_listing(&client, addr, CHANNEL_HEX, b"not a listing".to_vec()).await;
+    assert_eq!(resp.status(), 400);
+    assert_eq!(code_of(resp).await, "bad-listing");
 }

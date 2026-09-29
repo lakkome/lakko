@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// G4-2-rotation-timer-ios — one entry in the rotation
 /// batch the publisher posts to
@@ -48,28 +49,65 @@ public final class ChannelsClient {
 
     public let baseURL: String
     private let session: URLSession
+    /// The anonymous session the token route (subscribe) travels on.
+    private let anonymousSession: URLSession
+    private let tokens: AnonTokenSource
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
     public init(
         baseURL: String = ChannelsClient.defaultBaseURL,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        tokens: AnonTokenSource = AnonTokenPool.shared
     ) {
         self.baseURL = baseURL
         self.session = session
+        self.anonymousSession = AnonymousHTTP.session(pairedWith: session)
+        self.tokens = tokens
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
     }
 
+    /// The owner signer of `channelIdHex` for the account identity
+    /// (ADR-0059 section 1). Only the account that created the channel
+    /// derives the key the server registered for it.
+    public static func ownerSigner(
+        accountIdentity: Identity,
+        channelIdHex: String
+    ) throws -> ChannelOwnerSigner {
+        guard let id = hexToData(channelIdHex), id.count == 16 else {
+            throw ChannelsApiError(status: -1, code: "bad-channel-id", detail: "channel id is not 32 hex chars")
+        }
+        return try channelOwnerSigner(accountIdentity: accountIdentity, channelId: id)
+    }
+
+    private static func hexToData(_ hex: String) -> Data? {
+        guard hex.count % 2 == 0 else { return nil }
+        var out = Data(capacity: hex.count / 2)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
+            out.append(byte)
+            index = next
+        }
+        return out
+    }
+
     // MARK: - Channels
 
-    /// `POST /v1/channels` — register a fresh channel.
-    public func createChannel(channelIdHex: String) async throws -> String {
-        struct Req: Encodable { let channel_id: String }
+    /// `POST /v1/channels` — register a fresh channel under the owner key
+    /// `accountIdentity` derives for it (ADR-0059 section 1). The same key
+    /// again is idempotent; another key for an existing id is refused with
+    /// 409 `channel-exists`.
+    public func createChannel(channelIdHex: String, accountIdentity: Identity) async throws -> String {
+        struct Req: Encodable { let channel_id: String; let owner_pubkey_hex: String }
         struct Resp: Decodable { let channel_id: String }
+        let signer = try Self.ownerSigner(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
+        let ownerHex = signer.verifyingKey().map { String(format: "%02x", $0) }.joined()
         let resp: Resp = try await postJson(
             endpoint: "/v1/channels",
-            body: Req(channel_id: channelIdHex)
+            body: Req(channel_id: channelIdHex, owner_pubkey_hex: ownerHex)
         )
         return resp.channel_id
     }
@@ -143,7 +181,9 @@ public final class ChannelsClient {
     // MARK: - Subscribers (G4-3c)
 
     /// `POST /v1/channels/:id/subscribers` — register a
-    /// subscriber's X25519 public key.
+    /// subscriber's X25519 public key. Spends one `channel-subscribe`
+    /// anonymous token (ADR-0059 section 4) on the anonymous session; the
+    /// request carries no session token.
     @discardableResult
     public func subscribe(
         channelIdHex: String,
@@ -151,23 +191,47 @@ public final class ChannelsClient {
     ) async throws -> String {
         struct Req: Encodable { let subscriber_pubkey_hex: String }
         struct Resp: Decodable { let subscriber_id: String }
-        let resp: Resp = try await postJson(
-            endpoint: "/v1/channels/\(channelIdHex)/subscribers",
-            body: Req(subscriber_pubkey_hex: subscriberPubkeyHex)
-        )
+        let url = try buildURL(endpoint: "/v1/channels/\(channelIdHex)/subscribers")
+        let body = try encoder.encode(Req(subscriber_pubkey_hex: subscriberPubkeyHex))
+        let anonymousSession = self.anonymousSession
+        let (data, http) = try await AnonTokenRoute.send(
+            context: .channelSubscribe,
+            tokens: tokens
+        ) { tokenHeader in
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(tokenHeader, forHTTPHeaderField: AnonTokenRoute.headerName)
+            request.httpBody = body
+            let (data, response) = try await AntiCensorshipTransport.perform(
+                request, session: anonymousSession, config: .current
+            )
+            guard let http = response as? HTTPURLResponse else {
+                throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
+            }
+            return (data, http)
+        }
+        let resp: Resp = try decode(data: data, http: http)
         return resp.subscriber_id
     }
 
     /// `GET /v1/channels/:id/subscribers` — list registered
     /// subscriber pubkey-hex strings. Used by the publisher
-    /// to fan out HPKE-sealed seed envelopes.
+    /// to fan out HPKE-sealed seed envelopes. Owner-signed (ADR-0059
+    /// section 4) with the key `accountIdentity` derives for the channel,
+    /// over the service path (never the `/channels` prefix nginx strips).
     public func listSubscribers(
-        channelIdHex: String
+        channelIdHex: String,
+        accountIdentity: Identity
     ) async throws -> [String] {
         struct Resp: Decodable { let subscribers: [String] }
-        let resp: Resp = try await getJson(
-            endpoint: "/v1/channels/\(channelIdHex)/subscribers"
-        )
+        let path = "/v1/channels/\(channelIdHex)/subscribers"
+        let signer = try Self.ownerSigner(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
+        let proof = signer.sign(method: "GET", path: path, query: "", body: Data())
+        var request = URLRequest(url: try buildURL(endpoint: path))
+        request.httpMethod = "GET"
+        request.setValue(proof, forHTTPHeaderField: channelOwnerProofHeaderName())
+        let resp: Resp = try await execute(request: request)
         return resp.subscribers
     }
 
@@ -438,6 +502,10 @@ public final class ChannelsClient {
                 detail: "non-HTTP response"
             )
         }
+        return try decode(data: data, http: http)
+    }
+
+    private func decode<R: Decodable>(data: Data, http: HTTPURLResponse) throws -> R {
         if !(200..<300).contains(http.statusCode) {
             // Server promises {code, detail} on every 4xx/5xx.
             // The decoded shape lives on the type

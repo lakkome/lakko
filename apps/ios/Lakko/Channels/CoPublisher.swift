@@ -380,7 +380,10 @@ public enum CoPublisher {
         if newServerEpoch < currentEpoch {
             throw CoPublisherError.unexpectedServerEpoch(currentEpoch)
         }
-        let subscribers = try await channelsClient.listSubscribers(channelIdHex: channelIdHex)
+        let subscribers = try await channelsClient.listSubscribers(
+            channelIdHex: channelIdHex,
+            accountIdentity: identity
+        )
         var batch: [RotateBatchEntry] = []
         batch.reserveCapacity(subscribers.count)
         for subscriberHex in subscribers {

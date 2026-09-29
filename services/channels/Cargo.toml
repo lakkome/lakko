@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Channel-broadcast backend for Phase 4a (publisher path). Stores opaque ChannelPost bytes and fans them out by cursor; the server never decrypts. See ADR-0010."
+description = "Channel-broadcast backend (ADR-0010) and the channel directory (ADR-0059). Stores opaque ChannelPost bytes and fans them out by cursor; the server never decrypts."
 
 [lints]
 workspace = true
@@ -68,21 +68,27 @@ sqlx = { version = "0.9", default-features = false, features = [
 # uses the `async-trait` crate, so we stay consistent.
 async-trait = "0.1"
 
-# We do NOT pull lakko-channels here: the server treats
-# every ChannelPost as opaque bytes (ADR-0010 §"What the
-# SFU does NOT do" extends to this service — no payload
-# inspection). Clients verify signatures + decrypt; the
-# server only stores and forwards. Keeping the workspace
-# crate out of the dep graph keeps the proof of opacity
-# obvious to an auditor.
+# ADR-0059 S2: the directory and the owner-signed routes. The server
+# still never decodes a ChannelPost, opens a seed envelope or derives a key
+# (the opacity contract of `storage.rs` is unchanged for posts and
+# envelopes). What it now parses is the owner's own public artefacts: the
+# owner request proof (`lakko_channels::owner::verify_owner_proof`, against
+# the `owner_pubkey` registered at creation) and the plaintext listing the
+# owner chose to publish (`lakko_channels::listing`, the bounded codec the
+# clients compose with), so a malformed listing never reaches the table.
+lakko-channels.workspace = true
+lakko-crypto.workspace = true
+
+# Anonymous tokens (ADR-0054): subscribe spends `channel-subscribe`, search
+# spends `directory-search`, through the shared spend gate.
+lakko-anon-token.workspace = true
+lakko-anon-token-server.workspace = true
+
+# Constant-time comparison of the internal moderation listener's shared
+# secret (the push-gw pattern). Already in the workspace graph.
+subtle = "2"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-# Integration tests assert that the wire-level envelope-
-# length constant matches the crypto crate's
-# SEED_ENVELOPE_LEN at compile time. Pulling lakko-channels
-# in as a dev-only dep keeps the production binary's
-# opacity invariant intact while still letting the test
-# crate cross-check.
-lakko-channels.workspace = true
 base64 = "0.22"
+lakko-anon-token-server = { workspace = true, features = ["testing"] }

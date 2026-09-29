@@ -27,6 +27,10 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
     case dsKnock = "ds-knock"
     /// push-gw register, unregister, group subscribe and group unsubscribe.
     case pushRegister = "push-register"
+    /// `POST /v1/channels/{id}/subscribers` (ADR-0059 section 4).
+    case channelSubscribe = "channel-subscribe"
+    /// `GET /v1/directory/search` (ADR-0059 section 5).
+    case directorySearch = "directory-search"
 
     /// Tokens asked for per issuance (ADR-0054 S5): a lookup is the common
     /// action; the others are rare, so a small batch leaves little unspent
@@ -38,6 +42,8 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
         case .inviteConsume: return 2
         case .dsKnock: return 2
         case .discoveryRegister: return 1
+        case .channelSubscribe: return 2
+        case .directorySearch: return 1
         }
     }
 

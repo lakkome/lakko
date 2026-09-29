@@ -328,14 +328,19 @@ public fun NewChannelScreen(
                                     return@launch
                                 }
                             }
-                            client.createChannel(id)
                             // G-27 / ADR-0017: the channel content-key seed
                             // comes from a real MLS publisher group exporter,
                             // created in the shared publisher identity's
                             // provider and snapshotted with it so the seed
-                            // survives a relaunch.
+                            // survives a relaunch. The same identity derives
+                            // the owner key the channel is registered under
+                            // (ADR-0059 section 1).
                             val publisher = state.publisher
                                 ?: throw IllegalStateException("channel publisher identity not available")
+                            val owner = publisher.withIdentity(persist = false) { identity ->
+                                ChannelsClient.ownerSigner(identity, id)
+                            }
+                            owner.use { client.createChannel(id, it) }
                             val keys = publisher.withIdentity { identity ->
                                 ChannelsComposer.freshPublisherKeys(
                                     identity = identity,
@@ -1242,12 +1247,19 @@ private fun SubscriberChannelView(
     LaunchedEffect(channelId, attempt) {
         bootstrap = SubscribeBootstrap.Registering
         try {
-            val kp = state.subscriberKeysByChannel.value[channelId]
+            // A registration spends a `channel-subscribe` token (ADR-0059
+            // section 4): a channel this device already follows with a key
+            // it already holds is not registered again on every open; the
+            // catch-up re-registers when the current epoch's seed is missing.
+            val existingKeys = state.subscriberKeysByChannel.value[channelId]
+            val alreadyFollowing = existingKeys != null &&
+                state.channels.value.any { it.id == channelId }
+            val kp = existingKeys
                 ?: ChannelsComposer.freshSubscriberKeys().also {
                     state.setSubscriberKeys(channelId, it)
                 }
             val pubHex = ChannelsComposer.bytesToHex(kp.publicKey)
-            client.subscribe(channelId, pubHex)
+            if (!alreadyFollowing) client.subscribe(channelId, pubHex)
 
             if (state.subscribedSeeds(channelId).isNotEmpty()) {
                 bootstrap = SubscribeBootstrap.Active
@@ -1405,7 +1417,12 @@ private fun SubscriberFanoutEffect(channelId: String, state: ChannelsUiState, cl
     LaunchedEffect(channelId) {
         while (true) {
             try {
-                fanout.subscribers = client.listSubscribers(channelId)
+                val pub = state.publisher
+                    ?: throw IllegalStateException("channel publisher identity not available")
+                val owner = pub.withIdentity(persist = false) { identity ->
+                    ChannelsClient.ownerSigner(identity, channelId)
+                }
+                fanout.subscribers = owner.use { client.listSubscribers(channelId, it) }
             } catch (e: Throwable) {
                 Log.w(TAG, "list subscribers failed", e)
             }

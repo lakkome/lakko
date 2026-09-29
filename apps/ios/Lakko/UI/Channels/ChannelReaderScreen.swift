@@ -262,18 +262,31 @@ struct ChannelReaderScreen: View {
     private func runBootstrap() async {
         bootstrap = .registering
         bootstrapError = nil
+        // A registration spends a `channel-subscribe` token (ADR-0059
+        // section 4): a channel this device already follows with a key it
+        // already holds is not registered again on every open; the re-sync
+        // below re-registers when the current epoch's seed is missing.
+        let alreadyFollowing = state.channels.contains(where: { $0.id == channelId })
+            && state.subscriberKeysByChannel[channelId] != nil
         let kp = ensureKeypair()
         let pubHex = ChannelsComposer.bytesToHex(kp.publicKey)
-        do {
-            _ = try await client.subscribe(
-                channelIdHex: channelId,
-                subscriberPubkeyHex: pubHex
-            )
-        } catch {
-            NSLog("Channels: subscribe failed: %@", String(describing: error))
-            bootstrapError = "Could not subscribe. Try again."
-            bootstrap = .errorState
-            return
+        if !alreadyFollowing {
+            do {
+                _ = try await client.subscribe(
+                    channelIdHex: channelId,
+                    subscriberPubkeyHex: pubHex
+                )
+            } catch let token as AnonTokenUnavailable {
+                NSLog("Channels: subscribe token: %@", String(describing: token))
+                bootstrapError = token.errorDescription
+                bootstrap = .errorState
+                return
+            } catch {
+                NSLog("Channels: subscribe failed: %@", String(describing: error))
+                bootstrapError = "Could not subscribe. Try again."
+                bootstrap = .errorState
+                return
+            }
         }
 
         // Catch-up (ADR-0031): pull the whole retained envelope set and open

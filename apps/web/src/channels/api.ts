@@ -8,11 +8,11 @@
  * Endpoints — see services/channels/src/api.rs for the
  * server-side contract:
  *
- *   POST /v1/channels
+ *   POST /v1/channels                       (with the owner key, ADR-0059)
  *   POST /v1/channels/:id/posts             (publish)
  *   GET  /v1/channels/:id/posts?after=&limit=
- *   POST /v1/channels/:id/subscribers       (register)
- *   GET  /v1/channels/:id/subscribers       (list, for fan-out)
+ *   POST /v1/channels/:id/subscribers       (register; one channel-subscribe token)
+ *   GET  /v1/channels/:id/subscribers       (list, for fan-out; owner-signed)
  *   POST /v1/channels/:id/subscribers/:pk/envelope
  *   GET  /v1/channels/:id/subscribers/:pk/envelope
  *   POST /v1/channels/:id/rotate
@@ -26,6 +26,13 @@
  * `lakko-channels` Rust crate via WASM bindings (follow-
  * up sub-sprint G4-2-crypto).
  */
+
+import { anonTokens, anonymousFetchInit } from "../tokens/anon-token-pool";
+import type { Wasm } from "../wasm";
+import { loadWasm } from "../wasm";
+
+type Identity = InstanceType<Wasm["Identity"]>;
+type ChannelOwnerSigner = Wasm["ChannelOwnerSigner"]["prototype"];
 
 /** Default base URL — `LAKKO_CHANNELS_URL` env var
  *  resolved at build time (Vite `import.meta.env`), falls
@@ -187,16 +194,49 @@ async function fetchJson<T>(
   return (await resp.json()) as T;
 }
 
-/** Create a fresh channel. Idempotent on the server side
- *  if the channel id is already registered. */
+/** The channel owner signer of `channelIdHex` for the account identity
+ *  (ADR-0059 section 1). Only the account that created the channel derives
+ *  the key the server registered for it. */
+async function ownerSigner(
+  accountIdentity: Identity,
+  channelIdHex: string,
+): Promise<ChannelOwnerSigner> {
+  const wasm = await loadWasm();
+  return wasm.channelOwnerSigner(accountIdentity, hexToBytesStrict(channelIdHex));
+}
+
+function hexToBytesStrict(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
+    throw new Error("channel id is not hex");
+  }
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function bytesToHexLower(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+/** Create a fresh channel under the owner key the account identity derives
+ *  for it. Idempotent on the server side for the same key; another key for
+ *  an existing id is refused with 409 `channel-exists`. */
 export async function createChannel(
   channelIdHex: string,
+  accountIdentity: Identity,
   base: string = DEFAULT_BASE,
 ): Promise<{ readonly channelId: string }> {
+  const signer = await ownerSigner(accountIdentity, channelIdHex);
+  const ownerPubkeyHex = bytesToHexLower(signer.verifyingKey());
+  signer.free();
   const body = await fetchJson<{ channel_id: string }>(`${base}/v1/channels`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ channel_id: channelIdHex }),
+    body: JSON.stringify({ channel_id: channelIdHex, owner_pubkey_hex: ownerPubkeyHex }),
   });
   return { channelId: body.channel_id };
 }
@@ -277,32 +317,56 @@ export async function fetchEpoch(
   return fetchJson<ChannelEpoch>(`${base}/v1/channels/${channelIdHex}/epoch`);
 }
 
-/** Register a subscriber's X25519 pubkey. */
+/** Register a subscriber's X25519 pubkey. Spends one `channel-subscribe`
+ *  anonymous token (ADR-0059 section 4); the request carries no session. */
 export async function subscribe(
   channelIdHex: string,
   subscriberPubkeyHex: string,
   base: string = DEFAULT_BASE,
 ): Promise<{ readonly subscriberId: string }> {
-  const body = await fetchJson<{ subscriber_id: string }>(
-    `${base}/v1/channels/${channelIdHex}/subscribers`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ subscriber_pubkey_hex: subscriberPubkeyHex }),
-    },
-  );
+  const url = `${base}/v1/channels/${channelIdHex}/subscribers`;
+  const json = JSON.stringify({ subscriber_pubkey_hex: subscriberPubkeyHex });
+  let resp: Response;
+  try {
+    resp = await anonTokens.spend("channel-subscribe", (headerName, headerValue) =>
+      fetch(
+        url,
+        anonymousFetchInit({
+          method: "POST",
+          headers: { "content-type": "application/json", [headerName]: headerValue },
+          body: json,
+        }),
+      ),
+    );
+  } catch (err) {
+    // A token failure (quota, disabled, unavailable) is the caller's to
+    // word; a fetch rejection is the network.
+    if (err instanceof TypeError) throw unreachable(0);
+    throw err;
+  }
+  if (!resp.ok) throw await parseError(resp);
+  if (!isJsonResponse(resp)) throw unreachable(resp.status);
+  const body = (await resp.json()) as { subscriber_id: string };
   return { subscriberId: body.subscriber_id };
 }
 
-/** List subscribers — used by the publisher to fan out
- *  HPKE seed envelopes. */
+/** List subscribers — used by the publisher to fan out HPKE seed
+ *  envelopes. Owner-signed (ADR-0059 section 4): the proof is made with the
+ *  owner key `accountIdentity` derives for this channel, over the service
+ *  path (never the `/api/channels` prefix nginx strips). */
 export async function listSubscribers(
   channelIdHex: string,
+  accountIdentity: Identity,
   base: string = DEFAULT_BASE,
 ): Promise<ChannelSubscribers> {
-  return fetchJson<ChannelSubscribers>(
-    `${base}/v1/channels/${channelIdHex}/subscribers`,
-  );
+  const path = `/v1/channels/${channelIdHex}/subscribers`;
+  const wasm = await loadWasm();
+  const signer = await ownerSigner(accountIdentity, channelIdHex);
+  const proof = signer.sign("GET", path, "", new Uint8Array());
+  signer.free();
+  return fetchJson<ChannelSubscribers>(`${base}${path}`, {
+    headers: { [wasm.channelOwnerProofHeaderName()]: proof },
+  });
 }
 
 /** Fetch the latest seed envelope delivered to `pubkey`.

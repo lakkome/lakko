@@ -450,6 +450,7 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.DeviceLink,
                 is FfiException.InviteLinkDamaged,
                 is FfiException.FeedRule,
+                is FfiException.ChannelListing,
                 -> null
 
                 // Everything that is NOT a membership refusal. Enumerated

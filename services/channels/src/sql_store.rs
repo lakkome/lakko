@@ -32,7 +32,11 @@ use sqlx::MySqlPool;
 use sqlx::Row;
 
 use crate::config::DEFAULT_ENVELOPE_RETENTION_EPOCHS;
-use crate::storage::{ChannelId, ChannelStore, StorageError, StoredPost, SubscriberId};
+use crate::directory::{DirectoryEntry, GROWTH_WINDOW_MS};
+use crate::storage::{
+    ChannelId, ChannelStore, DirectoryQuery, ModerationAction, StorageError, StoredListing,
+    StoredPost, SubscriberId, OWNER_NONCE_LEN, OWNER_PUBKEY_LEN,
+};
 
 /// MariaDB-backed `ChannelStore`. Construct with a pool
 /// that has been migrated via `sqlx::migrate!` from the
@@ -122,21 +126,76 @@ fn db_err(e: sqlx::Error) -> StorageError {
     StorageError::Database(e.to_string())
 }
 
+/// Escape a search needle for `LIKE ... ESCAPE '!'` and wrap it in `%`.
+fn like_pattern(needle: &str) -> String {
+    let mut out = String::with_capacity(needle.len() + 2);
+    out.push('%');
+    for c in needle.chars() {
+        if matches!(c, '!' | '%' | '_') {
+            out.push('!');
+        }
+        out.push(c);
+    }
+    out.push('%');
+    out
+}
+
+/// One directory row as the candidate queries select it.
+type DirectoryRow = (Vec<u8>, Vec<u8>, Option<u64>, i64, i64);
+
+/// The select list + joins every directory read shares, as a literal so each
+/// query stays a static string (`concat!`). The two `COUNT(*)` subqueries run
+/// over `channel_subscribers`' primary key and its `(channel_id,
+/// registered_at)` index.
+macro_rules! directory_select {
+    () => {
+        "SELECT l.channel_id, l.listing, c.first_listed_at_ms, \
+       (SELECT COUNT(*) FROM channel_subscribers s \
+         WHERE s.channel_id = l.channel_id) AS subs, \
+       (SELECT COUNT(*) FROM channel_subscribers s \
+         WHERE s.channel_id = l.channel_id \
+           AND s.registered_at >= FROM_UNIXTIME(? / 1000.0)) AS recent \
+     FROM channel_listings l JOIN channels c ON c.id = l.channel_id "
+    };
+}
+
+fn directory_entry(row: DirectoryRow, now_ms: u64) -> Result<DirectoryEntry, StorageError> {
+    let (channel, listing, first_listed, subs, recent) = row;
+    Ok(DirectoryEntry {
+        channel: ChannelId::from_bytes(&channel)?,
+        listing,
+        subscribers: u64::try_from(subs).unwrap_or(0),
+        recent_registrations: u64::try_from(recent).unwrap_or(0),
+        first_listed_at_ms: first_listed.unwrap_or(now_ms),
+    })
+}
+
 #[async_trait]
 impl ChannelStore for SqlChannelStore {
-    async fn create(&self, channel: ChannelId) -> Result<(), StorageError> {
-        // INSERT IGNORE keeps the call idempotent — a second
-        // call with the same id is a no-op (matches the
-        // in-memory impl's contract).
+    async fn create(
+        &self,
+        channel: ChannelId,
+        owner_pubkey: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<(), StorageError> {
+        // INSERT IGNORE keeps the call idempotent; the owner key of the row
+        // that won is then compared, so a second create with another key
+        // changes nothing and is refused (ADR-0059 section 1).
         sqlx::query(
-            "INSERT IGNORE INTO channels (id, current_epoch, next_cursor) \
-             VALUES (?, 0, 1)",
+            "INSERT IGNORE INTO channels (id, current_epoch, next_cursor, owner_pubkey) \
+             VALUES (?, 0, 1, ?)",
         )
         .bind(channel.as_bytes().as_slice())
+        .bind(owner_pubkey.as_slice())
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
-        Ok(())
+        match self.owner_pubkey(channel).await? {
+            Some(stored) if stored == owner_pubkey => Ok(()),
+            Some(_) => Err(StorageError::OwnerMismatch),
+            None => Err(StorageError::Database(
+                "channel row missing after insert".to_string(),
+            )),
+        }
     }
 
     async fn exists(&self, channel: ChannelId) -> bool {
@@ -280,22 +339,25 @@ impl ChannelStore for SqlChannelStore {
         &self,
         channel: ChannelId,
         subscriber: SubscriberId,
-        _server_ts_ms: u64,
+        server_ts_ms: u64,
     ) -> Result<(), StorageError> {
         if !self.exists(channel).await {
             return Err(StorageError::UnknownChannel);
         }
         // INSERT ... ON DUPLICATE KEY UPDATE keeps the call
-        // idempotent. `registered_at` is bumped on re-subscribe
-        // to mirror the in-memory impl's behaviour.
+        // idempotent. A re-subscribe counts as activity; the first
+        // registration time is kept, since the directory's 7-day growth
+        // signal counts new subscribers, not re-registrations (ADR-0059).
         sqlx::query(
             "INSERT INTO channel_subscribers \
-                 (channel_id, subscriber_id) \
-             VALUES (?, ?) \
-             ON DUPLICATE KEY UPDATE registered_at = CURRENT_TIMESTAMP(3)",
+                 (channel_id, subscriber_id, registered_at, last_active_at) \
+             VALUES (?, ?, FROM_UNIXTIME(? / 1000.0), FROM_UNIXTIME(? / 1000.0)) \
+             ON DUPLICATE KEY UPDATE last_active_at = VALUES(last_active_at)",
         )
         .bind(channel.as_bytes().as_slice())
         .bind(subscriber.as_bytes().as_slice())
+        .bind(server_ts_ms)
+        .bind(server_ts_ms)
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -793,5 +855,235 @@ impl ChannelStore for SqlChannelStore {
             .map_err(db_err)?;
         tx.commit().await.map_err(db_err)?;
         Ok(target_epoch)
+    }
+
+    async fn owner_pubkey(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Option<[u8; OWNER_PUBKEY_LEN]>, StorageError> {
+        let row: Option<(Vec<u8>,)> =
+            sqlx::query_as("SELECT owner_pubkey FROM channels WHERE id = ?")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(db_err)?;
+        row.map(|(bytes,)| {
+            <[u8; OWNER_PUBKEY_LEN]>::try_from(bytes.as_slice())
+                .map_err(|_| StorageError::Database("owner_pubkey is not 32 bytes".to_string()))
+        })
+        .transpose()
+    }
+
+    async fn consume_owner_nonce(
+        &self,
+        nonce: [u8; OWNER_NONCE_LEN],
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        // One INSERT on the primary key: of two concurrent uses of one nonce
+        // exactly one succeeds.
+        let res = sqlx::query("INSERT INTO channel_owner_nonces (nonce, seen_at_ms) VALUES (?, ?)")
+            .bind(nonce.as_slice())
+            .bind(now_ms)
+            .execute(&self.pool)
+            .await;
+        match res {
+            Ok(_) => Ok(true),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Ok(false),
+            Err(e) => Err(db_err(e)),
+        }
+    }
+
+    async fn prune_owner_nonces_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
+        let res = sqlx::query("DELETE FROM channel_owner_nonces WHERE seen_at_ms < ?")
+            .bind(cutoff_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(res.rows_affected())
+    }
+
+    async fn put_listing(
+        &self,
+        channel: ChannelId,
+        listing: StoredListing,
+        now_ms: u64,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        // Lock the channel row: serialises concurrent listings of one channel
+        // so the newer-than check and the write are one step.
+        let exists: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM channels WHERE id = ? FOR UPDATE")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        if exists.is_none() {
+            return Err(StorageError::UnknownChannel);
+        }
+        let blocked: Option<(i8,)> =
+            sqlx::query_as("SELECT blocked FROM channel_moderation WHERE channel_id = ?")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        if blocked.is_some_and(|(b,)| b != 0) {
+            return Err(StorageError::ListingBlocked);
+        }
+        let stored: Option<(u64,)> =
+            sqlx::query_as("SELECT updated_at_ms FROM channel_listings WHERE channel_id = ?")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        if let Some((stored,)) = stored {
+            if !lakko_channels::listing::listing_is_newer(listing.updated_at_ms, stored) {
+                return Err(StorageError::StaleListing);
+            }
+        }
+        sqlx::query(
+            "INSERT INTO channel_listings \
+                 (channel_id, topic, language, handle, name, description, listing, updated_at_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON DUPLICATE KEY UPDATE \
+                 topic = VALUES(topic), language = VALUES(language), \
+                 handle = VALUES(handle), name = VALUES(name), \
+                 description = VALUES(description), listing = VALUES(listing), \
+                 updated_at_ms = VALUES(updated_at_ms)",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(listing.topic)
+        .bind(&listing.language)
+        .bind(&listing.handle)
+        .bind(&listing.name)
+        .bind(&listing.description)
+        .bind(&listing.bytes)
+        .bind(listing.updated_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        sqlx::query(
+            "UPDATE channels SET first_listed_at_ms = COALESCE(first_listed_at_ms, ?) \
+             WHERE id = ?",
+        )
+        .bind(now_ms)
+        .bind(channel.as_bytes().as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn withdraw_listing(&self, channel: ChannelId) -> Result<bool, StorageError> {
+        let res = sqlx::query("DELETE FROM channel_listings WHERE channel_id = ?")
+            .bind(channel.as_bytes().as_slice())
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    async fn listing(
+        &self,
+        channel: ChannelId,
+        now_ms: u64,
+    ) -> Result<Option<DirectoryEntry>, StorageError> {
+        let row: Option<DirectoryRow> =
+            sqlx::query_as(concat!(directory_select!(), "WHERE l.channel_id = ?"))
+                .bind(now_ms.saturating_sub(GROWTH_WINDOW_MS))
+                .bind(channel.as_bytes().as_slice())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(db_err)?;
+        row.map(|r| directory_entry(r, now_ms)).transpose()
+    }
+
+    async fn directory_candidates(
+        &self,
+        query: &DirectoryQuery,
+        now_ms: u64,
+    ) -> Result<Vec<DirectoryEntry>, StorageError> {
+        let since = now_ms.saturating_sub(GROWTH_WINDOW_MS);
+        let rows: Vec<DirectoryRow> = match query {
+            DirectoryQuery::Bucket { topic, language } => {
+                sqlx::query_as(concat!(
+                    directory_select!(),
+                    "WHERE l.topic = ? AND l.language = ?"
+                ))
+                .bind(since)
+                .bind(*topic)
+                .bind(language)
+                .fetch_all(&self.pool)
+                .await
+            },
+            DirectoryQuery::Search { needle } => {
+                // `LIKE` under the table's case-insensitive collation; the
+                // needle arrives lowercased and is escaped here.
+                let pattern = like_pattern(needle);
+                sqlx::query_as(concat!(
+                    directory_select!(),
+                    "WHERE l.name LIKE ? ESCAPE '!' \
+                       OR l.handle LIKE ? ESCAPE '!' \
+                       OR l.description LIKE ? ESCAPE '!'"
+                ))
+                .bind(since)
+                .bind(&pattern)
+                .bind(&pattern)
+                .bind(&pattern)
+                .fetch_all(&self.pool)
+                .await
+            },
+        }
+        .map_err(db_err)?;
+        rows.into_iter()
+            .map(|r| directory_entry(r, now_ms))
+            .collect()
+    }
+
+    async fn moderate(
+        &self,
+        channel: ChannelId,
+        action: ModerationAction,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let upsert = match action {
+            // A removal keeps whatever block is in force.
+            ModerationAction::Remove => {
+                "INSERT INTO channel_moderation (channel_id, blocked, reason, action_at_ms) \
+                 VALUES (?, 0, ?, ?) \
+                 ON DUPLICATE KEY UPDATE reason = VALUES(reason), \
+                     action_at_ms = VALUES(action_at_ms)"
+            },
+            ModerationAction::Block => {
+                "INSERT INTO channel_moderation (channel_id, blocked, reason, action_at_ms) \
+                 VALUES (?, 1, ?, ?) \
+                 ON DUPLICATE KEY UPDATE blocked = 1, reason = VALUES(reason), \
+                     action_at_ms = VALUES(action_at_ms)"
+            },
+            ModerationAction::Unblock => {
+                "INSERT INTO channel_moderation (channel_id, blocked, reason, action_at_ms) \
+                 VALUES (?, 0, ?, ?) \
+                 ON DUPLICATE KEY UPDATE blocked = 0, reason = VALUES(reason), \
+                     action_at_ms = VALUES(action_at_ms)"
+            },
+        };
+        sqlx::query(upsert)
+            .bind(channel.as_bytes().as_slice())
+            .bind(reason)
+            .bind(now_ms)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        if action != ModerationAction::Unblock {
+            sqlx::query("DELETE FROM channel_listings WHERE channel_id = ?")
+                .bind(channel.as_bytes().as_slice())
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
     }
 }

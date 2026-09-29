@@ -45,8 +45,10 @@ infra/
 | storage | 127.0.0.1:8083 | `journalctl -u lakko-svc-storage` |
 | discovery | 127.0.0.1:8084 | `journalctl -u lakko-svc-discovery` |
 | push-gw | 127.0.0.1:8085 (public API) + 127.0.0.1:8092 (internal, DS wake forward) | `journalctl -u lakko-svc-push-gw` |
-| channels | 127.0.0.1:8086 | `journalctl -u lakko-svc-channels` |
+| channels | 127.0.0.1:8086 (public API) + 127.0.0.1:8093 (internal, directory moderation) | `journalctl -u lakko-svc-channels` |
 | gif-proxy | 127.0.0.1:8091 | `journalctl -u lakko-svc-gif-proxy` |
+
+channels' second listener (`LAKKO_CHANNELS_INTERNAL_BIND`, default 127.0.0.1:8093) is **never** proxied: it serves only `POST /internal/v1/channels/{channel_id}/moderation` (`{"action": "remove"|"block"|"unblock", "reason": "<a-z0-9->"}`, ADR-0059 section 7), authenticated by `x-lakko-internal-secret` = `LAKKO_CHANNELS_INTERNAL_SECRET` (base64, at least 16 bytes). With the secret unset the listener does not start and listings cannot be removed by the operator. The service also needs `LAKKO_ANON_TOKEN_MASTER_SECRET` (the value auth and the other verifiers share) for subscribe and directory search; unset, both answer `503 anon-tokens-disabled`.
 
 system-nginx listens on 80/443 → reverse proxies to 127.0.0.1:808X. Services are not exposed externally.
 
