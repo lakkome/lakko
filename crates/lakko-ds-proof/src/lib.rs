@@ -99,8 +99,10 @@ use lakko_crypto::hash;
 
 pub use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey};
 
+pub mod committer;
 pub mod delegation;
 
+pub use committer::{check_committer_delegations, delegation_for, CommitterDelegationCheckError};
 pub use delegation::{
     sign_delegation, verify_delegated_proof, verify_delegation, Delegation, DelegationError,
     DELEGATION_HEADER_NAME, DELEGATION_LEN, MAX_DELEGATION_TTL_MS,

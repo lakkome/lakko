@@ -243,15 +243,42 @@ filters by the whole query, runs the reach check, and shows the result.
   a prefix of some name word). Name terms are OPRF inputs in their own domain,
   apart from usernames and channel handles.
 
-### 6. Links and requests
+### 6. Every write path carries its key
 
-- An invite capability (ADR-0005) and a `/g/` capability (ADR-0028) gain a
-  `link` reach seed, so a link holder can write the contact request, or so a
-  sweep can deliver a group Welcome. Revoking the link removes the key.
-- Every outgoing contact request carries a delegation made from a fresh
-  `reply` key, so the accept (the 1:1 Welcome and the ack) can come back.
-- A contact accept hands over the `contact` reach seed inside the new 1:1
-  conversation.
+Amended 2026-09-28 before the client sprints (the maintainer's call, "S3b"):
+the first draft named delegations here that no one could build, because the
+issuer of a delegation must know the delegate's key in advance. Each path
+now carries a grant, or a delegation to a key known in advance.
+
+- **Contact request (reply).** The sealed request carries the requester's
+  `reply` grant. The recipient writes the accept (the 1:1 Welcome) and the
+  ack with it. Registered with a 7-day expiry, removed once answered.
+- **One-to-one conversation (contact).** A 1:1 conversation's profile carries
+  the `contact` grant (and `member`); the receiver keeps it only from the
+  other participant of a 1:1 conversation.
+- **Contact and call links (link).** An `/i/` and a `/c/` capability carry a
+  `link` grant inside their signed, sealed part, scoped to that link, so
+  revoking the link removes exactly its key. A call joiner's cold-start
+  message to the owner carries the joiner's `reply` grant, for the Welcome.
+- **Group link (reply).** A `/g/` join request's self-signed attribution
+  carries the joiner's `reply` grant; the committer delivers the sweep's
+  Welcome with it (C-69).
+- **An add a contact proposed (delegation).** Under ADR-0045 the member who
+  proposes an Add may not be the one who commits it. The proposer posts a
+  committer-delegation envelope in the group: one delegation per committer
+  candidate (the owner and each admin), each to that candidate's account
+  key. A delegation lives at most 24 hours, so the proposer re-sends a fresh
+  one while its proposal is pending.
+
+**One inbound mailbox per person** (decided 2026-09-29 after S3b, the
+maintainer's call). Reach keys are registered on the **account** mailbox
+only, and every write a reach key or a delegation authorises goes there,
+Welcomes included: ADR-0050 section 2.7 is amended so that a Welcome is
+addressed to the added leaf's account mailbox rather than its device
+mailbox. A device mailbox stays claimed and closed with no reach keys, so
+nobody can write to it. The alternative, the account's reach keys mirrored on
+every device mailbox, would have made every delegation per device and added a
+key set that can drift between mailboxes.
 
 ### 7. The setting itself
 
@@ -338,6 +365,9 @@ The UI transition rules of UX section 11 live in `lakko_ui_rules`.
   accepts. The owner's client drops anything under a `member` key that is not
   a Welcome for that group, so it never shows - but it is stored, which is
   weaker than the requirement's "before it reaches them" for that one case.
+- **A `/g/` joiner's reply key is readable by every group member**, who can
+  write to the joiner's mailbox until the key expires (7 days) or the joiner
+  removes it on joining.
 - **Contacts of contacts** lose reach only at the next scheduled rotation when
   it is the intermediary who removed them.
 

@@ -80,6 +80,7 @@ use lakko_contacts::group_name::{
 use lakko_contacts::incoming_envelope::{
     dispatch_incoming_envelope as rust_dispatch_incoming_envelope, IncomingEnvelope,
 };
+use lakko_contacts::invite::LINK_ID_LEN;
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
     decode_and_verify as rust_invite_decode, open_link as rust_invite_open_link,
@@ -116,6 +117,7 @@ use lakko_contacts::push_routing::{
     derive_push_gid as rust_derive_push_gid,
     push_routing_secret_is_newer as rust_push_routing_secret_is_newer, PUSH_ROUTING_SECRET_LEN,
 };
+use lakko_contacts::reach::ReachGrant as RustReachGrant;
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
     ContactError, ContactRequest as RustContactRequest, Direction as RustDirection,
@@ -183,6 +185,32 @@ pub fn invite_link_secret_len() -> u32 {
 #[must_use]
 pub fn invite_link_secret_url_len() -> u32 {
     u32::try_from(INVITE_LINK_SECRET_B64URL_LEN).unwrap_or(u32::MAX)
+}
+
+/// A fresh random 16-byte link id (ADR-0058 §6): the scope of an `/i/` or
+/// `/c/` link's `link` reach grant. Mint one per link, before deriving the
+/// grant.
+#[uniffi::export]
+#[must_use]
+pub fn generate_link_id() -> Vec<u8> {
+    lakko_contacts::invite::generate_link_id().to_vec()
+}
+
+/// Width in bytes of a link id: 16.
+#[uniffi::export]
+#[must_use]
+pub fn link_id_len() -> u32 {
+    u32::try_from(LINK_ID_LEN).unwrap_or(u32::MAX)
+}
+
+/// Helper: a link id of exactly [`LINK_ID_LEN`] bytes.
+fn link_id16(bytes: &[u8]) -> Result<[u8; LINK_ID_LEN], FfiError> {
+    <[u8; LINK_ID_LEN]>::try_from(bytes).map_err(|_| {
+        FfiError::Contacts(format!(
+            "linkId must be {LINK_ID_LEN} bytes, got {}",
+            bytes.len()
+        ))
+    })
 }
 
 impl From<lakko_crypto::error::Error> for FfiError {
@@ -365,6 +393,16 @@ impl PerRelationship {
 /// prepared exactly as [`compose_profile_envelope`] prepares it (display
 /// name trimmed, blank = no name; username normalised and checked).
 ///
+/// `reply_grant` (ADR-0058 §6) is the sender's `reply` reach grant, sealed
+/// beside the profile so the recipient can write the accept and the ack back
+/// to the sender's closed mailbox. Derive it as
+/// `deriveReachGrant(accountSeed, Reply, replyId, 0)` over a fresh random
+/// 16-byte `replyId`, register its public key with a 7-day expiry BEFORE
+/// sending, and remove it once the request is answered. `None` only when the
+/// sender's mailbox is open to everyone. A cold-start call join (a
+/// `wrapCallKeyPackage` / `wrapCallWelcome` intro) carries it too, for the
+/// Welcome back.
+///
 /// `intro_message` is the optional plaintext payload (sealed in
 /// an HPKE-equivalent envelope to `recipient_x25519_pub`).
 ///
@@ -375,9 +413,12 @@ impl PerRelationship {
 ///   failure inside the sealed envelope.
 /// * A `Username*` / `DisplayName*` variant when `profile` violates a
 ///   bound — nothing is composed, so no recipient ever drops it.
+/// * [`FfiError::Reach`] `seedLength` for a reply grant whose seed is not
+///   32 bytes; [`FfiError::Contacts`] for a grant of any class but `Reply`.
 /// * [`FfiError::Crypto`] when `recipient_x25519_pub` is not a
 ///   valid X25519 public key (canonical encoding).
 #[uniffi::export]
+#[allow(clippy::too_many_arguments)]
 pub fn compose_contact_request(
     sender_signing_seed: Vec<u8>,
     sender_account_id: Vec<u8>,
@@ -386,9 +427,11 @@ pub fn compose_contact_request(
     valid_after_ms: u64,
     privacy_pass_token: Vec<u8>,
     profile: Option<FfiProfile>,
+    reply_grant: Option<crate::scoped_discovery::FfiReachGrant>,
     intro_message: Vec<u8>,
 ) -> Result<Vec<u8>, FfiError> {
     let profile = profile.map(prepare_profile).transpose()?;
+    let reply_grant = reply_grant.map(RustReachGrant::try_from).transpose()?;
     if sender_signing_seed.len() != 32 {
         return Err(FfiError::Contacts(
             "senderSigningSeed must be 32 bytes".to_string(),
@@ -425,6 +468,7 @@ pub fn compose_contact_request(
         valid_after_ms,
         &privacy_pass_token,
         profile.as_ref(),
+        reply_grant.as_ref(),
         &intro_message,
     )?;
     Ok(wire)
@@ -527,10 +571,11 @@ impl ContactRequest {
         let mut sk = [0u8; 32];
         sk.copy_from_slice(&recipient_x25519_priv);
         let priv_key = X25519SecretKey::from_bytes(sk);
-        let (profile, intro_message) = rust_open(&self.inner, &priv_key)?;
+        let opened = rust_open(&self.inner, &priv_key)?;
         Ok(OpenedContactRequest {
-            profile: profile.map(Into::into),
-            intro_message,
+            profile: opened.profile.map(Into::into),
+            reply_grant: opened.reply_grant.map(Into::into),
+            intro_message: opened.intro,
         })
     }
 }
@@ -542,6 +587,12 @@ pub struct OpenedContactRequest {
     /// carried one that failed its bounds. A claim bound to the request's
     /// `from_pubkey` — see [`ContactRequest::open_envelope`].
     pub profile: Option<FfiProfile>,
+    /// The requester's `reply` reach grant (ADR-0058 §6), or `None` when it
+    /// sent none. SECRET — store encrypted, never log. Sign the accept (the
+    /// one-to-one Welcome, or a call Welcome) and the ack back to the
+    /// requester's mailbox with `DsProofSigner.forReach(replyGrant.seed)`.
+    /// Always class `Reply`; a grant of any other class fails the open.
+    pub reply_grant: Option<crate::scoped_discovery::FfiReachGrant>,
     /// The intro message, possibly empty. May itself be a call envelope —
     /// classify it with [`dispatch_incoming_envelope`] as before.
     pub intro_message: Vec<u8>,
@@ -575,11 +626,14 @@ pub struct FfiProfile {
     /// only after `verify_username_binding` accepts this certificate for the
     /// OPRF of the claimed username and the sender's account id.
     pub username_certificate: Option<Vec<u8>>,
-    /// Reach grants handed to the group's members (ADR-0058 §3): at most
-    /// two, one per class, of class `Group`, `Member` or `Channel`. SECRET —
-    /// see [`crate::scoped_discovery::FfiReachGrant`]. Send the `Group` /
-    /// `Channel` grant only where the setting allows the scope; the `Member`
-    /// grant rides in every group.
+    /// Reach grants handed to the receivers (ADR-0058 §3, §6): at most two,
+    /// one per class, of class `Contact`, `Group`, `Member` or `Channel`.
+    /// SECRET — see [`crate::scoped_discovery::FfiReachGrant`]. A group's
+    /// profile carries `Group` (only where the setting allows that group) +
+    /// `Member` (always); a one-to-one conversation's profile carries
+    /// `Contact` + `Member`; a channel card carries `Channel`. On receipt,
+    /// keep a `Contact` grant ONLY from the other participant of a
+    /// one-to-one conversation and drop it anywhere else.
     pub grants: Vec<crate::scoped_discovery::FfiReachGrant>,
 }
 
@@ -903,14 +957,23 @@ pub fn group_name_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u6
 /// `label` is an optional human-visible UTF-8 string capped at
 /// [`MAX_LABEL_LEN`] bytes — empty string is fine.
 ///
+/// `link_id` (16 random bytes, [`generate_link_id`]) and `link_grant`
+/// (ADR-0058 §6) scope the link's reach key: derive the grant as
+/// `deriveReachGrant(accountSeed, Link, linkId, version)`, register its
+/// public key with the Delivery Service BEFORE sharing the link, and remove
+/// it when the link is revoked or expires. The grant travels inside the
+/// signed, sealed capability, so only a link holder reads it.
+///
 /// # Errors
 ///
 /// * [`FfiError::Contacts`] on wrong-length seed / account-id /
-///   x25519 pubkey, or on a label exceeding `MAX_LABEL_LEN`
-///   bytes.
+///   x25519 pubkey / link id, on a label exceeding `MAX_LABEL_LEN`
+///   bytes, or on a grant of any class but `Link`.
+/// * [`FfiError::Reach`] `seedLength` for a grant seed that is not 32 bytes.
 /// * [`FfiError::Crypto`] when `owner_x25519_pubkey` is not a
 ///   valid X25519 public key (canonical encoding).
 #[uniffi::export]
+#[allow(clippy::too_many_arguments)]
 pub fn compose_invite_capability(
     owner_signing_seed: Vec<u8>,
     owner_account_id: Vec<u8>,
@@ -919,7 +982,11 @@ pub fn compose_invite_capability(
     max_uses: u32,
     bootstrap_referral: bool,
     label: String,
+    link_id: Vec<u8>,
+    link_grant: crate::scoped_discovery::FfiReachGrant,
 ) -> Result<InviteLinkMint, FfiError> {
+    let link_id = link_id16(&link_id)?;
+    let link_grant = RustReachGrant::try_from(link_grant)?;
     if owner_signing_seed.len() != 32 {
         return Err(FfiError::Contacts(
             "ownerSigningSeed must be 32 bytes".to_string(),
@@ -961,6 +1028,8 @@ pub fn compose_invite_capability(
         max_uses,
         bootstrap_referral,
         &label,
+        &link_id,
+        &link_grant,
     )?;
     seal_mint(
         &signing,
@@ -1079,6 +1148,18 @@ impl InviteCapability {
     /// lookup.
     pub fn label(&self) -> String {
         self.inner.label.clone()
+    }
+
+    /// The link's 16-byte reach scope id (ADR-0058 §6).
+    pub fn link_id(&self) -> Vec<u8> {
+        self.inner.link_id.to_vec()
+    }
+
+    /// The link's `link` reach grant (ADR-0058 §6). SECRET — hold it only
+    /// until the contact request is sent: the joiner writes the request to
+    /// the inviter's mailbox with `DsProofSigner.forReach(linkGrant.seed)`.
+    pub fn link_grant(&self) -> crate::scoped_discovery::FfiReachGrant {
+        self.inner.link_grant.clone().into()
     }
 
     /// `true` iff the capability has not expired at `now_ms`.
@@ -1504,13 +1585,18 @@ impl FfiCallInviteMedia {
 /// across all joiners.
 /// `one_time_key_package` is the opaque wire bytes minted
 /// via `Identity::create_key_package`.
+/// `link_id` + `link_grant` scope the link's reach key exactly as
+/// [`compose_invite_capability`] does (ADR-0058 §6): register the grant's
+/// public key before sharing, remove it on revoke or expiry.
 ///
 /// # Errors
 ///
 /// * [`FfiError::Contacts`] on wrong-length seed /
-///   account-id / call-id, empty or oversized KP,
-///   oversized label.
+///   account-id / call-id / link id, empty or oversized KP,
+///   oversized label, a grant of any class but `Link`.
+/// * [`FfiError::Reach`] `seedLength` for a grant seed that is not 32 bytes.
 #[uniffi::export]
+#[allow(clippy::too_many_arguments)]
 pub fn compose_call_invite_capability(
     owner_signing_seed: Vec<u8>,
     owner_account_id: Vec<u8>,
@@ -1520,7 +1606,11 @@ pub fn compose_call_invite_capability(
     media: FfiCallInviteMedia,
     one_time_key_package: Vec<u8>,
     label: String,
+    link_id: Vec<u8>,
+    link_grant: crate::scoped_discovery::FfiReachGrant,
 ) -> Result<InviteLinkMint, FfiError> {
+    let link_id = link_id16(&link_id)?;
+    let link_grant = RustReachGrant::try_from(link_grant)?;
     if owner_signing_seed.len() != 32 {
         return Err(FfiError::Contacts(
             "ownerSigningSeed must be 32 bytes".to_string(),
@@ -1567,6 +1657,8 @@ pub fn compose_call_invite_capability(
         media.into_inner(),
         &one_time_key_package,
         &label,
+        &link_id,
+        &link_grant,
     )?;
     seal_mint(
         &signing,
@@ -1658,6 +1750,19 @@ impl CallInviteCapability {
     /// inviter didn't set one.
     pub fn label(&self) -> String {
         self.inner.label.clone()
+    }
+
+    /// The link's 16-byte reach scope id (ADR-0058 §6).
+    pub fn link_id(&self) -> Vec<u8> {
+        self.inner.link_id.to_vec()
+    }
+
+    /// The link's `link` reach grant (ADR-0058 §6). SECRET — a cold-start
+    /// joiner writes its `ContactRequest` (carrying the KeyPackage forward
+    /// and its own `reply` grant) to the owner's mailbox with
+    /// `DsProofSigner.forReach(linkGrant.seed)`.
+    pub fn link_grant(&self) -> crate::scoped_discovery::FfiReachGrant {
+        self.inner.link_grant.clone().into()
     }
 
     /// `true` iff the capability has not expired at `now_ms`.
@@ -1917,6 +2022,15 @@ pub enum FfiIncomingEnvelopeKind {
     /// ADR-0057 client surface (addressee check, open) is not on this FFI
     /// yet, so a caller only drops it and never renders it.
     RegistrarSeed,
+    /// A proposer's committer delegations (ADR-0058 §6). The structurally
+    /// decoded envelope rides the `committer_delegation` field; `payload` is
+    /// empty. Never render it. Keep the newest per `(MLS sender resolved at
+    /// receipt, added_account_key)`; when this device commits a sweep that
+    /// added that person, get its delegation with
+    /// [`crate::scoped_discovery::committer_delegation_for`] and deliver the
+    /// Welcome under it. Appended last so every earlier variant keeps its
+    /// ordinal.
+    CommitterDelegation,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1969,6 +2083,9 @@ pub struct FfiIncomingEnvelope {
     /// Set only for `ReachState` (ADR-0058): the decoded reach state. `None`
     /// for every other kind.
     pub reach_state: Option<crate::scoped_discovery::FfiReachState>,
+    /// Set only for `CommitterDelegation` (ADR-0058 §6): the envelope,
+    /// structurally checked. `None` for every other kind.
+    pub committer_delegation: Option<crate::scoped_discovery::FfiCommitterDelegationEnvelope>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -2042,6 +2159,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             payload: plaintext.clone(),
             ..FfiIncomingEnvelope::of(K::RegistrarSeed)
         },
+        IncomingEnvelope::CommitterDelegation(envelope) => FfiIncomingEnvelope {
+            committer_delegation: Some(envelope.into()),
+            ..FfiIncomingEnvelope::of(K::CommitterDelegation)
+        },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
             ..FfiIncomingEnvelope::of(K::IntroMessage)
@@ -2065,6 +2186,7 @@ impl FfiIncomingEnvelope {
             introductions: None,
             visibility: None,
             reach_state: None,
+            committer_delegation: None,
         }
     }
 }
@@ -2897,6 +3019,12 @@ pub struct GroupJoinAttribution {
     pub issuer_fingerprint: String,
     /// UNIX milliseconds when the link stops being valid. `0` = never expires.
     pub expiry_ms: u64,
+    /// The joiner's `reply` reach grant (ADR-0058 §6), inside the signed
+    /// part. SECRET and readable by every member: the acting committer that
+    /// sweeps the joiner's approved `Add` delivers the Welcome to the
+    /// joiner's mailbox with `DsProofSigner.forReach(replyGrant.seed)`.
+    /// Always class `Reply`.
+    pub reply_grant: crate::scoped_discovery::FfiReachGrant,
 }
 
 /// Joiner-side: compose + self-sign the attribution envelope binding the
@@ -2906,18 +3034,28 @@ pub struct GroupJoinAttribution {
 /// is signed with it, so the admin can verify the attribution is authentic. The
 /// joiner posts this to the group journal alongside its external-join proposal.
 ///
+/// `reply_grant` (ADR-0058 §6, C-69) is the joiner's `reply` reach grant:
+/// derive it as `deriveReachGrant(accountSeed, Reply, replyId, 0)` over a
+/// fresh random 16-byte `replyId`, register its public key with a 7-day
+/// expiry BEFORE posting, and remove it once joined. Every member of the
+/// group can read it (the ADR's stated residual).
+///
 /// # Errors
 ///
-/// [`FfiError::Contacts`] when the seed is not 32 bytes or the capability is
-/// empty / exceeds its bound.
+/// [`FfiError::Contacts`] when the seed is not 32 bytes, the capability is
+/// empty / exceeds its bound, or the grant is not class `Reply`;
+/// [`FfiError::Reach`] `seedLength` for a grant seed that is not 32 bytes.
 #[uniffi::export]
 pub fn compose_group_join_attribution(
     joiner_signing_seed: Vec<u8>,
     capability_bytes: Vec<u8>,
+    reply_grant: crate::scoped_discovery::FfiReachGrant,
 ) -> Result<Vec<u8>, FfiError> {
+    let reply_grant = RustReachGrant::try_from(reply_grant)?;
     Ok(rust_group_join_attribution_compose(
         &joiner_signing_seed,
         &capability_bytes,
+        &reply_grant,
     )?)
 }
 
@@ -2938,13 +3076,31 @@ pub fn parse_group_join_attribution(bytes: Vec<u8>) -> Result<GroupJoinAttributi
         issuer_signature_pubkey: inner.capability.issuer_signature_pubkey.to_bytes().to_vec(),
         issuer_fingerprint: inner.capability.issuer_fingerprint(),
         expiry_ms: inner.capability.expiry_ms,
+        reply_grant: inner.reply_grant.into(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scoped_discovery::{derive_reach_grant, FfiReachClass, FfiReachGrant};
     use lakko_crypto::agreement::SecretKey as InnerX25519SecretKey;
+
+    const TEST_LINK_ID: [u8; 16] = [0x1C; 16];
+
+    fn test_link_grant() -> FfiReachGrant {
+        derive_reach_grant(
+            vec![0x6E; 32],
+            FfiReachClass::Link,
+            TEST_LINK_ID.to_vec(),
+            0,
+        )
+        .unwrap()
+    }
+
+    fn test_reply_grant() -> FfiReachGrant {
+        derive_reach_grant(vec![0x6F; 32], FfiReachClass::Reply, vec![0x9A; 16], 0).unwrap()
+    }
 
     // ===================================================================
     // Pseudonym surface
@@ -3027,6 +3183,7 @@ mod tests {
             1_700_000_000_000,
             vec![], // privacy_pass_token — empty for unit test
             None,   // profile (ADR-0048)
+            Some(test_reply_grant()),
             intro.clone(),
         )
         .expect("compose");
@@ -3047,7 +3204,75 @@ mod tests {
             .open_envelope(bob_priv.to_bytes().to_vec())
             .expect("open");
         assert_eq!(opened.profile, None);
+        assert_eq!(opened.reply_grant, Some(test_reply_grant()));
         assert_eq!(opened.intro_message, intro);
+    }
+
+    /// ADR-0058 §6: a `/c/` capability carries its link id and `link` grant
+    /// inside the signed, sealed part.
+    #[test]
+    fn call_invite_capability_carries_the_link_grant() {
+        let mint = compose_call_invite_capability(
+            vec![0xAA; 32],
+            vec![0xA1; ACCOUNT_ID_LEN],
+            vec![0x10; CALL_ID_LEN],
+            0,
+            0,
+            FfiCallInviteMedia {
+                audio: true,
+                video: false,
+            },
+            vec![0xCD; 300],
+            String::new(),
+            TEST_LINK_ID.to_vec(),
+            test_link_grant(),
+        )
+        .unwrap();
+        let cap = CallInviteCapability::open_link(mint.sealed, mint.link_secret).unwrap();
+        assert_eq!(cap.link_id(), TEST_LINK_ID.to_vec());
+        assert_eq!(cap.link_grant(), test_link_grant());
+    }
+
+    /// ADR-0058 §6: a reply grant of any other class never leaves the
+    /// sender.
+    #[test]
+    fn contact_request_refuses_a_non_reply_grant() {
+        let err = compose_contact_request(
+            vec![0xAA; 32],
+            vec![0xA1; ACCOUNT_ID_LEN],
+            InnerX25519SecretKey::from_bytes([0xBB; 32])
+                .public_key()
+                .to_bytes()
+                .to_vec(),
+            vec![0x55; PSEUDONYM_LEN],
+            0,
+            vec![],
+            None,
+            Some(test_link_grant()),
+            b"hi".to_vec(),
+        )
+        .expect_err("a link grant is not a reply grant");
+        assert!(matches!(err, FfiError::Contacts(_)), "{err:?}");
+    }
+
+    /// ADR-0058 §6: the joiner's reply grant rides the self-signed
+    /// attribution and comes out whole; any other class is refused.
+    #[test]
+    fn group_join_attribution_carries_the_reply_grant() {
+        let seed = vec![0x33u8; 32];
+        let cap = compose_group_invite_capability(seed.clone(), vec![7u8; 32], 0).unwrap();
+        let wire = GroupInviteCapability::open_link(cap.sealed, cap.link_secret)
+            .unwrap()
+            .wire();
+        let env = compose_group_join_attribution(vec![0x44; 32], wire.clone(), test_reply_grant())
+            .unwrap();
+        let parsed = parse_group_join_attribution(env).unwrap();
+        assert_eq!(parsed.reply_grant, test_reply_grant());
+        assert_eq!(parsed.group_id, vec![7u8; 32]);
+        assert!(matches!(
+            compose_group_join_attribution(vec![0x44; 32], wire, test_link_grant()),
+            Err(FfiError::Contacts(_))
+        ));
     }
 
     #[test]
@@ -3062,6 +3287,7 @@ mod tests {
             0,
             vec![], // privacy_pass_token
             None,   // profile (ADR-0048)
+            None,   // reply grant (ADR-0058 §6)
             vec![],
         )
         .expect_err("expected wrong-length rejection");
@@ -3081,6 +3307,7 @@ mod tests {
             0,
             vec![], // privacy_pass_token
             None,   // profile (ADR-0048)
+            None,   // reply grant (ADR-0058 §6)
             vec![],
         )
         .expect_err("expected wrong-length rejection");
@@ -3116,6 +3343,8 @@ mod tests {
             5,                 // max_uses
             true,              // bootstrap_referral
             "lunch group".to_string(),
+            TEST_LINK_ID.to_vec(),
+            test_link_grant(),
         )
         .expect("compose");
         assert_eq!(mint.link_secret.len(), 12);
@@ -3146,6 +3375,25 @@ mod tests {
         assert_eq!(cap.owner_account_id(), alice_account_id.to_vec());
         assert_eq!(cap.owner_x25519_pubkey(), alice_x25519.to_bytes().to_vec());
         assert_eq!(cap.expiry_ms(), 1_900_000_000_000);
+        assert_eq!(cap.link_id(), TEST_LINK_ID.to_vec());
+        assert_eq!(cap.link_grant(), test_link_grant());
+        assert_eq!(generate_link_id().len(), 16);
+        assert_eq!(link_id_len(), 16);
+        // A grant of another class is refused at the mint.
+        assert!(matches!(
+            compose_invite_capability(
+                alice_signing.to_seed().to_vec(),
+                alice_account_id.to_vec(),
+                alice_x25519.to_bytes().to_vec(),
+                0,
+                0,
+                false,
+                String::new(),
+                TEST_LINK_ID.to_vec(),
+                test_reply_grant(),
+            ),
+            Err(FfiError::Contacts(_))
+        ));
         assert_eq!(cap.max_uses(), 5);
         assert!(cap.bootstrap_referral());
         assert_eq!(cap.label(), "lunch group");
@@ -3169,6 +3417,8 @@ mod tests {
             0,
             false,
             too_long,
+            TEST_LINK_ID.to_vec(),
+            test_link_grant(),
         )
         .expect_err("expected oversize-label rejection");
         match err {
@@ -3314,6 +3564,8 @@ mod tests {
             0,
             false,
             String::new(),
+            TEST_LINK_ID.to_vec(),
+            test_link_grant(),
         )
         .expect("compose");
         // The tag is over the PLAINTEXT capability the link opens to.
@@ -3359,6 +3611,7 @@ mod tests {
             0,
             vec![], // privacy_pass_token
             None,   // profile (ADR-0048)
+            None,   // reply grant (ADR-0058 §6)
             b"secret".to_vec(),
         )
         .expect("compose");
@@ -3394,6 +3647,7 @@ mod tests {
             0,
             token.clone(),
             None, // profile (ADR-0048)
+            None, // reply grant (ADR-0058 §6)
             b"".to_vec(),
         )
         .expect("compose");
@@ -4160,7 +4414,7 @@ mod tests {
         ));
         let mut bad = canonical_profile();
         bad.grants =
-            vec![derive_reach_grant(seed.clone(), FfiReachClass::Contact, vec![], 1).unwrap()];
+            vec![derive_reach_grant(seed.clone(), FfiReachClass::Link, vec![1; 16], 1).unwrap()];
         assert!(matches!(
             compose_profile_envelope(bad),
             Err(FfiError::Contacts(_))
@@ -4391,6 +4645,7 @@ mod tests {
             0,
             vec![],
             Some(typed_profile()),
+            None, // reply grant (ADR-0058 §6)
             b"hi bob".to_vec(),
         )
         .expect("compose");
@@ -4411,6 +4666,7 @@ mod tests {
             0,
             vec![],
             Some(bad),
+            None, // reply grant (ADR-0058 §6)
             b"hi bob".to_vec(),
         )
         .expect_err("an out-of-bounds profile must refuse the compose");

@@ -25,6 +25,12 @@
 //!   live in `ui_rules.rs`.
 //! - **Username certificate** (`lakko_attest::username_cert`):
 //!   [`verify_username_binding`], verify only — signing is discovery's.
+//! - **Committer delegations** (§6, `lakko_contacts::committer_delegation` +
+//!   `lakko_ds_proof::committer`): [`compose_committer_delegation_envelope`],
+//!   [`decode_committer_delegation_envelope`], [`check_committer_delegations`],
+//!   [`committer_delegation_for`], [`decode_delegation`],
+//!   [`delegation_header_value`]; the blobs are signed with
+//!   `sign_delegation_blob` (`ds_proof.rs`).
 //!
 //! Every order is strictly-greater (a re-send carries its original stamp and
 //! is not an update, the ADR-0044 lesson); persist a stamp and re-emit it
@@ -35,6 +41,12 @@ use core::fmt;
 use lakko_attest::username_cert::{
     verify_username_binding as rust_verify_username_binding, UsernameCertError,
     UsernameCertificate as RustUsernameCertificate, OPRF_HASH_LEN,
+};
+use lakko_contacts::committer_delegation::{
+    compose_committer_delegation as rust_compose_committer_delegation,
+    decode_committer_delegation as rust_decode_committer_delegation, CommitterDelegationEnvelope,
+    CommitterDelegationError, ADDED_ACCOUNT_KEY_LEN, COMMITTER_DELEGATION_BLOB_LEN,
+    MAX_COMMITTER_DELEGATIONS,
 };
 use lakko_contacts::introduction::{
     bundle_is_newer as rust_bundle_is_newer, compose_bundle as rust_compose_bundle,
@@ -65,6 +77,11 @@ use lakko_contacts::visibility::{
 };
 use lakko_crypto::secret::SecretBytes;
 use lakko_crypto::signing::VerifyingKey;
+use lakko_ds_proof::{
+    check_committer_delegations as rust_check_committer_delegations,
+    delegation_for as rust_delegation_for, CommitterDelegationCheckError, Delegation,
+    DelegationError,
+};
 
 use crate::FfiError;
 
@@ -1007,6 +1024,252 @@ pub fn username_certificate_len() -> u32 {
 }
 
 // ============================================================================
+// Committer delegations — ADR-0058 §6
+// ============================================================================
+
+impl From<CommitterDelegationError> for FfiError {
+    fn from(e: CommitterDelegationError) -> Self {
+        Self::CommitterDelegation(format!("{}: {e}", e.code()))
+    }
+}
+
+impl From<CommitterDelegationCheckError> for FfiError {
+    fn from(e: CommitterDelegationCheckError) -> Self {
+        Self::CommitterDelegation(format!("{}: {e}", e.code()))
+    }
+}
+
+fn delegation_error(e: &DelegationError) -> FfiError {
+    let code = match e {
+        DelegationError::UnknownVersion => "delegationUnknownVersion",
+        _ => "delegationMalformed",
+    };
+    FfiError::CommitterDelegation(format!("{code}: {e}"))
+}
+
+/// A proposer's committer delegations (ADR-0058 §6). Mirror of
+/// [`lakko_contacts::committer_delegation::CommitterDelegationEnvelope`].
+///
+/// Under ADR-0045 the member who proposes an `Add` may not be the one who
+/// commits it, and the added person's mailbox is closed. So the proposer
+/// posts, in the group beside its proposal, one delegation per committer
+/// candidate (the owner and each admin), each signed with the proposer's
+/// reach key for the added person's mailbox ([`sign_delegation_blob`]) and
+/// naming that candidate's account signature key as delegate. A delegation
+/// lives at most 24 hours: **re-send a fresh envelope while the proposal is
+/// pending**, and whenever the candidate set changes.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiCommitterDelegationEnvelope {
+    /// The added person's 32-byte account signature key; every delegation
+    /// must name its mailbox.
+    pub added_account_key: Vec<u8>,
+    /// 1 to [`max_committer_delegations`] raw 185-byte delegation blobs.
+    pub delegations: Vec<Vec<u8>>,
+}
+
+impl From<CommitterDelegationEnvelope> for FfiCommitterDelegationEnvelope {
+    fn from(e: CommitterDelegationEnvelope) -> Self {
+        Self {
+            added_account_key: e.added_account_key.to_vec(),
+            delegations: e.delegations.iter().map(|d| d.to_vec()).collect(),
+        }
+    }
+}
+
+impl TryFrom<FfiCommitterDelegationEnvelope> for CommitterDelegationEnvelope {
+    type Error = FfiError;
+
+    fn try_from(e: FfiCommitterDelegationEnvelope) -> Result<Self, FfiError> {
+        let added_account_key = <[u8; ADDED_ACCOUNT_KEY_LEN]>::try_from(
+            e.added_account_key.as_slice(),
+        )
+        .map_err(|_| {
+            reach_arg(
+                "keyLength",
+                "added account key",
+                ADDED_ACCOUNT_KEY_LEN,
+                e.added_account_key.len(),
+            )
+        })?;
+        let delegations = e
+            .delegations
+            .iter()
+            .map(|d| {
+                <[u8; COMMITTER_DELEGATION_BLOB_LEN]>::try_from(d.as_slice()).map_err(|_| {
+                    FfiError::CommitterDelegation(format!(
+                        "delegationMalformed: a delegation must be \
+                         {COMMITTER_DELEGATION_BLOB_LEN} bytes, got {}",
+                        d.len()
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            added_account_key,
+            delegations,
+        })
+    }
+}
+
+/// One delegation, decoded (structure only; the Delivery Service checks the
+/// signature and the expiry when it is used).
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiDelegation {
+    /// The mailbox pseudonym the write may go to (32 bytes).
+    pub mailbox: Vec<u8>,
+    /// The key that signs the delegated request (32 bytes).
+    pub delegate_pk: Vec<u8>,
+    /// When the delegation stops being honoured, unix milliseconds.
+    pub expires_at_ms: u64,
+    /// The 16-byte nonce the DS consumes on use.
+    pub nonce: Vec<u8>,
+    /// The reach public key that signed the delegation (32 bytes).
+    pub issuer_pk: Vec<u8>,
+}
+
+impl From<&Delegation> for FfiDelegation {
+    fn from(d: &Delegation) -> Self {
+        Self {
+            mailbox: d.mailbox.to_vec(),
+            delegate_pk: d.delegate_pk.to_vec(),
+            expires_at_ms: d.expires_at_ms,
+            nonce: d.nonce.to_vec(),
+            issuer_pk: d.issuer_pk.to_vec(),
+        }
+    }
+}
+
+/// Compose a committer-delegation envelope: the plaintext of an MLS
+/// application message the proposer sends in the group beside its `Add`
+/// proposal (ADR-0058 §6). Structural checks only; build each blob with
+/// [`sign_delegation_blob`].
+///
+/// # Errors
+///
+/// [`FfiError::CommitterDelegation`] `badCount` (none, or more than
+/// [`max_committer_delegations`]) or `delegationMalformed` (a blob that is
+/// not 185 bytes); [`FfiError::Reach`] `keyLength` for an added account key
+/// that is not 32 bytes.
+#[uniffi::export]
+pub fn compose_committer_delegation_envelope(
+    envelope: FfiCommitterDelegationEnvelope,
+) -> Result<Vec<u8>, FfiError> {
+    let envelope = CommitterDelegationEnvelope::try_from(envelope)?;
+    Ok(rust_compose_committer_delegation(&envelope)?)
+}
+
+/// Strictly decode a committer-delegation envelope (structure only). The
+/// dispatcher already returns it as `CommitterDelegation`; this is for a
+/// caller that holds the plaintext alone.
+///
+/// # Errors
+///
+/// [`FfiError::CommitterDelegation`] `wrongDomain` / `unknownVersion` /
+/// `badCount` / `badLength`.
+#[uniffi::export]
+pub fn decode_committer_delegation_envelope(
+    plaintext: Vec<u8>,
+) -> Result<FfiCommitterDelegationEnvelope, FfiError> {
+    Ok(rust_decode_committer_delegation(&plaintext)?.into())
+}
+
+/// Parse and check every delegation of an envelope (ADR-0058 §6): each blob
+/// parses, names the added person's mailbox, and no two name the same
+/// delegate. Any failure refuses the whole envelope — keep the previous one.
+///
+/// # Errors
+///
+/// [`FfiError::CommitterDelegation`] `badAddedAccountKey` / `malformed` /
+/// `wrongMailbox` / `duplicateDelegate`, plus the argument errors of
+/// [`compose_committer_delegation_envelope`].
+#[uniffi::export]
+pub fn check_committer_delegations(
+    envelope: FfiCommitterDelegationEnvelope,
+) -> Result<Vec<FfiDelegation>, FfiError> {
+    let envelope = CommitterDelegationEnvelope::try_from(envelope)?;
+    Ok(rust_check_committer_delegations(&envelope)?
+        .iter()
+        .map(FfiDelegation::from)
+        .collect())
+}
+
+/// The committer's side of ADR-0058 §6: after its sweep added the envelope's
+/// person, the delegation naming `own_account_key` (this device's account
+/// signature key), as the `x-lakko-ds-delegation` header value to send with
+/// the Welcome's mailbox write — signed with
+/// `DsProofSigner.forReach(accountIdentity ed25519 seed)`, the key the
+/// delegation names. `None` when no delegation names this account (another
+/// candidate commits, or the proposer has not re-sent since this device
+/// became a candidate). The envelope is checked first
+/// ([`check_committer_delegations`]).
+///
+/// Use a delegation only from the newest envelope kept per
+/// `(MLS sender resolved at receipt, added_account_key)`, and only for the
+/// Welcome of a sweep that added that person.
+///
+/// # Errors
+///
+/// Every error of [`check_committer_delegations`]; [`FfiError::Reach`]
+/// `keyLength` for an own key that is not 32 bytes.
+#[uniffi::export]
+pub fn committer_delegation_for(
+    envelope: FfiCommitterDelegationEnvelope,
+    own_account_key: Vec<u8>,
+) -> Result<Option<String>, FfiError> {
+    let own =
+        <[u8; ADDED_ACCOUNT_KEY_LEN]>::try_from(own_account_key.as_slice()).map_err(|_| {
+            reach_arg(
+                "keyLength",
+                "own account key",
+                ADDED_ACCOUNT_KEY_LEN,
+                own_account_key.len(),
+            )
+        })?;
+    let envelope = CommitterDelegationEnvelope::try_from(envelope)?;
+    let parsed = rust_check_committer_delegations(&envelope)?;
+    Ok(rust_delegation_for(&parsed, &own).map(Delegation::to_header_value))
+}
+
+/// Decode one raw 185-byte delegation blob (structure only).
+///
+/// # Errors
+///
+/// [`FfiError::CommitterDelegation`] `delegationMalformed` /
+/// `delegationUnknownVersion`.
+#[uniffi::export]
+pub fn decode_delegation(blob: Vec<u8>) -> Result<FfiDelegation, FfiError> {
+    Delegation::decode(&blob)
+        .map(|d| FfiDelegation::from(&d))
+        .map_err(|e| delegation_error(&e))
+}
+
+/// The `x-lakko-ds-delegation` header value of a raw delegation blob.
+///
+/// # Errors
+///
+/// As [`decode_delegation`].
+#[uniffi::export]
+pub fn delegation_header_value(blob: Vec<u8>) -> Result<String, FfiError> {
+    Delegation::decode(&blob)
+        .map(|d| d.to_header_value())
+        .map_err(|e| delegation_error(&e))
+}
+
+/// Most delegations one envelope carries: 16.
+#[uniffi::export]
+#[must_use]
+pub fn max_committer_delegations() -> u32 {
+    u32::try_from(MAX_COMMITTER_DELEGATIONS).unwrap_or(u32::MAX)
+}
+
+/// Length of one delegation blob: 185.
+#[uniffi::export]
+#[must_use]
+pub fn committer_delegation_blob_len() -> u32 {
+    u32::try_from(COMMITTER_DELEGATION_BLOB_LEN).unwrap_or(u32::MAX)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1017,6 +1280,89 @@ mod tests {
     use lakko_crypto::signing::SigningKey;
 
     const ACCOUNT_SEED: [u8; 32] = [0x42; 32];
+
+    /// ADR-0058 §6 end to end through this surface: the proposer signs one
+    /// blob per candidate, the envelope rides the dispatcher, and each
+    /// candidate finds exactly its own delegation as a header the DS checks.
+    #[test]
+    fn a_committer_finds_its_own_delegation_through_the_dispatcher() {
+        let account = |b: u8| SigningKey::from_seed(&[b; 32]).verifying_key().to_bytes();
+        let added = account(9);
+        let mailbox = lakko_ds_proof::mailbox_pseudonym(&VerifyingKey::from_bytes(&added).unwrap());
+        let (owner, admin) = (account(1), account(2));
+        let expires = 1_000;
+        let blob = |delegate: [u8; 32], n: u8| {
+            crate::ds_proof::sign_delegation_blob(
+                vec![0x44; 32],
+                mailbox.to_vec(),
+                delegate.to_vec(),
+                expires,
+                vec![n; 16],
+            )
+            .unwrap()
+        };
+        let envelope = FfiCommitterDelegationEnvelope {
+            added_account_key: added.to_vec(),
+            delegations: vec![blob(owner, 1), blob(admin, 2)],
+        };
+        let wire = compose_committer_delegation_envelope(envelope.clone()).unwrap();
+        let dispatched = crate::contacts::dispatch_incoming_envelope(wire.clone()).unwrap();
+        assert_eq!(
+            dispatched.kind,
+            crate::contacts::FfiIncomingEnvelopeKind::CommitterDelegation
+        );
+        assert_eq!(dispatched.committer_delegation, Some(envelope.clone()));
+        assert!(dispatched.payload.is_empty());
+        assert_eq!(
+            decode_committer_delegation_envelope(wire).unwrap(),
+            envelope
+        );
+
+        let checked = check_committer_delegations(envelope.clone()).unwrap();
+        assert_eq!(checked.len(), 2);
+        assert_eq!(checked[1].delegate_pk, admin.to_vec());
+        let header = committer_delegation_for(envelope.clone(), admin.to_vec())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            header,
+            delegation_header_value(envelope.delegations[1].clone()).unwrap()
+        );
+        let parsed = Delegation::parse_header_value(&header).unwrap();
+        assert!(lakko_ds_proof::verify_delegation(&parsed, &mailbox, expires - 10).is_ok());
+        assert_eq!(
+            committer_delegation_for(envelope.clone(), account(3).to_vec()).unwrap(),
+            None
+        );
+        assert_eq!(
+            decode_delegation(envelope.delegations[0].clone())
+                .unwrap()
+                .delegate_pk,
+            owner
+        );
+
+        // A delegation for another mailbox refuses the whole envelope.
+        let mut bad = envelope;
+        bad.delegations[1] = crate::ds_proof::sign_delegation_blob(
+            vec![0x44; 32],
+            vec![0x11; 32],
+            admin.to_vec(),
+            expires,
+            vec![3; 16],
+        )
+        .unwrap();
+        let err = committer_delegation_for(bad, owner.to_vec()).unwrap_err();
+        assert!(matches!(err, FfiError::CommitterDelegation(_)));
+        assert_eq!(code_of(&err), "wrongMailbox");
+        let err = compose_committer_delegation_envelope(FfiCommitterDelegationEnvelope {
+            added_account_key: added.to_vec(),
+            delegations: vec![],
+        })
+        .unwrap_err();
+        assert_eq!(code_of(&err), "badCount");
+        assert_eq!(max_committer_delegations(), 16);
+        assert_eq!(committer_delegation_blob_len(), 185);
+    }
 
     fn code_of(e: &FfiError) -> String {
         e.to_string()

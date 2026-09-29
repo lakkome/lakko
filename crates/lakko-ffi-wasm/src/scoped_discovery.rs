@@ -16,7 +16,8 @@
 //!   (`introductionTags`, 32 bytes each);
 //! - a refusal throws a real `Error` whose message is the core's sentence
 //!   and which carries the frozen code as an own property: `reachError`,
-//!   `introductionError`, `visibilityError`, `usernameCertificateError`
+//!   `introductionError`, `visibilityError`, `usernameCertificateError`,
+//!   `committerDelegationError` (ADR-0058 §6)
 //!   (a display-name / username refusal inside an introduction payload
 //!   throws the profile's `profileError` shape).
 //!
@@ -30,6 +31,12 @@
 use lakko_attest::username_cert::{
     verify_username_binding as rust_verify_username_binding, UsernameCertError,
     UsernameCertificate as RustUsernameCertificate, OPRF_HASH_LEN,
+};
+use lakko_contacts::committer_delegation::{
+    compose_committer_delegation as rust_compose_committer_delegation,
+    decode_committer_delegation as rust_decode_committer_delegation,
+    CommitterDelegationEnvelope as RustCommitterDelegationEnvelope, CommitterDelegationError,
+    ADDED_ACCOUNT_KEY_LEN, COMMITTER_DELEGATION_BLOB_LEN, MAX_COMMITTER_DELEGATIONS,
 };
 use lakko_contacts::introduction::{
     bundle_is_newer as rust_bundle_is_newer, compose_bundle as rust_compose_bundle,
@@ -61,6 +68,11 @@ use lakko_contacts::visibility::{
 };
 use lakko_crypto::secret::SecretBytes;
 use lakko_crypto::signing::VerifyingKey;
+use lakko_ds_proof::{
+    check_committer_delegations as rust_check_committer_delegations,
+    delegation_for as rust_delegation_for, CommitterDelegationCheckError, Delegation,
+    DelegationError,
+};
 use wasm_bindgen::prelude::*;
 
 use crate::contacts::coded_error;
@@ -1272,6 +1284,323 @@ pub fn max_reach_state_entries() -> usize {
 }
 
 // ============================================================================
+// Committer delegations — ADR-0058 §6
+// ============================================================================
+
+impl From<CommitterDelegationError> for Refusal {
+    fn from(e: CommitterDelegationError) -> Self {
+        Self::new("committerDelegationError", e.code(), e.to_string())
+    }
+}
+
+impl From<CommitterDelegationCheckError> for Refusal {
+    fn from(e: CommitterDelegationCheckError) -> Self {
+        Self::new("committerDelegationError", e.code(), e.to_string())
+    }
+}
+
+fn delegation_refusal(e: &DelegationError) -> Refusal {
+    let code = match e {
+        DelegationError::UnknownVersion => "delegationUnknownVersion",
+        _ => "delegationMalformed",
+    };
+    Refusal::new("committerDelegationError", code, e.to_string())
+}
+
+/// A proposer's committer delegations (ADR-0058 §6). Mirror of
+/// `lakko_contacts::committer_delegation::CommitterDelegationEnvelope`.
+///
+/// Under ADR-0045 the member who proposes an `Add` may not be the one who
+/// commits it, and the added person's mailbox is closed. So the proposer
+/// posts, in the group beside its proposal, one delegation per committer
+/// candidate (the owner and each admin), each signed with the proposer's
+/// reach key for the added person's mailbox (`signDelegationBlob`) and naming
+/// that candidate's account signature key as delegate. A delegation lives at
+/// most 24 hours: **re-send a fresh envelope while the proposal is pending**,
+/// and whenever the candidate set changes.
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitterDelegationEnvelope {
+    inner: RustCommitterDelegationEnvelope,
+}
+
+impl CommitterDelegationEnvelope {
+    pub(crate) const fn from_rust(inner: RustCommitterDelegationEnvelope) -> Self {
+        Self { inner }
+    }
+
+    fn new_inner(added_account_key: &[u8], delegations: &[Vec<u8>]) -> Result<Self, Refusal> {
+        let added_account_key = <[u8; ADDED_ACCOUNT_KEY_LEN]>::try_from(added_account_key)
+            .map_err(|_| {
+                length_refusal(
+                    "reachError",
+                    "keyLength",
+                    "added account key",
+                    ADDED_ACCOUNT_KEY_LEN,
+                    added_account_key.len(),
+                )
+            })?;
+        let delegations = delegations
+            .iter()
+            .map(|d| {
+                <[u8; COMMITTER_DELEGATION_BLOB_LEN]>::try_from(d.as_slice()).map_err(|_| {
+                    length_refusal(
+                        "committerDelegationError",
+                        "delegationMalformed",
+                        "a delegation",
+                        COMMITTER_DELEGATION_BLOB_LEN,
+                        d.len(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            inner: RustCommitterDelegationEnvelope {
+                added_account_key,
+                delegations,
+            },
+        })
+    }
+}
+
+#[wasm_bindgen]
+impl CommitterDelegationEnvelope {
+    /// Build an envelope from the added person's 32-byte account signature
+    /// key and the raw 185-byte delegation blobs (`Uint8Array[]`).
+    ///
+    /// # Errors
+    ///
+    /// Throws with `reachError` `keyLength`, or `committerDelegationError`
+    /// `delegationMalformed` for a blob that is not 185 bytes.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        added_account_key: &[u8],
+        delegations: Vec<js_sys::Uint8Array>,
+    ) -> Result<CommitterDelegationEnvelope, JsValue> {
+        let owned: Vec<Vec<u8>> = delegations.into_iter().map(|a| a.to_vec()).collect();
+        js(Self::new_inner(added_account_key, &owned))
+    }
+
+    /// The added person's 32-byte account signature key.
+    #[wasm_bindgen(getter, js_name = addedAccountKey)]
+    #[must_use]
+    pub fn added_account_key(&self) -> Vec<u8> {
+        self.inner.added_account_key.to_vec()
+    }
+
+    /// How many delegations.
+    #[wasm_bindgen(js_name = delegationCount)]
+    #[must_use]
+    pub fn delegation_count(&self) -> usize {
+        self.inner.delegations.len()
+    }
+
+    /// The raw delegation blob at `index`, or `undefined` past the end.
+    #[must_use]
+    pub fn delegation(&self, index: usize) -> Option<Vec<u8>> {
+        self.inner.delegations.get(index).map(|d| d.to_vec())
+    }
+}
+
+/// One delegation, decoded (structure only; the Delivery Service checks the
+/// signature and the expiry when it is used).
+#[wasm_bindgen(js_name = Delegation)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WasmDelegation {
+    inner: Delegation,
+}
+
+#[wasm_bindgen(js_class = Delegation)]
+impl WasmDelegation {
+    /// The 32-byte mailbox pseudonym the write may go to.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn mailbox(&self) -> Vec<u8> {
+        self.inner.mailbox.to_vec()
+    }
+
+    /// The 32-byte key that signs the delegated request.
+    #[wasm_bindgen(getter, js_name = delegatePk)]
+    #[must_use]
+    pub fn delegate_pk(&self) -> Vec<u8> {
+        self.inner.delegate_pk.to_vec()
+    }
+
+    /// When the delegation stops being honoured, unix ms (a `bigint`).
+    #[wasm_bindgen(getter, js_name = expiresAtMs)]
+    #[must_use]
+    pub fn expires_at_ms(&self) -> u64 {
+        self.inner.expires_at_ms
+    }
+
+    /// The 16-byte nonce the DS consumes on use.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn nonce(&self) -> Vec<u8> {
+        self.inner.nonce.to_vec()
+    }
+
+    /// The 32-byte reach public key that signed the delegation.
+    #[wasm_bindgen(getter, js_name = issuerPk)]
+    #[must_use]
+    pub fn issuer_pk(&self) -> Vec<u8> {
+        self.inner.issuer_pk.to_vec()
+    }
+
+    /// The `x-lakko-ds-delegation` header value.
+    #[wasm_bindgen(js_name = headerValue)]
+    #[must_use]
+    pub fn header_value(&self) -> String {
+        self.inner.to_header_value()
+    }
+}
+
+fn compose_committer_delegation_inner(
+    envelope: &CommitterDelegationEnvelope,
+) -> Result<Vec<u8>, Refusal> {
+    Ok(rust_compose_committer_delegation(&envelope.inner)?)
+}
+
+/// Compose a committer-delegation envelope: the plaintext of an MLS
+/// application message the proposer sends in the group beside its `Add`
+/// proposal (ADR-0058 §6). Structural checks only.
+///
+/// # Errors
+///
+/// Throws with `committerDelegationError` `badCount`.
+#[wasm_bindgen(js_name = composeCommitterDelegationEnvelope)]
+pub fn compose_committer_delegation_envelope(
+    envelope: &CommitterDelegationEnvelope,
+) -> Result<Vec<u8>, JsValue> {
+    js(compose_committer_delegation_inner(envelope))
+}
+
+fn decode_committer_delegation_inner(
+    plaintext: &[u8],
+) -> Result<CommitterDelegationEnvelope, Refusal> {
+    Ok(CommitterDelegationEnvelope::from_rust(
+        rust_decode_committer_delegation(plaintext)?,
+    ))
+}
+
+/// Strictly decode a committer-delegation envelope (structure only).
+///
+/// # Errors
+///
+/// Throws with `committerDelegationError` `wrongDomain` / `unknownVersion` /
+/// `badCount` / `badLength`.
+#[wasm_bindgen(js_name = decodeCommitterDelegationEnvelope)]
+pub fn decode_committer_delegation_envelope(
+    plaintext: &[u8],
+) -> Result<CommitterDelegationEnvelope, JsValue> {
+    js(decode_committer_delegation_inner(plaintext))
+}
+
+fn check_committer_delegations_inner(
+    envelope: &CommitterDelegationEnvelope,
+) -> Result<Vec<WasmDelegation>, Refusal> {
+    Ok(rust_check_committer_delegations(&envelope.inner)?
+        .into_iter()
+        .map(|inner| WasmDelegation { inner })
+        .collect())
+}
+
+/// Parse and check every delegation of an envelope (ADR-0058 §6): each blob
+/// parses, names the added person's mailbox, and no two name the same
+/// delegate. Any failure refuses the whole envelope — keep the previous one.
+///
+/// # Errors
+///
+/// Throws with `committerDelegationError` `badAddedAccountKey` /
+/// `malformed` / `wrongMailbox` / `duplicateDelegate`.
+#[wasm_bindgen(js_name = checkCommitterDelegations)]
+pub fn check_committer_delegations(
+    envelope: &CommitterDelegationEnvelope,
+) -> Result<Vec<WasmDelegation>, JsValue> {
+    js(check_committer_delegations_inner(envelope))
+}
+
+fn committer_delegation_for_inner(
+    envelope: &CommitterDelegationEnvelope,
+    own_account_key: &[u8],
+) -> Result<Option<String>, Refusal> {
+    let own = <[u8; ADDED_ACCOUNT_KEY_LEN]>::try_from(own_account_key).map_err(|_| {
+        length_refusal(
+            "reachError",
+            "keyLength",
+            "own account key",
+            ADDED_ACCOUNT_KEY_LEN,
+            own_account_key.len(),
+        )
+    })?;
+    let parsed = rust_check_committer_delegations(&envelope.inner)?;
+    Ok(rust_delegation_for(&parsed, &own).map(Delegation::to_header_value))
+}
+
+/// The committer's side of ADR-0058 §6: after its sweep added the envelope's
+/// person, the delegation naming `ownAccountKey` (this device's account
+/// signature key), as the `x-lakko-ds-delegation` header value to send with
+/// the Welcome's mailbox write — signed with
+/// `DsProofSigner.forReach(accountIdentity ed25519 seed)`, the key the
+/// delegation names. `undefined` when no delegation names this account. The
+/// envelope is checked first (`checkCommitterDelegations`). Use a delegation
+/// only from the newest envelope kept per `(MLS sender resolved at receipt,
+/// addedAccountKey)`, and only for the Welcome of a sweep that added that
+/// person.
+///
+/// # Errors
+///
+/// Every error of `checkCommitterDelegations`; `reachError` `keyLength`.
+#[wasm_bindgen(js_name = committerDelegationFor)]
+pub fn committer_delegation_for(
+    envelope: &CommitterDelegationEnvelope,
+    own_account_key: &[u8],
+) -> Result<Option<String>, JsValue> {
+    js(committer_delegation_for_inner(envelope, own_account_key))
+}
+
+fn decode_delegation_inner(blob: &[u8]) -> Result<WasmDelegation, Refusal> {
+    Delegation::decode(blob)
+        .map(|inner| WasmDelegation { inner })
+        .map_err(|e| delegation_refusal(&e))
+}
+
+/// Decode one raw 185-byte delegation blob (structure only).
+///
+/// # Errors
+///
+/// Throws with `committerDelegationError` `delegationMalformed` /
+/// `delegationUnknownVersion`.
+#[wasm_bindgen(js_name = decodeDelegation)]
+pub fn decode_delegation(blob: &[u8]) -> Result<WasmDelegation, JsValue> {
+    js(decode_delegation_inner(blob))
+}
+
+/// The `x-lakko-ds-delegation` header value of a raw delegation blob.
+///
+/// # Errors
+///
+/// As `decodeDelegation`.
+#[wasm_bindgen(js_name = delegationHeaderValue)]
+pub fn delegation_header_value(blob: &[u8]) -> Result<String, JsValue> {
+    js(decode_delegation_inner(blob).map(|d| d.header_value()))
+}
+
+/// Most delegations one envelope carries: 16.
+#[wasm_bindgen(js_name = maxCommitterDelegations)]
+#[must_use]
+pub fn max_committer_delegations() -> usize {
+    MAX_COMMITTER_DELEGATIONS
+}
+
+/// Length of one delegation blob: 185.
+#[wasm_bindgen(js_name = committerDelegationBlobLen)]
+#[must_use]
+pub fn committer_delegation_blob_len() -> usize {
+    COMMITTER_DELEGATION_BLOB_LEN
+}
+
+// ============================================================================
 // Username certificate — ADR-0058 §5 (verify only)
 // ============================================================================
 
@@ -1385,6 +1714,63 @@ mod tests {
     use lakko_crypto::signing::SigningKey;
 
     const ACCOUNT_SEED: [u8; 32] = [0x42; 32];
+
+    /// ADR-0058 §6 through this surface (the `*_inner` halves, so refusals
+    /// are checkable on the host): each candidate finds exactly its own
+    /// delegation; a delegation for another mailbox refuses the envelope.
+    #[test]
+    fn a_committer_finds_its_own_delegation() {
+        let account = |b: u8| SigningKey::from_seed(&[b; 32]).verifying_key().to_bytes();
+        let added = account(9);
+        let mailbox = lakko_ds_proof::mailbox_pseudonym(&VerifyingKey::from_bytes(&added).unwrap());
+        let (owner, admin) = (account(1), account(2));
+        let blob = |mb: &[u8; 32], delegate: [u8; 32], n: u8| {
+            lakko_ds_proof::sign_delegation(&[0x44; 32], mb, &delegate, 1_000, [n; 16])
+                .encode()
+                .to_vec()
+        };
+        let env = CommitterDelegationEnvelope::new_inner(
+            &added,
+            &[blob(&mailbox, owner, 1), blob(&mailbox, admin, 2)],
+        )
+        .unwrap();
+        let wire = compose_committer_delegation_inner(&env).unwrap();
+        let decoded = decode_committer_delegation_inner(&wire).unwrap();
+        assert_eq!(decoded, env);
+        assert_eq!(decoded.delegation_count(), 2);
+        let dispatched = crate::contacts::dispatch_incoming_envelope_for_tests(&wire);
+        assert_eq!(dispatched, Some(env.clone()));
+        assert_eq!(check_committer_delegations_inner(&env).unwrap().len(), 2);
+        let header = committer_delegation_for_inner(&env, &admin)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            header,
+            decode_delegation_inner(&env.delegation(1).unwrap())
+                .unwrap()
+                .header_value()
+        );
+        assert_eq!(
+            committer_delegation_for_inner(&env, &account(3)).unwrap(),
+            None
+        );
+
+        let bad = CommitterDelegationEnvelope::new_inner(
+            &added,
+            &[blob(&mailbox, owner, 1), blob(&[0x11; 32], admin, 2)],
+        )
+        .unwrap();
+        let refusal = committer_delegation_for_inner(&bad, &owner).unwrap_err();
+        assert_eq!(refusal.property, "committerDelegationError");
+        assert_eq!(refusal.code, "wrongMailbox");
+        let refusal = compose_committer_delegation_inner(
+            &CommitterDelegationEnvelope::new_inner(&added, &[]).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(refusal.code, "badCount");
+        assert_eq!(max_committer_delegations(), 16);
+        assert_eq!(committer_delegation_blob_len(), 185);
+    }
 
     /// `(certificate, expected OPRF hash, expected account id, code)`.
     type Case<'a> = (&'a [u8], &'a [u8], &'a [u8], &'a str);

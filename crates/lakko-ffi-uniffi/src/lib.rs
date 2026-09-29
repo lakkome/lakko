@@ -516,6 +516,16 @@ pub enum FfiError {
     /// does not show the username (invariant #4).
     #[error("{0}")]
     UsernameCertificate(String),
+
+    /// A committer-delegation envelope (ADR-0058 §6) refused, structurally
+    /// (`wrongDomain`, `unknownVersion`, `badCount`, `badLength`) or by the
+    /// delegation check (`badAddedAccountKey`, `malformed`, `wrongMailbox`,
+    /// `duplicateDelegate`), or a single delegation blob that does not parse
+    /// (`delegationMalformed`, `delegationUnknownVersion`). A receiver keeps
+    /// the envelope it already holds and uses none of this one. Appended
+    /// last so every earlier variant keeps its ordinal.
+    #[error("{0}")]
+    CommitterDelegation(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

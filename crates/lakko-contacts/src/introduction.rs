@@ -1691,6 +1691,7 @@ mod tests {
             crate::pin::PIN_ENVELOPE_DOMAIN_V1,
             crate::visibility::VISIBILITY_ENVELOPE_DOMAIN_V1,
             crate::visibility::REACH_STATE_ENVELOPE_DOMAIN_V1,
+            crate::committer_delegation::COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1,
             crate::invite::REVOKE_DOMAIN_V1,
             crate::invite::OWNER_LIST_DOMAIN_V1,
             crate::invite::JOINER_TAG_SALT_DOMAIN_V1,

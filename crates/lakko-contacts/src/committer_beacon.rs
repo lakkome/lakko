@@ -760,6 +760,7 @@ mod tests {
             crate::introduction::INTRODUCTIONS_ENVELOPE_DOMAIN_V1,
             crate::visibility::VISIBILITY_ENVELOPE_DOMAIN_V1,
             crate::visibility::REACH_STATE_ENVELOPE_DOMAIN_V1,
+            crate::committer_delegation::COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1,
             crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,
             b"lakko-invite-revoke/v1\x00",
             b"lakko-call-invite-revoke/v1\x00",

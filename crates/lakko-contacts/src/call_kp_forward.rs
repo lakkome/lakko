@@ -56,6 +56,19 @@
 //! [`crate::call_welcome`]; the only difference is which
 //! prefix the owner-side polling loop matches against.
 //!
+//! ## The joiner's reply grant (ADR-0058 §6)
+//!
+//! Since ADR-0058 the joiner's mailbox is closed, so the committer could not
+//! ferry the Welcome back without one of the joiner's reach keys. This
+//! envelope carries no key of its own because its carrier already does: the
+//! joiner passes its **`reply` reach grant** to [`crate::request::compose`]
+//! beside this envelope, and it rides inside the same sealed, signed
+//! `ContactRequest` plaintext ([`crate::request::OpenedRequest::reply_grant`]).
+//! The owner (or the call's acting committer, to whom the owner hands it)
+//! writes the [`crate::call_welcome`] envelope to the joiner's mailbox under
+//! it. A grant of any other class is refused on compose and fails the open
+//! there, so the check lives once, in the carrier.
+//!
 //! ## Cross-kind isolation
 //!
 //! The separator MUST be byte-distinct from every other
@@ -270,6 +283,54 @@ mod tests {
         let wrapped = wrap_call_kp_forward(&kp);
         let unwrapped = try_unwrap_call_kp_forward(&wrapped).unwrap().unwrap();
         assert_eq!(unwrapped, kp.as_slice());
+    }
+
+    /// ADR-0058 §6: a cold-start KeyPackage forward reaches the owner with
+    /// the joiner's reply grant beside it, in the one sealed carrier; a grant
+    /// of any other class never leaves the joiner.
+    #[test]
+    fn a_cold_start_forward_carries_the_joiners_reply_grant() {
+        use crate::reach::{ReachClass, ReachGrant};
+        use crate::request::{compose, decode_and_verify, open_envelope};
+        use lakko_crypto::agreement::SecretKey as X25519SecretKey;
+        use lakko_crypto::signing::SigningKey;
+
+        let owner = X25519SecretKey::from_bytes([0xCD; 32]);
+        let joiner = SigningKey::from_seed(&[0x51; 32]);
+        let grant = ReachGrant::derive(&[0x52; 32], ReachClass::Reply, &[0x53; 16], 0).unwrap();
+        let wrapped = wrap_call_kp_forward(&[0xCD; 512]);
+        let wire = compose(
+            &joiner,
+            &[0x54; 16],
+            &owner.public_key(),
+            [0; 32],
+            0,
+            b"",
+            None,
+            Some(&grant),
+            &wrapped,
+        )
+        .unwrap();
+        let opened = open_envelope(&decode_and_verify(&wire).unwrap(), &owner).unwrap();
+        assert_eq!(opened.reply_grant, Some(grant));
+        assert_eq!(
+            try_unwrap_call_kp_forward(&opened.intro).unwrap().unwrap(),
+            &[0xCD; 512][..]
+        );
+
+        let contact = ReachGrant::derive(&[0x52; 32], ReachClass::Contact, b"", 0).unwrap();
+        assert!(compose(
+            &joiner,
+            &[0x54; 16],
+            &owner.public_key(),
+            [0; 32],
+            0,
+            b"",
+            None,
+            Some(&contact),
+            &wrapped,
+        )
+        .is_err());
     }
 
     #[test]

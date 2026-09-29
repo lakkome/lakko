@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Slim ADR-0058 surface — the CLASSIFY half only, for the four "who can
+//! Slim ADR-0058 surface — the CLASSIFY half only, for the five "who can
 //! find me" service envelopes (ADR-0041 Phase 2).
 //!
 //! ## Why the NSE needs this at all
@@ -9,7 +9,9 @@
 //! Four new envelopes ride MLS application messages: the introduction offer
 //! and the introductions bundle (in 1:1 conversations, ADR-0058 §4), the
 //! "who can find me" setting and the reach-key state (on the owner's
-//! DeviceGroup, §7). Unrecognised, each falls through to
+//! DeviceGroup, §7), and — since §6 — the committer-delegation envelope a
+//! proposer posts in a group beside its `Add` proposal. Unrecognised, each
+//! falls through to
 //! [`crate::attachments::parse_body_envelope`]'s deliberate lossy-UTF-8
 //! fallback and reaches the notification body as its domain string plus
 //! binary bytes — the same defect the push-routing, beacon, profile and pin
@@ -17,16 +19,17 @@
 //!
 //! ## Scope: ONE decode + the length range, nothing else
 //!
-//! [`decode_scoped_discovery_envelope`] answers "is this one of the four
+//! [`decode_scoped_discovery_envelope`] answers "is this one of the five
 //! envelopes I must not render?" and **returns nothing else**: an offer or a
-//! bundle carries sealed records whose grants are secret, and a setting or a
-//! reach state is the owner's private configuration. The NSE is
+//! bundle carries sealed records whose grants are secret, a setting or a
+//! reach state is the owner's private configuration, and a committer
+//! delegation is usable only by a committer's foreground app. The NSE is
 //! read-only-throwaway (C-59); it must never learn, store or act on any of
 //! it. Compose, the orders and the dispatcher's data are the app's.
 //!
-//! One function for four kinds, rather than four, because the NSE's answer
+//! One function for five kinds, rather than five, because the NSE's answer
 //! is the same for all of them (suppress) and each export is surface the
-//! size-budgeted extension carries. The length range spans all four;
+//! size-budgeted extension carries. The length range spans all five;
 //! [`scoped_discovery_envelope_min_len`] / [`scoped_discovery_envelope_max_len`]
 //! are derived from the core's constants and pinned by goldens that compose
 //! each kind's extremes.
@@ -34,11 +37,15 @@
 //! ## A malformed envelope is NOT classified here
 //!
 //! As for the profile arm (see [`crate::profile`]): an envelope carrying one
-//! of the four domains but failing a bound returns `Err`, exactly as a
+//! of the five domains but failing a bound returns `Err`, exactly as a
 //! non-envelope does, and the NSE falls through to the chat parser. The
 //! app's dispatcher drops it instead. Recorded rather than changed, for the
 //! reason the profile module gives.
 
+use lakko_contacts::committer_delegation::{
+    try_unwrap_committer_delegation, COMMITTER_DELEGATION_ENVELOPE_MAX_LEN,
+    COMMITTER_DELEGATION_ENVELOPE_MIN_LEN,
+};
 use lakko_contacts::introduction::{
     try_unwrap_introduction_offer, try_unwrap_introductions, INTRODUCTIONS_ENVELOPE_DOMAIN_V1,
     INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1, INTRODUCTION_RECORD_MAX_LEN,
@@ -52,7 +59,7 @@ use lakko_contacts::visibility::{
 
 use crate::FfiError;
 
-// The four layouts' extremes, from the core's public constants. Each is
+// The five layouts' extremes, from the core's public constants. Each is
 // pinned against a composed envelope in the tests below, so a layout change
 // in the core that these sums missed fails a Rust test.
 
@@ -75,6 +82,10 @@ const VISIBILITY_MAX: usize = VISIBILITY_MIN + MAX_CHOSEN_SCOPES * (2 + MAX_SCOP
 const REACH_STATE_MIN: usize = REACH_STATE_ENVELOPE_DOMAIN_V1.len() + 1 + 8 + 2;
 const REACH_STATE_MAX: usize =
     REACH_STATE_MIN + MAX_REACH_STATE_ENTRIES * (1 + 1 + MAX_REACH_SCOPE_ID_LEN + 4);
+/// Committer delegation: `domain || version(1) || added_account_key(32) ||
+/// count(1)` then `count × 185`, 1 to 16 delegations — the core's constants.
+const DELEGATION_MIN: usize = COMMITTER_DELEGATION_ENVELOPE_MIN_LEN;
+const DELEGATION_MAX: usize = COMMITTER_DELEGATION_ENVELOPE_MAX_LEN;
 
 const fn min2(a: usize, b: usize) -> usize {
     if a < b {
@@ -93,22 +104,29 @@ const fn max2(a: usize, b: usize) -> usize {
 }
 
 const RANGE_MIN: usize = min2(
-    min2(OFFER_MIN, BUNDLE_MIN),
-    min2(VISIBILITY_MIN, REACH_STATE_MIN),
+    min2(
+        min2(OFFER_MIN, BUNDLE_MIN),
+        min2(VISIBILITY_MIN, REACH_STATE_MIN),
+    ),
+    DELEGATION_MIN,
 );
 const RANGE_MAX: usize = max2(
-    max2(OFFER_MAX, BUNDLE_MAX),
-    max2(VISIBILITY_MAX, REACH_STATE_MAX),
+    max2(
+        max2(OFFER_MAX, BUNDLE_MAX),
+        max2(VISIBILITY_MAX, REACH_STATE_MAX),
+    ),
+    DELEGATION_MAX,
 );
 
-/// Recognise one of the four ADR-0058 service envelopes (introduction offer,
-/// introductions bundle, "who can find me" setting, reach state). `Ok(())`
+/// Recognise one of the five ADR-0058 service envelopes (introduction offer,
+/// introductions bundle, "who can find me" setting, reach state, committer
+/// delegation). `Ok(())`
 /// for a well-formed one — "this is a service envelope, render nothing". No
 /// field is returned (see the module docs).
 ///
 /// # Errors
 ///
-/// [`FfiError::Contacts`] for anything else, including one of the four
+/// [`FfiError::Contacts`] for anything else, including one of the five
 /// domains with a malformed payload. On the NSE filter path that is the
 /// EXPECTED, common outcome — every chat message lands here — not a fault.
 #[uniffi::export]
@@ -126,6 +144,9 @@ pub fn decode_scoped_discovery_envelope(plaintext: Vec<u8>) -> Result<(), FfiErr
         || try_unwrap_reach_state(&plaintext)
             .map_err(|e| err(&e))?
             .is_some()
+        || try_unwrap_committer_delegation(&plaintext)
+            .map_err(|e| err(&e))?
+            .is_some()
     {
         return Ok(());
     }
@@ -134,7 +155,7 @@ pub fn decode_scoped_discovery_envelope(plaintext: Vec<u8>) -> Result<(), FfiErr
     ))
 }
 
-/// Shortest well-formed envelope of the four, in bytes (an empty reach
+/// Shortest well-formed envelope of the five, in bytes (an empty reach
 /// state). The NSE pre-filter's lower bound.
 #[uniffi::export]
 #[must_use]
@@ -142,7 +163,7 @@ pub fn scoped_discovery_envelope_min_len() -> u32 {
     u32::try_from(RANGE_MIN).unwrap_or(u32::MAX)
 }
 
-/// Longest well-formed envelope of the four, in bytes (a full introductions
+/// Longest well-formed envelope of the five, in bytes (a full introductions
 /// bundle of maximal records). A bound that is too LOW fails in the
 /// dangerous direction — it stops suppressing — hence exported, not copied.
 #[uniffi::export]
@@ -154,6 +175,7 @@ pub fn scoped_discovery_envelope_max_len() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lakko_contacts::committer_delegation::COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1;
     use lakko_contacts::introduction::{
         compose_bundle, compose_introduction, compose_introduction_offer, IntroductionPayload,
         IntroductionRecord,
@@ -225,8 +247,18 @@ mod tests {
         .unwrap()
     }
 
+    fn delegation(count: usize) -> Vec<u8> {
+        lakko_contacts::committer_delegation::compose_committer_delegation(
+            &lakko_contacts::committer_delegation::CommitterDelegationEnvelope {
+                added_account_key: [7; 32],
+                delegations: vec![[1; 185]; count],
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
-    fn recognises_all_four_kinds() {
+    fn recognises_all_five_kinds() {
         let rec = record(false);
         let bundle = compose_bundle(&[IntroductionRecord::decode(&rec).unwrap()], 2).unwrap();
         for wire in [
@@ -234,6 +266,7 @@ mod tests {
             bundle,
             visibility(false),
             reach_state(false),
+            delegation(1),
         ] {
             decode_scoped_discovery_envelope(wire).expect("recognised");
         }
@@ -251,7 +284,7 @@ mod tests {
         assert!(decode_scoped_discovery_envelope(broken).is_err());
     }
 
-    /// Pinned as the reason the module exists: unfiltered, each of the four
+    /// Pinned as the reason the module exists: unfiltered, each of the five
     /// would render as lossy chat text starting with its domain.
     #[test]
     fn an_unfiltered_envelope_would_otherwise_render_as_chat_text() {
@@ -281,6 +314,10 @@ mod tests {
         );
         assert_eq!(VISIBILITY_ENVELOPE_DOMAIN_V1, b"lakko/visibility/v1\x00");
         assert_eq!(REACH_STATE_ENVELOPE_DOMAIN_V1, b"lakko/reach-state/v1\x00");
+        assert_eq!(
+            COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1,
+            b"lakko/committer-delegation/v1\x00"
+        );
 
         let min_rec = record(false);
         let max_rec = record(true);
@@ -300,6 +337,9 @@ mod tests {
 
         let (v_min, v_max) = (visibility(false), visibility(true));
         assert_eq!((v_min.len(), v_max.len()), (VISIBILITY_MIN, VISIBILITY_MAX));
+        let (d_min, d_max) = (delegation(1), delegation(16));
+        assert_eq!((d_min.len(), d_max.len()), (DELEGATION_MIN, DELEGATION_MAX));
+        assert_eq!((DELEGATION_MIN, DELEGATION_MAX), (249, 3024));
         let (r_min, r_max) = (reach_state(false), reach_state(true));
         assert_eq!(
             (r_min.len(), r_max.len()),
@@ -320,6 +360,8 @@ mod tests {
             &v_max,
             &r_min,
             &r_max,
+            &d_min,
+            &d_max,
         ] {
             assert_eq!(wire[0], 0x6c);
             assert!((32..=scoped_discovery_envelope_max_len() as usize).contains(&wire.len()));

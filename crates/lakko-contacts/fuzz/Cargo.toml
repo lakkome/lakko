@@ -187,3 +187,10 @@ path = "fuzz_targets/registrar_seed_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "committer_delegation_decode"
+path = "fuzz_targets/committer_delegation_decode.rs"
+test = false
+doc = false
+bench = false

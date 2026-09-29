@@ -22,8 +22,12 @@
 //!   [`compose`] / [`decode_and_verify`] / [`open_envelope`].
 //!   Manual length-prefixed binary codec, frozen at v1.
 //!   Ed25519-signed by the sender's identity key.
-//!   The sealed plaintext is `profile_len ‖ profile ‖ intro`
-//!   (ADR-0048 §2).
+//!   The sealed plaintext is
+//!   `profile_len ‖ profile ‖ reply_grant_len ‖ reply_grant ‖ intro`
+//!   (ADR-0048 §2, ADR-0058 §6).
+//! - [`committer_delegation`] — the ADR-0058 §6 committer-delegation
+//!   envelope: a proposer's delegations for whichever candidate commits its
+//!   `Add`, so the Welcome reaches the added person's closed mailbox.
 //! - [`profile`] — the ADR-0048 profile envelope (display name,
 //!   claimed username, `updated_at_ms`): bounded, fail-closed,
 //!   classified by [`incoming_envelope`].
@@ -84,6 +88,7 @@ pub mod call_invite;
 pub mod call_kp_forward;
 pub mod call_welcome;
 pub mod committer_beacon;
+pub mod committer_delegation;
 pub mod envelope;
 pub mod error;
 pub mod group_invite;
@@ -128,6 +133,13 @@ pub use committer_beacon::{
     COMMITTER_BEACON_FRESHNESS_WINDOW_MS, COMMITTER_BEACON_INTERVAL_MS,
     COMMITTER_BEACON_PAYLOAD_LEN, COMMITTER_BEACON_VERSION_V1, COMMITTER_BEACON_WORST_CASE_POLL_MS,
 };
+pub use committer_delegation::{
+    compose_committer_delegation, decode_committer_delegation, try_unwrap_committer_delegation,
+    CommitterDelegationEnvelope, CommitterDelegationError, COMMITTER_DELEGATION_BLOB_LEN,
+    COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1, COMMITTER_DELEGATION_ENVELOPE_MAX_LEN,
+    COMMITTER_DELEGATION_ENVELOPE_MIN_LEN, COMMITTER_DELEGATION_VERSION_V1,
+    MAX_COMMITTER_DELEGATIONS,
+};
 pub use error::{ContactError, Result};
 pub use group_invite::{
     compose as compose_group_invite, decode_and_verify as decode_and_verify_group_invite,
@@ -156,10 +168,10 @@ pub use introduction::{
     WRAPPED_KEY_LEN,
 };
 pub use invite::{
-    compute_joiner_tag, generate_blob_id, owner_list_canonical_bytes, revoke_canonical_bytes,
-    sign_owner_list, sign_revocation, InviteCapability, BLOB_ID_B64URL_LEN, BLOB_ID_LEN,
-    JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1, MAX_LABEL_LEN, NEVER_EXPIRES, OWNER_LIST_DOMAIN_V1,
-    REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS, SINGLE_USE,
+    compute_joiner_tag, generate_blob_id, generate_link_id, owner_list_canonical_bytes,
+    revoke_canonical_bytes, sign_owner_list, sign_revocation, InviteCapability, BLOB_ID_B64URL_LEN,
+    BLOB_ID_LEN, JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1, LINK_ID_LEN, MAX_LABEL_LEN,
+    NEVER_EXPIRES, OWNER_LIST_DOMAIN_V1, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS, SINGLE_USE,
 };
 pub use media_state::{
     compose_media_state, decode_media_state, try_unwrap_media_state, MediaState, MediaStateError,
@@ -201,7 +213,9 @@ pub use registrar_seed::{
     RegistrarSeedEnvelope, RegistrarSeedError, RegistrarSeedRank,
     REGISTRAR_SEED_ENVELOPE_DOMAIN_V1, REGISTRAR_SEED_ENVELOPE_LEN, REGISTRAR_SEED_VERSION_V1,
 };
-pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};
+pub use request::{
+    compose, decode_and_verify, open_envelope, ContactRequest, OpenedRequest, ACCOUNT_ID_LEN,
+};
 pub use safety::{
     safety_number, safety_number_bytes, SAFETY_NUMBER_DIGITS, SAFETY_NUMBER_DIGITS_PER_GROUP,
     SAFETY_NUMBER_GROUPS,
@@ -240,5 +254,16 @@ pub mod fuzz_api {
     #[must_use]
     pub fn open_sealed_link(kind_byte: u8, secret: &[u8], sealed: &[u8]) -> Option<bool> {
         crate::link_seal::fuzz_open(kind_byte, secret, sealed)
+    }
+
+    /// Split a contact request's **sealed plaintext** (the bytes inside the
+    /// sealed envelope, which a fuzzer cannot reach through the AEAD) into
+    /// profile, reply grant and intro. `None` when the splitter refuses;
+    /// `Some(true)` when what it accepted re-frames to the same bytes (a
+    /// profile only when it decoded, a reply grant always class `reply`),
+    /// `Some(false)` on a disagreement (a bug).
+    #[must_use]
+    pub fn contact_request_plaintext(plain: &[u8]) -> Option<bool> {
+        crate::request::fuzz_split(plain)
     }
 }

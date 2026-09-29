@@ -54,7 +54,10 @@
 //!    [`crate::pin::try_unwrap_pin`] and
 //!    [`crate::registrar_seed::try_unwrap_registrar_seed`] (ADR-0048
 //!    trigger 4, ADR-0052, ADR-0057): service envelopes the caller acts
-//!    on and never renders.
+//!    on and never renders. Then
+//!    [`crate::committer_delegation::try_unwrap_committer_delegation`]
+//!    (ADR-0058 §6): a proposer's delegations for the committer that
+//!    sweeps its `Add`. Never rendered.
 //! 9. [`crate::introduction::try_unwrap_introduction_offer`] and
 //!    [`crate::introduction::try_unwrap_introductions`] — a contact's
 //!    introduction record to relay, and a contact's bundle of records to
@@ -98,6 +101,9 @@ use thiserror::Error;
 use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
 use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError};
+use crate::committer_delegation::{
+    try_unwrap_committer_delegation, CommitterDelegationEnvelope, CommitterDelegationError,
+};
 use crate::group_name::{try_unwrap_group_name, GroupName, GroupNameError};
 use crate::introduction::{
     try_unwrap_introduction_offer, try_unwrap_introductions, IntroductionError, IntroductionRecord,
@@ -248,6 +254,14 @@ pub enum IncomingEnvelope<'a> {
     /// with its account X25519 secret and drops the envelope on a failed
     /// open. Every other member drops it unopened.
     RegistrarSeed(RegistrarSeedEnvelope),
+    /// A proposer's committer delegations (ADR-0058 §6), structurally
+    /// checked only. Never a chat bubble. **The caller parses the blobs with
+    /// `lakko_ds_proof::committer`** (each must name the added person's
+    /// mailbox; no two the same delegate), keeps the newest envelope per
+    /// `(MLS sender resolved at receipt, added_account_key)`, and uses a
+    /// delegation only when it names its own account key, only to deliver
+    /// the Welcome of a sweep that added that person.
+    CommitterDelegation(CommitterDelegationEnvelope),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -308,6 +322,10 @@ pub enum DispatchError {
     /// The registrar-seed domain (ADR-0057) with a malformed payload.
     #[error(transparent)]
     RegistrarSeed(#[from] RegistrarSeedError),
+    /// The committer-delegation domain (ADR-0058 §6) with a malformed
+    /// payload.
+    #[error(transparent)]
+    CommitterDelegation(#[from] CommitterDelegationError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -374,6 +392,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     if let Some(envelope) = try_unwrap_registrar_seed(plaintext)? {
         return Ok(IncomingEnvelope::RegistrarSeed(envelope));
     }
+    // 7e. Committer delegation — ADR-0058 §6.
+    if let Some(envelope) = try_unwrap_committer_delegation(plaintext)? {
+        return Ok(IncomingEnvelope::CommitterDelegation(envelope));
+    }
     // 8. Plain intro message — ADR-0005 scenario A.
     if let Some(record) = try_unwrap_introduction_offer(plaintext)? {
         return Ok(IncomingEnvelope::IntroductionOffer(record));
@@ -424,6 +446,35 @@ mod tests {
         assert!(matches!(
             dispatch_incoming_envelope(&wire[..wire.len() - 1]),
             Err(DispatchError::RegistrarSeed(_))
+        ));
+    }
+
+    #[test]
+    fn dispatches_a_committer_delegation_and_never_renders_it() {
+        use crate::committer_delegation::{
+            compose_committer_delegation, COMMITTER_DELEGATION_BLOB_LEN,
+            COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1,
+        };
+        let env = CommitterDelegationEnvelope {
+            added_account_key: [4; 32],
+            delegations: vec![[1; COMMITTER_DELEGATION_BLOB_LEN]; 2],
+        };
+        let wire = compose_committer_delegation(&env).unwrap();
+        assert_eq!(
+            dispatch_incoming_envelope(&wire).unwrap(),
+            IncomingEnvelope::CommitterDelegation(env),
+        );
+        let mut bad = COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1.to_vec();
+        bad.push(0x7F);
+        assert_eq!(
+            dispatch_incoming_envelope(&bad),
+            Err(DispatchError::CommitterDelegation(
+                CommitterDelegationError::UnknownVersion(0x7F)
+            )),
+        );
+        assert!(matches!(
+            dispatch_incoming_envelope(&wire[..wire.len() - 1]),
+            Err(DispatchError::CommitterDelegation(_))
         ));
     }
 

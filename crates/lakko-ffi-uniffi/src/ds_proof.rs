@@ -188,21 +188,65 @@ pub fn sign_delegation(
     expires_at_ms: u64,
     nonce: Vec<u8>,
 ) -> Result<String, FfiError> {
-    let seed = <[u8; 32]>::try_from(issuer_seed.as_slice()).map_err(|_| {
+    Ok(
+        signed_delegation(&issuer_seed, &mailbox, &delegate_pk, expires_at_ms, &nonce)?
+            .to_header_value(),
+    )
+}
+
+/// [`sign_delegation`], returning the raw 185-byte delegation instead of the
+/// header value: the blob a committer-delegation envelope carries (ADR-0058
+/// §6, `composeCommitterDelegationEnvelope`). The proposer signs one per
+/// committer candidate, the delegate being that candidate's account
+/// signature key and the mailbox the added person's. The committer turns
+/// the one naming it back into a header with `delegationHeaderValue`.
+///
+/// # Errors
+///
+/// As [`sign_delegation`].
+#[uniffi::export]
+pub fn sign_delegation_blob(
+    issuer_seed: Vec<u8>,
+    mailbox: Vec<u8>,
+    delegate_pk: Vec<u8>,
+    expires_at_ms: u64,
+    nonce: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    Ok(
+        signed_delegation(&issuer_seed, &mailbox, &delegate_pk, expires_at_ms, &nonce)?
+            .encode()
+            .to_vec(),
+    )
+}
+
+fn signed_delegation(
+    issuer_seed: &[u8],
+    mailbox: &[u8],
+    delegate_pk: &[u8],
+    expires_at_ms: u64,
+    nonce: &[u8],
+) -> Result<lakko_ds_proof::Delegation, FfiError> {
+    let seed = <[u8; 32]>::try_from(issuer_seed).map_err(|_| {
         FfiError::Reach(format!(
             "seedLength: issuer seed must be 32 bytes, got {}",
             issuer_seed.len()
         ))
     })?;
-    let mailbox = key32(&mailbox, "mailbox pseudonym")?;
-    let delegate = key32(&delegate_pk, "delegate key")?;
-    let nonce = <[u8; NONCE_LEN]>::try_from(nonce.as_slice()).map_err(|_| {
+    let mailbox = key32(mailbox, "mailbox pseudonym")?;
+    let delegate = key32(delegate_pk, "delegate key")?;
+    let nonce = <[u8; NONCE_LEN]>::try_from(nonce).map_err(|_| {
         FfiError::Reach(format!(
             "nonceLength: nonce must be {NONCE_LEN} bytes, got {}",
             nonce.len()
         ))
     })?;
-    Ok(inner_sign_delegation(&seed, &mailbox, &delegate, expires_at_ms, nonce).to_header_value())
+    Ok(inner_sign_delegation(
+        &seed,
+        &mailbox,
+        &delegate,
+        expires_at_ms,
+        nonce,
+    ))
 }
 
 /// The signer for `identity`'s own mailbox: its identity key at

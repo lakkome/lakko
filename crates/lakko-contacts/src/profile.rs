@@ -45,12 +45,24 @@
 //!   viewer verifies it (one OPRF evaluation plus the signature) in
 //!   `lakko-attest`, which owns the layout. This codec checks only its
 //!   length and that it never comes without a username.
-//! * `grants` (v3, ADR-0058 §3) are reach keys the sender hands to the
-//!   members of the group the envelope is published in: the `group` key when
-//!   the sender's setting lets that group find them, the `member` key always,
-//!   and the `channel` key inside a channel member card. A grant is a
-//!   **secret** ([`crate::reach::ReachGrant`]); the envelope is only ever sent
-//!   inside an E2EE carrier.
+//! * `grants` (v3, ADR-0058 §3 and §6) are reach keys the sender hands to
+//!   the receivers of the envelope. Which classes travel where:
+//!
+//!   | Carrier | Grants |
+//!   |---|---|
+//!   | a group's profile | `group` (when the sender's setting lets that group find them) + `member` (always) |
+//!   | a one-to-one conversation's profile | `contact` + `member` |
+//!   | a channel member card | `channel` |
+//!
+//!   The codec admits any of the four classes in any profile (at most two,
+//!   one per class); **where a grant is kept is the receiver's rule**, since
+//!   only the receiver knows the carrier. In particular a receiver keeps a
+//!   `contact` grant **only from the other participant of a one-to-one
+//!   conversation** (resolved at receipt, C-68) and drops it from a group's
+//!   profile or a channel card: a `contact` key in a group would hand every
+//!   co-member the reach of a contact. A grant is a **secret**
+//!   ([`crate::reach::ReachGrant`]); the envelope is only ever sent inside an
+//!   E2EE carrier.
 //!
 //! ## Wire shape
 //!
@@ -184,8 +196,9 @@ pub const PROFILE_VERSION_V3: u8 = 0x03;
 /// signature) happens there, never here.
 pub const USERNAME_CERT_LEN: usize = 153;
 
-/// Most reach grants one profile may carry (ADR-0058 §3): the `group` and the
-/// `member` key of a group, or the `channel` key of a channel.
+/// Most reach grants one profile may carry (ADR-0058 §3, §6): the `group`
+/// and the `member` key of a group, the `contact` and the `member` key of a
+/// one-to-one conversation, or the `channel` key of a channel.
 pub const MAX_PROFILE_GRANTS: usize = 2;
 
 /// Length of the account id the envelope may carry: the 16-byte auth
@@ -219,15 +232,20 @@ pub const PROFILE_ENVELOPE_MAX_LEN: usize = PROFILE_ENVELOPE_MIN_LEN
     + USERNAME_CERT_LEN
     + MAX_PROFILE_GRANTS * REACH_GRANT_LEN;
 
-/// `true` for the reach classes a profile may hand out (ADR-0058 §3):
-/// `group`, `member`, `channel`. The others travel elsewhere — a `contact`
-/// key in the 1:1 conversation, a `link` key inside a capability, a `reply`
-/// key as a delegation, a `fof` key inside an introduction record.
+/// `true` for the reach classes a profile may hand out (ADR-0058 §3, §6):
+/// `contact` (in a one-to-one conversation's profile), `group`, `member`,
+/// `channel`. The others travel elsewhere — a `link` key inside an invite
+/// capability, a `reply` key inside a contact request or a `/g/` join
+/// attribution, a `fof` key inside an introduction record.
+///
+/// The codec does not know the carrier, so it cannot say which of these a
+/// given profile should carry; the receiver keeps a `contact` grant only
+/// from the other participant of a one-to-one conversation (module docs).
 #[must_use]
 pub const fn is_profile_grant_class(class: ReachClass) -> bool {
     matches!(
         class,
-        ReachClass::Group | ReachClass::Member | ReachClass::Channel
+        ReachClass::Contact | ReachClass::Group | ReachClass::Member | ReachClass::Channel
     )
 }
 
@@ -1220,6 +1238,11 @@ mod tests {
             vec![grant(ReachClass::Group, 4), grant(ReachClass::Member, 5)],
             vec![grant(ReachClass::Member, 6), grant(ReachClass::Group, 7)],
             vec![grant(ReachClass::Channel, 8), grant(ReachClass::Member, 9)],
+            vec![grant(ReachClass::Contact, 10)],
+            vec![
+                grant(ReachClass::Contact, 11),
+                grant(ReachClass::Member, 12),
+            ],
         ] {
             p.grants = grants;
             let wire = compose_profile(&p).unwrap();
@@ -1300,8 +1323,8 @@ mod tests {
                 ProfileError::DuplicateGrantClass(ReachClass::Group.to_byte()),
             ),
             (
-                vec![grant(ReachClass::Contact, 1)],
-                ProfileError::GrantClassNotAllowed(ReachClass::Contact.to_byte()),
+                vec![grant(ReachClass::Contact, 1), grant(ReachClass::Contact, 2)],
+                ProfileError::DuplicateGrantClass(ReachClass::Contact.to_byte()),
             ),
             (
                 vec![grant(ReachClass::Link, 1)],
@@ -1480,6 +1503,7 @@ mod tests {
             crate::introduction::INTRODUCTIONS_ENVELOPE_DOMAIN_V1,
             crate::visibility::VISIBILITY_ENVELOPE_DOMAIN_V1,
             crate::visibility::REACH_STATE_ENVELOPE_DOMAIN_V1,
+            crate::committer_delegation::COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1,
             crate::invite::REVOKE_DOMAIN_V1,
             crate::invite::OWNER_LIST_DOMAIN_V1,
             crate::invite::JOINER_TAG_SALT_DOMAIN_V1,

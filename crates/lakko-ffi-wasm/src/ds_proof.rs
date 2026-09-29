@@ -182,13 +182,26 @@ pub fn max_delegation_ttl_ms() -> u64 {
     MAX_DELEGATION_TTL_MS
 }
 
+type LenRefusal = (&'static str, &'static str, usize, usize);
+
 fn sign_delegation_inner(
     issuer_seed: &[u8],
     mailbox: &[u8],
     delegate_pk: &[u8],
     expires_at_ms: u64,
     nonce: &[u8],
-) -> Result<String, (&'static str, &'static str, usize, usize)> {
+) -> Result<String, LenRefusal> {
+    signed_delegation(issuer_seed, mailbox, delegate_pk, expires_at_ms, nonce)
+        .map(|d| d.to_header_value())
+}
+
+fn signed_delegation(
+    issuer_seed: &[u8],
+    mailbox: &[u8],
+    delegate_pk: &[u8],
+    expires_at_ms: u64,
+    nonce: &[u8],
+) -> Result<lakko_ds_proof::Delegation, LenRefusal> {
     let seed = <[u8; 32]>::try_from(issuer_seed)
         .map_err(|_| ("seedLength", "issuer seed", 32, issuer_seed.len()))?;
     let mailbox = <[u8; 32]>::try_from(mailbox)
@@ -197,7 +210,13 @@ fn sign_delegation_inner(
         .map_err(|_| ("keyLength", "delegate key", 32, delegate_pk.len()))?;
     let nonce = <[u8; NONCE_LEN]>::try_from(nonce)
         .map_err(|_| ("nonceLength", "nonce", NONCE_LEN, nonce.len()))?;
-    Ok(inner_sign_delegation(&seed, &mailbox, &delegate, expires_at_ms, nonce).to_header_value())
+    Ok(inner_sign_delegation(
+        &seed,
+        &mailbox,
+        &delegate,
+        expires_at_ms,
+        nonce,
+    ))
 }
 
 /// Sign a delegation (ADR-0058 §2): the holder of the reach seed
@@ -219,6 +238,28 @@ pub fn sign_delegation(
     nonce: &[u8],
 ) -> Result<String, JsValue> {
     sign_delegation_inner(issuer_seed, mailbox, delegate_pk, expires_at_ms, nonce)
+        .map_err(|(code, what, want, got)| reach_len_refusal(code, what, want, got))
+}
+
+/// `signDelegation`, returning the raw 185-byte delegation instead of the
+/// header value: the blob a committer-delegation envelope carries (ADR-0058
+/// §6, `composeCommitterDelegationEnvelope`). The proposer signs one per
+/// committer candidate, the delegate being that candidate's account
+/// signature key and the mailbox the added person's.
+///
+/// # Errors
+///
+/// As `signDelegation`.
+#[wasm_bindgen(js_name = signDelegationBlob)]
+pub fn sign_delegation_blob(
+    issuer_seed: &[u8],
+    mailbox: &[u8],
+    delegate_pk: &[u8],
+    expires_at_ms: u64,
+    nonce: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    signed_delegation(issuer_seed, mailbox, delegate_pk, expires_at_ms, nonce)
+        .map(|d| d.encode().to_vec())
         .map_err(|(code, what, want, got)| reach_len_refusal(code, what, want, got))
 }
 
