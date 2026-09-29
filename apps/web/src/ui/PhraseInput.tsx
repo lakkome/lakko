@@ -15,6 +15,7 @@
  */
 import { Index, type JSX } from "solid-js";
 import { BIP39_ENGLISH, isBip39Word } from "../recovery/bip39-words";
+import { t } from "../l10n";
 
 export const PHRASE_WORDS = 24;
 
@@ -76,7 +77,7 @@ export function PhraseInput(props: {
   return (
     <div class="lk-phrase-input">
       <div class="lk-phrase-head">
-        <span>{props.label ?? "Recovery phrase"}</span>
+        <span>{props.label ?? t("recovery_phrase.label")}</span>
         <span class="form-info">
           {filled()} / {PHRASE_WORDS}
         </span>
@@ -98,7 +99,7 @@ export function PhraseInput(props: {
                 autocorrect="off"
                 spellcheck={false}
                 disabled={props.disabled?.() === true}
-                aria-label={`Word ${i + 1}`}
+                aria-label={t("recovery_phrase.word_label", { position: String(i + 1) })}
                 onInput={(e) => setWord(i, e.currentTarget.value)}
                 onPaste={(e) => onPaste(i, e)}
                 onKeyDown={(e) => onKeyDown(i, e)}

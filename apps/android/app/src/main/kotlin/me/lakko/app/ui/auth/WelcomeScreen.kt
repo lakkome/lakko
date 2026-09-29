@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import me.lakko.app.l10n.t
 
 /**
  * The first screen a signed-out user sees (docs/ux/client-redesign.md
@@ -54,7 +55,7 @@ public fun WelcomeScreen(
             Text("Lakko", style = MaterialTheme.typography.displaySmall)
             Spacer(Modifier.height(8.dp))
             Text(
-                "Your messages, your rules.",
+                t("auth.brand.tagline"),
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -66,10 +67,10 @@ public fun WelcomeScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Button(onClick = onCreateAccount, modifier = Modifier.fillMaxWidth()) {
-                    Text("Create account")
+                    Text(t("auth.signup.submit"))
                 }
                 FilledTonalButton(onClick = onLogIn, modifier = Modifier.fillMaxWidth()) {
-                    Text("Log in")
+                    Text(t("auth.login.submit"))
                 }
             }
         }

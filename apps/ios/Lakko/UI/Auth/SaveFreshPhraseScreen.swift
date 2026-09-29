@@ -12,19 +12,31 @@ import SwiftUI
 public struct SaveFreshPhraseScreen: View {
 
     public let phrase: String
+    /// The account's username; empty for a guest account (ADR-0032), whose
+    /// phrase is shown right after it was created without a password.
+    public let username: String
     public let onConfirm: () -> Void
 
-    public init(phrase: String, onConfirm: @escaping () -> Void) {
+    @ObservedObject private var l10n = Localization.shared
+
+    public init(phrase: String, username: String = "", onConfirm: @escaping () -> Void) {
         self.phrase = phrase
+        self.username = username
         self.onConfirm = onConfirm
     }
 
     public var body: some View {
+        let guest = username.isEmpty
         RecoveryPhraseGuide(
             phrase: phrase,
-            title: "Save your new recovery phrase",
-            intro: "You started over with a new identity. These 24 words are the only way to restore it on another device. Your contacts will be asked to verify you again.",
+            title: l10n.t(guest ? "recovery_phrase.save.title" : "recovery_phrase.fresh.title"),
+            intro: guest
+                ? l10n.t("recovery_phrase.guest.lede")
+                : l10n.t("recovery_phrase.fresh.lede", texts: ["username": "@\(username)"]),
             extra: {
+                if !guest {
+                    AuthHint(text: l10n.t("recovery_phrase.fresh.safety_note"))
+                }
                 SocialRecoverySharesPanel(phrase: phrase)
             },
             onDone: onConfirm

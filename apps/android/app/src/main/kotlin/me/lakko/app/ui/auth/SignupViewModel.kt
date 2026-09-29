@@ -15,7 +15,8 @@ import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
 import me.lakko.app.auth.AuthRepository
-import me.lakko.app.auth.SIGNUP_RATE_LIMITED_COPY
+import me.lakko.app.auth.SIGNUP_RATE_LIMITED_TEXT
+import me.lakko.app.l10n.UiText
 import me.lakko.app.auth.SignupOutcome
 import kotlin.coroutines.cancellation.CancellationException
 import me.lakko.app.discovery.DiscoveryHttpError
@@ -25,8 +26,8 @@ import me.lakko.app.profile.OwnProfile
 import me.lakko.app.profile.UsernameCheck
 import me.lakko.app.profile.checkDisplayName
 import me.lakko.app.profile.checkUsername
-import me.lakko.app.profile.usernameCanonicalHint
-import me.lakko.app.profile.usernameFieldError
+import me.lakko.app.profile.usernameCanonicalHintText
+import me.lakko.app.profile.usernameFieldErrorText
 
 /**
  * State + dispatcher for the [SignupScreen].
@@ -88,8 +89,8 @@ public class SignupViewModel internal constructor(
         mutableState.update {
             it.copy(
                 username = value,
-                usernameError = usernameFieldError(check, value),
-                usernameHint = usernameCanonicalHint(check, value),
+                usernameError = usernameFieldErrorText(check, value),
+                usernameHint = usernameCanonicalHintText(check, value),
             )
         }
     }
@@ -100,7 +101,7 @@ public class SignupViewModel internal constructor(
         mutableState.update {
             it.copy(
                 displayName = value,
-                displayNameError = (check as? DisplayNameCheck.Invalid)?.problem?.copy,
+                displayNameError = (check as? DisplayNameCheck.Invalid)?.problem?.text,
             )
         }
     }
@@ -130,14 +131,14 @@ public class SignupViewModel internal constructor(
         val usernameCheck = checkUsername(snapshot.username, validateUsername)
         if (usernameCheck is UsernameCheck.Invalid) {
             mutableState.update {
-                it.copy(error = usernameCheck.problem.copy, usernameError = usernameCheck.problem.copy)
+                it.copy(error = usernameCheck.problem.text, usernameError = usernameCheck.problem.text)
             }
             return
         }
         val normalizedUsername = (usernameCheck as UsernameCheck.Valid).normalized
         val nameCheck = checkDisplayName(snapshot.displayName, normalizeDisplayName)
         if (nameCheck is DisplayNameCheck.Invalid) {
-            mutableState.update { it.copy(error = nameCheck.problem.copy) }
+            mutableState.update { it.copy(error = UiText("auth.signup.error.fix_name")) }
             return
         }
         val chosenName = (nameCheck as DisplayNameCheck.Valid).normalized
@@ -146,14 +147,17 @@ public class SignupViewModel internal constructor(
         val confirm = snapshot.confirm
         if (pwd != confirm) {
             mutableState.update {
-                it.copy(error = "The passwords do not match. Type the same password twice.")
+                it.copy(error = UiText("auth.password.error.mismatch"))
             }
             return
         }
         if (pwd.length < MIN_PASSWORD_LEN) {
             mutableState.update {
                 it.copy(
-                    error = "Use at least $MIN_PASSWORD_LEN characters for the password.",
+                    error = UiText(
+                        "auth.password.error.too_short",
+                        counts = mapOf("count" to MIN_PASSWORD_LEN.toULong()),
+                    ),
                 )
             }
             return
@@ -204,7 +208,7 @@ public class SignupViewModel internal constructor(
                 }
             } catch (err: AuthClientArgError) {
                 mutableState.update {
-                    it.copy(busy = false, solving = false, error = err.message ?: "Invalid input.")
+                    it.copy(busy = false, solving = false, error = err.text ?: GENERIC)
                 }
             } catch (err: CancellationException) {
                 throw err
@@ -215,7 +219,7 @@ public class SignupViewModel internal constructor(
                         busy = false,
                         solving = false,
                         error = copy,
-                        rateLimited = copy == SIGNUP_RATE_LIMITED_COPY,
+                        rateLimited = copy == SIGNUP_RATE_LIMITED_TEXT,
                     )
                 }
             } catch (_: me.lakko.app.anon.AnonTokenException) {
@@ -225,7 +229,7 @@ public class SignupViewModel internal constructor(
                     it.copy(
                         busy = false,
                         solving = false,
-                        error = "No connection. Check your network and try again.",
+                        error = OFFLINE,
                     )
                 }
             } catch (_: AuthNetworkError) {
@@ -239,7 +243,7 @@ public class SignupViewModel internal constructor(
                     it.copy(
                         busy = false,
                         solving = false,
-                        error = "No connection. Check your network and try again.",
+                        error = OFFLINE,
                     )
                 }
             } catch (_: DiscoveryNetworkError) {
@@ -249,7 +253,7 @@ public class SignupViewModel internal constructor(
                     it.copy(
                         busy = false,
                         solving = false,
-                        error = "No connection. Check your network and try again.",
+                        error = OFFLINE,
                     )
                 }
             } catch (err: DiscoveryHttpError) {
@@ -258,7 +262,7 @@ public class SignupViewModel internal constructor(
                 }
             } catch (err: Throwable) {
                 mutableState.update {
-                    it.copy(busy = false, solving = false, error = err.message ?: "Could not create the account. Try again.")
+                    it.copy(busy = false, solving = false, error = GENERIC)
                 }
             } finally {
                 // Wipe the local bytes copy. The repo also wiped
@@ -287,22 +291,23 @@ public class SignupViewModel internal constructor(
      *  status code; future cases get added here as the service
      *  surface evolves. Indistinguishable-failure cases (login
      *  401) stay generic on purpose. */
-    private fun userFacingHttpError(err: AuthHttpError): String =
-        me.lakko.app.auth.authLimitCopy(err) ?: when (err.status) {
-            409 -> "That username is taken. Choose another one."
-            429 -> "Too many attempts. Wait a moment, then try again."
-            in 500..599 -> "Something went wrong on our side. Try again in a moment."
-            else -> "Could not create the account. Try again."
+    private fun userFacingHttpError(err: AuthHttpError): UiText =
+        me.lakko.app.auth.authLimitText(err) ?: when (err.status) {
+            409 -> UiText("auth.signup.error.username_taken")
+            429 -> UiText("common.error.too_many_attempts")
+            503 -> UiText("common.error.unavailable")
+            else -> GENERIC
         }
 
     /** Discovery failures other than a taken name (which the repository
      *  already turns into form copy): the username claim or the identity
      *  publish at signup. */
-    private fun userFacingDiscoveryError(err: DiscoveryHttpError): String =
+    private fun userFacingDiscoveryError(err: DiscoveryHttpError): UiText =
         when (err.status) {
-            429 -> "Too many attempts. Wait a moment, then try again."
-            in 500..599 -> "Something went wrong on our side. Try again in a moment."
-            else -> "Could not create the account. Try again."
+            409 -> UiText("auth.signup.error.username_taken")
+            429 -> UiText("common.error.too_many_attempts")
+            503 -> UiText("common.error.unavailable")
+            else -> GENERIC
         }
 
     public companion object {
@@ -310,6 +315,9 @@ public class SignupViewModel internal constructor(
          *  the floor in `apps/web` — a real strength heuristic
          *  + Argon2id KSF cost feedback lands in a later sprint. */
         public const val MIN_PASSWORD_LEN: Int = 8
+
+        private val GENERIC = UiText("auth.signup.error.generic")
+        private val OFFLINE = UiText("common.error.offline")
     }
 }
 
@@ -321,19 +329,20 @@ public class SignupViewModel internal constructor(
 public data class SignupUiState(
     val username: String = "",
     /** ADR-0048 §4 — the reason the typed username fails, or `null`. */
-    val usernameError: String? = null,
+    val usernameError: UiText? = null,
     /** ADR-0048 §4 — `Shown as @alice` when typed non-canonically. */
-    val usernameHint: String? = null,
+    val usernameHint: UiText? = null,
     /** ADR-0048 §4 — optional "Your name". */
     val displayName: String = "",
     /** The reason the typed name fails, or `null`. */
-    val displayNameError: String? = null,
+    val displayNameError: UiText? = null,
     val password: String = "",
     val confirm: String = "",
     val busy: Boolean = false,
     /** The proof-of-work solve is running: the working row offers `Cancel`. */
     val solving: Boolean = false,
-    val error: String? = null,
+    /** The form's error sentence (ADR-0058: rendered from its key). */
+    val error: UiText? = null,
     /** The last attempt met `signup-rate-limited`: the button reads
      *  `Try again`. The form keeps its contents. */
     val rateLimited: Boolean = false,

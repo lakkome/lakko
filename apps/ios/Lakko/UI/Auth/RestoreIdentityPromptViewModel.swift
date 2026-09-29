@@ -43,6 +43,7 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     }
 
     private let repository: AuthRepository
+    private let l10n = Localization.shared
 
     public init(
         repository: AuthRepository,
@@ -79,7 +80,7 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     public func onSubmit() {
         guard !busy else { return } // ignore double-tap
         if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            error = "Enter all 24 words of your recovery phrase."
+            error = l10n.t("recovery_phrase.error.incomplete")
             return
         }
         busy = true
@@ -93,28 +94,9 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
                 busy = false
                 error = nil
                 phrase = ""
-            } catch let err as FfiError {
-                // BIP39 mnemonic parse failure — unknown-word and
-                // bad-checksum collapse into one message by design.
-                busy = false
-                if case .Mnemonic = err {
-                    error = "That is not a valid recovery phrase. Check the spelling and order of the 24 words."
-                } else {
-                    error = err.localizedDescription
-                }
-            } catch let err as PhraseMismatch {
-                busy = false
-                error = err.errorDescription
-            } catch let err as IdentityVerificationUnavailable {
-                busy = false
-                error = err.errorDescription
-            } catch let err as AuthClientError {
-                busy = false
-                error = (err as LocalizedError).errorDescription ?? "Could not restore the account. Try again."
             } catch {
                 busy = false
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not restore the account. Try again."
+                self.error = AuthErrorCopy.identityRestore(error)
             }
         }
     }
@@ -136,8 +118,8 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
                 error = nil
             } catch {
                 busy = false
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not start over. Try again."
+                NSLog("[restore] WARN fresh identity failed: \(error)")
+                self.error = l10n.t("restore_identity.lost.error.generic")
             }
         }
     }

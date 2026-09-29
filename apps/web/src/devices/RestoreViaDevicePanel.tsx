@@ -19,7 +19,8 @@
  * diverge (authenticated vs anonymous join, `completeFromPairing`
  * vs `completeFromDeviceRestore`).
  */
-import { authLimitMessage } from "../auth/auth-error-copy";
+import { authLimitMessage, deviceRestoreErrorMessage } from "../auth/auth-error-copy";
+import { t } from "../l10n";
 import { createSignal, onCleanup, Show, Switch, Match, type JSX } from "solid-js";
 import QRCode from "qrcode";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
@@ -78,7 +79,9 @@ export default function RestoreViaDevicePanel(props: {
       }
     | { kind: "joining" }
     | { kind: "done" }
-    | { kind: "error"; message: string };
+    /** `messageKey` is a catalog key; `error` a caught value rendered through
+     *  `deviceRestoreErrorMessage` when it is shown. */
+    | { kind: "error"; messageKey?: string; error?: unknown };
   const [state, setState] = createSignal<State>({ kind: "idle" });
   const [canvasRef, setCanvasRef] = createSignal<HTMLCanvasElement | null>(
     null,
@@ -119,12 +122,13 @@ export default function RestoreViaDevicePanel(props: {
         err instanceof AuthHttpError &&
         err.status === 503 &&
         err.errorCode === "login-by-name-disabled";
+      // eslint-disable-next-line no-console
+      if (limit === null && !byNameOff) console.warn("device request: create failed", err);
       setRequestNote(
         limit ??
           (byNameOff
-            ? "Asking your other device is not available right now; the QR code still works."
-            : "Could not reach the server to ask your other device; the QR code still works. " +
-              (err instanceof Error ? err.message : String(err))),
+            ? t("device_link.error.ask_unavailable")
+            : t("device_link.error.ask_unreachable")),
       );
       setShowQr(true);
       return;
@@ -139,7 +143,7 @@ export default function RestoreViaDevicePanel(props: {
               abort.abort();
               flow.dispose();
               stopStatusPolling();
-              setState({ kind: "error", message: "Declined on another device." });
+              setState({ kind: "error", messageKey: "device_link.error.declined" });
             }
           }, 20_000);
         })
@@ -153,10 +157,7 @@ export default function RestoreViaDevicePanel(props: {
     try {
       flow = await props.prepare();
     } catch (err) {
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setState({ kind: "error", error: err });
       return;
     }
     try {
@@ -203,12 +204,7 @@ export default function RestoreViaDevicePanel(props: {
             );
             if (recovery === null) {
               flow.dispose();
-              setState({
-                kind: "error",
-                message:
-                  "The other device confirmed but did not send your identity. " +
-                  "Update Lakko on it and try again, or use your recovery phrase.",
-              });
+              setState({ kind: "error", messageKey: "device_link.error.no_identity" });
               return;
             }
             await props.onRestored(recovery);
@@ -216,28 +212,19 @@ export default function RestoreViaDevicePanel(props: {
             setState({ kind: "done" });
           } else if (outcome.kind === "timeout") {
             flow.dispose();
-            setState({
-              kind: "error",
-              message: "The other device did not answer in time. Try again.",
-            });
+            setState({ kind: "error", messageKey: "device_link.error.timeout" });
           } else {
             flow.dispose();
             setState({ kind: "idle" });
           }
         } catch (err) {
           flow.dispose();
-          setState({
-            kind: "error",
-            message: err instanceof Error ? err.message : String(err),
-          });
+          setState({ kind: "error", error: err });
         }
       })();
     } catch (err) {
       flow.dispose();
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setState({ kind: "error", error: err });
     }
   }
 
@@ -267,59 +254,61 @@ export default function RestoreViaDevicePanel(props: {
             disabled={props.disabled === true}
             onClick={() => void start()}
           >
-            Show pairing code
+            {t("device_link.show_code")}
           </button>
         </Match>
         <Match when={state().kind === "preparing"}>
-          <p class="lk-muted">Preparing...</p>
+          <p class="lk-muted">{t("common.preparing")}</p>
         </Match>
         <Match when={state().kind === "waiting"}>
           <div style={{ "text-align": "center", padding: "1rem 0" }}>
             <Show when={code() !== null}>
-              <p style={{ "margin-top": 0 }}>
-                Open Lakko on a device that is already signed in and confirm
-                this sign-in there.
+              <p style={{ "margin-top": 0 }}>{t("device_link.confirm_there")}</p>
+              <p class="form-info" style={{ "margin-bottom": "4px" }}>
+                {t("device_link.comparison_code")}
               </p>
-              <p class="form-info" style={{ "margin-bottom": "4px" }}>Comparison code</p>
-              <div class="lk-sas-code" aria-label="Comparison code">{code()}</div>
-              <p class="form-info">Make sure the other device shows the same code.</p>
+              <div class="lk-sas-code" aria-label={t("device_link.comparison_code")}>
+                {code()}
+              </div>
+              <p class="form-info">{t("device_link.compare_hint")}</p>
               <Show when={requestNote() !== null}>
                 <p class="form-error">{requestNote()}</p>
               </Show>
               <button type="button" onClick={() => setShowQr((v) => !v)}>
-                {showQr() ? "Hide the QR code" : "Show a QR code instead"}
+                {showQr() ? t("device_link.qr.hide") : t("device_link.qr.show")}
               </button>
             </Show>
             <canvas ref={(el) => setCanvasRef(el)} hidden={code() !== null && !showQr()} />
             <Show when={code() === null || showQr()}>
-              <p class="lk-muted">
-                On your other device, open Settings, then Devices, then Add a device, and
-                scan this code.
-              </p>
+              <p class="lk-muted">{t("device_link.qr.scan_hint")}</p>
             </Show>
             <button type="button" onClick={cancel}>
-              Cancel
+              {t("common.cancel")}
             </button>
           </div>
         </Match>
         <Match when={state().kind === "joining"}>
-          <p class="lk-muted">Transferring...</p>
+          <p class="lk-muted">{t("device_link.transferring")}</p>
         </Match>
         <Match when={state().kind === "done"}>
-          <p class="form-info">Restored.</p>
+          <p class="form-info">{t("device_link.restored")}</p>
         </Match>
         <Match when={state().kind === "error"}>
           {(_) => {
-            const s = state();
-            const message = s.kind === "error" ? s.message : "Unknown error.";
+            const message = (): string => {
+              const s = state();
+              if (s.kind !== "error") return "";
+              if (s.messageKey !== undefined) return t(s.messageKey);
+              return deviceRestoreErrorMessage(s.error);
+            };
             return (
               <div>
-                <p class="form-error">{message}</p>
+                <p class="form-error">{message()}</p>
                 <button
                   type="button"
                   onClick={() => setState({ kind: "idle" })}
                 >
-                  Try again
+                  {t("common.try_again")}
                 </button>
               </div>
             );

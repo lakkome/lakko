@@ -2,12 +2,552 @@
   "format": 1,
   "language": "fa",
   "messages": {
+    "auth.brand.body": {
+      "text": "گفتگوها، گروه‌ها، کانال‌ها و تماس‌ها به‌طور پیش‌فرض رمزگذاری سرتاسری دارند. سرورهای Lakko هرگز پیام‌های شما را نمی‌بینند.",
+      "status": "machine"
+    },
+    "auth.brand.foot": {
+      "text": "متن‌باز. بدون نیاز به شماره تلفن.",
+      "status": "machine"
+    },
+    "auth.brand.tagline": {
+      "text": "پیام‌های شما، قوانین شما.",
+      "status": "machine"
+    },
+    "auth.error.wrong_credentials": {
+      "text": "نام کاربری یا رمز عبور اشتباه است. آن‌ها را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "auth.explainer.never_leaves": {
+      "text": "رمز عبور شما هرگز از دستگاهتان خارج نمی‌شود. Lakko بدون دریافت آن، درستی‌اش را بررسی می‌کند؛ پس هیچ‌کس در Lakko نمی‌تواند آن را بخواند و هیچ‌کس نمی‌تواند آن را برایتان بازنشانی کند.",
+      "status": "machine"
+    },
+    "auth.explainer.same_answer": {
+      "text": "نام کاربری اشتباه و رمز عبور اشتباه پاسخ یکسانی می‌گیرند؛ پس هیچ‌کس نمی‌تواند از صفحه ورود برای فهمیدن اینکه کدام نام‌های کاربری وجود دارند استفاده کند.",
+      "status": "machine"
+    },
+    "auth.explainer.title": {
+      "text": "Lakko چگونه از رمز عبور شما محافظت می‌کند",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back": {
+      "text": "اگر آن را فراموش کنید، با عبارت بازیابی، دستگاه دیگری که هنوز وارد شده، سه کلمه از عبارت، یک برنامه احراز هویت، یا کدی که با ایمیل یا تلفن فرستاده می‌شود دوباره وارد می‌شوید.",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back_no_words": {
+      "text": "اگر آن را فراموش کنید، با عبارت بازیابی، دستگاه دیگری که هنوز وارد شده، یک برنامه احراز هویت، یا کدی که با ایمیل یا تلفن فرستاده می‌شود دوباره وارد می‌شوید.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "تغییر زبان",
       "status": "machine"
     },
+    "auth.login.forgot": {
+      "text": "رمز عبور را فراموش کرده‌اید؟",
+      "status": "machine"
+    },
+    "auth.login.lede": {
+      "text": "برای ادامه وارد شوید.",
+      "status": "machine"
+    },
+    "auth.login.no_account": {
+      "text": "در Lakko تازه‌وارد هستید؟ {link}",
+      "status": "machine"
+    },
+    "auth.login.passkey": {
+      "text": "استفاده از کلید عبور",
+      "status": "machine"
+    },
+    "auth.login.submit": {
+      "text": "ورود",
+      "status": "machine"
+    },
+    "auth.login.submitting": {
+      "text": "در حال ورود...",
+      "status": "machine"
+    },
+    "auth.login.title": {
+      "text": "خوش برگشتید",
+      "status": "machine"
+    },
+    "auth.passkey.error.cancelled": {
+      "text": "ورود با کلید عبور لغو شد.",
+      "status": "machine"
+    },
+    "auth.passkey.error.failed_status": {
+      "text": "ورود با کلید عبور ناموفق بود ({status}).",
+      "status": "machine"
+    },
+    "auth.passkey.error.generic": {
+      "text": "ورود با کلید عبور ممکن نشد. دوباره تلاش کنید یا از رمز عبور استفاده کنید.",
+      "status": "machine"
+    },
+    "auth.passkey.error.network": {
+      "text": "خطای شبکه هنگام ورود با کلید عبور.",
+      "status": "machine"
+    },
+    "auth.passkey.error.no_cached": {
+      "text": "اطلاعات ذخیره‌شده‌ای برای ورود با کلید عبور روی این دستگاه نیست. ابتدا با رمز عبور وارد شوید یا با عبارت بازیابی حساب را بازیابی کنید.",
+      "status": "machine"
+    },
+    "auth.passkey.error.not_registered": {
+      "text": "هیچ کلید عبوری برای این حساب ثبت نشده است. ابتدا با رمز عبور وارد شوید، سپس از صفحه اصلی یک کلید عبور اضافه کنید.",
+      "status": "machine"
+    },
+    "auth.passkey.error.server_disabled": {
+      "text": "سرور پشتیبانی از کلید عبور را فعال نکرده است.",
+      "status": "machine"
+    },
+    "auth.passkey.error.unsupported": {
+      "text": "این مرورگر از کلید عبور پشتیبانی نمی‌کند.",
+      "status": "machine"
+    },
+    "auth.passkey.error.wrong_account": {
+      "text": "این کلید عبور متعلق به حسابی غیر از حساب ذخیره‌شده روی این دستگاه است. ابتدا با رمز عبور وارد شوید.",
+      "status": "machine"
+    },
+    "auth.password.confirm.label": {
+      "text": "تکرار رمز عبور",
+      "status": "machine"
+    },
+    "auth.password.error.mismatch": {
+      "text": "رمزهای عبور یکسان نیستند. یک رمز عبور را دو بار وارد کنید.",
+      "status": "machine"
+    },
+    "auth.password.error.too_short": {
+      "text": "دست‌کم {count, plural, one {# نویسه} other {# نویسه}} به کار ببرید.",
+      "status": "machine"
+    },
+    "auth.password.hide": {
+      "text": "پنهان کردن رمز عبور",
+      "status": "machine"
+    },
+    "auth.password.hint": {
+      "text": "دست‌کم {count, plural, one {# نویسه} other {# نویسه}}.",
+      "status": "machine"
+    },
+    "auth.password.label": {
+      "text": "رمز عبور",
+      "status": "machine"
+    },
+    "auth.password.new.label": {
+      "text": "رمز عبور جدید",
+      "status": "machine"
+    },
+    "auth.password.new_confirm.label": {
+      "text": "تکرار رمز عبور جدید",
+      "status": "machine"
+    },
+    "auth.password.show": {
+      "text": "نمایش رمز عبور",
+      "status": "machine"
+    },
+    "auth.signup.error.enter_username": {
+      "text": "یک نام کاربری وارد کنید.",
+      "status": "machine"
+    },
+    "auth.signup.error.fix_name": {
+      "text": "پیش از ادامه، نام خود را اصلاح کنید.",
+      "status": "machine"
+    },
+    "auth.signup.error.generic": {
+      "text": "ساخت حساب ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "auth.signup.error.rate_limited": {
+      "text": "در حال حاضر حساب‌های جدید زیادی از این شبکه ساخته شده است. بعداً دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "auth.signup.error.username_taken": {
+      "text": "این نام کاربری گرفته شده است. نام دیگری انتخاب کنید.",
+      "status": "machine"
+    },
+    "auth.signup.have_account": {
+      "text": "حساب دارید؟ {link}",
+      "status": "machine"
+    },
+    "auth.signup.lede": {
+      "text": "رمز عبور شما هرگز از دستگاهتان خارج نمی‌شود. در مرحله بعد یک عبارت بازیابی می‌گیرید که باید آن را یادداشت کنید.",
+      "status": "machine"
+    },
+    "auth.signup.name.hint": {
+      "text": "به مخاطبانتان نشان داده می‌شود. برای نمایش نام کاربری، آن را خالی بگذارید.",
+      "status": "machine"
+    },
+    "auth.signup.name.label": {
+      "text": "نام (اختیاری)",
+      "status": "machine"
+    },
+    "auth.signup.submit": {
+      "text": "ساخت حساب",
+      "status": "machine"
+    },
+    "auth.signup.title": {
+      "text": "حساب خود را بسازید",
+      "status": "machine"
+    },
+    "auth.signup.username.hint": {
+      "text": "حروف لاتین، ارقام و _. دیگران شما را با این نام پیدا می‌کنند.",
+      "status": "machine"
+    },
+    "auth.signup.working.line": {
+      "text": "این کار فقط یک بار کمی طول می‌کشد. دیگر این‌طور منتظر نمی‌مانید.",
+      "status": "machine"
+    },
+    "auth.signup.working.title": {
+      "text": "در حال ساخت حساب شما...",
+      "status": "machine"
+    },
+    "auth.username.label": {
+      "text": "نام کاربری",
+      "status": "machine"
+    },
+    "call.guest.working.title": {
+      "text": "در حال ورود شما به تماس...",
+      "status": "machine"
+    },
+    "chats.empty.select": {
+      "text": "برای شروع پیام‌رسانی یک گفتگو را انتخاب کنید",
+      "status": "machine"
+    },
+    "common.back": {
+      "text": "بازگشت",
+      "status": "machine"
+    },
+    "common.cancel": {
+      "text": "لغو",
+      "status": "machine"
+    },
+    "common.checking": {
+      "text": "در حال بررسی...",
+      "status": "machine"
+    },
     "common.close": {
       "text": "بستن",
+      "status": "machine"
+    },
+    "common.confirm": {
+      "text": "تأیید",
+      "status": "machine"
+    },
+    "common.continue": {
+      "text": "ادامه",
+      "status": "machine"
+    },
+    "common.copied": {
+      "text": "کپی شد",
+      "status": "machine"
+    },
+    "common.copy": {
+      "text": "کپی",
+      "status": "machine"
+    },
+    "common.dismiss": {
+      "text": "بستن",
+      "status": "machine"
+    },
+    "common.done": {
+      "text": "تمام",
+      "status": "machine"
+    },
+    "common.email": {
+      "text": "ایمیل",
+      "status": "machine"
+    },
+    "common.error.a11y": {
+      "text": "خطا: {message}",
+      "status": "machine"
+    },
+    "common.error.offline": {
+      "text": "دسترسی به Lakko ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "common.error.server_unreachable": {
+      "text": "دسترسی به سرور ممکن نشد. اتصال خود را بررسی کنید.",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts": {
+      "text": "تلاش‌ها بیش از حد است. کمی صبر کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts_minutes": {
+      "text": "تلاش‌ها بیش از حد است. {minutes, plural, one {# دقیقه} other {# دقیقه}} دیگر دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "common.error.unavailable": {
+      "text": "این مورد اکنون در دسترس نیست. بعداً دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "common.loading": {
+      "text": "در حال بارگیری...",
+      "status": "machine"
+    },
+    "common.looking_up": {
+      "text": "در حال جستجو...",
+      "status": "machine"
+    },
+    "common.more_options": {
+      "text": "گزینه‌های بیشتر",
+      "status": "machine"
+    },
+    "common.optional": {
+      "text": "اختیاری",
+      "status": "machine"
+    },
+    "common.paste": {
+      "text": "جای‌گذاری",
+      "status": "machine"
+    },
+    "common.phone": {
+      "text": "تلفن",
+      "status": "machine"
+    },
+    "common.preparing": {
+      "text": "در حال آماده‌سازی...",
+      "status": "machine"
+    },
+    "common.sending": {
+      "text": "در حال ارسال...",
+      "status": "machine"
+    },
+    "common.try_again": {
+      "text": "تلاش دوباره",
+      "status": "machine"
+    },
+    "device_link.compare_hint": {
+      "text": "مطمئن شوید دستگاه دیگر همین کد را نشان می‌دهد.",
+      "status": "machine"
+    },
+    "device_link.comparison_code": {
+      "text": "کد مقایسه",
+      "status": "machine"
+    },
+    "device_link.confirm_there": {
+      "text": "Lakko را روی دستگاهی که از قبل وارد شده باز کنید و این ورود را آنجا تأیید کنید.",
+      "status": "machine"
+    },
+    "device_link.error.ask_unavailable": {
+      "text": "درخواست از دستگاه دیگرتان اکنون در دسترس نیست؛ کد QR همچنان کار می‌کند.",
+      "status": "machine"
+    },
+    "device_link.error.ask_unreachable": {
+      "text": "برای درخواست از دستگاه دیگرتان دسترسی به سرور ممکن نشد؛ کد QR همچنان کار می‌کند.",
+      "status": "machine"
+    },
+    "device_link.error.declined": {
+      "text": "روی دستگاه دیگر رد شد.",
+      "status": "machine"
+    },
+    "device_link.error.generic": {
+      "text": "بازیابی از دستگاه دیگرتان ممکن نشد. دوباره تلاش کنید یا از عبارت بازیابی استفاده کنید.",
+      "status": "machine"
+    },
+    "device_link.error.identity_mismatch": {
+      "text": "هویتی که از دستگاه دیگرتان رسید با هویت منتشرشده این حساب مطابقت ندارد؛ از آن استفاده نمی‌شود.",
+      "status": "machine"
+    },
+    "device_link.error.name_other_account": {
+      "text": "نامی که وارد کردید متعلق به حساب دیگری است. چیزی روی این دستگاه تغییر نکرد.",
+      "status": "machine"
+    },
+    "device_link.error.no_identity": {
+      "text": "دستگاه دیگر تأیید کرد اما هویت شما را نفرستاد. Lakko را روی آن به‌روز کنید و دوباره تلاش کنید، یا از عبارت بازیابی استفاده کنید.",
+      "status": "machine"
+    },
+    "device_link.error.not_let_in": {
+      "text": "دستگاه دیگرتان هویت را فرستاد، اما ورود این دستگاه ممکن نشد. دوباره تلاش کنید یا از عبارت بازیابی استفاده کنید.",
+      "status": "machine"
+    },
+    "device_link.error.request_limited": {
+      "text": "درخواست‌ها به دستگاه‌های دیگرتان بیش از حد است. چند دقیقه دیگر دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "device_link.error.timeout": {
+      "text": "دستگاه دیگر به‌موقع پاسخ نداد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "device_link.pairing.needs_username": {
+      "text": "برای افزودن دستگاه دیگر، ابتدا یک نام کاربری تعیین کنید.",
+      "status": "machine"
+    },
+    "device_link.pairing.unsupported": {
+      "text": "این کد از نسخه دیگری از Lakko است. Lakko را روی هر دو دستگاه به‌روز کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "device_link.pairing.wrong_account": {
+      "text": "این کد برای حساب دیگری است. بررسی کنید دستگاه جدید همان نام کاربری این دستگاه را به کار می‌برد.",
+      "status": "machine"
+    },
+    "device_link.qr.hide": {
+      "text": "پنهان کردن کد QR",
+      "status": "machine"
+    },
+    "device_link.qr.intro": {
+      "text": "این کد را به دستگاهی نشان دهید که حسابتان هنوز روی آن است. آن دستگاه این دستگاه را اضافه می‌کند و هویت شما را با رمزگذاری سرتاسری منتقل می‌کند، بدون اینکه عبارتی تایپ کنید.",
+      "status": "machine"
+    },
+    "device_link.qr.scan_hint": {
+      "text": "روی دستگاه دیگرتان، تنظیمات، سپس دستگاه‌ها، سپس افزودن دستگاه را باز کنید و این کد را اسکن کنید.",
+      "status": "machine"
+    },
+    "device_link.qr.show": {
+      "text": "به‌جای آن کد QR نشان بده",
+      "status": "machine"
+    },
+    "device_link.qr.waiting": {
+      "text": "در انتظار اسکن این کد با دستگاه دیگرتان...",
+      "status": "machine"
+    },
+    "device_link.request.added": {
+      "text": "دستگاه اضافه شد.",
+      "status": "machine"
+    },
+    "device_link.request.adding": {
+      "text": "در حال افزودن دستگاه...",
+      "status": "machine"
+    },
+    "device_link.request.body": {
+      "text": "یک دستگاه جدید درخواست پیوستن به حساب شما را دارد. آن دستگاه یک کد نشان می‌دهد.",
+      "status": "machine"
+    },
+    "device_link.request.code_label": {
+      "text": "کد روی دستگاه جدید",
+      "status": "machine"
+    },
+    "device_link.request.confirm": {
+      "text": "بله، اضافه کن",
+      "status": "machine"
+    },
+    "device_link.request.confirm_only_if": {
+      "text": "فقط در صورتی تأیید کنید که دستگاه جدید دقیقاً همین کد را نشان دهد.",
+      "status": "machine"
+    },
+    "device_link.request.decline": {
+      "text": "این من نیستم",
+      "status": "machine"
+    },
+    "device_link.request.declined": {
+      "text": "رد شد. اگر این اتفاق تکرار شد، رمز عبور خود را تغییر دهید.",
+      "status": "machine"
+    },
+    "device_link.request.error.generic": {
+      "text": "افزودن دستگاه ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "device_link.request.error.no_device_key": {
+      "text": "کلید دستگاه در این مرورگر وجود ندارد. دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "device_link.request.title": {
+      "text": "این شما هستید؟",
+      "status": "machine"
+    },
+    "device_link.restored": {
+      "text": "بازیابی شد.",
+      "status": "machine"
+    },
+    "device_link.show_code": {
+      "text": "نمایش کد جفت‌سازی",
+      "status": "machine"
+    },
+    "device_link.transferring": {
+      "text": "در حال انتقال...",
+      "status": "machine"
+    },
+    "devices.add.e2ee_note": {
+      "text": "اتصال بین دو دستگاه شما با رمزگذاری سرتاسری انجام می‌شود.",
+      "status": "machine"
+    },
+    "devices.add.error.generic": {
+      "text": "اتصال این دستگاه ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "devices.add.joining": {
+      "text": "در حال اتصال این دستگاه...",
+      "status": "machine"
+    },
+    "devices.add.linked": {
+      "text": "متصل شد. این دستگاه اکنون بخشی از حساب شماست.",
+      "status": "machine"
+    },
+    "devices.add.side.scan": {
+      "text": "اسکن کد",
+      "status": "machine"
+    },
+    "devices.add.side.scan_detail": {
+      "text": "این دستگاه از قبل وارد شده است: کد دستگاه جدید را اسکن می‌کند و به آن اجازه ورود می‌دهد.",
+      "status": "machine"
+    },
+    "devices.add.side.show": {
+      "text": "نمایش کد",
+      "status": "machine"
+    },
+    "devices.add.side.show_detail": {
+      "text": "این دستگاه جدید است: وقتی دستگاه دیگری کدش را اسکن کند، به حساب شما می‌پیوندد.",
+      "status": "machine"
+    },
+    "devices.add.sign_in_first": {
+      "text": "برای افزودن دستگاه، ابتدا وارد شوید.",
+      "status": "machine"
+    },
+    "devices.add.title": {
+      "text": "افزودن دستگاه",
+      "status": "machine"
+    },
+    "devices.scan.confirm.body": {
+      "text": "این کار به دستگاه اسکن‌شده دسترسی کامل به حسابتان می‌دهد: پیام‌ها، مخاطبان و هویت شما. فقط در صورتی ادامه دهید که کد روی دستگاه جدید خودتان باشد.",
+      "status": "machine"
+    },
+    "devices.scan.confirm.submit": {
+      "text": "اتصال دستگاه",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title": {
+      "text": "این دستگاه متصل شود؟",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied": {
+      "text": "Lakko نمی‌تواند از دوربین استفاده کند. در تنظیمات اجازه دسترسی به دوربین را بدهید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_failed": {
+      "text": "دوربین راه‌اندازی نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "devices.scan.error.no_camera": {
+      "text": "این دستگاه دوربین پشتی ندارد.",
+      "status": "machine"
+    },
+    "devices.scan.error.not_a_code": {
+      "text": "این کد دستگاه Lakko نیست. دوربین را به سمت کد روی دستگاه دیگرتان بگیرید.",
+      "status": "machine"
+    },
+    "devices.scan.intro": {
+      "text": "دوربین را به سمت کدی بگیرید که دستگاه جدیدتان نشان می‌دهد.",
+      "status": "machine"
+    },
+    "devices.scan.open_camera": {
+      "text": "باز کردن دوربین",
+      "status": "machine"
+    },
+    "display_name.error.control": {
+      "text": "نویسه‌های نامرئی یا جهت‌دهنده متن را حذف کنید",
+      "status": "machine"
+    },
+    "display_name.error.line_break": {
+      "text": "فقط یک خط",
+      "status": "machine"
+    },
+    "display_name.error.too_long": {
+      "text": "حداکثر {count, plural, one {# نویسه} other {# نویسه}}",
+      "status": "machine"
+    },
+    "display_name.error.too_many_bytes": {
+      "text": "این نام خیلی طولانی است",
+      "status": "machine"
+    },
+    "display_name.error.unknown": {
+      "text": "این نام قابل استفاده نیست",
       "status": "machine"
     },
     "language.name.ar": {
@@ -72,6 +612,514 @@
     },
     "nav.settings": {
       "text": "تنظیمات",
+      "status": "machine"
+    },
+    "recovery.access_only_note": {
+      "text": "برنامه احراز هویت یا کد شما را دوباره وارد حساب می‌کند؛ اما برای گفتگوهایتان به عبارت بازیابی یا دستگاه دیگری نیاز دارید.",
+      "status": "machine"
+    },
+    "recovery.cached_account": {
+      "text": "{username} روی این دستگاه",
+      "status": "machine"
+    },
+    "recovery.contact.change": {
+      "text": "استفاده از ایمیل یا تلفن دیگر",
+      "status": "machine"
+    },
+    "recovery.contact.code_label": {
+      "text": "کدی که فرستادیم",
+      "status": "machine"
+    },
+    "recovery.contact.email_label": {
+      "text": "نشانی ایمیل",
+      "status": "machine"
+    },
+    "recovery.contact.error.bad_contact": {
+      "text": "این شبیه نشانی ایمیل یا شماره تلفن نیست. آن را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.contact.error.enter_code": {
+      "text": "کد شش‌رقمی‌ای را که فرستادیم وارد کنید.",
+      "status": "machine"
+    },
+    "recovery.contact.error.generic": {
+      "text": "بررسی کد ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_email": {
+      "text": "یک نشانی ایمیل معتبر وارد کنید.",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_phone": {
+      "text": "شماره تلفن را در قالب بین‌المللی وارد کنید، مانند +15551234567.",
+      "status": "machine"
+    },
+    "recovery.contact.error.send_failed": {
+      "text": "ارسال کد ممکن نشد. نام کاربری را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.contact.error.unavailable": {
+      "text": "بازیابی با ایمیل و تلفن اینجا در دسترس نیست. از راه دیگری استفاده کنید.",
+      "status": "machine"
+    },
+    "recovery.contact.error.wrong": {
+      "text": "این کد کار نکرد. کدی را که فرستادیم بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.contact.intro": {
+      "text": "یک کد شش‌رقمی به نشانی ایمیل یا شماره تلفنی که در تنظیمات تعیین کرده‌اید می‌فرستیم. این کد شما را دوباره وارد حساب می‌کند؛ اما برای گفتگوهایتان به عبارت بازیابی یا دستگاه دیگری نیاز دارید.",
+      "status": "machine"
+    },
+    "recovery.contact.phone_label": {
+      "text": "شماره تلفن",
+      "status": "machine"
+    },
+    "recovery.contact.send": {
+      "text": "ارسال کد",
+      "status": "machine"
+    },
+    "recovery.contact.send_by": {
+      "text": "ارسال کد از طریق",
+      "status": "machine"
+    },
+    "recovery.contact.sent_email": {
+      "text": "اگر این نشانی برای این حساب تعیین شده باشد، یک کد شش‌رقمی در راه است. آن را در زیر وارد کنید.",
+      "status": "machine"
+    },
+    "recovery.contact.sent_phone": {
+      "text": "اگر این شماره برای این حساب تعیین شده باشد، یک کد شش‌رقمی در راه است. آن را در زیر وارد کنید.",
+      "status": "machine"
+    },
+    "recovery.device.intro": {
+      "text": "نام کاربری خود را وارد کنید، سپس روی دستگاهی که هنوز وارد شده تأیید کنید و کدی را که نشان می‌دهد مقایسه کنید. هیچ چیزی فرستاده نمی‌شود که سرورهای Lakko بتوانند بخوانند. نیازی به دوربین نیست؛ اگر بخواهید کد QR هم هست.",
+      "status": "machine"
+    },
+    "recovery.device.intro_qr": {
+      "text": "دستگاه دیگرتان این دستگاه را متصل می‌کند و حسابتان را به آن منتقل می‌کند.",
+      "status": "machine"
+    },
+    "recovery.device.restoring": {
+      "text": "در حال بازیابی {username}",
+      "status": "machine"
+    },
+    "recovery.error.code_send_limited": {
+      "text": "به‌تازگی کدی فرستادیم. پیش از درخواست کد دیگر چند دقیقه صبر کنید.",
+      "status": "machine"
+    },
+    "recovery.error.generic": {
+      "text": "بازیابی حساب ممکن نشد. کلمات را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.error.no_match": {
+      "text": "با این حساب مطابقت نداشت. کلمات و نام کاربری را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.lede": {
+      "text": "روش بازگشت به حساب را انتخاب کنید.",
+      "status": "machine"
+    },
+    "recovery.lede_account": {
+      "text": "انتخاب کنید چگونه به {username} برگردید.",
+      "status": "machine"
+    },
+    "recovery.method.contact.sub": {
+      "text": "کدی که به ایمیل یا تلفن تعیین‌شده شما فرستاده می‌شود.",
+      "status": "machine"
+    },
+    "recovery.method.contact.title": {
+      "text": "ایمیل یا تلفن",
+      "status": "machine"
+    },
+    "recovery.method.device.sub": {
+      "text": "از دستگاهی که هنوز وارد شده تأیید کنید.",
+      "status": "machine"
+    },
+    "recovery.method.device.title": {
+      "text": "دستگاه دیگر",
+      "status": "machine"
+    },
+    "recovery.method.phrase.restore_sub": {
+      "text": "هر بیست‌وچهار کلمه را وارد کنید.",
+      "status": "machine"
+    },
+    "recovery.method.phrase.sub": {
+      "text": "بیست‌وچهار کلمه خود را وارد کنید و رمز عبور جدیدی انتخاب کنید.",
+      "status": "machine"
+    },
+    "recovery.method.phrase.title": {
+      "text": "عبارت بازیابی",
+      "status": "machine"
+    },
+    "recovery.method.shares.sub": {
+      "text": "سهم‌هایی که به افراد مورد اعتمادتان داده‌اید.",
+      "status": "machine"
+    },
+    "recovery.method.shares.title": {
+      "text": "سهم‌های بازیابی اجتماعی",
+      "status": "machine"
+    },
+    "recovery.method.totp.sub": {
+      "text": "کدی از برنامه احراز هویت شما.",
+      "status": "machine"
+    },
+    "recovery.method.totp.title": {
+      "text": "برنامه احراز هویت",
+      "status": "machine"
+    },
+    "recovery.method.words.restore_sub": {
+      "text": "سه کلمه از عبارت بازیابی شما.",
+      "status": "machine"
+    },
+    "recovery.method.words.sub": {
+      "text": "سه کلمه از عبارت شما، اگر این میان‌بر فعال باشد.",
+      "status": "machine"
+    },
+    "recovery.method.words.title": {
+      "text": "سه کلمه",
+      "status": "machine"
+    },
+    "recovery.methods.back": {
+      "text": "بازگشت به همه روش‌ها",
+      "status": "machine"
+    },
+    "recovery.phrase.intro": {
+      "text": "بیست‌وچهار کلمه خود را وارد کنید، سپس رمز عبور جدیدی انتخاب کنید.",
+      "status": "machine"
+    },
+    "recovery.remembered": {
+      "text": "رمز عبورتان یادتان آمد؟ {link}",
+      "status": "machine"
+    },
+    "recovery.shares.copy_failed": {
+      "text": "کپی ممکن نشد. سهم را انتخاب کنید و دستی کپی کنید.",
+      "status": "machine"
+    },
+    "recovery.shares.error.combine_failed": {
+      "text": "ترکیب سهم‌ها ممکن نشد. بررسی کنید که هر کدام کامل باشد و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.shares.error.generic": {
+      "text": "ساخت سهم‌ها ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.shares.error.too_few": {
+      "text": "دست‌کم دو سهم را جای‌گذاری کنید، هر کدام در یک خط.",
+      "status": "machine"
+    },
+    "recovery.shares.generate": {
+      "text": "ساخت {count, plural, one {# سهم} other {# سهم}}",
+      "status": "machine"
+    },
+    "recovery.shares.generating": {
+      "text": "در حال ساخت...",
+      "status": "machine"
+    },
+    "recovery.shares.help": {
+      "text": "آن‌ها را دقیقاً همان‌طور که فرستاده شده‌اند جای‌گذاری کنید. به همان تعدادی نیاز دارید که هنگام ساخت توافق شده بود، معمولاً سه از پنج.",
+      "status": "machine"
+    },
+    "recovery.shares.intro": {
+      "text": "سهم‌هایی را که به شما داده شده جای‌گذاری کنید، هر کدام در یک خط، سپس رمز عبور جدیدی انتخاب کنید.",
+      "status": "machine"
+    },
+    "recovery.shares.label": {
+      "text": "سهم‌های بازیابی، هر کدام در یک خط",
+      "status": "machine"
+    },
+    "recovery.shares.panel_body": {
+      "text": "عبارت را به {count, plural, one {# سهم} other {# سهم}} برای افراد مورد اعتمادتان تقسیم کنید. هر {threshold} سهم از آن‌ها عبارت را بازسازی می‌کنند؛ تعداد کمتر هیچ چیزی را فاش نمی‌کند. به هر نفر یک سهم بدهید.",
+      "status": "machine"
+    },
+    "recovery.shares.usage": {
+      "text": "برای استفاده در آینده، در صفحه بازیابی {method} را انتخاب کنید و هر {threshold} سهم را جای‌گذاری کنید.",
+      "status": "machine"
+    },
+    "recovery.submit": {
+      "text": "بازیابی حساب",
+      "status": "machine"
+    },
+    "recovery.title": {
+      "text": "حساب خود را بازیابی کنید",
+      "status": "machine"
+    },
+    "recovery.totp.code_label": {
+      "text": "کد برنامه",
+      "status": "machine"
+    },
+    "recovery.totp.error.enter_code": {
+      "text": "کد شش‌رقمی برنامه احراز هویت خود را وارد کنید.",
+      "status": "machine"
+    },
+    "recovery.totp.error.generic": {
+      "text": "بررسی کد ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.totp.error.unavailable": {
+      "text": "بازیابی با برنامه احراز هویت اینجا در دسترس نیست. از راه دیگری استفاده کنید.",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong": {
+      "text": "این کد کار نکرد. برنامه را بررسی کنید و کد بعدی را امتحان کنید.",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong_username": {
+      "text": "این کد کار نکرد. نام کاربری و برنامه را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.totp.intro": {
+      "text": "از کد شش‌رقمی برنامه احراز هویتی که در تنظیمات راه‌اندازی کرده‌اید استفاده کنید. این کد شما را دوباره وارد حساب می‌کند؛ اما برای گفتگوهایتان به عبارت بازیابی یا دستگاه دیگری نیاز دارید.",
+      "status": "machine"
+    },
+    "recovery.username_required": {
+      "text": "نام کاربری حساب را وارد کنید.",
+      "status": "machine"
+    },
+    "recovery.username_required_to_recover": {
+      "text": "نام کاربری حسابی را که می‌خواهید بازیابی کنید وارد کنید.",
+      "status": "machine"
+    },
+    "recovery.words.error.generic": {
+      "text": "بررسی کلمات ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match": {
+      "text": "این کلمات مطابقت نداشتند.",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match_tries": {
+      "text": "این کلمات مطابقت نداشتند. {count, plural, one {# تلاش دیگر باقی مانده} other {# تلاش دیگر باقی مانده}} تا میان‌بر سه‌کلمه‌ای غیرفعال شود.",
+      "status": "machine"
+    },
+    "recovery.words.error.open_failed": {
+      "text": "سرور پاسخ داد، اما داده‌های بازیابی باز نشد. هیچ چیزی تغییر نکرد.",
+      "status": "machine"
+    },
+    "recovery.words.error.server_off": {
+      "text": "بازیابی با سه کلمه در این سرور در دسترس نیست.",
+      "status": "machine"
+    },
+    "recovery.words.intro": {
+      "text": "سه کلمه از عبارت بازیابی خود را وارد کنید و رمز عبور جدیدی انتخاب کنید. اول، کدام حساب؟",
+      "status": "machine"
+    },
+    "recovery.words.prompt": {
+      "text": "{username}: کلمه‌های {positions} از عبارت بازیابی خود را وارد کنید.",
+      "status": "machine"
+    },
+    "recovery.words.prompt_restore": {
+      "text": "کلمه‌های {positions} از عبارت بازیابی خود را وارد کنید.",
+      "status": "machine"
+    },
+    "recovery.words.switched_off": {
+      "text": "میان‌بر سه‌کلمه‌ای اکنون برای این حساب غیرفعال شد. از عبارت بازیابی کامل یا دستگاه دیگری استفاده کنید.",
+      "status": "machine"
+    },
+    "recovery.words.switched_off_restore": {
+      "text": "میان‌بر سه‌کلمه‌ای اکنون برای این حساب غیرفعال شد. از دستگاه دیگری یا عبارت بازیابی کامل استفاده کنید.",
+      "status": "machine"
+    },
+    "recovery.words.tries_left": {
+      "text": "{count, plural, one {# تلاش باقی مانده است.} other {# تلاش باقی مانده است.}}",
+      "status": "machine"
+    },
+    "recovery.words.unavailable": {
+      "text": "بازیابی با سه کلمه اینجا در دسترس نیست. از راه دیگری استفاده کنید.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.acknowledge": {
+      "text": "می‌دانم که از دست دادن این کلمات یعنی از دست دادن دسترسی به این حساب.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.back": {
+      "text": "بازگشت به کلمات",
+      "status": "machine"
+    },
+    "recovery_phrase.check.lede": {
+      "text": "کلمه‌های {positions} را از آنچه یادداشت کرده‌اید وارد کنید.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_many": {
+      "text": "کلمه‌های {positions} مطابقت ندارند. یادداشت‌های خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_one": {
+      "text": "کلمه {position} مطابقت ندارد. یادداشت‌های خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.title": {
+      "text": "یادداشت‌های خود را بررسی کنید",
+      "status": "machine"
+    },
+    "recovery_phrase.copy_failed": {
+      "text": "کپی ممکن نشد. به‌جای آن کلمات را یادداشت کنید.",
+      "status": "machine"
+    },
+    "recovery_phrase.error.incomplete": {
+      "text": "هر بیست‌وچهار کلمه عبارت بازیابی را وارد کنید.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.acknowledge": {
+      "text": "این بیست‌وچهار کلمه را یادداشت کرده‌ام و می‌دانم که از دست دادن آن‌ها یعنی از دست دادن دسترسی به این حساب.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.error.generic": {
+      "text": "پایان کار ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.finishing": {
+      "text": "در حال پایان...",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.lede": {
+      "text": "شما هویت جدیدی برای {username} ساختید. این بیست‌وچهار کلمه تنها راه بازیابی آن است اگر دوباره دسترسی را از دست بدهید. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.safety_note": {
+      "text": "مخاطبانتان خواهند دید که شماره امنیتی شما تغییر کرده است و پیش از ارسال پیام امن به شما باید دوباره شما را تأیید کنند.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.title": {
+      "text": "عبارت بازیابی جدید خود را ذخیره کنید",
+      "status": "machine"
+    },
+    "recovery_phrase.guest.lede": {
+      "text": "حساب شما بدون رمز عبور ساخته شد. این بیست‌وچهار کلمه تنها راه بازگشت به آن روی دستگاه دیگر یا پس از پاک کردن داده‌های این مرورگر است. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
+      "status": "machine"
+    },
+    "recovery_phrase.label": {
+      "text": "عبارت بازیابی",
+      "status": "machine"
+    },
+    "recovery_phrase.save.anyone_with_words": {
+      "text": "هر کسی این کلمه‌ها را داشته باشد می‌تواند پیام‌هایتان را بخواند و به جای شما عمل کند. آن‌ها را با کسی به اشتراک نگذارید.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.lede": {
+      "text": "اگر رمز عبور و دستگاه‌هایتان را از دست بدهید، این بیست‌وچهار کلمه تنها راه بازگشت به حسابتان است. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.no_screenshot": {
+      "text": "آن‌ها را به صورت اسکرین‌شات یا در یک فایل متنی ساده نگه ندارید. Lakko نمی‌تواند دوباره آن‌ها را نشان دهد.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.title": {
+      "text": "عبارت بازیابی خود را ذخیره کنید",
+      "status": "machine"
+    },
+    "recovery_phrase.save.vault_note": {
+      "text": "روی دستگاه جدید معمولاً فقط سه کلمه از این‌ها از شما خواسته می‌شود، یعنی کلمه‌های {positions}. با این حال کل فهرست را نگه دارید: اگر این میان‌بر روزی غیرفعال شود، تنها راه بازگشت همین است.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.written": {
+      "text": "آن‌ها را یادداشت کرده‌ام",
+      "status": "machine"
+    },
+    "recovery_phrase.step": {
+      "text": "مرحله {current} از {total}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_label": {
+      "text": "کلمه {position}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_placeholder": {
+      "text": "کلمه {position}",
+      "status": "machine"
+    },
+    "restore_identity.device_intro": {
+      "text": "دستگاهی که هنوز وارد شده یک درخواست نشان می‌دهد؛ آن را آنجا تأیید کنید و کد را مقایسه کنید. انتقال رمزگذاری سرتاسری دارد و سرورهای Lakko نمی‌توانند آن را بخوانند. نیازی به دوربین نیست؛ اگر بخواهید کد QR هم هست.",
+      "status": "machine"
+    },
+    "restore_identity.error.bad_saved_account": {
+      "text": "حساب ذخیره‌شده روی این دستگاه مشکلی دارد. خارج شوید و دوباره وارد شوید، یا از عبارت بازیابی استفاده کنید.",
+      "status": "machine"
+    },
+    "restore_identity.error.generic": {
+      "text": "بازیابی هویت شما ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "restore_identity.error.invalid_phrase": {
+      "text": "این یک عبارت بازیابی معتبر نیست. هر کلمه را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "restore_identity.error.not_published": {
+      "text": "هیچ هویت منتشرشده‌ای برای تأیید هویت بازیابی‌شده پیدا نشد. دوباره تلاش کنید، یا از دستگاهی که هنوز حساب شما را دارد بازیابی کنید.",
+      "status": "machine"
+    },
+    "restore_identity.error.nothing": {
+      "text": "چیزی برای بازیابی نیست. ابتدا وارد شوید.",
+      "status": "machine"
+    },
+    "restore_identity.error.phrase_mismatch": {
+      "text": "این عبارت بازیابی با هویت این حساب مطابقت ندارد. عبارت را بررسی کنید، یا به‌جای آن یک دستگاه موجود را جفت کنید.",
+      "status": "machine"
+    },
+    "restore_identity.error.unreachable": {
+      "text": "برای تأیید هویت بازیابی‌شده دسترسی به فهرست ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "شما با {username} روی یک دستگاه جدید وارد شده‌اید. برای حفظ مخاطبانی که از قبل به شما اعتماد دارند، هویت خود را با سه کلمه، عبارت بازیابی، یا از دستگاهی که هنوز وارد شده بازیابی کنید.",
+      "status": "machine"
+    },
+    "restore_identity.lede_no_words": {
+      "text": "شما با {username} روی یک دستگاه جدید وارد شده‌اید. برای حفظ مخاطبانی که از قبل به شما اعتماد دارند، هویت خود را با عبارت بازیابی، یا از دستگاهی که هنوز وارد شده بازیابی کنید.",
+      "status": "machine"
+    },
+    "restore_identity.log_out": {
+      "text": "خروج",
+      "status": "machine"
+    },
+    "restore_identity.lost.create": {
+      "text": "ساخت هویت جدید",
+      "status": "machine"
+    },
+    "restore_identity.lost.creating": {
+      "text": "در حال ساخت هویت جدید...",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.generic": {
+      "text": "ساخت هویت جدید ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "restore_identity.lost.sub": {
+      "text": "شروع با هویت جدید",
+      "status": "machine"
+    },
+    "restore_identity.lost.summary": {
+      "text": "نه عبارت بازیابی دارم و نه دستگاه دیگری",
+      "status": "machine"
+    },
+    "restore_identity.lost.warning": {
+      "text": "این کار هویت جدیدی برای حساب شما می‌سازد. مخاطبانتان باید دوباره شما را تأیید کنند، پیام‌های روی دستگاه گم‌شده شما همچنان ناخوانا می‌مانند، و یک عبارت بازیابی جدید برای ذخیره می‌گیرید. فقط زمانی این کار را انجام دهید که هم عبارت بازیابی و هم همه دستگاه‌های دیگرتان را از دست داده باشید.",
+      "status": "machine"
+    },
+    "restore_identity.not_you": {
+      "text": "حساب شما نیست؟",
+      "status": "machine"
+    },
+    "restore_identity.phrase_intro": {
+      "text": "بیست‌وچهار کلمه را به ترتیب تایپ کنید. Lakko پیش از ادامه آن‌ها را با حساب شما مقایسه می‌کند.",
+      "status": "machine"
+    },
+    "restore_identity.submit": {
+      "text": "بازیابی",
+      "status": "machine"
+    },
+    "restore_identity.submitting": {
+      "text": "در حال بازیابی...",
+      "status": "machine"
+    },
+    "restore_identity.title": {
+      "text": "هویت خود را بازیابی کنید",
+      "status": "machine"
+    },
+    "security.identity_changed.body": {
+      "text": "اگر این کار را خودتان روی دستگاه دیگری انجام داده‌اید، این پیام را ببندید. اگر نه، شماره‌های امنیتی را با مخاطبانتان تأیید کنید و رمز عبور و کلیدهای عبور خود را تغییر دهید.",
+      "status": "machine"
+    },
+    "security.identity_changed.title": {
+      "text": "کلید امنیتی حساب شما تغییر کرد.",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -148,6 +1196,34 @@
     },
     "settings.section.security": {
       "text": "امنیت",
+      "status": "machine"
+    },
+    "username.a11y_hint": {
+      "text": "نام کاربری: {message}",
+      "status": "machine"
+    },
+    "username.error.empty": {
+      "text": "یک نام کاربری وارد کنید",
+      "status": "machine"
+    },
+    "username.error.invalid_characters": {
+      "text": "فقط حروف لاتین، ارقام و _",
+      "status": "machine"
+    },
+    "username.error.too_long": {
+      "text": "حداکثر {count, plural, one {# نویسه} other {# نویسه}}",
+      "status": "machine"
+    },
+    "username.error.too_short": {
+      "text": "دست‌کم {count, plural, one {# نویسه} other {# نویسه}}",
+      "status": "machine"
+    },
+    "username.error.unknown": {
+      "text": "این نام کاربری قابل استفاده نیست",
+      "status": "machine"
+    },
+    "username.hint.shown_as": {
+      "text": "به این شکل نمایش داده می‌شود: {username}",
       "status": "machine"
     }
   }

@@ -63,7 +63,7 @@ import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
 import SaveFreshPhrasePrompt from "../auth/SaveFreshPhrasePrompt";
 import { isAbortError } from "../auth/pow";
 import { signupErrorMessage } from "../auth/auth-error-copy";
-import { GUEST_WORKING_TITLE, SIGNUP_WORKING_LINE } from "../auth/signup-working";
+import { guestWorkingTitle, signupWorkingLine } from "../auth/signup-working";
 import { loadWasm } from "../wasm";
 import { DiscoveryClient, DiscoveryHttpError, isDiscoveryRateLimited } from "../discovery/client";
 import {
@@ -422,10 +422,10 @@ export default function JoinCall() {
                   same once-only work as a signup. */}
               <div role="status" aria-live="polite" class="lk-stack" style={{ gap: "8px" }}>
                 <button class="primary" type="button" disabled aria-busy="true">
-                  <span class="lakko-spinner" aria-hidden="true" /> {GUEST_WORKING_TITLE}
+                  <span class="lakko-spinner" aria-hidden="true" /> {guestWorkingTitle()}
                 </button>
                 <p class="form-info" style={{ margin: 0 }}>
-                  {SIGNUP_WORKING_LINE}
+                  {signupWorkingLine()}
                 </p>
                 <button type="button" onClick={onCancelGuest}>
                   Cancel

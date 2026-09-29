@@ -570,12 +570,13 @@ struct AppRoot: View, Equatable {
                 // phrase.
                 services.deviceGroupSync.clear()
             }
-        case .saveFreshPhrase:
+        case .saveFreshPhrase(let account):
             // ADR-0017 lost-everything fallback — the user minted a
             // brand-new identity (already published, no proof); show the
             // new recovery phrase for them to save before the session lands.
             SaveFreshPhraseScreen(
                 phrase: authRepository.freshPhrase() ?? "",
+                username: account.username,
                 onConfirm: { try? authRepository.confirmFreshPhraseSaved() }
             )
             .onAppear { services.deviceGroupSync.clear() }

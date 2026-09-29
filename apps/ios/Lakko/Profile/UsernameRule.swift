@@ -23,12 +23,12 @@ public enum UsernameRuleReason: Equatable, Sendable {
     /// More than 32 characters after normalisation.
     case tooLong
 
-    /// The UX spec §4 reason copy.
+    /// The UX spec §4 reason copy, in the interface language (ADR-0058).
     public var message: String {
         switch self {
-        case .invalidCharacters: return "Only Latin letters, digits and _"
-        case .tooShort: return "At least 3 characters"
-        case .tooLong: return "At most 32 characters"
+        case .invalidCharacters: return Localization.text("username.error.invalid_characters")
+        case .tooShort: return Localization.text("username.error.too_short", counts: ["count": 3])
+        case .tooLong: return Localization.text("username.error.too_long", counts: ["count": 32])
         }
     }
 }

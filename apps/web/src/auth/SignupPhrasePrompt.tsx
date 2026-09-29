@@ -25,9 +25,11 @@ import {
   confirmationComplete,
   confirmationErrorMessage,
   confirmationMismatches,
+  listPositions,
   phraseWords,
   pickConfirmationPositions,
 } from "./phrase-confirm";
+import { t } from "../l10n";
 import {
   DEFAULT_SHARE_COUNT,
   DEFAULT_THRESHOLD,
@@ -35,12 +37,6 @@ import {
 } from "../recovery/shamir";
 
 type Step = "show" | "confirm";
-
-/** "5, 14 and 21" */
-function listPositions(positions: readonly number[]): string {
-  if (positions.length <= 1) return positions.join("");
-  return `${positions.slice(0, -1).join(", ")} and ${positions[positions.length - 1]}`;
-}
 
 /**
  * Render the pending signup phrase. Acknowledging it clears the phrase; the
@@ -85,43 +81,34 @@ export default function SignupPhrasePrompt(): JSX.Element {
         when={step() === "confirm"}
         fallback={
           <>
-            <h1>Save your recovery phrase</h1>
-            <p class="lk-auth-step">Step 1 of 2</p>
-            <p class="lk-auth-lede">
-              These 24 words are the only way back into your account if you lose
-              your password and your devices. Write them down in order and keep
-              them somewhere safe.
-            </p>
+            <h1>{t("recovery_phrase.save.title")}</h1>
+            <p class="lk-auth-step">{t("recovery_phrase.step", { current: 1, total: 2 })}</p>
+            <p class="lk-auth-lede">{t("recovery_phrase.save.lede")}</p>
             <PhraseGrid words={words} highlight={() => auth.signupVaultPositions() ?? []} />
-            <p class="form-info">
-              Do not keep them as a screenshot or in a plain text file. Lakko
-              cannot show them again.
-            </p>
+            <p class="form-info">{t("recovery_phrase.save.no_screenshot")}</p>
             <Show when={auth.signupVaultPositions()}>
               {(picked) => (
                 <p class="form-info">
-                  On a new device you will usually be asked for just three of these,
-                  words {listPositions(picked())}. Keep the whole list anyway: it is
-                  the only way back if that shortcut is ever switched off.
+                  {t("recovery_phrase.save.vault_note", { positions: listPositions(picked()) })}
                 </p>
               )}
             </Show>
             <details class="lk-disclosure">
-              <summary>More options</summary>
+              <summary>{t("common.more_options")}</summary>
               <div class="lk-disclosure-body">
                 <SocialRecoveryPanel phrase={auth.signupPhrase() ?? ""} />
               </div>
             </details>
             <button class="primary" type="button" onClick={toConfirm}>
-              I have written them down
+              {t("recovery_phrase.save.written")}
             </button>
           </>
         }
       >
-        <h1>Check your notes</h1>
-        <p class="lk-auth-step">Step 2 of 2</p>
+        <h1>{t("recovery_phrase.check.title")}</h1>
+        <p class="lk-auth-step">{t("recovery_phrase.step", { current: 2, total: 2 })}</p>
         <p class="lk-auth-lede">
-          Type words {listPositions(positions())} from what you wrote down.
+          {t("recovery_phrase.check.lede", { positions: listPositions(positions()) })}
         </p>
         <form onSubmit={onDone}>
           <WordSlots
@@ -141,20 +128,17 @@ export default function SignupPhrasePrompt(): JSX.Element {
               checked={acknowledged()}
               onChange={(e) => setAcknowledged(e.currentTarget.checked)}
             />
-            <span>
-              I understand that losing these words means losing access to this
-              account.
-            </span>
+            <span>{t("recovery_phrase.check.acknowledge")}</span>
           </label>
           <button
             class="primary"
             type="submit"
             disabled={!acknowledged() || !confirmationComplete(positions(), typed())}
           >
-            Done
+            {t("common.done")}
           </button>
           <button type="button" class="ghost" onClick={toWords}>
-            Back to the words
+            {t("recovery_phrase.check.back")}
           </button>
         </form>
       </Show>
@@ -183,7 +167,9 @@ function SocialRecoveryPanel(props: { phrase: string }): JSX.Element {
     try {
       setShares(await splitMnemonic(props.phrase, DEFAULT_THRESHOLD, DEFAULT_SHARE_COUNT));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // eslint-disable-next-line no-console
+      console.warn("social recovery: splitting the phrase failed", err);
+      setError(t("recovery.shares.error.generic"));
     } finally {
       setBusy(false);
     }
@@ -195,24 +181,27 @@ function SocialRecoveryPanel(props: { phrase: string }): JSX.Element {
       setCopiedIndex(idx);
       setTimeout(() => setCopiedIndex((cur) => (cur === idx ? null : cur)), 1500);
     } catch {
-      setError("Could not copy. Select the share and copy it by hand.");
+      setError(t("recovery.shares.copy_failed"));
     }
   }
 
   return (
     <>
-      <h3>Social recovery shares</h3>
+      <h3>{t("recovery.method.shares.title")}</h3>
       <p>
-        Split the phrase into {DEFAULT_SHARE_COUNT} shares for people you trust.
-        Any {DEFAULT_THRESHOLD} of them rebuild it; fewer reveal nothing. Give
-        each person one share.
+        {t("recovery.shares.panel_body", {
+          count: DEFAULT_SHARE_COUNT,
+          threshold: DEFAULT_THRESHOLD,
+        })}
       </p>
       <Show
         when={shares().length > 0}
         fallback={
           <div class="lk-actions">
             <button type="button" class="small" onClick={() => void onGenerate()} disabled={busy()}>
-              {busy() ? "Generating..." : `Generate ${DEFAULT_SHARE_COUNT} shares`}
+              {busy()
+                ? t("recovery.shares.generating")
+                : t("recovery.shares.generate", { count: DEFAULT_SHARE_COUNT })}
             </button>
           </div>
         }
@@ -226,15 +215,17 @@ function SocialRecoveryPanel(props: { phrase: string }): JSX.Element {
                   {share}
                 </code>
                 <button type="button" class="small" onClick={() => void onCopy(i(), share)}>
-                  {copiedIndex() === i() ? "Copied" : "Copy"}
+                  {copiedIndex() === i() ? t("common.copied") : t("common.copy")}
                 </button>
               </li>
             )}
           </For>
         </ol>
         <p>
-          To use them later, choose Social recovery shares on the recovery
-          screen and paste any {DEFAULT_THRESHOLD}.
+          {t("recovery.shares.usage", {
+            method: t("recovery.method.shares.title"),
+            threshold: DEFAULT_THRESHOLD,
+          })}
         </p>
       </Show>
       <Show when={error() !== null}>

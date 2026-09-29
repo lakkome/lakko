@@ -43,6 +43,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import me.lakko.app.l10n.listPositions
+import me.lakko.app.l10n.t
 import me.lakko.app.recovery.ShamirBridge
 
 /**
@@ -62,10 +64,8 @@ public fun RecoveryPhraseOnboarding(
     phrase: String,
     onDone: () -> Unit,
     modifier: Modifier = Modifier,
-    title: String = "Save your recovery phrase",
-    lead: String = "These 24 words are the only way back into your account if you lose " +
-        "this phone and your password. Write them down in order and keep them " +
-        "somewhere safe. Lakko cannot show them again.",
+    title: String = t("recovery_phrase.save.title"),
+    lead: String = t("recovery_phrase.save.lede"),
 ) {
     val words = remember(phrase) { phraseWords(phrase) }
     var confirming by remember { mutableStateOf(false) }
@@ -81,14 +81,13 @@ public fun RecoveryPhraseOnboarding(
             Spacer(Modifier.height(8.dp))
             CopyPhraseButton(phrase)
             Spacer(Modifier.height(8.dp))
-            Lead(
-                "Anyone who has these words can read your messages and act as you. " +
-                    "Do not share them and do not keep them in a screenshot.",
-            )
+            Lead(t("recovery_phrase.save.anyone_with_words"))
+            Spacer(Modifier.height(8.dp))
+            Lead(t("recovery_phrase.save.no_screenshot"))
             Spacer(Modifier.height(16.dp))
             SocialRecoveryOptions(phrase)
             Spacer(Modifier.height(24.dp))
-            BusyButton(label = "Continue", busy = false, onClick = { confirming = true })
+            BusyButton(label = t("common.continue"), busy = false, onClick = { confirming = true })
             Spacer(Modifier.height(16.dp))
         }
     } else {
@@ -120,7 +119,7 @@ private fun CopyPhraseButton(phrase: String) {
     ) {
         Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
         Spacer(Modifier.width(8.dp))
-        Text(if (copied) "Copied" else "Copy")
+        Text(if (copied) t("common.copied") else t("common.copy"))
     }
 }
 
@@ -146,8 +145,8 @@ private fun ConfirmPhraseStep(
         }
     }
 
-    AuthScaffold(title = "Check your notes", onBack = onBack, modifier = modifier) {
-        Lead("Type the words at these positions to make sure you wrote the phrase down correctly.")
+    AuthScaffold(title = t("recovery_phrase.check.title"), onBack = onBack, modifier = modifier) {
+        Lead(t("recovery_phrase.check.lede", mapOf("positions" to listPositions(positions))))
         Spacer(Modifier.height(16.dp))
         positions.forEachIndexed { i, position ->
             val last = i == positions.lastIndex
@@ -157,7 +156,7 @@ private fun ConfirmPhraseStep(
                     answers = answers + (position to typed)
                     if (mismatch.isNotEmpty()) mismatch = emptyList()
                 },
-                label = { Text("Word $position") },
+                label = { Text(t("recovery_phrase.word_label", mapOf("position" to position.toString()))) },
                 singleLine = true,
                 isError = position in mismatch,
                 textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
@@ -175,18 +174,18 @@ private fun ConfirmPhraseStep(
         FormError(
             when (mismatch.size) {
                 0 -> null
-                1 -> "Word ${mismatch[0]} does not match. Check your notes and try again."
-                else -> "Words ${mismatch.joinToString(", ")} do not match. Check your notes and try again."
+                1 -> t("recovery_phrase.check.mismatch_one", mapOf("position" to mismatch[0].toString()))
+                else -> t("recovery_phrase.check.mismatch_many", mapOf("positions" to listPositions(mismatch)))
             },
         )
         Spacer(Modifier.height(16.dp))
         BusyButton(
-            label = "Confirm",
+            label = t("common.confirm"),
             busy = false,
             enabled = positions.all { answers[it].orEmpty().isNotBlank() },
             onClick = ::submit,
         )
-        TextButton(onClick = onBack, modifier = Modifier.padding(top = 4.dp)) { Text("Show the words again") }
+        TextButton(onClick = onBack, modifier = Modifier.padding(top = 4.dp)) { Text(t("recovery_phrase.check.back")) }
     }
 }
 
@@ -200,13 +199,13 @@ private fun SocialRecoveryOptions(phrase: String) {
     var expanded by remember { mutableStateOf(false) }
     var shares by remember { mutableStateOf<List<String>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<me.lakko.app.l10n.UiText?>(null) }
     var copiedIndex by remember { mutableStateOf<Int?>(null) }
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
 
     if (!expanded) {
-        TextButton(onClick = { expanded = true }) { Text("More options") }
+        TextButton(onClick = { expanded = true }) { Text(t("common.more_options")) }
         return
     }
 
@@ -216,12 +215,14 @@ private fun SocialRecoveryOptions(phrase: String) {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("Share the phrase with people you trust", style = MaterialTheme.typography.titleMedium)
+            Text(t("recovery.method.shares.title"), style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
             Lead(
-                "Split the phrase into five pieces and give one to each of five people. " +
-                    "Any three pieces together rebuild it; fewer reveal nothing. You can " +
-                    "lose touch with two of them and still recover.",
+                t(
+                    "recovery.shares.panel_body",
+                    mapOf("threshold" to SHARE_THRESHOLD.toString()),
+                    mapOf("count" to SHARE_COUNT.toULong()),
+                ),
             )
             Spacer(Modifier.height(12.dp))
             if (shares.isEmpty()) {
@@ -235,7 +236,7 @@ private fun SocialRecoveryOptions(phrase: String) {
                                     ShamirBridge.splitMnemonic(phrase)
                                 }
                             } catch (cause: Throwable) {
-                                error = "Could not create the pieces. Try again."
+                                error = me.lakko.app.l10n.UiText("recovery.shares.error.generic")
                             } finally {
                                 busy = false
                             }
@@ -247,9 +248,9 @@ private fun SocialRecoveryOptions(phrase: String) {
                     if (busy) {
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(8.dp))
-                        Text("Loading...")
+                        Text(t("recovery.shares.generating"))
                     } else {
-                        Text("Create five pieces")
+                        Text(t("recovery.shares.generate", emptyMap(), mapOf("count" to SHARE_COUNT.toULong())))
                     }
                 }
             } else {
@@ -281,13 +282,26 @@ private fun SocialRecoveryOptions(phrase: String) {
                                     if (copiedIndex == i) copiedIndex = null
                                 }
                             },
-                        ) { Text(if (copiedIndex == i) "Copied" else "Copy") }
+                        ) { Text(if (copiedIndex == i) t("common.copied") else t("common.copy")) }
                     }
                 }
                 Spacer(Modifier.height(4.dp))
-                Lead("Give each piece to a different person. To recover, collect any three and choose Recovery pieces on the Recover screen.")
+                Lead(
+                    t(
+                        "recovery.shares.usage",
+                        mapOf(
+                            "method" to t("recovery.method.shares.title"),
+                            "threshold" to SHARE_THRESHOLD.toString(),
+                        ),
+                    ),
+                )
             }
             FormError(error)
         }
     }
 }
+
+/** How many shares the split makes, and how many rebuild the phrase
+ *  (`ShamirBridge.splitMnemonic`'s defaults, stated for the copy). */
+private val SHARE_COUNT: Int = ShamirBridge.DEFAULT_SHARE_COUNT.toInt()
+private val SHARE_THRESHOLD: Int = ShamirBridge.DEFAULT_THRESHOLD.toInt()

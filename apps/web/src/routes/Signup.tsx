@@ -17,7 +17,9 @@ import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
 import { isSignupRateLimited, signupErrorMessage } from "../auth/auth-error-copy";
 import { isAbortError } from "../auth/pow";
-import { SIGNUP_WORKING_LINE, SIGNUP_WORKING_TITLE } from "../auth/signup-working";
+import { signupWorkingLine, signupWorkingTitle } from "../auth/signup-working";
+import { t } from "../l10n";
+import { tRich } from "../l10n/rich";
 import { PasswordExplainer } from "../auth/PasswordExplainer";
 import { useProfiles } from "../profile/ProfileContext";
 import {
@@ -81,11 +83,11 @@ export default function Signup(): JSX.Element {
     setRateLimited(false);
     const checked = usernameCheck();
     if (!mayLookUp(checked)) {
-      setError(usernameReason(checked) ?? "Enter a username.");
+      setError(usernameReason(checked) ?? t("auth.signup.error.enter_username"));
       return;
     }
     if (!maySaveDisplayName(displayNameCheck())) {
-      setError("Fix your name before continuing.");
+      setError(t("auth.signup.error.fix_name"));
       return;
     }
     const problem = newPasswordProblem(password(), confirm());
@@ -127,14 +129,11 @@ export default function Signup(): JSX.Element {
 
   return (
     <AuthLayout>
-      <h1>Create your account</h1>
-      <p class="lk-auth-lede">
-        Your password never leaves your device. You will get a recovery phrase
-        to write down next.
-      </p>
+      <h1>{t("auth.signup.title")}</h1>
+      <p class="lk-auth-lede">{t("auth.signup.lede")}</p>
       <form onSubmit={onSubmit}>
         <label>
-          Username
+          {t("auth.username.label")}
           <input
             type="text"
             autocomplete="username"
@@ -161,7 +160,7 @@ export default function Signup(): JSX.Element {
           </Show>
         </div>
         <label>
-          Name (optional)
+          {t("auth.signup.name.label")}
           <input
             type="text"
             autocomplete="name"
@@ -180,7 +179,7 @@ export default function Signup(): JSX.Element {
           )}
         </Show>
         <PasswordField
-          label="Password"
+          label={t("auth.password.label")}
           autocomplete="new-password"
           value={password}
           setValue={setPassword}
@@ -188,7 +187,7 @@ export default function Signup(): JSX.Element {
           minLength={MIN_PASSWORD_LENGTH}
         />
         <PasswordField
-          label="Confirm password"
+          label={t("auth.password.confirm.label")}
           autocomplete="new-password"
           value={confirm}
           setValue={setConfirm}
@@ -201,7 +200,7 @@ export default function Signup(): JSX.Element {
           </div>
           <Show when={rateLimited()}>
             <button type="button" onClick={() => void submit()}>
-              Try again
+              {t("common.try_again")}
             </button>
           </Show>
         </Show>
@@ -213,7 +212,7 @@ export default function Signup(): JSX.Element {
               type="submit"
               disabled={!mayLookUp(usernameCheck()) || !maySaveDisplayName(displayNameCheck())}
             >
-              Create account
+              {t("auth.signup.submit")}
             </button>
           }
         >
@@ -221,19 +220,21 @@ export default function Signup(): JSX.Element {
               one line below, and Cancel. No percentage, no time estimate. */}
           <div role="status" aria-live="polite" class="lk-stack" style={{ gap: "8px" }}>
             <button class="primary" type="button" disabled aria-busy="true">
-              <span class="lakko-spinner" aria-hidden="true" /> {SIGNUP_WORKING_TITLE}
+              <span class="lakko-spinner" aria-hidden="true" /> {signupWorkingTitle()}
             </button>
             <p class="form-info" style={{ margin: 0 }}>
-              {SIGNUP_WORKING_LINE}
+              {signupWorkingLine()}
             </p>
             <button type="button" onClick={onCancel}>
-              Cancel
+              {t("common.cancel")}
             </button>
           </div>
         </Show>
       </form>
       <p class="lk-auth-foot">
-        Already have an account? <A href={paths.login}>Log in</A>
+        {tRich("auth.signup.have_account", {
+          link: <A href={paths.login}>{t("auth.login.submit")}</A>,
+        })}
       </p>
       <PasswordExplainer />
     </AuthLayout>

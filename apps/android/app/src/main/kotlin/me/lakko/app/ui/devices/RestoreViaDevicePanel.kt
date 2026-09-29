@@ -24,6 +24,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import me.lakko.app.devices.PairingOrchestrator
 import me.lakko.app.devices.WelcomeCourier
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 
 /**
  * Shared "restore from your other device" panel (ADR-0018 factor (a))
@@ -83,9 +86,7 @@ public fun RestoreViaDevicePanel(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            "Show this QR code to a device that still has your account. " +
-                "It links this device and securely transfers your identity " +
-                "— no phrase entry needed.",
+            t("device_link.qr.intro"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -114,10 +115,7 @@ public fun RestoreViaDevicePanel(
                                         )
                                         if (recovery == null) {
                                             ui = RestoreViaDeviceUi.Error(
-                                                "The other device linked this one but " +
-                                                    "didn't send recovery data. Update " +
-                                                    "it, or restore with your recovery " +
-                                                    "phrase instead.",
+                                                UiText("device_link.error.no_identity"),
                                             )
                                         } else {
                                             onRecovered(recovery)
@@ -126,8 +124,7 @@ public fun RestoreViaDevicePanel(
                                     }
                                     WelcomeCourier.WelcomeOutcome.Timeout -> {
                                         ui = RestoreViaDeviceUi.Error(
-                                            "Timed out waiting for the other device. " +
-                                                "Try again.",
+                                            UiText("device_link.error.timeout"),
                                         )
                                     }
                                     WelcomeCourier.WelcomeOutcome.Cancelled -> {
@@ -135,28 +132,24 @@ public fun RestoreViaDevicePanel(
                                     }
                                 }
                             } catch (cause: Throwable) {
-                                ui = RestoreViaDeviceUi.Error(
-                                    cause.message ?: "Restore failed",
-                                )
+                                ui = RestoreViaDeviceUi.Error(deviceRestoreErrorText(cause))
                             } finally {
                                 session?.dispose()
                                 session = null
                             }
                         }
                     } catch (cause: Throwable) {
-                        ui = RestoreViaDeviceUi.Error(
-                            cause.message ?: "Could not prepare the QR code",
-                        )
+                        ui = RestoreViaDeviceUi.Error(deviceRestoreErrorText(cause))
                     }
                 },
-            ) { Text("Show QR code") }
+            ) { Text(t("device_link.show_code")) }
 
             RestoreViaDeviceUi.Preparing -> CircularProgressIndicator()
 
             is RestoreViaDeviceUi.Waiting -> {
                 QrImageComposable(payload = s.qrPayload)
                 Text(
-                    "Waiting for your other device to scan…",
+                    t("device_link.qr.waiting"),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -164,28 +157,44 @@ public fun RestoreViaDevicePanel(
             RestoreViaDeviceUi.Joining -> {
                 CircularProgressIndicator()
                 Text(
-                    "Linking and restoring your identity…",
+                    t("device_link.transferring"),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
 
             is RestoreViaDeviceUi.Error -> {
                 Text(
-                    s.message,
+                    s.message.text(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )
                 Button(onClick = { ui = RestoreViaDeviceUi.Idle }) {
-                    Text("Try again")
+                    Text(t("common.try_again"))
                 }
             }
 
             RestoreViaDeviceUi.Done -> Text(
-                "Identity restored.",
+                t("device_link.restored"),
                 style = MaterialTheme.typography.bodySmall,
             )
         }
     }
+}
+
+/**
+ * The sentence a failed restore shows (ADR-0058 section 6: from its kind,
+ * never from the exception's text). Mirrors web `deviceRestoreErrorMessage`.
+ */
+internal fun deviceRestoreErrorText(cause: Throwable): UiText = when (cause) {
+    is me.lakko.app.auth.AuthNetworkError -> UiText("common.error.offline")
+    is me.lakko.app.auth.AuthHttpError ->
+        me.lakko.app.auth.authLimitText(cause) ?: UiText("device_link.error.generic")
+    is me.lakko.app.auth.PhraseMismatch -> UiText("device_link.error.identity_mismatch")
+    is me.lakko.app.auth.IdentityVerificationUnavailable -> UiText(
+        if (cause.missing) "restore_identity.error.not_published" else "restore_identity.error.unreachable",
+    )
+    is me.lakko.app.auth.AuthClientArgError -> cause.text ?: UiText("device_link.error.generic")
+    else -> UiText("device_link.error.generic")
 }
 
 /** Internal UI state machine for [RestoreViaDevicePanel]. */
@@ -202,6 +211,6 @@ private sealed interface RestoreViaDeviceUi {
         override fun hashCode(): Int = qrPayload.contentHashCode()
     }
     data object Joining : RestoreViaDeviceUi
-    data class Error(val message: String) : RestoreViaDeviceUi
+    data class Error(val message: UiText) : RestoreViaDeviceUi
     data object Done : RestoreViaDeviceUi
 }

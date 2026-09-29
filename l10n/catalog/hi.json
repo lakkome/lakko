@@ -2,12 +2,552 @@
   "format": 1,
   "language": "hi",
   "messages": {
+    "auth.brand.body": {
+      "text": "चैट, ग्रुप, चैनल और कॉल, सब डिफ़ॉल्ट रूप से एंड-टू-एंड एन्क्रिप्टेड। Lakko के सर्वर आपके मैसेज कभी नहीं देखते।",
+      "status": "machine"
+    },
+    "auth.brand.foot": {
+      "text": "ओपन सोर्स। फ़ोन नंबर की ज़रूरत नहीं।",
+      "status": "machine"
+    },
+    "auth.brand.tagline": {
+      "text": "आपके मैसेज, आपके नियम।",
+      "status": "machine"
+    },
+    "auth.error.wrong_credentials": {
+      "text": "यूज़रनेम या पासवर्ड गलत है। इन्हें जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.explainer.never_leaves": {
+      "text": "आपका पासवर्ड कभी आपके डिवाइस से बाहर नहीं जाता। Lakko उसे पाए बिना ही जाँचता है, इसलिए Lakko में कोई भी उसे पढ़ नहीं सकता, और कोई भी आपके लिए उसे रीसेट नहीं कर सकता।",
+      "status": "machine"
+    },
+    "auth.explainer.same_answer": {
+      "text": "गलत यूज़रनेम और गलत पासवर्ड पर एक ही जवाब मिलता है, इसलिए कोई भी लॉग इन स्क्रीन से यह पता नहीं लगा सकता कि कौन-से यूज़रनेम मौजूद हैं।",
+      "status": "machine"
+    },
+    "auth.explainer.title": {
+      "text": "Lakko आपके पासवर्ड को कैसे सुरक्षित रखता है",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back": {
+      "text": "अगर आप इसे भूल जाएँ, तो आपकी रिकवरी फ़्रेज़, कोई दूसरा डिवाइस जिस पर अभी भी लॉग इन है, फ़्रेज़ के तीन शब्द, कोई ऑथेंटिकेटर ऐप, या ईमेल या फ़ोन पर भेजा गया कोड आपको वापस अकाउंट में ले आता है।",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back_no_words": {
+      "text": "अगर आप इसे भूल जाएँ, तो आपकी रिकवरी फ़्रेज़, कोई दूसरा डिवाइस जिस पर अभी भी लॉग इन है, कोई ऑथेंटिकेटर ऐप, या ईमेल या फ़ोन पर भेजा गया कोड आपको वापस अकाउंट में ले आता है।",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "भाषा बदलें",
       "status": "machine"
     },
+    "auth.login.forgot": {
+      "text": "पासवर्ड भूल गए?",
+      "status": "machine"
+    },
+    "auth.login.lede": {
+      "text": "जारी रखने के लिए लॉग इन करें।",
+      "status": "machine"
+    },
+    "auth.login.no_account": {
+      "text": "Lakko पर नए हैं? {link}",
+      "status": "machine"
+    },
+    "auth.login.passkey": {
+      "text": "पासकी इस्तेमाल करें",
+      "status": "machine"
+    },
+    "auth.login.submit": {
+      "text": "लॉग इन करें",
+      "status": "machine"
+    },
+    "auth.login.submitting": {
+      "text": "लॉग इन हो रहा है...",
+      "status": "machine"
+    },
+    "auth.login.title": {
+      "text": "फिर से स्वागत है",
+      "status": "machine"
+    },
+    "auth.passkey.error.cancelled": {
+      "text": "पासकी से साइन इन रद्द किया गया।",
+      "status": "machine"
+    },
+    "auth.passkey.error.failed_status": {
+      "text": "पासकी से साइन इन नहीं हो सका ({status})।",
+      "status": "machine"
+    },
+    "auth.passkey.error.generic": {
+      "text": "पासकी से साइन इन नहीं हो सका। फिर से कोशिश करें, या अपना पासवर्ड इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "auth.passkey.error.network": {
+      "text": "पासकी से साइन इन के दौरान नेटवर्क में गड़बड़ी हुई।",
+      "status": "machine"
+    },
+    "auth.passkey.error.no_cached": {
+      "text": "इस डिवाइस पर पासकी से साइन इन के लिए कोई सेव की गई जानकारी नहीं है। पहले पासवर्ड से साइन इन करें या अपनी फ़्रेज़ से अकाउंट रिकवर करें।",
+      "status": "machine"
+    },
+    "auth.passkey.error.not_registered": {
+      "text": "इस अकाउंट के लिए कोई पासकी रजिस्टर नहीं है। पहले पासवर्ड से साइन इन करें, फिर होम से पासकी जोड़ें।",
+      "status": "machine"
+    },
+    "auth.passkey.error.server_disabled": {
+      "text": "सर्वर पर पासकी की सुविधा चालू नहीं है।",
+      "status": "machine"
+    },
+    "auth.passkey.error.unsupported": {
+      "text": "यह ब्राउज़र पासकी सपोर्ट नहीं करता।",
+      "status": "machine"
+    },
+    "auth.passkey.error.wrong_account": {
+      "text": "यह पासकी इस डिवाइस पर सेव अकाउंट की नहीं, किसी दूसरे अकाउंट की है। पहले अपने पासवर्ड से लॉग इन करें।",
+      "status": "machine"
+    },
+    "auth.password.confirm.label": {
+      "text": "पासवर्ड की पुष्टि करें",
+      "status": "machine"
+    },
+    "auth.password.error.mismatch": {
+      "text": "दोनों पासवर्ड मेल नहीं खाते। एक ही पासवर्ड दो बार टाइप करें।",
+      "status": "machine"
+    },
+    "auth.password.error.too_short": {
+      "text": "कम से कम {count, plural, one {# अक्षर} other {# अक्षर}} इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "auth.password.hide": {
+      "text": "पासवर्ड छिपाएँ",
+      "status": "machine"
+    },
+    "auth.password.hint": {
+      "text": "कम से कम {count, plural, one {# अक्षर} other {# अक्षर}}।",
+      "status": "machine"
+    },
+    "auth.password.label": {
+      "text": "पासवर्ड",
+      "status": "machine"
+    },
+    "auth.password.new.label": {
+      "text": "नया पासवर्ड",
+      "status": "machine"
+    },
+    "auth.password.new_confirm.label": {
+      "text": "नए पासवर्ड की पुष्टि करें",
+      "status": "machine"
+    },
+    "auth.password.show": {
+      "text": "पासवर्ड दिखाएँ",
+      "status": "machine"
+    },
+    "auth.signup.error.enter_username": {
+      "text": "यूज़रनेम डालें।",
+      "status": "machine"
+    },
+    "auth.signup.error.fix_name": {
+      "text": "आगे बढ़ने से पहले अपना नाम ठीक करें।",
+      "status": "machine"
+    },
+    "auth.signup.error.generic": {
+      "text": "अकाउंट नहीं बन सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.signup.error.rate_limited": {
+      "text": "इस नेटवर्क से अभी बहुत सारे नए अकाउंट बनाए जा रहे हैं। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.signup.error.username_taken": {
+      "text": "यह यूज़रनेम पहले से लिया जा चुका है। कोई दूसरा चुनें।",
+      "status": "machine"
+    },
+    "auth.signup.have_account": {
+      "text": "पहले से अकाउंट है? {link}",
+      "status": "machine"
+    },
+    "auth.signup.lede": {
+      "text": "आपका पासवर्ड कभी आपके डिवाइस से बाहर नहीं जाता। इसके बाद आपको लिखकर रखने के लिए एक रिकवरी फ़्रेज़ मिलेगी।",
+      "status": "machine"
+    },
+    "auth.signup.name.hint": {
+      "text": "यह आपके संपर्कों को दिखता है। अपना यूज़रनेम दिखाने के लिए इसे खाली छोड़ दें।",
+      "status": "machine"
+    },
+    "auth.signup.name.label": {
+      "text": "नाम (वैकल्पिक)",
+      "status": "machine"
+    },
+    "auth.signup.submit": {
+      "text": "अकाउंट बनाएँ",
+      "status": "machine"
+    },
+    "auth.signup.title": {
+      "text": "अपना अकाउंट बनाएँ",
+      "status": "machine"
+    },
+    "auth.signup.username.hint": {
+      "text": "लैटिन अक्षर, अंक और _। दूसरे लोग आपको इसी नाम से ढूँढते हैं।",
+      "status": "machine"
+    },
+    "auth.signup.working.line": {
+      "text": "इसमें थोड़ा समय लगता है, बस एक बार। आपको दोबारा ऐसे इंतज़ार नहीं करना पड़ेगा।",
+      "status": "machine"
+    },
+    "auth.signup.working.title": {
+      "text": "आपका अकाउंट बनाया जा रहा है...",
+      "status": "machine"
+    },
+    "auth.username.label": {
+      "text": "यूज़रनेम",
+      "status": "machine"
+    },
+    "call.guest.working.title": {
+      "text": "आपको कॉल में जोड़ा जा रहा है...",
+      "status": "machine"
+    },
+    "chats.empty.select": {
+      "text": "मैसेज भेजने के लिए कोई चैट चुनें",
+      "status": "machine"
+    },
+    "common.back": {
+      "text": "वापस",
+      "status": "machine"
+    },
+    "common.cancel": {
+      "text": "रद्द करें",
+      "status": "machine"
+    },
+    "common.checking": {
+      "text": "जाँच हो रही है...",
+      "status": "machine"
+    },
     "common.close": {
       "text": "बंद करें",
+      "status": "machine"
+    },
+    "common.confirm": {
+      "text": "पुष्टि करें",
+      "status": "machine"
+    },
+    "common.continue": {
+      "text": "जारी रखें",
+      "status": "machine"
+    },
+    "common.copied": {
+      "text": "कॉपी हो गया",
+      "status": "machine"
+    },
+    "common.copy": {
+      "text": "कॉपी करें",
+      "status": "machine"
+    },
+    "common.dismiss": {
+      "text": "हटाएँ",
+      "status": "machine"
+    },
+    "common.done": {
+      "text": "हो गया",
+      "status": "machine"
+    },
+    "common.email": {
+      "text": "ईमेल",
+      "status": "machine"
+    },
+    "common.error.a11y": {
+      "text": "त्रुटि: {message}",
+      "status": "machine"
+    },
+    "common.error.offline": {
+      "text": "Lakko से कनेक्ट नहीं हो सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "common.error.server_unreachable": {
+      "text": "सर्वर से कनेक्ट नहीं हो सका। अपना कनेक्शन जाँचें।",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts": {
+      "text": "बहुत ज़्यादा कोशिशें हो गईं। थोड़ा रुकें, फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts_minutes": {
+      "text": "बहुत ज़्यादा कोशिशें हो गईं। {minutes, plural, one {# मिनट} other {# मिनट}} बाद फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "common.error.unavailable": {
+      "text": "यह अभी उपलब्ध नहीं है। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "common.loading": {
+      "text": "लोड हो रहा है...",
+      "status": "machine"
+    },
+    "common.looking_up": {
+      "text": "खोजा जा रहा है...",
+      "status": "machine"
+    },
+    "common.more_options": {
+      "text": "और विकल्प",
+      "status": "machine"
+    },
+    "common.optional": {
+      "text": "वैकल्पिक",
+      "status": "machine"
+    },
+    "common.paste": {
+      "text": "पेस्ट करें",
+      "status": "machine"
+    },
+    "common.phone": {
+      "text": "फ़ोन",
+      "status": "machine"
+    },
+    "common.preparing": {
+      "text": "तैयार किया जा रहा है...",
+      "status": "machine"
+    },
+    "common.sending": {
+      "text": "भेजा जा रहा है...",
+      "status": "machine"
+    },
+    "common.try_again": {
+      "text": "फिर से कोशिश करें",
+      "status": "machine"
+    },
+    "device_link.compare_hint": {
+      "text": "पक्का करें कि दूसरे डिवाइस पर भी यही कोड दिख रहा है।",
+      "status": "machine"
+    },
+    "device_link.comparison_code": {
+      "text": "मिलान कोड",
+      "status": "machine"
+    },
+    "device_link.confirm_there": {
+      "text": "किसी ऐसे डिवाइस पर Lakko खोलें जिस पर पहले से साइन इन है, और वहाँ इस साइन इन की पुष्टि करें।",
+      "status": "machine"
+    },
+    "device_link.error.ask_unavailable": {
+      "text": "अभी आपके दूसरे डिवाइस से पूछना संभव नहीं है; QR कोड अब भी काम करता है।",
+      "status": "machine"
+    },
+    "device_link.error.ask_unreachable": {
+      "text": "आपके दूसरे डिवाइस से पूछने के लिए सर्वर से कनेक्ट नहीं हो सका; QR कोड अब भी काम करता है।",
+      "status": "machine"
+    },
+    "device_link.error.declined": {
+      "text": "दूसरे डिवाइस पर अस्वीकार कर दिया गया।",
+      "status": "machine"
+    },
+    "device_link.error.generic": {
+      "text": "आपके दूसरे डिवाइस से रिस्टोर नहीं हो सका। फिर से कोशिश करें, या अपनी रिकवरी फ़्रेज़ इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "device_link.error.identity_mismatch": {
+      "text": "आपके दूसरे डिवाइस से मिली पहचान इस अकाउंट की प्रकाशित पहचान से मेल नहीं खाती — इसलिए इसका इस्तेमाल नहीं किया जाएगा।",
+      "status": "machine"
+    },
+    "device_link.error.name_other_account": {
+      "text": "आपने जो नाम टाइप किया वह किसी दूसरे अकाउंट का है। इस डिवाइस पर कुछ भी नहीं बदला गया।",
+      "status": "machine"
+    },
+    "device_link.error.no_identity": {
+      "text": "दूसरे डिवाइस ने पुष्टि तो की, लेकिन आपकी पहचान नहीं भेजी। उस पर Lakko अपडेट करें और फिर से कोशिश करें, या अपनी रिकवरी फ़्रेज़ इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "device_link.error.not_let_in": {
+      "text": "आपके दूसरे डिवाइस ने पहचान भेज दी, लेकिन इस डिवाइस पर साइन इन नहीं हो सका। फिर से कोशिश करें, या अपनी रिकवरी फ़्रेज़ इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "device_link.error.request_limited": {
+      "text": "आपके दूसरे डिवाइस को बहुत ज़्यादा अनुरोध भेजे गए। कुछ मिनट बाद फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "device_link.error.timeout": {
+      "text": "दूसरे डिवाइस ने समय पर जवाब नहीं दिया। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "device_link.pairing.needs_username": {
+      "text": "दूसरा डिवाइस जोड़ने के लिए पहले यूज़रनेम सेट करें।",
+      "status": "machine"
+    },
+    "device_link.pairing.unsupported": {
+      "text": "यह कोड Lakko के किसी दूसरे वर्शन का है। दोनों डिवाइस पर Lakko अपडेट करें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "device_link.pairing.wrong_account": {
+      "text": "यह कोड किसी दूसरे अकाउंट का है। जाँचें कि नया डिवाइस वही यूज़रनेम इस्तेमाल कर रहा है जो यह डिवाइस करता है।",
+      "status": "machine"
+    },
+    "device_link.qr.hide": {
+      "text": "QR कोड छिपाएँ",
+      "status": "machine"
+    },
+    "device_link.qr.intro": {
+      "text": "यह कोड ऐसे डिवाइस को दिखाएँ जिस पर अभी भी आपका अकाउंट है। वह इस डिवाइस को जोड़ देगा और आपकी पहचान को एंड-टू-एंड एन्क्रिप्टेड तरीके से ट्रांसफ़र करेगा, कोई फ़्रेज़ टाइप नहीं करनी होगी।",
+      "status": "machine"
+    },
+    "device_link.qr.scan_hint": {
+      "text": "अपने दूसरे डिवाइस पर सेटिंग्स खोलें, फिर डिवाइस, फिर डिवाइस जोड़ें, और यह कोड स्कैन करें।",
+      "status": "machine"
+    },
+    "device_link.qr.show": {
+      "text": "इसके बजाय QR कोड दिखाएँ",
+      "status": "machine"
+    },
+    "device_link.qr.waiting": {
+      "text": "आपके दूसरे डिवाइस के यह कोड स्कैन करने का इंतज़ार है...",
+      "status": "machine"
+    },
+    "device_link.request.added": {
+      "text": "डिवाइस जोड़ दिया गया।",
+      "status": "machine"
+    },
+    "device_link.request.adding": {
+      "text": "डिवाइस जोड़ा जा रहा है...",
+      "status": "machine"
+    },
+    "device_link.request.body": {
+      "text": "एक नया डिवाइस आपके अकाउंट से जुड़ना चाहता है। उस पर एक कोड दिख रहा है।",
+      "status": "machine"
+    },
+    "device_link.request.code_label": {
+      "text": "नए डिवाइस पर दिख रहा कोड",
+      "status": "machine"
+    },
+    "device_link.request.confirm": {
+      "text": "हाँ, जोड़ें",
+      "status": "machine"
+    },
+    "device_link.request.confirm_only_if": {
+      "text": "पुष्टि तभी करें जब नए डिवाइस पर ठीक यही कोड दिख रहा हो।",
+      "status": "machine"
+    },
+    "device_link.request.decline": {
+      "text": "यह मैं नहीं हूँ",
+      "status": "machine"
+    },
+    "device_link.request.declined": {
+      "text": "अस्वीकार कर दिया गया। अगर ऐसा बार-बार हो, तो अपना पासवर्ड बदलें।",
+      "status": "machine"
+    },
+    "device_link.request.error.generic": {
+      "text": "डिवाइस नहीं जोड़ा जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "device_link.request.error.no_device_key": {
+      "text": "इस ब्राउज़र में कोई डिवाइस कुंजी नहीं है। फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "device_link.request.title": {
+      "text": "क्या यह आप हैं?",
+      "status": "machine"
+    },
+    "device_link.restored": {
+      "text": "रिस्टोर हो गया।",
+      "status": "machine"
+    },
+    "device_link.show_code": {
+      "text": "पेयरिंग कोड दिखाएँ",
+      "status": "machine"
+    },
+    "device_link.transferring": {
+      "text": "ट्रांसफ़र हो रहा है...",
+      "status": "machine"
+    },
+    "devices.add.e2ee_note": {
+      "text": "आपके दोनों डिवाइस के बीच लिंक करना एंड-टू-एंड एन्क्रिप्टेड है।",
+      "status": "machine"
+    },
+    "devices.add.error.generic": {
+      "text": "यह डिवाइस लिंक नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "devices.add.joining": {
+      "text": "यह डिवाइस लिंक हो रहा है...",
+      "status": "machine"
+    },
+    "devices.add.linked": {
+      "text": "लिंक हो गया। यह डिवाइस अब आपके अकाउंट का हिस्सा है।",
+      "status": "machine"
+    },
+    "devices.add.side.scan": {
+      "text": "कोड स्कैन करें",
+      "status": "machine"
+    },
+    "devices.add.side.scan_detail": {
+      "text": "इस डिवाइस पर पहले से साइन इन है: यह नए डिवाइस का कोड स्कैन करके उसे अंदर आने देता है।",
+      "status": "machine"
+    },
+    "devices.add.side.show": {
+      "text": "कोड दिखाएँ",
+      "status": "machine"
+    },
+    "devices.add.side.show_detail": {
+      "text": "यह नया डिवाइस है: किसी दूसरे डिवाइस के इसका कोड स्कैन करते ही यह आपके अकाउंट से जुड़ जाता है।",
+      "status": "machine"
+    },
+    "devices.add.sign_in_first": {
+      "text": "डिवाइस जोड़ने के लिए पहले साइन इन करें।",
+      "status": "machine"
+    },
+    "devices.add.title": {
+      "text": "डिवाइस जोड़ें",
+      "status": "machine"
+    },
+    "devices.scan.confirm.body": {
+      "text": "इससे स्कैन किए गए डिवाइस को आपके अकाउंट का पूरा एक्सेस मिल जाता है: आपके मैसेज, आपके संपर्क और आपकी पहचान। तभी आगे बढ़ें जब कोड आपके अपने नए डिवाइस पर हो।",
+      "status": "machine"
+    },
+    "devices.scan.confirm.submit": {
+      "text": "डिवाइस लिंक करें",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title": {
+      "text": "इस डिवाइस को लिंक करें?",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied": {
+      "text": "Lakko कैमरा इस्तेमाल नहीं कर पा रहा। सेटिंग्स में कैमरा एक्सेस की अनुमति दें, फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_failed": {
+      "text": "कैमरा चालू नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "devices.scan.error.no_camera": {
+      "text": "इस डिवाइस पर पीछे का कैमरा उपलब्ध नहीं है।",
+      "status": "machine"
+    },
+    "devices.scan.error.not_a_code": {
+      "text": "यह Lakko डिवाइस कोड नहीं है। कैमरे को अपने दूसरे डिवाइस पर दिख रहे कोड की ओर करें।",
+      "status": "machine"
+    },
+    "devices.scan.intro": {
+      "text": "अपना कैमरा उस कोड की ओर करें जो आपका नया डिवाइस दिखा रहा है।",
+      "status": "machine"
+    },
+    "devices.scan.open_camera": {
+      "text": "कैमरा खोलें",
+      "status": "machine"
+    },
+    "display_name.error.control": {
+      "text": "अदृश्य या टेक्स्ट-दिशा वाले अक्षर हटाएँ",
+      "status": "machine"
+    },
+    "display_name.error.line_break": {
+      "text": "सिर्फ़ एक लाइन",
+      "status": "machine"
+    },
+    "display_name.error.too_long": {
+      "text": "ज़्यादा से ज़्यादा {count, plural, one {# अक्षर} other {# अक्षर}}",
+      "status": "machine"
+    },
+    "display_name.error.too_many_bytes": {
+      "text": "यह नाम बहुत लंबा है",
+      "status": "machine"
+    },
+    "display_name.error.unknown": {
+      "text": "यह नाम इस्तेमाल नहीं किया जा सकता",
       "status": "machine"
     },
     "language.name.ar": {
@@ -72,6 +612,514 @@
     },
     "nav.settings": {
       "text": "सेटिंग्स",
+      "status": "machine"
+    },
+    "recovery.access_only_note": {
+      "text": "ऑथेंटिकेटर या कोड से आप अकाउंट में वापस आ जाते हैं; उसके बाद आपकी चैट के लिए रिकवरी फ़्रेज़ या दूसरा डिवाइस चाहिए।",
+      "status": "machine"
+    },
+    "recovery.cached_account": {
+      "text": "इस डिवाइस पर {username}",
+      "status": "machine"
+    },
+    "recovery.contact.change": {
+      "text": "कोई दूसरा ईमेल या फ़ोन इस्तेमाल करें",
+      "status": "machine"
+    },
+    "recovery.contact.code_label": {
+      "text": "हमारा भेजा गया कोड",
+      "status": "machine"
+    },
+    "recovery.contact.email_label": {
+      "text": "ईमेल पता",
+      "status": "machine"
+    },
+    "recovery.contact.error.bad_contact": {
+      "text": "यह ईमेल पता या फ़ोन नंबर नहीं लगता। इसे जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery.contact.error.enter_code": {
+      "text": "हमारा भेजा गया छह अंकों का कोड डालें।",
+      "status": "machine"
+    },
+    "recovery.contact.error.generic": {
+      "text": "कोड की जाँच नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_email": {
+      "text": "सही ईमेल पता डालें।",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_phone": {
+      "text": "फ़ोन नंबर अंतरराष्ट्रीय फ़ॉर्मैट में डालें, जैसे +15551234567।",
+      "status": "machine"
+    },
+    "recovery.contact.error.send_failed": {
+      "text": "कोड नहीं भेजा जा सका। यूज़रनेम जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery.contact.error.unavailable": {
+      "text": "ईमेल और फ़ोन से रिकवरी यहाँ उपलब्ध नहीं है। अंदर आने का कोई दूसरा तरीका अपनाएँ।",
+      "status": "machine"
+    },
+    "recovery.contact.error.wrong": {
+      "text": "यह कोड काम नहीं किया। हमारा भेजा गया कोड जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery.contact.intro": {
+      "text": "हम सेटिंग्स में सेट किए गए आपके ईमेल पते या फ़ोन नंबर पर छह अंकों का कोड भेजते हैं। इससे आप अकाउंट में वापस आ जाते हैं; उसके बाद आपकी चैट के लिए रिकवरी फ़्रेज़ या दूसरा डिवाइस चाहिए।",
+      "status": "machine"
+    },
+    "recovery.contact.phone_label": {
+      "text": "फ़ोन नंबर",
+      "status": "machine"
+    },
+    "recovery.contact.send": {
+      "text": "कोड भेजें",
+      "status": "machine"
+    },
+    "recovery.contact.send_by": {
+      "text": "कोड इससे भेजें",
+      "status": "machine"
+    },
+    "recovery.contact.sent_email": {
+      "text": "अगर यह पता इस अकाउंट के लिए सेट है, तो छह अंकों का कोड भेजा जा रहा है। उसे नीचे डालें।",
+      "status": "machine"
+    },
+    "recovery.contact.sent_phone": {
+      "text": "अगर यह नंबर इस अकाउंट के लिए सेट है, तो छह अंकों का कोड भेजा जा रहा है। उसे नीचे डालें।",
+      "status": "machine"
+    },
+    "recovery.device.intro": {
+      "text": "अपना यूज़रनेम डालें, फिर किसी ऐसे डिवाइस पर पुष्टि करें जिस पर अभी भी लॉग इन है और उस पर दिख रहे कोड का मिलान करें। ऐसा कुछ नहीं भेजा जाता जिसे Lakko के सर्वर पढ़ सकें। कैमरे की ज़रूरत नहीं; चाहें तो QR कोड भी है।",
+      "status": "machine"
+    },
+    "recovery.device.intro_qr": {
+      "text": "आपका दूसरा डिवाइस इसे लिंक करके आपका अकाउंट यहाँ ले आएगा।",
+      "status": "machine"
+    },
+    "recovery.device.restoring": {
+      "text": "{username} रिस्टोर हो रहा है",
+      "status": "machine"
+    },
+    "recovery.error.code_send_limited": {
+      "text": "हमने हाल ही में एक कोड भेजा है। दूसरा कोड माँगने से पहले कुछ मिनट रुकें।",
+      "status": "machine"
+    },
+    "recovery.error.generic": {
+      "text": "अकाउंट रिकवर नहीं हो सका। शब्द जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery.error.no_match": {
+      "text": "यह इस अकाउंट से मेल नहीं खाया। शब्द और यूज़रनेम जाँचें, फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery.lede": {
+      "text": "चुनें कि आप अकाउंट में वापस कैसे आना चाहते हैं।",
+      "status": "machine"
+    },
+    "recovery.lede_account": {
+      "text": "चुनें कि {username} में वापस कैसे आना है।",
+      "status": "machine"
+    },
+    "recovery.method.contact.sub": {
+      "text": "आपके सेट किए गए ईमेल या फ़ोन पर भेजा गया कोड।",
+      "status": "machine"
+    },
+    "recovery.method.contact.title": {
+      "text": "ईमेल या फ़ोन",
+      "status": "machine"
+    },
+    "recovery.method.device.sub": {
+      "text": "किसी ऐसे डिवाइस से पुष्टि करें जिस पर अभी भी लॉग इन है।",
+      "status": "machine"
+    },
+    "recovery.method.device.title": {
+      "text": "दूसरा डिवाइस",
+      "status": "machine"
+    },
+    "recovery.method.phrase.restore_sub": {
+      "text": "सभी 24 शब्द टाइप करें।",
+      "status": "machine"
+    },
+    "recovery.method.phrase.sub": {
+      "text": "अपने 24 शब्द टाइप करें और नया पासवर्ड चुनें।",
+      "status": "machine"
+    },
+    "recovery.method.phrase.title": {
+      "text": "रिकवरी फ़्रेज़",
+      "status": "machine"
+    },
+    "recovery.method.shares.sub": {
+      "text": "वे हिस्से जो आपने अपने भरोसेमंद लोगों को दिए थे।",
+      "status": "machine"
+    },
+    "recovery.method.shares.title": {
+      "text": "सोशल रिकवरी हिस्से",
+      "status": "machine"
+    },
+    "recovery.method.totp.sub": {
+      "text": "आपके ऑथेंटिकेटर ऐप का कोड।",
+      "status": "machine"
+    },
+    "recovery.method.totp.title": {
+      "text": "ऑथेंटिकेटर",
+      "status": "machine"
+    },
+    "recovery.method.words.restore_sub": {
+      "text": "आपकी रिकवरी फ़्रेज़ के तीन शब्द।",
+      "status": "machine"
+    },
+    "recovery.method.words.sub": {
+      "text": "आपकी फ़्रेज़ के तीन शब्द, अगर यह शॉर्टकट चालू है।",
+      "status": "machine"
+    },
+    "recovery.method.words.title": {
+      "text": "तीन शब्द",
+      "status": "machine"
+    },
+    "recovery.methods.back": {
+      "text": "सभी तरीकों पर वापस जाएँ",
+      "status": "machine"
+    },
+    "recovery.phrase.intro": {
+      "text": "अपने 24 शब्द टाइप करें, फिर नया पासवर्ड चुनें।",
+      "status": "machine"
+    },
+    "recovery.remembered": {
+      "text": "पासवर्ड याद आ गया? {link}",
+      "status": "machine"
+    },
+    "recovery.shares.copy_failed": {
+      "text": "कॉपी नहीं हो सका। हिस्सा चुनें और उसे खुद कॉपी करें।",
+      "status": "machine"
+    },
+    "recovery.shares.error.combine_failed": {
+      "text": "हिस्सों को जोड़ा नहीं जा सका। जाँचें कि हर हिस्सा पूरा है और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery.shares.error.generic": {
+      "text": "हिस्से नहीं बन सके। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery.shares.error.too_few": {
+      "text": "कम से कम दो हिस्से पेस्ट करें, हर लाइन में एक।",
+      "status": "machine"
+    },
+    "recovery.shares.generate": {
+      "text": "{count, plural, one {# हिस्सा बनाएँ} other {# हिस्से बनाएँ}}",
+      "status": "machine"
+    },
+    "recovery.shares.generating": {
+      "text": "बनाया जा रहा है...",
+      "status": "machine"
+    },
+    "recovery.shares.help": {
+      "text": "इन्हें ठीक वैसे ही पेस्ट करें जैसे भेजे गए थे। आपको उतने हिस्से चाहिए जितने बनाते समय तय किए गए थे, आम तौर पर 5 में से 3।",
+      "status": "machine"
+    },
+    "recovery.shares.intro": {
+      "text": "आपको दिए गए हिस्से पेस्ट करें, हर लाइन में एक, फिर नया पासवर्ड चुनें।",
+      "status": "machine"
+    },
+    "recovery.shares.label": {
+      "text": "रिकवरी हिस्से, हर लाइन में एक",
+      "status": "machine"
+    },
+    "recovery.shares.panel_body": {
+      "text": "फ़्रेज़ को अपने भरोसेमंद लोगों के लिए {count, plural, one {# हिस्से} other {# हिस्सों}} में बाँटें। इनमें से कोई भी {threshold} हिस्से मिलकर इसे फिर से बना देते हैं; इससे कम हिस्सों से कुछ पता नहीं चलता। हर व्यक्ति को एक हिस्सा दें।",
+      "status": "machine"
+    },
+    "recovery.shares.usage": {
+      "text": "बाद में इनका इस्तेमाल करने के लिए, रिकवरी स्क्रीन पर {method} चुनें और कोई भी {threshold} हिस्से पेस्ट करें।",
+      "status": "machine"
+    },
+    "recovery.submit": {
+      "text": "अकाउंट रिकवर करें",
+      "status": "machine"
+    },
+    "recovery.title": {
+      "text": "अपना अकाउंट रिकवर करें",
+      "status": "machine"
+    },
+    "recovery.totp.code_label": {
+      "text": "ऐप का कोड",
+      "status": "machine"
+    },
+    "recovery.totp.error.enter_code": {
+      "text": "अपने ऑथेंटिकेटर ऐप का छह अंकों का कोड डालें।",
+      "status": "machine"
+    },
+    "recovery.totp.error.generic": {
+      "text": "कोड की जाँच नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery.totp.error.unavailable": {
+      "text": "ऑथेंटिकेटर से रिकवरी यहाँ उपलब्ध नहीं है। अंदर आने का कोई दूसरा तरीका अपनाएँ।",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong": {
+      "text": "यह कोड काम नहीं किया। ऐप जाँचें और अगला कोड आज़माएँ।",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong_username": {
+      "text": "यह कोड काम नहीं किया। यूज़रनेम और ऐप जाँचें, फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery.totp.intro": {
+      "text": "सेटिंग्स में सेट किए गए ऑथेंटिकेटर ऐप का छह अंकों का कोड इस्तेमाल करें। इससे आप अकाउंट में वापस आ जाते हैं; उसके बाद आपकी चैट के लिए रिकवरी फ़्रेज़ या दूसरा डिवाइस चाहिए।",
+      "status": "machine"
+    },
+    "recovery.username_required": {
+      "text": "अकाउंट का यूज़रनेम डालें।",
+      "status": "machine"
+    },
+    "recovery.username_required_to_recover": {
+      "text": "जिस अकाउंट को रिकवर करना है, उसका यूज़रनेम डालें।",
+      "status": "machine"
+    },
+    "recovery.words.error.generic": {
+      "text": "शब्दों की जाँच नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match": {
+      "text": "ये शब्द मेल नहीं खाए।",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match_tries": {
+      "text": "ये शब्द मेल नहीं खाए। तीन-शब्द वाला शॉर्टकट बंद होने से पहले {count, plural, one {# कोशिश बाकी है} other {# कोशिशें बाकी हैं}}।",
+      "status": "machine"
+    },
+    "recovery.words.error.open_failed": {
+      "text": "सर्वर ने जवाब दिया, लेकिन रिकवरी डेटा खुल नहीं सका। कुछ भी नहीं बदला गया।",
+      "status": "machine"
+    },
+    "recovery.words.error.server_off": {
+      "text": "इस सर्वर पर तीन-शब्द वाली रिकवरी उपलब्ध नहीं है।",
+      "status": "machine"
+    },
+    "recovery.words.intro": {
+      "text": "अपनी रिकवरी फ़्रेज़ के तीन शब्द टाइप करें और नया पासवर्ड चुनें। पहले बताएँ, कौन-सा अकाउंट?",
+      "status": "machine"
+    },
+    "recovery.words.prompt": {
+      "text": "{username}: अपनी रिकवरी फ़्रेज़ के शब्द {positions} टाइप करें।",
+      "status": "machine"
+    },
+    "recovery.words.prompt_restore": {
+      "text": "अपनी रिकवरी फ़्रेज़ के शब्द {positions} टाइप करें।",
+      "status": "machine"
+    },
+    "recovery.words.switched_off": {
+      "text": "इस अकाउंट के लिए तीन-शब्द वाला शॉर्टकट अब बंद कर दिया गया है। अपनी पूरी रिकवरी फ़्रेज़ या कोई दूसरा डिवाइस इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "recovery.words.switched_off_restore": {
+      "text": "इस अकाउंट के लिए तीन-शब्द वाला शॉर्टकट अब बंद कर दिया गया है। कोई दूसरा डिवाइस या अपनी पूरी रिकवरी फ़्रेज़ इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "recovery.words.tries_left": {
+      "text": "{count, plural, one {# कोशिश बाकी है।} other {# कोशिशें बाकी हैं।}}",
+      "status": "machine"
+    },
+    "recovery.words.unavailable": {
+      "text": "तीन-शब्द वाली रिकवरी यहाँ उपलब्ध नहीं है। अंदर आने का कोई दूसरा तरीका अपनाएँ।",
+      "status": "machine"
+    },
+    "recovery_phrase.check.acknowledge": {
+      "text": "मैं समझता/समझती हूँ कि इन शब्दों को खोने का मतलब इस अकाउंट तक पहुँच खोना है।",
+      "status": "machine"
+    },
+    "recovery_phrase.check.back": {
+      "text": "शब्दों पर वापस जाएँ",
+      "status": "machine"
+    },
+    "recovery_phrase.check.lede": {
+      "text": "आपने जो लिखा है, उसमें से शब्द {positions} टाइप करें।",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_many": {
+      "text": "शब्द {positions} मेल नहीं खाते। अपने नोट्स जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_one": {
+      "text": "शब्द {position} मेल नहीं खाता। अपने नोट्स जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery_phrase.check.title": {
+      "text": "अपने नोट्स जाँचें",
+      "status": "machine"
+    },
+    "recovery_phrase.copy_failed": {
+      "text": "कॉपी नहीं हो सका। इसके बजाय शब्दों को लिख लें।",
+      "status": "machine"
+    },
+    "recovery_phrase.error.incomplete": {
+      "text": "अपनी रिकवरी फ़्रेज़ के सभी 24 शब्द डालें।",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.acknowledge": {
+      "text": "मैंने ये 24 शब्द लिख लिए हैं और समझता/समझती हूँ कि इन्हें खोने का मतलब इस अकाउंट तक पहुँच खोना है।",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.error.generic": {
+      "text": "पूरा नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.finishing": {
+      "text": "पूरा किया जा रहा है...",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.lede": {
+      "text": "आपने {username} के लिए एक नई पहचान बनाई है। अगर आप फिर से पहुँच खो दें, तो इसे रिकवर करने का ये 24 शब्द ही एकमात्र तरीका हैं। इन्हें क्रम से लिखें और किसी सुरक्षित जगह रखें।",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.safety_note": {
+      "text": "आपके संपर्क देखेंगे कि आपका सुरक्षा नंबर बदल गया है, और आपको सुरक्षित रूप से मैसेज भेजने से पहले उन्हें फिर से आपकी पुष्टि करनी होगी।",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.title": {
+      "text": "अपनी नई रिकवरी फ़्रेज़ सेव करें",
+      "status": "machine"
+    },
+    "recovery_phrase.guest.lede": {
+      "text": "आपका अकाउंट बिना पासवर्ड के बनाया गया था। दूसरे डिवाइस पर या यह ब्राउज़र साफ़ करने के बाद, इसमें वापस आने का ये 24 शब्द ही एकमात्र तरीका हैं। इन्हें क्रम से लिखें और किसी सुरक्षित जगह रखें।",
+      "status": "machine"
+    },
+    "recovery_phrase.label": {
+      "text": "रिकवरी फ़्रेज़",
+      "status": "machine"
+    },
+    "recovery_phrase.save.anyone_with_words": {
+      "text": "जिसके पास भी ये शब्द होंगे, वह आपके मैसेज पढ़ सकता है और आपकी जगह काम कर सकता है। इन्हें किसी से शेयर न करें।",
+      "status": "machine"
+    },
+    "recovery_phrase.save.lede": {
+      "text": "अगर आपका पासवर्ड और आपके डिवाइस खो जाएँ, तो अपने अकाउंट में वापस आने का ये 24 शब्द ही एकमात्र तरीका हैं। इन्हें क्रम से लिखें और किसी सुरक्षित जगह रखें।",
+      "status": "machine"
+    },
+    "recovery_phrase.save.no_screenshot": {
+      "text": "इन्हें स्क्रीनशॉट या सादी टेक्स्ट फ़ाइल में न रखें। Lakko इन्हें दोबारा नहीं दिखा सकता।",
+      "status": "machine"
+    },
+    "recovery_phrase.save.title": {
+      "text": "अपनी रिकवरी फ़्रेज़ सेव करें",
+      "status": "machine"
+    },
+    "recovery_phrase.save.vault_note": {
+      "text": "नए डिवाइस पर आम तौर पर आपसे इनमें से सिर्फ़ तीन शब्द माँगे जाएँगे, शब्द {positions}। फिर भी पूरी सूची रखें: अगर वह शॉर्टकट कभी बंद हो जाए, तो वापस आने का यही एकमात्र तरीका है।",
+      "status": "machine"
+    },
+    "recovery_phrase.save.written": {
+      "text": "मैंने इन्हें लिख लिया है",
+      "status": "machine"
+    },
+    "recovery_phrase.step": {
+      "text": "चरण {current} / {total}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_label": {
+      "text": "शब्द {position}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_placeholder": {
+      "text": "शब्द {position}",
+      "status": "machine"
+    },
+    "restore_identity.device_intro": {
+      "text": "जिस डिवाइस पर अभी भी लॉग इन है, उस पर एक सूचना दिखेगी; वहाँ पुष्टि करें और कोड का मिलान करें। ट्रांसफ़र एंड-टू-एंड एन्क्रिप्टेड है; Lakko के सर्वर इसे नहीं पढ़ सकते। कैमरे की ज़रूरत नहीं; चाहें तो QR कोड भी है।",
+      "status": "machine"
+    },
+    "restore_identity.error.bad_saved_account": {
+      "text": "इस डिवाइस पर सेव अकाउंट में कुछ गड़बड़ है। लॉग आउट करके फिर से लॉग इन करें, या अपनी रिकवरी फ़्रेज़ इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "restore_identity.error.generic": {
+      "text": "आपकी पहचान रिस्टोर नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "restore_identity.error.invalid_phrase": {
+      "text": "यह सही रिकवरी फ़्रेज़ नहीं है। हर शब्द जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "restore_identity.error.not_published": {
+      "text": "रिकवर की गई पहचान की पुष्टि के लिए कोई प्रकाशित पहचान नहीं मिली। फिर से कोशिश करें, या किसी ऐसे डिवाइस से रिस्टोर करें जिस पर अब भी आपका अकाउंट है।",
+      "status": "machine"
+    },
+    "restore_identity.error.nothing": {
+      "text": "रिस्टोर करने के लिए कुछ नहीं है। पहले लॉग इन करें।",
+      "status": "machine"
+    },
+    "restore_identity.error.phrase_mismatch": {
+      "text": "यह रिकवरी फ़्रेज़ इस अकाउंट की पहचान से मेल नहीं खाती। फ़्रेज़ जाँचें, या इसके बजाय किसी मौजूदा डिवाइस से पेयर करें।",
+      "status": "machine"
+    },
+    "restore_identity.error.unreachable": {
+      "text": "रिकवर की गई पहचान की पुष्टि के लिए डायरेक्टरी से कनेक्ट नहीं हो सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "आप एक नए डिवाइस पर {username} के रूप में लॉग इन हैं। जो संपर्क पहले से आप पर भरोसा करते हैं, उन्हें बनाए रखने के लिए अपनी पहचान तीन शब्दों से, अपनी रिकवरी फ़्रेज़ से, या किसी ऐसे डिवाइस से रिस्टोर करें जिस पर अभी भी लॉग इन है।",
+      "status": "machine"
+    },
+    "restore_identity.lede_no_words": {
+      "text": "आप एक नए डिवाइस पर {username} के रूप में लॉग इन हैं। जो संपर्क पहले से आप पर भरोसा करते हैं, उन्हें बनाए रखने के लिए अपनी पहचान अपनी रिकवरी फ़्रेज़ से, या किसी ऐसे डिवाइस से रिस्टोर करें जिस पर अभी भी लॉग इन है।",
+      "status": "machine"
+    },
+    "restore_identity.log_out": {
+      "text": "लॉग आउट करें",
+      "status": "machine"
+    },
+    "restore_identity.lost.create": {
+      "text": "नई पहचान बनाएँ",
+      "status": "machine"
+    },
+    "restore_identity.lost.creating": {
+      "text": "नई पहचान बनाई जा रही है...",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.generic": {
+      "text": "नई पहचान नहीं बन सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "restore_identity.lost.sub": {
+      "text": "नई पहचान के साथ शुरू करें",
+      "status": "machine"
+    },
+    "restore_identity.lost.summary": {
+      "text": "मेरे पास न तो रिकवरी फ़्रेज़ है और न ही कोई दूसरा डिवाइस",
+      "status": "machine"
+    },
+    "restore_identity.lost.warning": {
+      "text": "इससे आपके अकाउंट के लिए एक नई पहचान बनेगी। आपके संपर्कों को फिर से आपकी पुष्टि करनी होगी, आपके खोए हुए डिवाइस के मैसेज पढ़े नहीं जा सकेंगे, और आपको सेव करने के लिए एक नई रिकवरी फ़्रेज़ मिलेगी। ऐसा तभी करें जब आपने अपनी रिकवरी फ़्रेज़ और बाकी सभी डिवाइस, दोनों खो दिए हों।",
+      "status": "machine"
+    },
+    "restore_identity.not_you": {
+      "text": "आपका अकाउंट नहीं है?",
+      "status": "machine"
+    },
+    "restore_identity.phrase_intro": {
+      "text": "24 शब्द क्रम से टाइप करें। आगे बढ़ने से पहले Lakko इन्हें आपके अकाउंट से मिलाता है।",
+      "status": "machine"
+    },
+    "restore_identity.submit": {
+      "text": "रिस्टोर करें",
+      "status": "machine"
+    },
+    "restore_identity.submitting": {
+      "text": "रिस्टोर हो रहा है...",
+      "status": "machine"
+    },
+    "restore_identity.title": {
+      "text": "अपनी पहचान रिस्टोर करें",
+      "status": "machine"
+    },
+    "security.identity_changed.body": {
+      "text": "अगर यह आपने किसी दूसरे डिवाइस पर किया था, तो इसे हटा दें। अगर नहीं, तो अपने संपर्कों के साथ सुरक्षा नंबर की पुष्टि करें और अपना पासवर्ड और पासकी बदलें।",
+      "status": "machine"
+    },
+    "security.identity_changed.title": {
+      "text": "आपके अकाउंट की सुरक्षा कुंजी बदल दी गई है।",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -148,6 +1196,34 @@
     },
     "settings.section.security": {
       "text": "सुरक्षा",
+      "status": "machine"
+    },
+    "username.a11y_hint": {
+      "text": "यूज़रनेम: {message}",
+      "status": "machine"
+    },
+    "username.error.empty": {
+      "text": "यूज़रनेम डालें",
+      "status": "machine"
+    },
+    "username.error.invalid_characters": {
+      "text": "सिर्फ़ लैटिन अक्षर, अंक और _",
+      "status": "machine"
+    },
+    "username.error.too_long": {
+      "text": "ज़्यादा से ज़्यादा {count, plural, one {# अक्षर} other {# अक्षर}}",
+      "status": "machine"
+    },
+    "username.error.too_short": {
+      "text": "कम से कम {count, plural, one {# अक्षर} other {# अक्षर}}",
+      "status": "machine"
+    },
+    "username.error.unknown": {
+      "text": "यह यूज़रनेम इस्तेमाल नहीं किया जा सकता",
+      "status": "machine"
+    },
+    "username.hint.shown_as": {
+      "text": "{username} के रूप में दिखेगा",
       "status": "machine"
     }
   }

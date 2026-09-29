@@ -2,13 +2,579 @@
   "format": 1,
   "version": 1,
   "messages": {
+    "auth.brand.body": {
+      "text": "Chats, groups, channels and calls, end-to-end encrypted by default. Lakko's servers never see your messages.",
+      "comment": "Text under the headline on the brand panel beside the sign-in and sign-up forms.",
+      "security_critical": true
+    },
+    "auth.brand.foot": {
+      "text": "Open source. No phone number required.",
+      "comment": "Small line at the bottom of the brand panel."
+    },
+    "auth.brand.tagline": {
+      "text": "Your messages, your rules.",
+      "comment": "Headline on the brand panel beside the sign-in and sign-up forms."
+    },
+    "auth.error.wrong_credentials": {
+      "text": "Wrong username or password. Check them and try again.",
+      "comment": "Sign-in failed. Deliberately does not say which of the two was wrong, so nobody can find out which usernames exist.",
+      "security_critical": true
+    },
+    "auth.explainer.never_leaves": {
+      "text": "Your password never leaves your device. Lakko checks it without ever receiving it, so nobody at Lakko can read it, and nobody can reset it for you.",
+      "comment": "First paragraph of the password explanation.",
+      "security_critical": true
+    },
+    "auth.explainer.same_answer": {
+      "text": "A wrong username and a wrong password get the same answer, so nobody can use the login screen to find out which usernames exist.",
+      "comment": "Second paragraph of the password explanation."
+    },
+    "auth.explainer.title": {
+      "text": "How Lakko protects your password",
+      "comment": "Link that expands an explanation of how the password is protected."
+    },
+    "auth.explainer.ways_back": {
+      "text": "If you forget it, your recovery phrase, another device that is still logged in, three words from the phrase, an authenticator app, or a code sent by email or phone get you back in.",
+      "comment": "Third paragraph of the password explanation: the ways back into an account."
+    },
+    "auth.explainer.ways_back_no_words": {
+      "text": "If you forget it, your recovery phrase, another device that is still logged in, an authenticator app, or a code sent by email or phone get you back in.",
+      "comment": "Last paragraph of the password explanation on a client that has no three-word recovery."
+    },
     "auth.language.button": {
       "text": "Change language",
       "comment": "Accessibility label of the globe button on the sign-in and sign-up screens."
     },
+    "auth.login.forgot": {
+      "text": "Forgot password?",
+      "comment": "Link from the sign-in screen to the recovery screen."
+    },
+    "auth.login.lede": {
+      "text": "Log in to continue.",
+      "comment": "Line under the sign-in title."
+    },
+    "auth.login.no_account": {
+      "text": "New to Lakko? {link}",
+      "comment": "Line under the sign-in form; {link} is the 'Create account' link."
+    },
+    "auth.login.passkey": {
+      "text": "Use passkey",
+      "comment": "Button that signs in with a passkey instead of the password."
+    },
+    "auth.login.submit": {
+      "text": "Log in",
+      "comment": "Sign-in button, and the link to the sign-in screen from other auth screens."
+    },
+    "auth.login.submitting": {
+      "text": "Logging in...",
+      "comment": "Busy label of the sign-in button."
+    },
+    "auth.login.title": {
+      "text": "Welcome back",
+      "comment": "Title of the sign-in screen."
+    },
+    "auth.passkey.error.cancelled": {
+      "text": "Passkey sign-in cancelled.",
+      "comment": "The person closed the passkey prompt."
+    },
+    "auth.passkey.error.failed_status": {
+      "text": "Passkey sign-in failed ({status}).",
+      "comment": "Passkey sign-in failed; {status} is an HTTP status number, keep it in Latin digits."
+    },
+    "auth.passkey.error.generic": {
+      "text": "Could not sign in with the passkey. Try again, or use your password.",
+      "comment": "Passkey sign-in failed for a reason with no more specific message."
+    },
+    "auth.passkey.error.network": {
+      "text": "Network error during passkey sign-in.",
+      "comment": "The connection failed during passkey sign-in."
+    },
+    "auth.passkey.error.no_cached": {
+      "text": "No cached credentials for passkey sign-in on this device. Sign in with password or recover with your phrase first.",
+      "comment": "Passkey sign-in needs a previous sign-in on this device."
+    },
+    "auth.passkey.error.not_registered": {
+      "text": "No passkey is registered for this account. Sign in with password first, then add a passkey from Home.",
+      "comment": "No passkey exists for the account."
+    },
+    "auth.passkey.error.server_disabled": {
+      "text": "Server hasn't enabled passkey support.",
+      "comment": "The server has passkeys switched off."
+    },
+    "auth.passkey.error.unsupported": {
+      "text": "This browser doesn't support passkeys.",
+      "comment": "Passkeys are not available in this browser."
+    },
+    "auth.passkey.error.wrong_account": {
+      "text": "This passkey belongs to a different account than the one on this device. Log in with your password first.",
+      "comment": "Passkey sign-in refused: the passkey chosen is for another account than the one saved on this device."
+    },
+    "auth.password.confirm.label": {
+      "text": "Confirm password",
+      "comment": "Label of the second password field on the sign-up form."
+    },
+    "auth.password.error.mismatch": {
+      "text": "The passwords do not match. Type the same password twice.",
+      "comment": "The two new-password fields differ."
+    },
+    "auth.password.error.too_short": {
+      "text": "Use at least {count, plural, one {# character} other {# characters}}.",
+      "comment": "The new password is too short; {count} is the minimum length."
+    },
+    "auth.password.hide": {
+      "text": "Hide password",
+      "comment": "Accessibility label of the button that hides the typed password again."
+    },
+    "auth.password.hint": {
+      "text": "At least {count, plural, one {# character} other {# characters}}.",
+      "comment": "Helper text under a password field that sets a new password, before anything is typed."
+    },
+    "auth.password.label": {
+      "text": "Password",
+      "comment": "Label of the password field."
+    },
+    "auth.password.new.label": {
+      "text": "New password",
+      "comment": "Label of the new password field on the recovery forms."
+    },
+    "auth.password.new_confirm.label": {
+      "text": "Confirm new password",
+      "comment": "Label of the second new-password field on the recovery forms."
+    },
+    "auth.password.show": {
+      "text": "Show password",
+      "comment": "Accessibility label of the button that reveals the typed password."
+    },
+    "auth.signup.error.enter_username": {
+      "text": "Enter a username.",
+      "comment": "Sign-up submitted without a username."
+    },
+    "auth.signup.error.fix_name": {
+      "text": "Fix your name before continuing.",
+      "comment": "Sign-up submitted with a profile name that is not allowed."
+    },
+    "auth.signup.error.generic": {
+      "text": "Could not create the account. Try again.",
+      "comment": "Sign-up failed for a reason with no more specific message."
+    },
+    "auth.signup.error.rate_limited": {
+      "text": "Too many new accounts from this network right now. Try again later.",
+      "comment": "The server limits new accounts per network."
+    },
+    "auth.signup.error.username_taken": {
+      "text": "That username is taken. Choose another one.",
+      "comment": "The chosen username belongs to someone else."
+    },
+    "auth.signup.have_account": {
+      "text": "Already have an account? {link}",
+      "comment": "Line under the sign-up form; {link} is the 'Log in' link."
+    },
+    "auth.signup.lede": {
+      "text": "Your password never leaves your device. You will get a recovery phrase to write down next.",
+      "comment": "Line under the sign-up title.",
+      "security_critical": true
+    },
+    "auth.signup.name.hint": {
+      "text": "Shown to your contacts. Leave it empty to show your username.",
+      "comment": "Helper text under the optional name field on the sign-up form."
+    },
+    "auth.signup.name.label": {
+      "text": "Name (optional)",
+      "comment": "Label of the optional profile name field on the sign-up form."
+    },
+    "auth.signup.submit": {
+      "text": "Create account",
+      "comment": "Sign-up button, and the link to the sign-up screen from the sign-in screen."
+    },
+    "auth.signup.title": {
+      "text": "Create your account",
+      "comment": "Title of the sign-up screen."
+    },
+    "auth.signup.username.hint": {
+      "text": "Latin letters, digits and _. Others find you by this name.",
+      "comment": "Helper text under the username field on the sign-up form, shown while the name is fine."
+    },
+    "auth.signup.working.line": {
+      "text": "This takes a little while, once. You will not wait like this again.",
+      "comment": "Line under the busy row while an account is created."
+    },
+    "auth.signup.working.title": {
+      "text": "Creating your account...",
+      "comment": "Busy row while the account is created; this takes a while once."
+    },
+    "auth.username.label": {
+      "text": "Username",
+      "comment": "Label of the username field on the sign-in, sign-up and recovery forms."
+    },
+    "call.guest.working.title": {
+      "text": "Getting you into the call...",
+      "comment": "Busy row while a guest account is created to join a call from a link."
+    },
+    "chats.empty.select": {
+      "text": "Select a chat to start messaging",
+      "comment": "Hint in the empty main pane when no chat is open."
+    },
+    "common.back": {
+      "text": "Back",
+      "comment": "Accessibility label of the back arrow in a screen's top bar."
+    },
+    "common.cancel": {
+      "text": "Cancel",
+      "comment": "Button that stops the operation in progress and returns to the form."
+    },
+    "common.checking": {
+      "text": "Checking...",
+      "comment": "Busy label of a submit button while what was typed is checked."
+    },
     "common.close": {
       "text": "Close",
       "comment": "Accessibility label of a button that closes a sheet or dialog, e.g. the language list opened from the sign-in screen."
+    },
+    "common.confirm": {
+      "text": "Confirm",
+      "comment": "Button that confirms what the screen asks for."
+    },
+    "common.continue": {
+      "text": "Continue",
+      "comment": "Button that moves a form to its next step."
+    },
+    "common.copied": {
+      "text": "Copied",
+      "comment": "Label the Copy button shows for a moment after it copied."
+    },
+    "common.copy": {
+      "text": "Copy",
+      "comment": "Button that copies the text next to it to the clipboard."
+    },
+    "common.dismiss": {
+      "text": "Dismiss",
+      "comment": "Button (and accessibility label) that hides a notice."
+    },
+    "common.done": {
+      "text": "Done",
+      "comment": "Button that finishes a flow."
+    },
+    "common.email": {
+      "text": "Email",
+      "comment": "Label of an email address option or field."
+    },
+    "common.error.a11y": {
+      "text": "Error: {message}",
+      "comment": "Spoken by the screen reader for an inline error under a field. {message} is the error text."
+    },
+    "common.error.offline": {
+      "text": "Could not reach Lakko. Check your connection and try again.",
+      "comment": "Error when the device could not reach the server at all."
+    },
+    "common.error.server_unreachable": {
+      "text": "Could not reach the server. Check your connection.",
+      "comment": "Error when the server could not be reached."
+    },
+    "common.error.too_many_attempts": {
+      "text": "Too many attempts. Wait a moment, then try again.",
+      "comment": "The server is limiting attempts for a short time. Never means the account is locked or the input was wrong."
+    },
+    "common.error.too_many_attempts_minutes": {
+      "text": "Too many attempts. Try again in {minutes, plural, one {# minute} other {# minutes}}.",
+      "comment": "The server is limiting attempts; {minutes} is how long to wait, in minutes."
+    },
+    "common.error.unavailable": {
+      "text": "That is not available right now. Try again later.",
+      "comment": "Error when the server refused because a service is temporarily down."
+    },
+    "common.loading": {
+      "text": "Loading...",
+      "comment": "Shown while a screen is still loading."
+    },
+    "common.looking_up": {
+      "text": "Looking up...",
+      "comment": "Busy label of a button while an account is looked up."
+    },
+    "common.more_options": {
+      "text": "More options",
+      "comment": "Title of a collapsed section with less common choices."
+    },
+    "common.optional": {
+      "text": "Optional",
+      "comment": "Placeholder of a field that may be left empty."
+    },
+    "common.paste": {
+      "text": "Paste",
+      "comment": "Button that pastes the clipboard into a form."
+    },
+    "common.phone": {
+      "text": "Phone",
+      "comment": "Label of the phone option (as opposed to email)."
+    },
+    "common.preparing": {
+      "text": "Preparing...",
+      "comment": "Shown while something is being set up."
+    },
+    "common.sending": {
+      "text": "Sending...",
+      "comment": "Busy label of a button while a code is being sent."
+    },
+    "common.try_again": {
+      "text": "Try again",
+      "comment": "Button that repeats an operation that failed."
+    },
+    "device_link.compare_hint": {
+      "text": "Make sure the other device shows the same code.",
+      "comment": "Instruction under the comparison code on the new device.",
+      "security_critical": true
+    },
+    "device_link.comparison_code": {
+      "text": "Comparison code",
+      "comment": "Label over the code the person compares between the two devices.",
+      "security_critical": true
+    },
+    "device_link.confirm_there": {
+      "text": "Open Lakko on a device that is already signed in and confirm this sign-in there.",
+      "comment": "Instruction on the new device while it waits for another device to confirm.",
+      "security_critical": true
+    },
+    "device_link.error.ask_unavailable": {
+      "text": "Asking your other device is not available right now; the QR code still works.",
+      "comment": "The server cannot pass the request to other devices; the QR code is offered instead."
+    },
+    "device_link.error.ask_unreachable": {
+      "text": "Could not reach the server to ask your other device; the QR code still works.",
+      "comment": "The request to other devices could not be sent; the QR code is offered instead."
+    },
+    "device_link.error.declined": {
+      "text": "Declined on another device.",
+      "comment": "The other device refused the sign-in.",
+      "security_critical": true
+    },
+    "device_link.error.generic": {
+      "text": "Could not restore from your other device. Try again, or use your recovery phrase.",
+      "comment": "Restoring from another device failed for a reason with no more specific message."
+    },
+    "device_link.error.identity_mismatch": {
+      "text": "The identity received from your other device doesn't match this account's published identity — refusing to use it.",
+      "comment": "The identity from the other device does not match the account; it is refused for safety.",
+      "security_critical": true
+    },
+    "device_link.error.name_other_account": {
+      "text": "The name you typed belongs to a different account. Nothing was changed on this device.",
+      "comment": "Restoring from another device: the username typed on this device resolves to a different account than the one the other device answered for, so nothing was saved.",
+      "security_critical": true
+    },
+    "device_link.error.no_identity": {
+      "text": "The other device confirmed but did not send your identity. Update Lakko on it and try again, or use your recovery phrase.",
+      "comment": "The other device confirmed without sending the identity."
+    },
+    "device_link.error.not_let_in": {
+      "text": "Your other device sent the identity, but this device could not be let in. Try again, or use your recovery phrase.",
+      "comment": "The identity arrived but signing in on this device failed."
+    },
+    "device_link.error.request_limited": {
+      "text": "Too many requests to your other devices. Try again in a few minutes.",
+      "comment": "The server limits how often other devices are asked."
+    },
+    "device_link.error.timeout": {
+      "text": "The other device did not answer in time. Try again.",
+      "comment": "Nobody confirmed on another device in time."
+    },
+    "device_link.pairing.needs_username": {
+      "text": "Set a username first to add another device.",
+      "comment": "An account without a username cannot add another device."
+    },
+    "device_link.pairing.unsupported": {
+      "text": "This code comes from a different version of Lakko. Update Lakko on both devices and try again.",
+      "comment": "The new device runs a version this one cannot read."
+    },
+    "device_link.pairing.wrong_account": {
+      "text": "This code is for a different account. Check that the new device uses the same username as this one.",
+      "comment": "The new device asked to join a different account.",
+      "security_critical": true
+    },
+    "device_link.qr.hide": {
+      "text": "Hide the QR code",
+      "comment": "Button that hides the QR code again."
+    },
+    "device_link.qr.intro": {
+      "text": "Show this code to a device that still has your account. It adds this device and transfers your identity end-to-end encrypted, with no phrase to type.",
+      "comment": "Line above the pairing code shown on a new device.",
+      "security_critical": true
+    },
+    "device_link.qr.scan_hint": {
+      "text": "On your other device, open Settings, then Devices, then Add a device, and scan this code.",
+      "comment": "Instruction under the pairing QR code.",
+      "security_critical": true
+    },
+    "device_link.qr.show": {
+      "text": "Show a QR code instead",
+      "comment": "Button that shows a QR code as an alternative to confirming."
+    },
+    "device_link.qr.waiting": {
+      "text": "Waiting for your other device to scan this code...",
+      "comment": "Shown under the pairing QR code while the other device has not scanned it yet."
+    },
+    "device_link.request.added": {
+      "text": "Device added.",
+      "comment": "Shown after a new device was added."
+    },
+    "device_link.request.adding": {
+      "text": "Adding the device...",
+      "comment": "Busy label while the new device is added."
+    },
+    "device_link.request.body": {
+      "text": "A new device is asking to join your account. It shows a code.",
+      "comment": "Text of the prompt on a signed-in device when a new device asks to join.",
+      "security_critical": true
+    },
+    "device_link.request.code_label": {
+      "text": "Code on the new device",
+      "comment": "Label over the code the new device shows.",
+      "security_critical": true
+    },
+    "device_link.request.confirm": {
+      "text": "Yes, add it",
+      "comment": "Button that lets a new device into the account.",
+      "security_critical": true
+    },
+    "device_link.request.confirm_only_if": {
+      "text": "Confirm only if the new device shows exactly this code.",
+      "comment": "Instruction: compare the code before confirming.",
+      "security_critical": true
+    },
+    "device_link.request.decline": {
+      "text": "It is not me",
+      "comment": "Button that refuses a new device's request to join.",
+      "security_critical": true
+    },
+    "device_link.request.declined": {
+      "text": "Declined. If this keeps happening, change your password.",
+      "comment": "Shown after the request was refused.",
+      "security_critical": true
+    },
+    "device_link.request.error.generic": {
+      "text": "Could not add the device. Try again.",
+      "comment": "Adding the new device failed for a reason with no more specific message."
+    },
+    "device_link.request.error.no_device_key": {
+      "text": "No device key on this browser. Sign in again.",
+      "comment": "This browser lost its device key; signing in again fixes it."
+    },
+    "device_link.request.title": {
+      "text": "Is this you?",
+      "comment": "Title of the prompt on a signed-in device when a new device asks to join.",
+      "security_critical": true
+    },
+    "device_link.restored": {
+      "text": "Restored.",
+      "comment": "Shown when the restore from another device finished."
+    },
+    "device_link.show_code": {
+      "text": "Show pairing code",
+      "comment": "Button that starts the another-device sign-in and shows the code."
+    },
+    "device_link.transferring": {
+      "text": "Transferring...",
+      "comment": "Shown while the identity arrives from the other device."
+    },
+    "devices.add.e2ee_note": {
+      "text": "Linking is end-to-end encrypted between your two devices.",
+      "comment": "Line at the top of the add-a-device screen.",
+      "security_critical": true
+    },
+    "devices.add.error.generic": {
+      "text": "Could not link this device. Try again.",
+      "comment": "Linking the new device failed."
+    },
+    "devices.add.joining": {
+      "text": "Linking this device...",
+      "comment": "Progress on the new device after the other device scanned its code."
+    },
+    "devices.add.linked": {
+      "text": "Linked. This device is now part of your account.",
+      "comment": "The new device was linked to the account."
+    },
+    "devices.add.side.scan": {
+      "text": "Scan a code",
+      "comment": "Segment on the add-a-device screen: this device is signed in, it scans the new device's code."
+    },
+    "devices.add.side.scan_detail": {
+      "text": "This device is already signed in: it scans the new device's code and lets it in.",
+      "comment": "Explains the 'Scan a code' segment.",
+      "security_critical": true
+    },
+    "devices.add.side.show": {
+      "text": "Show a code",
+      "comment": "Segment on the add-a-device screen: this is the new device, it shows its code."
+    },
+    "devices.add.side.show_detail": {
+      "text": "This is the new device: it joins your account once another device scans its code.",
+      "comment": "Explains the 'Show a code' segment."
+    },
+    "devices.add.sign_in_first": {
+      "text": "Sign in first to add a device.",
+      "comment": "The add-a-device screen was opened without a session."
+    },
+    "devices.add.title": {
+      "text": "Add a device",
+      "comment": "Title of the screen that links a new device to the account."
+    },
+    "devices.scan.confirm.body": {
+      "text": "This gives the scanned device full access to your account: your messages, your contacts and your identity. Continue only if the code is on your own new device.",
+      "comment": "Warning before the scanned device is let into the account.",
+      "security_critical": true
+    },
+    "devices.scan.confirm.submit": {
+      "text": "Link device",
+      "comment": "Confirms letting the scanned device into the account.",
+      "security_critical": true
+    },
+    "devices.scan.confirm.title": {
+      "text": "Link this device?",
+      "comment": "Asked after a pairing code was scanned, before the new device is let in.",
+      "security_critical": true
+    },
+    "devices.scan.error.camera_denied": {
+      "text": "Lakko cannot use the camera. Allow camera access in Settings, then try again.",
+      "comment": "Camera access for scanning a pairing code was refused or failed."
+    },
+    "devices.scan.error.camera_failed": {
+      "text": "The camera could not start. Try again.",
+      "comment": "The camera started but the scanner could not attach to it."
+    },
+    "devices.scan.error.no_camera": {
+      "text": "No back camera is available on this device.",
+      "comment": "The camera needed to scan a pairing code is missing."
+    },
+    "devices.scan.error.not_a_code": {
+      "text": "That is not a Lakko device code. Point the camera at the code on your other device.",
+      "comment": "Hint over the camera when it sees a QR code that is not a Lakko pairing code; scanning goes on."
+    },
+    "devices.scan.intro": {
+      "text": "Point your camera at the code your new device is showing.",
+      "comment": "Instruction on the signed-in device before it scans the new device's code."
+    },
+    "devices.scan.open_camera": {
+      "text": "Open camera",
+      "comment": "Button that starts the camera to scan a pairing code."
+    },
+    "display_name.error.control": {
+      "text": "Remove invisible or text-direction characters",
+      "comment": "Shown under a name field that contains invisible or text-direction characters.",
+      "security_critical": true
+    },
+    "display_name.error.line_break": {
+      "text": "One line only",
+      "comment": "Shown under a name field that contains a line break."
+    },
+    "display_name.error.too_long": {
+      "text": "At most {count, plural, one {# character} other {# characters}}",
+      "comment": "Shown under a name field that is too long; {count} is the maximum."
+    },
+    "display_name.error.too_many_bytes": {
+      "text": "This name is too long",
+      "comment": "Shown under a name field that is too long to store."
+    },
+    "display_name.error.unknown": {
+      "text": "This name can't be used",
+      "comment": "Shown under a name field for any other refusal."
     },
     "language.name.ar": {
       "text": "Arabic",
@@ -73,6 +639,564 @@
     "nav.settings": {
       "text": "Settings",
       "comment": "Primary navigation: settings."
+    },
+    "recovery.access_only_note": {
+      "text": "An authenticator or a code gets you back in; your chats then need your recovery phrase or another device.",
+      "comment": "Note under the list of recovery methods.",
+      "security_critical": true
+    },
+    "recovery.cached_account": {
+      "text": "{username} on this device",
+      "comment": "On a recovery form, names the account saved on this device. {username} is '@name'."
+    },
+    "recovery.contact.change": {
+      "text": "Use a different email or phone",
+      "comment": "Button back to the first step of the email-or-phone recovery."
+    },
+    "recovery.contact.code_label": {
+      "text": "Code we sent",
+      "comment": "Label of the field for the code sent by email or phone."
+    },
+    "recovery.contact.email_label": {
+      "text": "Email address",
+      "comment": "Label of the email field in email-or-phone recovery."
+    },
+    "recovery.contact.error.bad_contact": {
+      "text": "That does not look like an email address or phone number. Check it and try again.",
+      "comment": "The server refused the email address or phone number."
+    },
+    "recovery.contact.error.enter_code": {
+      "text": "Enter the six-digit code we sent.",
+      "comment": "The code field is empty or not six digits."
+    },
+    "recovery.contact.error.generic": {
+      "text": "Could not check the code. Try again.",
+      "comment": "Email-or-phone recovery failed for a reason with no more specific message."
+    },
+    "recovery.contact.error.invalid_email": {
+      "text": "Enter a valid email address.",
+      "comment": "The email address does not look valid."
+    },
+    "recovery.contact.error.invalid_phone": {
+      "text": "Enter the phone number in international format, like +15551234567.",
+      "comment": "The phone number does not look valid. Keep the example number as is."
+    },
+    "recovery.contact.error.send_failed": {
+      "text": "Could not send a code. Check the username and try again.",
+      "comment": "The code could not be sent."
+    },
+    "recovery.contact.error.unavailable": {
+      "text": "Email and phone recovery are not available here. Use another way in.",
+      "comment": "The server has email and phone recovery switched off."
+    },
+    "recovery.contact.error.wrong": {
+      "text": "That code did not work. Check the code we sent and try again.",
+      "comment": "The code sent by email or phone was not accepted."
+    },
+    "recovery.contact.intro": {
+      "text": "We send a six-digit code to the email address or phone number you set up in Settings. It gets you back in; your chats then need your recovery phrase or another device.",
+      "comment": "Instructions of the email-or-phone recovery."
+    },
+    "recovery.contact.phone_label": {
+      "text": "Phone number",
+      "comment": "Label of the phone number field."
+    },
+    "recovery.contact.send": {
+      "text": "Send code",
+      "comment": "Button that sends the recovery code."
+    },
+    "recovery.contact.send_by": {
+      "text": "Send the code by",
+      "comment": "Accessibility label of the Email / Phone choice."
+    },
+    "recovery.contact.sent_email": {
+      "text": "If that address is set up for this account, a six-digit code is on its way. Enter it below.",
+      "comment": "Shown after a code was requested by email. Deliberately does not confirm the address is on the account."
+    },
+    "recovery.contact.sent_phone": {
+      "text": "If that number is set up for this account, a six-digit code is on its way. Enter it below.",
+      "comment": "Shown after a code was requested by phone. Deliberately does not confirm the number is on the account."
+    },
+    "recovery.device.intro": {
+      "text": "Enter your username, then confirm on a device that is still logged in and compare the code it shows. Nothing is sent that Lakko's servers can read. No camera needed; a QR code is there if you prefer.",
+      "comment": "Instructions of the another-device recovery.",
+      "security_critical": true
+    },
+    "recovery.device.intro_qr": {
+      "text": "Your other device links this one and carries your account across.",
+      "comment": "Line under the 'Another device' recovery title when the link runs by scanning a QR code."
+    },
+    "recovery.device.restoring": {
+      "text": "Restoring {username}",
+      "comment": "Heading while another device restores the account; {username} is the username with @."
+    },
+    "recovery.error.code_send_limited": {
+      "text": "We sent a code recently. Wait a few minutes before asking for another.",
+      "comment": "The server limits how often a recovery code is sent."
+    },
+    "recovery.error.generic": {
+      "text": "Could not recover the account. Check the words and try again.",
+      "comment": "Recovery failed for a reason with no more specific message."
+    },
+    "recovery.error.no_match": {
+      "text": "That did not match this account. Check the words and the username, then try again.",
+      "comment": "Recovery failed. Deliberately the same whether the username or the words were wrong.",
+      "security_critical": true
+    },
+    "recovery.lede": {
+      "text": "Choose how to get back in.",
+      "comment": "Line under the recovery title, above the list of methods."
+    },
+    "recovery.lede_account": {
+      "text": "Choose how to get back into {username}.",
+      "comment": "Line under the recovery title when an account is saved on this device; {username} is its username with @."
+    },
+    "recovery.method.contact.sub": {
+      "text": "A code sent to the email or phone you set up.",
+      "comment": "Subtitle of the email-or-phone method."
+    },
+    "recovery.method.contact.title": {
+      "text": "Email or phone",
+      "comment": "Recovery method: a code sent by email or text message."
+    },
+    "recovery.method.device.sub": {
+      "text": "Confirm from a device that is still logged in.",
+      "comment": "Subtitle of the another-device method."
+    },
+    "recovery.method.device.title": {
+      "text": "Another device",
+      "comment": "Recovery method: confirm from another signed-in device."
+    },
+    "recovery.method.phrase.restore_sub": {
+      "text": "Type all 24 words.",
+      "comment": "Subtitle of the recovery phrase method on the restore-identity screen."
+    },
+    "recovery.method.phrase.sub": {
+      "text": "Type your 24 words and choose a new password.",
+      "comment": "Subtitle of the recovery phrase method."
+    },
+    "recovery.method.phrase.title": {
+      "text": "Recovery phrase",
+      "comment": "Recovery method: type the 24-word recovery phrase."
+    },
+    "recovery.method.shares.sub": {
+      "text": "The shares you gave to people you trust.",
+      "comment": "Subtitle of the social recovery shares method."
+    },
+    "recovery.method.shares.title": {
+      "text": "Social recovery shares",
+      "comment": "Recovery method: pieces of the recovery phrase given to trusted people."
+    },
+    "recovery.method.totp.sub": {
+      "text": "A code from your authenticator app.",
+      "comment": "Subtitle of the authenticator method."
+    },
+    "recovery.method.totp.title": {
+      "text": "Authenticator",
+      "comment": "Recovery method: a code from an authenticator app."
+    },
+    "recovery.method.words.restore_sub": {
+      "text": "Three words from your recovery phrase.",
+      "comment": "Subtitle of the three-words method on the restore-identity screen."
+    },
+    "recovery.method.words.sub": {
+      "text": "Three words from your phrase, if that shortcut is on.",
+      "comment": "Subtitle of the three-words method."
+    },
+    "recovery.method.words.title": {
+      "text": "Three words",
+      "comment": "Recovery method: type three words from the recovery phrase."
+    },
+    "recovery.methods.back": {
+      "text": "Back to all methods",
+      "comment": "Accessibility label of the back button over a chosen recovery method."
+    },
+    "recovery.phrase.intro": {
+      "text": "Type your 24 words, then choose a new password.",
+      "comment": "Instructions of the recovery phrase form.",
+      "security_critical": true
+    },
+    "recovery.remembered": {
+      "text": "Remembered your password? {link}",
+      "comment": "Line at the bottom of the recovery screen; {link} is the 'Log in' link."
+    },
+    "recovery.shares.copy_failed": {
+      "text": "Could not copy. Select the share and copy it by hand.",
+      "comment": "Copying a share failed."
+    },
+    "recovery.shares.error.combine_failed": {
+      "text": "Could not combine the shares. Check that each one is complete and try again.",
+      "comment": "The pasted shares could not be combined."
+    },
+    "recovery.shares.error.generic": {
+      "text": "Could not make the shares. Try again.",
+      "comment": "Making the shares failed."
+    },
+    "recovery.shares.error.too_few": {
+      "text": "Paste at least two shares, one per line.",
+      "comment": "Fewer than two shares were pasted."
+    },
+    "recovery.shares.generate": {
+      "text": "Generate {count, plural, one {# share} other {# shares}}",
+      "comment": "Button that splits the phrase into shares."
+    },
+    "recovery.shares.generating": {
+      "text": "Generating...",
+      "comment": "Busy label while the shares are made."
+    },
+    "recovery.shares.help": {
+      "text": "Paste them exactly as they were sent. You need as many as were agreed when they were made, usually 3 of 5.",
+      "comment": "Help under the shares box.",
+      "security_critical": true
+    },
+    "recovery.shares.intro": {
+      "text": "Paste the shares you were given, one per line, then choose a new password.",
+      "comment": "Instructions of the social recovery form.",
+      "security_critical": true
+    },
+    "recovery.shares.label": {
+      "text": "Recovery shares, one per line",
+      "comment": "Label of the box the social recovery shares are pasted into."
+    },
+    "recovery.shares.panel_body": {
+      "text": "Split the phrase into {count, plural, one {# share} other {# shares}} for people you trust. Any {threshold} of them rebuild it; fewer reveal nothing. Give each person one share.",
+      "comment": "Explains social recovery shares; {count} is how many are made, {threshold} how many rebuild the phrase.",
+      "security_critical": true
+    },
+    "recovery.shares.usage": {
+      "text": "To use them later, choose {method} on the recovery screen and paste any {threshold}.",
+      "comment": "How to use the shares; {method} is the name of the recovery method, {threshold} how many are needed.",
+      "security_critical": true
+    },
+    "recovery.submit": {
+      "text": "Recover account",
+      "comment": "Submit button of the recovery forms."
+    },
+    "recovery.title": {
+      "text": "Recover your account",
+      "comment": "Title of the account recovery screen."
+    },
+    "recovery.totp.code_label": {
+      "text": "Code from the app",
+      "comment": "Label of the authenticator code field."
+    },
+    "recovery.totp.error.enter_code": {
+      "text": "Enter the six-digit code from your authenticator app.",
+      "comment": "The authenticator code field is empty or not six digits."
+    },
+    "recovery.totp.error.generic": {
+      "text": "Could not check the code. Try again.",
+      "comment": "Authenticator recovery failed for a reason with no more specific message."
+    },
+    "recovery.totp.error.unavailable": {
+      "text": "Authenticator recovery is not available here. Use another way in.",
+      "comment": "The server has authenticator recovery switched off."
+    },
+    "recovery.totp.error.wrong": {
+      "text": "That code did not work. Check the app and try the next one.",
+      "comment": "The authenticator code was not accepted."
+    },
+    "recovery.totp.error.wrong_username": {
+      "text": "That code did not work. Check the username and the app, then try again.",
+      "comment": "The authenticator code or the username was not accepted."
+    },
+    "recovery.totp.intro": {
+      "text": "Use the six-digit code from the authenticator app you set up in Settings. It gets you back in; your chats then need your recovery phrase or another device.",
+      "comment": "Instructions of the authenticator recovery."
+    },
+    "recovery.username_required": {
+      "text": "Enter the username of the account.",
+      "comment": "A recovery form was submitted without a username."
+    },
+    "recovery.username_required_to_recover": {
+      "text": "Enter the username of the account to recover.",
+      "comment": "Recovery was started with no username typed and none remembered on this device."
+    },
+    "recovery.words.error.generic": {
+      "text": "Could not check the words. Try again.",
+      "comment": "The three-word check failed for a reason with no more specific message."
+    },
+    "recovery.words.error.no_match": {
+      "text": "Those words did not match.",
+      "comment": "The three words were wrong.",
+      "security_critical": true
+    },
+    "recovery.words.error.no_match_tries": {
+      "text": "Those words did not match. {count, plural, one {# try left} other {# tries left}} before the three-word shortcut is switched off.",
+      "comment": "The three words were wrong; {count} wrong answers remain before the shortcut is destroyed.",
+      "security_critical": true
+    },
+    "recovery.words.error.open_failed": {
+      "text": "The server answered, but the recovery data did not open. Nothing was changed.",
+      "comment": "The server released the recovery data but it could not be opened.",
+      "security_critical": true
+    },
+    "recovery.words.error.server_off": {
+      "text": "Three-word recovery is not available on this server.",
+      "comment": "The server has the three-word shortcut switched off."
+    },
+    "recovery.words.intro": {
+      "text": "Type three words from your recovery phrase and choose a new password. First, which account?",
+      "comment": "Instructions of the three-words form, before the account is chosen.",
+      "security_critical": true
+    },
+    "recovery.words.prompt": {
+      "text": "{username}: type words {positions} of your recovery phrase.",
+      "comment": "Which words to type. {username} is the account (@name, shown bold); {positions} is a list of word numbers such as '5, 14 and 21', shown bold, in Latin digits.",
+      "security_critical": true
+    },
+    "recovery.words.prompt_restore": {
+      "text": "Type words {positions} of your recovery phrase.",
+      "comment": "Which words to type on the restore-identity screen; {positions} is a list of word numbers in Latin digits, shown bold.",
+      "security_critical": true
+    },
+    "recovery.words.switched_off": {
+      "text": "The three-word shortcut is now switched off for this account. Use your full recovery phrase or another device.",
+      "comment": "Too many wrong answers: the server destroyed the three-word shortcut.",
+      "security_critical": true
+    },
+    "recovery.words.switched_off_restore": {
+      "text": "The three-word shortcut is now switched off for this account. Use another device or your full recovery phrase.",
+      "comment": "Too many wrong answers on the restore-identity screen: the server destroyed the three-word shortcut.",
+      "security_critical": true
+    },
+    "recovery.words.tries_left": {
+      "text": "{count, plural, one {# try left.} other {# tries left.}}",
+      "comment": "How many wrong answers remain before the three-word shortcut is switched off.",
+      "security_critical": true
+    },
+    "recovery.words.unavailable": {
+      "text": "Three-word recovery is not available here. Use another way in.",
+      "comment": "The three-word shortcut is off for this account or server."
+    },
+    "recovery_phrase.check.acknowledge": {
+      "text": "I understand that losing these words means losing access to this account.",
+      "comment": "Checkbox the person ticks before finishing.",
+      "security_critical": true
+    },
+    "recovery_phrase.check.back": {
+      "text": "Back to the words",
+      "comment": "Button back to the recovery phrase."
+    },
+    "recovery_phrase.check.lede": {
+      "text": "Type words {positions} from what you wrote down.",
+      "comment": "Which words to type back; {positions} is a list of word numbers in Latin digits.",
+      "security_critical": true
+    },
+    "recovery_phrase.check.mismatch_many": {
+      "text": "Words {positions} do not match. Check your notes and try again.",
+      "comment": "Several typed words were wrong; {positions} is a list of numbers in Latin digits.",
+      "security_critical": true
+    },
+    "recovery_phrase.check.mismatch_one": {
+      "text": "Word {position} does not match. Check your notes and try again.",
+      "comment": "One typed word was wrong; {position} is its number in Latin digits.",
+      "security_critical": true
+    },
+    "recovery_phrase.check.title": {
+      "text": "Check your notes",
+      "comment": "Title of the step that checks the phrase was written down.",
+      "security_critical": true
+    },
+    "recovery_phrase.copy_failed": {
+      "text": "Could not copy. Write the words down instead.",
+      "comment": "Copying the recovery phrase failed.",
+      "security_critical": true
+    },
+    "recovery_phrase.error.incomplete": {
+      "text": "Enter all 24 words of your recovery phrase.",
+      "comment": "The recovery phrase fields were submitted empty."
+    },
+    "recovery_phrase.fresh.acknowledge": {
+      "text": "I have written down these 24 words and understand that losing them means losing access to this account.",
+      "comment": "Checkbox the person ticks before finishing.",
+      "security_critical": true
+    },
+    "recovery_phrase.fresh.error.generic": {
+      "text": "Could not finish. Try again.",
+      "comment": "Finishing after the new phrase failed."
+    },
+    "recovery_phrase.fresh.finishing": {
+      "text": "Finishing...",
+      "comment": "Busy label while the new identity is finished."
+    },
+    "recovery_phrase.fresh.lede": {
+      "text": "You created a new identity for {username}. These 24 words are the only way to recover it if you lose access again. Write them down in order and keep them somewhere safe.",
+      "comment": "After creating a new identity; {username} is the account (@name, shown bold).",
+      "security_critical": true
+    },
+    "recovery_phrase.fresh.safety_note": {
+      "text": "Your contacts will see that your safety number changed and will need to verify you again before messaging you securely.",
+      "comment": "Consequence of a new identity for the person's contacts.",
+      "security_critical": true
+    },
+    "recovery_phrase.fresh.title": {
+      "text": "Save your new recovery phrase",
+      "comment": "Title of the screen that shows the phrase of a newly created identity.",
+      "security_critical": true
+    },
+    "recovery_phrase.guest.lede": {
+      "text": "Your account was created without a password. These 24 words are the only way back into it on another device or after clearing this browser. Write them down in order and keep them somewhere safe.",
+      "comment": "For an account created without a password (a guest from a call link).",
+      "security_critical": true
+    },
+    "recovery_phrase.label": {
+      "text": "Recovery phrase",
+      "comment": "Label of the recovery phrase grid and input."
+    },
+    "recovery_phrase.save.anyone_with_words": {
+      "text": "Anyone who has these words can read your messages and act as you. Do not share them.",
+      "comment": "Warning under the 24 words on the save-your-phrase screen.",
+      "security_critical": true
+    },
+    "recovery_phrase.save.lede": {
+      "text": "These 24 words are the only way back into your account if you lose your password and your devices. Write them down in order and keep them somewhere safe.",
+      "comment": "Why the recovery phrase matters and what to do with it.",
+      "security_critical": true
+    },
+    "recovery_phrase.save.no_screenshot": {
+      "text": "Do not keep them as a screenshot or in a plain text file. Lakko cannot show them again.",
+      "comment": "Warning under the recovery phrase.",
+      "security_critical": true
+    },
+    "recovery_phrase.save.title": {
+      "text": "Save your recovery phrase",
+      "comment": "Title of the screen that shows a new recovery phrase.",
+      "security_critical": true
+    },
+    "recovery_phrase.save.vault_note": {
+      "text": "On a new device you will usually be asked for just three of these, words {positions}. Keep the whole list anyway: it is the only way back if that shortcut is ever switched off.",
+      "comment": "Note about the three-word shortcut; {positions} is a list of word numbers in Latin digits.",
+      "security_critical": true
+    },
+    "recovery_phrase.save.written": {
+      "text": "I have written them down",
+      "comment": "Button to go on once the recovery phrase is written down.",
+      "security_critical": true
+    },
+    "recovery_phrase.step": {
+      "text": "Step {current} of {total}",
+      "comment": "Progress through the recovery phrase screens."
+    },
+    "recovery_phrase.word_label": {
+      "text": "Word {position}",
+      "comment": "Accessibility label of one word slot; {position} is its number in the phrase, in Latin digits.",
+      "security_critical": true
+    },
+    "recovery_phrase.word_placeholder": {
+      "text": "word {position}",
+      "comment": "Placeholder of one word slot; {position} is its number in the phrase, in Latin digits.",
+      "security_critical": true
+    },
+    "restore_identity.device_intro": {
+      "text": "A device that is still logged in shows a prompt; confirm it there and compare the code. The transfer is end-to-end encrypted; Lakko's servers cannot read it. No camera needed; a QR code is there if you prefer.",
+      "comment": "Instructions of the another-device restore.",
+      "security_critical": true
+    },
+    "restore_identity.error.bad_saved_account": {
+      "text": "Something is wrong with the account saved on this device. Log out and log in again, or use your recovery phrase.",
+      "comment": "The account saved on this device cannot be read, so restoring from another device cannot start."
+    },
+    "restore_identity.error.generic": {
+      "text": "Could not restore your identity. Try again.",
+      "comment": "Restoring failed for a reason with no more specific message."
+    },
+    "restore_identity.error.invalid_phrase": {
+      "text": "That is not a valid recovery phrase. Check each word and try again.",
+      "comment": "The typed words are not a valid recovery phrase.",
+      "security_critical": true
+    },
+    "restore_identity.error.not_published": {
+      "text": "No published identity was found to verify the recovered identity. Try again, or restore from a device that still has your account.",
+      "comment": "The account's identity could not be found to check against; refused for safety.",
+      "security_critical": true
+    },
+    "restore_identity.error.nothing": {
+      "text": "Nothing to restore. Log in first.",
+      "comment": "The restore screen was reached without a sign-in."
+    },
+    "restore_identity.error.phrase_mismatch": {
+      "text": "That recovery phrase doesn't match this account's identity. Check the phrase, or pair an existing device instead.",
+      "comment": "The typed phrase belongs to a different identity; it is refused for safety.",
+      "security_critical": true
+    },
+    "restore_identity.error.unreachable": {
+      "text": "Could not reach the directory to verify the recovered identity. Check your connection and try again.",
+      "comment": "The identity could not be checked because the server was unreachable."
+    },
+    "restore_identity.lede": {
+      "text": "You are logged in as {username} on a new device. To keep the contacts who already trust you, restore your identity with three words, your recovery phrase, or from a device that is still logged in.",
+      "comment": "Why the identity is needed; {username} is the account (@name, shown bold).",
+      "security_critical": true
+    },
+    "restore_identity.lede_no_words": {
+      "text": "You are logged in as {username} on a new device. To keep the contacts who already trust you, restore your identity with your recovery phrase, or from a device that is still logged in.",
+      "comment": "Same as the other lede, when the three-word shortcut is not available.",
+      "security_critical": true
+    },
+    "restore_identity.log_out": {
+      "text": "Log out",
+      "comment": "Button that signs out from the restore-identity screen."
+    },
+    "restore_identity.lost.create": {
+      "text": "Create a new identity",
+      "comment": "Button that creates a new identity (a last resort).",
+      "security_critical": true
+    },
+    "restore_identity.lost.creating": {
+      "text": "Creating a new identity...",
+      "comment": "Busy label while the new identity is created."
+    },
+    "restore_identity.lost.error.generic": {
+      "text": "Could not create a new identity. Try again.",
+      "comment": "Creating a new identity failed."
+    },
+    "restore_identity.lost.sub": {
+      "text": "Start with a new identity",
+      "comment": "Subtitle of the option for someone who has neither the recovery phrase nor another device; also the title of that screen.",
+      "security_critical": true
+    },
+    "restore_identity.lost.summary": {
+      "text": "I have neither my recovery phrase nor another device",
+      "comment": "Collapsed section for someone who lost every way to restore the identity.",
+      "security_critical": true
+    },
+    "restore_identity.lost.warning": {
+      "text": "This creates a new identity for your account. Your contacts will need to verify you again, messages on your lost device stay unreadable, and you get a new recovery phrase to save. Only do this if you have lost both your recovery phrase and every other device.",
+      "comment": "Warning before creating a new identity.",
+      "security_critical": true
+    },
+    "restore_identity.not_you": {
+      "text": "Not your account?",
+      "comment": "Text before the Log out link on the restore-identity screen."
+    },
+    "restore_identity.phrase_intro": {
+      "text": "Type the 24 words in order. Lakko checks them against your account before continuing.",
+      "comment": "Line above the 24 word fields when restoring the identity on a new device.",
+      "security_critical": true
+    },
+    "restore_identity.submit": {
+      "text": "Restore",
+      "comment": "Button that restores the identity from the typed phrase."
+    },
+    "restore_identity.submitting": {
+      "text": "Restoring...",
+      "comment": "Busy label of the Restore button."
+    },
+    "restore_identity.title": {
+      "text": "Restore your identity",
+      "comment": "Title of the screen that asks for the identity on a new device.",
+      "security_critical": true
+    },
+    "security.identity_changed.body": {
+      "text": "If that was you, on another device, dismiss this. If it was not, verify your safety numbers with your contacts and change your password and passkeys.",
+      "comment": "Rest of the alert shown when the account's identity key changed.",
+      "security_critical": true
+    },
+    "security.identity_changed.title": {
+      "text": "Your account's security key was changed.",
+      "comment": "Bold first sentence of the alert shown when the account's identity key changed.",
+      "security_critical": true
     },
     "settings.about.translations_updated": {
       "text": "Translations updated {date}",
@@ -149,6 +1273,34 @@
     "settings.section.security": {
       "text": "Security",
       "comment": "Settings section: passkeys, devices, recovery."
+    },
+    "username.a11y_hint": {
+      "text": "Username: {message}",
+      "comment": "Spoken by the screen reader for the reason under a username field. {message} is the reason, like 'At least 3 characters'."
+    },
+    "username.error.empty": {
+      "text": "Enter a username",
+      "comment": "Shown under the username field when it is empty."
+    },
+    "username.error.invalid_characters": {
+      "text": "Only Latin letters, digits and _",
+      "comment": "Shown under the username field: usernames may only use a-z, 0-9 and underscore. Keep '_' as is."
+    },
+    "username.error.too_long": {
+      "text": "At most {count, plural, one {# character} other {# characters}}",
+      "comment": "Shown under the username field when it is too long; {count} is the maximum."
+    },
+    "username.error.too_short": {
+      "text": "At least {count, plural, one {# character} other {# characters}}",
+      "comment": "Shown under the username field when it is too short; {count} is the minimum."
+    },
+    "username.error.unknown": {
+      "text": "This username can't be used",
+      "comment": "Shown under the username field for any other refusal."
+    },
+    "username.hint.shown_as": {
+      "text": "Shown as {username}",
+      "comment": "Hint under a username field when the name is typed in another form (for example with capitals); {username} is how it will show, with @, like @alice."
     }
   }
 }

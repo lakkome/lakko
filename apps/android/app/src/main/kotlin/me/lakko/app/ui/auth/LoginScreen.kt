@@ -22,6 +22,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import me.lakko.app.l10n.t
 
 /**
  * Log in (docs/ux/client-redesign.md section 5.6): username, password with
@@ -41,12 +42,12 @@ public fun LoginScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     var explainerOpen by rememberSaveable { mutableStateOf(false) }
 
-    AuthScaffold(title = "Log in", onBack = onBack, modifier = modifier, showLanguageButton = true) {
+    AuthScaffold(title = t("auth.login.title"), onBack = onBack, modifier = modifier, showLanguageButton = true) {
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
             value = state.username,
             onValueChange = viewModel::onUsernameChange,
-            label = { Text("Username") },
+            label = { Text(t("auth.username.label")) },
             singleLine = true,
             enabled = !state.busy,
             keyboardOptions = KeyboardOptions(
@@ -61,7 +62,7 @@ public fun LoginScreen(
         PasswordField(
             value = state.password,
             onValueChange = viewModel::onPasswordChange,
-            label = "Password",
+            label = t("auth.password.label"),
             enabled = !state.busy,
             imeAction = ImeAction.Done,
             onDone = viewModel::onSubmit,
@@ -69,9 +70,9 @@ public fun LoginScreen(
         FormError(state.error)
         Spacer(Modifier.height(24.dp))
         BusyButton(
-            label = "Log in",
+            label = t("auth.login.submit"),
             busy = state.busy,
-            busyLabel = "Logging in...",
+            busyLabel = t("auth.login.submitting"),
             onClick = viewModel::onSubmit,
         )
         Spacer(Modifier.height(8.dp))
@@ -80,15 +81,15 @@ public fun LoginScreen(
             enabled = !state.busy,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Use passkey")
+            Text(t("auth.login.passkey"))
         }
         Spacer(Modifier.height(8.dp))
         TextButton(onClick = onNavigateToRecover, enabled = !state.busy) {
-            Text("Forgot password?")
+            Text(t("auth.login.forgot"))
         }
         Spacer(Modifier.height(24.dp))
         TextButton(onClick = { explainerOpen = true }) {
-            Text("How Lakko protects your password")
+            Text(t("auth.explainer.title"))
         }
     }
 

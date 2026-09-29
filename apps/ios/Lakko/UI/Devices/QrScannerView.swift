@@ -141,7 +141,7 @@ public final class ScannerViewController: UIViewController,
             )
         else {
             session.commitConfiguration()
-            delegate?.scanner(self, didFail: "No back-facing camera available.")
+            delegate?.scanner(self, didFail: Localization.text("devices.scan.error.no_camera"))
             return
         }
 
@@ -150,15 +150,13 @@ public final class ScannerViewController: UIViewController,
             input = try AVCaptureDeviceInput(device: device)
         } catch {
             session.commitConfiguration()
-            delegate?.scanner(
-                self,
-                didFail: "Camera access denied or unavailable: \(error.localizedDescription)"
-            )
+            NSLog("[pairing] WARN camera input failed: \(error)")
+            delegate?.scanner(self, didFail: Localization.text("devices.scan.error.camera_denied"))
             return
         }
         guard session.canAddInput(input) else {
             session.commitConfiguration()
-            delegate?.scanner(self, didFail: "Camera input could not be attached.")
+            delegate?.scanner(self, didFail: Localization.text("devices.scan.error.camera_failed"))
             return
         }
         session.addInput(input)
@@ -166,7 +164,7 @@ public final class ScannerViewController: UIViewController,
         let output = AVCaptureMetadataOutput()
         guard session.canAddOutput(output) else {
             session.commitConfiguration()
-            delegate?.scanner(self, didFail: "Metadata output could not be attached.")
+            delegate?.scanner(self, didFail: Localization.text("devices.scan.error.camera_failed"))
             return
         }
         session.addOutput(output)

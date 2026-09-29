@@ -13,7 +13,8 @@
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { AuthHttpError } from "../client";
-import { authLimitMessage } from "../auth-error-copy";
+import { authLimitMessage, screenText } from "../auth-error-copy";
+import { t } from "../../l10n";
 import { isPlausibleContact } from "../contact-shape";
 import { normalizeTotpCode } from "../totp-code";
 import { ContactKind } from "../wire";
@@ -27,19 +28,19 @@ export function contactRecoverErrorMessage(err: unknown): string {
   if (limit !== null) return limit;
   if (err instanceof AuthHttpError) {
     if (err.status === 401) {
-      return "That code did not work. Check the code we sent and try again.";
+      return t("recovery.contact.error.wrong");
     }
     if (err.status === 503) {
-      return "Email and phone recovery are not available here. Use another way in.";
+      return t("recovery.contact.error.unavailable");
     }
     if (err.status === 400) {
-      return "That does not look like an email address or phone number. Check it and try again.";
+      return t("recovery.contact.error.bad_contact");
     }
   }
   if (err instanceof Error && /username not found/.test(err.message)) {
-    return "Could not send a code. Check the username and try again.";
+    return t("recovery.contact.error.send_failed");
   }
-  return err instanceof Error ? err.message : String(err);
+  return screenText(err) ?? t("recovery.contact.error.generic");
 }
 
 export function ContactRecover(props: {
@@ -60,14 +61,14 @@ export function ContactRecover(props: {
     setError(null);
     let user = props.username().trim();
     if (user.length === 0) {
-      setError("Enter the username of the account.");
+      setError(t("recovery.username_required"));
       return;
     }
     // ADR-0048 section 4: no lookup for a name that fails the username rule.
     try {
       user = await requireValidUsername(user);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(screenText(err) ?? t("username.error.unknown"));
       return;
     }
     // A light shape check saves a proof-of-work solve on an obviously
@@ -75,8 +76,8 @@ export function ContactRecover(props: {
     if (!isPlausibleContact(kind(), contact())) {
       setError(
         kind() === ContactKind.Email
-          ? "Enter a valid email address."
-          : "Enter the phone number in international format, like +15551234567.",
+          ? t("recovery.contact.error.invalid_email")
+          : t("recovery.contact.error.invalid_phone"),
       );
       return;
     }
@@ -97,7 +98,7 @@ export function ContactRecover(props: {
     setError(null);
     const normalized = normalizeTotpCode(code());
     if (normalized === null) {
-      setError("Enter the six-digit code we sent.");
+      setError(t("recovery.contact.error.enter_code"));
       return;
     }
     setBusy(true);
@@ -116,13 +117,9 @@ export function ContactRecover(props: {
       when={step() === "code"}
       fallback={
         <form onSubmit={(e) => void onSendCode(e)}>
-          <p class="lk-muted">
-            We send a six-digit code to the email address or phone number you set up in
-            Settings. It gets you back in; your chats then need your recovery phrase or
-            another device.
-          </p>
+          <p class="lk-muted">{t("recovery.contact.intro")}</p>
           <UsernameField value={props.username} setValue={props.setUsername} disabled={busy} />
-          <div class="lk-segmented" role="radiogroup" aria-label="Send the code by">
+          <div class="lk-segmented" role="radiogroup" aria-label={t("recovery.contact.send_by")}>
             <label>
               <input
                 type="radio"
@@ -131,7 +128,7 @@ export function ContactRecover(props: {
                 disabled={busy()}
                 onChange={() => setKind(ContactKind.Email)}
               />
-              Email
+              {t("common.email")}
             </label>
             <label>
               <input
@@ -141,11 +138,11 @@ export function ContactRecover(props: {
                 disabled={busy()}
                 onChange={() => setKind(ContactKind.Phone)}
               />
-              Phone
+              {t("common.phone")}
             </label>
           </div>
           <label>
-            {kind() === ContactKind.Email ? "Email" : "Phone number"}
+            {kind() === ContactKind.Email ? t("common.email") : t("recovery.contact.phone_label")}
             <input
               type={kind() === ContactKind.Email ? "email" : "tel"}
               autocomplete={kind() === ContactKind.Email ? "email" : "tel"}
@@ -162,18 +159,19 @@ export function ContactRecover(props: {
             </div>
           </Show>
           <button class="primary" type="submit" disabled={busy()}>
-            {busy() ? "Sending..." : "Send code"}
+            {busy() ? t("common.sending") : t("recovery.contact.send")}
           </button>
         </form>
       }
     >
       <form onSubmit={(e) => void onSubmitCode(e)}>
         <p class="lk-muted">
-          If that {kind() === ContactKind.Email ? "address" : "number"} is set up for this
-          account, a six-digit code is on its way. Enter it below.
+          {kind() === ContactKind.Email
+            ? t("recovery.contact.sent_email")
+            : t("recovery.contact.sent_phone")}
         </p>
         <label>
-          Code we sent
+          {t("recovery.contact.code_label")}
           <input
             type="text"
             inputmode="numeric"
@@ -194,7 +192,7 @@ export function ContactRecover(props: {
           </div>
         </Show>
         <button class="primary" type="submit" disabled={busy()}>
-          {busy() ? "Checking..." : "Continue"}
+          {busy() ? t("common.checking") : t("common.continue")}
         </button>
         <button
           type="button"
@@ -206,7 +204,7 @@ export function ContactRecover(props: {
             setStep("request");
           }}
         >
-          Use a different email or phone
+          {t("recovery.contact.change")}
         </button>
       </form>
     </Show>

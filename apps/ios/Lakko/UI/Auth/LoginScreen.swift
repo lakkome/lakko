@@ -17,6 +17,7 @@ public struct LoginScreen: View {
     public var onNavigateToRecover: () -> Void
 
     @State private var showingExplainer = false
+    @ObservedObject private var l10n = Localization.shared
 
     public init(
         viewModel: LoginViewModel,
@@ -30,11 +31,10 @@ public struct LoginScreen: View {
 
     public var body: some View {
         AuthScreen {
-            AuthTitle(title: "Log in")
+            AuthTitle(title: l10n.t("auth.login.title"), subtitle: l10n.t("auth.login.lede"))
 
             AuthTextField(
-                label: "Username",
-                placeholder: "username",
+                label: l10n.t("auth.username.label"),
                 text: $viewModel.username,
                 contentType: .username,
                 disabled: viewModel.busy
@@ -42,7 +42,7 @@ public struct LoginScreen: View {
             UsernameRuleHint(input: viewModel.username)
 
             AuthSecureField(
-                label: "Password",
+                label: l10n.t("auth.password.label"),
                 text: $viewModel.password,
                 disabled: viewModel.busy,
                 submitLabel: .go,
@@ -54,29 +54,29 @@ public struct LoginScreen: View {
             }
 
             AuthPrimaryButton(
-                title: "Log in",
+                title: l10n.t("auth.login.submit"),
                 busy: viewModel.busy,
-                busyTitle: "Logging in...",
+                busyTitle: l10n.t("auth.login.submitting"),
                 action: viewModel.onSubmit
             )
 
             AuthSecondaryButton(
-                title: "Use passkey",
+                title: l10n.t("auth.login.passkey"),
                 systemImage: "person.badge.key",
                 disabled: viewModel.busy,
                 action: viewModel.onPasskeyLogin
             )
 
-            AuthLinkRow(title: "Forgot password?", disabled: viewModel.busy, action: onNavigateToRecover)
+            AuthLinkRow(title: l10n.t("auth.login.forgot"), disabled: viewModel.busy, action: onNavigateToRecover)
 
             AuthLinkRow(
-                lead: "New to Lakko?",
-                title: "Create account",
+                message: "auth.login.no_account",
+                title: l10n.t("auth.signup.submit"),
                 disabled: viewModel.busy,
                 action: onNavigateToSignup
             )
 
-            AuthLinkRow(title: "How Lakko protects your password") {
+            AuthLinkRow(title: l10n.t("auth.explainer.title")) {
                 showingExplainer = true
             }
             .padding(.top, 8)

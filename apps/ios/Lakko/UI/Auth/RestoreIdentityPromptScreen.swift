@@ -17,6 +17,7 @@ public struct RestoreIdentityPromptScreen: View {
 
     @State private var method: Method = .phrase
     @State private var showingStartOver = false
+    @ObservedObject private var l10n = Localization.shared
 
     public init(viewModel: RestoreIdentityPromptViewModel) {
         self.viewModel = viewModel
@@ -24,13 +25,15 @@ public struct RestoreIdentityPromptScreen: View {
 
     public var body: some View {
         AuthScreen {
+            // No three-word recovery on this client (ADR-0049 is web-only).
             AuthTitle(
-                title: "Restore your account on this device",
-                subtitle: "You are signed in as @\(viewModel.username). To read your messages here, enter your recovery phrase or confirm from a device that is still signed in.")
+                title: l10n.t("restore_identity.title"),
+                subtitle: l10n.t(
+                    "restore_identity.lede_no_words", texts: ["username": "@\(viewModel.username)"]))
 
-            Picker("Restore with", selection: $method) {
-                Text("Recovery phrase").tag(Method.phrase)
-                Text("Another device").tag(Method.device)
+            Picker(l10n.t("restore_identity.title"), selection: $method) {
+                Text(l10n.t("recovery.method.phrase.title")).tag(Method.phrase)
+                Text(l10n.t("recovery.method.device.title")).tag(Method.device)
             }
             .pickerStyle(.segmented)
             .disabled(viewModel.busy)
@@ -44,9 +47,9 @@ public struct RestoreIdentityPromptScreen: View {
                 }
 
                 AuthPrimaryButton(
-                    title: "Restore",
+                    title: l10n.t("restore_identity.submit"),
                     busy: viewModel.busy,
-                    busyTitle: "Restoring...",
+                    busyTitle: l10n.t("restore_identity.submitting"),
                     action: viewModel.onSubmit
                 )
 
@@ -75,9 +78,7 @@ public struct RestoreIdentityPromptScreen: View {
                     // username; an account without one cannot be named.
                     AuthHint(text: PairingScanFailure.needsUsernameCopy, isError: true)
                 } else {
-                    AuthHint(
-                        text: "Something is wrong with the account saved on this device. Log out and log in again, or use your recovery phrase.",
-                        isError: true)
+                    AuthHint(text: l10n.t("restore_identity.error.bad_saved_account"), isError: true)
                 }
             }
 
@@ -88,7 +89,7 @@ public struct RestoreIdentityPromptScreen: View {
                     withAnimation { showingStartOver.toggle() }
                 } label: {
                     HStack(spacing: 6) {
-                        Text("I don't have either")
+                        Text(l10n.t("restore_identity.lost.summary"))
                             .font(.footnote.weight(.medium))
                         Image(systemName: showingStartOver ? "chevron.up" : "chevron.down")
                             .font(.caption.weight(.semibold))
@@ -100,16 +101,13 @@ public struct RestoreIdentityPromptScreen: View {
 
                 if showingStartOver {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Start over with a new identity")
-                            .font(.body.weight(.medium))
-                            .foregroundStyle(Color.lakkoText)
-                        Text(
-                            "Your messages on the lost device stay out of reach, your contacts will be asked to verify you again, and you get a new recovery phrase to save. Only do this if nothing else works."
-                        )
+                        Text(l10n.t("restore_identity.lost.warning"))
                         .font(.subheadline)
                         .foregroundStyle(Color.lakkoTextMuted)
                         Button(action: viewModel.startFresh) {
-                            Text("Start over")
+                            Text(l10n.t(viewModel.busy
+                                ? "restore_identity.lost.creating"
+                                : "restore_identity.lost.create"))
                                 .font(.body.weight(.medium))
                                 .foregroundStyle(Color.lakkoDanger)
                                 .frame(maxWidth: .infinity, minHeight: 44)
@@ -132,7 +130,7 @@ public struct RestoreIdentityPromptScreen: View {
             }
             .padding(.top, 8)
 
-            AuthLinkRow(title: "Log out", disabled: viewModel.busy, action: viewModel.onSignOut)
+            AuthLinkRow(title: l10n.t("restore_identity.log_out"), disabled: viewModel.busy, action: viewModel.onSignOut)
         }
         .onChange(of: method) { _, _ in
             // A stale error from the other method should not linger.

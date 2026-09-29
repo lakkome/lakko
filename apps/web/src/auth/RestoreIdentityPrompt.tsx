@@ -26,7 +26,11 @@ import { MethodHead, MethodList } from "../ui/MethodList";
 import { PhraseInput } from "../ui/PhraseInput";
 import { WordSlots } from "../ui/WordSlots";
 import { RESTORE_IDENTITY_METHODS, recoverMethod, type RecoverMethodId } from "./recover/methods";
-import { listPositions } from "./recover/WordsRecover";
+import { listPositions } from "./phrase-confirm";
+import { identityRestoreErrorMessage, isOffline, screenText } from "./auth-error-copy";
+import { t } from "../l10n";
+import { KeyedError } from "../l10n/keyed-error";
+import { tRich } from "../l10n/rich";
 import {
   WORD_VAULT_DESTRUCTION_CAP,
   wordVaultErrorMessage,
@@ -123,9 +127,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
         setMisses(next);
         setWords(["", "", ""]);
         if (next >= WORD_VAULT_DESTRUCTION_CAP) {
-          setError(
-            "The three-word shortcut is now switched off for this account. Use another device or your full recovery phrase.",
-          );
+          setError(t("recovery.words.switched_off_restore"));
           setMethod("phrase");
         } else {
           setError(wordVaultErrorMessage(err, WORD_VAULT_DESTRUCTION_CAP - next));
@@ -147,7 +149,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       setPhrase("");
       // No navigation: the state flips to `session` and the guard re-renders.
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(identityRestoreErrorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -161,11 +163,11 @@ export default function RestoreIdentityPrompt(): JSX.Element {
   async function prepareDeviceFlow(): Promise<DeviceRestoreFlowHandle> {
     const acct = account();
     if (acct === null) {
-      throw new Error("Nothing to restore. Log in first.");
+      throw new KeyedError("restore_identity.error.nothing");
     }
     const name = pairingUsername().trim();
     if (name.length === 0) {
-      throw new Error("Enter the username of the account.");
+      throw new KeyedError("recovery.username_required");
     }
     // Throws the username rule's copy for a name it refuses.
     const loginHandle = (await loginHandleFor(name)).bytes;
@@ -213,13 +215,12 @@ export default function RestoreIdentityPrompt(): JSX.Element {
         when={method()}
         fallback={
           <>
-            <h1>Restore your identity</h1>
+            <h1>{t("restore_identity.title")}</h1>
             <p class="lk-auth-lede">
-              You are logged in as <strong>@{account()?.username ?? ""}</strong> on a new
-              device. To keep the contacts who already trust you, restore your identity
-              {wordsUnavailable()
-                ? " with your recovery phrase, or from a device that is still logged in."
-                : " with three words, your recovery phrase, or from a device that is still logged in."}
+              {tRich(
+                wordsUnavailable() ? "restore_identity.lede_no_words" : "restore_identity.lede",
+                { username: <strong>@{account()?.username ?? ""}</strong> },
+              )}
             </p>
             <MethodList methods={methods} onPick={pick} disabled={busy} />
             <Show when={challengeError() !== null && !wordsUnavailable()}>
@@ -241,14 +242,15 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                   <Show
                     when={challenge()}
                     fallback={
-                      <p class="form-info">{challengeError() ?? "Loading..."}</p>
+                      <p class="form-info">{challengeError() ?? t("common.loading")}</p>
                     }
                   >
                     {(c) => (
                       <>
                         <p class="lk-muted">
-                          Type words <strong>{listPositions(c().positions)}</strong> of your
-                          recovery phrase.
+                          {tRich("recovery.words.prompt_restore", {
+                            positions: <strong>{listPositions(c().positions)}</strong>,
+                          })}
                         </p>
                         <WordSlots
                           positions={() => c().positions}
@@ -269,20 +271,16 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                     type="submit"
                     disabled={busy() || challenge() === null || !wordsAreAnswerable(words())}
                   >
-                    {busy() ? "Checking..." : "Continue"}
+                    {busy() ? t("common.checking") : t("common.continue")}
                   </button>
                   <Show when={misses() > 0 && !wordsUnavailable()}>
-                    <p class="form-info">{triesLeft()} tries left.</p>
+                    <p class="form-info">{t("recovery.words.tries_left", { count: triesLeft() })}</p>
                   </Show>
                 </form>
               </Match>
               <Match when={picked() === "device"}>
                 <div class="lk-stack">
-                  <p class="lk-muted">
-                    A device that is still logged in shows a prompt; confirm it there and
-                    compare the code. The transfer is end-to-end encrypted; Lakko's servers
-                    cannot read it. No camera needed; a QR code is there if you prefer.
-                  </p>
+                  <p class="lk-muted">{t("restore_identity.device_intro")}</p>
                   <Show when={(account()?.username.trim().length ?? 0) === 0}>
                     <div>
                       <UsernameField
@@ -315,7 +313,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                     </div>
                   </Show>
                   <button class="primary" type="submit" disabled={busy()}>
-                    {busy() ? "Restoring..." : "Restore"}
+                    {busy() ? t("restore_identity.submitting") : t("restore_identity.submit")}
                   </button>
                 </form>
               </Match>
@@ -326,7 +324,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       <LostEverythingPanel busy={busy()} />
       <p class="lk-auth-foot">
         <button type="button" class="ghost small" disabled={busy()} onClick={() => void auth.logout()}>
-          Log out
+          {t("restore_identity.log_out")}
         </button>
       </p>
     </AuthLayout>
@@ -352,7 +350,11 @@ function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
       // `save-fresh-phrase`, which the guard renders as the phrase screen.
       await auth.mintFreshIdentity();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(
+        isOffline(err)
+          ? t("common.error.offline")
+          : (screenText(err) ?? t("restore_identity.lost.error.generic")),
+      );
     } finally {
       setBusy(false);
     }
@@ -360,13 +362,10 @@ function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
 
   return (
     <details class="lk-disclosure">
-      <summary>I have neither my recovery phrase nor another device</summary>
+      <summary>{t("restore_identity.lost.summary")}</summary>
       <div class="lk-disclosure-body">
         <div class="lk-alert danger" role="alert">
-          This creates a new identity for your account. Your contacts will need to verify
-          you again, messages on your lost device stay unreadable, and you get a new
-          recovery phrase to save. Only do this if you have lost both your recovery phrase
-          and every other device.
+          {t("restore_identity.lost.warning")}
         </div>
         <Show when={error() !== null}>
           <div class="form-error">{error()}</div>
@@ -378,7 +377,7 @@ function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
             disabled={busy() || props.busy}
             onClick={() => void onCreate()}
           >
-            {busy() ? "Creating a new identity..." : "Create a new identity"}
+            {busy() ? t("restore_identity.lost.creating") : t("restore_identity.lost.create")}
           </button>
         </div>
       </div>

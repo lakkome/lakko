@@ -31,15 +31,12 @@ export function AuthLayout(props: { children: JSX.Element }): JSX.Element {
           <span>Lakko</span>
         </div>
         <div>
-          <h2>Your messages, your rules.</h2>
-          <p>
-            Chats, groups, channels and calls, end-to-end encrypted by default.
-            Lakko's servers never see your messages.
-          </p>
+          <h2>{t("auth.brand.tagline")}</h2>
+          <p>{t("auth.brand.body")}</p>
         </div>
         <div class="auth-brand-foot">
           <Icon name="lock" size={16} />
-          <span>Open source. No phone number required.</span>
+          <span>{t("auth.brand.foot")}</span>
         </div>
       </section>
       <section class="auth-side">

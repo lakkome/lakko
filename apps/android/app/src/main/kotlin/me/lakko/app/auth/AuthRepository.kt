@@ -1282,6 +1282,7 @@ public class AuthRepository(
         if (trimmed.isEmpty()) {
             throw AuthClientArgError(
                 "enter the username of the account to recover",
+                me.lakko.app.l10n.UiText("recovery.username_required_to_recover"),
             )
         }
         // ADR-0054 S5 - the code goes with the login handle of the name; the
@@ -1345,6 +1346,7 @@ public class AuthRepository(
         if (trimmed.isEmpty()) {
             throw AuthClientArgError(
                 "enter the username of the account to recover",
+                me.lakko.app.l10n.UiText("recovery.username_required_to_recover"),
             )
         }
         // ADR-0054 S5 - the request names the account by the login handle of
@@ -1391,6 +1393,7 @@ public class AuthRepository(
         val pending = pendingContactRecover.get()
             ?: throw AuthClientArgError(
                 "request a code first (no pending phone / email recovery)",
+                me.lakko.app.l10n.UiText("recovery.contact.error.generic"),
             )
         val result = authClientFactory().use { client ->
             signInByName(
@@ -2088,6 +2091,7 @@ public class AuthRepository(
                 throw IdentityVerificationUnavailable(
                     "No published identity was found to verify against. " +
                         "Try again, or restore with your recovery phrase.",
+                    missing = true,
                 )
             }
             val published = base64Decode(bundle.signature_pubkey)
@@ -2373,6 +2377,7 @@ public class AuthRepository(
             ?: throw AuthClientArgError(
                 "No cached account on this device. Sign in with " +
                     "password or recover with your phrase first.",
+                me.lakko.app.l10n.UiText("auth.passkey.error.no_cached"),
             )
 
         val webauthnClient = WebauthnClient()
@@ -2386,6 +2391,7 @@ public class AuthRepository(
         // a generic "cancelled" message.
         assertion ?: throw AuthClientArgError(
             "Cancelled. No passkey sign-in happened.",
+            me.lakko.app.l10n.UiText("auth.passkey.error.cancelled"),
         )
 
         // Compare via raw bytes — the cached `accountIdB64`
@@ -2416,6 +2422,7 @@ public class AuthRepository(
                 "This passkey belongs to a different account than the " +
                     "one cached on this device. Sign in with password " +
                     "first to enable passkey on this device.",
+                me.lakko.app.l10n.UiText("auth.passkey.error.wrong_account"),
             )
         }
 
@@ -2425,6 +2432,7 @@ public class AuthRepository(
         ) ?: throw AuthClientArgError(
             "No cached credentials for passkey sign-in on this device. " +
                 "Sign in with password or recover with your phrase first.",
+            me.lakko.app.l10n.UiText("auth.passkey.error.no_cached"),
         )
 
         // Re-derive the device root key from the cached export
@@ -3400,5 +3408,9 @@ public class PhraseMismatch : IllegalStateException(
  *
  * Mirror of the web `IdentityVerificationUnavailable`.
  */
-public class IdentityVerificationUnavailable(message: String) :
-    IllegalStateException(message)
+public class IdentityVerificationUnavailable(
+    message: String,
+    /** `true` when the directory answered with no published identity;
+     *  `false` when it could not be reached. Picks the screen sentence. */
+    public val missing: Boolean = false,
+) : IllegalStateException(message)

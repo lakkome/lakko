@@ -2,12 +2,552 @@
   "format": 1,
   "language": "ru",
   "messages": {
+    "auth.brand.body": {
+      "text": "Чаты, группы, каналы и звонки — со сквозным шифрованием по умолчанию. Серверы Lakko никогда не видят ваши сообщения.",
+      "status": "machine"
+    },
+    "auth.brand.foot": {
+      "text": "Открытый исходный код. Номер телефона не нужен.",
+      "status": "machine"
+    },
+    "auth.brand.tagline": {
+      "text": "Ваши сообщения — ваши правила.",
+      "status": "machine"
+    },
+    "auth.error.wrong_credentials": {
+      "text": "Неверное имя пользователя или пароль. Проверьте их и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "auth.explainer.never_leaves": {
+      "text": "Ваш пароль никогда не покидает устройство. Lakko проверяет его, не получая, поэтому никто в Lakko не может его прочитать и никто не может сбросить его за вас.",
+      "status": "machine"
+    },
+    "auth.explainer.same_answer": {
+      "text": "Неверное имя пользователя и неверный пароль дают одинаковый ответ, поэтому через экран входа нельзя узнать, какие имена пользователей существуют.",
+      "status": "machine"
+    },
+    "auth.explainer.title": {
+      "text": "Как Lakko защищает ваш пароль",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back": {
+      "text": "Если вы его забудете, вернуться в аккаунт помогут фраза восстановления, другое устройство, на котором вы ещё вошли, три слова из фразы, приложение-аутентификатор или код по электронной почте или телефону.",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back_no_words": {
+      "text": "Если вы его забудете, вернуться в аккаунт помогут фраза восстановления, другое устройство, на котором вы ещё вошли, приложение-аутентификатор или код по электронной почте или телефону.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "Сменить язык",
       "status": "machine"
     },
+    "auth.login.forgot": {
+      "text": "Забыли пароль?",
+      "status": "machine"
+    },
+    "auth.login.lede": {
+      "text": "Войдите, чтобы продолжить.",
+      "status": "machine"
+    },
+    "auth.login.no_account": {
+      "text": "Впервые в Lakko? {link}",
+      "status": "machine"
+    },
+    "auth.login.passkey": {
+      "text": "Войти с ключом доступа",
+      "status": "machine"
+    },
+    "auth.login.submit": {
+      "text": "Войти",
+      "status": "machine"
+    },
+    "auth.login.submitting": {
+      "text": "Вход...",
+      "status": "machine"
+    },
+    "auth.login.title": {
+      "text": "С возвращением",
+      "status": "machine"
+    },
+    "auth.passkey.error.cancelled": {
+      "text": "Вход с ключом доступа отменён.",
+      "status": "machine"
+    },
+    "auth.passkey.error.failed_status": {
+      "text": "Не удалось войти с ключом доступа ({status}).",
+      "status": "machine"
+    },
+    "auth.passkey.error.generic": {
+      "text": "Не удалось войти с ключом доступа. Попробуйте ещё раз или войдите с паролем.",
+      "status": "machine"
+    },
+    "auth.passkey.error.network": {
+      "text": "Ошибка сети при входе с ключом доступа.",
+      "status": "machine"
+    },
+    "auth.passkey.error.no_cached": {
+      "text": "На этом устройстве нет сохранённых данных для входа с ключом доступа. Сначала войдите с паролем или восстановите доступ с помощью фразы.",
+      "status": "machine"
+    },
+    "auth.passkey.error.not_registered": {
+      "text": "Для этого аккаунта нет ключа доступа. Сначала войдите с паролем, затем добавьте ключ доступа на главном экране.",
+      "status": "machine"
+    },
+    "auth.passkey.error.server_disabled": {
+      "text": "На сервере не включена поддержка ключей доступа.",
+      "status": "machine"
+    },
+    "auth.passkey.error.unsupported": {
+      "text": "Этот браузер не поддерживает ключи доступа.",
+      "status": "machine"
+    },
+    "auth.passkey.error.wrong_account": {
+      "text": "Этот ключ доступа принадлежит другому аккаунту, а не тому, что сохранён на этом устройстве. Сначала войдите с паролем.",
+      "status": "machine"
+    },
+    "auth.password.confirm.label": {
+      "text": "Повторите пароль",
+      "status": "machine"
+    },
+    "auth.password.error.mismatch": {
+      "text": "Пароли не совпадают. Введите один и тот же пароль дважды.",
+      "status": "machine"
+    },
+    "auth.password.error.too_short": {
+      "text": "Используйте не менее {count, plural, one {# символа} few {# символов} many {# символов} other {# символа}}.",
+      "status": "machine"
+    },
+    "auth.password.hide": {
+      "text": "Скрыть пароль",
+      "status": "machine"
+    },
+    "auth.password.hint": {
+      "text": "Не менее {count, plural, one {# символа} few {# символов} many {# символов} other {# символа}}.",
+      "status": "machine"
+    },
+    "auth.password.label": {
+      "text": "Пароль",
+      "status": "machine"
+    },
+    "auth.password.new.label": {
+      "text": "Новый пароль",
+      "status": "machine"
+    },
+    "auth.password.new_confirm.label": {
+      "text": "Повторите новый пароль",
+      "status": "machine"
+    },
+    "auth.password.show": {
+      "text": "Показать пароль",
+      "status": "machine"
+    },
+    "auth.signup.error.enter_username": {
+      "text": "Введите имя пользователя.",
+      "status": "machine"
+    },
+    "auth.signup.error.fix_name": {
+      "text": "Исправьте имя, чтобы продолжить.",
+      "status": "machine"
+    },
+    "auth.signup.error.generic": {
+      "text": "Не удалось создать аккаунт. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "auth.signup.error.rate_limited": {
+      "text": "Сейчас из этой сети создаётся слишком много аккаунтов. Попробуйте позже.",
+      "status": "machine"
+    },
+    "auth.signup.error.username_taken": {
+      "text": "Это имя пользователя занято. Выберите другое.",
+      "status": "machine"
+    },
+    "auth.signup.have_account": {
+      "text": "Уже есть аккаунт? {link}",
+      "status": "machine"
+    },
+    "auth.signup.lede": {
+      "text": "Ваш пароль никогда не покидает устройство. Затем вы получите фразу восстановления, которую нужно записать.",
+      "status": "machine"
+    },
+    "auth.signup.name.hint": {
+      "text": "Его видят ваши контакты. Оставьте пустым, чтобы показывать имя пользователя.",
+      "status": "machine"
+    },
+    "auth.signup.name.label": {
+      "text": "Имя (необязательно)",
+      "status": "machine"
+    },
+    "auth.signup.submit": {
+      "text": "Создать аккаунт",
+      "status": "machine"
+    },
+    "auth.signup.title": {
+      "text": "Создайте аккаунт",
+      "status": "machine"
+    },
+    "auth.signup.username.hint": {
+      "text": "Латинские буквы, цифры и _. По этому имени вас находят другие.",
+      "status": "machine"
+    },
+    "auth.signup.working.line": {
+      "text": "Это займёт немного времени, но только один раз. Больше так ждать не придётся.",
+      "status": "machine"
+    },
+    "auth.signup.working.title": {
+      "text": "Создаём аккаунт...",
+      "status": "machine"
+    },
+    "auth.username.label": {
+      "text": "Имя пользователя",
+      "status": "machine"
+    },
+    "call.guest.working.title": {
+      "text": "Подключаем вас к звонку...",
+      "status": "machine"
+    },
+    "chats.empty.select": {
+      "text": "Выберите чат, чтобы начать общение",
+      "status": "machine"
+    },
+    "common.back": {
+      "text": "Назад",
+      "status": "machine"
+    },
+    "common.cancel": {
+      "text": "Отмена",
+      "status": "machine"
+    },
+    "common.checking": {
+      "text": "Проверка...",
+      "status": "machine"
+    },
     "common.close": {
       "text": "Закрыть",
+      "status": "machine"
+    },
+    "common.confirm": {
+      "text": "Подтвердить",
+      "status": "machine"
+    },
+    "common.continue": {
+      "text": "Продолжить",
+      "status": "machine"
+    },
+    "common.copied": {
+      "text": "Скопировано",
+      "status": "machine"
+    },
+    "common.copy": {
+      "text": "Копировать",
+      "status": "machine"
+    },
+    "common.dismiss": {
+      "text": "Скрыть",
+      "status": "machine"
+    },
+    "common.done": {
+      "text": "Готово",
+      "status": "machine"
+    },
+    "common.email": {
+      "text": "Эл. почта",
+      "status": "machine"
+    },
+    "common.error.a11y": {
+      "text": "Ошибка: {message}",
+      "status": "machine"
+    },
+    "common.error.offline": {
+      "text": "Не удалось связаться с Lakko. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "common.error.server_unreachable": {
+      "text": "Не удалось связаться с сервером. Проверьте подключение.",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts": {
+      "text": "Слишком много попыток. Подождите немного и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts_minutes": {
+      "text": "Слишком много попыток. Попробуйте снова через {minutes, plural, one {# минуту} few {# минуты} many {# минут} other {# минуты}}.",
+      "status": "machine"
+    },
+    "common.error.unavailable": {
+      "text": "Сейчас это недоступно. Попробуйте позже.",
+      "status": "machine"
+    },
+    "common.loading": {
+      "text": "Загрузка...",
+      "status": "machine"
+    },
+    "common.looking_up": {
+      "text": "Поиск...",
+      "status": "machine"
+    },
+    "common.more_options": {
+      "text": "Другие варианты",
+      "status": "machine"
+    },
+    "common.optional": {
+      "text": "Необязательно",
+      "status": "machine"
+    },
+    "common.paste": {
+      "text": "Вставить",
+      "status": "machine"
+    },
+    "common.phone": {
+      "text": "Телефон",
+      "status": "machine"
+    },
+    "common.preparing": {
+      "text": "Подготовка...",
+      "status": "machine"
+    },
+    "common.sending": {
+      "text": "Отправка...",
+      "status": "machine"
+    },
+    "common.try_again": {
+      "text": "Повторить",
+      "status": "machine"
+    },
+    "device_link.compare_hint": {
+      "text": "Убедитесь, что на другом устройстве показан такой же код.",
+      "status": "machine"
+    },
+    "device_link.comparison_code": {
+      "text": "Код для сверки",
+      "status": "machine"
+    },
+    "device_link.confirm_there": {
+      "text": "Откройте Lakko на устройстве, где вы уже вошли, и подтвердите этот вход там.",
+      "status": "machine"
+    },
+    "device_link.error.ask_unavailable": {
+      "text": "Сейчас нельзя отправить запрос на другое устройство; QR-код по-прежнему работает.",
+      "status": "machine"
+    },
+    "device_link.error.ask_unreachable": {
+      "text": "Не удалось связаться с сервером, чтобы отправить запрос на другое устройство; QR-код по-прежнему работает.",
+      "status": "machine"
+    },
+    "device_link.error.declined": {
+      "text": "Отклонено на другом устройстве.",
+      "status": "machine"
+    },
+    "device_link.error.generic": {
+      "text": "Не удалось выполнить восстановление с другого устройства. Попробуйте ещё раз или используйте фразу восстановления.",
+      "status": "machine"
+    },
+    "device_link.error.identity_mismatch": {
+      "text": "Ключи аккаунта, полученные с другого устройства, не совпадают с опубликованными ключами этого аккаунта — они не будут использованы.",
+      "status": "machine"
+    },
+    "device_link.error.name_other_account": {
+      "text": "Введённое имя принадлежит другому аккаунту. На этом устройстве ничего не изменено.",
+      "status": "machine"
+    },
+    "device_link.error.no_identity": {
+      "text": "Другое устройство подтвердило вход, но не прислало ключи аккаунта. Обновите на нём Lakko и попробуйте ещё раз или используйте фразу восстановления.",
+      "status": "machine"
+    },
+    "device_link.error.not_let_in": {
+      "text": "Другое устройство прислало ключи аккаунта, но войти на этом устройстве не удалось. Попробуйте ещё раз или используйте фразу восстановления.",
+      "status": "machine"
+    },
+    "device_link.error.request_limited": {
+      "text": "Слишком много запросов к другим устройствам. Попробуйте через несколько минут.",
+      "status": "machine"
+    },
+    "device_link.error.timeout": {
+      "text": "Другое устройство не ответило вовремя. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "device_link.pairing.needs_username": {
+      "text": "Чтобы добавить другое устройство, сначала задайте имя пользователя.",
+      "status": "machine"
+    },
+    "device_link.pairing.unsupported": {
+      "text": "Этот код создан другой версией Lakko. Обновите Lakko на обоих устройствах и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "device_link.pairing.wrong_account": {
+      "text": "Этот код для другого аккаунта. Проверьте, что на новом устройстве указано то же имя пользователя, что и здесь.",
+      "status": "machine"
+    },
+    "device_link.qr.hide": {
+      "text": "Скрыть QR-код",
+      "status": "machine"
+    },
+    "device_link.qr.intro": {
+      "text": "Покажите этот код устройству, на котором есть ваш аккаунт. Оно добавит это устройство и передаст ключи аккаунта со сквозным шифрованием — вводить фразу не нужно.",
+      "status": "machine"
+    },
+    "device_link.qr.scan_hint": {
+      "text": "На другом устройстве откройте «Настройки», затем «Устройства», затем «Добавить устройство» и отсканируйте этот код.",
+      "status": "machine"
+    },
+    "device_link.qr.show": {
+      "text": "Показать QR-код",
+      "status": "machine"
+    },
+    "device_link.qr.waiting": {
+      "text": "Ждём, пока другое устройство отсканирует этот код...",
+      "status": "machine"
+    },
+    "device_link.request.added": {
+      "text": "Устройство добавлено.",
+      "status": "machine"
+    },
+    "device_link.request.adding": {
+      "text": "Добавляем устройство...",
+      "status": "machine"
+    },
+    "device_link.request.body": {
+      "text": "Новое устройство просит доступ к вашему аккаунту. На нём показан код.",
+      "status": "machine"
+    },
+    "device_link.request.code_label": {
+      "text": "Код на новом устройстве",
+      "status": "machine"
+    },
+    "device_link.request.confirm": {
+      "text": "Да, добавить",
+      "status": "machine"
+    },
+    "device_link.request.confirm_only_if": {
+      "text": "Подтверждайте, только если на новом устройстве показан именно этот код.",
+      "status": "machine"
+    },
+    "device_link.request.decline": {
+      "text": "Это не я",
+      "status": "machine"
+    },
+    "device_link.request.declined": {
+      "text": "Отклонено. Если это повторяется, смените пароль.",
+      "status": "machine"
+    },
+    "device_link.request.error.generic": {
+      "text": "Не удалось добавить устройство. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "device_link.request.error.no_device_key": {
+      "text": "В этом браузере нет ключа устройства. Войдите снова.",
+      "status": "machine"
+    },
+    "device_link.request.title": {
+      "text": "Это вы?",
+      "status": "machine"
+    },
+    "device_link.restored": {
+      "text": "Восстановлено.",
+      "status": "machine"
+    },
+    "device_link.show_code": {
+      "text": "Показать код привязки",
+      "status": "machine"
+    },
+    "device_link.transferring": {
+      "text": "Передача...",
+      "status": "machine"
+    },
+    "devices.add.e2ee_note": {
+      "text": "Привязка защищена сквозным шифрованием между вашими двумя устройствами.",
+      "status": "machine"
+    },
+    "devices.add.error.generic": {
+      "text": "Не удалось привязать это устройство. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "devices.add.joining": {
+      "text": "Привязываем это устройство...",
+      "status": "machine"
+    },
+    "devices.add.linked": {
+      "text": "Готово. Это устройство теперь привязано к вашему аккаунту.",
+      "status": "machine"
+    },
+    "devices.add.side.scan": {
+      "text": "Сканировать код",
+      "status": "machine"
+    },
+    "devices.add.side.scan_detail": {
+      "text": "На этом устройстве вы уже вошли: оно сканирует код нового устройства и впускает его.",
+      "status": "machine"
+    },
+    "devices.add.side.show": {
+      "text": "Показать код",
+      "status": "machine"
+    },
+    "devices.add.side.show_detail": {
+      "text": "Это новое устройство: оно присоединится к вашему аккаунту, когда другое устройство отсканирует его код.",
+      "status": "machine"
+    },
+    "devices.add.sign_in_first": {
+      "text": "Чтобы добавить устройство, сначала войдите.",
+      "status": "machine"
+    },
+    "devices.add.title": {
+      "text": "Добавить устройство",
+      "status": "machine"
+    },
+    "devices.scan.confirm.body": {
+      "text": "Отсканированное устройство получит полный доступ к вашему аккаунту: сообщениям, контактам и ключам аккаунта. Продолжайте, только если этот код показан на вашем собственном новом устройстве.",
+      "status": "machine"
+    },
+    "devices.scan.confirm.submit": {
+      "text": "Привязать устройство",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title": {
+      "text": "Привязать это устройство?",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied": {
+      "text": "Lakko не может использовать камеру. Разрешите доступ к камере в настройках и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_failed": {
+      "text": "Не удалось включить камеру. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "devices.scan.error.no_camera": {
+      "text": "На этом устройстве нет задней камеры.",
+      "status": "machine"
+    },
+    "devices.scan.error.not_a_code": {
+      "text": "Это не код устройства Lakko. Наведите камеру на код на другом устройстве.",
+      "status": "machine"
+    },
+    "devices.scan.intro": {
+      "text": "Наведите камеру на код, который показывает новое устройство.",
+      "status": "machine"
+    },
+    "devices.scan.open_camera": {
+      "text": "Открыть камеру",
+      "status": "machine"
+    },
+    "display_name.error.control": {
+      "text": "Удалите невидимые символы и символы направления текста",
+      "status": "machine"
+    },
+    "display_name.error.line_break": {
+      "text": "Только одна строка",
+      "status": "machine"
+    },
+    "display_name.error.too_long": {
+      "text": "Не более {count, plural, one {# символа} few {# символов} many {# символов} other {# символа}}",
+      "status": "machine"
+    },
+    "display_name.error.too_many_bytes": {
+      "text": "Это имя слишком длинное",
+      "status": "machine"
+    },
+    "display_name.error.unknown": {
+      "text": "Это имя нельзя использовать",
       "status": "machine"
     },
     "language.name.ar": {
@@ -72,6 +612,514 @@
     },
     "nav.settings": {
       "text": "Настройки",
+      "status": "machine"
+    },
+    "recovery.access_only_note": {
+      "text": "Аутентификатор или код вернут вам доступ к аккаунту; для чатов затем понадобится фраза восстановления или другое устройство.",
+      "status": "machine"
+    },
+    "recovery.cached_account": {
+      "text": "{username} на этом устройстве",
+      "status": "machine"
+    },
+    "recovery.contact.change": {
+      "text": "Указать другую почту или телефон",
+      "status": "machine"
+    },
+    "recovery.contact.code_label": {
+      "text": "Код, который мы отправили",
+      "status": "machine"
+    },
+    "recovery.contact.email_label": {
+      "text": "Адрес электронной почты",
+      "status": "machine"
+    },
+    "recovery.contact.error.bad_contact": {
+      "text": "Это не похоже на адрес электронной почты или номер телефона. Проверьте и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery.contact.error.enter_code": {
+      "text": "Введите шестизначный код, который мы отправили.",
+      "status": "machine"
+    },
+    "recovery.contact.error.generic": {
+      "text": "Не удалось проверить код. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_email": {
+      "text": "Введите правильный адрес электронной почты.",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_phone": {
+      "text": "Введите номер телефона в международном формате, например +15551234567.",
+      "status": "machine"
+    },
+    "recovery.contact.error.send_failed": {
+      "text": "Не удалось отправить код. Проверьте имя пользователя и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery.contact.error.unavailable": {
+      "text": "Восстановление по почте и телефону здесь недоступно. Выберите другой способ.",
+      "status": "machine"
+    },
+    "recovery.contact.error.wrong": {
+      "text": "Код не подошёл. Проверьте код, который мы отправили, и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery.contact.intro": {
+      "text": "Мы отправим шестизначный код на адрес электронной почты или номер телефона, указанный в настройках. Он вернёт вам доступ к аккаунту; для чатов затем понадобится фраза восстановления или другое устройство.",
+      "status": "machine"
+    },
+    "recovery.contact.phone_label": {
+      "text": "Номер телефона",
+      "status": "machine"
+    },
+    "recovery.contact.send": {
+      "text": "Отправить код",
+      "status": "machine"
+    },
+    "recovery.contact.send_by": {
+      "text": "Отправить код через",
+      "status": "machine"
+    },
+    "recovery.contact.sent_email": {
+      "text": "Если этот адрес привязан к аккаунту, шестизначный код уже в пути. Введите его ниже.",
+      "status": "machine"
+    },
+    "recovery.contact.sent_phone": {
+      "text": "Если этот номер привязан к аккаунту, шестизначный код уже в пути. Введите его ниже.",
+      "status": "machine"
+    },
+    "recovery.device.intro": {
+      "text": "Введите имя пользователя, затем подтвердите вход на устройстве, где вы ещё вошли, и сверьте показанный код. Серверы Lakko не получают ничего, что могли бы прочитать. Камера не нужна; при желании можно использовать QR-код.",
+      "status": "machine"
+    },
+    "recovery.device.intro_qr": {
+      "text": "Другое устройство привяжет это и перенесёт на него ваш аккаунт.",
+      "status": "machine"
+    },
+    "recovery.device.restoring": {
+      "text": "Восстановление {username}",
+      "status": "machine"
+    },
+    "recovery.error.code_send_limited": {
+      "text": "Мы недавно отправили код. Подождите несколько минут, прежде чем запрашивать новый.",
+      "status": "machine"
+    },
+    "recovery.error.generic": {
+      "text": "Не удалось восстановить аккаунт. Проверьте слова и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery.error.no_match": {
+      "text": "Не совпадает с этим аккаунтом. Проверьте слова и имя пользователя, затем попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery.lede": {
+      "text": "Выберите, как вернуться в аккаунт.",
+      "status": "machine"
+    },
+    "recovery.lede_account": {
+      "text": "Выберите, как вернуться в {username}.",
+      "status": "machine"
+    },
+    "recovery.method.contact.sub": {
+      "text": "Код на почту или телефон, указанные в настройках.",
+      "status": "machine"
+    },
+    "recovery.method.contact.title": {
+      "text": "Почта или телефон",
+      "status": "machine"
+    },
+    "recovery.method.device.sub": {
+      "text": "Подтвердите с устройства, на котором вы ещё вошли.",
+      "status": "machine"
+    },
+    "recovery.method.device.title": {
+      "text": "Другое устройство",
+      "status": "machine"
+    },
+    "recovery.method.phrase.restore_sub": {
+      "text": "Введите все 24 слова.",
+      "status": "machine"
+    },
+    "recovery.method.phrase.sub": {
+      "text": "Введите 24 слова и задайте новый пароль.",
+      "status": "machine"
+    },
+    "recovery.method.phrase.title": {
+      "text": "Фраза восстановления",
+      "status": "machine"
+    },
+    "recovery.method.shares.sub": {
+      "text": "Части, которые вы передали людям, которым доверяете.",
+      "status": "machine"
+    },
+    "recovery.method.shares.title": {
+      "text": "Части для социального восстановления",
+      "status": "machine"
+    },
+    "recovery.method.totp.sub": {
+      "text": "Код из приложения-аутентификатора.",
+      "status": "machine"
+    },
+    "recovery.method.totp.title": {
+      "text": "Аутентификатор",
+      "status": "machine"
+    },
+    "recovery.method.words.restore_sub": {
+      "text": "Три слова из фразы восстановления.",
+      "status": "machine"
+    },
+    "recovery.method.words.sub": {
+      "text": "Три слова из фразы, если этот быстрый способ включён.",
+      "status": "machine"
+    },
+    "recovery.method.words.title": {
+      "text": "Три слова",
+      "status": "machine"
+    },
+    "recovery.methods.back": {
+      "text": "Назад ко всем способам",
+      "status": "machine"
+    },
+    "recovery.phrase.intro": {
+      "text": "Введите 24 слова, затем задайте новый пароль.",
+      "status": "machine"
+    },
+    "recovery.remembered": {
+      "text": "Вспомнили пароль? {link}",
+      "status": "machine"
+    },
+    "recovery.shares.copy_failed": {
+      "text": "Не удалось скопировать. Выделите часть и скопируйте её вручную.",
+      "status": "machine"
+    },
+    "recovery.shares.error.combine_failed": {
+      "text": "Не удалось объединить части. Проверьте, что каждая скопирована полностью, и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery.shares.error.generic": {
+      "text": "Не удалось создать части. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery.shares.error.too_few": {
+      "text": "Вставьте не менее двух частей, по одной на строку.",
+      "status": "machine"
+    },
+    "recovery.shares.generate": {
+      "text": "Создать {count, plural, one {# часть} few {# части} many {# частей} other {# части}}",
+      "status": "machine"
+    },
+    "recovery.shares.generating": {
+      "text": "Создание...",
+      "status": "machine"
+    },
+    "recovery.shares.help": {
+      "text": "Вставьте их в точности так, как их прислали. Нужно столько частей, сколько было оговорено при их создании, обычно 3 из 5.",
+      "status": "machine"
+    },
+    "recovery.shares.intro": {
+      "text": "Вставьте полученные части, по одной на строку, затем задайте новый пароль.",
+      "status": "machine"
+    },
+    "recovery.shares.label": {
+      "text": "Части для восстановления, по одной на строку",
+      "status": "machine"
+    },
+    "recovery.shares.panel_body": {
+      "text": "Разделите фразу на {count, plural, one {# часть} few {# части} many {# частей} other {# части}} для людей, которым доверяете. Любые {threshold} из них восстановят фразу; меньшее число не раскрывает ничего. Дайте каждому человеку одну часть.",
+      "status": "machine"
+    },
+    "recovery.shares.usage": {
+      "text": "Чтобы использовать их позже, выберите «{method}» на экране восстановления и вставьте любые {threshold}.",
+      "status": "machine"
+    },
+    "recovery.submit": {
+      "text": "Восстановить аккаунт",
+      "status": "machine"
+    },
+    "recovery.title": {
+      "text": "Восстановление аккаунта",
+      "status": "machine"
+    },
+    "recovery.totp.code_label": {
+      "text": "Код из приложения",
+      "status": "machine"
+    },
+    "recovery.totp.error.enter_code": {
+      "text": "Введите шестизначный код из приложения-аутентификатора.",
+      "status": "machine"
+    },
+    "recovery.totp.error.generic": {
+      "text": "Не удалось проверить код. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery.totp.error.unavailable": {
+      "text": "Восстановление через аутентификатор здесь недоступно. Выберите другой способ.",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong": {
+      "text": "Код не подошёл. Проверьте приложение и введите следующий код.",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong_username": {
+      "text": "Код не подошёл. Проверьте имя пользователя и приложение, затем попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery.totp.intro": {
+      "text": "Введите шестизначный код из приложения-аутентификатора, настроенного в настройках. Он вернёт вам доступ к аккаунту; для чатов затем понадобится фраза восстановления или другое устройство.",
+      "status": "machine"
+    },
+    "recovery.username_required": {
+      "text": "Введите имя пользователя аккаунта.",
+      "status": "machine"
+    },
+    "recovery.username_required_to_recover": {
+      "text": "Введите имя пользователя аккаунта, который нужно восстановить.",
+      "status": "machine"
+    },
+    "recovery.words.error.generic": {
+      "text": "Не удалось проверить слова. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match": {
+      "text": "Слова не совпадают.",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match_tries": {
+      "text": "Слова не совпадают. {count, plural, one {Осталась # попытка} few {Осталось # попытки} many {Осталось # попыток} other {Осталось # попытки}}, после чего быстрый способ с тремя словами будет отключён.",
+      "status": "machine"
+    },
+    "recovery.words.error.open_failed": {
+      "text": "Сервер ответил, но данные для восстановления не удалось открыть. Ничего не изменено.",
+      "status": "machine"
+    },
+    "recovery.words.error.server_off": {
+      "text": "Восстановление по трём словам недоступно на этом сервере.",
+      "status": "machine"
+    },
+    "recovery.words.intro": {
+      "text": "Введите три слова из фразы восстановления и задайте новый пароль. Сначала укажите аккаунт.",
+      "status": "machine"
+    },
+    "recovery.words.prompt": {
+      "text": "{username}: введите слова {positions} из фразы восстановления.",
+      "status": "machine"
+    },
+    "recovery.words.prompt_restore": {
+      "text": "Введите слова {positions} из фразы восстановления.",
+      "status": "machine"
+    },
+    "recovery.words.switched_off": {
+      "text": "Быстрый способ с тремя словами для этого аккаунта отключён. Используйте полную фразу восстановления или другое устройство.",
+      "status": "machine"
+    },
+    "recovery.words.switched_off_restore": {
+      "text": "Быстрый способ с тремя словами для этого аккаунта отключён. Используйте другое устройство или полную фразу восстановления.",
+      "status": "machine"
+    },
+    "recovery.words.tries_left": {
+      "text": "{count, plural, one {Осталась # попытка.} few {Осталось # попытки.} many {Осталось # попыток.} other {Осталось # попытки.}}",
+      "status": "machine"
+    },
+    "recovery.words.unavailable": {
+      "text": "Восстановление по трём словам здесь недоступно. Выберите другой способ.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.acknowledge": {
+      "text": "Я понимаю, что, потеряв эти слова, я потеряю доступ к аккаунту.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.back": {
+      "text": "Назад к словам",
+      "status": "machine"
+    },
+    "recovery_phrase.check.lede": {
+      "text": "Введите слова {positions} из того, что вы записали.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_many": {
+      "text": "Слова {positions} не совпадают. Проверьте записи и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_one": {
+      "text": "Слово {position} не совпадает. Проверьте записи и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.title": {
+      "text": "Проверьте записи",
+      "status": "machine"
+    },
+    "recovery_phrase.copy_failed": {
+      "text": "Не удалось скопировать. Запишите слова вручную.",
+      "status": "machine"
+    },
+    "recovery_phrase.error.incomplete": {
+      "text": "Введите все 24 слова фразы восстановления.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.acknowledge": {
+      "text": "Я записал(а) эти 24 слова и понимаю, что, потеряв их, потеряю доступ к аккаунту.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.error.generic": {
+      "text": "Не удалось завершить. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.finishing": {
+      "text": "Завершение...",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.lede": {
+      "text": "Вы создали новые ключи аккаунта для {username}. Эти 24 слова — единственный способ восстановить их, если вы снова потеряете доступ. Запишите их по порядку и храните в надёжном месте.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.safety_note": {
+      "text": "Ваши контакты увидят, что ваш код безопасности изменился, и им нужно будет снова подтвердить вас, прежде чем безопасно переписываться с вами.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.title": {
+      "text": "Сохраните новую фразу восстановления",
+      "status": "machine"
+    },
+    "recovery_phrase.guest.lede": {
+      "text": "Ваш аккаунт создан без пароля. Эти 24 слова — единственный способ вернуться в него на другом устройстве или после очистки данных этого браузера. Запишите их по порядку и храните в надёжном месте.",
+      "status": "machine"
+    },
+    "recovery_phrase.label": {
+      "text": "Фраза восстановления",
+      "status": "machine"
+    },
+    "recovery_phrase.save.anyone_with_words": {
+      "text": "Любой, у кого есть эти слова, может читать ваши сообщения и действовать от вашего имени. Никому их не показывайте.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.lede": {
+      "text": "Эти 24 слова — единственный способ вернуться в аккаунт, если вы потеряете пароль и все устройства. Запишите их по порядку и храните в надёжном месте.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.no_screenshot": {
+      "text": "Не храните их в виде снимка экрана или в обычном текстовом файле. Lakko не сможет показать их снова.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.title": {
+      "text": "Сохраните фразу восстановления",
+      "status": "machine"
+    },
+    "recovery_phrase.save.vault_note": {
+      "text": "На новом устройстве обычно понадобятся только три из них — слова {positions}. Всё равно сохраните весь список: это единственный способ вернуться, если быстрый способ когда-нибудь отключится.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.written": {
+      "text": "Я их записал(а)",
+      "status": "machine"
+    },
+    "recovery_phrase.step": {
+      "text": "Шаг {current} из {total}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_label": {
+      "text": "Слово {position}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_placeholder": {
+      "text": "слово {position}",
+      "status": "machine"
+    },
+    "restore_identity.device_intro": {
+      "text": "На устройстве, где вы ещё вошли, появится запрос; подтвердите его там и сверьте код. Передача защищена сквозным шифрованием; серверы Lakko не могут её прочитать. Камера не нужна; при желании можно использовать QR-код.",
+      "status": "machine"
+    },
+    "restore_identity.error.bad_saved_account": {
+      "text": "С аккаунтом, сохранённым на этом устройстве, что-то не так. Выйдите и войдите снова или используйте фразу восстановления.",
+      "status": "machine"
+    },
+    "restore_identity.error.generic": {
+      "text": "Не удалось восстановить ключи аккаунта. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "restore_identity.error.invalid_phrase": {
+      "text": "Это не фраза восстановления. Проверьте каждое слово и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "restore_identity.error.not_published": {
+      "text": "Не найдены опубликованные ключи аккаунта, чтобы проверить восстановленные. Попробуйте ещё раз или выполните восстановление с устройства, где ваш аккаунт ещё есть.",
+      "status": "machine"
+    },
+    "restore_identity.error.nothing": {
+      "text": "Нечего восстанавливать. Сначала войдите.",
+      "status": "machine"
+    },
+    "restore_identity.error.phrase_mismatch": {
+      "text": "Эта фраза восстановления не соответствует ключам этого аккаунта. Проверьте фразу или привяжите устройство, на котором вы уже вошли.",
+      "status": "machine"
+    },
+    "restore_identity.error.unreachable": {
+      "text": "Не удалось связаться с каталогом, чтобы проверить восстановленные ключи аккаунта. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "Вы вошли как {username} на новом устройстве. Чтобы сохранить доверие контактов, восстановите ключи аккаунта с помощью трёх слов, фразы восстановления или с устройства, где вы ещё вошли.",
+      "status": "machine"
+    },
+    "restore_identity.lede_no_words": {
+      "text": "Вы вошли как {username} на новом устройстве. Чтобы сохранить доверие контактов, восстановите ключи аккаунта с помощью фразы восстановления или с устройства, где вы ещё вошли.",
+      "status": "machine"
+    },
+    "restore_identity.log_out": {
+      "text": "Выйти",
+      "status": "machine"
+    },
+    "restore_identity.lost.create": {
+      "text": "Создать новые ключи аккаунта",
+      "status": "machine"
+    },
+    "restore_identity.lost.creating": {
+      "text": "Создаём новые ключи аккаунта...",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.generic": {
+      "text": "Не удалось создать новые ключи аккаунта. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "restore_identity.lost.sub": {
+      "text": "Начать с новыми ключами аккаунта",
+      "status": "machine"
+    },
+    "restore_identity.lost.summary": {
+      "text": "У меня нет ни фразы восстановления, ни другого устройства",
+      "status": "machine"
+    },
+    "restore_identity.lost.warning": {
+      "text": "Будут созданы новые ключи для вашего аккаунта. Контактам придётся снова подтвердить вас, сообщения на потерянном устройстве останутся нечитаемыми, а вы получите новую фразу восстановления, которую нужно сохранить. Делайте это, только если потеряли и фразу восстановления, и все остальные устройства.",
+      "status": "machine"
+    },
+    "restore_identity.not_you": {
+      "text": "Это не ваш аккаунт?",
+      "status": "machine"
+    },
+    "restore_identity.phrase_intro": {
+      "text": "Введите 24 слова по порядку. Lakko сверит их с вашим аккаунтом, прежде чем продолжить.",
+      "status": "machine"
+    },
+    "restore_identity.submit": {
+      "text": "Восстановить",
+      "status": "machine"
+    },
+    "restore_identity.submitting": {
+      "text": "Восстановление...",
+      "status": "machine"
+    },
+    "restore_identity.title": {
+      "text": "Восстановите ключи аккаунта",
+      "status": "machine"
+    },
+    "security.identity_changed.body": {
+      "text": "Если это сделали вы на другом устройстве, закройте это уведомление. Если нет — сверьте коды безопасности с контактами и смените пароль и ключи доступа.",
+      "status": "machine"
+    },
+    "security.identity_changed.title": {
+      "text": "Ключ безопасности вашего аккаунта изменён.",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -148,6 +1196,34 @@
     },
     "settings.section.security": {
       "text": "Безопасность",
+      "status": "machine"
+    },
+    "username.a11y_hint": {
+      "text": "Имя пользователя: {message}",
+      "status": "machine"
+    },
+    "username.error.empty": {
+      "text": "Введите имя пользователя",
+      "status": "machine"
+    },
+    "username.error.invalid_characters": {
+      "text": "Только латинские буквы, цифры и _",
+      "status": "machine"
+    },
+    "username.error.too_long": {
+      "text": "Не более {count, plural, one {# символа} few {# символов} many {# символов} other {# символа}}",
+      "status": "machine"
+    },
+    "username.error.too_short": {
+      "text": "Не менее {count, plural, one {# символа} few {# символов} many {# символов} other {# символа}}",
+      "status": "machine"
+    },
+    "username.error.unknown": {
+      "text": "Это имя пользователя нельзя использовать",
+      "status": "machine"
+    },
+    "username.hint.shown_as": {
+      "text": "Будет показано как {username}",
       "status": "machine"
     }
   }

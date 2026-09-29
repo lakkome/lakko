@@ -2,12 +2,552 @@
   "format": 1,
   "language": "zh-Hans",
   "messages": {
+    "auth.brand.body": {
+      "text": "聊天、群组、频道和通话默认端到端加密。Lakko 的服务器永远看不到你的消息。",
+      "status": "machine"
+    },
+    "auth.brand.foot": {
+      "text": "开源。无需手机号。",
+      "status": "machine"
+    },
+    "auth.brand.tagline": {
+      "text": "你的消息，你做主。",
+      "status": "machine"
+    },
+    "auth.error.wrong_credentials": {
+      "text": "用户名或密码错误。请检查后重试。",
+      "status": "machine"
+    },
+    "auth.explainer.never_leaves": {
+      "text": "你的密码永远不会离开你的设备。Lakko 无需接收密码即可完成验证，因此 Lakko 的任何人都无法读取它，也无人能替你重置。",
+      "status": "machine"
+    },
+    "auth.explainer.same_answer": {
+      "text": "用户名错误和密码错误会得到相同的提示，因此没人能通过登录界面查出哪些用户名存在。",
+      "status": "machine"
+    },
+    "auth.explainer.title": {
+      "text": "Lakko 如何保护你的密码",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back": {
+      "text": "如果忘记密码，你可以通过恢复短语、另一台仍在登录的设备、恢复短语中的三个词、身份验证器应用，或发送到邮箱或手机的验证码重新登录。",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back_no_words": {
+      "text": "如果忘记密码，你可以通过恢复短语、另一台仍在登录的设备、身份验证器应用，或发送到邮箱或手机的验证码重新登录。",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "更改语言",
       "status": "machine"
     },
+    "auth.login.forgot": {
+      "text": "忘记密码？",
+      "status": "machine"
+    },
+    "auth.login.lede": {
+      "text": "登录以继续。",
+      "status": "machine"
+    },
+    "auth.login.no_account": {
+      "text": "初次使用 Lakko？{link}",
+      "status": "machine"
+    },
+    "auth.login.passkey": {
+      "text": "使用通行密钥",
+      "status": "machine"
+    },
+    "auth.login.submit": {
+      "text": "登录",
+      "status": "machine"
+    },
+    "auth.login.submitting": {
+      "text": "正在登录…",
+      "status": "machine"
+    },
+    "auth.login.title": {
+      "text": "欢迎回来",
+      "status": "machine"
+    },
+    "auth.passkey.error.cancelled": {
+      "text": "已取消通行密钥登录。",
+      "status": "machine"
+    },
+    "auth.passkey.error.failed_status": {
+      "text": "通行密钥登录失败（{status}）。",
+      "status": "machine"
+    },
+    "auth.passkey.error.generic": {
+      "text": "无法使用通行密钥登录。请重试，或使用密码登录。",
+      "status": "machine"
+    },
+    "auth.passkey.error.network": {
+      "text": "通行密钥登录时出现网络错误。",
+      "status": "machine"
+    },
+    "auth.passkey.error.no_cached": {
+      "text": "此设备上没有用于通行密钥登录的缓存凭据。请先使用密码登录，或用恢复短语恢复账号。",
+      "status": "machine"
+    },
+    "auth.passkey.error.not_registered": {
+      "text": "此账号尚未注册通行密钥。请先使用密码登录，然后在主页添加通行密钥。",
+      "status": "machine"
+    },
+    "auth.passkey.error.server_disabled": {
+      "text": "服务器未启用通行密钥。",
+      "status": "machine"
+    },
+    "auth.passkey.error.unsupported": {
+      "text": "此浏览器不支持通行密钥。",
+      "status": "machine"
+    },
+    "auth.passkey.error.wrong_account": {
+      "text": "此通行密钥属于另一个账号，而不是此设备上保存的账号。请先使用密码登录。",
+      "status": "machine"
+    },
+    "auth.password.confirm.label": {
+      "text": "确认密码",
+      "status": "machine"
+    },
+    "auth.password.error.mismatch": {
+      "text": "两次输入的密码不一致。请输入相同的密码。",
+      "status": "machine"
+    },
+    "auth.password.error.too_short": {
+      "text": "请至少使用 {count, plural, other {# 个字符}}。",
+      "status": "machine"
+    },
+    "auth.password.hide": {
+      "text": "隐藏密码",
+      "status": "machine"
+    },
+    "auth.password.hint": {
+      "text": "至少 {count, plural, other {# 个字符}}。",
+      "status": "machine"
+    },
+    "auth.password.label": {
+      "text": "密码",
+      "status": "machine"
+    },
+    "auth.password.new.label": {
+      "text": "新密码",
+      "status": "machine"
+    },
+    "auth.password.new_confirm.label": {
+      "text": "确认新密码",
+      "status": "machine"
+    },
+    "auth.password.show": {
+      "text": "显示密码",
+      "status": "machine"
+    },
+    "auth.signup.error.enter_username": {
+      "text": "请输入用户名。",
+      "status": "machine"
+    },
+    "auth.signup.error.fix_name": {
+      "text": "请先修改你的名字再继续。",
+      "status": "machine"
+    },
+    "auth.signup.error.generic": {
+      "text": "无法创建账号。请重试。",
+      "status": "machine"
+    },
+    "auth.signup.error.rate_limited": {
+      "text": "此网络当前新建账号过多。请稍后再试。",
+      "status": "machine"
+    },
+    "auth.signup.error.username_taken": {
+      "text": "该用户名已被占用。请换一个。",
+      "status": "machine"
+    },
+    "auth.signup.have_account": {
+      "text": "已有账号？{link}",
+      "status": "machine"
+    },
+    "auth.signup.lede": {
+      "text": "你的密码永远不会离开你的设备。接下来你会获得一个需要抄写下来的恢复短语。",
+      "status": "machine"
+    },
+    "auth.signup.name.hint": {
+      "text": "会显示给你的联系人。留空则显示你的用户名。",
+      "status": "machine"
+    },
+    "auth.signup.name.label": {
+      "text": "名字（可选）",
+      "status": "machine"
+    },
+    "auth.signup.submit": {
+      "text": "创建账号",
+      "status": "machine"
+    },
+    "auth.signup.title": {
+      "text": "创建你的账号",
+      "status": "machine"
+    },
+    "auth.signup.username.hint": {
+      "text": "拉丁字母、数字和 _。其他人通过这个名字找到你。",
+      "status": "machine"
+    },
+    "auth.signup.working.line": {
+      "text": "这需要一点时间，但只有这一次。以后不会再这样等待。",
+      "status": "machine"
+    },
+    "auth.signup.working.title": {
+      "text": "正在创建你的账号…",
+      "status": "machine"
+    },
+    "auth.username.label": {
+      "text": "用户名",
+      "status": "machine"
+    },
+    "call.guest.working.title": {
+      "text": "正在让你加入通话…",
+      "status": "machine"
+    },
+    "chats.empty.select": {
+      "text": "选择一个聊天开始发消息",
+      "status": "machine"
+    },
+    "common.back": {
+      "text": "返回",
+      "status": "machine"
+    },
+    "common.cancel": {
+      "text": "取消",
+      "status": "machine"
+    },
+    "common.checking": {
+      "text": "正在检查…",
+      "status": "machine"
+    },
     "common.close": {
       "text": "关闭",
+      "status": "machine"
+    },
+    "common.confirm": {
+      "text": "确认",
+      "status": "machine"
+    },
+    "common.continue": {
+      "text": "继续",
+      "status": "machine"
+    },
+    "common.copied": {
+      "text": "已复制",
+      "status": "machine"
+    },
+    "common.copy": {
+      "text": "复制",
+      "status": "machine"
+    },
+    "common.dismiss": {
+      "text": "关闭",
+      "status": "machine"
+    },
+    "common.done": {
+      "text": "完成",
+      "status": "machine"
+    },
+    "common.email": {
+      "text": "邮箱",
+      "status": "machine"
+    },
+    "common.error.a11y": {
+      "text": "错误：{message}",
+      "status": "machine"
+    },
+    "common.error.offline": {
+      "text": "无法连接到 Lakko。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "common.error.server_unreachable": {
+      "text": "无法连接到服务器。请检查网络连接。",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts": {
+      "text": "尝试次数过多。请稍等片刻再试。",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts_minutes": {
+      "text": "尝试次数过多。请在 {minutes, plural, other {# 分钟}}后重试。",
+      "status": "machine"
+    },
+    "common.error.unavailable": {
+      "text": "该功能暂时不可用。请稍后再试。",
+      "status": "machine"
+    },
+    "common.loading": {
+      "text": "正在加载…",
+      "status": "machine"
+    },
+    "common.looking_up": {
+      "text": "正在查找…",
+      "status": "machine"
+    },
+    "common.more_options": {
+      "text": "更多选项",
+      "status": "machine"
+    },
+    "common.optional": {
+      "text": "可选",
+      "status": "machine"
+    },
+    "common.paste": {
+      "text": "粘贴",
+      "status": "machine"
+    },
+    "common.phone": {
+      "text": "手机",
+      "status": "machine"
+    },
+    "common.preparing": {
+      "text": "正在准备…",
+      "status": "machine"
+    },
+    "common.sending": {
+      "text": "正在发送…",
+      "status": "machine"
+    },
+    "common.try_again": {
+      "text": "重试",
+      "status": "machine"
+    },
+    "device_link.compare_hint": {
+      "text": "请确认另一台设备显示的是相同的代码。",
+      "status": "machine"
+    },
+    "device_link.comparison_code": {
+      "text": "比对码",
+      "status": "machine"
+    },
+    "device_link.confirm_there": {
+      "text": "在一台已登录的设备上打开 Lakko，并在那里确认此次登录。",
+      "status": "machine"
+    },
+    "device_link.error.ask_unavailable": {
+      "text": "当前无法向你的另一台设备发出请求；二维码仍然可用。",
+      "status": "machine"
+    },
+    "device_link.error.ask_unreachable": {
+      "text": "无法连接服务器向你的另一台设备发出请求；二维码仍然可用。",
+      "status": "machine"
+    },
+    "device_link.error.declined": {
+      "text": "已在另一台设备上被拒绝。",
+      "status": "machine"
+    },
+    "device_link.error.generic": {
+      "text": "无法从你的另一台设备恢复。请重试，或使用恢复短语。",
+      "status": "machine"
+    },
+    "device_link.error.identity_mismatch": {
+      "text": "从你的另一台设备收到的身份与此账号公开的身份不符，已拒绝使用。",
+      "status": "machine"
+    },
+    "device_link.error.name_other_account": {
+      "text": "你输入的名字属于另一个账号。此设备上没有做任何更改。",
+      "status": "machine"
+    },
+    "device_link.error.no_identity": {
+      "text": "另一台设备已确认，但没有发送你的身份。请在该设备上更新 Lakko 后重试，或使用恢复短语。",
+      "status": "machine"
+    },
+    "device_link.error.not_let_in": {
+      "text": "你的另一台设备已发送身份，但此设备无法登录。请重试，或使用恢复短语。",
+      "status": "machine"
+    },
+    "device_link.error.request_limited": {
+      "text": "向你的其他设备发出的请求过多。请几分钟后再试。",
+      "status": "machine"
+    },
+    "device_link.error.timeout": {
+      "text": "另一台设备未及时响应。请重试。",
+      "status": "machine"
+    },
+    "device_link.pairing.needs_username": {
+      "text": "请先设置用户名，才能添加其他设备。",
+      "status": "machine"
+    },
+    "device_link.pairing.unsupported": {
+      "text": "此代码来自不同版本的 Lakko。请在两台设备上都更新 Lakko 后重试。",
+      "status": "machine"
+    },
+    "device_link.pairing.wrong_account": {
+      "text": "此代码属于另一个账号。请确认新设备使用的用户名与这台设备相同。",
+      "status": "machine"
+    },
+    "device_link.qr.hide": {
+      "text": "隐藏二维码",
+      "status": "machine"
+    },
+    "device_link.qr.intro": {
+      "text": "将此二维码出示给仍登录着你账号的设备。它会添加此设备，并以端到端加密方式转移你的身份，无需输入短语。",
+      "status": "machine"
+    },
+    "device_link.qr.scan_hint": {
+      "text": "在你的另一台设备上，依次打开“设置”、“设备”、“添加设备”，然后扫描此二维码。",
+      "status": "machine"
+    },
+    "device_link.qr.show": {
+      "text": "改为显示二维码",
+      "status": "machine"
+    },
+    "device_link.qr.waiting": {
+      "text": "正在等待你的另一台设备扫描此二维码…",
+      "status": "machine"
+    },
+    "device_link.request.added": {
+      "text": "已添加设备。",
+      "status": "machine"
+    },
+    "device_link.request.adding": {
+      "text": "正在添加设备…",
+      "status": "machine"
+    },
+    "device_link.request.body": {
+      "text": "一台新设备请求加入你的账号。它会显示一个代码。",
+      "status": "machine"
+    },
+    "device_link.request.code_label": {
+      "text": "新设备上的代码",
+      "status": "machine"
+    },
+    "device_link.request.confirm": {
+      "text": "是，添加",
+      "status": "machine"
+    },
+    "device_link.request.confirm_only_if": {
+      "text": "仅当新设备显示的代码与此完全相同时才确认。",
+      "status": "machine"
+    },
+    "device_link.request.decline": {
+      "text": "不是我",
+      "status": "machine"
+    },
+    "device_link.request.declined": {
+      "text": "已拒绝。如果这种情况反复出现，请修改密码。",
+      "status": "machine"
+    },
+    "device_link.request.error.generic": {
+      "text": "无法添加设备。请重试。",
+      "status": "machine"
+    },
+    "device_link.request.error.no_device_key": {
+      "text": "此浏览器上没有设备密钥。请重新登录。",
+      "status": "machine"
+    },
+    "device_link.request.title": {
+      "text": "是你吗？",
+      "status": "machine"
+    },
+    "device_link.restored": {
+      "text": "已恢复。",
+      "status": "machine"
+    },
+    "device_link.show_code": {
+      "text": "显示配对码",
+      "status": "machine"
+    },
+    "device_link.transferring": {
+      "text": "正在传输…",
+      "status": "machine"
+    },
+    "devices.add.e2ee_note": {
+      "text": "关联过程在你的两台设备之间端到端加密。",
+      "status": "machine"
+    },
+    "devices.add.error.generic": {
+      "text": "无法关联此设备。请重试。",
+      "status": "machine"
+    },
+    "devices.add.joining": {
+      "text": "正在关联此设备…",
+      "status": "machine"
+    },
+    "devices.add.linked": {
+      "text": "已关联。此设备现在已加入你的账号。",
+      "status": "machine"
+    },
+    "devices.add.side.scan": {
+      "text": "扫描二维码",
+      "status": "machine"
+    },
+    "devices.add.side.scan_detail": {
+      "text": "此设备已登录：它会扫描新设备的二维码并允许其加入。",
+      "status": "machine"
+    },
+    "devices.add.side.show": {
+      "text": "显示二维码",
+      "status": "machine"
+    },
+    "devices.add.side.show_detail": {
+      "text": "这是新设备：另一台设备扫描它的二维码后，它就会加入你的账号。",
+      "status": "machine"
+    },
+    "devices.add.sign_in_first": {
+      "text": "请先登录再添加设备。",
+      "status": "machine"
+    },
+    "devices.add.title": {
+      "text": "添加设备",
+      "status": "machine"
+    },
+    "devices.scan.confirm.body": {
+      "text": "这会让扫描到的设备完全访问你的账号：你的消息、联系人和身份。仅当二维码显示在你自己的新设备上时才继续。",
+      "status": "machine"
+    },
+    "devices.scan.confirm.submit": {
+      "text": "关联设备",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title": {
+      "text": "关联此设备？",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied": {
+      "text": "Lakko 无法使用相机。请在“设置”中允许访问相机，然后重试。",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_failed": {
+      "text": "相机无法启动。请重试。",
+      "status": "machine"
+    },
+    "devices.scan.error.no_camera": {
+      "text": "此设备没有可用的后置摄像头。",
+      "status": "machine"
+    },
+    "devices.scan.error.not_a_code": {
+      "text": "这不是 Lakko 设备二维码。请将相机对准你另一台设备上的二维码。",
+      "status": "machine"
+    },
+    "devices.scan.intro": {
+      "text": "将相机对准你的新设备上显示的二维码。",
+      "status": "machine"
+    },
+    "devices.scan.open_camera": {
+      "text": "打开相机",
+      "status": "machine"
+    },
+    "display_name.error.control": {
+      "text": "请删除不可见字符或文字方向控制字符",
+      "status": "machine"
+    },
+    "display_name.error.line_break": {
+      "text": "只能有一行",
+      "status": "machine"
+    },
+    "display_name.error.too_long": {
+      "text": "最多 {count, plural, other {# 个字符}}",
+      "status": "machine"
+    },
+    "display_name.error.too_many_bytes": {
+      "text": "这个名字太长了",
+      "status": "machine"
+    },
+    "display_name.error.unknown": {
+      "text": "无法使用这个名字",
       "status": "machine"
     },
     "language.name.ar": {
@@ -72,6 +612,514 @@
     },
     "nav.settings": {
       "text": "设置",
+      "status": "machine"
+    },
+    "recovery.access_only_note": {
+      "text": "身份验证器或验证码可让你重新登录；之后你的聊天还需要恢复短语或另一台设备才能恢复。",
+      "status": "machine"
+    },
+    "recovery.cached_account": {
+      "text": "此设备上的 {username}",
+      "status": "machine"
+    },
+    "recovery.contact.change": {
+      "text": "使用其他邮箱或手机号",
+      "status": "machine"
+    },
+    "recovery.contact.code_label": {
+      "text": "我们发送的验证码",
+      "status": "machine"
+    },
+    "recovery.contact.email_label": {
+      "text": "邮箱地址",
+      "status": "machine"
+    },
+    "recovery.contact.error.bad_contact": {
+      "text": "这看起来不是有效的邮箱地址或手机号。请检查后重试。",
+      "status": "machine"
+    },
+    "recovery.contact.error.enter_code": {
+      "text": "请输入我们发送的六位验证码。",
+      "status": "machine"
+    },
+    "recovery.contact.error.generic": {
+      "text": "无法验证该验证码。请重试。",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_email": {
+      "text": "请输入有效的邮箱地址。",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_phone": {
+      "text": "请以国际格式输入手机号，例如 +15551234567。",
+      "status": "machine"
+    },
+    "recovery.contact.error.send_failed": {
+      "text": "无法发送验证码。请检查用户名后重试。",
+      "status": "machine"
+    },
+    "recovery.contact.error.unavailable": {
+      "text": "此处不支持邮箱和手机恢复。请使用其他方式。",
+      "status": "machine"
+    },
+    "recovery.contact.error.wrong": {
+      "text": "验证码无效。请检查我们发送的验证码后重试。",
+      "status": "machine"
+    },
+    "recovery.contact.intro": {
+      "text": "我们会向你在“设置”中绑定的邮箱或手机号发送六位验证码。它可以让你重新登录；之后你的聊天还需要恢复短语或另一台设备才能恢复。",
+      "status": "machine"
+    },
+    "recovery.contact.phone_label": {
+      "text": "手机号",
+      "status": "machine"
+    },
+    "recovery.contact.send": {
+      "text": "发送验证码",
+      "status": "machine"
+    },
+    "recovery.contact.send_by": {
+      "text": "验证码发送方式",
+      "status": "machine"
+    },
+    "recovery.contact.sent_email": {
+      "text": "如果该邮箱已绑定到此账号，六位验证码正在发送中。请在下方输入。",
+      "status": "machine"
+    },
+    "recovery.contact.sent_phone": {
+      "text": "如果该手机号已绑定到此账号，六位验证码正在发送中。请在下方输入。",
+      "status": "machine"
+    },
+    "recovery.device.intro": {
+      "text": "输入你的用户名，然后在一台仍在登录的设备上确认，并比对它显示的代码。发送的内容 Lakko 的服务器都无法读取。无需摄像头；如果你愿意，也可以使用二维码。",
+      "status": "machine"
+    },
+    "recovery.device.intro_qr": {
+      "text": "你的另一台设备会关联此设备，并把你的账号转移过来。",
+      "status": "machine"
+    },
+    "recovery.device.restoring": {
+      "text": "正在恢复 {username}",
+      "status": "machine"
+    },
+    "recovery.error.code_send_limited": {
+      "text": "我们刚刚发送过验证码。请等几分钟再重新获取。",
+      "status": "machine"
+    },
+    "recovery.error.generic": {
+      "text": "无法恢复账号。请检查这些词后重试。",
+      "status": "machine"
+    },
+    "recovery.error.no_match": {
+      "text": "与此账号不匹配。请检查这些词和用户名后重试。",
+      "status": "machine"
+    },
+    "recovery.lede": {
+      "text": "选择重新登录的方式。",
+      "status": "machine"
+    },
+    "recovery.lede_account": {
+      "text": "选择重新登录 {username} 的方式。",
+      "status": "machine"
+    },
+    "recovery.method.contact.sub": {
+      "text": "发送到你绑定的邮箱或手机的验证码。",
+      "status": "machine"
+    },
+    "recovery.method.contact.title": {
+      "text": "邮箱或手机",
+      "status": "machine"
+    },
+    "recovery.method.device.sub": {
+      "text": "在仍在登录的设备上确认。",
+      "status": "machine"
+    },
+    "recovery.method.device.title": {
+      "text": "另一台设备",
+      "status": "machine"
+    },
+    "recovery.method.phrase.restore_sub": {
+      "text": "输入全部 24 个词。",
+      "status": "machine"
+    },
+    "recovery.method.phrase.sub": {
+      "text": "输入你的 24 个词并设置新密码。",
+      "status": "machine"
+    },
+    "recovery.method.phrase.title": {
+      "text": "恢复短语",
+      "status": "machine"
+    },
+    "recovery.method.shares.sub": {
+      "text": "你交给信任之人的分片。",
+      "status": "machine"
+    },
+    "recovery.method.shares.title": {
+      "text": "社交恢复分片",
+      "status": "machine"
+    },
+    "recovery.method.totp.sub": {
+      "text": "来自身份验证器应用的验证码。",
+      "status": "machine"
+    },
+    "recovery.method.totp.title": {
+      "text": "身份验证器",
+      "status": "machine"
+    },
+    "recovery.method.words.restore_sub": {
+      "text": "恢复短语中的三个词。",
+      "status": "machine"
+    },
+    "recovery.method.words.sub": {
+      "text": "恢复短语中的三个词（如果已开启此快捷方式）。",
+      "status": "machine"
+    },
+    "recovery.method.words.title": {
+      "text": "三个词",
+      "status": "machine"
+    },
+    "recovery.methods.back": {
+      "text": "返回所有方式",
+      "status": "machine"
+    },
+    "recovery.phrase.intro": {
+      "text": "输入你的 24 个词，然后设置新密码。",
+      "status": "machine"
+    },
+    "recovery.remembered": {
+      "text": "想起密码了？{link}",
+      "status": "machine"
+    },
+    "recovery.shares.copy_failed": {
+      "text": "无法复制。请选中分片后手动复制。",
+      "status": "machine"
+    },
+    "recovery.shares.error.combine_failed": {
+      "text": "无法合并这些分片。请检查每个分片是否完整后重试。",
+      "status": "machine"
+    },
+    "recovery.shares.error.generic": {
+      "text": "无法生成分片。请重试。",
+      "status": "machine"
+    },
+    "recovery.shares.error.too_few": {
+      "text": "请至少粘贴两个分片，每行一个。",
+      "status": "machine"
+    },
+    "recovery.shares.generate": {
+      "text": "生成 {count, plural, other {# 个分片}}",
+      "status": "machine"
+    },
+    "recovery.shares.generating": {
+      "text": "正在生成…",
+      "status": "machine"
+    },
+    "recovery.shares.help": {
+      "text": "请按收到时的原样粘贴。所需数量为生成时约定的数量，通常是 5 个中的 3 个。",
+      "status": "machine"
+    },
+    "recovery.shares.intro": {
+      "text": "粘贴你收到的分片，每行一个，然后设置新密码。",
+      "status": "machine"
+    },
+    "recovery.shares.label": {
+      "text": "恢复分片，每行一个",
+      "status": "machine"
+    },
+    "recovery.shares.panel_body": {
+      "text": "将短语拆分成 {count, plural, other {# 个分片}}，交给你信任的人。任意 {threshold} 个分片即可重建短语；少于此数则无法获得任何信息。每人只给一个分片。",
+      "status": "machine"
+    },
+    "recovery.shares.usage": {
+      "text": "日后使用时，请在恢复界面选择“{method}”，并粘贴任意 {threshold} 个分片。",
+      "status": "machine"
+    },
+    "recovery.submit": {
+      "text": "恢复账号",
+      "status": "machine"
+    },
+    "recovery.title": {
+      "text": "恢复你的账号",
+      "status": "machine"
+    },
+    "recovery.totp.code_label": {
+      "text": "应用中的验证码",
+      "status": "machine"
+    },
+    "recovery.totp.error.enter_code": {
+      "text": "请输入身份验证器应用中的六位验证码。",
+      "status": "machine"
+    },
+    "recovery.totp.error.generic": {
+      "text": "无法验证该验证码。请重试。",
+      "status": "machine"
+    },
+    "recovery.totp.error.unavailable": {
+      "text": "此处不支持身份验证器恢复。请使用其他方式。",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong": {
+      "text": "验证码无效。请查看应用并尝试下一个验证码。",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong_username": {
+      "text": "验证码无效。请检查用户名和应用后重试。",
+      "status": "machine"
+    },
+    "recovery.totp.intro": {
+      "text": "使用你在“设置”中绑定的身份验证器应用生成的六位验证码。它可以让你重新登录；之后你的聊天还需要恢复短语或另一台设备才能恢复。",
+      "status": "machine"
+    },
+    "recovery.username_required": {
+      "text": "请输入账号的用户名。",
+      "status": "machine"
+    },
+    "recovery.username_required_to_recover": {
+      "text": "请输入要恢复的账号的用户名。",
+      "status": "machine"
+    },
+    "recovery.words.error.generic": {
+      "text": "无法验证这些词。请重试。",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match": {
+      "text": "这些词不匹配。",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match_tries": {
+      "text": "这些词不匹配。还剩 {count, plural, other {# 次机会}}，之后三词快捷方式将被关闭。",
+      "status": "machine"
+    },
+    "recovery.words.error.open_failed": {
+      "text": "服务器已响应，但恢复数据无法打开。未做任何更改。",
+      "status": "machine"
+    },
+    "recovery.words.error.server_off": {
+      "text": "此服务器不支持三词恢复。",
+      "status": "machine"
+    },
+    "recovery.words.intro": {
+      "text": "输入恢复短语中的三个词并设置新密码。首先，是哪个账号？",
+      "status": "machine"
+    },
+    "recovery.words.prompt": {
+      "text": "{username}：请输入恢复短语中的第 {positions} 个词。",
+      "status": "machine"
+    },
+    "recovery.words.prompt_restore": {
+      "text": "请输入恢复短语中的第 {positions} 个词。",
+      "status": "machine"
+    },
+    "recovery.words.switched_off": {
+      "text": "此账号的三词快捷方式现已关闭。请使用完整的恢复短语或另一台设备。",
+      "status": "machine"
+    },
+    "recovery.words.switched_off_restore": {
+      "text": "此账号的三词快捷方式现已关闭。请使用另一台设备或完整的恢复短语。",
+      "status": "machine"
+    },
+    "recovery.words.tries_left": {
+      "text": "{count, plural, other {还剩 # 次机会。}}",
+      "status": "machine"
+    },
+    "recovery.words.unavailable": {
+      "text": "此处不支持三词恢复。请使用其他方式。",
+      "status": "machine"
+    },
+    "recovery_phrase.check.acknowledge": {
+      "text": "我明白，丢失这些词就意味着失去对此账号的访问权限。",
+      "status": "machine"
+    },
+    "recovery_phrase.check.back": {
+      "text": "返回查看这些词",
+      "status": "machine"
+    },
+    "recovery_phrase.check.lede": {
+      "text": "根据你抄写的内容，输入第 {positions} 个词。",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_many": {
+      "text": "第 {positions} 个词不匹配。请检查你的记录后重试。",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_one": {
+      "text": "第 {position} 个词不匹配。请检查你的记录后重试。",
+      "status": "machine"
+    },
+    "recovery_phrase.check.title": {
+      "text": "检查你的记录",
+      "status": "machine"
+    },
+    "recovery_phrase.copy_failed": {
+      "text": "无法复制。请改为手动抄写这些词。",
+      "status": "machine"
+    },
+    "recovery_phrase.error.incomplete": {
+      "text": "请输入恢复短语的全部 24 个词。",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.acknowledge": {
+      "text": "我已抄写下这 24 个词，并明白丢失它们就意味着失去对此账号的访问权限。",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.error.generic": {
+      "text": "无法完成。请重试。",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.finishing": {
+      "text": "正在完成…",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.lede": {
+      "text": "你已为 {username} 创建了新身份。如果再次失去访问权限，这 24 个词是恢复它的唯一方式。请按顺序抄写下来，并妥善保管。",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.safety_note": {
+      "text": "你的联系人会看到你的安全码已更改，他们需要重新验证你，才能与你安全地收发消息。",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.title": {
+      "text": "保存你的新恢复短语",
+      "status": "machine"
+    },
+    "recovery_phrase.guest.lede": {
+      "text": "你的账号是在没有密码的情况下创建的。在另一台设备上或清除此浏览器数据后，这 24 个词是重新进入账号的唯一方式。请按顺序抄写下来，并妥善保管。",
+      "status": "machine"
+    },
+    "recovery_phrase.label": {
+      "text": "恢复短语",
+      "status": "machine"
+    },
+    "recovery_phrase.save.anyone_with_words": {
+      "text": "任何拿到这些词的人都能读取你的消息并冒充你。请勿分享。",
+      "status": "machine"
+    },
+    "recovery_phrase.save.lede": {
+      "text": "如果你忘记密码并失去所有设备，这 24 个词是重新进入账号的唯一方式。请按顺序抄写下来，并妥善保管。",
+      "status": "machine"
+    },
+    "recovery_phrase.save.no_screenshot": {
+      "text": "不要以截图或纯文本文件的形式保存它们。Lakko 无法再次显示这些词。",
+      "status": "machine"
+    },
+    "recovery_phrase.save.title": {
+      "text": "保存你的恢复短语",
+      "status": "machine"
+    },
+    "recovery_phrase.save.vault_note": {
+      "text": "在新设备上，通常只会要求你输入其中三个词，即第 {positions} 个词。但请仍然保存完整列表：一旦该快捷方式被关闭，这是唯一的恢复方式。",
+      "status": "machine"
+    },
+    "recovery_phrase.save.written": {
+      "text": "我已抄写下来",
+      "status": "machine"
+    },
+    "recovery_phrase.step": {
+      "text": "第 {current} 步，共 {total} 步",
+      "status": "machine"
+    },
+    "recovery_phrase.word_label": {
+      "text": "第 {position} 个词",
+      "status": "machine"
+    },
+    "recovery_phrase.word_placeholder": {
+      "text": "第 {position} 个词",
+      "status": "machine"
+    },
+    "restore_identity.device_intro": {
+      "text": "仍在登录的设备上会显示提示；请在那里确认并比对代码。传输过程端到端加密，Lakko 的服务器无法读取。无需摄像头；如果你愿意，也可以使用二维码。",
+      "status": "machine"
+    },
+    "restore_identity.error.bad_saved_account": {
+      "text": "此设备上保存的账号出现问题。请退出登录后重新登录，或使用恢复短语。",
+      "status": "machine"
+    },
+    "restore_identity.error.generic": {
+      "text": "无法恢复你的身份。请重试。",
+      "status": "machine"
+    },
+    "restore_identity.error.invalid_phrase": {
+      "text": "这不是有效的恢复短语。请逐词检查后重试。",
+      "status": "machine"
+    },
+    "restore_identity.error.not_published": {
+      "text": "未找到可用于验证所恢复身份的公开身份。请重试，或从仍登录着你账号的设备恢复。",
+      "status": "machine"
+    },
+    "restore_identity.error.nothing": {
+      "text": "没有可恢复的内容。请先登录。",
+      "status": "machine"
+    },
+    "restore_identity.error.phrase_mismatch": {
+      "text": "该恢复短语与此账号的身份不匹配。请检查短语，或改为与现有设备配对。",
+      "status": "machine"
+    },
+    "restore_identity.error.unreachable": {
+      "text": "无法连接到目录服务来验证所恢复的身份。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "你已在一台新设备上以 {username} 身份登录。为了保留已信任你的联系人，请使用三个词、恢复短语，或通过仍在登录的设备恢复你的身份。",
+      "status": "machine"
+    },
+    "restore_identity.lede_no_words": {
+      "text": "你已在一台新设备上以 {username} 身份登录。为了保留已信任你的联系人，请使用恢复短语，或通过仍在登录的设备恢复你的身份。",
+      "status": "machine"
+    },
+    "restore_identity.log_out": {
+      "text": "退出登录",
+      "status": "machine"
+    },
+    "restore_identity.lost.create": {
+      "text": "创建新身份",
+      "status": "machine"
+    },
+    "restore_identity.lost.creating": {
+      "text": "正在创建新身份…",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.generic": {
+      "text": "无法创建新身份。请重试。",
+      "status": "machine"
+    },
+    "restore_identity.lost.sub": {
+      "text": "以新身份重新开始",
+      "status": "machine"
+    },
+    "restore_identity.lost.summary": {
+      "text": "我既没有恢复短语，也没有其他设备",
+      "status": "machine"
+    },
+    "restore_identity.lost.warning": {
+      "text": "此操作会为你的账号创建新身份。你的联系人需要重新验证你，丢失设备上的消息将无法读取，你还会获得一个需要保存的新恢复短语。仅当你同时丢失了恢复短语和所有其他设备时才这样做。",
+      "status": "machine"
+    },
+    "restore_identity.not_you": {
+      "text": "不是你的账号？",
+      "status": "machine"
+    },
+    "restore_identity.phrase_intro": {
+      "text": "按顺序输入这 24 个词。Lakko 会先与你的账号核对，然后再继续。",
+      "status": "machine"
+    },
+    "restore_identity.submit": {
+      "text": "恢复",
+      "status": "machine"
+    },
+    "restore_identity.submitting": {
+      "text": "正在恢复…",
+      "status": "machine"
+    },
+    "restore_identity.title": {
+      "text": "恢复你的身份",
+      "status": "machine"
+    },
+    "security.identity_changed.body": {
+      "text": "如果是你在另一台设备上操作的，请关闭此提示。如果不是，请与联系人核对安全码，并修改你的密码和通行密钥。",
+      "status": "machine"
+    },
+    "security.identity_changed.title": {
+      "text": "你账号的安全密钥已被更改。",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -148,6 +1196,34 @@
     },
     "settings.section.security": {
       "text": "安全",
+      "status": "machine"
+    },
+    "username.a11y_hint": {
+      "text": "用户名：{message}",
+      "status": "machine"
+    },
+    "username.error.empty": {
+      "text": "请输入用户名",
+      "status": "machine"
+    },
+    "username.error.invalid_characters": {
+      "text": "只能使用拉丁字母、数字和 _",
+      "status": "machine"
+    },
+    "username.error.too_long": {
+      "text": "最多 {count, plural, other {# 个字符}}",
+      "status": "machine"
+    },
+    "username.error.too_short": {
+      "text": "至少 {count, plural, other {# 个字符}}",
+      "status": "machine"
+    },
+    "username.error.unknown": {
+      "text": "无法使用这个用户名",
+      "status": "machine"
+    },
+    "username.hint.shown_as": {
+      "text": "将显示为 {username}",
       "status": "machine"
     }
   }

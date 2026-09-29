@@ -2,12 +2,552 @@
   "format": 1,
   "language": "ar",
   "messages": {
+    "auth.brand.body": {
+      "text": "الدردشات والمجموعات والقنوات والمكالمات مشفّرة تشفيرًا تامًا بين الطرفين افتراضيًا. خوادم Lakko لا ترى رسائلك أبدًا.",
+      "status": "machine"
+    },
+    "auth.brand.foot": {
+      "text": "مفتوح المصدر. لا يلزم رقم هاتف.",
+      "status": "machine"
+    },
+    "auth.brand.tagline": {
+      "text": "رسائلك، قواعدك.",
+      "status": "machine"
+    },
+    "auth.error.wrong_credentials": {
+      "text": "اسم المستخدم أو كلمة المرور غير صحيحة. تحقّق منهما وحاول مجددًا.",
+      "status": "machine"
+    },
+    "auth.explainer.never_leaves": {
+      "text": "كلمة مرورك لا تغادر جهازك أبدًا. يتحقّق Lakko منها دون أن يستلمها، لذا لا أحد في Lakko يستطيع قراءتها، ولا أحد يستطيع إعادة تعيينها نيابةً عنك.",
+      "status": "machine"
+    },
+    "auth.explainer.same_answer": {
+      "text": "اسم المستخدم الخاطئ وكلمة المرور الخاطئة يحصلان على الرد نفسه، لذا لا يمكن لأحد استخدام شاشة تسجيل الدخول لمعرفة أسماء المستخدمين الموجودة.",
+      "status": "machine"
+    },
+    "auth.explainer.title": {
+      "text": "كيف يحمي Lakko كلمة مرورك",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back": {
+      "text": "إذا نسيتها، يمكنك العودة إلى حسابك بعبارة الاسترداد، أو بجهاز آخر لا يزال مسجّل الدخول، أو بثلاث كلمات من العبارة، أو بتطبيق مصادقة، أو برمز يُرسل إلى بريدك الإلكتروني أو هاتفك.",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back_no_words": {
+      "text": "إذا نسيتها، يمكنك العودة إلى حسابك بعبارة الاسترداد، أو بجهاز آخر لا يزال مسجّل الدخول، أو بتطبيق مصادقة، أو برمز يُرسل إلى بريدك الإلكتروني أو هاتفك.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "تغيير اللغة",
       "status": "machine"
     },
+    "auth.login.forgot": {
+      "text": "نسيت كلمة المرور؟",
+      "status": "machine"
+    },
+    "auth.login.lede": {
+      "text": "سجّل الدخول للمتابعة.",
+      "status": "machine"
+    },
+    "auth.login.no_account": {
+      "text": "جديد على Lakko؟ {link}",
+      "status": "machine"
+    },
+    "auth.login.passkey": {
+      "text": "استخدام مفتاح المرور",
+      "status": "machine"
+    },
+    "auth.login.submit": {
+      "text": "تسجيل الدخول",
+      "status": "machine"
+    },
+    "auth.login.submitting": {
+      "text": "جارٍ تسجيل الدخول...",
+      "status": "machine"
+    },
+    "auth.login.title": {
+      "text": "مرحبًا بعودتك",
+      "status": "machine"
+    },
+    "auth.passkey.error.cancelled": {
+      "text": "أُلغي تسجيل الدخول بمفتاح المرور.",
+      "status": "machine"
+    },
+    "auth.passkey.error.failed_status": {
+      "text": "فشل تسجيل الدخول بمفتاح المرور ({status}).",
+      "status": "machine"
+    },
+    "auth.passkey.error.generic": {
+      "text": "تعذّر تسجيل الدخول بمفتاح المرور. حاول مجددًا، أو استخدم كلمة مرورك.",
+      "status": "machine"
+    },
+    "auth.passkey.error.network": {
+      "text": "خطأ في الشبكة أثناء تسجيل الدخول بمفتاح المرور.",
+      "status": "machine"
+    },
+    "auth.passkey.error.no_cached": {
+      "text": "لا توجد بيانات اعتماد محفوظة على هذا الجهاز لتسجيل الدخول بمفتاح المرور. سجّل الدخول بكلمة المرور أو استرد حسابك بعبارة الاسترداد أولًا.",
+      "status": "machine"
+    },
+    "auth.passkey.error.not_registered": {
+      "text": "لا يوجد مفتاح مرور مسجّل لهذا الحساب. سجّل الدخول بكلمة المرور أولًا، ثم أضف مفتاح مرور من الصفحة الرئيسية.",
+      "status": "machine"
+    },
+    "auth.passkey.error.server_disabled": {
+      "text": "لم يفعّل الخادم دعم مفاتيح المرور.",
+      "status": "machine"
+    },
+    "auth.passkey.error.unsupported": {
+      "text": "هذا المتصفح لا يدعم مفاتيح المرور.",
+      "status": "machine"
+    },
+    "auth.passkey.error.wrong_account": {
+      "text": "ينتمي مفتاح المرور هذا إلى حساب مختلف عن الحساب الموجود على هذا الجهاز. سجّل الدخول بكلمة المرور أولًا.",
+      "status": "machine"
+    },
+    "auth.password.confirm.label": {
+      "text": "تأكيد كلمة المرور",
+      "status": "machine"
+    },
+    "auth.password.error.mismatch": {
+      "text": "كلمتا المرور غير متطابقتين. اكتب كلمة المرور نفسها مرتين.",
+      "status": "machine"
+    },
+    "auth.password.error.too_short": {
+      "text": "استخدم {count, plural, zero {# حرف} one {حرفًا واحدًا} two {حرفين} few {# أحرف} many {# حرفًا} other {# حرف}} على الأقل.",
+      "status": "machine"
+    },
+    "auth.password.hide": {
+      "text": "إخفاء كلمة المرور",
+      "status": "machine"
+    },
+    "auth.password.hint": {
+      "text": "{count, plural, zero {# حرف} one {حرف واحد} two {حرفان} few {# أحرف} many {# حرفًا} other {# حرف}} على الأقل.",
+      "status": "machine"
+    },
+    "auth.password.label": {
+      "text": "كلمة المرور",
+      "status": "machine"
+    },
+    "auth.password.new.label": {
+      "text": "كلمة المرور الجديدة",
+      "status": "machine"
+    },
+    "auth.password.new_confirm.label": {
+      "text": "تأكيد كلمة المرور الجديدة",
+      "status": "machine"
+    },
+    "auth.password.show": {
+      "text": "إظهار كلمة المرور",
+      "status": "machine"
+    },
+    "auth.signup.error.enter_username": {
+      "text": "أدخل اسم مستخدم.",
+      "status": "machine"
+    },
+    "auth.signup.error.fix_name": {
+      "text": "صحّح اسمك قبل المتابعة.",
+      "status": "machine"
+    },
+    "auth.signup.error.generic": {
+      "text": "تعذّر إنشاء الحساب. حاول مجددًا.",
+      "status": "machine"
+    },
+    "auth.signup.error.rate_limited": {
+      "text": "حسابات جديدة كثيرة جدًا من هذه الشبكة حاليًا. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "auth.signup.error.username_taken": {
+      "text": "اسم المستخدم هذا مأخوذ. اختر اسمًا آخر.",
+      "status": "machine"
+    },
+    "auth.signup.have_account": {
+      "text": "لديك حساب بالفعل؟ {link}",
+      "status": "machine"
+    },
+    "auth.signup.lede": {
+      "text": "كلمة مرورك لا تغادر جهازك أبدًا. ستحصل بعد ذلك على عبارة استرداد لتدوّنها.",
+      "status": "machine"
+    },
+    "auth.signup.name.hint": {
+      "text": "يظهر لجهات اتصالك. اتركه فارغًا لعرض اسم المستخدم.",
+      "status": "machine"
+    },
+    "auth.signup.name.label": {
+      "text": "الاسم (اختياري)",
+      "status": "machine"
+    },
+    "auth.signup.submit": {
+      "text": "إنشاء حساب",
+      "status": "machine"
+    },
+    "auth.signup.title": {
+      "text": "أنشئ حسابك",
+      "status": "machine"
+    },
+    "auth.signup.username.hint": {
+      "text": "أحرف لاتينية وأرقام و _. يعثر عليك الآخرون بهذا الاسم.",
+      "status": "machine"
+    },
+    "auth.signup.working.line": {
+      "text": "يستغرق هذا بعض الوقت، مرة واحدة فقط. لن تنتظر هكذا مجددًا.",
+      "status": "machine"
+    },
+    "auth.signup.working.title": {
+      "text": "جارٍ إنشاء حسابك...",
+      "status": "machine"
+    },
+    "auth.username.label": {
+      "text": "اسم المستخدم",
+      "status": "machine"
+    },
+    "call.guest.working.title": {
+      "text": "جارٍ إدخالك إلى المكالمة...",
+      "status": "machine"
+    },
+    "chats.empty.select": {
+      "text": "اختر دردشة لبدء المراسلة",
+      "status": "machine"
+    },
+    "common.back": {
+      "text": "رجوع",
+      "status": "machine"
+    },
+    "common.cancel": {
+      "text": "إلغاء",
+      "status": "machine"
+    },
+    "common.checking": {
+      "text": "جارٍ التحقق...",
+      "status": "machine"
+    },
     "common.close": {
       "text": "إغلاق",
+      "status": "machine"
+    },
+    "common.confirm": {
+      "text": "تأكيد",
+      "status": "machine"
+    },
+    "common.continue": {
+      "text": "متابعة",
+      "status": "machine"
+    },
+    "common.copied": {
+      "text": "تم النسخ",
+      "status": "machine"
+    },
+    "common.copy": {
+      "text": "نسخ",
+      "status": "machine"
+    },
+    "common.dismiss": {
+      "text": "إغلاق",
+      "status": "machine"
+    },
+    "common.done": {
+      "text": "تم",
+      "status": "machine"
+    },
+    "common.email": {
+      "text": "البريد الإلكتروني",
+      "status": "machine"
+    },
+    "common.error.a11y": {
+      "text": "خطأ: {message}",
+      "status": "machine"
+    },
+    "common.error.offline": {
+      "text": "تعذّر الوصول إلى Lakko. تحقّق من اتصالك وحاول مجددًا.",
+      "status": "machine"
+    },
+    "common.error.server_unreachable": {
+      "text": "تعذّر الوصول إلى الخادم. تحقّق من اتصالك.",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts": {
+      "text": "محاولات كثيرة جدًا. انتظر قليلًا ثم حاول مجددًا.",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts_minutes": {
+      "text": "محاولات كثيرة جدًا. حاول مجددًا بعد {minutes, plural, zero {# دقيقة} one {دقيقة واحدة} two {دقيقتين} few {# دقائق} many {# دقيقة} other {# دقيقة}}.",
+      "status": "machine"
+    },
+    "common.error.unavailable": {
+      "text": "هذا غير متاح حاليًا. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "common.loading": {
+      "text": "جارٍ التحميل...",
+      "status": "machine"
+    },
+    "common.looking_up": {
+      "text": "جارٍ البحث...",
+      "status": "machine"
+    },
+    "common.more_options": {
+      "text": "خيارات أخرى",
+      "status": "machine"
+    },
+    "common.optional": {
+      "text": "اختياري",
+      "status": "machine"
+    },
+    "common.paste": {
+      "text": "لصق",
+      "status": "machine"
+    },
+    "common.phone": {
+      "text": "الهاتف",
+      "status": "machine"
+    },
+    "common.preparing": {
+      "text": "جارٍ التحضير...",
+      "status": "machine"
+    },
+    "common.sending": {
+      "text": "جارٍ الإرسال...",
+      "status": "machine"
+    },
+    "common.try_again": {
+      "text": "حاول مجددًا",
+      "status": "machine"
+    },
+    "device_link.compare_hint": {
+      "text": "تأكّد من أن الجهاز الآخر يعرض الرمز نفسه.",
+      "status": "machine"
+    },
+    "device_link.comparison_code": {
+      "text": "رمز المطابقة",
+      "status": "machine"
+    },
+    "device_link.confirm_there": {
+      "text": "افتح Lakko على جهاز مسجّل الدخول بالفعل وأكّد تسجيل الدخول هذا من هناك.",
+      "status": "machine"
+    },
+    "device_link.error.ask_unavailable": {
+      "text": "طلب التأكيد من جهازك الآخر غير متاح حاليًا؛ لا يزال رمز QR يعمل.",
+      "status": "machine"
+    },
+    "device_link.error.ask_unreachable": {
+      "text": "تعذّر الوصول إلى الخادم لسؤال جهازك الآخر؛ لا يزال رمز QR يعمل.",
+      "status": "machine"
+    },
+    "device_link.error.declined": {
+      "text": "رُفض على جهاز آخر.",
+      "status": "machine"
+    },
+    "device_link.error.generic": {
+      "text": "تعذّرت الاستعادة من جهازك الآخر. حاول مجددًا، أو استخدم عبارة الاسترداد.",
+      "status": "machine"
+    },
+    "device_link.error.identity_mismatch": {
+      "text": "الهوية الواردة من جهازك الآخر لا تطابق الهوية المنشورة لهذا الحساب، لذا رُفض استخدامها.",
+      "status": "machine"
+    },
+    "device_link.error.name_other_account": {
+      "text": "الاسم الذي كتبته يخص حسابًا آخر. لم يتغيّر شيء على هذا الجهاز.",
+      "status": "machine"
+    },
+    "device_link.error.no_identity": {
+      "text": "أكّد الجهاز الآخر لكنه لم يرسل هويتك. حدّث Lakko عليه وحاول مجددًا، أو استخدم عبارة الاسترداد.",
+      "status": "machine"
+    },
+    "device_link.error.not_let_in": {
+      "text": "أرسل جهازك الآخر الهوية، لكن تعذّر إدخال هذا الجهاز. حاول مجددًا، أو استخدم عبارة الاسترداد.",
+      "status": "machine"
+    },
+    "device_link.error.request_limited": {
+      "text": "طلبات كثيرة جدًا إلى أجهزتك الأخرى. حاول مجددًا بعد بضع دقائق.",
+      "status": "machine"
+    },
+    "device_link.error.timeout": {
+      "text": "لم يستجب الجهاز الآخر في الوقت المحدد. حاول مجددًا.",
+      "status": "machine"
+    },
+    "device_link.pairing.needs_username": {
+      "text": "عيّن اسم مستخدم أولًا لإضافة جهاز آخر.",
+      "status": "machine"
+    },
+    "device_link.pairing.unsupported": {
+      "text": "هذا الرمز من إصدار مختلف من Lakko. حدّث Lakko على الجهازين وحاول مجددًا.",
+      "status": "machine"
+    },
+    "device_link.pairing.wrong_account": {
+      "text": "هذا الرمز لحساب مختلف. تحقّق من أن الجهاز الجديد يستخدم اسم المستخدم نفسه المستخدم هنا.",
+      "status": "machine"
+    },
+    "device_link.qr.hide": {
+      "text": "إخفاء رمز QR",
+      "status": "machine"
+    },
+    "device_link.qr.intro": {
+      "text": "اعرض هذا الرمز على جهاز لا يزال حسابك عليه. سيضيف هذا الجهاز وينقل هويتك مشفّرةً تشفيرًا تامًا بين الطرفين، دون الحاجة إلى كتابة أي عبارة.",
+      "status": "machine"
+    },
+    "device_link.qr.scan_hint": {
+      "text": "على جهازك الآخر، افتح الإعدادات، ثم الأجهزة، ثم إضافة جهاز، وامسح هذا الرمز.",
+      "status": "machine"
+    },
+    "device_link.qr.show": {
+      "text": "عرض رمز QR بدلًا من ذلك",
+      "status": "machine"
+    },
+    "device_link.qr.waiting": {
+      "text": "بانتظار أن يمسح جهازك الآخر هذا الرمز...",
+      "status": "machine"
+    },
+    "device_link.request.added": {
+      "text": "أُضيف الجهاز.",
+      "status": "machine"
+    },
+    "device_link.request.adding": {
+      "text": "جارٍ إضافة الجهاز...",
+      "status": "machine"
+    },
+    "device_link.request.body": {
+      "text": "جهاز جديد يطلب الانضمام إلى حسابك. إنه يعرض رمزًا.",
+      "status": "machine"
+    },
+    "device_link.request.code_label": {
+      "text": "الرمز على الجهاز الجديد",
+      "status": "machine"
+    },
+    "device_link.request.confirm": {
+      "text": "نعم، أضِفه",
+      "status": "machine"
+    },
+    "device_link.request.confirm_only_if": {
+      "text": "لا تؤكّد إلا إذا كان الجهاز الجديد يعرض هذا الرمز بالضبط.",
+      "status": "machine"
+    },
+    "device_link.request.decline": {
+      "text": "ليس أنا",
+      "status": "machine"
+    },
+    "device_link.request.declined": {
+      "text": "تم الرفض. إذا تكرّر هذا، فغيّر كلمة مرورك.",
+      "status": "machine"
+    },
+    "device_link.request.error.generic": {
+      "text": "تعذّرت إضافة الجهاز. حاول مجددًا.",
+      "status": "machine"
+    },
+    "device_link.request.error.no_device_key": {
+      "text": "لا يوجد مفتاح جهاز في هذا المتصفح. سجّل الدخول مجددًا.",
+      "status": "machine"
+    },
+    "device_link.request.title": {
+      "text": "هل هذا أنت؟",
+      "status": "machine"
+    },
+    "device_link.restored": {
+      "text": "تمت الاستعادة.",
+      "status": "machine"
+    },
+    "device_link.show_code": {
+      "text": "عرض رمز الإقران",
+      "status": "machine"
+    },
+    "device_link.transferring": {
+      "text": "جارٍ النقل...",
+      "status": "machine"
+    },
+    "devices.add.e2ee_note": {
+      "text": "الربط مشفّر تشفيرًا تامًا بين جهازيك.",
+      "status": "machine"
+    },
+    "devices.add.error.generic": {
+      "text": "تعذّر ربط هذا الجهاز. حاول مجددًا.",
+      "status": "machine"
+    },
+    "devices.add.joining": {
+      "text": "جارٍ ربط هذا الجهاز...",
+      "status": "machine"
+    },
+    "devices.add.linked": {
+      "text": "تم الربط. أصبح هذا الجهاز الآن جزءًا من حسابك.",
+      "status": "machine"
+    },
+    "devices.add.side.scan": {
+      "text": "مسح رمز",
+      "status": "machine"
+    },
+    "devices.add.side.scan_detail": {
+      "text": "هذا الجهاز مسجّل الدخول بالفعل: يمسح رمز الجهاز الجديد ويسمح له بالدخول.",
+      "status": "machine"
+    },
+    "devices.add.side.show": {
+      "text": "عرض رمز",
+      "status": "machine"
+    },
+    "devices.add.side.show_detail": {
+      "text": "هذا هو الجهاز الجديد: ينضم إلى حسابك بمجرد أن يمسح جهاز آخر رمزه.",
+      "status": "machine"
+    },
+    "devices.add.sign_in_first": {
+      "text": "سجّل الدخول أولًا لإضافة جهاز.",
+      "status": "machine"
+    },
+    "devices.add.title": {
+      "text": "إضافة جهاز",
+      "status": "machine"
+    },
+    "devices.scan.confirm.body": {
+      "text": "سيمنح هذا الجهازَ الذي مسحت رمزه وصولًا كاملًا إلى حسابك: رسائلك وجهات اتصالك وهويتك. تابع فقط إذا كان الرمز معروضًا على جهازك الجديد أنت.",
+      "status": "machine"
+    },
+    "devices.scan.confirm.submit": {
+      "text": "ربط الجهاز",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title": {
+      "text": "ربط هذا الجهاز؟",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied": {
+      "text": "لا يستطيع Lakko استخدام الكاميرا. اسمح بالوصول إلى الكاميرا من الإعدادات، ثم حاول مجددًا.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_failed": {
+      "text": "تعذّر تشغيل الكاميرا. حاول مجددًا.",
+      "status": "machine"
+    },
+    "devices.scan.error.no_camera": {
+      "text": "لا تتوفر كاميرا خلفية على هذا الجهاز.",
+      "status": "machine"
+    },
+    "devices.scan.error.not_a_code": {
+      "text": "هذا ليس رمز جهاز من Lakko. وجّه الكاميرا نحو الرمز على جهازك الآخر.",
+      "status": "machine"
+    },
+    "devices.scan.intro": {
+      "text": "وجّه الكاميرا نحو الرمز الذي يعرضه جهازك الجديد.",
+      "status": "machine"
+    },
+    "devices.scan.open_camera": {
+      "text": "فتح الكاميرا",
+      "status": "machine"
+    },
+    "display_name.error.control": {
+      "text": "أزِل الأحرف غير المرئية أو أحرف اتجاه النص",
+      "status": "machine"
+    },
+    "display_name.error.line_break": {
+      "text": "سطر واحد فقط",
+      "status": "machine"
+    },
+    "display_name.error.too_long": {
+      "text": "{count, plural, zero {# حرف} one {حرف واحد} two {حرفان} few {# أحرف} many {# حرفًا} other {# حرف}} كحد أقصى",
+      "status": "machine"
+    },
+    "display_name.error.too_many_bytes": {
+      "text": "هذا الاسم طويل جدًا",
+      "status": "machine"
+    },
+    "display_name.error.unknown": {
+      "text": "لا يمكن استخدام هذا الاسم",
       "status": "machine"
     },
     "language.name.ar": {
@@ -72,6 +612,514 @@
     },
     "nav.settings": {
       "text": "الإعدادات",
+      "status": "machine"
+    },
+    "recovery.access_only_note": {
+      "text": "تطبيق المصادقة أو الرمز يعيدك إلى حسابك؛ ثم تحتاج دردشاتك إلى عبارة الاسترداد أو جهاز آخر.",
+      "status": "machine"
+    },
+    "recovery.cached_account": {
+      "text": "{username} على هذا الجهاز",
+      "status": "machine"
+    },
+    "recovery.contact.change": {
+      "text": "استخدام بريد إلكتروني أو هاتف آخر",
+      "status": "machine"
+    },
+    "recovery.contact.code_label": {
+      "text": "الرمز الذي أرسلناه",
+      "status": "machine"
+    },
+    "recovery.contact.email_label": {
+      "text": "البريد الإلكتروني",
+      "status": "machine"
+    },
+    "recovery.contact.error.bad_contact": {
+      "text": "هذا لا يبدو عنوان بريد إلكتروني أو رقم هاتف. تحقّق منه وحاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery.contact.error.enter_code": {
+      "text": "أدخل الرمز المكوّن من ستة أرقام الذي أرسلناه.",
+      "status": "machine"
+    },
+    "recovery.contact.error.generic": {
+      "text": "تعذّر التحقق من الرمز. حاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_email": {
+      "text": "أدخل عنوان بريد إلكتروني صالحًا.",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_phone": {
+      "text": "أدخل رقم الهاتف بالصيغة الدولية، مثل +15551234567.",
+      "status": "machine"
+    },
+    "recovery.contact.error.send_failed": {
+      "text": "تعذّر إرسال رمز. تحقّق من اسم المستخدم وحاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery.contact.error.unavailable": {
+      "text": "الاسترداد عبر البريد الإلكتروني والهاتف غير متاح هنا. استخدم طريقة أخرى.",
+      "status": "machine"
+    },
+    "recovery.contact.error.wrong": {
+      "text": "لم ينجح هذا الرمز. تحقّق من الرمز الذي أرسلناه وحاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery.contact.intro": {
+      "text": "نرسل رمزًا من ستة أرقام إلى البريد الإلكتروني أو رقم الهاتف الذي أعددته في الإعدادات. يعيدك الرمز إلى حسابك؛ ثم تحتاج دردشاتك إلى عبارة الاسترداد أو جهاز آخر.",
+      "status": "machine"
+    },
+    "recovery.contact.phone_label": {
+      "text": "رقم الهاتف",
+      "status": "machine"
+    },
+    "recovery.contact.send": {
+      "text": "إرسال الرمز",
+      "status": "machine"
+    },
+    "recovery.contact.send_by": {
+      "text": "إرسال الرمز عبر",
+      "status": "machine"
+    },
+    "recovery.contact.sent_email": {
+      "text": "إذا كان هذا العنوان مُعدًّا لهذا الحساب، فإن رمزًا من ستة أرقام في طريقه إليك. أدخله أدناه.",
+      "status": "machine"
+    },
+    "recovery.contact.sent_phone": {
+      "text": "إذا كان هذا الرقم مُعدًّا لهذا الحساب، فإن رمزًا من ستة أرقام في طريقه إليك. أدخله أدناه.",
+      "status": "machine"
+    },
+    "recovery.device.intro": {
+      "text": "أدخل اسم المستخدم، ثم أكّد على جهاز لا يزال مسجّل الدخول وطابِق الرمز الذي يعرضه. لا يُرسل شيء يمكن لخوادم Lakko قراءته. لا حاجة إلى كاميرا؛ ويتوفر رمز QR إن فضّلت ذلك.",
+      "status": "machine"
+    },
+    "recovery.device.intro_qr": {
+      "text": "سيربط جهازك الآخر هذا الجهاز وينقل حسابك إليه.",
+      "status": "machine"
+    },
+    "recovery.device.restoring": {
+      "text": "جارٍ استعادة {username}",
+      "status": "machine"
+    },
+    "recovery.error.code_send_limited": {
+      "text": "أرسلنا رمزًا مؤخرًا. انتظر بضع دقائق قبل طلب رمز آخر.",
+      "status": "machine"
+    },
+    "recovery.error.generic": {
+      "text": "تعذّر استرداد الحساب. تحقّق من الكلمات وحاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery.error.no_match": {
+      "text": "هذا لا يطابق هذا الحساب. تحقّق من الكلمات واسم المستخدم، ثم حاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery.lede": {
+      "text": "اختر طريقة العودة إلى حسابك.",
+      "status": "machine"
+    },
+    "recovery.lede_account": {
+      "text": "اختر طريقة العودة إلى {username}.",
+      "status": "machine"
+    },
+    "recovery.method.contact.sub": {
+      "text": "رمز يُرسل إلى البريد الإلكتروني أو الهاتف الذي أعددته.",
+      "status": "machine"
+    },
+    "recovery.method.contact.title": {
+      "text": "البريد الإلكتروني أو الهاتف",
+      "status": "machine"
+    },
+    "recovery.method.device.sub": {
+      "text": "أكّد من جهاز لا يزال مسجّل الدخول.",
+      "status": "machine"
+    },
+    "recovery.method.device.title": {
+      "text": "جهاز آخر",
+      "status": "machine"
+    },
+    "recovery.method.phrase.restore_sub": {
+      "text": "اكتب الكلمات الـ 24 كلها.",
+      "status": "machine"
+    },
+    "recovery.method.phrase.sub": {
+      "text": "اكتب كلماتك الـ 24 واختر كلمة مرور جديدة.",
+      "status": "machine"
+    },
+    "recovery.method.phrase.title": {
+      "text": "عبارة الاسترداد",
+      "status": "machine"
+    },
+    "recovery.method.shares.sub": {
+      "text": "الحصص التي أعطيتها لأشخاص تثق بهم.",
+      "status": "machine"
+    },
+    "recovery.method.shares.title": {
+      "text": "حصص الاسترداد الاجتماعي",
+      "status": "machine"
+    },
+    "recovery.method.totp.sub": {
+      "text": "رمز من تطبيق المصادقة.",
+      "status": "machine"
+    },
+    "recovery.method.totp.title": {
+      "text": "تطبيق المصادقة",
+      "status": "machine"
+    },
+    "recovery.method.words.restore_sub": {
+      "text": "ثلاث كلمات من عبارة الاسترداد.",
+      "status": "machine"
+    },
+    "recovery.method.words.sub": {
+      "text": "ثلاث كلمات من عبارتك، إذا كان هذا الاختصار مفعّلًا.",
+      "status": "machine"
+    },
+    "recovery.method.words.title": {
+      "text": "ثلاث كلمات",
+      "status": "machine"
+    },
+    "recovery.methods.back": {
+      "text": "العودة إلى كل الطرق",
+      "status": "machine"
+    },
+    "recovery.phrase.intro": {
+      "text": "اكتب كلماتك الـ 24، ثم اختر كلمة مرور جديدة.",
+      "status": "machine"
+    },
+    "recovery.remembered": {
+      "text": "تذكّرت كلمة مرورك؟ {link}",
+      "status": "machine"
+    },
+    "recovery.shares.copy_failed": {
+      "text": "تعذّر النسخ. حدّد الحصة وانسخها يدويًا.",
+      "status": "machine"
+    },
+    "recovery.shares.error.combine_failed": {
+      "text": "تعذّر دمج الحصص. تحقّق من اكتمال كل حصة وحاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery.shares.error.generic": {
+      "text": "تعذّر إنشاء الحصص. حاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery.shares.error.too_few": {
+      "text": "الصق حصتين على الأقل، واحدة في كل سطر.",
+      "status": "machine"
+    },
+    "recovery.shares.generate": {
+      "text": "إنشاء {count, plural, zero {# حصة} one {حصة واحدة} two {حصتين} few {# حصص} many {# حصة} other {# حصة}}",
+      "status": "machine"
+    },
+    "recovery.shares.generating": {
+      "text": "جارٍ الإنشاء...",
+      "status": "machine"
+    },
+    "recovery.shares.help": {
+      "text": "الصقها تمامًا كما أُرسلت. تحتاج إلى العدد الذي اتُّفق عليه عند إنشائها، وعادةً 3 من 5.",
+      "status": "machine"
+    },
+    "recovery.shares.intro": {
+      "text": "الصق الحصص التي أُعطيت لك، واحدة في كل سطر، ثم اختر كلمة مرور جديدة.",
+      "status": "machine"
+    },
+    "recovery.shares.label": {
+      "text": "حصص الاسترداد، واحدة في كل سطر",
+      "status": "machine"
+    },
+    "recovery.shares.panel_body": {
+      "text": "قسّم العبارة إلى {count, plural, zero {# حصة} one {حصة واحدة} two {حصتين} few {# حصص} many {# حصة} other {# حصة}} لأشخاص تثق بهم. أيّ {threshold} منها تعيد بناءها؛ وأقل من ذلك لا يكشف شيئًا. أعطِ كل شخص حصة واحدة.",
+      "status": "machine"
+    },
+    "recovery.shares.usage": {
+      "text": "لاستخدامها لاحقًا، اختر {method} في شاشة الاسترداد والصق أيّ {threshold} منها.",
+      "status": "machine"
+    },
+    "recovery.submit": {
+      "text": "استرداد الحساب",
+      "status": "machine"
+    },
+    "recovery.title": {
+      "text": "استرد حسابك",
+      "status": "machine"
+    },
+    "recovery.totp.code_label": {
+      "text": "الرمز من التطبيق",
+      "status": "machine"
+    },
+    "recovery.totp.error.enter_code": {
+      "text": "أدخل الرمز المكوّن من ستة أرقام من تطبيق المصادقة.",
+      "status": "machine"
+    },
+    "recovery.totp.error.generic": {
+      "text": "تعذّر التحقق من الرمز. حاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery.totp.error.unavailable": {
+      "text": "الاسترداد عبر تطبيق المصادقة غير متاح هنا. استخدم طريقة أخرى.",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong": {
+      "text": "لم ينجح هذا الرمز. تحقّق من التطبيق وجرّب الرمز التالي.",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong_username": {
+      "text": "لم ينجح هذا الرمز. تحقّق من اسم المستخدم والتطبيق، ثم حاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery.totp.intro": {
+      "text": "استخدم الرمز المكوّن من ستة أرقام من تطبيق المصادقة الذي أعددته في الإعدادات. يعيدك الرمز إلى حسابك؛ ثم تحتاج دردشاتك إلى عبارة الاسترداد أو جهاز آخر.",
+      "status": "machine"
+    },
+    "recovery.username_required": {
+      "text": "أدخل اسم المستخدم للحساب.",
+      "status": "machine"
+    },
+    "recovery.username_required_to_recover": {
+      "text": "أدخل اسم المستخدم للحساب المراد استرداده.",
+      "status": "machine"
+    },
+    "recovery.words.error.generic": {
+      "text": "تعذّر التحقق من الكلمات. حاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match": {
+      "text": "هذه الكلمات غير مطابقة.",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match_tries": {
+      "text": "هذه الكلمات غير مطابقة. {count, plural, zero {لم تتبقَّ أي محاولة} one {تتبقى محاولة واحدة} two {تتبقى محاولتان} few {تتبقى # محاولات} many {تتبقى # محاولة} other {تتبقى # محاولة}} قبل إيقاف اختصار الكلمات الثلاث.",
+      "status": "machine"
+    },
+    "recovery.words.error.open_failed": {
+      "text": "أجاب الخادم، لكن تعذّر فتح بيانات الاسترداد. لم يتغيّر شيء.",
+      "status": "machine"
+    },
+    "recovery.words.error.server_off": {
+      "text": "الاسترداد بثلاث كلمات غير متاح على هذا الخادم.",
+      "status": "machine"
+    },
+    "recovery.words.intro": {
+      "text": "اكتب ثلاث كلمات من عبارة الاسترداد واختر كلمة مرور جديدة. أولًا، أيّ حساب؟",
+      "status": "machine"
+    },
+    "recovery.words.prompt": {
+      "text": "{username}: اكتب الكلمات {positions} من عبارة الاسترداد.",
+      "status": "machine"
+    },
+    "recovery.words.prompt_restore": {
+      "text": "اكتب الكلمات {positions} من عبارة الاسترداد.",
+      "status": "machine"
+    },
+    "recovery.words.switched_off": {
+      "text": "تم الآن إيقاف اختصار الكلمات الثلاث لهذا الحساب. استخدم عبارة الاسترداد كاملة أو جهازًا آخر.",
+      "status": "machine"
+    },
+    "recovery.words.switched_off_restore": {
+      "text": "تم الآن إيقاف اختصار الكلمات الثلاث لهذا الحساب. استخدم جهازًا آخر أو عبارة الاسترداد كاملة.",
+      "status": "machine"
+    },
+    "recovery.words.tries_left": {
+      "text": "{count, plural, zero {لم تتبقَّ أي محاولة.} one {تتبقى محاولة واحدة.} two {تتبقى محاولتان.} few {تتبقى # محاولات.} many {تتبقى # محاولة.} other {تتبقى # محاولة.}}",
+      "status": "machine"
+    },
+    "recovery.words.unavailable": {
+      "text": "الاسترداد بثلاث كلمات غير متاح هنا. استخدم طريقة أخرى.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.acknowledge": {
+      "text": "أفهم أن فقدان هذه الكلمات يعني فقدان الوصول إلى هذا الحساب.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.back": {
+      "text": "العودة إلى الكلمات",
+      "status": "machine"
+    },
+    "recovery_phrase.check.lede": {
+      "text": "اكتب الكلمات {positions} مما دوّنته.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_many": {
+      "text": "الكلمات {positions} غير مطابقة. راجع ما دوّنته وحاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_one": {
+      "text": "الكلمة {position} غير مطابقة. راجع ما دوّنته وحاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.title": {
+      "text": "راجع ما دوّنته",
+      "status": "machine"
+    },
+    "recovery_phrase.copy_failed": {
+      "text": "تعذّر النسخ. دوّن الكلمات بدلًا من ذلك.",
+      "status": "machine"
+    },
+    "recovery_phrase.error.incomplete": {
+      "text": "أدخل كل كلمات عبارة الاسترداد الـ 24.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.acknowledge": {
+      "text": "لقد دوّنت هذه الكلمات الـ 24 وأفهم أن فقدانها يعني فقدان الوصول إلى هذا الحساب.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.error.generic": {
+      "text": "تعذّر الإنهاء. حاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.finishing": {
+      "text": "جارٍ الإنهاء...",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.lede": {
+      "text": "أنشأت هوية جديدة لـ {username}. هذه الكلمات الـ 24 هي الطريقة الوحيدة لاستردادها إذا فقدت الوصول مجددًا. دوّنها بالترتيب واحفظها في مكان آمن.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.safety_note": {
+      "text": "سيرى جهات اتصالك أن رقم الأمان الخاص بك قد تغيّر، وسيحتاجون إلى التحقق منك مجددًا قبل مراسلتك بأمان.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.title": {
+      "text": "احفظ عبارة الاسترداد الجديدة",
+      "status": "machine"
+    },
+    "recovery_phrase.guest.lede": {
+      "text": "أُنشئ حسابك دون كلمة مرور. هذه الكلمات الـ 24 هي الطريقة الوحيدة للعودة إليه على جهاز آخر أو بعد مسح بيانات هذا المتصفح. دوّنها بالترتيب واحفظها في مكان آمن.",
+      "status": "machine"
+    },
+    "recovery_phrase.label": {
+      "text": "عبارة الاسترداد",
+      "status": "machine"
+    },
+    "recovery_phrase.save.anyone_with_words": {
+      "text": "يستطيع أي شخص لديه هذه الكلمات قراءة رسائلك والتصرف باسمك. لا تشاركها مع أحد.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.lede": {
+      "text": "هذه الكلمات الـ 24 هي الطريقة الوحيدة للعودة إلى حسابك إذا فقدت كلمة مرورك وأجهزتك. دوّنها بالترتيب واحفظها في مكان آمن.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.no_screenshot": {
+      "text": "لا تحتفظ بها في لقطة شاشة أو في ملف نصي عادي. لا يستطيع Lakko عرضها مجددًا.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.title": {
+      "text": "احفظ عبارة الاسترداد",
+      "status": "machine"
+    },
+    "recovery_phrase.save.vault_note": {
+      "text": "على جهاز جديد، سيُطلب منك عادةً ثلاث كلمات فقط منها، هي الكلمات {positions}. احتفظ بالقائمة كاملة على أي حال: فهي الطريقة الوحيدة للعودة إذا أُوقف هذا الاختصار يومًا.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.written": {
+      "text": "لقد دوّنتها",
+      "status": "machine"
+    },
+    "recovery_phrase.step": {
+      "text": "الخطوة {current} من {total}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_label": {
+      "text": "الكلمة {position}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_placeholder": {
+      "text": "الكلمة {position}",
+      "status": "machine"
+    },
+    "restore_identity.device_intro": {
+      "text": "يعرض جهاز لا يزال مسجّل الدخول طلبًا؛ أكّده هناك وطابِق الرمز. النقل مشفّر تشفيرًا تامًا بين الطرفين؛ لا تستطيع خوادم Lakko قراءته. لا حاجة إلى كاميرا؛ ويتوفر رمز QR إن فضّلت ذلك.",
+      "status": "machine"
+    },
+    "restore_identity.error.bad_saved_account": {
+      "text": "هناك مشكلة في الحساب المحفوظ على هذا الجهاز. سجّل الخروج ثم سجّل الدخول مجددًا، أو استخدم عبارة الاسترداد.",
+      "status": "machine"
+    },
+    "restore_identity.error.generic": {
+      "text": "تعذّرت استعادة هويتك. حاول مجددًا.",
+      "status": "machine"
+    },
+    "restore_identity.error.invalid_phrase": {
+      "text": "هذه ليست عبارة استرداد صالحة. تحقّق من كل كلمة وحاول مجددًا.",
+      "status": "machine"
+    },
+    "restore_identity.error.not_published": {
+      "text": "لم يُعثر على هوية منشورة للتحقق من الهوية المستردة. حاول مجددًا، أو استعِدها من جهاز لا يزال عليه حسابك.",
+      "status": "machine"
+    },
+    "restore_identity.error.nothing": {
+      "text": "لا شيء لاستعادته. سجّل الدخول أولًا.",
+      "status": "machine"
+    },
+    "restore_identity.error.phrase_mismatch": {
+      "text": "عبارة الاسترداد هذه لا تطابق هوية هذا الحساب. تحقّق من العبارة، أو اقرن جهازًا موجودًا بدلًا من ذلك.",
+      "status": "machine"
+    },
+    "restore_identity.error.unreachable": {
+      "text": "تعذّر الوصول إلى الدليل للتحقق من الهوية المستردة. تحقّق من اتصالك وحاول مجددًا.",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "أنت مسجّل الدخول باسم {username} على جهاز جديد. للاحتفاظ بجهات الاتصال التي تثق بك بالفعل، استعِد هويتك بثلاث كلمات، أو بعبارة الاسترداد، أو من جهاز لا يزال مسجّل الدخول.",
+      "status": "machine"
+    },
+    "restore_identity.lede_no_words": {
+      "text": "أنت مسجّل الدخول باسم {username} على جهاز جديد. للاحتفاظ بجهات الاتصال التي تثق بك بالفعل، استعِد هويتك بعبارة الاسترداد، أو من جهاز لا يزال مسجّل الدخول.",
+      "status": "machine"
+    },
+    "restore_identity.log_out": {
+      "text": "تسجيل الخروج",
+      "status": "machine"
+    },
+    "restore_identity.lost.create": {
+      "text": "إنشاء هوية جديدة",
+      "status": "machine"
+    },
+    "restore_identity.lost.creating": {
+      "text": "جارٍ إنشاء هوية جديدة...",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.generic": {
+      "text": "تعذّر إنشاء هوية جديدة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "restore_identity.lost.sub": {
+      "text": "البدء بهوية جديدة",
+      "status": "machine"
+    },
+    "restore_identity.lost.summary": {
+      "text": "ليس لديّ عبارة الاسترداد ولا جهاز آخر",
+      "status": "machine"
+    },
+    "restore_identity.lost.warning": {
+      "text": "سيؤدي هذا إلى إنشاء هوية جديدة لحسابك. ستحتاج جهات اتصالك إلى التحقق منك مجددًا، وستبقى الرسائل على جهازك المفقود غير قابلة للقراءة، وستحصل على عبارة استرداد جديدة لتحفظها. لا تفعل ذلك إلا إذا فقدت عبارة الاسترداد وكل جهاز آخر.",
+      "status": "machine"
+    },
+    "restore_identity.not_you": {
+      "text": "ليس حسابك؟",
+      "status": "machine"
+    },
+    "restore_identity.phrase_intro": {
+      "text": "اكتب الكلمات الـ 24 بالترتيب. يتحقق Lakko منها مقابل حسابك قبل المتابعة.",
+      "status": "machine"
+    },
+    "restore_identity.submit": {
+      "text": "استعادة",
+      "status": "machine"
+    },
+    "restore_identity.submitting": {
+      "text": "جارٍ الاستعادة...",
+      "status": "machine"
+    },
+    "restore_identity.title": {
+      "text": "استعِد هويتك",
+      "status": "machine"
+    },
+    "security.identity_changed.body": {
+      "text": "إذا كنت أنت من فعل ذلك على جهاز آخر، فتجاهل هذا التنبيه. وإن لم تكن أنت، فتحقّق من أرقام الأمان مع جهات اتصالك وغيّر كلمة مرورك ومفاتيح المرور.",
+      "status": "machine"
+    },
+    "security.identity_changed.title": {
+      "text": "تم تغيير مفتاح الأمان الخاص بحسابك.",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -148,6 +1196,34 @@
     },
     "settings.section.security": {
       "text": "الأمان",
+      "status": "machine"
+    },
+    "username.a11y_hint": {
+      "text": "اسم المستخدم: {message}",
+      "status": "machine"
+    },
+    "username.error.empty": {
+      "text": "أدخل اسم مستخدم",
+      "status": "machine"
+    },
+    "username.error.invalid_characters": {
+      "text": "أحرف لاتينية وأرقام و _ فقط",
+      "status": "machine"
+    },
+    "username.error.too_long": {
+      "text": "{count, plural, zero {# حرف} one {حرف واحد} two {حرفان} few {# أحرف} many {# حرفًا} other {# حرف}} كحد أقصى",
+      "status": "machine"
+    },
+    "username.error.too_short": {
+      "text": "{count, plural, zero {# حرف} one {حرف واحد} two {حرفان} few {# أحرف} many {# حرفًا} other {# حرف}} على الأقل",
+      "status": "machine"
+    },
+    "username.error.unknown": {
+      "text": "لا يمكن استخدام اسم المستخدم هذا",
+      "status": "machine"
+    },
+    "username.hint.shown_as": {
+      "text": "سيظهر هكذا: {username}",
       "status": "machine"
     }
   }

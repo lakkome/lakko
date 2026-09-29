@@ -74,6 +74,9 @@ import me.lakko.app.devices.decodeForOwnAccount
 import me.lakko.app.devices.ownPairingHandle
 import uniffi.lakko_ffi_uniffi.DecodedPairingQr
 import me.lakko.app.devices.WelcomeCourier
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.webauthn.WebauthnClient
 import me.lakko.app.webauthn.WebauthnHttpError
 import me.lakko.app.webauthn.actionHashForRemoveDevice
@@ -238,7 +241,7 @@ public fun AddDeviceScreen(
             }
             if (ownHandle == null) {
                 Text(
-                    PAIRING_NO_USERNAME_COPY,
+                    PAIRING_NO_USERNAME_COPY.text(),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -489,7 +492,7 @@ private sealed interface ScanUi {
 
     data object Processing : ScanUi
     data object Done : ScanUi
-    data class Error(val message: String) : ScanUi
+    data class Error(val message: UiText) : ScanUi
 }
 
 @Composable
@@ -512,7 +515,7 @@ private fun ScanSection(
     // Transient inline hint shown over the live scanner when a non-Lakko QR is
     // seen — we keep scanning (no dead-end to Error / re-mount) and just nudge
     // the user (G-29). Cleared once a valid pairing QR is decoded.
-    var scanHint: String? by remember { mutableStateOf(null) }
+    var scanHint: UiText? by remember { mutableStateOf(null) }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -525,8 +528,7 @@ private fun ScanSection(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            "Point the camera at the code your new device is showing. " +
-                "Linking takes a couple of seconds.",
+            t("devices.scan.intro"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -542,15 +544,14 @@ private fun ScanSection(
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Open camera")
+                Text(t("devices.scan.open_camera"))
             }
 
             ScanUi.NeedsPermission -> Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    "Lakko needs the camera to scan the code. " +
-                        "Allow camera access in Android settings, then try again.",
+                    t("devices.scan.error.camera_denied"),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -559,7 +560,7 @@ private fun ScanSection(
                         cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
                     },
                 ) {
-                    Text("Try again")
+                    Text(t("common.try_again"))
                 }
             }
 
@@ -586,9 +587,7 @@ private fun ScanSection(
                                 // won't re-fire for this same QR, but will for a
                                 // different one, so the camera can pan straight
                                 // onto the real code with no re-mount (G-29).
-                                scanHint =
-                                    "That is not a Lakko device code. Point " +
-                                    "the camera at the code on your other device."
+                                scanHint = UiText("devices.scan.error.not_a_code")
                                 return@QrScannerComposable
                             }
                             // ADR-0056 — the code must name this
@@ -609,17 +608,17 @@ private fun ScanSection(
                                 is PairingScanDecision.Accepted ->
                                     ScanUi.ConfirmTransfer(decision.decoded)
                                 is PairingScanDecision.Refused ->
-                                    ScanUi.Error(decision.copy)
+                                    ScanUi.Error(decision.text)
                             }
                         },
-                        onError = { msg ->
-                            state = ScanUi.Error(msg)
+                        onError = { _ ->
+                            state = ScanUi.Error(PAIRING_FAILED_COPY)
                         },
                     )
                 }
                 scanHint?.let { hint ->
                     Text(
-                        hint,
+                        hint.text(),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
@@ -630,7 +629,7 @@ private fun ScanSection(
                         state = ScanUi.Idle
                     },
                 ) {
-                    Text("Cancel")
+                    Text(t("common.cancel"))
                 }
             }
 
@@ -638,14 +637,12 @@ private fun ScanSection(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(
-                    "Link this device?",
+                    t("devices.scan.confirm.title"),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    "The scanned device gets full access to your account: " +
-                        "your messages, your contacts and your identity. " +
-                        "Only continue if the code is on your own new device.",
+                    t("devices.scan.confirm.body"),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -685,16 +682,14 @@ private fun ScanSection(
                                     chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
                                     state = ScanUi.Done
                                 } catch (cause: Throwable) {
-                                    state = ScanUi.Error(
-                                        cause.message ?: PAIRING_FAILED_COPY,
-                                    )
+                                    state = ScanUi.Error(PAIRING_FAILED_COPY)
                                 }
                             }
                         },
-                    ) { Text("Link device") }
+                    ) { Text(t("devices.scan.confirm.submit")) }
                     OutlinedButton(
                         onClick = { state = ScanUi.Idle },
-                    ) { Text("Cancel") }
+                    ) { Text(t("common.cancel")) }
                 }
             }
 
@@ -703,12 +698,11 @@ private fun ScanSection(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 CircularProgressIndicator()
-                Text("Adding the device...")
+                Text(t("device_link.request.adding"))
             }
 
             ScanUi.Done -> Text(
-                "Device added. The other device should land on its success " +
-                    "screen any moment now.",
+                t("device_link.request.added"),
                 color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
@@ -718,12 +712,12 @@ private fun ScanSection(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    s.message,
+                    s.message.text(),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 OutlinedButton(onClick = { state = ScanUi.Idle }) {
-                    Text("Try again")
+                    Text(t("common.try_again"))
                 }
             }
         }

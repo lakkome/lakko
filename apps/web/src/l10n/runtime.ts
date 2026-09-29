@@ -134,13 +134,63 @@ function parseEnglish(sourceJson: string): Record<string, string> {
   return out;
 }
 
-/** Last-resort rendering of an English template: `{name}` replaced, no
- *  plural selection. Used only before the core has loaded. */
+/** Index of the brace closing the one opened at `open`, or -1. */
+function matchingBrace(s: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < s.length; i += 1) {
+    if (s[i] === "{") depth += 1;
+    else if (s[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** English plural selection for `{n, plural, =N {..} one {..} other {..}}`:
+ *  the body after `plural,`, the count. `#` becomes the count. */
+function naivePlural(body: string, count: number): string | null {
+  const forms = new Map<string, string>();
+  let i = 0;
+  while (i < body.length) {
+    const open = body.indexOf("{", i);
+    if (open < 0) break;
+    const selector = body.slice(i, open).trim();
+    const close = matchingBrace(body, open);
+    if (close < 0) return null;
+    forms.set(selector, body.slice(open + 1, close));
+    i = close + 1;
+  }
+  const chosen =
+    forms.get(`=${count}`) ?? (count === 1 ? forms.get("one") : undefined) ?? forms.get("other");
+  return chosen === undefined ? null : chosen.replace(/#/g, String(count));
+}
+
+/** Last-resort rendering of an English template: `{name}` replaced and an
+ *  English plural chosen. Used only before the core has loaded. */
 function naiveFormat(template: string, args: L10nArgs): string {
-  return template.replace(/\{([A-Za-z0-9_]+)\}/g, (whole, name: string) => {
-    const v = args[name];
-    return v === undefined ? whole : String(v);
-  });
+  let out = "";
+  let i = 0;
+  while (i < template.length) {
+    const open = template.indexOf("{", i);
+    if (open < 0) break;
+    const close = matchingBrace(template, open);
+    if (close < 0) break;
+    out += template.slice(i, open);
+    const inner = template.slice(open + 1, close);
+    const plural = /^\s*([A-Za-z0-9_]+)\s*,\s*plural\s*,([\s\S]*)$/.exec(inner);
+    const whole = template.slice(open, close + 1);
+    if (plural !== null) {
+      const v = args[plural[1] ?? ""];
+      const rendered = typeof v === "number" ? naivePlural(plural[2] ?? "", v) : null;
+      out += rendered === null ? whole : naiveFormat(rendered, args);
+    } else {
+      const v = args[inner.trim()];
+      out += v === undefined ? whole : String(v);
+    }
+    i = close + 1;
+  }
+  return out + template.slice(i);
 }
 
 function readStored(storage: L10nStorage | null): string | null {

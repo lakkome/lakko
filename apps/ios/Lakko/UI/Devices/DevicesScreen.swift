@@ -115,28 +115,29 @@ struct AddDeviceScreen: View {
         case show
         case scan
         var id: String { rawValue }
-        var label: String {
+        var labelKey: String {
             switch self {
-            case .show: return "Show a code"
-            case .scan: return "Scan a code"
+            case .show: return "devices.add.side.show"
+            case .scan: return "devices.add.side.scan"
             }
         }
 
         /// One line under the switch saying which device this is.
-        var explanation: String {
+        var explanationKey: String {
             switch self {
-            case .show: return "This is the new device: it joins your account once another device scans its code."
-            case .scan: return "This device is already signed in: it scans the new device's code and lets it in."
+            case .show: return "devices.add.side.show_detail"
+            case .scan: return "devices.add.side.scan_detail"
             }
         }
     }
 
     @State private var side: Side = .scan
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Linking is end-to-end encrypted between your two devices.")
+                Text(l10n.t("devices.add.e2ee_note"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 if let session = DeviceSession.current(authRepository),
@@ -150,11 +151,11 @@ struct AddDeviceScreen: View {
                           let handle = session.loginHandle {
                     Picker("", selection: $side) {
                         ForEach(Side.allCases) { s in
-                            Text(s.label).tag(s)
+                            Text(l10n.t(s.labelKey)).tag(s)
                         }
                     }
                     .pickerStyle(.segmented)
-                    Text(side.explanation)
+                    Text(l10n.t(side.explanationKey))
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoTextMuted)
 
@@ -176,13 +177,13 @@ struct AddDeviceScreen: View {
                         )
                     }
                 } else {
-                    Text("Sign in first to add a device.")
+                    Text(l10n.t("devices.add.sign_in_first"))
                         .foregroundStyle(.red)
                 }
             }
             .padding(16)
         }
-        .navigationTitle("Add a device")
+        .navigationTitle(l10n.t("devices.add.title"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -266,6 +267,7 @@ private struct PairView: View {
     @State private var state: PairState = .idle
     @State private var session: PairingOrchestrator.JoinSession?
     @State private var pollTask: Task<Void, Never>?
+    @ObservedObject private var l10n = Localization.shared
 
     private enum PairState: Equatable {
         case idle
@@ -278,41 +280,38 @@ private struct PairView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Show this code to a device that is already signed in to your account, and scan it there.")
+            Text(l10n.t("device_link.qr.scan_hint"))
             .font(.footnote)
             .foregroundStyle(.secondary)
 
             switch state {
             case .idle:
                 Button(action: { start() }) {
-                    Text("Show pairing code").frame(maxWidth: .infinity)
+                    Text(l10n.t("device_link.show_code")).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
 
             case .preparing:
-                ProgressView("Preparing pairing material…")
+                ProgressView(l10n.t("common.preparing"))
 
             case .waiting(let payload):
                 VStack {
                     QrImageView(payload: payload)
                         .padding(.vertical, 8)
-                    Text("Waiting for the other device to scan this code…")
+                    Text(l10n.t("device_link.qr.waiting"))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Button("Cancel", role: .cancel, action: cancel)
+                    Button(l10n.t("common.cancel"), role: .cancel, action: cancel)
                         .padding(.top, 4)
                 }
                 .frame(maxWidth: .infinity)
 
             case .joining:
-                ProgressView("Joining the device group…")
+                ProgressView(l10n.t("devices.add.joining"))
 
             case .done:
-                Label(
-                    "Linked. This device is now part of your account.",
-                    systemImage: "checkmark.circle.fill"
-                )
+                Label(l10n.t("devices.add.linked"), systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .font(.footnote)
 
@@ -321,7 +320,7 @@ private struct PairView: View {
                     Label(message, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
                         .font(.footnote)
-                    Button("Try again", action: { state = .idle })
+                    Button(l10n.t("common.try_again"), action: { state = .idle })
                 }
             }
         }
@@ -352,20 +351,23 @@ private struct PairView: View {
                             )
                             state = .done
                         } catch {
-                            state = .error(error.localizedDescription)
+                            NSLog("[pairing] WARN join failed: \(error)")
+                            state = .error(l10n.t("devices.add.error.generic"))
                         }
                     case .timeout:
-                        state = .error("Timed out waiting for the other device. Try again.")
+                        state = .error(l10n.t("device_link.error.timeout"))
                     case .cancelled:
                         state = .idle
                     }
                 } catch {
                     if Task.isCancelled { return }
-                    state = .error(error.localizedDescription)
+                    NSLog("[pairing] WARN waiting for the other device failed: \(error)")
+                    state = .error(AuthErrorCopy.shared(error) ?? l10n.t("devices.add.error.generic"))
                 }
             }
         } catch {
-            state = .error(error.localizedDescription)
+            NSLog("[pairing] WARN pairing code not prepared: \(error)")
+            state = .error(l10n.t("devices.add.error.generic"))
         }
     }
 
@@ -399,6 +401,7 @@ private struct ScanView: View {
     let onDeviceAdded: (Data) -> Void
 
     @State private var state: ScanState = .idle
+    @ObservedObject private var l10n = Localization.shared
 
     private enum ScanState: Equatable {
         case idle
@@ -416,17 +419,14 @@ private struct ScanView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(
-                "Aim your camera at the QR code your new device is " +
-                "showing. The pairing completes within a couple of seconds."
-            )
+            Text(l10n.t("devices.scan.intro"))
             .font(.footnote)
             .foregroundStyle(.secondary)
 
             switch state {
             case .idle:
                 Button(action: { state = .scanning }) {
-                    Text("Open camera").frame(maxWidth: .infinity)
+                    Text(l10n.t("devices.scan.open_camera")).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -439,40 +439,31 @@ private struct ScanView: View {
                     )
                     .frame(height: 280)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
-                    Button("Cancel", role: .cancel, action: { state = .idle })
+                    Button(l10n.t("common.cancel"), role: .cancel, action: { state = .idle })
                         .padding(.top, 4)
                 }
 
             case .confirm(let scannedBytes):
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Link this device?")
+                    Text(l10n.t("devices.scan.confirm.title"))
                         .font(.headline)
-                    Text(
-                        "This gives the scanned device FULL access to " +
-                        "your account: your messages, your contacts, and " +
-                        "your secure identity. Only continue if the QR " +
-                        "code is on YOUR OWN new device."
-                    )
+                    Text(l10n.t("devices.scan.confirm.body"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     HStack {
                         Button(action: { runTransfer(bytes: scannedBytes) }) {
-                            Text("Link device")
+                            Text(l10n.t("devices.scan.confirm.submit"))
                         }
                         .buttonStyle(.borderedProminent)
-                        Button("Cancel", role: .cancel, action: { state = .idle })
+                        Button(l10n.t("common.cancel"), role: .cancel, action: { state = .idle })
                     }
                 }
 
             case .processing:
-                ProgressView("Adding the device…")
+                ProgressView(l10n.t("device_link.request.adding"))
 
             case .done:
-                Label(
-                    "Device added. The other device should land on its " +
-                    "success screen any moment now.",
-                    systemImage: "checkmark.circle.fill"
-                )
+                Label(l10n.t("device_link.request.added"), systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .font(.footnote)
 
@@ -481,7 +472,7 @@ private struct ScanView: View {
                     Label(message, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
                         .font(.footnote)
-                    Button("Try again", action: { state = .idle })
+                    Button(l10n.t("common.try_again"), action: { state = .idle })
                 }
             }
         }

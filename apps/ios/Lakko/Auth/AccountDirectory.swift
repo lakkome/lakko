@@ -224,23 +224,7 @@ extension DiscoveryClientError {
     /// the identity publish). A taken name never reaches here: it is
     /// ``UsernameTaken``.
     var authFormMessage: String {
-        switch self {
-        case .argument(let message):
-            return message
-        case .http(let status, _, _):
-            switch status {
-            case 429:
-                return "Too many requests. Please wait a moment and retry."
-            case 500...599:
-                return "Server error. Please try again shortly."
-            default:
-                return "The username directory refused the request (\(status))."
-            }
-        case .network:
-            return "Network error. Check your connection and try again."
-        case .rateLimited:
-            return "Too many requests. Please wait a moment and retry."
-        }
+        AuthErrorCopy.shared(self) ?? Localization.text("auth.signup.error.generic")
     }
 }
 
@@ -306,10 +290,9 @@ public enum TypedNameCheckRefusal: Error, LocalizedError, Equatable {
 /// `apps/web/src/auth/device-restore-name-check.ts`.
 enum TypedNameCheck {
     /// The name resolves to another account, or to none.
-    static let otherAccountCopy =
-        "The name you typed belongs to a different account. Nothing was changed on this device."
+    static var otherAccountCopy: String { Localization.text("device_link.error.name_other_account") }
     /// The lookup could not run; the generic network failure copy.
-    static let unavailableCopy = "Could not reach Lakko. Check your connection and try again."
+    static var unavailableCopy: String { Localization.text("common.error.offline") }
 
     /// - Throws: ``TypedNameCheckRefusal``.
     static func check(

@@ -1253,7 +1253,13 @@ public enum class LoginHandleBinding {
 /** A precondition was violated by the caller — e.g. an empty
  *  password. Distinct from a network error so the UI can surface
  *  it as a form validation message. */
-public class AuthClientArgError(message: String) : IllegalArgumentException(message)
+public class AuthClientArgError(
+    message: String,
+    /** The sentence a screen shows for this refusal (ADR-0058 section 6);
+     *  `null` for a caller-contract diagnostic, which a screen replaces with
+     *  its own generic sentence. [message] stays English for logs. */
+    public val text: me.lakko.app.l10n.UiText? = null,
+) : IllegalArgumentException(message)
 
 /** A request to the auth service did not return 2xx. The original
  *  status code and (truncated) body are exposed for diagnostics. */

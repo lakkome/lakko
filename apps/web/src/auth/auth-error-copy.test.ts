@@ -8,12 +8,12 @@ import {
   isSignupRateLimited,
   loginErrorMessage,
   passkeyErrorMessage,
-  RECOVERY_CODE_SEND_LIMITED,
+  recoveryCodeSendLimited,
   recoverErrorMessage,
   signupErrorMessage,
-  TOO_MANY_ATTEMPTS,
+  tooManyAttempts,
   tooManyAttemptsMessage,
-  WRONG_CREDENTIALS,
+  wrongCredentials,
 } from "./auth-error-copy";
 import { totpRecoverErrorMessage } from "./recover/TotpRecover";
 import { contactRecoverErrorMessage } from "./recover/ContactRecover";
@@ -28,11 +28,11 @@ describe("loginErrorMessage", () => {
     // `AuthContext.login` throws "invalid credentials" on a lookup miss and
     // the server answers 401 on a wrong password; the user must not be able
     // to tell them apart.
-    expect(loginErrorMessage(new Error("invalid credentials"))).toBe(WRONG_CREDENTIALS);
+    expect(loginErrorMessage(new Error("invalid credentials"))).toBe(wrongCredentials());
     expect(loginErrorMessage(new AuthHttpError(401, "/login/finish", "unauthorized"))).toBe(
-      WRONG_CREDENTIALS,
+      wrongCredentials(),
     );
-    expect(loginErrorMessage(new DiscoveryHttpError(404, "/lookup", ""))).toBe(WRONG_CREDENTIALS);
+    expect(loginErrorMessage(new DiscoveryHttpError(404, "/lookup", ""))).toBe(wrongCredentials());
   });
 
   it("names the network, never the endpoint", () => {
@@ -46,7 +46,7 @@ describe("loginErrorMessage", () => {
     const m = loginErrorMessage(new AuthHttpError(500, "/login/finish", "boom"));
     expect(m).not.toMatch(BANNED);
     expect(m.endsWith(".")).toBe(true);
-    expect(loginErrorMessage("garbage")).toBe(WRONG_CREDENTIALS);
+    expect(loginErrorMessage("garbage")).toBe(wrongCredentials());
   });
 
   it("passes through a sentence the context already wrote for the user", () => {
@@ -120,7 +120,7 @@ describe("ADR-0054 S4 limits (docs/ux/anti-abuse.md section 2)", () => {
     expect(authLimitMessage(limited("too-many-attempts", null, 300))).toBe(
       "Too many attempts. Try again in 5 minutes.",
     );
-    expect(tooManyAttemptsMessage(null)).toBe(TOO_MANY_ATTEMPTS);
+    expect(tooManyAttemptsMessage(null)).toBe(tooManyAttempts());
   });
 
   it("recovery-code-send-limited", () => {
@@ -161,7 +161,7 @@ describe("ADR-0054 S4 limits (docs/ux/anti-abuse.md section 2)", () => {
     expect(contactRecoverErrorMessage(err)).toBe(expected);
     expect(wordVaultErrorMessage(err, 3)).toBe(expected);
     expect(contactRecoverErrorMessage(limited("recovery-code-send-limited", 60))).toBe(
-      RECOVERY_CODE_SEND_LIMITED,
+      recoveryCodeSendLimited(),
     );
   });
 
@@ -175,7 +175,7 @@ describe("ADR-0054 S4 limits (docs/ux/anti-abuse.md section 2)", () => {
     ]) {
       const m = authLimitMessage(limited(code, 10)) ?? "";
       expect(m).not.toMatch(/password|sign in|signed out|invalid/i);
-      expect(m).not.toBe(WRONG_CREDENTIALS);
+      expect(m).not.toBe(wrongCredentials());
     }
   });
 

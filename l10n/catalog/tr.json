@@ -2,12 +2,552 @@
   "format": 1,
   "language": "tr",
   "messages": {
+    "auth.brand.body": {
+      "text": "Sohbetler, gruplar, kanallar ve aramalar varsayılan olarak uçtan uca şifreli. Lakko sunucuları mesajlarınızı asla göremez.",
+      "status": "machine"
+    },
+    "auth.brand.foot": {
+      "text": "Açık kaynak. Telefon numarası gerekmez.",
+      "status": "machine"
+    },
+    "auth.brand.tagline": {
+      "text": "Mesajlarınız, kurallarınız.",
+      "status": "machine"
+    },
+    "auth.error.wrong_credentials": {
+      "text": "Kullanıcı adı veya şifre yanlış. Kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.explainer.never_leaves": {
+      "text": "Şifreniz cihazınızdan asla çıkmaz. Lakko şifrenizi hiç almadan doğrular; bu yüzden Lakko'da kimse onu okuyamaz ve kimse sizin yerinize sıfırlayamaz.",
+      "status": "machine"
+    },
+    "auth.explainer.same_answer": {
+      "text": "Yanlış kullanıcı adı ile yanlış şifre aynı yanıtı alır; böylece kimse giriş ekranını kullanarak hangi kullanıcı adlarının var olduğunu öğrenemez.",
+      "status": "machine"
+    },
+    "auth.explainer.title": {
+      "text": "Lakko şifrenizi nasıl korur",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back": {
+      "text": "Şifrenizi unutursanız kurtarma ifadeniz, hâlâ oturumu açık olan başka bir cihaz, ifadenizden üç kelime, bir kimlik doğrulayıcı uygulaması ya da e-posta veya telefonla gönderilen bir kod ile hesabınıza geri dönebilirsiniz.",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back_no_words": {
+      "text": "Şifrenizi unutursanız kurtarma ifadeniz, hâlâ oturumu açık olan başka bir cihaz, bir kimlik doğrulayıcı uygulaması ya da e-posta veya telefonla gönderilen bir kod ile hesabınıza geri dönebilirsiniz.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "Dili değiştir",
       "status": "machine"
     },
+    "auth.login.forgot": {
+      "text": "Şifrenizi mi unuttunuz?",
+      "status": "machine"
+    },
+    "auth.login.lede": {
+      "text": "Devam etmek için giriş yapın.",
+      "status": "machine"
+    },
+    "auth.login.no_account": {
+      "text": "Lakko'da yeni misiniz? {link}",
+      "status": "machine"
+    },
+    "auth.login.passkey": {
+      "text": "Geçiş anahtarı kullan",
+      "status": "machine"
+    },
+    "auth.login.submit": {
+      "text": "Giriş yap",
+      "status": "machine"
+    },
+    "auth.login.submitting": {
+      "text": "Giriş yapılıyor...",
+      "status": "machine"
+    },
+    "auth.login.title": {
+      "text": "Tekrar hoş geldiniz",
+      "status": "machine"
+    },
+    "auth.passkey.error.cancelled": {
+      "text": "Geçiş anahtarıyla giriş iptal edildi.",
+      "status": "machine"
+    },
+    "auth.passkey.error.failed_status": {
+      "text": "Geçiş anahtarıyla giriş başarısız oldu ({status}).",
+      "status": "machine"
+    },
+    "auth.passkey.error.generic": {
+      "text": "Geçiş anahtarıyla giriş yapılamadı. Tekrar deneyin veya şifrenizi kullanın.",
+      "status": "machine"
+    },
+    "auth.passkey.error.network": {
+      "text": "Geçiş anahtarıyla giriş sırasında ağ hatası.",
+      "status": "machine"
+    },
+    "auth.passkey.error.no_cached": {
+      "text": "Bu cihazda geçiş anahtarıyla giriş için kayıtlı kimlik bilgisi yok. Önce şifrenizle giriş yapın veya kurtarma ifadenizle hesabınızı kurtarın.",
+      "status": "machine"
+    },
+    "auth.passkey.error.not_registered": {
+      "text": "Bu hesap için kayıtlı geçiş anahtarı yok. Önce şifrenizle giriş yapın, ardından Ana sayfadan bir geçiş anahtarı ekleyin.",
+      "status": "machine"
+    },
+    "auth.passkey.error.server_disabled": {
+      "text": "Sunucuda geçiş anahtarı desteği etkin değil.",
+      "status": "machine"
+    },
+    "auth.passkey.error.unsupported": {
+      "text": "Bu tarayıcı geçiş anahtarlarını desteklemiyor.",
+      "status": "machine"
+    },
+    "auth.passkey.error.wrong_account": {
+      "text": "Bu geçiş anahtarı, bu cihazdaki hesaptan farklı bir hesaba ait. Önce şifrenizle giriş yapın.",
+      "status": "machine"
+    },
+    "auth.password.confirm.label": {
+      "text": "Şifreyi onayla",
+      "status": "machine"
+    },
+    "auth.password.error.mismatch": {
+      "text": "Şifreler eşleşmiyor. Aynı şifreyi iki kez yazın.",
+      "status": "machine"
+    },
+    "auth.password.error.too_short": {
+      "text": "En az {count, plural, one {# karakter} other {# karakter}} kullanın.",
+      "status": "machine"
+    },
+    "auth.password.hide": {
+      "text": "Şifreyi gizle",
+      "status": "machine"
+    },
+    "auth.password.hint": {
+      "text": "En az {count, plural, one {# karakter} other {# karakter}}.",
+      "status": "machine"
+    },
+    "auth.password.label": {
+      "text": "Şifre",
+      "status": "machine"
+    },
+    "auth.password.new.label": {
+      "text": "Yeni şifre",
+      "status": "machine"
+    },
+    "auth.password.new_confirm.label": {
+      "text": "Yeni şifreyi onayla",
+      "status": "machine"
+    },
+    "auth.password.show": {
+      "text": "Şifreyi göster",
+      "status": "machine"
+    },
+    "auth.signup.error.enter_username": {
+      "text": "Bir kullanıcı adı girin.",
+      "status": "machine"
+    },
+    "auth.signup.error.fix_name": {
+      "text": "Devam etmeden önce adınızı düzeltin.",
+      "status": "machine"
+    },
+    "auth.signup.error.generic": {
+      "text": "Hesap oluşturulamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.signup.error.rate_limited": {
+      "text": "Şu anda bu ağdan çok fazla yeni hesap açılıyor. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.signup.error.username_taken": {
+      "text": "Bu kullanıcı adı alınmış. Başka bir tane seçin.",
+      "status": "machine"
+    },
+    "auth.signup.have_account": {
+      "text": "Zaten hesabınız var mı? {link}",
+      "status": "machine"
+    },
+    "auth.signup.lede": {
+      "text": "Şifreniz cihazınızdan asla çıkmaz. Sonraki adımda not almanız için bir kurtarma ifadesi alacaksınız.",
+      "status": "machine"
+    },
+    "auth.signup.name.hint": {
+      "text": "Kişilerinize gösterilir. Kullanıcı adınızın gösterilmesi için boş bırakın.",
+      "status": "machine"
+    },
+    "auth.signup.name.label": {
+      "text": "Ad (isteğe bağlı)",
+      "status": "machine"
+    },
+    "auth.signup.submit": {
+      "text": "Hesap oluştur",
+      "status": "machine"
+    },
+    "auth.signup.title": {
+      "text": "Hesabınızı oluşturun",
+      "status": "machine"
+    },
+    "auth.signup.username.hint": {
+      "text": "Latin harfleri, rakamlar ve _. Başkaları sizi bu adla bulur.",
+      "status": "machine"
+    },
+    "auth.signup.working.line": {
+      "text": "Bu işlem bir kez biraz zaman alır. Bir daha böyle beklemeyeceksiniz.",
+      "status": "machine"
+    },
+    "auth.signup.working.title": {
+      "text": "Hesabınız oluşturuluyor...",
+      "status": "machine"
+    },
+    "auth.username.label": {
+      "text": "Kullanıcı adı",
+      "status": "machine"
+    },
+    "call.guest.working.title": {
+      "text": "Aramaya bağlanıyorsunuz...",
+      "status": "machine"
+    },
+    "chats.empty.select": {
+      "text": "Mesajlaşmaya başlamak için bir sohbet seçin",
+      "status": "machine"
+    },
+    "common.back": {
+      "text": "Geri",
+      "status": "machine"
+    },
+    "common.cancel": {
+      "text": "İptal",
+      "status": "machine"
+    },
+    "common.checking": {
+      "text": "Kontrol ediliyor...",
+      "status": "machine"
+    },
     "common.close": {
       "text": "Kapat",
+      "status": "machine"
+    },
+    "common.confirm": {
+      "text": "Onayla",
+      "status": "machine"
+    },
+    "common.continue": {
+      "text": "Devam",
+      "status": "machine"
+    },
+    "common.copied": {
+      "text": "Kopyalandı",
+      "status": "machine"
+    },
+    "common.copy": {
+      "text": "Kopyala",
+      "status": "machine"
+    },
+    "common.dismiss": {
+      "text": "Kapat",
+      "status": "machine"
+    },
+    "common.done": {
+      "text": "Bitti",
+      "status": "machine"
+    },
+    "common.email": {
+      "text": "E-posta",
+      "status": "machine"
+    },
+    "common.error.a11y": {
+      "text": "Hata: {message}",
+      "status": "machine"
+    },
+    "common.error.offline": {
+      "text": "Lakko'ya ulaşılamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "common.error.server_unreachable": {
+      "text": "Sunucuya ulaşılamadı. Bağlantınızı kontrol edin.",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts": {
+      "text": "Çok fazla deneme yapıldı. Biraz bekleyip tekrar deneyin.",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts_minutes": {
+      "text": "Çok fazla deneme yapıldı. {minutes, plural, one {# dakika} other {# dakika}} sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "common.error.unavailable": {
+      "text": "Bu şu anda kullanılamıyor. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "common.loading": {
+      "text": "Yükleniyor...",
+      "status": "machine"
+    },
+    "common.looking_up": {
+      "text": "Aranıyor...",
+      "status": "machine"
+    },
+    "common.more_options": {
+      "text": "Diğer seçenekler",
+      "status": "machine"
+    },
+    "common.optional": {
+      "text": "İsteğe bağlı",
+      "status": "machine"
+    },
+    "common.paste": {
+      "text": "Yapıştır",
+      "status": "machine"
+    },
+    "common.phone": {
+      "text": "Telefon",
+      "status": "machine"
+    },
+    "common.preparing": {
+      "text": "Hazırlanıyor...",
+      "status": "machine"
+    },
+    "common.sending": {
+      "text": "Gönderiliyor...",
+      "status": "machine"
+    },
+    "common.try_again": {
+      "text": "Tekrar dene",
+      "status": "machine"
+    },
+    "device_link.compare_hint": {
+      "text": "Diğer cihazın aynı kodu gösterdiğinden emin olun.",
+      "status": "machine"
+    },
+    "device_link.comparison_code": {
+      "text": "Karşılaştırma kodu",
+      "status": "machine"
+    },
+    "device_link.confirm_there": {
+      "text": "Lakko'yu oturumu zaten açık olan bir cihazda açın ve bu girişi orada onaylayın.",
+      "status": "machine"
+    },
+    "device_link.error.ask_unavailable": {
+      "text": "Diğer cihazınıza sormak şu anda mümkün değil; QR kodu yine de çalışır.",
+      "status": "machine"
+    },
+    "device_link.error.ask_unreachable": {
+      "text": "Diğer cihazınıza sormak için sunucuya ulaşılamadı; QR kodu yine de çalışır.",
+      "status": "machine"
+    },
+    "device_link.error.declined": {
+      "text": "Başka bir cihazda reddedildi.",
+      "status": "machine"
+    },
+    "device_link.error.generic": {
+      "text": "Diğer cihazınızdan geri yüklenemedi. Tekrar deneyin veya kurtarma ifadenizi kullanın.",
+      "status": "machine"
+    },
+    "device_link.error.identity_mismatch": {
+      "text": "Diğer cihazınızdan gelen kimlik, bu hesabın yayımlanmış kimliğiyle eşleşmiyor. Kullanılmayacak.",
+      "status": "machine"
+    },
+    "device_link.error.name_other_account": {
+      "text": "Yazdığınız ad başka bir hesaba ait. Bu cihazda hiçbir şey değiştirilmedi.",
+      "status": "machine"
+    },
+    "device_link.error.no_identity": {
+      "text": "Diğer cihaz onayladı ancak kimliğinizi göndermedi. O cihazda Lakko'yu güncelleyip tekrar deneyin veya kurtarma ifadenizi kullanın.",
+      "status": "machine"
+    },
+    "device_link.error.not_let_in": {
+      "text": "Diğer cihazınız kimliği gönderdi ancak bu cihazda giriş yapılamadı. Tekrar deneyin veya kurtarma ifadenizi kullanın.",
+      "status": "machine"
+    },
+    "device_link.error.request_limited": {
+      "text": "Diğer cihazlarınıza çok fazla istek gönderildi. Birkaç dakika sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "device_link.error.timeout": {
+      "text": "Diğer cihaz zamanında yanıt vermedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "device_link.pairing.needs_username": {
+      "text": "Başka bir cihaz eklemek için önce bir kullanıcı adı belirleyin.",
+      "status": "machine"
+    },
+    "device_link.pairing.unsupported": {
+      "text": "Bu kod Lakko'nun farklı bir sürümünden geliyor. İki cihazda da Lakko'yu güncelleyip tekrar deneyin.",
+      "status": "machine"
+    },
+    "device_link.pairing.wrong_account": {
+      "text": "Bu kod farklı bir hesaba ait. Yeni cihazın bu cihazla aynı kullanıcı adını kullandığını kontrol edin.",
+      "status": "machine"
+    },
+    "device_link.qr.hide": {
+      "text": "QR kodunu gizle",
+      "status": "machine"
+    },
+    "device_link.qr.intro": {
+      "text": "Bu kodu hesabınızın hâlâ bulunduğu bir cihaza gösterin. O cihaz bu cihazı ekler ve kimliğinizi uçtan uca şifreli olarak aktarır; ifade yazmanız gerekmez.",
+      "status": "machine"
+    },
+    "device_link.qr.scan_hint": {
+      "text": "Diğer cihazınızda Ayarlar, ardından Cihazlar, ardından Cihaz ekle bölümünü açın ve bu kodu tarayın.",
+      "status": "machine"
+    },
+    "device_link.qr.show": {
+      "text": "Bunun yerine QR kodu göster",
+      "status": "machine"
+    },
+    "device_link.qr.waiting": {
+      "text": "Diğer cihazınızın bu kodu taraması bekleniyor...",
+      "status": "machine"
+    },
+    "device_link.request.added": {
+      "text": "Cihaz eklendi.",
+      "status": "machine"
+    },
+    "device_link.request.adding": {
+      "text": "Cihaz ekleniyor...",
+      "status": "machine"
+    },
+    "device_link.request.body": {
+      "text": "Yeni bir cihaz hesabınıza katılmak istiyor. Bir kod gösteriyor.",
+      "status": "machine"
+    },
+    "device_link.request.code_label": {
+      "text": "Yeni cihazdaki kod",
+      "status": "machine"
+    },
+    "device_link.request.confirm": {
+      "text": "Evet, ekle",
+      "status": "machine"
+    },
+    "device_link.request.confirm_only_if": {
+      "text": "Yalnızca yeni cihaz tam olarak bu kodu gösteriyorsa onaylayın.",
+      "status": "machine"
+    },
+    "device_link.request.decline": {
+      "text": "Bu ben değilim",
+      "status": "machine"
+    },
+    "device_link.request.declined": {
+      "text": "Reddedildi. Bu tekrarlanırsa şifrenizi değiştirin.",
+      "status": "machine"
+    },
+    "device_link.request.error.generic": {
+      "text": "Cihaz eklenemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "device_link.request.error.no_device_key": {
+      "text": "Bu tarayıcıda cihaz anahtarı yok. Tekrar giriş yapın.",
+      "status": "machine"
+    },
+    "device_link.request.title": {
+      "text": "Bu siz misiniz?",
+      "status": "machine"
+    },
+    "device_link.restored": {
+      "text": "Geri yüklendi.",
+      "status": "machine"
+    },
+    "device_link.show_code": {
+      "text": "Eşleştirme kodunu göster",
+      "status": "machine"
+    },
+    "device_link.transferring": {
+      "text": "Aktarılıyor...",
+      "status": "machine"
+    },
+    "devices.add.e2ee_note": {
+      "text": "Bağlama işlemi iki cihazınız arasında uçtan uca şifrelidir.",
+      "status": "machine"
+    },
+    "devices.add.error.generic": {
+      "text": "Bu cihaz bağlanamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "devices.add.joining": {
+      "text": "Bu cihaz bağlanıyor...",
+      "status": "machine"
+    },
+    "devices.add.linked": {
+      "text": "Bağlandı. Bu cihaz artık hesabınızın bir parçası.",
+      "status": "machine"
+    },
+    "devices.add.side.scan": {
+      "text": "Kod tara",
+      "status": "machine"
+    },
+    "devices.add.side.scan_detail": {
+      "text": "Bu cihazda oturum zaten açık: yeni cihazın kodunu tarar ve onu içeri alır.",
+      "status": "machine"
+    },
+    "devices.add.side.show": {
+      "text": "Kod göster",
+      "status": "machine"
+    },
+    "devices.add.side.show_detail": {
+      "text": "Bu yeni cihaz: başka bir cihaz kodunu taradığında hesabınıza katılır.",
+      "status": "machine"
+    },
+    "devices.add.sign_in_first": {
+      "text": "Cihaz eklemek için önce giriş yapın.",
+      "status": "machine"
+    },
+    "devices.add.title": {
+      "text": "Cihaz ekle",
+      "status": "machine"
+    },
+    "devices.scan.confirm.body": {
+      "text": "Bu işlem, taranan cihaza hesabınıza tam erişim verir: mesajlarınız, kişileriniz ve kimliğiniz. Yalnızca kod kendi yeni cihazınızdaysa devam edin.",
+      "status": "machine"
+    },
+    "devices.scan.confirm.submit": {
+      "text": "Cihazı bağla",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title": {
+      "text": "Bu cihaz bağlansın mı?",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied": {
+      "text": "Lakko kamerayı kullanamıyor. Ayarlar bölümünden kamera erişimine izin verin ve tekrar deneyin.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_failed": {
+      "text": "Kamera başlatılamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "devices.scan.error.no_camera": {
+      "text": "Bu cihazda arka kamera yok.",
+      "status": "machine"
+    },
+    "devices.scan.error.not_a_code": {
+      "text": "Bu bir Lakko cihaz kodu değil. Kamerayı diğer cihazınızdaki koda doğrultun.",
+      "status": "machine"
+    },
+    "devices.scan.intro": {
+      "text": "Kameranızı yeni cihazınızın gösterdiği koda doğrultun.",
+      "status": "machine"
+    },
+    "devices.scan.open_camera": {
+      "text": "Kamerayı aç",
+      "status": "machine"
+    },
+    "display_name.error.control": {
+      "text": "Görünmez veya yazı yönü karakterlerini kaldırın",
+      "status": "machine"
+    },
+    "display_name.error.line_break": {
+      "text": "Yalnızca tek satır",
+      "status": "machine"
+    },
+    "display_name.error.too_long": {
+      "text": "En fazla {count, plural, one {# karakter} other {# karakter}}",
+      "status": "machine"
+    },
+    "display_name.error.too_many_bytes": {
+      "text": "Bu ad çok uzun",
+      "status": "machine"
+    },
+    "display_name.error.unknown": {
+      "text": "Bu ad kullanılamaz",
       "status": "machine"
     },
     "language.name.ar": {
@@ -72,6 +612,514 @@
     },
     "nav.settings": {
       "text": "Ayarlar",
+      "status": "machine"
+    },
+    "recovery.access_only_note": {
+      "text": "Kimlik doğrulayıcı veya bir kod ile hesabınıza geri dönersiniz; sohbetleriniz için ise kurtarma ifadeniz veya başka bir cihaz gerekir.",
+      "status": "machine"
+    },
+    "recovery.cached_account": {
+      "text": "Bu cihazdaki hesap: {username}",
+      "status": "machine"
+    },
+    "recovery.contact.change": {
+      "text": "Farklı bir e-posta veya telefon kullan",
+      "status": "machine"
+    },
+    "recovery.contact.code_label": {
+      "text": "Gönderdiğimiz kod",
+      "status": "machine"
+    },
+    "recovery.contact.email_label": {
+      "text": "E-posta adresi",
+      "status": "machine"
+    },
+    "recovery.contact.error.bad_contact": {
+      "text": "Bu bir e-posta adresi veya telefon numarasına benzemiyor. Kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.contact.error.enter_code": {
+      "text": "Gönderdiğimiz altı haneli kodu girin.",
+      "status": "machine"
+    },
+    "recovery.contact.error.generic": {
+      "text": "Kod kontrol edilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_email": {
+      "text": "Geçerli bir e-posta adresi girin.",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_phone": {
+      "text": "Telefon numarasını uluslararası biçimde girin, örneğin +15551234567.",
+      "status": "machine"
+    },
+    "recovery.contact.error.send_failed": {
+      "text": "Kod gönderilemedi. Kullanıcı adını kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.contact.error.unavailable": {
+      "text": "E-posta ve telefonla kurtarma burada kullanılamıyor. Başka bir yol kullanın.",
+      "status": "machine"
+    },
+    "recovery.contact.error.wrong": {
+      "text": "Bu kod çalışmadı. Gönderdiğimiz kodu kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.contact.intro": {
+      "text": "Ayarlar'da belirlediğiniz e-posta adresine veya telefon numarasına altı haneli bir kod göndeririz. Bu kod hesabınıza geri dönmenizi sağlar; sohbetleriniz için ise kurtarma ifadeniz veya başka bir cihaz gerekir.",
+      "status": "machine"
+    },
+    "recovery.contact.phone_label": {
+      "text": "Telefon numarası",
+      "status": "machine"
+    },
+    "recovery.contact.send": {
+      "text": "Kod gönder",
+      "status": "machine"
+    },
+    "recovery.contact.send_by": {
+      "text": "Kodu şununla gönder",
+      "status": "machine"
+    },
+    "recovery.contact.sent_email": {
+      "text": "Bu adres bu hesap için ayarlanmışsa altı haneli bir kod yolda. Aşağıya girin.",
+      "status": "machine"
+    },
+    "recovery.contact.sent_phone": {
+      "text": "Bu numara bu hesap için ayarlanmışsa altı haneli bir kod yolda. Aşağıya girin.",
+      "status": "machine"
+    },
+    "recovery.device.intro": {
+      "text": "Kullanıcı adınızı girin, ardından oturumu hâlâ açık olan bir cihazda onaylayın ve gösterdiği kodu karşılaştırın. Lakko sunucularının okuyabileceği hiçbir şey gönderilmez. Kamera gerekmez; isterseniz QR kodu da var.",
+      "status": "machine"
+    },
+    "recovery.device.intro_qr": {
+      "text": "Diğer cihazınız bu cihazı bağlar ve hesabınızı buraya taşır.",
+      "status": "machine"
+    },
+    "recovery.device.restoring": {
+      "text": "Geri yükleniyor: {username}",
+      "status": "machine"
+    },
+    "recovery.error.code_send_limited": {
+      "text": "Kısa süre önce bir kod gönderdik. Yenisini istemeden önce birkaç dakika bekleyin.",
+      "status": "machine"
+    },
+    "recovery.error.generic": {
+      "text": "Hesap kurtarılamadı. Kelimeleri kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.error.no_match": {
+      "text": "Bu hesapla eşleşmedi. Kelimeleri ve kullanıcı adını kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.lede": {
+      "text": "Hesabınıza nasıl geri döneceğinizi seçin.",
+      "status": "machine"
+    },
+    "recovery.lede_account": {
+      "text": "Şu hesaba nasıl geri döneceğinizi seçin: {username}",
+      "status": "machine"
+    },
+    "recovery.method.contact.sub": {
+      "text": "Belirlediğiniz e-postaya veya telefona gönderilen bir kod.",
+      "status": "machine"
+    },
+    "recovery.method.contact.title": {
+      "text": "E-posta veya telefon",
+      "status": "machine"
+    },
+    "recovery.method.device.sub": {
+      "text": "Oturumu hâlâ açık olan bir cihazdan onaylayın.",
+      "status": "machine"
+    },
+    "recovery.method.device.title": {
+      "text": "Başka bir cihaz",
+      "status": "machine"
+    },
+    "recovery.method.phrase.restore_sub": {
+      "text": "24 kelimenin tamamını yazın.",
+      "status": "machine"
+    },
+    "recovery.method.phrase.sub": {
+      "text": "24 kelimenizi yazın ve yeni bir şifre seçin.",
+      "status": "machine"
+    },
+    "recovery.method.phrase.title": {
+      "text": "Kurtarma ifadesi",
+      "status": "machine"
+    },
+    "recovery.method.shares.sub": {
+      "text": "Güvendiğiniz kişilere verdiğiniz paylar.",
+      "status": "machine"
+    },
+    "recovery.method.shares.title": {
+      "text": "Sosyal kurtarma payları",
+      "status": "machine"
+    },
+    "recovery.method.totp.sub": {
+      "text": "Kimlik doğrulayıcı uygulamanızdan bir kod.",
+      "status": "machine"
+    },
+    "recovery.method.totp.title": {
+      "text": "Kimlik doğrulayıcı",
+      "status": "machine"
+    },
+    "recovery.method.words.restore_sub": {
+      "text": "Kurtarma ifadenizden üç kelime.",
+      "status": "machine"
+    },
+    "recovery.method.words.sub": {
+      "text": "Bu kısayol açıksa ifadenizden üç kelime.",
+      "status": "machine"
+    },
+    "recovery.method.words.title": {
+      "text": "Üç kelime",
+      "status": "machine"
+    },
+    "recovery.methods.back": {
+      "text": "Tüm yöntemlere dön",
+      "status": "machine"
+    },
+    "recovery.phrase.intro": {
+      "text": "24 kelimenizi yazın, ardından yeni bir şifre seçin.",
+      "status": "machine"
+    },
+    "recovery.remembered": {
+      "text": "Şifrenizi hatırladınız mı? {link}",
+      "status": "machine"
+    },
+    "recovery.shares.copy_failed": {
+      "text": "Kopyalanamadı. Payı seçip elle kopyalayın.",
+      "status": "machine"
+    },
+    "recovery.shares.error.combine_failed": {
+      "text": "Paylar birleştirilemedi. Her birinin eksiksiz olduğunu kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.shares.error.generic": {
+      "text": "Paylar oluşturulamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.shares.error.too_few": {
+      "text": "Her satıra bir tane olmak üzere en az iki pay yapıştırın.",
+      "status": "machine"
+    },
+    "recovery.shares.generate": {
+      "text": "{count, plural, one {# pay oluştur} other {# pay oluştur}}",
+      "status": "machine"
+    },
+    "recovery.shares.generating": {
+      "text": "Oluşturuluyor...",
+      "status": "machine"
+    },
+    "recovery.shares.help": {
+      "text": "Payları size gönderildiği gibi aynen yapıştırın. Oluşturulurken kararlaştırılan sayıda pay gerekir; genellikle 5 paydan 3 tanesi.",
+      "status": "machine"
+    },
+    "recovery.shares.intro": {
+      "text": "Size verilen payları her satıra bir tane olacak şekilde yapıştırın, ardından yeni bir şifre seçin.",
+      "status": "machine"
+    },
+    "recovery.shares.label": {
+      "text": "Kurtarma payları, her satıra bir tane",
+      "status": "machine"
+    },
+    "recovery.shares.panel_body": {
+      "text": "İfadeyi güvendiğiniz kişiler için {count, plural, one {# paya} other {# paya}} bölün. Bunlardan herhangi {threshold} tanesi ifadeyi yeniden oluşturur; daha azı hiçbir şey açığa çıkarmaz. Her kişiye bir pay verin.",
+      "status": "machine"
+    },
+    "recovery.shares.usage": {
+      "text": "Daha sonra kullanmak için kurtarma ekranında {method} seçeneğini seçin ve herhangi {threshold} tanesini yapıştırın.",
+      "status": "machine"
+    },
+    "recovery.submit": {
+      "text": "Hesabı kurtar",
+      "status": "machine"
+    },
+    "recovery.title": {
+      "text": "Hesabınızı kurtarın",
+      "status": "machine"
+    },
+    "recovery.totp.code_label": {
+      "text": "Uygulamadaki kod",
+      "status": "machine"
+    },
+    "recovery.totp.error.enter_code": {
+      "text": "Kimlik doğrulayıcı uygulamanızdaki altı haneli kodu girin.",
+      "status": "machine"
+    },
+    "recovery.totp.error.generic": {
+      "text": "Kod kontrol edilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.totp.error.unavailable": {
+      "text": "Kimlik doğrulayıcıyla kurtarma burada kullanılamıyor. Başka bir yol kullanın.",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong": {
+      "text": "Bu kod çalışmadı. Uygulamayı kontrol edip bir sonraki kodu deneyin.",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong_username": {
+      "text": "Bu kod çalışmadı. Kullanıcı adını ve uygulamayı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.totp.intro": {
+      "text": "Ayarlar'da kurduğunuz kimlik doğrulayıcı uygulamasındaki altı haneli kodu kullanın. Bu kod hesabınıza geri dönmenizi sağlar; sohbetleriniz için ise kurtarma ifadeniz veya başka bir cihaz gerekir.",
+      "status": "machine"
+    },
+    "recovery.username_required": {
+      "text": "Hesabın kullanıcı adını girin.",
+      "status": "machine"
+    },
+    "recovery.username_required_to_recover": {
+      "text": "Kurtarılacak hesabın kullanıcı adını girin.",
+      "status": "machine"
+    },
+    "recovery.words.error.generic": {
+      "text": "Kelimeler kontrol edilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match": {
+      "text": "Bu kelimeler eşleşmedi.",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match_tries": {
+      "text": "Bu kelimeler eşleşmedi. Üç kelime kısayolu kapatılmadan önce {count, plural, one {# deneme hakkınız kaldı} other {# deneme hakkınız kaldı}}.",
+      "status": "machine"
+    },
+    "recovery.words.error.open_failed": {
+      "text": "Sunucu yanıt verdi ancak kurtarma verileri açılamadı. Hiçbir şey değiştirilmedi.",
+      "status": "machine"
+    },
+    "recovery.words.error.server_off": {
+      "text": "Üç kelimeyle kurtarma bu sunucuda kullanılamıyor.",
+      "status": "machine"
+    },
+    "recovery.words.intro": {
+      "text": "Kurtarma ifadenizden üç kelime yazın ve yeni bir şifre seçin. Önce, hangi hesap?",
+      "status": "machine"
+    },
+    "recovery.words.prompt": {
+      "text": "{username}: kurtarma ifadenizin {positions} numaralı kelimelerini yazın.",
+      "status": "machine"
+    },
+    "recovery.words.prompt_restore": {
+      "text": "Kurtarma ifadenizin {positions} numaralı kelimelerini yazın.",
+      "status": "machine"
+    },
+    "recovery.words.switched_off": {
+      "text": "Üç kelime kısayolu bu hesap için artık kapatıldı. Kurtarma ifadenizin tamamını veya başka bir cihazı kullanın.",
+      "status": "machine"
+    },
+    "recovery.words.switched_off_restore": {
+      "text": "Üç kelime kısayolu bu hesap için artık kapatıldı. Başka bir cihazı veya kurtarma ifadenizin tamamını kullanın.",
+      "status": "machine"
+    },
+    "recovery.words.tries_left": {
+      "text": "{count, plural, one {# deneme hakkı kaldı.} other {# deneme hakkı kaldı.}}",
+      "status": "machine"
+    },
+    "recovery.words.unavailable": {
+      "text": "Üç kelimeyle kurtarma burada kullanılamıyor. Başka bir yol kullanın.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.acknowledge": {
+      "text": "Bu kelimeleri kaybetmenin bu hesaba erişimi kaybetmek anlamına geldiğini anlıyorum.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.back": {
+      "text": "Kelimelere dön",
+      "status": "machine"
+    },
+    "recovery_phrase.check.lede": {
+      "text": "Not aldıklarınızdan {positions} numaralı kelimeleri yazın.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_many": {
+      "text": "{positions} numaralı kelimeler eşleşmiyor. Notlarınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_one": {
+      "text": "{position} numaralı kelime eşleşmiyor. Notlarınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.title": {
+      "text": "Notlarınızı kontrol edin",
+      "status": "machine"
+    },
+    "recovery_phrase.copy_failed": {
+      "text": "Kopyalanamadı. Bunun yerine kelimeleri bir yere yazın.",
+      "status": "machine"
+    },
+    "recovery_phrase.error.incomplete": {
+      "text": "Kurtarma ifadenizin 24 kelimesinin tamamını girin.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.acknowledge": {
+      "text": "Bu 24 kelimeyi not aldım ve bunları kaybetmenin bu hesaba erişimi kaybetmek anlamına geldiğini anlıyorum.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.error.generic": {
+      "text": "Tamamlanamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.finishing": {
+      "text": "Tamamlanıyor...",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.lede": {
+      "text": "{username} için yeni bir kimlik oluşturdunuz. Erişimi yeniden kaybederseniz onu kurtarmanın tek yolu bu 24 kelimedir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.safety_note": {
+      "text": "Kişileriniz güvenlik numaranızın değiştiğini görecek ve size güvenli şekilde mesaj göndermeden önce sizi yeniden doğrulamaları gerekecek.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.title": {
+      "text": "Yeni kurtarma ifadenizi kaydedin",
+      "status": "machine"
+    },
+    "recovery_phrase.guest.lede": {
+      "text": "Hesabınız şifresiz oluşturuldu. Başka bir cihazda veya bu tarayıcıyı temizledikten sonra hesabınıza geri dönmenin tek yolu bu 24 kelimedir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
+      "status": "machine"
+    },
+    "recovery_phrase.label": {
+      "text": "Kurtarma ifadesi",
+      "status": "machine"
+    },
+    "recovery_phrase.save.anyone_with_words": {
+      "text": "Bu kelimelere sahip olan herkes mesajlarınızı okuyabilir ve sizin adınıza işlem yapabilir. Kimseyle paylaşmayın.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.lede": {
+      "text": "Şifrenizi ve cihazlarınızı kaybederseniz hesabınıza geri dönmenin tek yolu bu 24 kelimedir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.no_screenshot": {
+      "text": "Bunları ekran görüntüsü veya düz metin dosyası olarak saklamayın. Lakko bunları size bir daha gösteremez.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.title": {
+      "text": "Kurtarma ifadenizi kaydedin",
+      "status": "machine"
+    },
+    "recovery_phrase.save.vault_note": {
+      "text": "Yeni bir cihazda genellikle bunlardan yalnızca üçü, {positions} numaralı kelimeler istenir. Yine de listenin tamamını saklayın: bu kısayol bir gün kapatılırsa geri dönmenin tek yolu odur.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.written": {
+      "text": "Not aldım",
+      "status": "machine"
+    },
+    "recovery_phrase.step": {
+      "text": "Adım {current} / {total}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_label": {
+      "text": "Kelime {position}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_placeholder": {
+      "text": "kelime {position}",
+      "status": "machine"
+    },
+    "restore_identity.device_intro": {
+      "text": "Oturumu hâlâ açık olan bir cihazda bir istek görünür; orada onaylayın ve kodu karşılaştırın. Aktarım uçtan uca şifrelidir; Lakko sunucuları onu okuyamaz. Kamera gerekmez; isterseniz QR kodu da var.",
+      "status": "machine"
+    },
+    "restore_identity.error.bad_saved_account": {
+      "text": "Bu cihazda kayıtlı hesapta bir sorun var. Çıkış yapıp yeniden giriş yapın veya kurtarma ifadenizi kullanın.",
+      "status": "machine"
+    },
+    "restore_identity.error.generic": {
+      "text": "Kimliğiniz geri yüklenemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "restore_identity.error.invalid_phrase": {
+      "text": "Bu geçerli bir kurtarma ifadesi değil. Her kelimeyi kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "restore_identity.error.not_published": {
+      "text": "Kurtarılan kimliği doğrulamak için yayımlanmış bir kimlik bulunamadı. Tekrar deneyin veya hesabınızın hâlâ bulunduğu bir cihazdan geri yükleyin.",
+      "status": "machine"
+    },
+    "restore_identity.error.nothing": {
+      "text": "Geri yüklenecek bir şey yok. Önce giriş yapın.",
+      "status": "machine"
+    },
+    "restore_identity.error.phrase_mismatch": {
+      "text": "Bu kurtarma ifadesi bu hesabın kimliğiyle eşleşmiyor. İfadeyi kontrol edin veya bunun yerine mevcut bir cihazı eşleştirin.",
+      "status": "machine"
+    },
+    "restore_identity.error.unreachable": {
+      "text": "Kurtarılan kimliği doğrulamak için dizine ulaşılamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "Yeni bir cihazda {username} olarak giriş yaptınız. Size zaten güvenen kişileri korumak için kimliğinizi üç kelimeyle, kurtarma ifadenizle veya oturumu hâlâ açık olan bir cihazdan geri yükleyin.",
+      "status": "machine"
+    },
+    "restore_identity.lede_no_words": {
+      "text": "Yeni bir cihazda {username} olarak giriş yaptınız. Size zaten güvenen kişileri korumak için kimliğinizi kurtarma ifadenizle veya oturumu hâlâ açık olan bir cihazdan geri yükleyin.",
+      "status": "machine"
+    },
+    "restore_identity.log_out": {
+      "text": "Çıkış yap",
+      "status": "machine"
+    },
+    "restore_identity.lost.create": {
+      "text": "Yeni bir kimlik oluştur",
+      "status": "machine"
+    },
+    "restore_identity.lost.creating": {
+      "text": "Yeni kimlik oluşturuluyor...",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.generic": {
+      "text": "Yeni kimlik oluşturulamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "restore_identity.lost.sub": {
+      "text": "Yeni bir kimlikle başla",
+      "status": "machine"
+    },
+    "restore_identity.lost.summary": {
+      "text": "Ne kurtarma ifadem ne de başka bir cihazım var",
+      "status": "machine"
+    },
+    "restore_identity.lost.warning": {
+      "text": "Bu işlem hesabınız için yeni bir kimlik oluşturur. Kişilerinizin sizi yeniden doğrulaması gerekir, kaybettiğiniz cihazdaki mesajlar okunamaz kalır ve kaydetmeniz için yeni bir kurtarma ifadesi alırsınız. Bunu yalnızca hem kurtarma ifadenizi hem de diğer tüm cihazlarınızı kaybettiyseniz yapın.",
+      "status": "machine"
+    },
+    "restore_identity.not_you": {
+      "text": "Hesap sizin değil mi?",
+      "status": "machine"
+    },
+    "restore_identity.phrase_intro": {
+      "text": "24 kelimeyi sırasıyla yazın. Lakko devam etmeden önce bunları hesabınızla karşılaştırır.",
+      "status": "machine"
+    },
+    "restore_identity.submit": {
+      "text": "Geri yükle",
+      "status": "machine"
+    },
+    "restore_identity.submitting": {
+      "text": "Geri yükleniyor...",
+      "status": "machine"
+    },
+    "restore_identity.title": {
+      "text": "Kimliğinizi geri yükleyin",
+      "status": "machine"
+    },
+    "security.identity_changed.body": {
+      "text": "Bunu başka bir cihazda siz yaptıysanız bu uyarıyı kapatın. Siz yapmadıysanız güvenlik numaralarınızı kişilerinizle doğrulayın ve şifrenizi ve geçiş anahtarlarınızı değiştirin.",
+      "status": "machine"
+    },
+    "security.identity_changed.title": {
+      "text": "Hesabınızın güvenlik anahtarı değiştirildi.",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -148,6 +1196,34 @@
     },
     "settings.section.security": {
       "text": "Güvenlik",
+      "status": "machine"
+    },
+    "username.a11y_hint": {
+      "text": "Kullanıcı adı: {message}",
+      "status": "machine"
+    },
+    "username.error.empty": {
+      "text": "Bir kullanıcı adı girin",
+      "status": "machine"
+    },
+    "username.error.invalid_characters": {
+      "text": "Yalnızca Latin harfleri, rakamlar ve _",
+      "status": "machine"
+    },
+    "username.error.too_long": {
+      "text": "En fazla {count, plural, one {# karakter} other {# karakter}}",
+      "status": "machine"
+    },
+    "username.error.too_short": {
+      "text": "En az {count, plural, one {# karakter} other {# karakter}}",
+      "status": "machine"
+    },
+    "username.error.unknown": {
+      "text": "Bu kullanıcı adı kullanılamaz",
+      "status": "machine"
+    },
+    "username.hint.shown_as": {
+      "text": "Şöyle görünecek: {username}",
       "status": "machine"
     }
   }

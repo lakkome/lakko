@@ -15,6 +15,7 @@ struct SocialRecoverySharesPanel: View {
     @State private var busy = false
     @State private var error: String?
     @State private var copiedIndex: Int?
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -22,7 +23,7 @@ struct SocialRecoverySharesPanel: View {
                 withAnimation { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
-                    Text("More options")
+                    Text(l10n.t("common.more_options"))
                         .font(.footnote.weight(.medium))
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
                         .font(.caption.weight(.semibold))
@@ -46,18 +47,21 @@ struct SocialRecoverySharesPanel: View {
 
     @ViewBuilder private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Share the recovery with people you trust")
+            Text(l10n.t("recovery.method.shares.title"))
                 .font(.body.weight(.medium))
                 .foregroundStyle(Color.lakkoText)
-            Text(
-                "Split your phrase into five shares and give one to each of five people. Any three of them together can restore it; fewer cannot."
-            )
+            Text(l10n.t(
+                "recovery.shares.panel_body",
+                texts: ["threshold": String(ShamirBridge.defaultThreshold)],
+                counts: ["count": UInt64(ShamirBridge.defaultShareCount)]))
             .font(.subheadline)
             .foregroundStyle(Color.lakkoTextMuted)
 
             if shares.isEmpty {
                 AuthSecondaryButton(
-                    title: busy ? "Generating..." : "Generate five shares",
+                    title: busy
+                        ? l10n.t("recovery.shares.generating")
+                        : l10n.t("recovery.shares.generate", counts: ["count": UInt64(ShamirBridge.defaultShareCount)]),
                     disabled: busy,
                     action: generate
                 )
@@ -70,7 +74,10 @@ struct SocialRecoverySharesPanel: View {
                         onCopy: { copy(index: index, value: share) }
                     )
                 }
-                Text("Give one share to each person. To restore, choose \"Social recovery shares\" on the recovery screen and enter any three.")
+                Text(l10n.t("recovery.shares.usage", texts: [
+                    "method": l10n.t("recovery.method.shares.title"),
+                    "threshold": String(ShamirBridge.defaultThreshold),
+                ]))
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
@@ -93,7 +100,8 @@ struct SocialRecoverySharesPanel: View {
                     shares: ShamirBridge.defaultShareCount
                 )
             } catch {
-                self.error = "Could not create the shares. Try again."
+                NSLog("[recovery] WARN shares not made: \(error)")
+                self.error = l10n.t("recovery.shares.error.generic")
             }
         }
     }
@@ -114,6 +122,8 @@ private struct ShareRow: View {
     let copied: Bool
     let onCopy: () -> Void
 
+    @ObservedObject private var l10n = Localization.shared
+
     var body: some View {
         HStack(spacing: 8) {
             Text("\(index)")
@@ -127,7 +137,7 @@ private struct ShareRow: View {
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button(action: onCopy) {
-                Text(copied ? "Copied" : "Copy")
+                Text(l10n.t(copied ? "common.copied" : "common.copy"))
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(Color.lakkoAccent)
             }

@@ -10,12 +10,14 @@ import SwiftUI
 struct UsernameRuleHint: View {
     let input: String
 
+    @ObservedObject private var l10n = Localization.shared
+
     var body: some View {
         if let message = checkUsername(input).inlineMessage {
             Text(message)
                 .font(.footnote)
                 .foregroundStyle(Color.lakkoDanger)
-                .accessibilityLabel("Username: \(message)")
+                .accessibilityLabel(l10n.t("username.a11y_hint", texts: ["message": message]))
         }
     }
 }

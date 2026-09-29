@@ -86,16 +86,14 @@ public enum PairingScanFailure {
 
     /// The payload names another account (the name typed on the new device
     /// is not this account's username).
-    public static let wrongAccountCopy =
-        "This code is for a different account. Check that the new device uses the same username as this one."
+    public static var wrongAccountCopy: String { Localization.text("device_link.pairing.wrong_account") }
 
     /// The payload comes from a Lakko version this one cannot read.
-    public static let unsupportedCopy =
-        "This code comes from a different version of Lakko. Update Lakko on both devices and try again."
+    public static var unsupportedCopy: String { Localization.text("device_link.pairing.unsupported") }
 
     /// A signed-in account without a username (a guest) has no login
     /// handle, so no pairing code can name it.
-    public static let needsUsernameCopy = "Set a username first to add another device."
+    public static var needsUsernameCopy: String { Localization.text("device_link.pairing.needs_username") }
 
     /// Whether `error` is the core's refusal of a payload naming another
     /// account's handle.
@@ -107,11 +105,13 @@ public enum PairingScanFailure {
     }
 
     /// Copy for a failed scan: the wrong-account and version refusals get
-    /// their own sentence, anything else keeps its description.
+    /// their own sentence, a limit or a lost connection theirs, anything
+    /// else the generic one (ADR-0058: never a core or server message).
     public static func userFacing(_ error: Error) -> String {
         if isWrongAccount(error) { return wrongAccountCopy }
         if case .Unsupported = error as? FfiError { return unsupportedCopy }
-        return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        if let common = AuthErrorCopy.shared(error) { return common }
+        return Localization.text("device_link.request.error.generic")
     }
 }
 

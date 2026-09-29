@@ -26,6 +26,21 @@
  * an invalid name with a generic reason, and an unchecked name blocks a lookup.
  */
 
+import { t, type L10nArgs } from "../l10n";
+
+/** A record whose values are catalog messages rendered on each read, so a
+ *  screen reading it inside a reactive scope follows the language. */
+function keyedRecord<K extends string>(
+  spec: Readonly<Record<K, readonly [string, L10nArgs?]>>,
+): Readonly<Record<K, string>> {
+  const out = {} as Record<K, string>;
+  for (const k of Object.keys(spec) as K[]) {
+    const [key, args] = spec[k];
+    Object.defineProperty(out, k, { enumerable: true, get: () => t(key, args) });
+  }
+  return out;
+}
+
 /** The four stable `usernameError` codes the core throws. */
 export type UsernameErrorCode = "empty" | "tooShort" | "tooLong" | "invalidCharacters";
 
@@ -47,13 +62,19 @@ export type UsernameCheck =
     };
 
 /** UX spec §4 — the reason copy, one string per code. */
-export const USERNAME_REASON: Readonly<Record<UsernameErrorCode | "unknown", string>> = {
-  empty: "Enter a username",
-  tooShort: "At least 3 characters",
-  tooLong: "At most 32 characters",
-  invalidCharacters: "Only Latin letters, digits and _",
-  unknown: "This username can't be used",
+export const USERNAME_REASON_KEYS: Readonly<
+  Record<UsernameErrorCode | "unknown", readonly [string, L10nArgs?]>
+> = {
+  empty: ["username.error.empty"],
+  tooShort: ["username.error.too_short", { count: 3 }],
+  tooLong: ["username.error.too_long", { count: 32 }],
+  invalidCharacters: ["username.error.invalid_characters"],
+  unknown: ["username.error.unknown"],
 };
+
+/** The reason copy by code, in the current language. */
+export const USERNAME_REASON: Readonly<Record<UsernameErrorCode | "unknown", string>> =
+  keyedRecord(USERNAME_REASON_KEYS);
 
 const USERNAME_CODES: ReadonlySet<string> = new Set([
   "empty",
@@ -90,6 +111,18 @@ export function checkUsername(
       raw !== undefined && USERNAME_CODES.has(raw) ? (raw as UsernameErrorCode) : "unknown";
     return { kind: "invalid", code, reason: USERNAME_REASON[code] };
   }
+}
+
+/** The reason copy for an error that carries a username rule code
+ *  (`usernameError`, from the core or from `LoginHandleUsernameError`), in the
+ *  current language; `null` for any other value. */
+export function usernameRuleText(err: unknown): string | null {
+  const raw = codeOf(err, "usernameError");
+  if (raw === undefined) return null;
+  const code: UsernameErrorCode | "unknown" = USERNAME_CODES.has(raw)
+    ? (raw as UsernameErrorCode)
+    : "unknown";
+  return USERNAME_REASON[code];
 }
 
 /** The reason to show under a username field, or `null` for none. A blank
@@ -129,13 +162,14 @@ export type DisplayNameCheck =
     };
 
 /** UX spec §4 — display-name refusal copy. */
-export const DISPLAY_NAME_REASON: Readonly<Record<DisplayNameErrorCode | "unknown", string>> = {
-  lineBreak: "One line only",
-  controlOrFormatCharacter: "Remove invisible or text-direction characters",
-  tooLong: "At most 64 characters",
-  tooManyBytes: "This name is too long",
-  unknown: "This name can't be used",
-};
+export const DISPLAY_NAME_REASON: Readonly<Record<DisplayNameErrorCode | "unknown", string>> =
+  keyedRecord({
+    lineBreak: ["display_name.error.line_break"],
+    controlOrFormatCharacter: ["display_name.error.control"],
+    tooLong: ["display_name.error.too_long", { count: 64 }],
+    tooManyBytes: ["display_name.error.too_many_bytes"],
+    unknown: ["display_name.error.unknown"],
+  });
 
 const DISPLAY_NAME_CODES: ReadonlySet<string> = new Set([
   "lineBreak",

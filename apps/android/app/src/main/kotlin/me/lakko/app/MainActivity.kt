@@ -560,7 +560,7 @@ private fun AppRoot(
         // identity (already published, no proof); show the new recovery
         // phrase for them to save before the session lands.
         is AuthState.SaveFreshPhrase -> InsetRoot {
-            SaveFreshPhraseRoot(repository = authRepository)
+            SaveFreshPhraseRoot(repository = authRepository, username = current.account.username)
         }
         is AuthState.Session -> {
             // Sign-up lands the session the moment the account exists; the
@@ -745,11 +745,13 @@ private fun RestoreIdentityRoot(
 @Composable
 private fun SaveFreshPhraseRoot(
     repository: AuthRepository,
+    username: String,
 ) {
     val phrase = repository.freshPhrase() ?: ""
     me.lakko.app.ui.auth.SaveFreshPhraseScreen(
         phrase = phrase,
         onConfirm = { repository.confirmFreshPhraseSaved() },
+        username = username,
     )
 }
 

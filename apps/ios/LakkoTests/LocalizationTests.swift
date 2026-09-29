@@ -114,4 +114,56 @@ final class LocalizationTests: XCTestCase {
             XCTAssertFalse(l10n.translatedName(of: info).hasPrefix("language.name."), info.code)
         }
     }
+
+    // MARK: - ADR-0058 S5 batch 1 (sign-in, sign-up, recovery)
+
+    func testALinkMessageSplitsAroundTheLink() {
+        let l10n = make(system: ["en-US"])
+        let parts = l10n.linkParts("auth.login.no_account")
+        XCTAssertEqual(parts.lead.trimmingCharacters(in: .whitespaces), "New to Lakko?")
+        XCTAssertEqual(parts.trail, "")
+    }
+
+    func testWordPositionsUseTheListFormatterAndLatinDigits() {
+        let l10n = make(system: ["en-US"])
+        XCTAssertEqual(l10n.positions([3, 7, 15]), "3, 7, and 15")
+        l10n.select("ar")
+        let arabic = l10n.positions([3, 7, 15])
+        XCTAssertTrue(arabic.contains("3") && arabic.contains("7") && arabic.contains("15"), arabic)
+        XCTAssertFalse(arabic.contains("and"), arabic)
+    }
+
+    func testTheOffActorLookupAnswersFromTheCatalog() {
+        XCTAssertNotEqual(Localization.text("auth.error.wrong_credentials"), "auth.error.wrong_credentials")
+        XCTAssertEqual(
+            Localization.text("auth.password.error.too_short", counts: ["count": 8]),
+            Localization.shared.t("auth.password.error.too_short", counts: ["count": 8]))
+    }
+
+    func testAuthErrorsRenderFromTheirCodeNotTheirMessage() {
+        let t = { (key: String) in Localization.text(key) }
+        XCTAssertEqual(
+            AuthErrorCopy.login(AuthClientError.http(status: 401, endpoint: "invalid", body: "server prose")),
+            t("auth.error.wrong_credentials"))
+        XCTAssertEqual(AuthErrorCopy.login(AuthClientError.argument("core prose")), t("auth.error.wrong_credentials"))
+        XCTAssertEqual(
+            AuthErrorCopy.signup(AuthClientError.http(status: 409, endpoint: "taken", body: "")), t("auth.signup.error.username_taken"))
+        XCTAssertEqual(AuthErrorCopy.signup(AuthClientError.http(status: 502, endpoint: "", body: "")), t("common.error.unavailable"))
+        XCTAssertEqual(
+            AuthErrorCopy.recover(FfiError.Mnemonic(message: "bad checksum")),
+            t("restore_identity.error.invalid_phrase"))
+        XCTAssertEqual(AuthErrorCopy.recover(AuthClientError.http(status: 401, endpoint: "", body: "")), t("recovery.error.no_match"))
+        XCTAssertEqual(
+            AuthErrorCopy.totp(AuthClientError.http(status: 401, endpoint: "", body: ""), typedUsername: true),
+            t("recovery.totp.error.wrong_username"))
+        XCTAssertEqual(
+            AuthErrorCopy.contact(AuthClientError.http(status: 418, endpoint: "", body: ""), sending: true),
+            t("recovery.contact.error.send_failed"))
+        XCTAssertEqual(AuthErrorCopy.identityRestore(PhraseMismatch()), t("restore_identity.error.phrase_mismatch"))
+        XCTAssertEqual(AuthErrorCopy.deviceRestore(PhraseMismatch()), t("device_link.error.identity_mismatch"))
+        XCTAssertEqual(
+            AuthErrorCopy.deviceRestore(IdentityVerificationUnavailable("diagnostic", kind: .missing)),
+            t("restore_identity.error.not_published"))
+        XCTAssertEqual(AuthErrorCopy.deviceRestore(DeviceRestoreNotLetIn()), t("device_link.error.not_let_in"))
+    }
 }

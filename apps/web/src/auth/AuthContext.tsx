@@ -177,6 +177,7 @@ import {
 import { deleteFloor } from "../backup/floor-store";
 import { restoreFromServerBackupFromPhraseString } from "../backup/restore";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
+import { KeyedError } from "../l10n/keyed-error";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -259,9 +260,14 @@ export class SupersessionPhraseMismatch extends Error {
  *  push a socially-engineered wrong phrase into the published identity.
  *  Surfaced as a retryable error, not a dead end. */
 export class IdentityVerificationUnavailable extends Error {
-  constructor(message: string) {
+  /** `missing`: no published identity to check against; `unreachable`: the
+   *  directory could not be reached. The screen renders its sentence from
+   *  this (ADR-0058), `message` stays for the logs. */
+  readonly kind: "missing" | "unreachable";
+  constructor(kind: "missing" | "unreachable", message: string) {
     super(message);
     this.name = "IdentityVerificationUnavailable";
+    this.kind = kind;
   }
 }
 
@@ -1910,25 +1916,22 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         assertion = await webauthn.loginWithPasskey({ prfSalt: PASSKEY_PRF_SALT });
       } catch (err) {
         if (err instanceof WebauthnUserCancelledError) {
-          throw new Error("Passkey sign-in cancelled.");
+          throw new KeyedError("auth.passkey.error.cancelled");
         }
         if (err instanceof WebauthnUnsupportedError) {
-          throw new Error("This browser doesn't support passkeys.");
+          throw new KeyedError("auth.passkey.error.unsupported");
         }
         if (err instanceof WebauthnHttpError) {
           if (err.status === 503) {
-            throw new Error("Server hasn't enabled passkey support.");
+            throw new KeyedError("auth.passkey.error.server_disabled");
           }
           if (err.status === 404) {
-            throw new Error(
-              "No passkey is registered for this account. Sign in with " +
-                "password first, then add a passkey from Home.",
-            );
+            throw new KeyedError("auth.passkey.error.not_registered");
           }
-          throw new Error(`Passkey sign-in failed (${err.status}).`);
+          throw new KeyedError("auth.passkey.error.failed_status", { status: String(err.status) });
         }
         if (err instanceof WebauthnNetworkError) {
-          throw new Error("Network error during passkey sign-in.");
+          throw new KeyedError("auth.passkey.error.network");
         }
         throw err;
       }
@@ -2001,10 +2004,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         exportKey = null;
       }
       if (exportKey === null) {
-        throw new Error(
-          "No cached credentials for passkey sign-in on this device. " +
-            "Sign in with password or recover with your phrase first.",
-        );
+        throw new KeyedError("auth.passkey.error.no_cached");
       }
 
       // From here on we have everything we need to reconstruct
@@ -3679,6 +3679,7 @@ async function verifySeedAgainstPublishedIdentity(args: {
     if (bundle === null) {
       args.accountIdentitySeed.fill(0);
       throw new IdentityVerificationUnavailable(
+        "missing",
         "No published identity was found to verify the recovered " +
           "identity. Try again, or restore from a device that still " +
           "has your account.",
@@ -3703,6 +3704,7 @@ async function verifySeedAgainstPublishedIdentity(args: {
     // eslint-disable-next-line no-console
     console.warn("identity-seed verification fetch failed", err);
     throw new IdentityVerificationUnavailable(
+      "unreachable",
       "Could not reach the directory to verify the recovered identity. " +
         "Check your connection and try again.",
     );

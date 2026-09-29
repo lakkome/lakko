@@ -2,12 +2,552 @@
   "format": 1,
   "language": "he",
   "messages": {
+    "auth.brand.body": {
+      "text": "צ׳אטים, קבוצות, ערוצים ושיחות – מוצפנים מקצה לקצה כברירת מחדל. השרתים של Lakko אף פעם לא רואים את ההודעות שלכם.",
+      "status": "machine"
+    },
+    "auth.brand.foot": {
+      "text": "קוד פתוח. לא נדרש מספר טלפון.",
+      "status": "machine"
+    },
+    "auth.brand.tagline": {
+      "text": "ההודעות שלכם, הכללים שלכם.",
+      "status": "machine"
+    },
+    "auth.error.wrong_credentials": {
+      "text": "שם משתמש או סיסמה שגויים. בדקו אותם ונסו שוב.",
+      "status": "machine"
+    },
+    "auth.explainer.never_leaves": {
+      "text": "הסיסמה שלכם אף פעם לא יוצאת מהמכשיר. Lakko בודקת אותה בלי לקבל אותה אף פעם, כך שאף אחד ב-Lakko לא יכול לקרוא אותה, ואף אחד לא יכול לאפס אותה עבורכם.",
+      "status": "machine"
+    },
+    "auth.explainer.same_answer": {
+      "text": "שם משתמש שגוי וסיסמה שגויה מקבלים אותה תשובה, כך שאי אפשר להשתמש במסך ההתחברות כדי לגלות אילו שמות משתמש קיימים.",
+      "status": "machine"
+    },
+    "auth.explainer.title": {
+      "text": "איך Lakko מגנה על הסיסמה שלכם",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back": {
+      "text": "אם שכחתם אותה, תוכלו לחזור לחשבון בעזרת ביטוי השחזור, מכשיר אחר שעדיין מחובר, שלוש מילים מהביטוי, אפליקציית אימות, או קוד שנשלח בדוא״ל או בטלפון.",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back_no_words": {
+      "text": "אם שכחתם אותה, תוכלו לחזור לחשבון בעזרת ביטוי השחזור, מכשיר אחר שעדיין מחובר, אפליקציית אימות, או קוד שנשלח בדוא״ל או בטלפון.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "שינוי שפה",
       "status": "machine"
     },
+    "auth.login.forgot": {
+      "text": "שכחתם את הסיסמה?",
+      "status": "machine"
+    },
+    "auth.login.lede": {
+      "text": "התחברו כדי להמשיך.",
+      "status": "machine"
+    },
+    "auth.login.no_account": {
+      "text": "חדשים ב-Lakko? {link}",
+      "status": "machine"
+    },
+    "auth.login.passkey": {
+      "text": "שימוש במפתח גישה",
+      "status": "machine"
+    },
+    "auth.login.submit": {
+      "text": "התחברות",
+      "status": "machine"
+    },
+    "auth.login.submitting": {
+      "text": "מתחברים...",
+      "status": "machine"
+    },
+    "auth.login.title": {
+      "text": "ברוכים השבים",
+      "status": "machine"
+    },
+    "auth.passkey.error.cancelled": {
+      "text": "ההתחברות עם מפתח הגישה בוטלה.",
+      "status": "machine"
+    },
+    "auth.passkey.error.failed_status": {
+      "text": "ההתחברות עם מפתח הגישה נכשלה ({status}).",
+      "status": "machine"
+    },
+    "auth.passkey.error.generic": {
+      "text": "לא ניתן היה להתחבר עם מפתח הגישה. נסו שוב, או השתמשו בסיסמה.",
+      "status": "machine"
+    },
+    "auth.passkey.error.network": {
+      "text": "שגיאת רשת במהלך ההתחברות עם מפתח הגישה.",
+      "status": "machine"
+    },
+    "auth.passkey.error.no_cached": {
+      "text": "אין במכשיר זה פרטי התחברות שמורים עבור מפתח גישה. התחברו קודם עם סיסמה או שחזרו עם ביטוי השחזור.",
+      "status": "machine"
+    },
+    "auth.passkey.error.not_registered": {
+      "text": "לא רשום מפתח גישה לחשבון זה. התחברו קודם עם סיסמה, ואז הוסיפו מפתח גישה ממסך הבית.",
+      "status": "machine"
+    },
+    "auth.passkey.error.server_disabled": {
+      "text": "השרת לא הפעיל תמיכה במפתחות גישה.",
+      "status": "machine"
+    },
+    "auth.passkey.error.unsupported": {
+      "text": "הדפדפן הזה לא תומך במפתחות גישה.",
+      "status": "machine"
+    },
+    "auth.passkey.error.wrong_account": {
+      "text": "מפתח הגישה הזה שייך לחשבון אחר מזה שבמכשיר הזה. התחברו קודם עם הסיסמה.",
+      "status": "machine"
+    },
+    "auth.password.confirm.label": {
+      "text": "אימות סיסמה",
+      "status": "machine"
+    },
+    "auth.password.error.mismatch": {
+      "text": "הסיסמאות אינן תואמות. הקלידו את אותה סיסמה פעמיים.",
+      "status": "machine"
+    },
+    "auth.password.error.too_short": {
+      "text": "יש להשתמש לפחות ב{count, plural, one {תו אחד} two {שני תווים} other {־# תווים}}.",
+      "status": "machine"
+    },
+    "auth.password.hide": {
+      "text": "הסתרת הסיסמה",
+      "status": "machine"
+    },
+    "auth.password.hint": {
+      "text": "לפחות {count, plural, one {תו אחד} two {שני תווים} other {# תווים}}.",
+      "status": "machine"
+    },
+    "auth.password.label": {
+      "text": "סיסמה",
+      "status": "machine"
+    },
+    "auth.password.new.label": {
+      "text": "סיסמה חדשה",
+      "status": "machine"
+    },
+    "auth.password.new_confirm.label": {
+      "text": "אימות הסיסמה החדשה",
+      "status": "machine"
+    },
+    "auth.password.show": {
+      "text": "הצגת הסיסמה",
+      "status": "machine"
+    },
+    "auth.signup.error.enter_username": {
+      "text": "הזינו שם משתמש.",
+      "status": "machine"
+    },
+    "auth.signup.error.fix_name": {
+      "text": "תקנו את השם לפני שממשיכים.",
+      "status": "machine"
+    },
+    "auth.signup.error.generic": {
+      "text": "לא ניתן היה ליצור את החשבון. נסו שוב.",
+      "status": "machine"
+    },
+    "auth.signup.error.rate_limited": {
+      "text": "יותר מדי חשבונות חדשים מהרשת הזו כרגע. נסו שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "auth.signup.error.username_taken": {
+      "text": "שם המשתמש הזה תפוס. בחרו שם אחר.",
+      "status": "machine"
+    },
+    "auth.signup.have_account": {
+      "text": "כבר יש לכם חשבון? {link}",
+      "status": "machine"
+    },
+    "auth.signup.lede": {
+      "text": "הסיסמה שלכם אף פעם לא יוצאת מהמכשיר. בשלב הבא תקבלו ביטוי שחזור שצריך לרשום.",
+      "status": "machine"
+    },
+    "auth.signup.name.hint": {
+      "text": "יוצג לאנשי הקשר שלכם. השאירו ריק כדי להציג את שם המשתמש.",
+      "status": "machine"
+    },
+    "auth.signup.name.label": {
+      "text": "שם (לא חובה)",
+      "status": "machine"
+    },
+    "auth.signup.submit": {
+      "text": "יצירת חשבון",
+      "status": "machine"
+    },
+    "auth.signup.title": {
+      "text": "יצירת החשבון שלכם",
+      "status": "machine"
+    },
+    "auth.signup.username.hint": {
+      "text": "אותיות לטיניות, ספרות ו-_. אחרים מוצאים אתכם לפי השם הזה.",
+      "status": "machine"
+    },
+    "auth.signup.working.line": {
+      "text": "זה לוקח קצת זמן, פעם אחת בלבד. לא תצטרכו לחכות ככה שוב.",
+      "status": "machine"
+    },
+    "auth.signup.working.title": {
+      "text": "יוצרים את החשבון שלכם...",
+      "status": "machine"
+    },
+    "auth.username.label": {
+      "text": "שם משתמש",
+      "status": "machine"
+    },
+    "call.guest.working.title": {
+      "text": "מכניסים אתכם לשיחה...",
+      "status": "machine"
+    },
+    "chats.empty.select": {
+      "text": "בחרו צ׳אט כדי להתחיל לשלוח הודעות",
+      "status": "machine"
+    },
+    "common.back": {
+      "text": "חזרה",
+      "status": "machine"
+    },
+    "common.cancel": {
+      "text": "ביטול",
+      "status": "machine"
+    },
+    "common.checking": {
+      "text": "בודקים...",
+      "status": "machine"
+    },
     "common.close": {
       "text": "סגירה",
+      "status": "machine"
+    },
+    "common.confirm": {
+      "text": "אישור",
+      "status": "machine"
+    },
+    "common.continue": {
+      "text": "המשך",
+      "status": "machine"
+    },
+    "common.copied": {
+      "text": "הועתק",
+      "status": "machine"
+    },
+    "common.copy": {
+      "text": "העתקה",
+      "status": "machine"
+    },
+    "common.dismiss": {
+      "text": "סגירה",
+      "status": "machine"
+    },
+    "common.done": {
+      "text": "סיום",
+      "status": "machine"
+    },
+    "common.email": {
+      "text": "דוא״ל",
+      "status": "machine"
+    },
+    "common.error.a11y": {
+      "text": "שגיאה: {message}",
+      "status": "machine"
+    },
+    "common.error.offline": {
+      "text": "לא ניתן היה להתחבר ל-Lakko. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "common.error.server_unreachable": {
+      "text": "לא ניתן היה להתחבר לשרת. בדקו את החיבור.",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts": {
+      "text": "יותר מדי ניסיונות. המתינו רגע ונסו שוב.",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts_minutes": {
+      "text": "יותר מדי ניסיונות. נסו שוב בעוד {minutes, plural, one {דקה} two {שתי דקות} other {# דקות}}.",
+      "status": "machine"
+    },
+    "common.error.unavailable": {
+      "text": "האפשרות הזו לא זמינה כרגע. נסו שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "common.loading": {
+      "text": "טוען...",
+      "status": "machine"
+    },
+    "common.looking_up": {
+      "text": "מחפשים...",
+      "status": "machine"
+    },
+    "common.more_options": {
+      "text": "אפשרויות נוספות",
+      "status": "machine"
+    },
+    "common.optional": {
+      "text": "לא חובה",
+      "status": "machine"
+    },
+    "common.paste": {
+      "text": "הדבקה",
+      "status": "machine"
+    },
+    "common.phone": {
+      "text": "טלפון",
+      "status": "machine"
+    },
+    "common.preparing": {
+      "text": "מכינים...",
+      "status": "machine"
+    },
+    "common.sending": {
+      "text": "שולחים...",
+      "status": "machine"
+    },
+    "common.try_again": {
+      "text": "ניסיון חוזר",
+      "status": "machine"
+    },
+    "device_link.compare_hint": {
+      "text": "ודאו שבמכשיר השני מוצג אותו קוד.",
+      "status": "machine"
+    },
+    "device_link.comparison_code": {
+      "text": "קוד השוואה",
+      "status": "machine"
+    },
+    "device_link.confirm_there": {
+      "text": "פתחו את Lakko במכשיר שכבר מחובר ואשרו שם את ההתחברות הזו.",
+      "status": "machine"
+    },
+    "device_link.error.ask_unavailable": {
+      "text": "פנייה למכשיר האחר שלכם לא זמינה כרגע; קוד ה-QR עדיין עובד.",
+      "status": "machine"
+    },
+    "device_link.error.ask_unreachable": {
+      "text": "לא ניתן היה להתחבר לשרת כדי לפנות למכשיר האחר שלכם; קוד ה-QR עדיין עובד.",
+      "status": "machine"
+    },
+    "device_link.error.declined": {
+      "text": "נדחה במכשיר אחר.",
+      "status": "machine"
+    },
+    "device_link.error.generic": {
+      "text": "לא ניתן היה לשחזר מהמכשיר האחר שלכם. נסו שוב, או השתמשו בביטוי השחזור.",
+      "status": "machine"
+    },
+    "device_link.error.identity_mismatch": {
+      "text": "הזהות שהתקבלה מהמכשיר האחר שלכם אינה תואמת לזהות המפורסמת של החשבון הזה – היא לא תשמש.",
+      "status": "machine"
+    },
+    "device_link.error.name_other_account": {
+      "text": "השם שהקלדתם שייך לחשבון אחר. שום דבר לא שונה במכשיר הזה.",
+      "status": "machine"
+    },
+    "device_link.error.no_identity": {
+      "text": "המכשיר האחר אישר אבל לא שלח את הזהות שלכם. עדכנו בו את Lakko ונסו שוב, או השתמשו בביטוי השחזור.",
+      "status": "machine"
+    },
+    "device_link.error.not_let_in": {
+      "text": "המכשיר האחר שלכם שלח את הזהות, אבל לא ניתן היה להכניס את המכשיר הזה. נסו שוב, או השתמשו בביטוי השחזור.",
+      "status": "machine"
+    },
+    "device_link.error.request_limited": {
+      "text": "יותר מדי בקשות למכשירים האחרים שלכם. נסו שוב בעוד כמה דקות.",
+      "status": "machine"
+    },
+    "device_link.error.timeout": {
+      "text": "המכשיר האחר לא ענה בזמן. נסו שוב.",
+      "status": "machine"
+    },
+    "device_link.pairing.needs_username": {
+      "text": "כדי להוסיף מכשיר נוסף, קבעו קודם שם משתמש.",
+      "status": "machine"
+    },
+    "device_link.pairing.unsupported": {
+      "text": "הקוד הזה מגיע מגרסה אחרת של Lakko. עדכנו את Lakko בשני המכשירים ונסו שוב.",
+      "status": "machine"
+    },
+    "device_link.pairing.wrong_account": {
+      "text": "הקוד הזה שייך לחשבון אחר. ודאו שבמכשיר החדש משתמשים באותו שם משתמש כמו כאן.",
+      "status": "machine"
+    },
+    "device_link.qr.hide": {
+      "text": "הסתרת קוד ה-QR",
+      "status": "machine"
+    },
+    "device_link.qr.intro": {
+      "text": "הציגו את הקוד הזה למכשיר שעדיין יש בו את החשבון שלכם. הוא יוסיף את המכשיר הזה ויעביר את הזהות שלכם בהצפנה מקצה לקצה, בלי להקליד ביטוי.",
+      "status": "machine"
+    },
+    "device_link.qr.scan_hint": {
+      "text": "במכשיר האחר שלכם, פתחו את ההגדרות, אחר כך מכשירים, אחר כך הוספת מכשיר, וסרקו את הקוד הזה.",
+      "status": "machine"
+    },
+    "device_link.qr.show": {
+      "text": "הצגת קוד QR במקום זאת",
+      "status": "machine"
+    },
+    "device_link.qr.waiting": {
+      "text": "ממתינים שהמכשיר האחר שלכם יסרוק את הקוד...",
+      "status": "machine"
+    },
+    "device_link.request.added": {
+      "text": "המכשיר נוסף.",
+      "status": "machine"
+    },
+    "device_link.request.adding": {
+      "text": "מוסיפים את המכשיר...",
+      "status": "machine"
+    },
+    "device_link.request.body": {
+      "text": "מכשיר חדש מבקש להצטרף לחשבון שלכם. מוצג בו קוד.",
+      "status": "machine"
+    },
+    "device_link.request.code_label": {
+      "text": "הקוד במכשיר החדש",
+      "status": "machine"
+    },
+    "device_link.request.confirm": {
+      "text": "כן, להוסיף",
+      "status": "machine"
+    },
+    "device_link.request.confirm_only_if": {
+      "text": "אשרו רק אם במכשיר החדש מוצג בדיוק הקוד הזה.",
+      "status": "machine"
+    },
+    "device_link.request.decline": {
+      "text": "זה לא אני",
+      "status": "machine"
+    },
+    "device_link.request.declined": {
+      "text": "נדחה. אם זה ממשיך לקרות, שנו את הסיסמה.",
+      "status": "machine"
+    },
+    "device_link.request.error.generic": {
+      "text": "לא ניתן היה להוסיף את המכשיר. נסו שוב.",
+      "status": "machine"
+    },
+    "device_link.request.error.no_device_key": {
+      "text": "אין מפתח מכשיר בדפדפן הזה. התחברו שוב.",
+      "status": "machine"
+    },
+    "device_link.request.title": {
+      "text": "האם זה אתם?",
+      "status": "machine"
+    },
+    "device_link.restored": {
+      "text": "שוחזר.",
+      "status": "machine"
+    },
+    "device_link.show_code": {
+      "text": "הצגת קוד צימוד",
+      "status": "machine"
+    },
+    "device_link.transferring": {
+      "text": "מעבירים...",
+      "status": "machine"
+    },
+    "devices.add.e2ee_note": {
+      "text": "הקישור מוצפן מקצה לקצה בין שני המכשירים שלכם.",
+      "status": "machine"
+    },
+    "devices.add.error.generic": {
+      "text": "לא ניתן היה לקשר את המכשיר הזה. נסו שוב.",
+      "status": "machine"
+    },
+    "devices.add.joining": {
+      "text": "מקשרים את המכשיר הזה...",
+      "status": "machine"
+    },
+    "devices.add.linked": {
+      "text": "המכשיר קושר. הוא חלק מהחשבון שלכם עכשיו.",
+      "status": "machine"
+    },
+    "devices.add.side.scan": {
+      "text": "סריקת קוד",
+      "status": "machine"
+    },
+    "devices.add.side.scan_detail": {
+      "text": "המכשיר הזה כבר מחובר: הוא סורק את הקוד של המכשיר החדש ומכניס אותו.",
+      "status": "machine"
+    },
+    "devices.add.side.show": {
+      "text": "הצגת קוד",
+      "status": "machine"
+    },
+    "devices.add.side.show_detail": {
+      "text": "זה המכשיר החדש: הוא מצטרף לחשבון שלכם אחרי שמכשיר אחר סורק את הקוד שלו.",
+      "status": "machine"
+    },
+    "devices.add.sign_in_first": {
+      "text": "כדי להוסיף מכשיר צריך להתחבר קודם.",
+      "status": "machine"
+    },
+    "devices.add.title": {
+      "text": "הוספת מכשיר",
+      "status": "machine"
+    },
+    "devices.scan.confirm.body": {
+      "text": "הפעולה נותנת למכשיר שנסרק גישה מלאה לחשבון שלכם: להודעות, לאנשי הקשר ולזהות שלכם. המשיכו רק אם הקוד מוצג במכשיר החדש שלכם.",
+      "status": "machine"
+    },
+    "devices.scan.confirm.submit": {
+      "text": "קישור המכשיר",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title": {
+      "text": "לקשר את המכשיר הזה?",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied": {
+      "text": "ל-Lakko אין גישה למצלמה. אפשרו גישה למצלמה בהגדרות ונסו שוב.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_failed": {
+      "text": "לא ניתן היה להפעיל את המצלמה. נסו שוב.",
+      "status": "machine"
+    },
+    "devices.scan.error.no_camera": {
+      "text": "אין מצלמה אחורית במכשיר הזה.",
+      "status": "machine"
+    },
+    "devices.scan.error.not_a_code": {
+      "text": "זה לא קוד מכשיר של Lakko. כוונו את המצלמה אל הקוד במכשיר האחר שלכם.",
+      "status": "machine"
+    },
+    "devices.scan.intro": {
+      "text": "כוונו את המצלמה אל הקוד שמוצג במכשיר החדש.",
+      "status": "machine"
+    },
+    "devices.scan.open_camera": {
+      "text": "פתיחת המצלמה",
+      "status": "machine"
+    },
+    "display_name.error.control": {
+      "text": "הסירו תווים בלתי נראים או תווי כיווניות טקסט",
+      "status": "machine"
+    },
+    "display_name.error.line_break": {
+      "text": "שורה אחת בלבד",
+      "status": "machine"
+    },
+    "display_name.error.too_long": {
+      "text": "לכל היותר {count, plural, one {תו אחד} two {שני תווים} other {# תווים}}",
+      "status": "machine"
+    },
+    "display_name.error.too_many_bytes": {
+      "text": "השם הזה ארוך מדי",
+      "status": "machine"
+    },
+    "display_name.error.unknown": {
+      "text": "לא ניתן להשתמש בשם הזה",
       "status": "machine"
     },
     "language.name.ar": {
@@ -72,6 +612,514 @@
     },
     "nav.settings": {
       "text": "הגדרות",
+      "status": "machine"
+    },
+    "recovery.access_only_note": {
+      "text": "אפליקציית אימות או קוד יחזירו אתכם לחשבון; לאחר מכן הצ׳אטים שלכם ידרשו את ביטוי השחזור או מכשיר אחר.",
+      "status": "machine"
+    },
+    "recovery.cached_account": {
+      "text": "{username} במכשיר הזה",
+      "status": "machine"
+    },
+    "recovery.contact.change": {
+      "text": "שימוש בדוא״ל או בטלפון אחר",
+      "status": "machine"
+    },
+    "recovery.contact.code_label": {
+      "text": "הקוד ששלחנו",
+      "status": "machine"
+    },
+    "recovery.contact.email_label": {
+      "text": "כתובת דוא״ל",
+      "status": "machine"
+    },
+    "recovery.contact.error.bad_contact": {
+      "text": "זה לא נראה כמו כתובת דוא״ל או מספר טלפון. בדקו ונסו שוב.",
+      "status": "machine"
+    },
+    "recovery.contact.error.enter_code": {
+      "text": "הזינו את הקוד בן שש הספרות ששלחנו.",
+      "status": "machine"
+    },
+    "recovery.contact.error.generic": {
+      "text": "לא ניתן היה לבדוק את הקוד. נסו שוב.",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_email": {
+      "text": "הזינו כתובת דוא״ל תקינה.",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_phone": {
+      "text": "הזינו את מספר הטלפון בפורמט בינלאומי, למשל +15551234567.",
+      "status": "machine"
+    },
+    "recovery.contact.error.send_failed": {
+      "text": "לא ניתן היה לשלוח קוד. בדקו את שם המשתמש ונסו שוב.",
+      "status": "machine"
+    },
+    "recovery.contact.error.unavailable": {
+      "text": "שחזור באמצעות דוא״ל וטלפון לא זמין כאן. השתמשו בדרך אחרת.",
+      "status": "machine"
+    },
+    "recovery.contact.error.wrong": {
+      "text": "הקוד לא עבד. בדקו את הקוד ששלחנו ונסו שוב.",
+      "status": "machine"
+    },
+    "recovery.contact.intro": {
+      "text": "נשלח קוד בן שש ספרות לכתובת הדוא״ל או למספר הטלפון שהגדרתם בהגדרות. הקוד יחזיר אתכם לחשבון; לאחר מכן הצ׳אטים שלכם ידרשו את ביטוי השחזור או מכשיר אחר.",
+      "status": "machine"
+    },
+    "recovery.contact.phone_label": {
+      "text": "מספר טלפון",
+      "status": "machine"
+    },
+    "recovery.contact.send": {
+      "text": "שליחת קוד",
+      "status": "machine"
+    },
+    "recovery.contact.send_by": {
+      "text": "שליחת הקוד באמצעות",
+      "status": "machine"
+    },
+    "recovery.contact.sent_email": {
+      "text": "אם הכתובת הזו מוגדרת לחשבון הזה, קוד בן שש ספרות בדרך. הזינו אותו למטה.",
+      "status": "machine"
+    },
+    "recovery.contact.sent_phone": {
+      "text": "אם המספר הזה מוגדר לחשבון הזה, קוד בן שש ספרות בדרך. הזינו אותו למטה.",
+      "status": "machine"
+    },
+    "recovery.device.intro": {
+      "text": "הזינו את שם המשתמש, ואז אשרו במכשיר שעדיין מחובר והשוו את הקוד שמוצג בו. לא נשלח שום דבר שהשרתים של Lakko יכולים לקרוא. לא צריך מצלמה; קוד QR זמין אם מעדיפים.",
+      "status": "machine"
+    },
+    "recovery.device.intro_qr": {
+      "text": "המכשיר האחר שלכם יקשר את המכשיר הזה ויעביר אליו את החשבון.",
+      "status": "machine"
+    },
+    "recovery.device.restoring": {
+      "text": "משחזרים את {username}",
+      "status": "machine"
+    },
+    "recovery.error.code_send_limited": {
+      "text": "שלחנו קוד לא מזמן. המתינו כמה דקות לפני שמבקשים קוד נוסף.",
+      "status": "machine"
+    },
+    "recovery.error.generic": {
+      "text": "לא ניתן היה לשחזר את החשבון. בדקו את המילים ונסו שוב.",
+      "status": "machine"
+    },
+    "recovery.error.no_match": {
+      "text": "הפרטים לא תואמים לחשבון הזה. בדקו את המילים ואת שם המשתמש ונסו שוב.",
+      "status": "machine"
+    },
+    "recovery.lede": {
+      "text": "בחרו איך לחזור לחשבון.",
+      "status": "machine"
+    },
+    "recovery.lede_account": {
+      "text": "בחרו איך לחזור אל {username}.",
+      "status": "machine"
+    },
+    "recovery.method.contact.sub": {
+      "text": "קוד שנשלח לדוא״ל או לטלפון שהגדרתם.",
+      "status": "machine"
+    },
+    "recovery.method.contact.title": {
+      "text": "דוא״ל או טלפון",
+      "status": "machine"
+    },
+    "recovery.method.device.sub": {
+      "text": "אישור ממכשיר שעדיין מחובר.",
+      "status": "machine"
+    },
+    "recovery.method.device.title": {
+      "text": "מכשיר אחר",
+      "status": "machine"
+    },
+    "recovery.method.phrase.restore_sub": {
+      "text": "הקלידו את כל 24 המילים.",
+      "status": "machine"
+    },
+    "recovery.method.phrase.sub": {
+      "text": "הקלידו את 24 המילים ובחרו סיסמה חדשה.",
+      "status": "machine"
+    },
+    "recovery.method.phrase.title": {
+      "text": "ביטוי שחזור",
+      "status": "machine"
+    },
+    "recovery.method.shares.sub": {
+      "text": "החלקים שנתתם לאנשים שאתם סומכים עליהם.",
+      "status": "machine"
+    },
+    "recovery.method.shares.title": {
+      "text": "חלקי שחזור חברתי",
+      "status": "machine"
+    },
+    "recovery.method.totp.sub": {
+      "text": "קוד מאפליקציית האימות שלכם.",
+      "status": "machine"
+    },
+    "recovery.method.totp.title": {
+      "text": "אפליקציית אימות",
+      "status": "machine"
+    },
+    "recovery.method.words.restore_sub": {
+      "text": "שלוש מילים מביטוי השחזור שלכם.",
+      "status": "machine"
+    },
+    "recovery.method.words.sub": {
+      "text": "שלוש מילים מהביטוי, אם קיצור הדרך הזה מופעל.",
+      "status": "machine"
+    },
+    "recovery.method.words.title": {
+      "text": "שלוש מילים",
+      "status": "machine"
+    },
+    "recovery.methods.back": {
+      "text": "חזרה לכל השיטות",
+      "status": "machine"
+    },
+    "recovery.phrase.intro": {
+      "text": "הקלידו את 24 המילים שלכם, ואז בחרו סיסמה חדשה.",
+      "status": "machine"
+    },
+    "recovery.remembered": {
+      "text": "נזכרתם בסיסמה? {link}",
+      "status": "machine"
+    },
+    "recovery.shares.copy_failed": {
+      "text": "לא ניתן היה להעתיק. סמנו את החלק והעתיקו אותו ידנית.",
+      "status": "machine"
+    },
+    "recovery.shares.error.combine_failed": {
+      "text": "לא ניתן היה לשלב את החלקים. ודאו שכל אחד מהם שלם ונסו שוב.",
+      "status": "machine"
+    },
+    "recovery.shares.error.generic": {
+      "text": "לא ניתן היה ליצור את החלקים. נסו שוב.",
+      "status": "machine"
+    },
+    "recovery.shares.error.too_few": {
+      "text": "הדביקו לפחות שני חלקים, אחד בכל שורה.",
+      "status": "machine"
+    },
+    "recovery.shares.generate": {
+      "text": "יצירת {count, plural, one {חלק אחד} two {שני חלקים} other {# חלקים}}",
+      "status": "machine"
+    },
+    "recovery.shares.generating": {
+      "text": "יוצרים...",
+      "status": "machine"
+    },
+    "recovery.shares.help": {
+      "text": "הדביקו אותם בדיוק כפי שנשלחו. תצטרכו כמה שסוכם כשהם נוצרו, בדרך כלל 3 מתוך 5.",
+      "status": "machine"
+    },
+    "recovery.shares.intro": {
+      "text": "הדביקו את החלקים שקיבלתם, אחד בכל שורה, ואז בחרו סיסמה חדשה.",
+      "status": "machine"
+    },
+    "recovery.shares.label": {
+      "text": "חלקי שחזור, אחד בכל שורה",
+      "status": "machine"
+    },
+    "recovery.shares.panel_body": {
+      "text": "פצלו את הביטוי ל{count, plural, one {חלק אחד} two {שני חלקים} other {־# חלקים}} עבור אנשים שאתם סומכים עליהם. כל {threshold} מהם משחזרים אותו; פחות מזה לא חושפים דבר. תנו לכל אדם חלק אחד.",
+      "status": "machine"
+    },
+    "recovery.shares.usage": {
+      "text": "כדי להשתמש בהם בהמשך, בחרו {method} במסך השחזור והדביקו {threshold} כלשהם.",
+      "status": "machine"
+    },
+    "recovery.submit": {
+      "text": "שחזור החשבון",
+      "status": "machine"
+    },
+    "recovery.title": {
+      "text": "שחזור החשבון שלכם",
+      "status": "machine"
+    },
+    "recovery.totp.code_label": {
+      "text": "הקוד מהאפליקציה",
+      "status": "machine"
+    },
+    "recovery.totp.error.enter_code": {
+      "text": "הזינו את הקוד בן שש הספרות מאפליקציית האימות.",
+      "status": "machine"
+    },
+    "recovery.totp.error.generic": {
+      "text": "לא ניתן היה לבדוק את הקוד. נסו שוב.",
+      "status": "machine"
+    },
+    "recovery.totp.error.unavailable": {
+      "text": "שחזור באמצעות אפליקציית אימות לא זמין כאן. השתמשו בדרך אחרת.",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong": {
+      "text": "הקוד לא עבד. בדקו את האפליקציה ונסו את הקוד הבא.",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong_username": {
+      "text": "הקוד לא עבד. בדקו את שם המשתמש ואת האפליקציה ונסו שוב.",
+      "status": "machine"
+    },
+    "recovery.totp.intro": {
+      "text": "השתמשו בקוד בן שש הספרות מאפליקציית האימות שהגדרתם בהגדרות. הקוד יחזיר אתכם לחשבון; לאחר מכן הצ׳אטים שלכם ידרשו את ביטוי השחזור או מכשיר אחר.",
+      "status": "machine"
+    },
+    "recovery.username_required": {
+      "text": "הזינו את שם המשתמש של החשבון.",
+      "status": "machine"
+    },
+    "recovery.username_required_to_recover": {
+      "text": "הזינו את שם המשתמש של החשבון שברצונכם לשחזר.",
+      "status": "machine"
+    },
+    "recovery.words.error.generic": {
+      "text": "לא ניתן היה לבדוק את המילים. נסו שוב.",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match": {
+      "text": "המילים לא תואמות.",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match_tries": {
+      "text": "המילים לא תואמות. {count, plural, one {נותר ניסיון אחד} two {נותרו שני ניסיונות} other {נותרו # ניסיונות}} לפני שקיצור הדרך של שלוש המילים יכובה.",
+      "status": "machine"
+    },
+    "recovery.words.error.open_failed": {
+      "text": "השרת ענה, אבל לא ניתן היה לפתוח את נתוני השחזור. שום דבר לא שונה.",
+      "status": "machine"
+    },
+    "recovery.words.error.server_off": {
+      "text": "שחזור באמצעות שלוש מילים לא זמין בשרת הזה.",
+      "status": "machine"
+    },
+    "recovery.words.intro": {
+      "text": "הקלידו שלוש מילים מביטוי השחזור ובחרו סיסמה חדשה. קודם כול, איזה חשבון?",
+      "status": "machine"
+    },
+    "recovery.words.prompt": {
+      "text": "{username}: הקלידו את המילים {positions} מביטוי השחזור.",
+      "status": "machine"
+    },
+    "recovery.words.prompt_restore": {
+      "text": "הקלידו את המילים {positions} מביטוי השחזור.",
+      "status": "machine"
+    },
+    "recovery.words.switched_off": {
+      "text": "קיצור הדרך של שלוש המילים כובה עכשיו לחשבון הזה. השתמשו בביטוי השחזור המלא או במכשיר אחר.",
+      "status": "machine"
+    },
+    "recovery.words.switched_off_restore": {
+      "text": "קיצור הדרך של שלוש המילים כובה עכשיו לחשבון הזה. השתמשו במכשיר אחר או בביטוי השחזור המלא.",
+      "status": "machine"
+    },
+    "recovery.words.tries_left": {
+      "text": "{count, plural, one {נותר ניסיון אחד.} two {נותרו שני ניסיונות.} other {נותרו # ניסיונות.}}",
+      "status": "machine"
+    },
+    "recovery.words.unavailable": {
+      "text": "שחזור באמצעות שלוש מילים לא זמין כאן. השתמשו בדרך אחרת.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.acknowledge": {
+      "text": "אני מבין/ה שאובדן המילים האלה פירושו אובדן הגישה לחשבון הזה.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.back": {
+      "text": "חזרה למילים",
+      "status": "machine"
+    },
+    "recovery_phrase.check.lede": {
+      "text": "הקלידו את המילים {positions} ממה שרשמתם.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_many": {
+      "text": "המילים {positions} לא תואמות. בדקו את מה שרשמתם ונסו שוב.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_one": {
+      "text": "מילה {position} לא תואמת. בדקו את מה שרשמתם ונסו שוב.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.title": {
+      "text": "בדיקת מה שרשמתם",
+      "status": "machine"
+    },
+    "recovery_phrase.copy_failed": {
+      "text": "לא ניתן היה להעתיק. רשמו את המילים במקום זאת.",
+      "status": "machine"
+    },
+    "recovery_phrase.error.incomplete": {
+      "text": "הזינו את כל 24 המילים של ביטוי השחזור.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.acknowledge": {
+      "text": "רשמתי את 24 המילים האלה ואני מבין/ה שאובדן שלהן פירושו אובדן הגישה לחשבון הזה.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.error.generic": {
+      "text": "לא ניתן היה לסיים. נסו שוב.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.finishing": {
+      "text": "מסיימים...",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.lede": {
+      "text": "יצרתם זהות חדשה עבור {username}. 24 המילים האלה הן הדרך היחידה לשחזר אותה אם תאבדו שוב את הגישה. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.safety_note": {
+      "text": "אנשי הקשר שלכם יראו שמספר הבטיחות שלכם השתנה, ויצטרכו לאמת אתכם שוב לפני שישלחו לכם הודעות באופן מאובטח.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.title": {
+      "text": "שמירת ביטוי השחזור החדש",
+      "status": "machine"
+    },
+    "recovery_phrase.guest.lede": {
+      "text": "החשבון שלכם נוצר ללא סיסמה. 24 המילים האלה הן הדרך היחידה לחזור אליו במכשיר אחר או אחרי ניקוי הדפדפן הזה. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
+      "status": "machine"
+    },
+    "recovery_phrase.label": {
+      "text": "ביטוי שחזור",
+      "status": "machine"
+    },
+    "recovery_phrase.save.anyone_with_words": {
+      "text": "כל מי שיש לו את המילים האלה יכול לקרוא את ההודעות שלכם ולפעול בשמכם. אל תשתפו אותן.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.lede": {
+      "text": "24 המילים האלה הן הדרך היחידה לחזור לחשבון שלכם אם תאבדו את הסיסמה ואת המכשירים. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.no_screenshot": {
+      "text": "אל תשמרו אותן כצילום מסך או בקובץ טקסט רגיל. Lakko לא תוכל להציג אותן שוב.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.title": {
+      "text": "שמירת ביטוי השחזור",
+      "status": "machine"
+    },
+    "recovery_phrase.save.vault_note": {
+      "text": "במכשיר חדש בדרך כלל יבקשו מכם רק שלוש מהן, המילים {positions}. שמרו בכל זאת את הרשימה כולה: היא הדרך היחידה לחזור אם קיצור הדרך הזה יכובה אי פעם.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.written": {
+      "text": "רשמתי אותן",
+      "status": "machine"
+    },
+    "recovery_phrase.step": {
+      "text": "שלב {current} מתוך {total}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_label": {
+      "text": "מילה {position}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_placeholder": {
+      "text": "מילה {position}",
+      "status": "machine"
+    },
+    "restore_identity.device_intro": {
+      "text": "במכשיר שעדיין מחובר תופיע בקשה; אשרו אותה שם והשוו את הקוד. ההעברה מוצפנת מקצה לקצה; השרתים של Lakko לא יכולים לקרוא אותה. לא צריך מצלמה; קוד QR זמין אם מעדיפים.",
+      "status": "machine"
+    },
+    "restore_identity.error.bad_saved_account": {
+      "text": "יש בעיה בחשבון שנשמר במכשיר הזה. התנתקו והתחברו שוב, או השתמשו בביטוי השחזור.",
+      "status": "machine"
+    },
+    "restore_identity.error.generic": {
+      "text": "לא ניתן היה לשחזר את הזהות שלכם. נסו שוב.",
+      "status": "machine"
+    },
+    "restore_identity.error.invalid_phrase": {
+      "text": "זה לא ביטוי שחזור תקין. בדקו כל מילה ונסו שוב.",
+      "status": "machine"
+    },
+    "restore_identity.error.not_published": {
+      "text": "לא נמצאה זהות מפורסמת שאפשר לאמת מולה את הזהות המשוחזרת. נסו שוב, או שחזרו ממכשיר שהחשבון שלכם עדיין נמצא בו.",
+      "status": "machine"
+    },
+    "restore_identity.error.nothing": {
+      "text": "אין מה לשחזר. התחברו קודם.",
+      "status": "machine"
+    },
+    "restore_identity.error.phrase_mismatch": {
+      "text": "ביטוי השחזור הזה לא תואם לזהות של החשבון הזה. בדקו את הביטוי, או צמדו מכשיר קיים במקום זאת.",
+      "status": "machine"
+    },
+    "restore_identity.error.unreachable": {
+      "text": "לא ניתן היה להתחבר לספרייה כדי לאמת את הזהות המשוחזרת. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "התחברתם בתור {username} במכשיר חדש. כדי לשמור על אנשי הקשר שכבר סומכים עליכם, שחזרו את הזהות שלכם בעזרת שלוש מילים, ביטוי השחזור, או ממכשיר שעדיין מחובר.",
+      "status": "machine"
+    },
+    "restore_identity.lede_no_words": {
+      "text": "התחברתם בתור {username} במכשיר חדש. כדי לשמור על אנשי הקשר שכבר סומכים עליכם, שחזרו את הזהות שלכם בעזרת ביטוי השחזור, או ממכשיר שעדיין מחובר.",
+      "status": "machine"
+    },
+    "restore_identity.log_out": {
+      "text": "התנתקות",
+      "status": "machine"
+    },
+    "restore_identity.lost.create": {
+      "text": "יצירת זהות חדשה",
+      "status": "machine"
+    },
+    "restore_identity.lost.creating": {
+      "text": "יוצרים זהות חדשה...",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.generic": {
+      "text": "לא ניתן היה ליצור זהות חדשה. נסו שוב.",
+      "status": "machine"
+    },
+    "restore_identity.lost.sub": {
+      "text": "התחלה עם זהות חדשה",
+      "status": "machine"
+    },
+    "restore_identity.lost.summary": {
+      "text": "אין לי לא את ביטוי השחזור ולא מכשיר אחר",
+      "status": "machine"
+    },
+    "restore_identity.lost.warning": {
+      "text": "הפעולה הזו יוצרת זהות חדשה לחשבון שלכם. אנשי הקשר שלכם יצטרכו לאמת אתכם שוב, ההודעות במכשיר שאבד יישארו בלתי קריאות, ותקבלו ביטוי שחזור חדש לשמירה. עשו זאת רק אם איבדתם גם את ביטוי השחזור וגם כל מכשיר אחר.",
+      "status": "machine"
+    },
+    "restore_identity.not_you": {
+      "text": "זה לא החשבון שלכם?",
+      "status": "machine"
+    },
+    "restore_identity.phrase_intro": {
+      "text": "הקלידו את 24 המילים לפי הסדר. Lakko בודקת אותן מול החשבון שלכם לפני שממשיכים.",
+      "status": "machine"
+    },
+    "restore_identity.submit": {
+      "text": "שחזור",
+      "status": "machine"
+    },
+    "restore_identity.submitting": {
+      "text": "משחזרים...",
+      "status": "machine"
+    },
+    "restore_identity.title": {
+      "text": "שחזור הזהות שלכם",
+      "status": "machine"
+    },
+    "security.identity_changed.body": {
+      "text": "אם זה הייתם אתם, במכשיר אחר, סגרו את ההודעה הזו. אם לא, אמתו את מספרי הבטיחות עם אנשי הקשר שלכם, ושנו את הסיסמה ואת מפתחות הגישה.",
+      "status": "machine"
+    },
+    "security.identity_changed.title": {
+      "text": "מפתח האבטחה של החשבון שלכם שונה.",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -148,6 +1196,34 @@
     },
     "settings.section.security": {
       "text": "אבטחה",
+      "status": "machine"
+    },
+    "username.a11y_hint": {
+      "text": "שם משתמש: {message}",
+      "status": "machine"
+    },
+    "username.error.empty": {
+      "text": "הזינו שם משתמש",
+      "status": "machine"
+    },
+    "username.error.invalid_characters": {
+      "text": "רק אותיות לטיניות, ספרות ו-_",
+      "status": "machine"
+    },
+    "username.error.too_long": {
+      "text": "לכל היותר {count, plural, one {תו אחד} two {שני תווים} other {# תווים}}",
+      "status": "machine"
+    },
+    "username.error.too_short": {
+      "text": "לפחות {count, plural, one {תו אחד} two {שני תווים} other {# תווים}}",
+      "status": "machine"
+    },
+    "username.error.unknown": {
+      "text": "לא ניתן להשתמש בשם המשתמש הזה",
+      "status": "machine"
+    },
+    "username.hint.shown_as": {
+      "text": "יוצג בתור {username}",
       "status": "machine"
     }
   }

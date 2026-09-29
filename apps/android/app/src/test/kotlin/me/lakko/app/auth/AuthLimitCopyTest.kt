@@ -3,6 +3,7 @@
 
 package me.lakko.app.auth
 
+import me.lakko.app.l10n.UiText
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -63,5 +64,22 @@ class AuthLimitCopyTest {
         assertEquals("Creating your account...", SIGNUP_WORKING_COPY)
         assertEquals("This takes a little while, once. You will not wait like this again.", SIGNUP_WORKING_LINE)
         assertEquals("Getting you into the call...", GUEST_JOIN_WORKING_COPY)
+    }
+
+    /** ADR-0058: the same decision as a catalog message, so the screen
+     *  renders it in the language showing when the error is on screen. */
+    @Test
+    fun theLimitAsACatalogMessage() {
+        assertEquals(UiText("common.error.too_many_attempts"), authLimitText(err(429, "too-many-attempts", 60)))
+        assertEquals(
+            UiText("common.error.too_many_attempts_minutes", counts = mapOf("minutes" to 16uL)),
+            authLimitText(err(429, "too-many-attempts", 901)),
+        )
+        assertEquals(UiText("recovery.error.code_send_limited"), authLimitText(err(429, "recovery-code-send-limited")))
+        assertEquals(UiText("device_link.error.request_limited"), authLimitText(err(429, "device-request-limited")))
+        assertEquals(SIGNUP_RATE_LIMITED_TEXT, authLimitText(err(429, "signup-rate-limited")))
+        assertEquals(UiText("common.error.too_many_attempts"), authLimitText(err(429, null)))
+        assertNull(authLimitText(err(503, "rate-limiter-unavailable")))
+        assertNull(authLimitText(err(401, null)))
     }
 }

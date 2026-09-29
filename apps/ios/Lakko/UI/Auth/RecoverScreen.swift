@@ -29,12 +29,13 @@ public struct RecoverScreen: View {
 
     /// `nil` shows the list; a method pushes that method's form.
     @State private var chosen: RecoverViewModel.Mode?
+    @ObservedObject private var l10n = Localization.shared
 
     public var body: some View {
         AuthScreen {
             AuthTitle(
-                title: "Recover your account",
-                subtitle: "Choose how to prove the account is yours.")
+                title: l10n.t("recovery.title"),
+                subtitle: l10n.t("recovery.lede"))
 
             VStack(spacing: 0) {
                 ForEach(RecoverViewModel.Mode.allCases, id: \.self) { mode in
@@ -48,10 +49,10 @@ public struct RecoverScreen: View {
                                 .frame(width: 28)
                                 .foregroundStyle(Color.lakkoAccent)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(mode.title)
+                                Text(l10n.t(mode.titleKey))
                                     .font(.body.weight(.medium))
                                     .foregroundStyle(Color.lakkoText)
-                                Text(mode.detail)
+                                Text(l10n.t(mode.detailKey))
                                     .font(.footnote)
                                     .foregroundStyle(Color.lakkoTextMuted)
                             }
@@ -78,14 +79,22 @@ public struct RecoverScreen: View {
                     .stroke(Color.lakkoBorder, lineWidth: 1)
             )
 
-            AuthLinkRow(lead: "Remembered your password?", title: "Log in", action: onNavigateToLogin)
-            AuthLinkRow(lead: "No account yet?", title: "Create account", action: onNavigateToSignup)
+            AuthHint(text: l10n.t("recovery.access_only_note"))
+
+            AuthLinkRow(
+                message: "recovery.remembered",
+                title: l10n.t("auth.login.submit"),
+                action: onNavigateToLogin)
+            AuthLinkRow(
+                message: "auth.login.no_account",
+                title: l10n.t("auth.signup.submit"),
+                action: onNavigateToSignup)
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(item: $chosen) { mode in
             AuthScreen {
-                AuthTitle(title: mode.title, subtitle: mode.formLead)
+                AuthTitle(title: l10n.t(mode.titleKey), subtitle: l10n.t(mode.formLeadKey))
                 RecoverForm(
                     viewModel: viewModel,
                     cachedUsername: viewModel.cachedUsername
@@ -101,23 +110,25 @@ extension RecoverViewModel.Mode {
     /// Row order on the method list (UX spec section 5.6).
     static let allCases: [RecoverViewModel.Mode] = [.phrase, .anotherDevice, .totp, .contact, .shares]
 
-    var title: String {
+    /// The catalog key of the row title (ADR-0058).
+    var titleKey: String {
         switch self {
-        case .phrase: return "Recovery phrase"
-        case .anotherDevice: return "Another device"
-        case .shares: return "Social recovery shares"
-        case .totp: return "Authenticator"
-        case .contact: return "Email or phone"
+        case .phrase: return "recovery.method.phrase.title"
+        case .anotherDevice: return "recovery.method.device.title"
+        case .shares: return "recovery.method.shares.title"
+        case .totp: return "recovery.method.totp.title"
+        case .contact: return "recovery.method.contact.title"
         }
     }
 
-    var detail: String {
+    /// The catalog key of the row's second line.
+    var detailKey: String {
         switch self {
-        case .phrase: return "Your 24 words. Restores everything."
-        case .anotherDevice: return "Confirm from a device that is still signed in."
-        case .shares: return "Three of the shares you gave to people you trust."
-        case .totp: return "A code from your authenticator app. Gets you back in."
-        case .contact: return "A one-time code sent to you. Gets you back in."
+        case .phrase: return "recovery.method.phrase.sub"
+        case .anotherDevice: return "recovery.method.device.sub"
+        case .shares: return "recovery.method.shares.sub"
+        case .totp: return "recovery.method.totp.sub"
+        case .contact: return "recovery.method.contact.sub"
         }
     }
 
@@ -131,14 +142,15 @@ extension RecoverViewModel.Mode {
         }
     }
 
-    /// One line under the form title.
-    var formLead: String? {
+    /// The catalog key of the line under the form title.
+    var formLeadKey: String {
         switch self {
-        case .phrase: return "Enter your 24 words and choose a new password."
-        case .anotherDevice: return "Your other device links this one and carries your account across."
-        case .shares: return "Enter any three shares and choose a new password."
-        case .totp: return "Your authenticator app gets you back in. Your messages come back from your recovery phrase or another device."
-        case .contact: return "A code sent to the email or phone number you set up under Settings > Recovery gets you back in. Your messages come back from your recovery phrase or another device."
+        case .phrase: return "recovery.phrase.intro"
+        // The QR flow: this client has no code-comparison link yet.
+        case .anotherDevice: return "recovery.device.intro_qr"
+        case .shares: return "recovery.shares.intro"
+        case .totp: return "recovery.totp.intro"
+        case .contact: return "recovery.contact.intro"
         }
     }
 }
@@ -151,23 +163,21 @@ private struct RecoverForm: View {
     /// account can be found.
     let cachedUsername: String?
 
+    @ObservedObject private var l10n = Localization.shared
+
     var body: some View {
         if viewModel.mode != .anotherDevice {
             if let cachedUsername {
                 HStack(spacing: 8) {
                     Image(systemName: "person.crop.circle")
                         .foregroundStyle(Color.lakkoTextMuted)
-                    Text("@\(cachedUsername)")
+                    Text(l10n.t("recovery.cached_account", texts: ["username": "@\(cachedUsername)"]))
                         .font(.body.weight(.medium))
                         .foregroundStyle(Color.lakkoText)
-                    Text("on this device")
-                        .font(.subheadline)
-                        .foregroundStyle(Color.lakkoTextMuted)
                 }
             } else {
                 AuthTextField(
-                    label: "Username",
-                    placeholder: "username",
+                    label: l10n.t("auth.username.label"),
                     text: $viewModel.username,
                     contentType: .username,
                     disabled: viewModel.busy
@@ -191,15 +201,16 @@ private struct RecoverForm: View {
             }
 
             AuthSecureField(
-                label: "New password",
+                label: l10n.t("auth.password.new.label"),
                 text: $viewModel.password,
                 contentType: .newPassword,
                 disabled: viewModel.busy
             )
-            AuthHint(text: "At least \(RecoverViewModel.minPasswordLength) characters.")
+            AuthHint(text: l10n.t(
+                "auth.password.hint", counts: ["count": UInt64(RecoverViewModel.minPasswordLength)]))
 
             AuthSecureField(
-                label: "Confirm new password",
+                label: l10n.t("auth.password.new_confirm.label"),
                 text: $viewModel.confirm,
                 contentType: .newPassword,
                 disabled: viewModel.busy,
@@ -212,9 +223,9 @@ private struct RecoverForm: View {
             }
 
             AuthPrimaryButton(
-                title: "Recover account",
+                title: l10n.t("recovery.submit"),
                 busy: viewModel.busy,
-                busyTitle: "Checking...",
+                busyTitle: l10n.t("common.checking"),
                 action: viewModel.onSubmit
             )
         }
@@ -225,7 +236,7 @@ private struct RecoverForm: View {
     @ViewBuilder
     private var totpSection: some View {
         AuthTextField(
-            label: "Six-digit code",
+            label: l10n.t("recovery.totp.code_label"),
             placeholder: "123456",
             text: $viewModel.totpCode,
             keyboard: .numberPad,
@@ -238,9 +249,9 @@ private struct RecoverForm: View {
             AuthHint(text: error, isError: true)
         }
         AuthPrimaryButton(
-            title: "Continue",
+            title: l10n.t("common.continue"),
             busy: viewModel.busy,
-            busyTitle: "Checking...",
+            busyTitle: l10n.t("common.checking"),
             action: viewModel.submitTotp
         )
     }
@@ -251,16 +262,16 @@ private struct RecoverForm: View {
     private var contactSection: some View {
         switch viewModel.contactStep {
         case .request:
-            Picker("Send the code by", selection: $viewModel.contactKind) {
-                Text("Email").tag(ContactKind.email)
-                Text("Text message").tag(ContactKind.phone)
+            Picker(l10n.t("recovery.contact.send_by"), selection: $viewModel.contactKind) {
+                Text(l10n.t("common.email")).tag(ContactKind.email)
+                Text(l10n.t("common.phone")).tag(ContactKind.phone)
             }
             .pickerStyle(.segmented)
             .disabled(viewModel.busy)
 
             AuthTextField(
-                label: viewModel.contactKind == .email ? "Email" : "Phone number",
-                placeholder: viewModel.contactKind == .email ? "name@example.com" : "+1 555 123 4567",
+                label: l10n.t(viewModel.contactKind == .email ? "common.email" : "recovery.contact.phone_label"),
+                placeholder: viewModel.contactKind == .email ? "you@example.com" : "+15551234567",
                 text: $viewModel.contact,
                 keyboard: viewModel.contactKind == .email ? .emailAddress : .phonePad,
                 contentType: viewModel.contactKind == .email ? .emailAddress : .telephoneNumber,
@@ -272,16 +283,17 @@ private struct RecoverForm: View {
                 AuthHint(text: error, isError: true)
             }
             AuthPrimaryButton(
-                title: "Send code",
+                title: l10n.t("recovery.contact.send"),
                 busy: viewModel.busy,
-                busyTitle: "Sending...",
+                busyTitle: l10n.t("common.sending"),
                 action: viewModel.sendContactCode
             )
 
         case .code:
-            AuthHint(text: "If that email or number is set up for this account, a code is on its way.")
+            AuthHint(text: l10n.t(
+                viewModel.contactKind == .email ? "recovery.contact.sent_email" : "recovery.contact.sent_phone"))
             AuthTextField(
-                label: "Six-digit code",
+                label: l10n.t("recovery.contact.code_label"),
                 placeholder: "123456",
                 text: $viewModel.contactCode,
                 keyboard: .numberPad,
@@ -294,9 +306,9 @@ private struct RecoverForm: View {
                 AuthHint(text: error, isError: true)
             }
             AuthPrimaryButton(
-                title: "Continue",
+                title: l10n.t("common.continue"),
                 busy: viewModel.busy,
-                busyTitle: "Checking...",
+                busyTitle: l10n.t("common.checking"),
                 action: viewModel.submitContactCode
             )
         }
@@ -324,8 +336,7 @@ private struct RecoverForm: View {
             )
         } else {
             AuthTextField(
-                label: "Username",
-                placeholder: "username",
+                label: l10n.t("auth.username.label"),
                 text: $viewModel.username,
                 contentType: .username,
                 disabled: viewModel.busy,
@@ -337,9 +348,9 @@ private struct RecoverForm: View {
                 AuthHint(text: error, isError: true)
             }
             AuthPrimaryButton(
-                title: "Continue",
+                title: l10n.t("common.continue"),
                 busy: viewModel.busy,
-                busyTitle: "Continue",
+                busyTitle: l10n.t("common.continue"),
                 action: viewModel.prepareDeviceRestore
             )
         }
@@ -348,10 +359,10 @@ private struct RecoverForm: View {
     /// One share per line, on the sunken surface.
     private var sharesEditor: some View {
         VStack(alignment: .leading, spacing: 6) {
-            AuthFieldLabel("Shares, one per line")
+            AuthFieldLabel(l10n.t("recovery.shares.label"))
             ZStack(alignment: .topLeading) {
                 if viewModel.sharesInput.isEmpty {
-                    Text("Paste at least three shares here")
+                    Text(verbatim: "3:abcdEFGH...\n1:zzzzABCD...\n5:mmmm0123...")
                         .font(.subheadline)
                         .foregroundStyle(Color.lakkoTextMuted)
                         .padding(.horizontal, 12)
@@ -375,6 +386,7 @@ private struct RecoverForm: View {
                 RoundedRectangle(cornerRadius: LakkoRadius.control)
                     .stroke(Color.lakkoBorder, lineWidth: 1)
             )
+            AuthHint(text: l10n.t("recovery.shares.help"))
         }
     }
 }

@@ -17,7 +17,9 @@
  * account's chat groups; see ADR-0049 section 5 for why that is blocked on
  * per-device conversation leaves.
  */
-import { authLimitMessage } from "../auth/auth-error-copy";
+import { authLimitMessage, pairingText } from "../auth/auth-error-copy";
+import { t } from "../l10n";
+import { KeyedError, keyedErrorText } from "../l10n/keyed-error";
 import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useAuth } from "../auth/AuthContext";
 import { AuthClient } from "../auth/client";
@@ -26,12 +28,7 @@ import { getDeviceKey } from "../auth/key-store";
 import { base64Decode } from "../auth/account-id";
 import { comparisonCode, DEVICE_REQUEST_POLL_MS } from "./device-request";
 import { runScanFlow } from "./orchestrator";
-import {
-  PAIRING_NEEDS_USERNAME,
-  PAIRING_UNSUPPORTED,
-  PAIRING_WRONG_ACCOUNT,
-  ownPairingHandle,
-} from "./pairing";
+import { ownPairingHandle } from "./pairing";
 
 export function DeviceRequestPrompt(): JSX.Element {
   const auth = useAuth();
@@ -100,7 +97,7 @@ export function DeviceRequestPrompt(): JSX.Element {
     } catch {
       // Already gone or unreachable; the request expires on its own.
     }
-    setResult("Declined. If this keeps happening, change your password.");
+    setResult(t("device_link.request.declined"));
   }
 
   async function confirmRequest(): Promise<void> {
@@ -112,7 +109,7 @@ export function DeviceRequestPrompt(): JSX.Element {
     try {
       const deviceKey = await getDeviceKey(s.account.accountId);
       if (deviceKey === null) {
-        throw new Error("No device key on this browser. Sign in again.");
+        throw new KeyedError("device_link.request.error.no_device_key");
       }
       const client = new AuthClient();
       const scanned = await runScanFlow({
@@ -143,22 +140,16 @@ export function DeviceRequestPrompt(): JSX.Element {
         // The request expires on its own.
       }
       setPending(null);
-      setResult("Device added.");
+      setResult(t("device_link.request.added"));
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("device-request: confirm failed", err);
-      const detail =
-        err instanceof Error
-          ? err.message.length > 0
-            ? err.message
-            : err.name
-          : String(err);
       // ADR-0054 S4: a server limit says when to try again, never "failed".
+      // ADR-0058: the detail goes to the log above, never to the screen.
       const limit = authLimitMessage(err);
-      const own = [PAIRING_WRONG_ACCOUNT, PAIRING_UNSUPPORTED, PAIRING_NEEDS_USERNAME].includes(detail)
-        ? detail
-        : null;
-      setResult(limit ?? own ?? `Could not add the device: ${detail}`);
+      const own =
+        keyedErrorText(err) ?? (err instanceof Error ? pairingText(err.message) : null);
+      setResult(limit ?? own ?? t("device_link.request.error.generic"));
       handled.add(p.requestId);
       setPending(null);
     } finally {
@@ -171,17 +162,21 @@ export function DeviceRequestPrompt(): JSX.Element {
       <Show when={pending() !== null}>
         <div class="lk-modal-backdrop" role="presentation">
           <div class="lk-modal" role="dialog" aria-modal="true" aria-labelledby="lk-devreq-title">
-            <h2 id="lk-devreq-title">Is this you?</h2>
-            <p>A new device is asking to join your account. It shows a code.</p>
-            <p class="form-info" style={{ "margin-bottom": "4px" }}>Code on the new device</p>
+            <h2 id="lk-devreq-title">{t("device_link.request.title")}</h2>
+            <p>{t("device_link.request.body")}</p>
+            <p class="form-info" style={{ "margin-bottom": "4px" }}>
+              {t("device_link.request.code_label")}
+            </p>
             <div class="lk-sas-code">{pending()?.code}</div>
-            <p>Confirm only if the new device shows exactly this code.</p>
+            <p>{t("device_link.request.confirm_only_if")}</p>
             <div class="lk-actions">
               <button type="button" disabled={busy() !== null} onClick={() => void decline()}>
-                It is not me
+                {t("device_link.request.decline")}
               </button>
               <button class="primary" type="button" disabled={busy() !== null} onClick={() => void confirmRequest()}>
-                {busy() === "confirming" ? "Adding the device..." : "Yes, add it"}
+                {busy() === "confirming"
+                  ? t("device_link.request.adding")
+                  : t("device_link.request.confirm")}
               </button>
             </div>
           </div>
@@ -190,8 +185,8 @@ export function DeviceRequestPrompt(): JSX.Element {
       <Show when={result() !== null}>
         <div class="lk-toast" role="status">
           <span>{result()}</span>
-          <button type="button" onClick={() => setResult(null)} aria-label="Dismiss">
-            Close
+          <button type="button" onClick={() => setResult(null)} aria-label={t("common.dismiss")}>
+            {t("common.close")}
           </button>
         </div>
       </Show>

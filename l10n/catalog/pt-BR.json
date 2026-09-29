@@ -2,12 +2,552 @@
   "format": 1,
   "language": "pt-BR",
   "messages": {
+    "auth.brand.body": {
+      "text": "Conversas, grupos, canais e chamadas com criptografia de ponta a ponta por padrão. Os servidores do Lakko nunca veem suas mensagens.",
+      "status": "machine"
+    },
+    "auth.brand.foot": {
+      "text": "Código aberto. Não precisa de número de telefone.",
+      "status": "machine"
+    },
+    "auth.brand.tagline": {
+      "text": "Suas mensagens, suas regras.",
+      "status": "machine"
+    },
+    "auth.error.wrong_credentials": {
+      "text": "Nome de usuário ou senha incorretos. Confira e tente novamente.",
+      "status": "machine"
+    },
+    "auth.explainer.never_leaves": {
+      "text": "Sua senha nunca sai do seu dispositivo. O Lakko a verifica sem nunca recebê-la, então ninguém no Lakko pode lê-la, e ninguém pode redefini-la por você.",
+      "status": "machine"
+    },
+    "auth.explainer.same_answer": {
+      "text": "Um nome de usuário errado e uma senha errada recebem a mesma resposta, então ninguém pode usar a tela de login para descobrir quais nomes de usuário existem.",
+      "status": "machine"
+    },
+    "auth.explainer.title": {
+      "text": "Como o Lakko protege sua senha",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back": {
+      "text": "Se você esquecer, sua frase de recuperação, outro dispositivo ainda conectado, três palavras da frase, um app autenticador ou um código enviado por e-mail ou telefone permitem que você volte a entrar.",
+      "status": "machine"
+    },
+    "auth.explainer.ways_back_no_words": {
+      "text": "Se você esquecer, sua frase de recuperação, outro dispositivo ainda conectado, um app autenticador ou um código enviado por e-mail ou telefone permitem que você volte a entrar.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "Mudar idioma",
       "status": "machine"
     },
+    "auth.login.forgot": {
+      "text": "Esqueceu a senha?",
+      "status": "machine"
+    },
+    "auth.login.lede": {
+      "text": "Entre para continuar.",
+      "status": "machine"
+    },
+    "auth.login.no_account": {
+      "text": "Novo no Lakko? {link}",
+      "status": "machine"
+    },
+    "auth.login.passkey": {
+      "text": "Usar chave de acesso",
+      "status": "machine"
+    },
+    "auth.login.submit": {
+      "text": "Entrar",
+      "status": "machine"
+    },
+    "auth.login.submitting": {
+      "text": "Entrando...",
+      "status": "machine"
+    },
+    "auth.login.title": {
+      "text": "Bem-vindo de volta",
+      "status": "machine"
+    },
+    "auth.passkey.error.cancelled": {
+      "text": "Entrada com chave de acesso cancelada.",
+      "status": "machine"
+    },
+    "auth.passkey.error.failed_status": {
+      "text": "Falha ao entrar com a chave de acesso ({status}).",
+      "status": "machine"
+    },
+    "auth.passkey.error.generic": {
+      "text": "Não foi possível entrar com a chave de acesso. Tente novamente ou use sua senha.",
+      "status": "machine"
+    },
+    "auth.passkey.error.network": {
+      "text": "Erro de rede ao entrar com a chave de acesso.",
+      "status": "machine"
+    },
+    "auth.passkey.error.no_cached": {
+      "text": "Não há credenciais salvas neste dispositivo para entrar com chave de acesso. Entre com a senha ou recupere com sua frase primeiro.",
+      "status": "machine"
+    },
+    "auth.passkey.error.not_registered": {
+      "text": "Nenhuma chave de acesso está registrada nesta conta. Entre com a senha primeiro e depois adicione uma chave de acesso no Início.",
+      "status": "machine"
+    },
+    "auth.passkey.error.server_disabled": {
+      "text": "O servidor não ativou o suporte a chaves de acesso.",
+      "status": "machine"
+    },
+    "auth.passkey.error.unsupported": {
+      "text": "Este navegador não é compatível com chaves de acesso.",
+      "status": "machine"
+    },
+    "auth.passkey.error.wrong_account": {
+      "text": "Esta chave de acesso pertence a uma conta diferente da que está neste dispositivo. Entre primeiro com sua senha.",
+      "status": "machine"
+    },
+    "auth.password.confirm.label": {
+      "text": "Confirmar senha",
+      "status": "machine"
+    },
+    "auth.password.error.mismatch": {
+      "text": "As senhas não coincidem. Digite a mesma senha duas vezes.",
+      "status": "machine"
+    },
+    "auth.password.error.too_short": {
+      "text": "Use pelo menos {count, plural, one {# caractere} other {# caracteres}}.",
+      "status": "machine"
+    },
+    "auth.password.hide": {
+      "text": "Ocultar senha",
+      "status": "machine"
+    },
+    "auth.password.hint": {
+      "text": "Pelo menos {count, plural, one {# caractere} other {# caracteres}}.",
+      "status": "machine"
+    },
+    "auth.password.label": {
+      "text": "Senha",
+      "status": "machine"
+    },
+    "auth.password.new.label": {
+      "text": "Nova senha",
+      "status": "machine"
+    },
+    "auth.password.new_confirm.label": {
+      "text": "Confirmar nova senha",
+      "status": "machine"
+    },
+    "auth.password.show": {
+      "text": "Mostrar senha",
+      "status": "machine"
+    },
+    "auth.signup.error.enter_username": {
+      "text": "Digite um nome de usuário.",
+      "status": "machine"
+    },
+    "auth.signup.error.fix_name": {
+      "text": "Corrija seu nome antes de continuar.",
+      "status": "machine"
+    },
+    "auth.signup.error.generic": {
+      "text": "Não foi possível criar a conta. Tente novamente.",
+      "status": "machine"
+    },
+    "auth.signup.error.rate_limited": {
+      "text": "Muitas contas novas desta rede agora. Tente novamente mais tarde.",
+      "status": "machine"
+    },
+    "auth.signup.error.username_taken": {
+      "text": "Esse nome de usuário já está em uso. Escolha outro.",
+      "status": "machine"
+    },
+    "auth.signup.have_account": {
+      "text": "Já tem uma conta? {link}",
+      "status": "machine"
+    },
+    "auth.signup.lede": {
+      "text": "Sua senha nunca sai do seu dispositivo. Em seguida, você vai receber uma frase de recuperação para anotar.",
+      "status": "machine"
+    },
+    "auth.signup.name.hint": {
+      "text": "Aparece para seus contatos. Deixe em branco para mostrar seu nome de usuário.",
+      "status": "machine"
+    },
+    "auth.signup.name.label": {
+      "text": "Nome (opcional)",
+      "status": "machine"
+    },
+    "auth.signup.submit": {
+      "text": "Criar conta",
+      "status": "machine"
+    },
+    "auth.signup.title": {
+      "text": "Crie sua conta",
+      "status": "machine"
+    },
+    "auth.signup.username.hint": {
+      "text": "Letras latinas, números e _. Outras pessoas encontram você por este nome.",
+      "status": "machine"
+    },
+    "auth.signup.working.line": {
+      "text": "Isso leva um pouco de tempo, só desta vez. Você não vai esperar assim de novo.",
+      "status": "machine"
+    },
+    "auth.signup.working.title": {
+      "text": "Criando sua conta...",
+      "status": "machine"
+    },
+    "auth.username.label": {
+      "text": "Nome de usuário",
+      "status": "machine"
+    },
+    "call.guest.working.title": {
+      "text": "Colocando você na chamada...",
+      "status": "machine"
+    },
+    "chats.empty.select": {
+      "text": "Selecione uma conversa para começar",
+      "status": "machine"
+    },
+    "common.back": {
+      "text": "Voltar",
+      "status": "machine"
+    },
+    "common.cancel": {
+      "text": "Cancelar",
+      "status": "machine"
+    },
+    "common.checking": {
+      "text": "Verificando...",
+      "status": "machine"
+    },
     "common.close": {
       "text": "Fechar",
+      "status": "machine"
+    },
+    "common.confirm": {
+      "text": "Confirmar",
+      "status": "machine"
+    },
+    "common.continue": {
+      "text": "Continuar",
+      "status": "machine"
+    },
+    "common.copied": {
+      "text": "Copiado",
+      "status": "machine"
+    },
+    "common.copy": {
+      "text": "Copiar",
+      "status": "machine"
+    },
+    "common.dismiss": {
+      "text": "Dispensar",
+      "status": "machine"
+    },
+    "common.done": {
+      "text": "Concluído",
+      "status": "machine"
+    },
+    "common.email": {
+      "text": "E-mail",
+      "status": "machine"
+    },
+    "common.error.a11y": {
+      "text": "Erro: {message}",
+      "status": "machine"
+    },
+    "common.error.offline": {
+      "text": "Não foi possível conectar ao Lakko. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "common.error.server_unreachable": {
+      "text": "Não foi possível conectar ao servidor. Verifique sua conexão.",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts": {
+      "text": "Muitas tentativas. Aguarde um momento e tente novamente.",
+      "status": "machine"
+    },
+    "common.error.too_many_attempts_minutes": {
+      "text": "Muitas tentativas. Tente novamente em {minutes, plural, one {# minuto} other {# minutos}}.",
+      "status": "machine"
+    },
+    "common.error.unavailable": {
+      "text": "Isso não está disponível no momento. Tente novamente mais tarde.",
+      "status": "machine"
+    },
+    "common.loading": {
+      "text": "Carregando...",
+      "status": "machine"
+    },
+    "common.looking_up": {
+      "text": "Procurando...",
+      "status": "machine"
+    },
+    "common.more_options": {
+      "text": "Mais opções",
+      "status": "machine"
+    },
+    "common.optional": {
+      "text": "Opcional",
+      "status": "machine"
+    },
+    "common.paste": {
+      "text": "Colar",
+      "status": "machine"
+    },
+    "common.phone": {
+      "text": "Telefone",
+      "status": "machine"
+    },
+    "common.preparing": {
+      "text": "Preparando...",
+      "status": "machine"
+    },
+    "common.sending": {
+      "text": "Enviando...",
+      "status": "machine"
+    },
+    "common.try_again": {
+      "text": "Tentar novamente",
+      "status": "machine"
+    },
+    "device_link.compare_hint": {
+      "text": "Confira se o outro dispositivo mostra o mesmo código.",
+      "status": "machine"
+    },
+    "device_link.comparison_code": {
+      "text": "Código de comparação",
+      "status": "machine"
+    },
+    "device_link.confirm_there": {
+      "text": "Abra o Lakko em um dispositivo que já esteja conectado e confirme esta entrada nele.",
+      "status": "machine"
+    },
+    "device_link.error.ask_unavailable": {
+      "text": "Não é possível consultar seu outro dispositivo agora; o QR code ainda funciona.",
+      "status": "machine"
+    },
+    "device_link.error.ask_unreachable": {
+      "text": "Não foi possível conectar ao servidor para consultar seu outro dispositivo; o QR code ainda funciona.",
+      "status": "machine"
+    },
+    "device_link.error.declined": {
+      "text": "Recusado em outro dispositivo.",
+      "status": "machine"
+    },
+    "device_link.error.generic": {
+      "text": "Não foi possível restaurar a partir do seu outro dispositivo. Tente novamente ou use sua frase de recuperação.",
+      "status": "machine"
+    },
+    "device_link.error.identity_mismatch": {
+      "text": "A identidade recebida do seu outro dispositivo não corresponde à identidade publicada desta conta — ela não será usada.",
+      "status": "machine"
+    },
+    "device_link.error.name_other_account": {
+      "text": "O nome que você digitou pertence a outra conta. Nada foi alterado neste dispositivo.",
+      "status": "machine"
+    },
+    "device_link.error.no_identity": {
+      "text": "O outro dispositivo confirmou, mas não enviou sua identidade. Atualize o Lakko nele e tente novamente, ou use sua frase de recuperação.",
+      "status": "machine"
+    },
+    "device_link.error.not_let_in": {
+      "text": "Seu outro dispositivo enviou a identidade, mas não foi possível dar acesso a este dispositivo. Tente novamente ou use sua frase de recuperação.",
+      "status": "machine"
+    },
+    "device_link.error.request_limited": {
+      "text": "Muitas solicitações aos seus outros dispositivos. Tente novamente em alguns minutos.",
+      "status": "machine"
+    },
+    "device_link.error.timeout": {
+      "text": "O outro dispositivo não respondeu a tempo. Tente novamente.",
+      "status": "machine"
+    },
+    "device_link.pairing.needs_username": {
+      "text": "Defina um nome de usuário antes de adicionar outro dispositivo.",
+      "status": "machine"
+    },
+    "device_link.pairing.unsupported": {
+      "text": "Este código vem de outra versão do Lakko. Atualize o Lakko nos dois dispositivos e tente novamente.",
+      "status": "machine"
+    },
+    "device_link.pairing.wrong_account": {
+      "text": "Este código é de outra conta. Confira se o novo dispositivo usa o mesmo nome de usuário que este.",
+      "status": "machine"
+    },
+    "device_link.qr.hide": {
+      "text": "Ocultar o QR code",
+      "status": "machine"
+    },
+    "device_link.qr.intro": {
+      "text": "Mostre este código a um dispositivo que ainda tenha sua conta. Ele adiciona este dispositivo e transfere sua identidade com criptografia de ponta a ponta, sem precisar digitar nenhuma frase.",
+      "status": "machine"
+    },
+    "device_link.qr.scan_hint": {
+      "text": "No seu outro dispositivo, abra Configurações, depois Dispositivos, depois Adicionar dispositivo, e escaneie este código.",
+      "status": "machine"
+    },
+    "device_link.qr.show": {
+      "text": "Mostrar um QR code",
+      "status": "machine"
+    },
+    "device_link.qr.waiting": {
+      "text": "Aguardando seu outro dispositivo escanear este código...",
+      "status": "machine"
+    },
+    "device_link.request.added": {
+      "text": "Dispositivo adicionado.",
+      "status": "machine"
+    },
+    "device_link.request.adding": {
+      "text": "Adicionando o dispositivo...",
+      "status": "machine"
+    },
+    "device_link.request.body": {
+      "text": "Um novo dispositivo está pedindo para entrar na sua conta. Ele mostra um código.",
+      "status": "machine"
+    },
+    "device_link.request.code_label": {
+      "text": "Código no novo dispositivo",
+      "status": "machine"
+    },
+    "device_link.request.confirm": {
+      "text": "Sim, adicionar",
+      "status": "machine"
+    },
+    "device_link.request.confirm_only_if": {
+      "text": "Confirme apenas se o novo dispositivo mostrar exatamente este código.",
+      "status": "machine"
+    },
+    "device_link.request.decline": {
+      "text": "Não sou eu",
+      "status": "machine"
+    },
+    "device_link.request.declined": {
+      "text": "Recusado. Se isso continuar acontecendo, altere sua senha.",
+      "status": "machine"
+    },
+    "device_link.request.error.generic": {
+      "text": "Não foi possível adicionar o dispositivo. Tente novamente.",
+      "status": "machine"
+    },
+    "device_link.request.error.no_device_key": {
+      "text": "Não há chave de dispositivo neste navegador. Entre novamente.",
+      "status": "machine"
+    },
+    "device_link.request.title": {
+      "text": "É você?",
+      "status": "machine"
+    },
+    "device_link.restored": {
+      "text": "Restaurado.",
+      "status": "machine"
+    },
+    "device_link.show_code": {
+      "text": "Mostrar código de pareamento",
+      "status": "machine"
+    },
+    "device_link.transferring": {
+      "text": "Transferindo...",
+      "status": "machine"
+    },
+    "devices.add.e2ee_note": {
+      "text": "A vinculação tem criptografia de ponta a ponta entre seus dois dispositivos.",
+      "status": "machine"
+    },
+    "devices.add.error.generic": {
+      "text": "Não foi possível vincular este dispositivo. Tente novamente.",
+      "status": "machine"
+    },
+    "devices.add.joining": {
+      "text": "Vinculando este dispositivo...",
+      "status": "machine"
+    },
+    "devices.add.linked": {
+      "text": "Vinculado. Este dispositivo agora faz parte da sua conta.",
+      "status": "machine"
+    },
+    "devices.add.side.scan": {
+      "text": "Escanear um código",
+      "status": "machine"
+    },
+    "devices.add.side.scan_detail": {
+      "text": "Este dispositivo já está conectado: ele escaneia o código do novo dispositivo e o deixa entrar.",
+      "status": "machine"
+    },
+    "devices.add.side.show": {
+      "text": "Mostrar um código",
+      "status": "machine"
+    },
+    "devices.add.side.show_detail": {
+      "text": "Este é o novo dispositivo: ele entra na sua conta assim que outro dispositivo escanear o código dele.",
+      "status": "machine"
+    },
+    "devices.add.sign_in_first": {
+      "text": "Entre primeiro para adicionar um dispositivo.",
+      "status": "machine"
+    },
+    "devices.add.title": {
+      "text": "Adicionar dispositivo",
+      "status": "machine"
+    },
+    "devices.scan.confirm.body": {
+      "text": "Isso dá ao dispositivo escaneado acesso total à sua conta: suas mensagens, seus contatos e sua identidade. Continue apenas se o código estiver no seu próprio dispositivo novo.",
+      "status": "machine"
+    },
+    "devices.scan.confirm.submit": {
+      "text": "Vincular dispositivo",
+      "status": "machine"
+    },
+    "devices.scan.confirm.title": {
+      "text": "Vincular este dispositivo?",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_denied": {
+      "text": "O Lakko não pode usar a câmera. Permita o acesso à câmera em Configurações e tente novamente.",
+      "status": "machine"
+    },
+    "devices.scan.error.camera_failed": {
+      "text": "Não foi possível iniciar a câmera. Tente novamente.",
+      "status": "machine"
+    },
+    "devices.scan.error.no_camera": {
+      "text": "Este dispositivo não tem câmera traseira.",
+      "status": "machine"
+    },
+    "devices.scan.error.not_a_code": {
+      "text": "Isso não é um código de dispositivo do Lakko. Aponte a câmera para o código no seu outro dispositivo.",
+      "status": "machine"
+    },
+    "devices.scan.intro": {
+      "text": "Aponte a câmera para o código que o novo dispositivo está mostrando.",
+      "status": "machine"
+    },
+    "devices.scan.open_camera": {
+      "text": "Abrir câmera",
+      "status": "machine"
+    },
+    "display_name.error.control": {
+      "text": "Remova caracteres invisíveis ou de direção do texto",
+      "status": "machine"
+    },
+    "display_name.error.line_break": {
+      "text": "Apenas uma linha",
+      "status": "machine"
+    },
+    "display_name.error.too_long": {
+      "text": "No máximo {count, plural, one {# caractere} other {# caracteres}}",
+      "status": "machine"
+    },
+    "display_name.error.too_many_bytes": {
+      "text": "Este nome é longo demais",
+      "status": "machine"
+    },
+    "display_name.error.unknown": {
+      "text": "Este nome não pode ser usado",
       "status": "machine"
     },
     "language.name.ar": {
@@ -72,6 +612,514 @@
     },
     "nav.settings": {
       "text": "Configurações",
+      "status": "machine"
+    },
+    "recovery.access_only_note": {
+      "text": "Um autenticador ou um código devolve o acesso à conta; depois, suas conversas precisam da frase de recuperação ou de outro dispositivo.",
+      "status": "machine"
+    },
+    "recovery.cached_account": {
+      "text": "{username} neste dispositivo",
+      "status": "machine"
+    },
+    "recovery.contact.change": {
+      "text": "Usar outro e-mail ou telefone",
+      "status": "machine"
+    },
+    "recovery.contact.code_label": {
+      "text": "Código enviado",
+      "status": "machine"
+    },
+    "recovery.contact.email_label": {
+      "text": "Endereço de e-mail",
+      "status": "machine"
+    },
+    "recovery.contact.error.bad_contact": {
+      "text": "Isso não parece um endereço de e-mail ou número de telefone. Confira e tente novamente.",
+      "status": "machine"
+    },
+    "recovery.contact.error.enter_code": {
+      "text": "Digite o código de seis dígitos que enviamos.",
+      "status": "machine"
+    },
+    "recovery.contact.error.generic": {
+      "text": "Não foi possível verificar o código. Tente novamente.",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_email": {
+      "text": "Digite um endereço de e-mail válido.",
+      "status": "machine"
+    },
+    "recovery.contact.error.invalid_phone": {
+      "text": "Digite o número de telefone no formato internacional, como +15551234567.",
+      "status": "machine"
+    },
+    "recovery.contact.error.send_failed": {
+      "text": "Não foi possível enviar um código. Confira o nome de usuário e tente novamente.",
+      "status": "machine"
+    },
+    "recovery.contact.error.unavailable": {
+      "text": "A recuperação por e-mail ou telefone não está disponível aqui. Use outra forma de entrar.",
+      "status": "machine"
+    },
+    "recovery.contact.error.wrong": {
+      "text": "Esse código não funcionou. Confira o código que enviamos e tente novamente.",
+      "status": "machine"
+    },
+    "recovery.contact.intro": {
+      "text": "Enviamos um código de seis dígitos para o e-mail ou telefone que você configurou em Configurações. Ele devolve o acesso à conta; depois, suas conversas precisam da frase de recuperação ou de outro dispositivo.",
+      "status": "machine"
+    },
+    "recovery.contact.phone_label": {
+      "text": "Número de telefone",
+      "status": "machine"
+    },
+    "recovery.contact.send": {
+      "text": "Enviar código",
+      "status": "machine"
+    },
+    "recovery.contact.send_by": {
+      "text": "Enviar o código por",
+      "status": "machine"
+    },
+    "recovery.contact.sent_email": {
+      "text": "Se esse endereço estiver configurado nesta conta, um código de seis dígitos está a caminho. Digite-o abaixo.",
+      "status": "machine"
+    },
+    "recovery.contact.sent_phone": {
+      "text": "Se esse número estiver configurado nesta conta, um código de seis dígitos está a caminho. Digite-o abaixo.",
+      "status": "machine"
+    },
+    "recovery.device.intro": {
+      "text": "Digite seu nome de usuário, depois confirme em um dispositivo que ainda esteja conectado e compare o código que ele mostra. Nada é enviado de forma que os servidores do Lakko possam ler. Não precisa de câmera; há um QR code se preferir.",
+      "status": "machine"
+    },
+    "recovery.device.intro_qr": {
+      "text": "Seu outro dispositivo vincula este e transfere sua conta para ele.",
+      "status": "machine"
+    },
+    "recovery.device.restoring": {
+      "text": "Restaurando {username}",
+      "status": "machine"
+    },
+    "recovery.error.code_send_limited": {
+      "text": "Enviamos um código há pouco. Aguarde alguns minutos antes de pedir outro.",
+      "status": "machine"
+    },
+    "recovery.error.generic": {
+      "text": "Não foi possível recuperar a conta. Confira as palavras e tente novamente.",
+      "status": "machine"
+    },
+    "recovery.error.no_match": {
+      "text": "Isso não corresponde a esta conta. Confira as palavras e o nome de usuário e tente novamente.",
+      "status": "machine"
+    },
+    "recovery.lede": {
+      "text": "Escolha como voltar a entrar.",
+      "status": "machine"
+    },
+    "recovery.lede_account": {
+      "text": "Escolha como voltar a entrar em {username}.",
+      "status": "machine"
+    },
+    "recovery.method.contact.sub": {
+      "text": "Um código enviado ao e-mail ou telefone que você configurou.",
+      "status": "machine"
+    },
+    "recovery.method.contact.title": {
+      "text": "E-mail ou telefone",
+      "status": "machine"
+    },
+    "recovery.method.device.sub": {
+      "text": "Confirme em um dispositivo que ainda esteja conectado.",
+      "status": "machine"
+    },
+    "recovery.method.device.title": {
+      "text": "Outro dispositivo",
+      "status": "machine"
+    },
+    "recovery.method.phrase.restore_sub": {
+      "text": "Digite as 24 palavras.",
+      "status": "machine"
+    },
+    "recovery.method.phrase.sub": {
+      "text": "Digite suas 24 palavras e escolha uma nova senha.",
+      "status": "machine"
+    },
+    "recovery.method.phrase.title": {
+      "text": "Frase de recuperação",
+      "status": "machine"
+    },
+    "recovery.method.shares.sub": {
+      "text": "As partes que você entregou a pessoas de confiança.",
+      "status": "machine"
+    },
+    "recovery.method.shares.title": {
+      "text": "Partes de recuperação social",
+      "status": "machine"
+    },
+    "recovery.method.totp.sub": {
+      "text": "Um código do seu app autenticador.",
+      "status": "machine"
+    },
+    "recovery.method.totp.title": {
+      "text": "Autenticador",
+      "status": "machine"
+    },
+    "recovery.method.words.restore_sub": {
+      "text": "Três palavras da sua frase de recuperação.",
+      "status": "machine"
+    },
+    "recovery.method.words.sub": {
+      "text": "Três palavras da sua frase, se esse atalho estiver ativado.",
+      "status": "machine"
+    },
+    "recovery.method.words.title": {
+      "text": "Três palavras",
+      "status": "machine"
+    },
+    "recovery.methods.back": {
+      "text": "Voltar a todas as opções",
+      "status": "machine"
+    },
+    "recovery.phrase.intro": {
+      "text": "Digite suas 24 palavras e depois escolha uma nova senha.",
+      "status": "machine"
+    },
+    "recovery.remembered": {
+      "text": "Lembrou a senha? {link}",
+      "status": "machine"
+    },
+    "recovery.shares.copy_failed": {
+      "text": "Não foi possível copiar. Selecione a parte e copie manualmente.",
+      "status": "machine"
+    },
+    "recovery.shares.error.combine_failed": {
+      "text": "Não foi possível combinar as partes. Confira se cada uma está completa e tente novamente.",
+      "status": "machine"
+    },
+    "recovery.shares.error.generic": {
+      "text": "Não foi possível gerar as partes. Tente novamente.",
+      "status": "machine"
+    },
+    "recovery.shares.error.too_few": {
+      "text": "Cole pelo menos duas partes, uma por linha.",
+      "status": "machine"
+    },
+    "recovery.shares.generate": {
+      "text": "Gerar {count, plural, one {# parte} other {# partes}}",
+      "status": "machine"
+    },
+    "recovery.shares.generating": {
+      "text": "Gerando...",
+      "status": "machine"
+    },
+    "recovery.shares.help": {
+      "text": "Cole exatamente como foram enviadas. Você precisa de tantas quanto foi combinado ao criá-las, geralmente 3 de 5.",
+      "status": "machine"
+    },
+    "recovery.shares.intro": {
+      "text": "Cole as partes que você recebeu, uma por linha, e depois escolha uma nova senha.",
+      "status": "machine"
+    },
+    "recovery.shares.label": {
+      "text": "Partes de recuperação, uma por linha",
+      "status": "machine"
+    },
+    "recovery.shares.panel_body": {
+      "text": "Divida a frase em {count, plural, one {# parte} other {# partes}} para pessoas de confiança. Quaisquer {threshold} delas a reconstroem; menos que isso não revela nada. Entregue uma parte a cada pessoa.",
+      "status": "machine"
+    },
+    "recovery.shares.usage": {
+      "text": "Para usá-las depois, escolha {method} na tela de recuperação e cole quaisquer {threshold}.",
+      "status": "machine"
+    },
+    "recovery.submit": {
+      "text": "Recuperar conta",
+      "status": "machine"
+    },
+    "recovery.title": {
+      "text": "Recupere sua conta",
+      "status": "machine"
+    },
+    "recovery.totp.code_label": {
+      "text": "Código do app",
+      "status": "machine"
+    },
+    "recovery.totp.error.enter_code": {
+      "text": "Digite o código de seis dígitos do seu app autenticador.",
+      "status": "machine"
+    },
+    "recovery.totp.error.generic": {
+      "text": "Não foi possível verificar o código. Tente novamente.",
+      "status": "machine"
+    },
+    "recovery.totp.error.unavailable": {
+      "text": "A recuperação por autenticador não está disponível aqui. Use outra forma de entrar.",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong": {
+      "text": "Esse código não funcionou. Confira o app e tente o próximo.",
+      "status": "machine"
+    },
+    "recovery.totp.error.wrong_username": {
+      "text": "Esse código não funcionou. Confira o nome de usuário e o app e tente novamente.",
+      "status": "machine"
+    },
+    "recovery.totp.intro": {
+      "text": "Use o código de seis dígitos do app autenticador que você configurou em Configurações. Ele devolve o acesso à conta; depois, suas conversas precisam da frase de recuperação ou de outro dispositivo.",
+      "status": "machine"
+    },
+    "recovery.username_required": {
+      "text": "Digite o nome de usuário da conta.",
+      "status": "machine"
+    },
+    "recovery.username_required_to_recover": {
+      "text": "Digite o nome de usuário da conta que deseja recuperar.",
+      "status": "machine"
+    },
+    "recovery.words.error.generic": {
+      "text": "Não foi possível verificar as palavras. Tente novamente.",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match": {
+      "text": "Essas palavras não correspondem.",
+      "status": "machine"
+    },
+    "recovery.words.error.no_match_tries": {
+      "text": "Essas palavras não correspondem. {count, plural, one {Resta # tentativa} other {Restam # tentativas}} antes que o atalho de três palavras seja desativado.",
+      "status": "machine"
+    },
+    "recovery.words.error.open_failed": {
+      "text": "O servidor respondeu, mas os dados de recuperação não puderam ser abertos. Nada foi alterado.",
+      "status": "machine"
+    },
+    "recovery.words.error.server_off": {
+      "text": "A recuperação com três palavras não está disponível neste servidor.",
+      "status": "machine"
+    },
+    "recovery.words.intro": {
+      "text": "Digite três palavras da sua frase de recuperação e escolha uma nova senha. Primeiro, qual conta?",
+      "status": "machine"
+    },
+    "recovery.words.prompt": {
+      "text": "{username}: digite as palavras {positions} da sua frase de recuperação.",
+      "status": "machine"
+    },
+    "recovery.words.prompt_restore": {
+      "text": "Digite as palavras {positions} da sua frase de recuperação.",
+      "status": "machine"
+    },
+    "recovery.words.switched_off": {
+      "text": "O atalho de três palavras agora está desativado para esta conta. Use sua frase de recuperação completa ou outro dispositivo.",
+      "status": "machine"
+    },
+    "recovery.words.switched_off_restore": {
+      "text": "O atalho de três palavras agora está desativado para esta conta. Use outro dispositivo ou sua frase de recuperação completa.",
+      "status": "machine"
+    },
+    "recovery.words.tries_left": {
+      "text": "{count, plural, one {Resta # tentativa.} other {Restam # tentativas.}}",
+      "status": "machine"
+    },
+    "recovery.words.unavailable": {
+      "text": "A recuperação com três palavras não está disponível aqui. Use outra forma de entrar.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.acknowledge": {
+      "text": "Entendo que perder estas palavras significa perder o acesso a esta conta.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.back": {
+      "text": "Voltar às palavras",
+      "status": "machine"
+    },
+    "recovery_phrase.check.lede": {
+      "text": "Digite as palavras {positions} do que você anotou.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_many": {
+      "text": "As palavras {positions} não correspondem. Confira suas anotações e tente novamente.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.mismatch_one": {
+      "text": "A palavra {position} não corresponde. Confira suas anotações e tente novamente.",
+      "status": "machine"
+    },
+    "recovery_phrase.check.title": {
+      "text": "Confira suas anotações",
+      "status": "machine"
+    },
+    "recovery_phrase.copy_failed": {
+      "text": "Não foi possível copiar. Anote as palavras.",
+      "status": "machine"
+    },
+    "recovery_phrase.error.incomplete": {
+      "text": "Digite todas as 24 palavras da sua frase de recuperação.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.acknowledge": {
+      "text": "Anotei estas 24 palavras e entendo que perdê-las significa perder o acesso a esta conta.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.error.generic": {
+      "text": "Não foi possível concluir. Tente novamente.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.finishing": {
+      "text": "Concluindo...",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.lede": {
+      "text": "Você criou uma nova identidade para {username}. Estas 24 palavras são a única forma de recuperá-la se perder o acesso de novo. Anote-as em ordem e guarde em um lugar seguro.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.safety_note": {
+      "text": "Seus contatos vão ver que seu número de segurança mudou e precisarão verificar você novamente antes de trocar mensagens com segurança.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.title": {
+      "text": "Salve sua nova frase de recuperação",
+      "status": "machine"
+    },
+    "recovery_phrase.guest.lede": {
+      "text": "Sua conta foi criada sem senha. Estas 24 palavras são a única forma de voltar a ela em outro dispositivo ou depois de limpar este navegador. Anote-as em ordem e guarde em um lugar seguro.",
+      "status": "machine"
+    },
+    "recovery_phrase.label": {
+      "text": "Frase de recuperação",
+      "status": "machine"
+    },
+    "recovery_phrase.save.anyone_with_words": {
+      "text": "Qualquer pessoa com estas palavras pode ler suas mensagens e agir como você. Não as compartilhe.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.lede": {
+      "text": "Estas 24 palavras são a única forma de voltar à sua conta se você perder sua senha e seus dispositivos. Anote-as em ordem e guarde em um lugar seguro.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.no_screenshot": {
+      "text": "Não guarde as palavras em captura de tela nem em arquivo de texto simples. O Lakko não pode mostrá-las novamente.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.title": {
+      "text": "Salve sua frase de recuperação",
+      "status": "machine"
+    },
+    "recovery_phrase.save.vault_note": {
+      "text": "Em um novo dispositivo, normalmente só serão pedidas três delas, as palavras {positions}. Guarde a lista completa mesmo assim: ela é a única forma de voltar se esse atalho for desativado.",
+      "status": "machine"
+    },
+    "recovery_phrase.save.written": {
+      "text": "Já anotei",
+      "status": "machine"
+    },
+    "recovery_phrase.step": {
+      "text": "Etapa {current} de {total}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_label": {
+      "text": "Palavra {position}",
+      "status": "machine"
+    },
+    "recovery_phrase.word_placeholder": {
+      "text": "palavra {position}",
+      "status": "machine"
+    },
+    "restore_identity.device_intro": {
+      "text": "Um dispositivo que ainda esteja conectado mostra um aviso; confirme nele e compare o código. A transferência tem criptografia de ponta a ponta; os servidores do Lakko não conseguem lê-la. Não precisa de câmera; há um QR code se preferir.",
+      "status": "machine"
+    },
+    "restore_identity.error.bad_saved_account": {
+      "text": "Há um problema com a conta salva neste dispositivo. Saia e entre novamente, ou use sua frase de recuperação.",
+      "status": "machine"
+    },
+    "restore_identity.error.generic": {
+      "text": "Não foi possível restaurar sua identidade. Tente novamente.",
+      "status": "machine"
+    },
+    "restore_identity.error.invalid_phrase": {
+      "text": "Esta não é uma frase de recuperação válida. Confira cada palavra e tente novamente.",
+      "status": "machine"
+    },
+    "restore_identity.error.not_published": {
+      "text": "Nenhuma identidade publicada foi encontrada para verificar a identidade recuperada. Tente novamente ou restaure a partir de um dispositivo que ainda tenha sua conta.",
+      "status": "machine"
+    },
+    "restore_identity.error.nothing": {
+      "text": "Nada para restaurar. Entre primeiro.",
+      "status": "machine"
+    },
+    "restore_identity.error.phrase_mismatch": {
+      "text": "Essa frase de recuperação não corresponde à identidade desta conta. Confira a frase ou pareie um dispositivo existente.",
+      "status": "machine"
+    },
+    "restore_identity.error.unreachable": {
+      "text": "Não foi possível conectar ao diretório para verificar a identidade recuperada. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "Você entrou como {username} em um novo dispositivo. Para manter os contatos que já confiam em você, restaure sua identidade com três palavras, com sua frase de recuperação ou a partir de um dispositivo que ainda esteja conectado.",
+      "status": "machine"
+    },
+    "restore_identity.lede_no_words": {
+      "text": "Você entrou como {username} em um novo dispositivo. Para manter os contatos que já confiam em você, restaure sua identidade com sua frase de recuperação ou a partir de um dispositivo que ainda esteja conectado.",
+      "status": "machine"
+    },
+    "restore_identity.log_out": {
+      "text": "Sair",
+      "status": "machine"
+    },
+    "restore_identity.lost.create": {
+      "text": "Criar uma nova identidade",
+      "status": "machine"
+    },
+    "restore_identity.lost.creating": {
+      "text": "Criando uma nova identidade...",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.generic": {
+      "text": "Não foi possível criar uma nova identidade. Tente novamente.",
+      "status": "machine"
+    },
+    "restore_identity.lost.sub": {
+      "text": "Começar com uma nova identidade",
+      "status": "machine"
+    },
+    "restore_identity.lost.summary": {
+      "text": "Não tenho minha frase de recuperação nem outro dispositivo",
+      "status": "machine"
+    },
+    "restore_identity.lost.warning": {
+      "text": "Isso cria uma nova identidade para sua conta. Seus contatos precisarão verificar você novamente, as mensagens no dispositivo perdido continuarão ilegíveis e você receberá uma nova frase de recuperação para salvar. Faça isso apenas se perdeu tanto sua frase de recuperação quanto todos os outros dispositivos.",
+      "status": "machine"
+    },
+    "restore_identity.not_you": {
+      "text": "Não é sua conta?",
+      "status": "machine"
+    },
+    "restore_identity.phrase_intro": {
+      "text": "Digite as 24 palavras na ordem. O Lakko as confere com sua conta antes de continuar.",
+      "status": "machine"
+    },
+    "restore_identity.submit": {
+      "text": "Restaurar",
+      "status": "machine"
+    },
+    "restore_identity.submitting": {
+      "text": "Restaurando...",
+      "status": "machine"
+    },
+    "restore_identity.title": {
+      "text": "Restaure sua identidade",
+      "status": "machine"
+    },
+    "security.identity_changed.body": {
+      "text": "Se foi você, em outro dispositivo, dispense este aviso. Se não foi, verifique os números de segurança com seus contatos e altere sua senha e suas chaves de acesso.",
+      "status": "machine"
+    },
+    "security.identity_changed.title": {
+      "text": "A chave de segurança da sua conta foi alterada.",
       "status": "machine"
     },
     "settings.about.translations_updated": {
@@ -148,6 +1196,34 @@
     },
     "settings.section.security": {
       "text": "Segurança",
+      "status": "machine"
+    },
+    "username.a11y_hint": {
+      "text": "Nome de usuário: {message}",
+      "status": "machine"
+    },
+    "username.error.empty": {
+      "text": "Digite um nome de usuário",
+      "status": "machine"
+    },
+    "username.error.invalid_characters": {
+      "text": "Apenas letras latinas, dígitos e _",
+      "status": "machine"
+    },
+    "username.error.too_long": {
+      "text": "No máximo {count, plural, one {# caractere} other {# caracteres}}",
+      "status": "machine"
+    },
+    "username.error.too_short": {
+      "text": "Pelo menos {count, plural, one {# caractere} other {# caracteres}}",
+      "status": "machine"
+    },
+    "username.error.unknown": {
+      "text": "Este nome de usuário não pode ser usado",
+      "status": "machine"
+    },
+    "username.hint.shown_as": {
+      "text": "Será exibido como {username}",
       "status": "machine"
     }
   }

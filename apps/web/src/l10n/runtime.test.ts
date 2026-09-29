@@ -74,6 +74,29 @@ describe("language resolution", () => {
     expect(h.runtime.t("nav.chats")).toBe("Chats");
   });
 
+  it("chooses an English plural and fills arguments before the core has loaded", () => {
+    const source = JSON.stringify({
+      format: 1,
+      version: 1,
+      messages: {
+        "x.tries": {
+          text: "{name}: {n, plural, =0 {none left} one {# try left} other {# tries left}}.",
+          comment: "test",
+        },
+      },
+    });
+    const rt = createL10n({
+      loadWasm: () => new Promise<L10nWasm>(() => undefined),
+      sourceJson: source,
+      loadCatalog: () => Promise.reject(new Error("unused")),
+      storage: null,
+      systemLanguages: () => [],
+    });
+    expect(rt.t("x.tries", { name: "Ann", n: 0 })).toBe("Ann: none left.");
+    expect(rt.t("x.tries", { name: "Ann", n: 1 })).toBe("Ann: 1 try left.");
+    expect(rt.t("x.tries", { name: "Ann", n: 7 })).toBe("Ann: 7 tries left.");
+  });
+
   it("follows the first supported system language when nothing is stored", async () => {
     const h = harness({ system: ["de-DE", "fa-IR", "ru-RU"] });
     await h.runtime.init();

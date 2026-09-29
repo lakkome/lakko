@@ -22,6 +22,8 @@ import { createSignal, Show, Switch, Match, type JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { AuthLayout } from "../ui/AuthLayout";
+import { t } from "../l10n";
+import { tRich } from "../l10n/rich";
 import { MethodHead, MethodList } from "../ui/MethodList";
 import { useAuth } from "../auth/AuthContext";
 import { RECOVER_METHODS, recoverMethod, type RecoverMethodId } from "../auth/recover/methods";
@@ -37,7 +39,8 @@ export default function Recover(): JSX.Element {
 
   const [method, setMethod] = createSignal<RecoverMethodId | null>(null);
   // Set when the three-word shortcut turns out to be off: the row goes, and
-  // the reason is shown over the phrase form the user is moved to.
+  // the reason (a catalog key) is shown over the phrase form the user is
+  // moved to.
   const [wordsOff, setWordsOff] = createSignal<string | null>(null);
   const methods = (): typeof RECOVER_METHODS =>
     RECOVER_METHODS.filter((m) => m.id !== "words" || wordsOff() === null);
@@ -58,15 +61,14 @@ export default function Recover(): JSX.Element {
         when={method()}
         fallback={
           <>
-            <h1>Recover your account</h1>
-            <p class="lk-auth-lede">Choose how to get back in.</p>
+            <h1>{t("recovery.title")}</h1>
+            <p class="lk-auth-lede">{t("recovery.lede")}</p>
             <MethodList methods={methods} onPick={setMethod} />
-            <p class="form-info">
-              An authenticator or a code gets you back in; your chats then need your
-              recovery phrase or another device.
-            </p>
+            <p class="form-info">{t("recovery.access_only_note")}</p>
             <p class="lk-auth-foot">
-              Remembered your password? <A href={paths.login}>Log in</A>
+              {tRich("recovery.remembered", {
+                link: <A href={paths.login}>{t("auth.login.submit")}</A>,
+              })}
             </p>
           </>
         }
@@ -76,7 +78,7 @@ export default function Recover(): JSX.Element {
             <MethodHead method={() => recoverMethod(picked())} onBack={() => setMethod(null)} />
             <Show when={picked() === "phrase" && wordsOff() !== null}>
               <div class="lk-alert info" role="status">
-                {wordsOff()}
+                {t(wordsOff() ?? "")}
               </div>
             </Show>
             <Switch>
@@ -108,7 +110,9 @@ export default function Recover(): JSX.Element {
               </Match>
             </Switch>
             <p class="lk-auth-foot">
-              Remembered your password? <A href={paths.login}>Log in</A>
+              {tRich("recovery.remembered", {
+                link: <A href={paths.login}>{t("auth.login.submit")}</A>,
+              })}
             </p>
           </>
         )}

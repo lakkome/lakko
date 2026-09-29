@@ -63,7 +63,7 @@ internal fun namedHandleOrRefuse(source: LoginHandleSource, username: String): N
         throw e
     } catch (e: Exception) {
         val problem = usernameProblemOf(e) ?: throw e
-        throw AuthClientArgError(problem.copy)
+        throw AuthClientArgError(problem.copy, problem.text)
     }
 
 /**
@@ -83,7 +83,7 @@ public fun resolveNamedSignIn(
     val name = when {
         trimmed.isNotEmpty() -> trimmed
         cached != null && cached.username.isNotEmpty() -> cached.username
-        else -> throw AuthClientArgError(NO_NAME_COPY)
+        else -> throw AuthClientArgError(NO_NAME_COPY, me.lakko.app.l10n.UiText("recovery.username_required_to_recover"))
     }
     return namedHandleOrRefuse(source, name)
 }

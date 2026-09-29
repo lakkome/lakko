@@ -61,6 +61,7 @@ public final class SignupViewModel: ObservableObject {
     // MARK: - Wiring
 
     private let repository: AuthRepository
+    private let l10n = Localization.shared
 
     /// Called once with the 24-word phrase right after a successful sign-up.
     /// The repository lands the session inside `signup`, which replaces the
@@ -92,7 +93,7 @@ public final class SignupViewModel: ObservableObject {
         // here, before anything reaches the auth service.
         switch checkUsername(username) {
         case .empty:
-            error = "Choose a username first."
+            error = l10n.t("auth.signup.error.enter_username")
             return
         case .invalid(let reason):
             error = reason.message
@@ -100,16 +101,16 @@ public final class SignupViewModel: ObservableObject {
         case .valid:
             break
         }
-        if let nameError = displayNameError {
-            error = nameError
+        if displayNameError != nil {
+            error = l10n.t("auth.signup.error.fix_name")
             return
         }
         if password != confirm {
-            error = "The passwords do not match. Type the same password twice."
+            error = l10n.t("auth.password.error.mismatch")
             return
         }
         if password.count < Self.minPasswordLength {
-            error = "Use at least \(Self.minPasswordLength) characters for the password."
+            error = l10n.t("auth.password.error.too_short", counts: ["count": UInt64(Self.minPasswordLength)])
             return
         }
 
@@ -153,19 +154,12 @@ public final class SignupViewModel: ObservableObject {
                 // no message. A cancelled network call surfaces as a network
                 // error, so the task's flag decides, not the error type.
                 if Task.isCancelled || error is CancellationError { return }
-                switch error {
-                case let err as AuthClientError:
-                    if let refusal = AuthRateLimit.refusal(in: err),
-                       refusal.code == AuthRateLimit.signupRateLimited {
-                        rateLimited = true
-                    }
-                    self.error = userFacing(err)
-                case let err as DiscoveryClientError:
-                    self.error = err.authFormMessage
-                default:
-                    self.error = (error as? LocalizedError)?.errorDescription
-                        ?? "Could not create the account. Try again."
+                if let err = error as? AuthClientError,
+                   let refusal = AuthRateLimit.refusal(in: err),
+                   refusal.code == AuthRateLimit.signupRateLimited {
+                    rateLimited = true
                 }
+                self.error = AuthErrorCopy.signup(error)
             }
         }
     }
@@ -190,8 +184,8 @@ public final class SignupViewModel: ObservableObject {
     }
 
     /// The working-state copy (`docs/ux/anti-abuse.md` section 1).
-    public static let workingTitle = "Creating your account..."
-    public static let workingNote = "This takes a little while, once. You will not wait like this again."
+    public static var workingTitle: String { Localization.shared.t("auth.signup.working.title") }
+    public static var workingNote: String { Localization.shared.t("auth.signup.working.line") }
 
     /// Called when the user has confirmed they wrote the recovery
     /// phrase down. Drops the in-memory phrase reference + signals
@@ -219,7 +213,7 @@ public final class SignupViewModel: ObservableObject {
             _ = try checkDisplayName(displayName)
             return nil
         } catch {
-            return (error as? LocalizedError)?.errorDescription ?? "That name cannot be used."
+            return (error as? LocalizedError)?.errorDescription ?? l10n.t("display_name.error.unknown")
         }
     }
 
@@ -235,34 +229,6 @@ public final class SignupViewModel: ObservableObject {
             try ProfileDirectory.shared.setOwnDisplayName(input, accountIdB64: base64Encode(accountId))
         } catch {
             NSLog("ADR-0048 signup name not saved: \(error)")
-        }
-    }
-
-    // MARK: - Error mapping
-
-    /// Map an ``AuthClientError`` to a user-facing message. Today's
-    /// auth service distinguishes a couple of cases by status code;
-    /// future cases get added here as the service surface evolves.
-    /// Indistinguishable-failure cases (login 401) stay generic on
-    /// purpose.
-    private func userFacing(_ err: AuthClientError) -> String {
-        if let limit = AuthRateLimit.copy(for: err) { return limit }
-        switch err {
-        case .argument(let message):
-            return message
-        case .http(let status, _, _):
-            switch status {
-            case 409:
-                return "That username is taken. Choose another one."
-            case 429:
-                return "Too many attempts. Wait a moment, then try again."
-            case 500...599:
-                return "Lakko is having trouble right now. Try again in a moment."
-            default:
-                return "Could not create the account. Try again."
-            }
-        case .network:
-            return "No connection. Check your network and try again."
         }
     }
 

@@ -108,6 +108,7 @@ public final class RecoverViewModel: ObservableObject {
     // MARK: - Wiring
 
     private let repository: AuthRepository
+    private let l10n = Localization.shared
 
     public init(repository: AuthRepository, cachedUsername: String?) {
         self.repository = repository
@@ -135,18 +136,18 @@ public final class RecoverViewModel: ObservableObject {
         guard !busy else { return } // ignore double-tap
 
         if password != confirm {
-            error = "The passwords do not match. Type the same password twice."
+            error = l10n.t("auth.password.error.mismatch")
             return
         }
         if password.count < Self.minPasswordLength {
-            error = "Use at least \(Self.minPasswordLength) characters for the new password."
+            error = l10n.t("auth.password.error.too_short", counts: ["count": UInt64(Self.minPasswordLength)])
             return
         }
         // ADR-0017 / ADR-0054 S5 — on a fresh device (no cached account)
         // the username is required: the account is named by its handle.
         let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
         if cachedUsername == nil && trimmedUsername.isEmpty {
-            error = "Enter your username so Lakko can find your account."
+            error = l10n.t("recovery.username_required")
             return
         }
 
@@ -160,23 +161,23 @@ public final class RecoverViewModel: ObservableObject {
             // ADR-0018 — the AnotherDevice mode never reaches the
             // OPAQUE submit: the RestoreViaDevicePanel drives
             // completeFromDeviceRestore directly. Defensive no-op.
-            error = "Show the QR code to your other device to continue."
+            error = l10n.t("recovery.error.generic")
             return
         case .totp:
             // ADR-0018 factor (c) — the Authenticator mode submits
             // via `submitTotp` (no new password on that path).
             // Defensive no-op.
-            error = "Enter the code from your authenticator app."
+            error = l10n.t("recovery.totp.error.enter_code")
             return
         case .contact:
             // ADR-0018 factor (d) — the Email/SMS mode submits via
             // `sendContactCode` / `submitContactCode` (no new password
             // on that path). Defensive no-op.
-            error = "Request a code by email or text message first."
+            error = l10n.t("recovery.error.generic")
             return
         case .phrase:
             if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                error = "Enter all 24 words of your recovery phrase."
+                error = l10n.t("recovery_phrase.error.incomplete")
                 return
             }
             phraseSnapshot = phrase
@@ -186,7 +187,7 @@ public final class RecoverViewModel: ObservableObject {
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
             if lines.count < 2 {
-                error = "Enter at least three shares, one per line."
+                error = l10n.t("recovery.shares.error.too_few")
                 return
             }
             do {
@@ -194,8 +195,8 @@ public final class RecoverViewModel: ObservableObject {
                     encodedShares: lines
                 )
             } catch {
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "These shares do not fit together. Check each one and try again."
+                NSLog("[recover] WARN shares did not combine: \(error)")
+                self.error = l10n.t("recovery.shares.error.combine_failed")
                 return
             }
         }
@@ -225,29 +226,11 @@ public final class RecoverViewModel: ObservableObject {
                 sharesInput = ""
                 password = ""
                 confirm = ""
-            } catch let err as FfiError {
-                // BIP39 mnemonic parse failure. UniFFI surfaces both
-                // unknown-word and bad-checksum cases through the
-                // single `Mnemonic` variant of `FfiError` — by
-                // design (preserves the no-probing property). Swift
-                // case names are PascalCase per the UniFFI codegen
-                // shape (the Kotlin side uses `FfiException` with
-                // PascalCase sub-classes — same vocabulary, different
-                // surface).
-                if case .Mnemonic = err {
-                    busy = false
-                    error = "That is not a valid recovery phrase. Check the spelling and order of the 24 words."
-                } else {
-                    busy = false
-                    self.error = err.localizedDescription
-                }
-            } catch let err as AuthClientError {
-                busy = false
-                error = userFacing(err)
             } catch {
+                // A bad phrase (unknown word or checksum) reads as one
+                // sentence; a wrong phrase and an unknown account too.
                 busy = false
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not recover the account. Try again."
+                self.error = AuthErrorCopy.recover(error)
             }
         }
     }
@@ -265,7 +248,7 @@ public final class RecoverViewModel: ObservableObject {
         do {
             let name = try LoginName.make(
                 username,
-                emptyError: AuthClientError.argument("Enter your username first.")
+                emptyError: AuthClientError.argument("empty username")
             )
             deviceRestoreTarget = DeviceRestoreTarget(
                 username: name.canonical,
@@ -273,8 +256,7 @@ public final class RecoverViewModel: ObservableObject {
             )
             error = nil
         } catch {
-            self.error = (error as? LocalizedError)?.errorDescription
-                ?? "Enter your username first."
+            self.error = AuthErrorCopy.rule(error) ?? l10n.t("recovery.username_required")
         }
     }
 
@@ -303,10 +285,7 @@ public final class RecoverViewModel: ObservableObject {
             // fresh pairing mints a fresh grant). The seed is zeroed
             // where it lives, in the outcome.
             outcome.wipeSeed()
-            throw AuthClientError.argument(
-                "The other device transferred your identity but the " +
-                "sign-in grant could not be redeemed. Try again."
-            )
+            throw DeviceRestoreNotLetIn()
         }
         // ADR-0056 security pass: the repository verifies the seed, checks
         // the typed name at discovery, and only then runs the pairing's
@@ -340,11 +319,11 @@ public final class RecoverViewModel: ObservableObject {
         let user = (cachedUsername ?? username)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !user.isEmpty else {
-            error = "Enter the username of the account to recover."
+            error = l10n.t("recovery.username_required_to_recover")
             return
         }
         guard let normalized = normalizeTotpCode(totpCode) else {
-            error = "Enter the 6-digit code from your authenticator app."
+            error = l10n.t("recovery.totp.error.enter_code")
             return
         }
         busy = true
@@ -360,43 +339,10 @@ public final class RecoverViewModel: ObservableObject {
                 busy = false
                 error = nil
                 totpCode = ""
-            } catch let err as AuthClientError {
-                busy = false
-                error = totpUserFacing(err)
             } catch {
                 busy = false
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not recover the account. Try again."
+                self.error = AuthErrorCopy.totp(error, typedUsername: cachedUsername == nil)
             }
-        }
-    }
-
-    /// Map a `recoverWithTotp` failure onto friendly inline copy. The
-    /// server is enumeration-safe: 401 covers unknown-account /
-    /// unconfirmed-enrollment / wrong-code / replayed-code uniformly
-    /// (mirror of Android's `totpUserFacingHttpError`).
-    private func totpUserFacing(_ err: AuthClientError) -> String {
-        // ADR-0054 S4 — a limit is the server's decision, never a wrong
-        // credential: its own copy, with the minutes when it says so.
-        if let limit = AuthRateLimit.copy(for: err) { return limit }
-        switch err {
-        case .argument(let message):
-            return message
-        case .http(let status, _, _):
-            switch status {
-            case 401:
-                return "That code is wrong or has expired. Enter the current code."
-            case 429:
-                return "Too many attempts. Wait 15 minutes, then try again."
-            case 503:
-                return "Recovery with an authenticator app is not available right now. Try another method."
-            case 500...599:
-                return "Lakko is having trouble right now. Try again in a moment."
-            default:
-                return "Could not recover the account. Try again."
-            }
-        case .network:
-            return "No connection. Check your network and try again."
         }
     }
 
@@ -412,15 +358,15 @@ public final class RecoverViewModel: ObservableObject {
         let user = (cachedUsername ?? username)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !user.isEmpty else {
-            error = "Enter the username of the account to recover."
+            error = l10n.t("recovery.username_required_to_recover")
             return
         }
         // Light client-side shape check — saves a round trip on an
         // obviously-malformed contact. The server is authoritative.
         guard isPlausibleContact(kind: contactKind, contact: contact) else {
-            error = contactKind == .email
-                ? "Enter a valid email address."
-                : "Enter a phone number in international format (e.g. +15551234567)."
+            error = l10n.t(contactKind == .email
+                ? "recovery.contact.error.invalid_email"
+                : "recovery.contact.error.invalid_phone")
             return
         }
         busy = true
@@ -439,13 +385,9 @@ public final class RecoverViewModel: ObservableObject {
                 contactStep = .code
                 busy = false
                 error = nil
-            } catch let err as AuthClientError {
-                busy = false
-                error = contactUserFacing(err)
             } catch {
                 busy = false
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Couldn't send the code."
+                self.error = AuthErrorCopy.contact(error, sending: true)
             }
         }
     }
@@ -459,7 +401,7 @@ public final class RecoverViewModel: ObservableObject {
     public func submitContactCode() {
         guard !busy else { return }
         guard let normalized = normalizeTotpCode(contactCode) else {
-            error = "Enter the 6-digit code we sent."
+            error = l10n.t("recovery.contact.error.enter_code")
             return
         }
         busy = true
@@ -472,75 +414,10 @@ public final class RecoverViewModel: ObservableObject {
                 busy = false
                 error = nil
                 contactCode = ""
-            } catch let err as AuthClientError {
-                busy = false
-                error = contactUserFacing(err)
             } catch {
                 busy = false
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not recover the account. Try again."
+                self.error = AuthErrorCopy.contact(error, sending: false)
             }
-        }
-    }
-
-    /// Map a phone / email OTP recover failure onto friendly inline
-    /// copy. The server is enumeration-safe: 401 covers unknown account
-    /// / no-live-challenge / wrong-code / replayed-code uniformly.
-    /// Mirror of the web `contactRecoverErrorMessage`.
-    private func contactUserFacing(_ err: AuthClientError) -> String {
-        // ADR-0054 S4 — a limit is the server's decision, never a wrong
-        // credential: its own copy, with the minutes when it says so.
-        if let limit = AuthRateLimit.copy(for: err) { return limit }
-        switch err {
-        case .argument(let message):
-            return message
-        case .http(let status, _, _):
-            switch status {
-            case 400:
-                return "That email or phone number does not look right. Check it and try again."
-            case 401:
-                return "That code is wrong or has expired. Check the code you received and try again."
-            case 429:
-                return "Too many attempts. Wait a moment, then request a new code."
-            case 503:
-                return "Recovery by email or text message is not available right now. Try another method."
-            case 500...599:
-                return "Lakko is having trouble right now. Try again in a moment."
-            default:
-                return "Could not recover the account. Try again."
-            }
-        case .network:
-            return "No connection. Check your network and try again."
-        }
-    }
-
-    // MARK: - Error mapping
-
-    /// Map server-side HTTP errors to user-facing copy. The
-    /// `/password/reset/{start,finish}` pair returns 401 on a wrong
-    /// mnemonic (the OPAQUE recovery login fails at AKE
-    /// finalisation). Surface generic copy — wrong-mnemonic and
-    /// wrong-account collapse into the same response by design.
-    private func userFacing(_ err: AuthClientError) -> String {
-        // ADR-0054 S4 — a limit is the server's decision, never a wrong
-        // credential: its own copy, with the minutes when it says so.
-        if let limit = AuthRateLimit.copy(for: err) { return limit }
-        switch err {
-        case .argument(let message):
-            return message
-        case .http(let status, _, _):
-            switch status {
-            case 401:
-                return "That recovery phrase does not match this account. Check the words and try again."
-            case 429:
-                return "Too many attempts. Wait a moment, then try again."
-            case 500...599:
-                return "Lakko is having trouble right now. Try again in a moment."
-            default:
-                return "Could not recover the account. Try again."
-            }
-        case .network:
-            return "No connection. Check your network and try again."
         }
     }
 

@@ -25,10 +25,12 @@ import SwiftUI
 @MainActor
 final class Localization: ObservableObject {
     /// The key of the stored choice. Absent = "Same as system".
-    static let storageKey = "lakko.l10n.language"
+    nonisolated static let storageKey = "lakko.l10n.language"
 
-    /// The process-wide instance every screen observes.
-    static let shared = Localization()
+    /// The process-wide instance every screen observes. It also publishes
+    /// the current catalog to ``text(_:texts:counts:)`` for code off the main
+    /// actor.
+    static let shared = Localization(publishesSnapshot: true)
 
     /// The stored choice: a supported code, or `nil` for "Same as system".
     @Published private(set) var selected: String?
@@ -47,6 +49,7 @@ final class Localization: ObservableObject {
     private var catalog: L10nCatalog?
     private var strings: [String: String] = [:]
     private var localeObserver: NSObjectProtocol?
+    private let publishesSnapshot: Bool
 
     /// The store for the choice: the App Group suite when it opens, else the
     /// app's own defaults (an unprovisioned build keeps working).
@@ -57,8 +60,10 @@ final class Localization: ObservableObject {
     init(
         defaults: UserDefaults = Localization.defaultStore(),
         bundle: Bundle = .main,
-        systemPreferred: @escaping () -> [String] = { Locale.preferredLanguages }
+        systemPreferred: @escaping () -> [String] = { Locale.preferredLanguages },
+        publishesSnapshot: Bool = false
     ) {
+        self.publishesSnapshot = publishesSnapshot
         self.defaults = defaults
         self.bundle = bundle
         self.systemPreferred = systemPreferred
@@ -165,7 +170,7 @@ final class Localization: ObservableObject {
 
     // MARK: - Catalog
 
-    private static func loadSource(bundle: Bundle) -> L10nSource? {
+    nonisolated fileprivate static func loadSource(bundle: Bundle) -> L10nSource? {
         guard let url = bundle.url(forResource: "source", withExtension: "json", subdirectory: "L10n"),
               let data = try? Data(contentsOf: url) else {
             NSLog("[l10n] ERR source catalog missing from the bundle")
@@ -187,13 +192,115 @@ final class Localization: ObservableObject {
             strings = [:]
             return
         }
+        let built = Localization.buildCatalog(source: source, bundle: bundle, code: code)
+        catalog = built
+        strings = built?.plainStrings() ?? [:]
+        if publishesSnapshot {
+            Localization.snapshot.publish(catalog: built, strings: strings)
+        }
+    }
+
+    /// The catalog for `code` from the compiled files in `bundle`, English
+    /// when that language does not load.
+    nonisolated fileprivate static func buildCatalog(
+        source: L10nSource,
+        bundle: Bundle,
+        code: String
+    ) -> L10nCatalog? {
         let builtIn: Data? = code == "en" ? nil : bundle
             .url(forResource: code, withExtension: "json", subdirectory: "L10n")
             .flatMap { try? Data(contentsOf: $0) }
-        let built = (try? L10nCatalog(source: source, language: code, builtIn: builtIn, bundle: nil))
+        return (try? L10nCatalog(source: source, language: code, builtIn: builtIn, bundle: nil))
             ?? (try? L10nCatalog(source: source, language: "en", builtIn: nil, bundle: nil))
-        catalog = built
-        strings = built?.plainStrings() ?? [:]
+    }
+
+    // MARK: - Off the main actor
+
+    /// The catalog ``shared`` has loaded, readable from any thread.
+    nonisolated fileprivate static let snapshot = CatalogSnapshot()
+
+    /// The string for `key` in the current interface language, for code
+    /// that is not on the main actor (an error's description, a UIKit
+    /// delegate). A view reads ``t(_:)`` on an observed instance instead, so
+    /// it re-renders on a language switch; text from here is fixed when it
+    /// is produced.
+    nonisolated static func text(
+        _ key: String,
+        texts: [String: String] = [:],
+        counts: [String: UInt64] = [:]
+    ) -> String {
+        snapshot.lookup(key, texts: texts, counts: counts)
+    }
+
+    // MARK: - Composition helpers
+
+    /// A message with one `{link}` part, split around it: the text before
+    /// the link and the text after it, so a view can put a tappable title
+    /// between them while the translator still sees one sentence.
+    func linkParts(_ key: String, texts: [String: String] = [:]) -> (lead: String, trail: String) {
+        let marker = "\u{E000}link\u{E001}"
+        var args = texts
+        args["link"] = marker
+        let whole = t(key, texts: args)
+        guard let range = whole.range(of: marker) else { return (whole, "") }
+        // The isolates the formatter puts around the argument stay with it.
+        let isolates = CharacterSet(charactersIn: "\u{2066}\u{2067}\u{2068}\u{2069}")
+        let lead = String(whole[..<range.lowerBound])
+            .trimmingCharacters(in: isolates)
+        let trail = String(whole[range.upperBound...])
+            .trimmingCharacters(in: isolates)
+        return (lead, trail)
+    }
+
+    /// A list of word positions for a `{positions}` argument: the numbers
+    /// stay in Latin digits (ADR-0058 open question 2) and are joined by the
+    /// list formatter of the interface language.
+    func positions(_ numbers: [Int]) -> String {
+        let formatter = ListFormatter()
+        formatter.locale = locale
+        let items = numbers.map { String($0) }
+        return formatter.string(from: items) ?? items.joined(separator: ", ")
+    }
+}
+
+/// The catalog of ``Localization/shared``, behind a lock so code off the
+/// main actor can read it. Until the shared instance has loaded, it loads
+/// the same language the shared instance will (the stored choice, else the
+/// system preference) from the main bundle on first use.
+final class CatalogSnapshot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var catalog: L10nCatalog?
+    private var strings: [String: String] = [:]
+    private var loaded = false
+
+    func publish(catalog: L10nCatalog?, strings: [String: String]) {
+        lock.withLock {
+            self.catalog = catalog
+            self.strings = strings
+            loaded = true
+        }
+    }
+
+    func lookup(_ key: String, texts: [String: String], counts: [String: UInt64]) -> String {
+        lock.withLock {
+            if !loaded { loadDefault() }
+            if texts.isEmpty && counts.isEmpty { return strings[key] ?? key }
+            return catalog?.format(key: key, texts: texts, counts: counts) ?? key
+        }
+    }
+
+    /// Called with the lock held.
+    private func loadDefault() {
+        loaded = true
+        guard let source = Localization.loadSource(bundle: .main) else { return }
+        let languages = l10nSupportedLanguages()
+        let stored = Localization.defaultStore().string(forKey: Localization.storageKey)
+        let selected = stored.flatMap { code in
+            languages.contains(where: { $0.code == code }) ? code : nil
+        }
+        let code = l10nResolveLanguage(selected: selected, systemPreferred: Locale.preferredLanguages)
+        catalog = Localization.buildCatalog(source: source, bundle: .main, code: code)
+        strings = catalog?.plainStrings() ?? [:]
     }
 }
 

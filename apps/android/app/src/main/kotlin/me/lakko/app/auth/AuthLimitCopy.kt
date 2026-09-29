@@ -69,5 +69,35 @@ public fun authLimitCopy(err: AuthHttpError): String? {
     }
 }
 
+/**
+ * [authLimitCopy] as a catalog message (ADR-0058): the same decision, the
+ * sentence rendered by the screen in the current language. The English
+ * constants above stay for the screens not yet moved to the catalog.
+ */
+public fun authLimitText(err: AuthHttpError): me.lakko.app.l10n.UiText? {
+    if (err.status != HTTP_TOO_MANY_REQUESTS) return null
+    return when (err.code) {
+        "recovery-code-send-limited" -> me.lakko.app.l10n.UiText("recovery.error.code_send_limited")
+        "device-request-limited" -> me.lakko.app.l10n.UiText("device_link.error.request_limited")
+        "signup-rate-limited" -> SIGNUP_RATE_LIMITED_TEXT
+        else -> {
+            val wait = err.retryAfterSecs
+            if (wait != null && wait > SECONDS_PER_MINUTE) {
+                val minutes = (wait + SECONDS_PER_MINUTE - 1) / SECONDS_PER_MINUTE
+                me.lakko.app.l10n.UiText(
+                    "common.error.too_many_attempts_minutes",
+                    counts = mapOf("minutes" to minutes.toULong()),
+                )
+            } else {
+                me.lakko.app.l10n.UiText("common.error.too_many_attempts")
+            }
+        }
+    }
+}
+
+/** `signup-rate-limited` as a catalog message; the form compares against it. */
+public val SIGNUP_RATE_LIMITED_TEXT: me.lakko.app.l10n.UiText =
+    me.lakko.app.l10n.UiText("auth.signup.error.rate_limited")
+
 private const val HTTP_TOO_MANY_REQUESTS: Int = 429
 private const val SECONDS_PER_MINUTE: Long = 60L

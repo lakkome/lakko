@@ -3,6 +3,7 @@
 
 package me.lakko.app.profile
 
+import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.FfiException
 
 /**
@@ -31,15 +32,19 @@ import uniffi.lakko_ffi_uniffi.FfiException
  * like a named refusal does.
  */
 
-/** Why a username fails the ADR-0048 §4 rule, with the UX spec's copy. */
-public enum class UsernameProblem(public val copy: String) {
-    EMPTY("Enter a username"),
-    TOO_SHORT("At least 3 characters"),
-    TOO_LONG("At most 32 characters"),
-    INVALID_CHARACTERS("Only Latin letters, digits and _"),
+/**
+ * Why a username fails the ADR-0048 §4 rule. [text] is what a screen shows
+ * (ADR-0058: the catalog key, rendered in the current language); [copy] is
+ * the English sentence, kept for screens not yet moved to the catalog.
+ */
+public enum class UsernameProblem(public val copy: String, public val text: UiText) {
+    EMPTY("Enter a username", UiText("username.error.empty")),
+    TOO_SHORT("At least 3 characters", UiText("username.error.too_short", counts = mapOf("count" to 3uL))),
+    TOO_LONG("At most 32 characters", UiText("username.error.too_long", counts = mapOf("count" to 32uL))),
+    INVALID_CHARACTERS("Only Latin letters, digits and _", UiText("username.error.invalid_characters")),
 
     /** The core refused for a reason it did not classify as a username rule. */
-    UNUSABLE("This username can't be used"),
+    UNUSABLE("This username can't be used", UiText("username.error.unknown")),
 }
 
 /** Outcome of checking a typed username. */
@@ -97,6 +102,23 @@ public fun usernameCanonicalHint(check: UsernameCheck, input: String): String? {
     return if (typed == valid.normalized) null else "Shown as @${valid.normalized}"
 }
 
+/** [usernameCanonicalHint] as a catalog message. */
+public fun usernameCanonicalHintText(check: UsernameCheck, input: String): UiText? {
+    val valid = check as? UsernameCheck.Valid ?: return null
+    val typed = input.trim().removePrefix("@")
+    return if (typed == valid.normalized) {
+        null
+    } else {
+        UiText("username.hint.shown_as", texts = mapOf("username" to "@${valid.normalized}"))
+    }
+}
+
+/** [usernameFieldError] as a catalog message. */
+public fun usernameFieldErrorText(check: UsernameCheck, input: String): UiText? {
+    if (input.isBlank()) return null
+    return (check as? UsernameCheck.Invalid)?.problem?.text
+}
+
 /**
  * What a search field does with [input]: a lookup for a name that passes, or
  * nothing and the reason for one that fails. A search field NEVER sends a
@@ -107,8 +129,8 @@ public sealed interface SearchDecision {
     /** Send the lookup for [normalized]. */
     public data class Lookup(val normalized: String) : SearchDecision
 
-    /** Do not send anything; show [message]. */
-    public data class Refuse(val message: String) : SearchDecision
+    /** Do not send anything; show [text] ([message] is its English form). */
+    public data class Refuse(val message: String, val text: UiText = UiText("username.error.unknown")) : SearchDecision
 }
 
 /** Decide a search field's action for [input]. */
@@ -117,18 +139,19 @@ public fun searchDecision(
     validate: (String) -> String = { uniffi.lakko_ffi_uniffi.validateUsername(it) },
 ): SearchDecision = when (val check = checkUsername(input, validate)) {
     is UsernameCheck.Valid -> SearchDecision.Lookup(check.normalized)
-    is UsernameCheck.Invalid -> SearchDecision.Refuse(check.problem.copy)
+    is UsernameCheck.Invalid -> SearchDecision.Refuse(check.problem.copy, check.problem.text)
 }
 
-/** Why a profile name fails the ADR-0048 §1 rule, with display copy. */
-public enum class DisplayNameProblem(public val copy: String) {
-    LINE_BREAK("One line only"),
-    CONTROL_OR_FORMAT("Remove invisible or text-direction characters"),
-    TOO_LONG("At most 64 characters"),
-    TOO_MANY_BYTES("This name is too long"),
+/** Why a profile name fails the ADR-0048 §1 rule; [text] and [copy] as for
+ *  [UsernameProblem]. */
+public enum class DisplayNameProblem(public val copy: String, public val text: UiText) {
+    LINE_BREAK("One line only", UiText("display_name.error.line_break")),
+    CONTROL_OR_FORMAT("Remove invisible or text-direction characters", UiText("display_name.error.control")),
+    TOO_LONG("At most 64 characters", UiText("display_name.error.too_long", counts = mapOf("count" to 64uL))),
+    TOO_MANY_BYTES("This name is too long", UiText("display_name.error.too_many_bytes")),
 
     /** The core refused for a reason it did not classify as a name rule. */
-    UNUSABLE("This name can't be used"),
+    UNUSABLE("This name can't be used", UiText("display_name.error.unknown")),
 }
 
 /** Outcome of checking a typed profile name. */

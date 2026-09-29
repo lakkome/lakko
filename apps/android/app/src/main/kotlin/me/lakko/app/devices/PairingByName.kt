@@ -10,6 +10,7 @@ import me.lakko.app.auth.LoginHandleSource
 import me.lakko.app.auth.NamedHandle
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.auth.namedHandleOrRefuse
+import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.DecodedPairingQr
 import uniffi.lakko_ffi_uniffi.FfiException
 
@@ -26,19 +27,17 @@ import uniffi.lakko_ffi_uniffi.FfiException
 
 /** Shown in place of the pairing affordances on an account with no username
  *  (a guest): neither side of a pairing can name the account. */
-public const val PAIRING_NO_USERNAME_COPY: String = "Set a username first to add another device."
+public val PAIRING_NO_USERNAME_COPY: UiText = UiText("device_link.pairing.needs_username")
 
 /** A scanned code whose login handle is not this account's. */
-public const val PAIRING_WRONG_ACCOUNT_COPY: String =
-    "This code is for a different account. Check that the new device uses the same username as this one."
+public val PAIRING_WRONG_ACCOUNT_COPY: UiText = UiText("device_link.pairing.wrong_account")
 
 /** A code from a different pairing version (the other device runs another Lakko version). */
-public const val PAIRING_UNSUPPORTED_COPY: String =
-    "This code comes from a different version of Lakko. Update Lakko on both devices and try again."
+public val PAIRING_UNSUPPORTED_COPY: UiText = UiText("device_link.pairing.unsupported")
 
 /** Any other refusal of a scanned code (a payload version this build does not
  *  read, a malformed payload). */
-public const val PAIRING_FAILED_COPY: String = "Pairing failed. Try again."
+public val PAIRING_FAILED_COPY: UiText = UiText("device_link.request.error.generic")
 
 /** The typed-nothing refusal on the fresh-device side. */
 public const val PAIRING_NO_NAME_COPY: String = "Enter your username first."
@@ -59,7 +58,7 @@ public fun pairingNameFor(
     val name = when {
         trimmed.isNotEmpty() -> trimmed
         !fallbackUsername.isNullOrBlank() -> fallbackUsername
-        else -> throw AuthClientArgError(PAIRING_NO_NAME_COPY)
+        else -> throw AuthClientArgError(PAIRING_NO_NAME_COPY, UiText("recovery.username_required"))
     }
     return namedHandleOrRefuse(source, name)
 }
@@ -85,8 +84,8 @@ public sealed interface PairingScanDecision {
     /** The code is for this account; confirm, then run the scan flow. */
     public class Accepted(public val decoded: DecodedPairingQr) : PairingScanDecision
 
-    /** Refused before any MLS commit; [copy] is what the scanner shows. */
-    public data class Refused(public val copy: String) : PairingScanDecision
+    /** Refused before any MLS commit; [text] is what the scanner shows. */
+    public data class Refused(public val text: UiText) : PairingScanDecision
 }
 
 /**

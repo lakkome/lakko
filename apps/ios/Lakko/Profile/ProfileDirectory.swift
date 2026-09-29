@@ -263,15 +263,18 @@ func checkDisplayName(
         return try normalize(input)
     } catch let error as FfiError {
         switch error {
+        // ADR-0058: the copy is the catalog's, in the interface language.
         case .DisplayNameLineBreak:
-            throw DisplayNameRuleViolation(message: "Your name must fit on one line.")
+            throw DisplayNameRuleViolation(message: Localization.text("display_name.error.line_break"))
         case .DisplayNameControlOrFormatCharacter:
+            throw DisplayNameRuleViolation(message: Localization.text("display_name.error.control"))
+        case .DisplayNameTooLong:
             throw DisplayNameRuleViolation(
-                message: "Your name contains an invisible or text-direction character.")
-        case .DisplayNameTooLong, .DisplayNameTooManyBytes:
-            throw DisplayNameRuleViolation(message: "At most 64 characters.")
+                message: Localization.text("display_name.error.too_long", counts: ["count": 64]))
+        case .DisplayNameTooManyBytes:
+            throw DisplayNameRuleViolation(message: Localization.text("display_name.error.too_many_bytes"))
         default:
-            throw DisplayNameRuleViolation(message: "That name cannot be used.")
+            throw DisplayNameRuleViolation(message: Localization.text("display_name.error.unknown"))
         }
     }
 }
