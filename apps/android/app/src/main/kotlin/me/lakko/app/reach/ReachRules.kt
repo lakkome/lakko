@@ -4,7 +4,7 @@
 package me.lakko.app.reach
 
 /*
- * ADR-0058 — who may reach this person, as pure decisions.
+ * ADR-0060 — who may reach this person, as pure decisions.
  *
  * Everything here is free of the native core so the whole rule set runs on the
  * host JVM: the classes are mirrored as [ReachKind], keys are compared as hex,
@@ -13,7 +13,7 @@ package me.lakko.app.reach
  * the FFI and the Delivery Service.
  */
 
-/** Who a reach key is handed to (ADR-0058 §1). Mirror of `FfiReachClass`. */
+/** Who a reach key is handed to (ADR-0060 §1). Mirror of `FfiReachClass`. */
 public enum class ReachKind {
     /** Every contact (sent in the 1:1 conversation). Empty scope. */
     CONTACT,
@@ -41,10 +41,10 @@ public enum class ReachKind {
     public val scopeless: Boolean get() = this == CONTACT || this == FOF
 }
 
-/** How long a `reply` key lives (ADR-0058 §1): seven days, chosen, not measured. */
+/** How long a `reply` key lives (ADR-0060 §1): seven days, chosen, not measured. */
 public const val REPLY_TTL_MS: Long = 7L * 24 * 60 * 60 * 1000
 
-/** Byte length of a random `reply` scope (ADR-0058 §1). */
+/** Byte length of a random `reply` scope (ADR-0060 §1). */
 public const val REPLY_SCOPE_LEN: Int = 16
 
 /** One of the owner's key slots: a class and a scope (lowercase hex, `""` for
@@ -92,7 +92,7 @@ public data class ReachInputs(
 )
 
 /**
- * The key set the owner's mailbox should hold at [nowMs] (ADR-0058 §1, the
+ * The key set the owner's mailbox should hold at [nowMs] (ADR-0060 §1, the
  * client contract "Reach keys the owner holds").
  *
  * `contact` is always there (a contact can always write); `member` for every
@@ -169,7 +169,7 @@ public enum class GrantVenue {
 }
 
 /**
- * Whether to keep a reach grant a peer handed out (ADR-0058 client contract,
+ * Whether to keep a reach grant a peer handed out (ADR-0060 client contract,
  * the last write-path rule): `contact` ONLY from the other participant of a
  * one-to-one conversation; `group` / `member` only from a member of that group
  * (and `member` also in a one-to-one, which is a group of two); `channel` only
@@ -223,7 +223,7 @@ public enum class WritePurpose {
 
 /**
  * Which of the grants held for one person authorises a write of [purpose]
- * (ADR-0058 §6), or `null` for none (the write then goes unsigned, which an
+ * (ADR-0060 §6), or `null` for none (the write then goes unsigned, which an
  * open mailbox takes and a closed one drops).
  *
  * - A contact request never uses `member`: a co-member the person hides from
@@ -300,7 +300,7 @@ public fun reachUnhex(hex: String): ByteArray? {
 private const val HEX_DIGITS: String = "0123456789abcdef"
 
 /**
- * ADR-0058 §3, "Shrink" — whether a membership change obliges this account to
+ * ADR-0060 §3, "Shrink" — whether a membership change obliges this account to
  * rotate its `group` and `member` keys for the group: someone left (a
  * signature key present before is absent after — a set difference, so a
  * remove-and-add in one batch still counts), the roster read was not torn

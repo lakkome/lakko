@@ -207,7 +207,7 @@ export async function runRotationOnce(
     }
     keyed.push({ hex: subscriberHex, bytes: subscriberBytes });
   }
-  // ADR-0058: a subscriber key is Ed25519 now. A key registered before the
+  // ADR-0060: a subscriber key is Ed25519 now. A key registered before the
   // flag day (an X25519 key) may not be a valid Ed25519 point, and the core
   // refuses to seal to it; that subscriber could not open the envelope
   // anyway, so it is skipped rather than aborting the whole rotation. Its

@@ -315,7 +315,7 @@ public final class DiscoveryClient {
         )
     }
 
-    // MARK: - ADR-0058 scoped discovery
+    // MARK: - ADR-0060 scoped discovery
 
     /// The 64-byte server OPRF output of `username` (one `discovery-lookup`
     /// token): what a username certificate binds, and the key an
@@ -2055,7 +2055,7 @@ public struct DeviceKeyPackage: Equatable {
     }
 }
 
-// MARK: - ADR-0058 wire shapes
+// MARK: - ADR-0060 wire shapes
 
 private struct UsernameCertificateWire: Decodable {
     let usernameCertificateB64: String

@@ -56,16 +56,16 @@
 //!    trigger 4, ADR-0052, ADR-0057): service envelopes the caller acts
 //!    on and never renders. Then
 //!    [`crate::committer_delegation::try_unwrap_committer_delegation`]
-//!    (ADR-0058 §6): a proposer's delegations for the committer that
+//!    (ADR-0060 §6): a proposer's delegations for the committer that
 //!    sweeps its `Add`. Never rendered.
 //! 9. [`crate::introduction::try_unwrap_introduction_offer`] and
 //!    [`crate::introduction::try_unwrap_introductions`] — a contact's
 //!    introduction record to relay, and a contact's bundle of records to
-//!    search (ADR-0058 §4).
+//!    search (ADR-0060 §4).
 //! 10. [`crate::visibility::try_unwrap_visibility`] and
 //!     [`crate::visibility::try_unwrap_reach_state`] — the owner's own
 //!     setting and reach-key versions, from another of their devices
-//!     (ADR-0058 §7).
+//!     (ADR-0060 §7).
 //! 11. **Intro-message fallthrough** — plain free-text
 //!     `ContactRequest` (ADR-0005 scenario A; "add me as a
 //!     contact"). Caller renders the bytes as a UTF-8 intro
@@ -228,22 +228,22 @@ pub enum IncomingEnvelope<'a> {
     /// for that message — the whole read-decide-write under the per-group
     /// lock (C-62 sub-invariant 5).
     Pin(PinOp),
-    /// A contact's introduction record to relay (ADR-0058 §4), structurally
+    /// A contact's introduction record to relay (ADR-0060 §4), structurally
     /// checked and still sealed. Never a chat bubble. **Accept it only from
     /// the other participant of a 1:1 conversation** and keep the newest per
     /// contact; it goes into the bundles this device sends its contacts.
     IntroductionOffer(IntroductionRecord),
-    /// A contact's bundle of introduction records (ADR-0058 §4), padded to a
+    /// A contact's bundle of introduction records (ADR-0060 §4), padded to a
     /// size bucket. Never a chat bubble. Keep the newest per contact via
     /// [`crate::introduction::bundle_is_newer`]; search it locally with OPRF
     /// outputs. Never re-relayed (contacts of contacts, not further).
     Introductions(IntroductionsBundle),
     /// The owner's "who can find me" setting, from another of their devices
-    /// (ADR-0058 §7). Never a chat bubble. **Accept only on the owner's
+    /// (ADR-0060 §7). Never a chat bubble. **Accept only on the owner's
     /// DeviceGroup**, keep via [`crate::visibility::visibility_is_newer`].
     Visibility(VisibilitySetting),
     /// The owner's reach-key version counters, from another of their
-    /// devices (ADR-0058 §7). Same rules as [`Self::Visibility`], ordered by
+    /// devices (ADR-0060 §7). Same rules as [`Self::Visibility`], ordered by
     /// [`crate::visibility::reach_state_is_newer`].
     ReachState(ReachState),
     /// A journal root hands one member its Delivery Service registrar seed
@@ -254,7 +254,7 @@ pub enum IncomingEnvelope<'a> {
     /// with its account X25519 secret and drops the envelope on a failed
     /// open. Every other member drops it unopened.
     RegistrarSeed(RegistrarSeedEnvelope),
-    /// A proposer's committer delegations (ADR-0058 §6), structurally
+    /// A proposer's committer delegations (ADR-0060 §6), structurally
     /// checked only. Never a chat bubble. **The caller parses the blobs with
     /// `lakko_ds_proof::committer`** (each must name the added person's
     /// mailbox; no two the same delegate), keeps the newest envelope per
@@ -322,7 +322,7 @@ pub enum DispatchError {
     /// The registrar-seed domain (ADR-0057) with a malformed payload.
     #[error(transparent)]
     RegistrarSeed(#[from] RegistrarSeedError),
-    /// The committer-delegation domain (ADR-0058 §6) with a malformed
+    /// The committer-delegation domain (ADR-0060 §6) with a malformed
     /// payload.
     #[error(transparent)]
     CommitterDelegation(#[from] CommitterDelegationError),
@@ -392,7 +392,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     if let Some(envelope) = try_unwrap_registrar_seed(plaintext)? {
         return Ok(IncomingEnvelope::RegistrarSeed(envelope));
     }
-    // 7e. Committer delegation — ADR-0058 §6.
+    // 7e. Committer delegation — ADR-0060 §6.
     if let Some(envelope) = try_unwrap_committer_delegation(plaintext)? {
         return Ok(IncomingEnvelope::CommitterDelegation(envelope));
     }
@@ -604,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_the_adr_0058_envelopes() {
+    fn dispatches_the_adr_0060_envelopes() {
         use crate::introduction::{
             compose_bundle, compose_introduction, compose_introduction_offer, IntroductionPayload,
         };
@@ -650,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_adr_0058_envelope_is_an_error_not_an_intro_message() {
+    fn a_malformed_adr_0060_envelope_is_an_error_not_an_intro_message() {
         use crate::introduction::{
             INTRODUCTIONS_ENVELOPE_DOMAIN_V1, INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1,
         };

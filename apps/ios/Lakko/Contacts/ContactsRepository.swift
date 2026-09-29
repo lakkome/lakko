@@ -206,7 +206,7 @@ public final class ContactsRepository: ObservableObject {
         return result
     }
 
-    /// ADR-0058 — send a contact request to a person a search found: their
+    /// ADR-0060 — send a contact request to a person a search found: their
     /// identity bundle through the pin gate (it must name the key the search
     /// found), then the request, written with the key the search found them
     /// under (`nil` for a person in Everyone, whose mailbox is open).
@@ -264,7 +264,7 @@ public final class ContactsRepository: ObservableObject {
             })
     }
 
-    /// ADR-0058 section 6 — an outgoing request carries a fresh `reply` grant
+    /// ADR-0060 section 6 — an outgoing request carries a fresh `reply` grant
     /// (registered first, retired when the recipient answers) and is written
     /// with whatever grant this device holds for the recipient. `linkSeed` is
     /// a link grant used for this one request and never kept.
@@ -361,7 +361,7 @@ public final class ContactsRepository: ObservableObject {
         // never appears. Remember the failure so this poll's final state can
         // say so.
         let welcomeJoinFailure: String? = nil
-        // ADR-0058 section 6 — one inbound mailbox per person: every Welcome,
+        // ADR-0060 section 6 — one inbound mailbox per person: every Welcome,
         // for any of this account's devices, lands in the ACCOUNT mailbox. The
         // device mailbox stays claimed and closed and is no longer polled.
         do {
@@ -380,7 +380,7 @@ public final class ContactsRepository: ObservableObject {
                 switch event {
                 case .contactRequest(let req, let replyGrant):
                     newPending.append(req)
-                    // ADR-0058 section 6 — the requester's `reply` grant, filed
+                    // ADR-0060 section 6 — the requester's `reply` grant, filed
                     // under the key the request signature authenticated; the
                     // accept (Welcome) and the ack are written with it.
                     if let replyGrant {
@@ -407,7 +407,7 @@ public final class ContactsRepository: ObservableObject {
                     // KeyPackage on success AND failure, so the directory
                     // never keeps serving a KeyPackage the Welcome consumed.
                     //
-                    // ADR-0058 section 6 — every Welcome for this account now
+                    // ADR-0060 section 6 — every Welcome for this account now
                     // lands here: a chat Welcome sealed to this device's leaf,
                     // one sealed to another of this account's devices (which
                     // this device cannot open), and a channel co-publisher
@@ -437,7 +437,7 @@ public final class ContactsRepository: ObservableObject {
                         $0.request.fromPubkey == ack.accepterPubkey
                     }
                     let accepterAccountIdB64 = base64Encode(ack.accepterAccountId)
-                    // ADR-0058 — the request was answered: its `reply` key goes.
+                    // ADR-0060 — the request was answered: its `reply` key goes.
                     ReachCenter.shared.retireReplies(
                         purpose: ReplyPurpose.contact(ack.accepterAccountId))
                     let remainingSent = state.sent.filter {
@@ -668,7 +668,7 @@ public final class ContactsRepository: ObservableObject {
         let remaining = state.accepted.filter { $0.request.messageId != messageId }
         guard remaining.count != state.accepted.count else { return }
         state = state.with(accepted: remaining)
-        // ADR-0058 sections 1 and 4 — the removed person held this account's
+        // ADR-0060 sections 1 and 4 — the removed person held this account's
         // `contact` and `fof` keys: rotate both (the old keys are unregistered
         // at once), and forget what they offered and relayed.
         ReachCenter.shared.rotate(.contact)
@@ -778,7 +778,7 @@ public final class ContactsRepository: ObservableObject {
         let expiryMs = nowMs + expiryMillisFromNow
 
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
-        // ADR-0058 section 6 — the link carries a `link` grant scoped to this
+        // ADR-0060 section 6 — the link carries a `link` grant scoped to this
         // link, registered BEFORE the link exists, so revoking it removes
         // exactly its key.
         let linkId = generateLinkId()
@@ -823,7 +823,7 @@ public final class ContactsRepository: ObservableObject {
             throw ContactsError.wrap(error)
         }
 
-        // ADR-0058 section 6 — the link key is registered; tie it to the ledger id
+        // ADR-0060 section 6 — the link key is registered; tie it to the ledger id
         // so a revoke by blob id removes exactly its key.
         ReachCenter.shared.attachBlob(linkId: linkId, blobId: blobId)
         let blobIdSlug = base64UrlEncodeNoPad(blobId)
@@ -870,7 +870,7 @@ public final class ContactsRepository: ObservableObject {
         } catch {
             throw ContactsError.wrap(error)
         }
-        // ADR-0058 — the link's key goes with it (also on "already gone").
+        // ADR-0060 — the link's key goes with it (also on "already gone").
         ReachCenter.shared.removeLink(blobId: blobId)
         if result == .revoked {
             state = state.with(
@@ -1065,7 +1065,7 @@ public final class ContactsRepository: ObservableObject {
                 recipientX25519Pubkey: inviterX25519Pubkey,
                 profile: ProfileDirectory.shared.ownProfileForRequest(),
                 introMessage: Data(),
-                // ADR-0058 section 6 — written with the link's grant, used for
+                // ADR-0060 section 6 — written with the link's grant, used for
                 // this flow only and never kept.
                 reach: Self.requestReach(linkSeed: capability.linkGrant().seed)
             )

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Channel member card ([ADR-0058] section 3, "Channels get a member list").
+//! Channel member card ([ADR-0060] section 3, "Channels get a member list").
 //!
 //! A subscriber (publishers too) uploads a **member card** to
 //! `services/channels`: its profile envelope ([ADR-0048] v3, opaque here),
@@ -65,7 +65,7 @@
 //! empty (a card is at least [`MEMBER_CARD_MIN_LEN`] bytes), so a delete
 //! signature never authorises a write and the other way round.
 //!
-//! [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 //! [ADR-0048]: ../../../docs/adr/0048-profile-names.md
 
 use lakko_crypto::aead::{self, Algorithm, KEY_LEN, NONCE_LEN};

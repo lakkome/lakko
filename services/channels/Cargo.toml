@@ -68,7 +68,7 @@ sqlx = { version = "0.9", default-features = false, features = [
 # uses the `async-trait` crate, so we stay consistent.
 async-trait = "0.1"
 
-# ADR-0058 member cards. The server still treats every
+# ADR-0060 member cards. The server still treats every
 # ChannelPost, seed envelope and card as opaque bytes
 # (ADR-0010 — no payload inspection). From lakko-channels
 # it calls `member_card_epoch` (the clear frame reader:

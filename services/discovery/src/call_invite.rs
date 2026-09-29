@@ -627,7 +627,7 @@ mod tests {
 
     /// The `MAX_SEALED_BYTES` constant pins the
     /// `call_invites.sealed_capability` width declared in
-    /// `0024_link_grant_sealed_width.sql` (ADR-0058 §6 widened it).
+    /// `0024_link_grant_sealed_width.sql` (ADR-0060 §6 widened it).
     #[test]
     fn max_sealed_bytes_matches_column_width() {
         let migration = include_str!("../migrations/0024_link_grant_sealed_width.sql");

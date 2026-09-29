@@ -187,7 +187,7 @@ pub fn invite_link_secret_url_len() -> u32 {
     u32::try_from(INVITE_LINK_SECRET_B64URL_LEN).unwrap_or(u32::MAX)
 }
 
-/// A fresh random 16-byte link id (ADR-0058 §6): the scope of an `/i/` or
+/// A fresh random 16-byte link id (ADR-0060 §6): the scope of an `/i/` or
 /// `/c/` link's `link` reach grant. Mint one per link, before deriving the
 /// grant.
 #[uniffi::export]
@@ -393,7 +393,7 @@ impl PerRelationship {
 /// prepared exactly as [`compose_profile_envelope`] prepares it (display
 /// name trimmed, blank = no name; username normalised and checked).
 ///
-/// `reply_grant` (ADR-0058 §6) is the sender's `reply` reach grant, sealed
+/// `reply_grant` (ADR-0060 §6) is the sender's `reply` reach grant, sealed
 /// beside the profile so the recipient can write the accept and the ack back
 /// to the sender's closed mailbox. Derive it as
 /// `deriveReachGrant(accountSeed, Reply, replyId, 0)` over a fresh random
@@ -587,7 +587,7 @@ pub struct OpenedContactRequest {
     /// carried one that failed its bounds. A claim bound to the request's
     /// `from_pubkey` — see [`ContactRequest::open_envelope`].
     pub profile: Option<FfiProfile>,
-    /// The requester's `reply` reach grant (ADR-0058 §6), or `None` when it
+    /// The requester's `reply` reach grant (ADR-0060 §6), or `None` when it
     /// sent none. SECRET — store encrypted, never log. Sign the accept (the
     /// one-to-one Welcome, or a call Welcome) and the ack back to the
     /// requester's mailbox with `DsProofSigner.forReach(replyGrant.seed)`.
@@ -621,12 +621,12 @@ pub struct FfiProfile {
     /// 16 bytes or absent; anything else is refused. On receipt, the value
     /// the call roster derives the ADR-0021 peer tag from (ADR-0048 v2).
     pub account_id: Option<Vec<u8>>,
-    /// The discovery-signed username certificate (ADR-0058 §5), exactly 153
+    /// The discovery-signed username certificate (ADR-0060 §5), exactly 153
     /// bytes, or `None`. Requires `username`. On receipt, show the username
     /// only after `verify_username_binding` accepts this certificate for the
     /// OPRF of the claimed username and the sender's account id.
     pub username_certificate: Option<Vec<u8>>,
-    /// Reach grants handed to the receivers (ADR-0058 §3, §6): at most two,
+    /// Reach grants handed to the receivers (ADR-0060 §3, §6): at most two,
     /// one per class, of class `Contact`, `Group`, `Member` or `Channel`.
     /// SECRET — see [`crate::scoped_discovery::FfiReachGrant`]. A group's
     /// profile carries `Group` (only where the setting allows that group) +
@@ -702,7 +702,7 @@ fn prepare_profile(p: FfiProfile) -> Result<RustProfile, FfiError> {
 /// * `UsernameEmpty` / `UsernameTooShort` / `UsernameTooLong` /
 ///   `UsernameInvalidCharacters` — the username.
 /// * [`FfiError::Reach`] `seedLength` — a grant seed is not 32 bytes.
-/// * [`FfiError::Contacts`] for the ADR-0058 bounds: a certificate that is
+/// * [`FfiError::Contacts`] for the ADR-0060 bounds: a certificate that is
 ///   not 153 bytes or has no username, more than two grants, two grants of
 ///   one class, or a grant of a class a profile may not carry.
 #[uniffi::export]
@@ -958,7 +958,7 @@ pub fn group_name_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u6
 /// [`MAX_LABEL_LEN`] bytes — empty string is fine.
 ///
 /// `link_id` (16 random bytes, [`generate_link_id`]) and `link_grant`
-/// (ADR-0058 §6) scope the link's reach key: derive the grant as
+/// (ADR-0060 §6) scope the link's reach key: derive the grant as
 /// `deriveReachGrant(accountSeed, Link, linkId, version)`, register its
 /// public key with the Delivery Service BEFORE sharing the link, and remove
 /// it when the link is revoked or expires. The grant travels inside the
@@ -1150,12 +1150,12 @@ impl InviteCapability {
         self.inner.label.clone()
     }
 
-    /// The link's 16-byte reach scope id (ADR-0058 §6).
+    /// The link's 16-byte reach scope id (ADR-0060 §6).
     pub fn link_id(&self) -> Vec<u8> {
         self.inner.link_id.to_vec()
     }
 
-    /// The link's `link` reach grant (ADR-0058 §6). SECRET — hold it only
+    /// The link's `link` reach grant (ADR-0060 §6). SECRET — hold it only
     /// until the contact request is sent: the joiner writes the request to
     /// the inviter's mailbox with `DsProofSigner.forReach(linkGrant.seed)`.
     pub fn link_grant(&self) -> crate::scoped_discovery::FfiReachGrant {
@@ -1586,7 +1586,7 @@ impl FfiCallInviteMedia {
 /// `one_time_key_package` is the opaque wire bytes minted
 /// via `Identity::create_key_package`.
 /// `link_id` + `link_grant` scope the link's reach key exactly as
-/// [`compose_invite_capability`] does (ADR-0058 §6): register the grant's
+/// [`compose_invite_capability`] does (ADR-0060 §6): register the grant's
 /// public key before sharing, remove it on revoke or expiry.
 ///
 /// # Errors
@@ -1752,12 +1752,12 @@ impl CallInviteCapability {
         self.inner.label.clone()
     }
 
-    /// The link's 16-byte reach scope id (ADR-0058 §6).
+    /// The link's 16-byte reach scope id (ADR-0060 §6).
     pub fn link_id(&self) -> Vec<u8> {
         self.inner.link_id.to_vec()
     }
 
-    /// The link's `link` reach grant (ADR-0058 §6). SECRET — a cold-start
+    /// The link's `link` reach grant (ADR-0060 §6). SECRET — a cold-start
     /// joiner writes its `ContactRequest` (carrying the KeyPackage forward
     /// and its own `reply` grant) to the owner's mailbox with
     /// `DsProofSigner.forReach(linkGrant.seed)`.
@@ -2001,30 +2001,30 @@ pub enum FfiIncomingEnvelopeKind {
     /// sender resolves (C-68) to the group's owner. Appended last so every
     /// earlier variant keeps its ordinal.
     RegistrarSeed,
-    /// A contact's introduction record to relay (ADR-0058 §4). The record
+    /// A contact's introduction record to relay (ADR-0060 §4). The record
     /// wire rides the `introduction_record` field; `payload` is empty. Never
     /// render it. **Accept only from the other participant of a 1:1
     /// conversation**, keep the newest per contact, and put it in the
     /// bundles this device sends its contacts. Appended last so every
     /// earlier variant keeps its ordinal.
     IntroductionOffer,
-    /// A contact's bundle of introduction records (ADR-0058 §4). The bundle
+    /// A contact's bundle of introduction records (ADR-0060 §4). The bundle
     /// rides the `introductions` field; `payload` is empty. Never render it.
     /// Keep the newest per contact via
     /// [`crate::scoped_discovery::bundle_is_newer`] and search it locally;
     /// never re-relay it.
     Introductions,
     /// The owner's "who can find me" setting from another of their devices
-    /// (ADR-0058 §7). Rides the `visibility` field; `payload` is empty.
+    /// (ADR-0060 §7). Rides the `visibility` field; `payload` is empty.
     /// **Accept only on the owner's DeviceGroup**, keep via
     /// [`crate::scoped_discovery::visibility_is_newer`].
     Visibility,
     /// The owner's reach-key version counters from another of their devices
-    /// (ADR-0058 §7). Rides the `reach_state` field; `payload` is empty. Same
+    /// (ADR-0060 §7). Rides the `reach_state` field; `payload` is empty. Same
     /// rules as `Visibility`, ordered by
     /// [`crate::scoped_discovery::reach_state_is_newer`].
     ReachState,
-    /// A proposer's committer delegations (ADR-0058 §6). The structurally
+    /// A proposer's committer delegations (ADR-0060 §6). The structurally
     /// decoded envelope rides the `committer_delegation` field; `payload` is
     /// empty. Never render it. Keep the newest per `(MLS sender resolved at
     /// receipt, added_account_key)`; when this device commits a sweep that
@@ -2073,19 +2073,19 @@ pub struct FfiIncomingEnvelope {
     /// Set only for `Pin` (ADR-0052): the decoded pin operation. `None` for
     /// every other kind.
     pub pin: Option<FfiPinOp>,
-    /// Set only for `IntroductionOffer` (ADR-0058): the record wire,
+    /// Set only for `IntroductionOffer` (ADR-0060): the record wire,
     /// structurally checked and still sealed. `None` for every other kind.
     pub introduction_record: Option<Vec<u8>>,
-    /// Set only for `Introductions` (ADR-0058): the decoded bundle. `None`
+    /// Set only for `Introductions` (ADR-0060): the decoded bundle. `None`
     /// for every other kind.
     pub introductions: Option<crate::scoped_discovery::FfiIntroductionsBundle>,
-    /// Set only for `Visibility` (ADR-0058): the decoded setting. `None` for
+    /// Set only for `Visibility` (ADR-0060): the decoded setting. `None` for
     /// every other kind.
     pub visibility: Option<crate::scoped_discovery::FfiVisibilitySetting>,
-    /// Set only for `ReachState` (ADR-0058): the decoded reach state. `None`
+    /// Set only for `ReachState` (ADR-0060): the decoded reach state. `None`
     /// for every other kind.
     pub reach_state: Option<crate::scoped_discovery::FfiReachState>,
-    /// Set only for `CommitterDelegation` (ADR-0058 §6): the envelope,
+    /// Set only for `CommitterDelegation` (ADR-0060 §6): the envelope,
     /// structurally checked. `None` for every other kind.
     pub committer_delegation: Option<crate::scoped_discovery::FfiCommitterDelegationEnvelope>,
 }
@@ -3021,7 +3021,7 @@ pub struct GroupJoinAttribution {
     pub issuer_fingerprint: String,
     /// UNIX milliseconds when the link stops being valid. `0` = never expires.
     pub expiry_ms: u64,
-    /// The joiner's `reply` reach grant (ADR-0058 §6), inside the signed
+    /// The joiner's `reply` reach grant (ADR-0060 §6), inside the signed
     /// part. SECRET and readable by every member: the acting committer that
     /// sweeps the joiner's approved `Add` delivers the Welcome to the
     /// joiner's mailbox with `DsProofSigner.forReach(replyGrant.seed)`.
@@ -3036,7 +3036,7 @@ pub struct GroupJoinAttribution {
 /// is signed with it, so the admin can verify the attribution is authentic. The
 /// joiner posts this to the group journal alongside its external-join proposal.
 ///
-/// `reply_grant` (ADR-0058 §6, C-69) is the joiner's `reply` reach grant:
+/// `reply_grant` (ADR-0060 §6, C-69) is the joiner's `reply` reach grant:
 /// derive it as `deriveReachGrant(accountSeed, Reply, replyId, 0)` over a
 /// fresh random 16-byte `replyId`, register its public key with a 7-day
 /// expiry BEFORE posting, and remove it once joined. Every member of the
@@ -3210,7 +3210,7 @@ mod tests {
         assert_eq!(opened.intro_message, intro);
     }
 
-    /// ADR-0058 §6: a `/c/` capability carries its link id and `link` grant
+    /// ADR-0060 §6: a `/c/` capability carries its link id and `link` grant
     /// inside the signed, sealed part.
     #[test]
     fn call_invite_capability_carries_the_link_grant() {
@@ -3235,7 +3235,7 @@ mod tests {
         assert_eq!(cap.link_grant(), test_link_grant());
     }
 
-    /// ADR-0058 §6: a reply grant of any other class never leaves the
+    /// ADR-0060 §6: a reply grant of any other class never leaves the
     /// sender.
     #[test]
     fn contact_request_refuses_a_non_reply_grant() {
@@ -3257,7 +3257,7 @@ mod tests {
         assert!(matches!(err, FfiError::Contacts(_)), "{err:?}");
     }
 
-    /// ADR-0058 §6: the joiner's reply grant rides the self-signed
+    /// ADR-0060 §6: the joiner's reply grant rides the self-signed
     /// attribution and comes out whole; any other class is refused.
     #[test]
     fn group_join_attribution_carries_the_reply_grant() {
@@ -3289,7 +3289,7 @@ mod tests {
             0,
             vec![], // privacy_pass_token
             None,   // profile (ADR-0048)
-            None,   // reply grant (ADR-0058 §6)
+            None,   // reply grant (ADR-0060 §6)
             vec![],
         )
         .expect_err("expected wrong-length rejection");
@@ -3309,7 +3309,7 @@ mod tests {
             0,
             vec![], // privacy_pass_token
             None,   // profile (ADR-0048)
-            None,   // reply grant (ADR-0058 §6)
+            None,   // reply grant (ADR-0060 §6)
             vec![],
         )
         .expect_err("expected wrong-length rejection");
@@ -3613,7 +3613,7 @@ mod tests {
             0,
             vec![], // privacy_pass_token
             None,   // profile (ADR-0048)
-            None,   // reply grant (ADR-0058 §6)
+            None,   // reply grant (ADR-0060 §6)
             b"secret".to_vec(),
         )
         .expect("compose");
@@ -3649,7 +3649,7 @@ mod tests {
             0,
             token.clone(),
             None, // profile (ADR-0048)
-            None, // reply grant (ADR-0058 §6)
+            None, // reply grant (ADR-0060 §6)
             b"".to_vec(),
         )
         .expect("compose");
@@ -4392,7 +4392,7 @@ mod tests {
         assert!(!profile_is_newer(1, 1));
     }
 
-    /// ADR-0058: profile v3 carries the username certificate and the reach
+    /// ADR-0060: profile v3 carries the username certificate and the reach
     /// grants across the boundary, both ways, and refuses the new bounds.
     #[test]
     fn profile_v3_carries_certificate_and_grants() {
@@ -4431,10 +4431,10 @@ mod tests {
         ));
     }
 
-    /// ADR-0058: the four envelopes the core classified but S1 refused now
+    /// ADR-0060: the four envelopes the core classified but S1 refused now
     /// dispatch as their own kinds, carrying their decoded data.
     #[test]
-    fn dispatch_surfaces_the_adr_0058_envelopes() {
+    fn dispatch_surfaces_the_adr_0060_envelopes() {
         use crate::scoped_discovery::{
             compose_introduction, compose_introduction_offer, compose_introductions_bundle,
             compose_reach_state_envelope, compose_visibility_envelope, default_visibility_setting,
@@ -4647,7 +4647,7 @@ mod tests {
             0,
             vec![],
             Some(typed_profile()),
-            None, // reply grant (ADR-0058 §6)
+            None, // reply grant (ADR-0060 §6)
             b"hi bob".to_vec(),
         )
         .expect("compose");
@@ -4668,7 +4668,7 @@ mod tests {
             0,
             vec![],
             Some(bad),
-            None, // reply grant (ADR-0058 §6)
+            None, // reply grant (ADR-0060 §6)
             b"hi bob".to_vec(),
         )
         .expect_err("an out-of-bounds profile must refuse the compose");

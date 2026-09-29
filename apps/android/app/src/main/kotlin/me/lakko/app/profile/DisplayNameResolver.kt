@@ -61,7 +61,7 @@ public data class PeerProfile(
      */
     val accountIdHex: String? = null,
     /**
-     * ADR-0058 §5 — the discovery-signed certificate of [username] as
+     * ADR-0060 §5 — the discovery-signed certificate of [username] as
      * lowercase hex, or `null`. A viewer shows the username only once the
      * certificate verifies for the OPRF of the username and [accountIdHex],
      * and that account's published key is the sender's.

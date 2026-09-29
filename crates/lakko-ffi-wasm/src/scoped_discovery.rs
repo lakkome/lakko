@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! wasm-bindgen exposure of ADR-0058 "who can find me" — scoped discovery.
+//! wasm-bindgen exposure of ADR-0060 "who can find me" — scoped discovery.
 //!
 //! Mirror of `lakko-ffi-uniffi/src/scoped_discovery.rs` over the same cores
 //! (reach keys, introduction records and bundles, the setting and the reach
@@ -17,7 +17,7 @@
 //! - a refusal throws a real `Error` whose message is the core's sentence
 //!   and which carries the frozen code as an own property: `reachError`,
 //!   `introductionError`, `visibilityError`, `usernameCertificateError`,
-//!   `committerDelegationError` (ADR-0058 §6)
+//!   `committerDelegationError` (ADR-0060 §6)
 //!   (a display-name / username refusal inside an introduction payload
 //!   throws the profile's `profileError` shape).
 //!
@@ -192,7 +192,7 @@ fn js<T>(r: Result<T, Refusal>) -> Result<T, JsValue> {
 }
 
 // ============================================================================
-// Reach keys — ADR-0058 §1
+// Reach keys — ADR-0060 §1
 // ============================================================================
 
 /// Who a reach key is handed to. The numeric values ARE the frozen wire
@@ -431,7 +431,7 @@ pub fn max_reach_scope_id_len() -> usize {
 }
 
 // ============================================================================
-// Introductions — ADR-0058 §4
+// Introductions — ADR-0060 §4
 // ============================================================================
 
 /// What an introduction record reveals to a searcher who opens it. The
@@ -813,7 +813,7 @@ pub fn fof_tag_len() -> usize {
 }
 
 // ============================================================================
-// The setting — ADR-0058 §7
+// The setting — ADR-0060 §7
 // ============================================================================
 
 /// The three positions. Numeric values are the frozen wire bytes.
@@ -1284,7 +1284,7 @@ pub fn max_reach_state_entries() -> usize {
 }
 
 // ============================================================================
-// Committer delegations — ADR-0058 §6
+// Committer delegations — ADR-0060 §6
 // ============================================================================
 
 impl From<CommitterDelegationError> for Refusal {
@@ -1307,7 +1307,7 @@ fn delegation_refusal(e: &DelegationError) -> Refusal {
     Refusal::new("committerDelegationError", code, e.to_string())
 }
 
-/// A proposer's committer delegations (ADR-0058 §6). Mirror of
+/// A proposer's committer delegations (ADR-0060 §6). Mirror of
 /// `lakko_contacts::committer_delegation::CommitterDelegationEnvelope`.
 ///
 /// Under ADR-0045 the member who proposes an `Add` may not be the one who
@@ -1463,7 +1463,7 @@ fn compose_committer_delegation_inner(
 
 /// Compose a committer-delegation envelope: the plaintext of an MLS
 /// application message the proposer sends in the group beside its `Add`
-/// proposal (ADR-0058 §6). Structural checks only.
+/// proposal (ADR-0060 §6). Structural checks only.
 ///
 /// # Errors
 ///
@@ -1505,7 +1505,7 @@ fn check_committer_delegations_inner(
         .collect())
 }
 
-/// Parse and check every delegation of an envelope (ADR-0058 §6): each blob
+/// Parse and check every delegation of an envelope (ADR-0060 §6): each blob
 /// parses, names the added person's mailbox, and no two name the same
 /// delegate. Any failure refuses the whole envelope — keep the previous one.
 ///
@@ -1537,7 +1537,7 @@ fn committer_delegation_for_inner(
     Ok(rust_delegation_for(&parsed, &own).map(Delegation::to_header_value))
 }
 
-/// The committer's side of ADR-0058 §6: after its sweep added the envelope's
+/// The committer's side of ADR-0060 §6: after its sweep added the envelope's
 /// person, the delegation naming `ownAccountKey` (this device's account
 /// signature key), as the `x-lakko-ds-delegation` header value to send with
 /// the Welcome's mailbox write — signed with
@@ -1601,7 +1601,7 @@ pub fn committer_delegation_blob_len() -> usize {
 }
 
 // ============================================================================
-// Username certificate — ADR-0058 §5 (verify only)
+// Username certificate — ADR-0060 §5 (verify only)
 // ============================================================================
 
 /// The authenticated claims of a verified username certificate.
@@ -1715,7 +1715,7 @@ mod tests {
 
     const ACCOUNT_SEED: [u8; 32] = [0x42; 32];
 
-    /// ADR-0058 §6 through this surface (the `*_inner` halves, so refusals
+    /// ADR-0060 §6 through this surface (the `*_inner` halves, so refusals
     /// are checkable on the host): each candidate finds exactly its own
     /// delegation; a delegation for another mailbox refuses the envelope.
     #[test]

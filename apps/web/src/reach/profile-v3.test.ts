@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 profile v3 — the foreground sniff detaches the grants and the
+ * ADR-0060 profile v3 — the foreground sniff detaches the grants and the
  * username certificate from the wasm handle, and the fold keeps them under
  * the rules. Over the REAL core composer and decoder.
  */

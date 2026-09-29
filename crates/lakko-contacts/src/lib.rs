@@ -24,8 +24,8 @@
 //!   Ed25519-signed by the sender's identity key.
 //!   The sealed plaintext is
 //!   `profile_len ‖ profile ‖ reply_grant_len ‖ reply_grant ‖ intro`
-//!   (ADR-0048 §2, ADR-0058 §6).
-//! - [`committer_delegation`] — the ADR-0058 §6 committer-delegation
+//!   (ADR-0048 §2, ADR-0060 §6).
+//! - [`committer_delegation`] — the ADR-0060 §6 committer-delegation
 //!   envelope: a proposer's delegations for whichever candidate commits its
 //!   `Add`, so the Welcome reaches the added person's closed mailbox.
 //! - [`profile`] — the ADR-0048 profile envelope (display name,
@@ -42,13 +42,13 @@
 //!   for everyone, `updated_at_ms`): fixed-length, fail-closed, classified
 //!   by [`incoming_envelope`]; the order is [`pin::pin_is_newer`], the
 //!   authority is the receiver's role-table check.
-//! - [`reach`] — ADR-0058 reach keys: the per-class, per-scope Ed25519 keys
+//! - [`reach`] — ADR-0060 reach keys: the per-class, per-scope Ed25519 keys
 //!   an identity mailbox accepts a write under, derived from the account
 //!   seed, and the [`ReachGrant`] that hands one to someone.
-//! - [`introduction`] — ADR-0058 contacts of contacts: introduction records
+//! - [`introduction`] — ADR-0060 contacts of contacts: introduction records
 //!   sealed under OPRF outputs, the offer that asks a contact to relay one,
 //!   and the padded bundle a contact relays.
-//! - [`visibility`] — ADR-0058 "who can find me" setting and the reach-key
+//! - [`visibility`] — ADR-0060 "who can find me" setting and the reach-key
 //!   version state, as envelopes the owner's devices exchange.
 //! - [`registrar_seed`] — the ADR-0057 registrar-seed envelope (a journal
 //!   root hands one member its Delivery Service registrar seed, sealed to

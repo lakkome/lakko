@@ -75,7 +75,7 @@ public const val PROFILE_SAVED_COPY: String = "Your name will update for your co
 
 /**
  * The wire form of this profile for the core's composer (profile v3,
- * ADR-0058 §3).
+ * ADR-0060 §3).
  *
  * @param accountId this account's raw 16-byte auth account id (ADR-0048 v2):
  *   what a receiver derives the ADR-0021 call peer tag from, so a group member

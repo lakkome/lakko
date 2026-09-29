@@ -247,7 +247,7 @@ export async function pollCoPublisherJournal(
           publisherGroup.processKnock(identity, k.payload);
         } catch {
           // Not a proposal: it may be the joiner's attribution, which carries
-          // the `reply` grant the approve writes the Welcome under (ADR-0058
+          // the `reply` grant the approve writes the Welcome under (ADR-0060
           // section 6). Anything else is skipped.
           rememberAttributionReply(wasm, groupId, k.payload);
         }
@@ -311,7 +311,7 @@ export async function approveCoPublisher(
       await ds.publishGroup(groupId, added.commit, { signer: signerN });
       // ADR-0053 contract point 8 — the Welcome goes to the joiner's own
       // mailbox (named after the joiner's signature key, `proposalRef`), the
-      // way a direct add delivers one; never to the journal. ADR-0058
+      // way a direct add delivers one; never to the journal. ADR-0060
       // section 6: the mailbox is closed, so the write is signed under the
       // `reply` grant the joiner's attribution carried (kept by the poll).
       const mailbox = wasm.IdentityPseudonym.fromIdentity(proposalRef).asBytes();
@@ -392,7 +392,7 @@ export async function requestToCoPublish(
     throw new Error("co-publisher link does not target a channel PublisherGroup");
   }
   const channelIdHex = bytesToHex(channelIdBytes);
-  // ADR-0058 section 6 (C-69) — the owner writes the Welcome to this
+  // ADR-0060 section 6 (C-69) — the owner writes the Welcome to this
   // account's closed mailbox under our `reply` grant, which rides the signed
   // attribution. Registered before the knock; closed when the Welcome joins.
   const session = reachSession();
@@ -514,7 +514,7 @@ async function resealSubscribers(
     }
     bytesByHex.set(subscriberHex, subscriberBytes);
   }
-  // ADR-0058: a subscriber key registered before the Ed25519 flag day may be
+  // ADR-0060: a subscriber key registered before the Ed25519 flag day may be
   // one the core refuses to seal to; that subscriber could not open the
   // envelope anyway, so it is skipped rather than aborting the reseal (the
   // same rule as the rotation cron).
@@ -542,7 +542,7 @@ async function resealSubscribers(
 // ---------------------------------------------------------
 
 /** Keep the `reply` grant of a join attribution read from this group's knock
- *  queue (ADR-0058 section 6). Anything that is not an attribution for this
+ *  queue (ADR-0060 section 6). Anything that is not an attribution for this
  *  group is ignored. */
 function rememberAttributionReply(wasm: Wasm, groupId: Uint8Array, payload: Uint8Array): void {
   const session = reachSession();

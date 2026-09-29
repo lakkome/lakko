@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 - recognising the scoped-discovery service envelopes in an
+ * ADR-0060 - recognising the scoped-discovery service envelopes in an
  * application plaintext, BEFORE the chat parser (whose lossy-UTF-8 fallback
  * would otherwise render them as a bubble of domain bytes and secrets).
  *

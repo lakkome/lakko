@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Reach-key delegations ([ADR-0058] section 2).
+//! Reach-key delegations ([ADR-0060] section 2).
 //!
 //! A holder of a reach key for a closed identity mailbox may authorise one
 //! write by another key: an ADR-0045 committer delivering the Welcome for an
@@ -58,7 +58,7 @@
 //! Every failure is the one `401` of ADR-0053; the variants of
 //! [`DelegationError`] exist for tests and logs, not for the response.
 //!
-//! [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;

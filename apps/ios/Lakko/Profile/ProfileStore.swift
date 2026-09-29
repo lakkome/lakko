@@ -25,11 +25,11 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
     /// is a claim; the sender can only mis-state its own tag, which then
     /// matches nobody on the call.
     public let accountId: Data?
-    /// ADR-0058 section 5 — the discovery-signed certificate of `username`
+    /// ADR-0060 section 5 — the discovery-signed certificate of `username`
     /// (profile envelope v3), or `nil`. The username is shown only once it
     /// verifies against this certificate.
     public let usernameCertificate: Data?
-    /// ADR-0058 sections 3 and 6 — the reach grants the envelope carried.
+    /// ADR-0060 sections 3 and 6 — the reach grants the envelope carried.
     /// SECRET, and scoped to the conversation the envelope arrived in, so they
     /// are handed to ``ReachCenter`` at receipt and NEVER persisted with the
     /// profile (``CodingKeys`` leaves them out).

@@ -48,7 +48,7 @@ fn prune_envelope_map_to_n(map: &mut BTreeMap<u32, Vec<u8>>, keep_n: usize) {
     }
 }
 
-/// 32-byte subscriber Ed25519 public key (ADR-0058), used
+/// 32-byte subscriber Ed25519 public key (ADR-0060), used
 /// as the subscriber's identifier on the wire. Stored as
 /// 64-char lowercase hex in URLs; this type is the parsed
 /// binary form. The server NEVER does Diffie-Hellman against
@@ -236,7 +236,7 @@ pub enum StorageError {
         got: u32,
     },
     /// A member card names an epoch greater than the channel's
-    /// `current_epoch` (ADR-0058): a card is sealed under a seed a reader
+    /// `current_epoch` (ADR-0060): a card is sealed under a seed a reader
     /// already holds, never a future one.
     #[error("member card epoch {got} is in the future (current epoch is {current})")]
     MemberCardEpochInFuture {
@@ -246,7 +246,7 @@ pub enum StorageError {
         got: u32,
     },
     /// A member card names an epoch lower than the card it would replace
-    /// (ADR-0058): a card only ever moves forward, so a replayed old card
+    /// (ADR-0060): a card only ever moves forward, so a replayed old card
     /// cannot roll a subscriber's profile back to a retired seed.
     #[error("member card epoch {got} is older than the stored card's {stored}")]
     MemberCardStale {
@@ -474,7 +474,7 @@ pub trait ChannelStore: Send + Sync {
         target_epoch: u32,
     ) -> Result<u32, StorageError>;
 
-    /// Store `(channel, subscriber)`'s member card (ADR-0058), replacing the
+    /// Store `(channel, subscriber)`'s member card (ADR-0060), replacing the
     /// previous one. `epoch` is the card's clear epoch, read by the caller;
     /// the card itself is opaque.
     ///
@@ -587,7 +587,7 @@ struct Inner {
     /// torn rotation is observable mid-stage) and re-staging
     /// the same key is an idempotent overwrite (resumability).
     staged_envelopes: HashMap<(ChannelId, u32), HashMap<SubscriberId, Vec<u8>>>,
-    /// Channel id → (subscriber → (epoch, opaque member card)), ADR-0058.
+    /// Channel id → (subscriber → (epoch, opaque member card)), ADR-0060.
     /// A `BTreeMap` so a page in subscriber-key order is a range scan.
     member_cards: HashMap<ChannelId, BTreeMap<SubscriberId, (u32, Vec<u8>)>>,
 }
@@ -2294,7 +2294,7 @@ mod tests {
         assert_eq!(epochs1, vec![3], "retention 0 floors to 1");
     }
 
-    // ADR-0058 - member cards.
+    // ADR-0060 - member cards.
 
     async fn member_store() -> InMemoryChannelStore {
         let s = InMemoryChannelStore::new();

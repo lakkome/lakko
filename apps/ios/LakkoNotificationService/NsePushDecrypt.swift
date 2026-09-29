@@ -1069,13 +1069,13 @@ public func nseLooksLikeRegistrarSeed(_ bytes: Data, envelopeLen: Int) -> Bool {
     bytes.count == envelopeLen && bytes.first == registrarSeedEnvelopeFirstByte
 }
 
-/// First byte of every ADR-0058 domain separator (`lakko/introduction-offer/…`,
+/// First byte of every ADR-0060 domain separator (`lakko/introduction-offer/…`,
 /// `lakko/introductions/…`, `lakko/visibility/…`, `lakko/reach-state/…`,
 /// `lakko/committer-delegation/…`) — the same ASCII `l` as every other in-group
 /// envelope, kept as its own constant for the reason the others give.
 private let scopedDiscoveryEnvelopeFirstByte: UInt8 = 0x6C
 
-/// Cheap PRE-FILTER for the five ADR-0058 "who can find me" envelopes: the
+/// Cheap PRE-FILTER for the five ADR-0060 "who can find me" envelopes: the
 /// first domain byte plus the length range the slim FFI exports
 /// (`scopedDiscoveryEnvelopeMinLen()` / `MaxLen()`), never a hand-copied
 /// number — a range too narrow fails in the dangerous direction and lets an

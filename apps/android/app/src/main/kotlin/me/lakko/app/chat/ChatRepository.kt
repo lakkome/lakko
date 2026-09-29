@@ -716,7 +716,7 @@ public class ChatRepository(
         }
         // ADR-0053 — sign reads of both own mailboxes and claim them.
         claimOwnMailboxesBestEffort()
-        // ADR-0058 — bind the reach keys to this account and reconcile its
+        // ADR-0060 — bind the reach keys to this account and reconcile its
         // mailbox (the default setting for an account that never chose).
         bindReachBestEffort(newAccountIdB64, account)
 
@@ -820,7 +820,7 @@ public class ChatRepository(
     public suspend fun startGroupWith(
         recipientAccountId: ByteArray,
         recipientSignaturePubkey: ByteArray,
-        /** ADR-0058 §6 — what authorises the Welcome into the recipient's
+        /** ADR-0060 §6 — what authorises the Welcome into the recipient's
          *  closed mailbox when the caller holds it for this flow only (the
          *  link grant of an `/i/` link). `null` picks from the grants this
          *  device holds for the recipient (their reply key after an accept,
@@ -874,7 +874,7 @@ public class ChatRepository(
                 throw ChatError("addMembersFromWire failed", e)
             }
             val welcomeEnvelope = wrapEnvelope(KIND_WELCOME, addResult.welcome)
-            // ADR-0058 §6 — one Welcome write per added ACCOUNT, into its
+            // ADR-0060 §6 — one Welcome write per added ACCOUNT, into its
             // account mailbox (ADR-0050 §2.7 as amended): the recipient's and,
             // when this account has other devices, this account's own.
             val accounts = welcomeAccounts(devices.map { it.keyPackage }) { kp ->
@@ -995,7 +995,7 @@ public class ChatRepository(
     /** G-37 — carries a freshly-created group across the provider-lock release
      *  so the Welcome mailbox publish can run outside it. */
     /**
-     * ADR-0058 §6 — the account key behind each Welcome mailbox this process
+     * ADR-0060 §6 — the account key behind each Welcome mailbox this process
      * addressed, so the write (or its restart re-publish) picks the grant for
      * that person.
      */
@@ -1010,7 +1010,7 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0058 §2 / §6 — write a Welcome into an account mailbox, signed with
+     * ADR-0060 §2 / §6 — write a Welcome into an account mailbox, signed with
      * [explicit] when the caller holds the grant for this flow, else with the
      * grant this device holds for the person ([me.lakko.app.reach.ReachManager.reachAuthFor]:
      * their reply key, contact key, `member` key of [groupIdHex], a committer
@@ -1029,17 +1029,17 @@ public class ChatRepository(
                 .reachAuthFor(it, me.lakko.app.reach.WritePurpose.WELCOME, groupIdHex)
         }
         if (reach == null) {
-            android.util.Log.i("ChatRepository", "ADR-0058: Welcome written without a reach grant")
+            android.util.Log.i("ChatRepository", "ADR-0060: Welcome written without a reach grant")
         }
         return dsClient.publishMailbox(mailbox, bytes, reach = reach)
     }
 
-    /** ADR-0058 §6 — where the delegation broadcasts run: they take the
+    /** ADR-0060 §6 — where the delegation broadcasts run: they take the
      *  per-group lock, so they are launched, never awaited under it. */
     private val reachScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
-     * ADR-0058 §6 — an Add this device proposed for [addedAccount]: when this
+     * ADR-0060 §6 — an Add this device proposed for [addedAccount]: when this
      * device is the added person's contact, sign one delegation per committer
      * candidate ([candidates], owner first, then admins by rank) and send them
      * in the group, so whichever of them sweeps the Add can deliver the
@@ -1068,7 +1068,7 @@ public class ChatRepository(
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0058 delegations not sent: ${cause.javaClass.simpleName}")
+                android.util.Log.w("ChatRepository", "ADR-0060 delegations not sent: ${cause.javaClass.simpleName}")
             }
         }
     }
@@ -1094,7 +1094,7 @@ public class ChatRepository(
         }
     }
 
-    /** ADR-0058 — bind the reach manager to the signed-in account, then
+    /** ADR-0060 — bind the reach manager to the signed-in account, then
      *  publish the joined groups it keys `member` / `group` keys on. */
     private fun bindReachBestEffort(accountIdB64: String, account: Identity) {
         try {
@@ -1102,7 +1102,7 @@ public class ChatRepository(
             reach.onVisibilityChanged = { onVisibilityChanged(it) }
             reach.bind(accountIdB64, account)
             publishThreadList()
-            // ADR-0058 §5 — the username certificate this account's profile
+            // ADR-0060 §5 — the username certificate this account's profile
             // carries, so a viewer shows the username without a lookup. A
             // first certificate republishes the profile everywhere.
             val token = keyPackageAccount.get()?.sessionToken
@@ -1117,17 +1117,17 @@ public class ChatRepository(
                     } catch (cause: kotlinx.coroutines.CancellationException) {
                         throw cause
                     } catch (cause: Throwable) {
-                        android.util.Log.i("ChatRepository", "ADR-0058: username certificate not fetched: ${cause.javaClass.simpleName}")
+                        android.util.Log.i("ChatRepository", "ADR-0060: username certificate not fetched: ${cause.javaClass.simpleName}")
                     }
                 }
             }
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0058: reach keys not bound: ${cause.javaClass.simpleName}")
+            android.util.Log.w("ChatRepository", "ADR-0060: reach keys not bound: ${cause.javaClass.simpleName}")
         }
     }
 
     /**
-     * ADR-0058 §3 — the setting changed: every group's profile carries (or
+     * ADR-0060 §3 — the setting changed: every group's profile carries (or
      * stops carrying) the `group` grant and the username, so republish it
      * everywhere. The mailbox was already reconciled by the manager.
      */
@@ -1136,7 +1136,7 @@ public class ChatRepository(
         visibilityListener?.invoke(setting)
     }
 
-    /** ADR-0058 §5 / §4 — Everyone publication and introduction offers,
+    /** ADR-0060 §5 / §4 — Everyone publication and introduction offers,
      *  installed by the app shell. */
     @Volatile
     public var visibilityListener: (suspend (uniffi.lakko_ffi_uniffi.FfiVisibilitySetting) -> Unit)? = null
@@ -1144,7 +1144,7 @@ public class ChatRepository(
     private class CreatedGroup(
         val group: Group,
         val groupId: ByteArray,
-        /** ADR-0058 §6 — the account key of every added person. */
+        /** ADR-0060 §6 — the account key of every added person. */
         val recipientAccounts: List<ByteArray>,
         val welcomeEnvelope: ByteArray,
         val accessSigner: DsJournalSigner?,
@@ -1185,7 +1185,7 @@ public class ChatRepository(
         withContext(mlsDispatcher) { joinGroupFromWelcomeOnMlsThread(welcomeBytes = welcomeBytes) }
 
     private suspend fun joinGroupFromWelcomeOnMlsThread(welcomeBytes: ByteArray): String {
-        // ADR-0058 §6 — every device of the account reads the one account
+        // ADR-0060 §6 — every device of the account reads the one account
         // mailbox, so a Welcome sealed to ANOTHER of its devices fails here
         // with no matching KeyPackage. That says nothing about this device's
         // published KeyPackage, so it is the one outcome that does not
@@ -2234,7 +2234,7 @@ public class ChatRepository(
                     // which is provider state — persist so a relaunch does not
                     // lose a request the peers hold.
                     persistSnapshotBestEffort()
-                    // ADR-0058 §6 — the committers who may sweep this Add, in
+                    // ADR-0060 §6 — the committers who may sweep this Add, in
                     // rank order (owner, then admins), so this device can
                     // hand each of them a delegation for the added person's
                     // closed mailbox. Read under the provider lock.
@@ -2308,7 +2308,7 @@ public class ChatRepository(
                     reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
                 ) {
                     val welcomeEnvelope = wrapEnvelope(KIND_WELCOME, addResult.welcome)
-                    // ADR-0058 §6 (amending ADR-0050 §2.7): the Welcome goes to
+                    // ADR-0060 §6 (amending ADR-0050 §2.7): the Welcome goes to
                     // the added leaf's ACCOUNT mailbox, resolved through the
                     // leaf's device binding; every device of that account reads
                     // it, and only this leaf's KeyPackage opens it.
@@ -3204,7 +3204,7 @@ public class ChatRepository(
                     uniffi.lakko_ffi_uniffi.composeGroupJoinAttribution(
                         identity.ed25519Seed(),
                         capabilityWire,
-                        // ADR-0058 §6 — this account's reply key, registered on
+                        // ADR-0060 §6 — this account's reply key, registered on
                         // its mailbox before the knock, so the committer can
                         // write the Welcome in. Retired once the group arrives.
                         joinReplyGrant,
@@ -3240,7 +3240,7 @@ public class ChatRepository(
         withContext(mlsDispatcher) { pollForJoinWelcomeOnMlsThread(groupId = groupId) }
 
     private suspend fun pollForJoinWelcomeOnMlsThread(groupId: ByteArray): String? {
-        // ADR-0058 §6 — the Welcome arrives in this ACCOUNT's mailbox, whose
+        // ADR-0060 §6 — the Welcome arrives in this ACCOUNT's mailbox, whose
         // one continuous reader (the app shell's inbox long poll) joins it; a
         // second reader here would race that reader's cursor. So the wait is
         // for the group to appear.
@@ -3963,7 +3963,7 @@ public class ChatRepository(
      *  when none is stored yet (nothing to publish). */
     private fun ownProfileForWire(groupIdHex: String, group: Group): uniffi.lakko_ffi_uniffi.FfiProfile? {
         val accountId = keyPackageAccount.get()?.accountId ?: return null
-        // ADR-0058 §3 — a one-to-one carries `contact` + `member` and the
+        // ADR-0060 §3 — a one-to-one carries `contact` + `member` and the
         // username; a group carries `member` always, and `group` + the username
         // only where the setting lets its members find this person.
         val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
@@ -4021,12 +4021,12 @@ public class ChatRepository(
     public fun publishOwnProfileToAllGroups() {
         val targets = synchronized(groups) { groups.keys.toList() }
         profileRepublish.publishNowToAll(targets)
-        // ADR-0058 §5 — the Everyone publication follows the name.
+        // ADR-0060 §5 — the Everyone publication follows the name.
         refreshEveryoneBestEffort()
     }
 
     /**
-     * ADR-0058 §5 — enter or leave Everyone on discovery: in Everyone, the
+     * ADR-0060 §5 — enter or leave Everyone on discovery: in Everyone, the
      * OPRF hash of every `nameSearchTerms(displayName)` term (one lookup token
      * each), republished on every name change; outside it, `public: false`
      * and no terms. Idempotent, and skipped when the server already holds it.
@@ -4060,7 +4060,7 @@ public class ChatRepository(
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0058 Everyone publication failed: ${cause.javaClass.simpleName}")
+                android.util.Log.w("ChatRepository", "ADR-0060 Everyone publication failed: ${cause.javaClass.simpleName}")
             }
         }
     }
@@ -4205,7 +4205,7 @@ public class ChatRepository(
                     // ADR-0048 v2 — the id the call roster derives the
                     // ADR-0021 peer tag from; kept per person key.
                     accountIdHex = me.lakko.app.profile.accountIdHexOrNull(profile.accountId),
-                    // ADR-0058 §5 — the username shows only on its certificate.
+                    // ADR-0060 §5 — the username shows only on its certificate.
                     usernameCertificateHex = profile.usernameCertificate?.let { me.lakko.app.reach.reachHex(it) },
                 ),
             )
@@ -4215,7 +4215,7 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0058 §3 / client contract, write paths — keep the reach grants a
+     * ADR-0060 §3 / client contract, write paths — keep the reach grants a
      * profile hands out, ONLY where they may come from: `contact` from the
      * other participant of a one-to-one, `group` / `member` from a member of
      * this group, keyed on the sender's account key resolved at receipt
@@ -4260,12 +4260,12 @@ public class ChatRepository(
                 reach.keepHeld(senderBytes, grant, scopeHex = groupIdHex)
             }
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0058 profile grants not kept: ${cause.javaClass.simpleName}")
+            android.util.Log.w("ChatRepository", "ADR-0060 profile grants not kept: ${cause.javaClass.simpleName}")
         }
     }
 
     /**
-     * ADR-0058 — a scoped-discovery service envelope reached this group. A
+     * ADR-0060 — a scoped-discovery service envelope reached this group. A
      * committer delegation is kept per (sender resolved at receipt, added
      * account); an introduction offer / bundle is handed to the introductions
      * store; a Visibility or ReachState does not belong in a conversation and
@@ -4301,11 +4301,11 @@ public class ChatRepository(
                 me.lakko.app.reach.ScopedEnvelopeKind.REACH_STATE -> Unit
             }
         } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0058 service envelope dropped: ${cause.javaClass.simpleName}")
+            android.util.Log.w("ChatRepository", "ADR-0060 service envelope dropped: ${cause.javaClass.simpleName}")
         }
     }
 
-    /** ADR-0058 §4 — where an introduction offer / bundle from a contact goes
+    /** ADR-0060 §4 — where an introduction offer / bundle from a contact goes
      *  (the contacts-of-contacts store). `null` drops it. */
     @Volatile
     public var introductionSink: ((ByteArray, me.lakko.app.reach.ScopedEnvelopeKind, ByteArray) -> Unit)? = null
@@ -5049,7 +5049,7 @@ public class ChatRepository(
          *  another batch may have landed. */
         selfEvicted: Boolean,
     ) {
-        // ADR-0058 §3 — a group that shrank rotates this account's own
+        // ADR-0060 §3 — a group that shrank rotates this account's own
         // `group` and `member` keys for it (the evicted member holds the old
         // ones), then republishes the profile carrying the new grants. This
         // runs after the Remove commit was applied, so the republished profile
@@ -5065,7 +5065,7 @@ public class ChatRepository(
                 } catch (cause: kotlinx.coroutines.CancellationException) {
                     throw cause
                 } catch (cause: Throwable) {
-                    android.util.Log.w("ChatRepository", "ADR-0058 shrink rotation failed: ${cause.javaClass.simpleName}")
+                    android.util.Log.w("ChatRepository", "ADR-0060 shrink rotation failed: ${cause.javaClass.simpleName}")
                 }
             }
         }
@@ -5251,7 +5251,7 @@ public class ChatRepository(
                 },
                 profileSink = { senderKey, profile ->
                     receiveProfileBestEffort(senderKey, profile)
-                    // ADR-0058 §3 — keep the grants the profile hands out,
+                    // ADR-0060 §3 — keep the grants the profile hands out,
                     // gated on who sent them and where (C-68).
                     receiveProfileGrantsBestEffort(record.group, groupIdHex, senderKey, profile)
                 },
@@ -5522,7 +5522,7 @@ public class ChatRepository(
                     )
                 }
                 record.consumeEvents(events = events)
-                // ADR-0058 §6 — a `/g/` joiner's attribution carries its reply
+                // ADR-0060 §6 — a `/g/` joiner's attribution carries its reply
                 // key: kept for the joiner's account (named by the retained
                 // KeyPackage's device binding), so the sweep that admits it
                 // can write the Welcome into its closed mailbox.
@@ -5540,7 +5540,7 @@ public class ChatRepository(
     // pairing / removal fan-outs and the scheduled re-admission.
     // -----------------------------------------------------------------
 
-    // ADR-0058 §6 (amending ADR-0050 section 2.7) — this DEVICE's mailbox is
+    // ADR-0060 §6 (amending ADR-0050 section 2.7) — this DEVICE's mailbox is
     // no longer polled: every Welcome goes to the ACCOUNT mailbox, which the
     // contacts inbox reads. The device mailbox stays claimed and closed.
 
@@ -5947,7 +5947,7 @@ public class ChatRepository(
         if (accountIdB64 != null) {
             DeviceReadmission.clearForAccount(applicationContext, accountIdB64)
         }
-        // ADR-0058 — the grants this device holds and its reach bookkeeping
+        // ADR-0060 — the grants this device holds and its reach bookkeeping
         // go with the device.
         me.lakko.app.reach.ReachManager.peek()?.clear(forget = true)
         clear()
@@ -8683,7 +8683,7 @@ public class ChatRepository(
             actingCommitter = ActingCommitterOracle { ownRank ->
                 actingCommitterNow(record.group, groupIdHex, ownRank)
             },
-            // ADR-0058 §6 — one Welcome write per added ACCOUNT, into its
+            // ADR-0060 §6 — one Welcome write per added ACCOUNT, into its
             // account mailbox: each added leaf resolved through its device
             // binding in the merged roster.
             welcomeTargets = { leafKeys ->
@@ -8838,7 +8838,7 @@ public class ChatRepository(
             return
         }
         if (entries.isEmpty()) return
-        // ADR-0058 §6 — the account each owed Welcome is addressed to, so the
+        // ADR-0060 §6 — the account each owed Welcome is addressed to, so the
         // re-publish picks that person's reach grant.
         for (entry in entries) {
             val mailbox = entry.secondArtifactMailboxB64 ?: continue
@@ -9098,7 +9098,7 @@ public class ChatRepository(
             thread.copy(localUnread = unread.count, unreadViewedThisSession = unread.viewedThisSession)
         }
         mutableState.update { it.copy(threads = threads) }
-        // ADR-0058 §1 — every group this account is still in carries a
+        // ADR-0060 §1 — every group this account is still in carries a
         // `member` key, and the setting decides its `group` key.
         if (mutableState.value.bootstrapped) {
             me.lakko.app.reach.ReachManager.peek()?.setJoinedGroups(
@@ -9783,7 +9783,7 @@ private class GroupRecord(
                     registrarSeedSink?.invoke(event.senderKey, event.envelope)
                 }
                 is IncomingChatEvent.ScopedDiscovery -> {
-                    // ADR-0058 — a scoped-discovery service envelope. Not a
+                    // ADR-0060 — a scoped-discovery service envelope. Not a
                     // timeline row; the sink keeps what this device acts on
                     // and drops the rest.
                     scopedSink?.invoke(event.senderKey, event.kind, event.bytes)

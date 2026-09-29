@@ -149,7 +149,7 @@ public enum CallInviteComposer {
         // ---- 2. The values every link carries ----------------
         // Fixed, not asked (`docs/ux/call-links.md` section 4).
         let expiryMs = CallInviteValues.expiryMs(nowMs: nowMs)
-        // ADR-0058 section 6 — a `/c/` link carries a `link` grant scoped to
+        // ADR-0060 section 6 — a `/c/` link carries a `link` grant scoped to
         // it, registered by the caller BEFORE the link exists.
         let linkId = generateLinkId()
         let grant = try await linkGrant(linkId, expiryMs)

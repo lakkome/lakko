@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 - binds the reach session and the "who can find me" setting to
+ * ADR-0060 - binds the reach session and the "who can find me" setting to
  * the signed-in account.
  *
  * Mounted inside `<AuthProvider>` and `<ChatProvider>`. When the account

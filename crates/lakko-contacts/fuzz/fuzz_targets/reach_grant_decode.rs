@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target - `ReachGrant::decode` (ADR-0058 §1).
+//! Fuzz target - `ReachGrant::decode` (ADR-0060 §1).
 //!
 //! A grant arrives inside a profile envelope any group member can craft,
 //! and inside an introduction record. Fixed length, so the parser is the

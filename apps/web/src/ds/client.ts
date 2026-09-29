@@ -78,7 +78,7 @@ export { DS_WAKE_HEADER, dsWakeHeaderValue, type DsWake, type DsWakeKind } from 
 export const DS_DELEGATION_HEADER = "x-lakko-ds-delegation";
 
 /**
- * How a write to someone else's identity mailbox is authorised (ADR-0058
+ * How a write to someone else's identity mailbox is authorised (ADR-0060
  * section 2). `signer` is a reach signer (`DsProofSigner.forReach(seed)`) of a
  * key the owner registered, or the delegate's signer next to `delegation`.
  * Absent: the write is unsigned, which an open (Everyone) or unclaimed
@@ -551,7 +551,7 @@ export class DsClient implements StatementSender {
    * `POST /ds/mailbox/{pseudonym_hex}/messages` — publish a raw
    * payload to a mailbox. The body is sent as
    * `application/octet-stream`; the server caps the size at
-   * `MAX_MESSAGE_BYTES`. ADR-0058: a claimed mailbox is closed unless its
+   * `MAX_MESSAGE_BYTES`. ADR-0060: a claimed mailbox is closed unless its
    * owner chose Everyone, so the write carries the reach grant (or the
    * delegation) that authorises it; an unauthorised write to a closed
    * mailbox is answered as stored and dropped.
@@ -584,7 +584,7 @@ export class DsClient implements StatementSender {
 
   /**
    * `POST /ds/rendezvous/{hex}/messages` - a random rendezvous id (pairing,
-   * recovery, the welcome courier, the state bundle; ADR-0058 section 2).
+   * recovery, the welcome courier, the state bundle; ADR-0060 section 2).
    * Never signed and never carries a delegation or wake header: the DS
    * refuses all three there.
    */
@@ -608,7 +608,7 @@ export class DsClient implements StatementSender {
   }
 
   /**
-   * `PUT /ds/mailbox/{hex}/reach` (ADR-0058 section 2): add and remove reach
+   * `PUT /ds/mailbox/{hex}/reach` (ADR-0060 section 2): add and remove reach
    * public keys and set the Everyone flag, proven under the mailbox's
    * identity key. `pseudonym` must be one of this device's own mailboxes (the
    * registry holds its signer); the mailbox is claimed first when the DS says
@@ -711,7 +711,7 @@ export class DsClient implements StatementSender {
    * `GET /ds/mailbox/{pseudonym_hex}/messages?after=&limit=&wait=`
    * — pull all messages newer than `after` for the given
    * mailbox. Always proven under the identity key: only this device's own
-   * mailboxes are read here (ADR-0058; a rendezvous id has its own route).
+   * mailboxes are read here (ADR-0060; a rendezvous id has its own route).
    *
    * `wait` is the long-poll budget in seconds (0 returns
    * immediately whatever's there; non-zero holds the connection
@@ -733,7 +733,7 @@ export class DsClient implements StatementSender {
     if (pseudonym.length !== 32) {
       throw new DsClientArgError("pseudonym must be 32 bytes");
     }
-    // ADR-0058: every read of a personal mailbox carries the identity proof
+    // ADR-0060: every read of a personal mailbox carries the identity proof
     // (an unproven read is 401 whether the mailbox is claimed or not);
     // rendezvous ids are read through `fetchRendezvous`.
     const plan: SigningPlan =

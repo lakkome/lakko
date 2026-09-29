@@ -43,7 +43,7 @@ final class ProfilePublisher {
         var send: @MainActor (_ groupIdHex: String, _ bytes: Data) async throws -> Void
         /// The current own-profile envelope for one group, or `nil` when there
         /// is nothing to publish (no active account). Per group because profile
-        /// v3 carries that conversation's reach grants (ADR-0058).
+        /// v3 carries that conversation's reach grants (ADR-0060).
         var envelope: @MainActor (_ groupIdHex: String) -> Data?
         /// Whether this device can still send into the group (not evicted).
         var canSend: @MainActor (_ groupIdHex: String) -> Bool

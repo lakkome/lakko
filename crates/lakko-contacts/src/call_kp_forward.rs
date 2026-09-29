@@ -56,9 +56,9 @@
 //! [`crate::call_welcome`]; the only difference is which
 //! prefix the owner-side polling loop matches against.
 //!
-//! ## The joiner's reply grant (ADR-0058 §6)
+//! ## The joiner's reply grant (ADR-0060 §6)
 //!
-//! Since ADR-0058 the joiner's mailbox is closed, so the committer could not
+//! Since ADR-0060 the joiner's mailbox is closed, so the committer could not
 //! ferry the Welcome back without one of the joiner's reach keys. This
 //! envelope carries no key of its own because its carrier already does: the
 //! joiner passes its **`reply` reach grant** to [`crate::request::compose`]
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(unwrapped, kp.as_slice());
     }
 
-    /// ADR-0058 §6: a cold-start KeyPackage forward reaches the owner with
+    /// ADR-0060 §6: a cold-start KeyPackage forward reaches the owner with
     /// the joiner's reply grant beside it, in the one sealed carrier; a grant
     /// of any other class never leaves the joiner.
     #[test]

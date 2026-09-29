@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 sections 4 and 5 - the session runtime that publishes what this
+ * ADR-0060 sections 4 and 5 - the session runtime that publishes what this
  * account can be found by: the Everyone publication at discovery, the
  * introduction record offered to contacts (contacts of contacts), and the
  * bundle of contacts' records relayed to the other contacts.
@@ -117,7 +117,7 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
             evaluate: () => scoped.nameTermHash(term),
           }));
 
-    // 1. Everyone (ADR-0058 section 5). The mailbox's `open` flag is the
+    // 1. Everyone (ADR-0060 section 5). The mailbox's `open` flag is the
     //    reach session's; this is the discovery half.
     const everyone = setting.mode === wasm.VisibilityMode.Everyone;
     const action = everyoneAction(state.everyone, everyone, name);

@@ -403,7 +403,7 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         (try? decodePinEnvelope(plaintext: bytes)) != nil
     }
 
-    /// The AUTHORITATIVE half of the ADR-0058 filter: the slim FFI's
+    /// The AUTHORITATIVE half of the ADR-0060 filter: the slim FFI's
     /// `decodeScopedDiscoveryEnvelope`, which answers "one of the five 'who can
     /// find me' envelopes" and returns nothing else. READ-ONLY: a pure decode;
     /// the NSE never keeps a grant, a setting or a delegation (C-59). The
@@ -412,7 +412,7 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         (try? decodeScopedDiscoveryEnvelope(plaintext: bytes)) != nil
     }
 
-    /// The length range of the five ADR-0058 envelopes, from the slim FFI.
+    /// The length range of the five ADR-0060 envelopes, from the slim FFI.
     private static var scopedDiscoveryEnvelopeLengths: ClosedRange<Int> {
         Int(scopedDiscoveryEnvelopeMinLen())...Int(scopedDiscoveryEnvelopeMaxLen())
     }

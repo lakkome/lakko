@@ -396,7 +396,7 @@ public final class ChannelsClient {
         return view.epoch
     }
 
-    // MARK: - ADR-0058 member cards
+    // MARK: - ADR-0060 member cards
 
     /// `PUT /v1/channels/:id/members/:pubkey_hex` — upload this subscriber's
     /// member card, signed by its subscriber key (`sigHeader` is

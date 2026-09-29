@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-/// ADR-0058 section 4 — contacts of contacts, the receiving half: the
+/// ADR-0060 section 4 — contacts of contacts, the receiving half: the
 /// introduction record each contact offered (their own) and the bundle each
 /// contact relayed (their contacts'). Kept in the ``ReachCenter`` record, so in
 /// the Keychain with the rest of this account's reach state.

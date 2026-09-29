@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 section 3 - the member-card rules: what the own card says, when
+ * ADR-0060 section 3 - the member-card rules: what the own card says, when
  * it is uploaded again, what a card read from the list does to the kept
  * grants, and the Ed25519 flag-day checks.
  */

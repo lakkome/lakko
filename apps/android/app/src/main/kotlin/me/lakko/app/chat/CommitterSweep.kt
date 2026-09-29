@@ -279,7 +279,7 @@ internal data class SweepDurableEntry(
     /**
      * base64 of the 32-byte signature key of every leaf the sweep ADDS.
      *
-     * ADR-0058 §6 — the Welcome goes to each added leaf's ACCOUNT mailbox,
+     * ADR-0060 §6 — the Welcome goes to each added leaf's ACCOUNT mailbox,
      * and a leaf's account is read from its device binding in the roster,
      * which holds the leaf only once the sweep merged. So the entry records
      * the leaves, and [SweepPorts.welcomeTargets] resolves them to mailboxes
@@ -383,7 +383,7 @@ internal class SweepPorts(
     val cursor: SweepCursorRef,
     val actingCommitter: ActingCommitterOracle,
     /**
-     * ADR-0058 §6 — the mailboxes one Welcome goes to, for the added leaves'
+     * ADR-0060 §6 — the mailboxes one Welcome goes to, for the added leaves'
      * 32-byte signature keys: one per added ACCOUNT (resolved through each
      * leaf's device binding in the merged roster), deduplicated. Called only
      * after the sweep merged.

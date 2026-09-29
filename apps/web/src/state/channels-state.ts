@@ -82,7 +82,7 @@ interface ChannelsStateInternal {
   readonly counterByChannel: Accessor<ReadonlyMap<string, bigint>>;
   /** Per-channel subscriber-side Ed25519 keypair the
    *  device generated for joining a channel as a
-   *  reader (Phase 4b G4-3c; Ed25519 since ADR-0058, so it
+   *  reader (Phase 4b G4-3c; Ed25519 since ADR-0060, so it
    *  can sign member-card requests - a publisher holds one
    *  too, for its own member card). Persisted in the encrypted
    *  channel log so a page reload does not lose the secret

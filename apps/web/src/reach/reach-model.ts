@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 - the pure half of the reach keys this account holds.
+ * ADR-0060 - the pure half of the reach keys this account holds.
  *
  * A reach key is an Ed25519 key derived from the account seed for
  * `(class, scope, version)`; the account mailbox accepts a write only under a
@@ -49,7 +49,7 @@ export function isAccountWideClass(cls: ReachClassName): boolean {
   return cls === "contact" || cls === "fof";
 }
 
-/** How long a `reply` key lives: 7 days (ADR-0058 open question 2, chosen). */
+/** How long a `reply` key lives: 7 days (ADR-0060 open question 2, chosen). */
 export const REPLY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** How often the `fof` key rotates on a schedule: 7 days (chosen). */
@@ -197,7 +197,7 @@ export interface ReachInputs {
  * The full set of keys that should be registered on the account mailbox:
  *
  * - `contact`, always (contacts can always write);
- * - `member` per group, always (ADR-0058 section 1: re-admission Welcomes);
+ * - `member` per group, always (ADR-0060 section 1: re-admission Welcomes);
  * - `group` per group the setting allows;
  * - `channel` per channel the setting allows, at the channel's epoch;
  * - `fof` while contacts of contacts are allowed;

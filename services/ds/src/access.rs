@@ -7,15 +7,15 @@
 //! is **claimed**: its gated routes answer only a request that carries a valid
 //! [`lakko_ds_proof`] header. A journal with no row keeps the Phase 1.3
 //! posture (anyone who names it) - which is every group journal until its
-//! owner claims it. A mailbox is different since ADR-0058: it is personal, so
+//! owner claims it. A mailbox is different since ADR-0060: it is personal, so
 //! its `GET messages` needs the identity proof whether or not it is claimed
 //! (an unclaimed one has no key and always answers the uniform `401`); the
 //! proofless meeting points moved to their own `/ds/rendezvous/` namespace.
 //!
 //! What is gated: a claimed group's `GET`/`POST messages` and `GET knocks`
 //! (write tier); every mailbox's `GET messages` (the identity proof, whether
-//! or not the mailbox is claimed, ADR-0058).
-//! A mailbox `POST` is gated by reach keys, not here (ADR-0058,
+//! or not the mailbox is claimed, ADR-0060).
+//! A mailbox `POST` is gated by reach keys, not here (ADR-0060,
 //! `src/reach.rs`): ADR-0053 left it the open cold inbox, and a claimed
 //! mailbox is now closed to a stranger.
 //! What is not gated: a group's `POST knock` (it spends an anonymous token
@@ -324,7 +324,7 @@ pub(crate) async fn gate_group(
 /// `MAILBOX_EPOCH`. An unclaimed mailbox has no key, so every read of it is
 /// the uniform [`refused`] - the same answer a claimed mailbox gives a read
 /// without a proof - and the answer never tells whether a mailbox is claimed
-/// (ADR-0058; proofless meeting points use `/ds/rendezvous/`).
+/// (ADR-0060; proofless meeting points use `/ds/rendezvous/`).
 pub(crate) async fn gate_mailbox_read(
     state: &AppState,
     device_id: &[u8; PSEUDONYM_LEN],
@@ -948,7 +948,7 @@ pub(crate) mod tests {
             assert_eq!(status, StatusCode::NO_CONTENT);
         }
         let uri = messages_uri("mailbox", &device);
-        // A proofless post is answered as stored; since ADR-0058 a claimed,
+        // A proofless post is answered as stored; since ADR-0060 a claimed,
         // closed mailbox drops it (`src/reach.rs` covers the reach keys).
         let (status, _) = send(
             &app,

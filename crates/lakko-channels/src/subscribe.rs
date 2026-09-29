@@ -9,7 +9,7 @@
 //! its secret and installs the seed into [`ContentKeySeed`],
 //! from which [`crate::post::verify_and_decrypt`] takes over.
 //!
-//! ## One subscriber key: Ed25519 ([ADR-0058] section 3)
+//! ## One subscriber key: Ed25519 ([ADR-0060] section 3)
 //!
 //! A subscriber holds ONE Ed25519 key pair. Its public key is
 //! the subscriber identifier everywhere: the registration, the
@@ -24,7 +24,7 @@
 //! registered value. A key that is not a valid Ed25519 point,
 //! or is of small order, is refused ([`subscriber_public_key`]).
 //!
-//! [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 //!
 //! ## Wire shape
 //!

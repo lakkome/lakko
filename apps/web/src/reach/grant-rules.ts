@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 section 6 (client contract) - which reach grants a receiver keeps.
+ * ADR-0060 section 6 (client contract) - which reach grants a receiver keeps.
  *
  * A grant is a secret that lets its holder write to someone's mailbox, so a
  * receiver must never keep one that did not come from the person it names,

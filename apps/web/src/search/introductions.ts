@@ -3,7 +3,7 @@
 
 /**
  * Contacts of contacts: opening the introduction records this device keeps
- * (ADR-0058 section 4).
+ * (ADR-0060 section 4).
  *
  * A contact relays the records of THEIR contacts as a bundle; a record is
  * sealed under the OPRF output of each search term of the introduced

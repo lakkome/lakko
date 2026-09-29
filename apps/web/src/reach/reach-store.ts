@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 - encrypted per-account rows for scoped discovery: this device's
+ * ADR-0060 - encrypted per-account rows for scoped discovery: this device's
  * reach book, the grants it received, the "who can find me" setting and the
  * introduction bundles its contacts relayed.
  *

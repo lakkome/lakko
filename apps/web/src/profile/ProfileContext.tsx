@@ -11,7 +11,7 @@
  *   * the store of RECEIVED profiles, keyed on authenticated signature keys
  *     (`profile-store.ts`, encrypted in IndexedDB by `profile-idb.ts`);
  *   * username VERIFICATION against the discovery-signed certificate a
- *     profile carries (ADR-0058; `username-verification.ts`);
+ *     profile carries (ADR-0060; `username-verification.ts`);
  *   * WHEN to publish into groups (`publish-scheduler.ts`) and the publishing
  *     itself, through `ChatClient.broadcastControl` — the locked,
  *     persist-before-publish service-envelope path the push routing secret and
@@ -82,7 +82,7 @@ export interface ProfileApi {
   /** Resolve a person — a 32-byte key or its base64. Reactive. */
   resolve(key: Uint8Array | string): ResolvedName;
   /** File a received profile under its AUTHENTICATED sender key. With a
-   *  `context`, the reach grants it carried are kept under the ADR-0058 rules
+   *  `context`, the reach grants it carried are kept under the ADR-0060 rules
    *  for that conversation. */
   ingest(
     senderKeyB64: string,
@@ -95,7 +95,7 @@ export interface ProfileApi {
   groupJoined(groupIdB64: string): void;
   /** `groupIdB64` gained at least one member. */
   groupGrew(groupIdB64: string): void;
-  /** ADR-0058 — `groupIdB64` lost a member (the ADR-0043 signature-key set
+  /** ADR-0060 — `groupIdB64` lost a member (the ADR-0043 signature-key set
    *  difference): rotate this account's `group` and `member` keys for it and
    *  republish the profile. */
   groupShrank(groupIdB64: string): Promise<void>;
@@ -110,11 +110,11 @@ export interface ProfileApi {
   /** Record a username binding a lookup already proved. */
   learnUsername(signatureKeyB64: string, username: string): void;
   /** The own profile envelope, or `null` when there is nothing to publish.
-   *  With `groupIdB64` it carries the ADR-0058 grants that conversation gets
+   *  With `groupIdB64` it carries the ADR-0060 grants that conversation gets
    *  (`member` always, `group` when the setting allows, `contact` in a
    *  one-to-one); without, none (a contact request's profile). */
   ownProfileEnvelope(groupIdB64?: string): Promise<Uint8Array | null>;
-  /** ADR-0058 — this account's username certificate, `null` until fetched
+  /** ADR-0060 — this account's username certificate, `null` until fetched
    *  (or for a guest account). */
   ownUsernameCertificate(): Uint8Array | null;
   /** The 16-byte auth account id a person CLAIMED in their profile, as 32
@@ -218,7 +218,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     return certFetch;
   }
   const verifier = new UsernameVerifier({
-    // ADR-0058 section 5 — a claimed username is verified against the
+    // ADR-0060 section 5 — a claimed username is verified against the
     // discovery-signed certificate the person's own profile carries: one OPRF
     // evaluation and the pinned key, no lookup (a hidden person answers no
     // lookup). No certificate, or one that does not bind this username to the
@@ -286,20 +286,20 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     // say. Once a name was ever saved, an empty envelope is meaningful: it
     // clears the name on the receivers.
     if (own.displayName === null && username === null && own.updatedAtMs === 0) {
-      // ADR-0058 — the grants still have to travel: a group's members reach
+      // ADR-0060 — the grants still have to travel: a group's members reach
       // us through them. An envelope with no name is a valid profile.
       if (groupIdB64 === undefined) return null;
     }
     const w = await loadWasm();
     await ensureOwnCertificate();
-    // ADR-0058 — the grants this conversation gets. A missing reach session
+    // ADR-0060 — the grants this conversation gets. A missing reach session
     // (signed out mid-publish) sends none.
     const grants = groupIdB64 === undefined ? [] : grantsFor(groupIdB64);
     try {
       // ADR-0048 v2 — the own account id rides along so a member who never
       // accepted this account as a contact can still derive its ADR-0021 peer
       // tag and name its call tile. `undefined` for a session without one.
-      // ADR-0058 v3 — the username certificate, and the grants.
+      // ADR-0060 v3 — the username certificate, and the grants.
       return w.composeProfileEnvelope(
         own.displayName,
         username,
@@ -321,7 +321,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
-  /** ADR-0058 — the grants a profile into `groupIdB64` carries. */
+  /** ADR-0060 — the grants a profile into `groupIdB64` carries. */
   function grantsFor(groupIdB64: string): ReturnType<NonNullable<ReturnType<typeof reachSession>>["profileGrants"]> {
     const session = reachSession();
     const entry = chats.get(groupIdB64);
@@ -400,7 +400,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     });
   });
 
-  // ADR-0058 — the grants a profile carries follow the "who can find me"
+  // ADR-0060 — the grants a profile carries follow the "who can find me"
   // setting and the key versions: whenever what a conversation's profile
   // WOULD carry differs from what was last published there (a setting change,
   // a rotation, a conversation that never received grants), the profile is
@@ -500,7 +500,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       void store.ingest(account, senderKeyB64, profile).then((replaced) => {
         if (replaced) verifyIfClaimed(senderKeyB64, store.get(senderKeyB64)?.username ?? null);
       });
-      // ADR-0058 — the grants, kept under the rules for this conversation and
+      // ADR-0060 — the grants, kept under the rules for this conversation and
       // filed under the sender key resolved at receipt (C-68).
       const session = reachSession();
       const entry = context === undefined ? undefined : chats.get(context.groupIdB64);
@@ -537,7 +537,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       scheduler.groupGrew(groupIdB64);
     },
     async groupShrank(groupIdB64) {
-      // ADR-0058 section 3 — new `group` and `member` keys, registered before
+      // ADR-0060 section 3 — new `group` and `member` keys, registered before
       // the old ones go, then the profile carrying them republished. Called
       // strictly after the removal commit merged (the C-61 shape): the
       // evicted member cannot open the republished profile.
@@ -611,7 +611,7 @@ export function useProfiles(): ProfileApi {
 }
 
 /**
- * ADR-0058 — a conversation is a one-to-one when its roster holds exactly two
+ * ADR-0060 — a conversation is a one-to-one when its roster holds exactly two
  * people (a person being one account key, however many devices). A torn
  * roster is not one: a `contact` grant is then neither sent nor kept.
  */
@@ -621,7 +621,7 @@ export function isOneToOne(group: Parameters<typeof rosterOf>[0]): boolean {
   return people.size === 2;
 }
 
-/** ADR-0058 — the grant signature last published per conversation, by
+/** ADR-0060 — the grant signature last published per conversation, by
  *  account (versions only: `member:3|group:1`). */
 const GRANT_SIGNATURE_KEY = "lakko.reach.profile-grants.v1.";
 

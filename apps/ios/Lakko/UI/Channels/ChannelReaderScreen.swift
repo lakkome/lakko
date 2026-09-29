@@ -404,7 +404,7 @@ struct ChannelReaderScreen: View {
             }
         }
 
-        // ADR-0058 section 3 — this subscriber's member card for the newest
+        // ADR-0060 section 3 — this subscriber's member card for the newest
         // epoch it holds, and the grants the other members' cards carry.
         await ChannelMemberCards.uploadIfNeeded(state: state, channelId: channelId)
         await ChannelMemberCards.refresh(

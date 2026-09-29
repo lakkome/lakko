@@ -62,7 +62,7 @@ public suspend fun resolveUsernameForVerification(
 private const val SIGNATURE_KEY_BYTES = 32
 
 /**
- * ADR-0058 §5 — verify a claimed username by its discovery-signed certificate
+ * ADR-0060 §5 — verify a claimed username by its discovery-signed certificate
  * instead of a public lookup (which a person outside Everyone no longer
  * answers).
  *

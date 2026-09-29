@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 - the reach grants other people handed this account, filed under
+ * ADR-0060 - the reach grants other people handed this account, filed under
  * the sender's account key resolved at receipt (C-68), plus the committer
  * delegations members posted for adds they proposed.
  *

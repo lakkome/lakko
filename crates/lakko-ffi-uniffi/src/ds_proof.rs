@@ -18,7 +18,7 @@
 //!   journal while a peer is applying the commit, and one two behind does not.
 //! - [`ds_mailbox_signer`] - the identity key at [`ds_mailbox_epoch`], for the
 //!   device's own mailbox.
-//! - [`DsProofSigner::for_reach`] - a reach key (ADR-0058 §2) at
+//! - [`DsProofSigner::for_reach`] - a reach key (ADR-0060 §2) at
 //!   [`ds_reach_epoch`], for a write to someone else's closed mailbox; a
 //!   delegate signs with it too, over its own delegate seed, next to the
 //!   [`sign_delegation`] header the reach-key holder issued.
@@ -69,7 +69,7 @@ fn key32(bytes: &[u8], what: &str) -> Result<[u8; 32], FfiError> {
 
 #[uniffi::export]
 impl DsProofSigner {
-    /// A reach-key signer (ADR-0058 §2) at [`ds_reach_epoch`]: signs a write
+    /// A reach-key signer (ADR-0060 §2) at [`ds_reach_epoch`]: signs a write
     /// to a closed identity mailbox with a 32-byte reach seed the owner
     /// registered (or with a delegate seed, next to a delegation). Its proof
     /// header names the signing key (a sixth field, inside the signed bytes)
@@ -172,7 +172,7 @@ pub fn max_delegation_ttl_ms() -> u64 {
     MAX_DELEGATION_TTL_MS
 }
 
-/// Sign a delegation (ADR-0058 §2): the holder of the reach seed
+/// Sign a delegation (ADR-0060 §2): the holder of the reach seed
 /// `issuer_seed` authorises ONE write by `delegate_pk` to the 32-byte
 /// `mailbox` pseudonym until `expires_at_ms`, under a fresh 16-byte `nonce`
 /// the DS consumes. Returns the [`delegation_header_name`] header value.
@@ -200,7 +200,7 @@ pub fn sign_delegation(
 }
 
 /// [`sign_delegation`], returning the raw 185-byte delegation instead of the
-/// header value: the blob a committer-delegation envelope carries (ADR-0058
+/// header value: the blob a committer-delegation envelope carries (ADR-0060
 /// §6, `composeCommitterDelegationEnvelope`). The proposer signs one per
 /// committer candidate, the delegate being that candidate's account
 /// signature key and the mailbox the added person's. The committer turns

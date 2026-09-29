@@ -68,7 +68,7 @@ pub const OPRF_HASH_LEN: usize = 64;
 const CHANNEL_OPRF_DOMAIN: &[u8] = b"\xfflakko/discovery/channel/v1\x1f";
 
 /// Domain-separation prefix for the display-name OPRF namespace
-/// ([ADR-0058] section 5), the same shape as [`CHANNEL_OPRF_DOMAIN`].
+/// ([ADR-0060] section 5), the same shape as [`CHANNEL_OPRF_DOMAIN`].
 ///
 /// A name is blinded as `NAME_OPRF_DOMAIN ‖ normalize_name_for_search(name)`,
 /// so the same string used as a username, a channel handle and a name gives
@@ -77,7 +77,7 @@ const CHANNEL_OPRF_DOMAIN: &[u8] = b"\xfflakko/discovery/channel/v1\x1f";
 /// label differs from the channel domain's, so no channel handle can reproduce
 /// a name input either.
 ///
-/// [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+/// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 const NAME_OPRF_DOMAIN: &[u8] = b"\xfflakko/discovery/name/v1\x1f";
 
 /// In-flight OPRF blinding state. Single-use: `finalize` consumes
@@ -173,7 +173,7 @@ impl OprfBlinder {
         Self::blind_input(normalised, oprf_input)
     }
 
-    /// Blind one name term ([ADR-0058] section 5) in the DOMAIN-SEPARATED
+    /// Blind one name term ([ADR-0060] section 5) in the DOMAIN-SEPARATED
     /// name namespace: the OPRF input is `NAME_OPRF_DOMAIN ‖ term`.
     ///
     /// A publisher blinds each of [`crate::name_search_terms`]; a searcher
@@ -189,7 +189,7 @@ impl OprfBlinder {
     /// normalised), or [`DiscoveryClientError::Voprf`] on a `voprf` blind
     /// failure.
     ///
-    /// [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+    /// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
     pub fn blind_name_term(term: &str) -> Result<(Self, String), DiscoveryClientError> {
         if !is_name_term(term) {
             return Err(DiscoveryClientError::InvalidName);
@@ -564,7 +564,7 @@ mod tests {
         blinder.finalize(&evaluated_b64).expect("finalize")
     }
 
-    /// ADR-0058 section 5: the same string as a username, a channel handle
+    /// ADR-0060 section 5: the same string as a username, a channel handle
     /// and a name gives three different OPRF inputs and three different
     /// hashes under one server key.
     #[test]

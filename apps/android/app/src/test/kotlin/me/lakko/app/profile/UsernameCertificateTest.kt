@@ -10,7 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0058 section 5 — a claimed username is shown only once its certificate
+ * ADR-0060 section 5 — a claimed username is shown only once its certificate
  * verifies for the OPRF of the username and the claimed account, AND that
  * account's published key is the sender's (a copied certificate fails).
  */

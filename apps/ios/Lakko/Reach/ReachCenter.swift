@@ -19,7 +19,7 @@ public enum ReachApplyStatus: Equatable {
     case failed
 }
 
-/// ADR-0058 — the app-scoped composition root for reach keys and the
+/// ADR-0060 — the app-scoped composition root for reach keys and the
 /// "who can find me" setting, in the posture of ``ProfileDirectory``: one
 /// instance per process (``shared``), bound to the signed-in account.
 ///
@@ -201,7 +201,7 @@ public final class ReachCenter: ObservableObject {
                 pseudonym: pseudonym, add: diff.add, remove: diff.remove, open: open, signer: signer)
         } catch {
             guard self.accountIdB64 == accountIdB64 else { return false }
-            NSLog("ADR-0058: reach registration failed: \(error)")
+            NSLog("ADR-0060: reach registration failed: \(error)")
             status = Self.isOffline(error) ? .pendingOffline : .failed
             return false
         }
@@ -238,7 +238,7 @@ public final class ReachCenter: ObservableObject {
         var stamped = next
         stamped.updatedAtMs = max(Self.nowMs(), setting.updatedAtMs &+ 1)
         guard let envelope = try? composeVisibilityEnvelope(setting: stamped) else {
-            NSLog("ADR-0058: a setting the core refuses was not applied")
+            NSLog("ADR-0060: a setting the core refuses was not applied")
             return
         }
         setting = stamped
@@ -326,7 +326,7 @@ public final class ReachCenter: ObservableObject {
             version: ReachRules.version(of: reachClass, scope: scope, in: reachState))
     }
 
-    /// The grants a profile in `groupId` carries (ADR-0058 section 3 / 6): in a
+    /// The grants a profile in `groupId` carries (ADR-0060 section 3 / 6): in a
     /// one-to-one conversation `contact` + `member`; in a group `member`, plus
     /// `group` when the setting lets that group's members find the owner.
     public func profileGrants(groupId: Data, oneToOne: Bool) -> [FfiReachGrant] {
@@ -515,7 +515,7 @@ public final class ReachCenter: ObservableObject {
         try? IdentityPseudonym.fromIdentity(pubkey: accountKey).asBytes()
     }
 
-    // MARK: - Committer delegations (ADR-0058 section 6)
+    // MARK: - Committer delegations (ADR-0060 section 6)
 
     /// Newest delegation envelope per (sender key resolved at receipt, added
     /// account key). In memory only: a delegation lives at most 24 hours and
@@ -610,7 +610,7 @@ public final class ReachCenter: ObservableObject {
         persist()
     }
 
-    // MARK: - Introductions storage (ADR-0058 section 4)
+    // MARK: - Introductions storage (ADR-0060 section 4)
 
     func storeOffer(_ record: Data, fromAccountKeyB64 key: String) {
         guard isActive else { return }
@@ -651,7 +651,7 @@ public final class ReachCenter: ObservableObject {
         persist()
     }
 
-    // MARK: - Everyone (ADR-0058 section 5)
+    // MARK: - Everyone (ADR-0060 section 5)
 
     /// The name terms this device last published in Everyone, to republish on
     /// a name change.
@@ -679,7 +679,7 @@ public final class ReachCenter: ObservableObject {
             publishedTermsFor = wantPublic ? name : nil
             persist()
         } catch {
-            NSLog("ADR-0058: Everyone publish failed: \(error)")
+            NSLog("ADR-0060: Everyone publish failed: \(error)")
             if status == .applied { status = Self.isOffline(error) ? .pendingOffline : .failed }
         }
     }
@@ -708,7 +708,7 @@ public final class ReachCenter: ObservableObject {
                 oprfs.append(try await discovery.nameTermOprfHash(term))
             }
         } catch {
-            NSLog("ADR-0058: introduction terms not evaluated: \(error)")
+            NSLog("ADR-0060: introduction terms not evaluated: \(error)")
             return nil
         }
         guard !oprfs.isEmpty else { return nil }

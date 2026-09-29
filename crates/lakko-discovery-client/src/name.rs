@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Display-name normalisation and word-prefix search terms ([ADR-0058]
+//! Display-name normalisation and word-prefix search terms ([ADR-0060]
 //! section 5, UX spec `docs/ux/who-can-find-me.md` section 6.1).
 //!
 //! A name is found by the beginnings of its words, ignoring letter case,
@@ -13,7 +13,7 @@
 //!
 //! ## Why it lives here and not in `lakko-contacts`
 //!
-//! ADR-0058 section 5 places the normaliser in `lakko-contacts`. It needs the
+//! ADR-0060 section 5 places the normaliser in `lakko-contacts`. It needs the
 //! Unicode decomposition and mark tables of `unicode-normalization`, and
 //! `lakko-contacts` is linked by the size-budgeted iOS notification service
 //! extension (`lakko-ffi-extension`), which must not grow those tables. This
@@ -55,7 +55,7 @@
 //! [`NAME_TERM_MAX_CHARS`]), and the candidates that come back are filtered
 //! locally with [`name_matches_query`], which checks every query word.
 //!
-//! [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 
 use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;

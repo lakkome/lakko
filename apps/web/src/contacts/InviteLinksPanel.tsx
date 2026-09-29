@@ -7,7 +7,7 @@
  * form. Never a raw URL in a textarea.
  *
  * The create path is the one that lived in `routes/Contacts.tsx`: register
- * the link's reach key (ADR-0058 section 6) before anything else, compose and
+ * the link's reach key (ADR-0060 section 6) before anything else, compose and
  * seal the capability in the core, upload the sealed blob to the discovery
  * service for the short pointer URL (the secret stays in the fragment and in
  * this device's `invite-link-secrets` record; the link's reach scope id is
@@ -185,7 +185,7 @@ export function InviteLinksPanel(): JSX.Element {
       if (id === null || secrets === null) {
         throw new Error("Sign in again to create an invite link.");
       }
-      // ADR-0058 section 6: the link's reach key is registered before the
+      // ADR-0060 section 6: the link's reach key is registered before the
       // link exists; a link shared before its key is registered does not
       // work. No reach session, or a failed registration, fails the mint.
       const session = reachSession();
@@ -241,7 +241,7 @@ export function InviteLinksPanel(): JSX.Element {
           base64UrlEncodeNoPad(blobId),
           fragment,
         );
-        // ADR-0058 section 6: the link id is what removes this link's reach
+        // ADR-0060 section 6: the link id is what removes this link's reach
         // key on revoke.
         await rememberMintedLink(
           base64Encode(secrets.accountId),
@@ -322,7 +322,7 @@ export function InviteLinksPanel(): JSX.Element {
       if (id === null || secrets === null) throw new Error("Sign in again to revoke an invite link.");
       const slug = row.blobIdSlug;
       const result = await discovery.revokeInvite(base64UrlDecodeNoPad(slug), id.ed25519Seed);
-      // ADR-0058 section 6: the link's reach key goes with it, so a request
+      // ADR-0060 section 6: the link's reach key goes with it, so a request
       // written under the link is dropped even by a joiner who fetched it.
       const local = minted().get(slug);
       if (local !== undefined) {

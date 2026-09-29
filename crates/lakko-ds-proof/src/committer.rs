@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The semantic half of the committer-delegation envelope ([ADR-0058] §6).
+//! The semantic half of the committer-delegation envelope ([ADR-0060] §6).
 //!
 //! `lakko_contacts::committer_delegation` carries a proposer's delegations for
 //! whichever committer candidate sweeps its `Add`; that crate cannot depend
@@ -25,7 +25,7 @@
 //! person registered. [`delegation_for`] returns the delegation naming the
 //! caller's own account key, which is the only one it can use.
 //!
-//! [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 
 use lakko_contacts::committer_delegation::{
     CommitterDelegationEnvelope, ADDED_ACCOUNT_KEY_LEN, COMMITTER_DELEGATION_BLOB_LEN,

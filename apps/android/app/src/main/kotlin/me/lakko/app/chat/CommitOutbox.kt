@@ -183,13 +183,13 @@ public data class PendingCommitEntry(
      *
      * A sweep commit can carry SEVERAL adds under ONE Welcome, where every
      * direct path has at most one destination ([secondArtifactMailboxB64]).
-     * ADR-0058 §6 — each leaf is resolved to its ACCOUNT mailbox at publish
+     * ADR-0060 §6 — each leaf is resolved to its ACCOUNT mailbox at publish
      * time, after the merge. Empty for a direct-path entry and for a sweep
      * that added nobody.
      */
     val sweepWelcomeLeafKeysB64: List<String> = emptyList(),
     /**
-     * ADR-0058 §6 — base64 of the added person's account key for a direct
+     * ADR-0060 §6 — base64 of the added person's account key for a direct
      * add's [SecondArtifactKind.WELCOME]: what picks the reach grant the
      * Welcome is written with on a restart re-publish. `null` otherwise.
      */

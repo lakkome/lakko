@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Fuzz target — `UsernameCertificate::open` (the discovery-signed username
-//! certificate parser, ADR-0058 section 5). The fuzz input is the
+//! certificate parser, ADR-0060 section 5). The fuzz input is the
 //! attacker-controlled wire envelope: a fixed-layout 153-byte blob (`version |
 //! oprf_hash(64) | account_id(16) | issued_at(8 BE) | sig(64)`) carried opaquely
 //! inside a profile envelope any group member, channel subscriber or stranger

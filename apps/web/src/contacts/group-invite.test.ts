@@ -216,7 +216,7 @@ describe("sealed links: compose, upload shape, open, damaged (all three kinds)",
     return out;
   }
   function mintContact() {
-    // ADR-0058 section 6: every /i/ and /c/ mint carries its link's reach grant.
+    // ADR-0060 section 6: every /i/ and /c/ mint carries its link's reach grant.
     const linkId = wasm.generateLinkId();
     const grant = wasm.deriveReachGrant(seedA, wasm.ReachClass.Link, linkId, 0);
     const m = wasm.InviteCapability.compose(seedA, account, x25519, 0n, 0, false, "hi", linkId, grant);

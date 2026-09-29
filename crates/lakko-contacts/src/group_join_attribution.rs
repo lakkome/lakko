@@ -35,9 +35,9 @@
 //! grants anything; a replayed third-party capability still only shows whose
 //! valid link was used.
 //!
-//! ## The joiner's reply grant (ADR-0058 §6, C-69)
+//! ## The joiner's reply grant (ADR-0060 §6, C-69)
 //!
-//! A joiner is not a member, and since ADR-0058 its mailbox is closed, so
+//! A joiner is not a member, and since ADR-0060 its mailbox is closed, so
 //! the committer that sweeps the approved `Add` could not deliver the
 //! Welcome (C-69 puts it in the joiner's mailbox) without a key. The
 //! attribution therefore carries the joiner's **`reply` reach grant**
@@ -48,7 +48,7 @@
 //! **removes it once it has joined**. The committer signs the Welcome's
 //! mailbox write with it (`DsProofSigner::for_reach(grant.seed)`).
 //!
-//! **Residual (ADR-0058):** the attribution is posted where every member of
+//! **Residual (ADR-0060):** the attribution is posted where every member of
 //! the group reads it, so **every member can write to the joiner's mailbox**
 //! with this key until it expires or the joiner removes it. Bounded by the
 //! 7-day expiry and the removal on joining; it is the price of letting
@@ -86,7 +86,7 @@ use crate::error::{ContactError, Result};
 use crate::group_invite::{decode_and_verify as decode_group_invite, GroupInviteCapability};
 use crate::reach::{ReachClass, ReachGrant, REACH_GRANT_LEN};
 
-/// Envelope wire version. 2 added the joiner self-signature; 3 (ADR-0058)
+/// Envelope wire version. 2 added the joiner self-signature; 3 (ADR-0060)
 /// the joiner's reply grant. Anything else is refused.
 const VERSION: u8 = 3;
 
@@ -112,7 +112,7 @@ pub struct GroupJoinAttribution {
     /// is the member who minted the link; `group_id` is the target the admin
     /// checks against its own group before trusting the attribution.
     pub capability: GroupInviteCapability,
-    /// The joiner's `reply` reach grant (ADR-0058 §6): the key the committer
+    /// The joiner's `reply` reach grant (ADR-0060 §6): the key the committer
     /// delivers the sweep's Welcome to the joiner's mailbox with. SECRET, and
     /// readable by every member (module docs). Always class `reply`.
     pub reply_grant: ReachGrant,

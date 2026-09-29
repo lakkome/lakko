@@ -261,13 +261,13 @@ platform, no timestamps beyond `updated_at`. Recorded in section 6.
 
 ### 2.7 Welcomes and mailboxes
 
-**Amended 2026-09-29 by [ADR-0058](0058-scoped-discovery.md) (the
+**Amended 2026-09-29 by [ADR-0060](0060-scoped-discovery.md) (the
 maintainer's call):** a Welcome goes to the **account** mailbox
 (`IdentityPseudonym(account_key)`) of the account the added leaf is bound to,
 resolved through the leaf's device binding; one write per added account, not
 per leaf. Every device of the account already polls that mailbox for contact
 requests and acks; a device that cannot open a Welcome (it names a sibling
-leaf) drops it. The **device** mailbox receives no writes any more: ADR-0058
+leaf) drops it. The **device** mailbox receives no writes any more: ADR-0060
 closes every claimed mailbox behind reach keys, a device key is readable by
 every co-member and by anyone fetching the account's KeyPackages, and
 registering the account's reach keys on each device mailbox would multiply

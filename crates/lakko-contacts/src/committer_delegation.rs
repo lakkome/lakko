@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Committer delegation envelope ([ADR-0058] §2 and §6): the proposer of an
+//! Committer delegation envelope ([ADR-0060] §2 and §6): the proposer of an
 //! `Add` authorises whichever member ends up committing it to deliver the
 //! Welcome to the added person's closed mailbox.
 //!
@@ -9,7 +9,7 @@
 //!
 //! Under [ADR-0045] a member does not commit an `Add`; it proposes one, and
 //! the acting committer (the owner, or an admin by rank) sweeps it into a
-//! commit and delivers the Welcome. Since ADR-0058 the added person's
+//! commit and delivers the Welcome. Since ADR-0060 the added person's
 //! identity mailbox is closed: only someone holding one of that person's
 //! reach keys can write to it. The **proposer** usually does (it added a
 //! contact, so it holds their `contact` grant); the committer usually does
@@ -72,7 +72,7 @@
 //! one write. Never rendered as a chat bubble.
 //!
 //! [ADR-0045]: ../../../docs/adr/0045-remote-commit-epoch-fork.md
-//! [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 
 use core::result::Result as CoreResult;
 

@@ -44,7 +44,7 @@
 //!   [`classify_post_plaintext`]. `compose_channel_meta` /
 //!   `decode_channel_meta` / `channel_meta_is_newer`.
 //!
-//! ## What's also here (ADR-0058)
+//! ## What's also here (ADR-0060)
 //!
 //! - [`member_card`] — a subscriber's profile sealed under the channel's
 //!   current epoch seed for the channel member list, keyed and bound per

@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0058 section 2: an identity mailbox accepts a write only when it is
+-- ADR-0060 section 2: an identity mailbox accepts a write only when it is
 -- signed with a reach key the owner registered.
 --
 -- A claimed mailbox (a `ds_mailbox_access` row) is now CLOSED unless its

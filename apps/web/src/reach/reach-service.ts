@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 - the session's reach keys: deriving them, handing them out, and
+ * ADR-0060 - the session's reach keys: deriving them, handing them out, and
  * keeping the account mailbox's registered set in step with the setting.
  *
  * One {@link ReachSession} lives per signed-in session (started by
@@ -18,7 +18,7 @@
  * that fails leaves the book untouched (the next one retries the same diff),
  * so the registered set on this device never claims more than the DS holds.
  *
- * The version counters are device-local. ADR-0058 section 7 asks for them in
+ * The version counters are device-local. ADR-0060 section 7 asks for them in
  * the ReachState envelope on the DeviceGroup, but the wasm DeviceGroup has no
  * way to carry an arbitrary application envelope (it composes only its four
  * typed payloads), so that sync is not built on web - see the sprint report.
@@ -202,14 +202,14 @@ export class ReachSession {
   /**
    * A reach signer over the account seed itself: a committer that is not the
    * added person's contact signs the Welcome write with its ACCOUNT key, the
-   * delegate key a committer delegation names (ADR-0058 section 6). The
+   * delegate key a committer delegation names (ADR-0060 section 6). The
    * caller frees it.
    */
   async accountReachSigner(): Promise<import("../ds/access").ProofSigner> {
     return this.wasm.DsProofSigner.forReach(this.accountSeed);
   }
 
-  /** The grants a profile carries in a conversation (ADR-0058 section 3 and
+  /** The grants a profile carries in a conversation (ADR-0060 section 3 and
    *  the section 6 contact grant): `member` always, `group` when the setting
    *  lets this group's members find the owner, `contact` in a one-to-one. */
   profileGrants(groupId: Uint8Array, oneToOne: boolean): WasmReachGrant[] {
@@ -230,7 +230,7 @@ export class ReachSession {
    * string of classes and versions (no key material). A conversation whose
    * last published signature differs needs the profile republished: a new
    * setting, a rotation after a shrink or a contact removal, or a
-   * conversation that never received grants (ADR-0058 is a flag day for
+   * conversation that never received grants (ADR-0060 is a flag day for
    * profiles already sent).
    */
   profileGrantSignature(groupId: Uint8Array, oneToOne: boolean): string {
@@ -553,7 +553,7 @@ export async function reachSignerForGrant(grant: WasmReachGrant): Promise<import
 }
 
 /**
- * A contact was removed (ADR-0058 section 1): rotate our `contact` and `fof`
+ * A contact was removed (ADR-0060 section 1): rotate our `contact` and `fof`
  * keys so the removed person's copy stops working at once, and forget the
  * contact grant they handed us. Never throws.
  */

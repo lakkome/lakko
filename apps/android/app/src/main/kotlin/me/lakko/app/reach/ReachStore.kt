@@ -10,7 +10,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 /*
- * ADR-0058 — this account's reach bookkeeping, one JSON document per account.
+ * ADR-0060 — this account's reach bookkeeping, one JSON document per account.
  *
  * Held in EncryptedSharedPreferences because the document carries SECRETS: the
  * reach grants other people handed this device (whoever holds one can write to
@@ -63,7 +63,7 @@ internal data class StoredHeld(
     val grantHex: String,
 )
 
-/** A committer delegation envelope received in a group (ADR-0058 §6). */
+/** A committer delegation envelope received in a group (ADR-0060 §6). */
 @Serializable
 internal data class StoredDelegation(
     val groupHex: String,

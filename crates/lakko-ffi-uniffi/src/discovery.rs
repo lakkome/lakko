@@ -108,7 +108,7 @@ pub fn normalize_username(input: String) -> String {
 }
 
 // ============================================================================
-// Name search — ADR-0058 §5 (word prefixes)
+// Name search — ADR-0060 §5 (word prefixes)
 // ============================================================================
 
 /// Normalise a display name or a typed query for search (NFKD, lowercase,
@@ -259,7 +259,7 @@ impl OprfBlinder {
         })
     }
 
-    /// Blind one name term (ADR-0058 §5) in the name OPRF namespace, apart
+    /// Blind one name term (ADR-0060 §5) in the name OPRF namespace, apart
     /// from usernames and channel handles. A publisher blinds each of
     /// [`name_search_terms`]; the finalised hash is one search term of an
     /// introduction record or a public name row. `normalized_username`

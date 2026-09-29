@@ -397,7 +397,7 @@ function ConnectPanel(props: {
       }
 
       const introBytes = new TextEncoder().encode(intro());
-      // ADR-0058 section 6: the request is written to the owner's closed
+      // ADR-0060 section 6: the request is written to the owner's closed
       // mailbox under this link's `link` grant. Used for this one write and
       // freed; never kept.
       const linkGrant = cap.linkGrant;

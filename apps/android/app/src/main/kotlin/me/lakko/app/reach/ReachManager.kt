@@ -51,7 +51,7 @@ public enum class ReachApplyStatus {
 }
 
 /**
- * ADR-0058 — the owner's reach keys and the grants other people handed this
+ * ADR-0060 — the owner's reach keys and the grants other people handed this
  * device, bound to the signed-in account.
  *
  * - Derives every one of the owner's keys from the account seed and a version
@@ -159,7 +159,7 @@ public class ReachManager internal constructor(
     }
 
     /**
-     * A fresh `reply` grant for a request going to [toKey] (ADR-0058 §6),
+     * A fresh `reply` grant for a request going to [toKey] (ADR-0060 §6),
      * registered with its seven-day expiry BEFORE this returns: a request
      * whose reply key is not on the server would be answered into a closed
      * mailbox. Throws when the registration does not land.
@@ -273,7 +273,7 @@ public class ReachManager internal constructor(
     }
 
     /**
-     * Rotate a slot (ADR-0058 §1): bump its version, so the old key comes off
+     * Rotate a slot (ADR-0060 §1): bump its version, so the old key comes off
      * the mailbox and a new one goes on. `contact` and `fof` when a contact is
      * removed; `group` and `member` of a group that shrank (strictly after the
      * remove commit, C-61 shape); `channel` on a channel epoch.
@@ -472,7 +472,7 @@ public class ReachManager internal constructor(
 
     /**
      * The grants and whether to state the username in a profile published in
-     * [groupHex] (ADR-0058 §3): a one-to-one carries `contact` + `member` and
+     * [groupHex] (ADR-0060 §3): a one-to-one carries `contact` + `member` and
      * the username; a group carries `member` always, and `group` + the
      * username only where the setting lets its members find this person.
      */
@@ -489,7 +489,7 @@ public class ReachManager internal constructor(
         )
     }
 
-    /** The username certificate discovery signed for this account (ADR-0058
+    /** The username certificate discovery signed for this account (ADR-0060
      *  §5), or `null` until one was fetched. */
     public fun usernameCertificate(): ByteArray? = doc.usernameCertHex?.let(::reachUnhex)
 
@@ -510,7 +510,7 @@ public class ReachManager internal constructor(
     }
 
     /** Whether the name terms were last published as Everyone, and for which
-     *  display name (the Everyone publication, ADR-0058 §5). */
+     *  display name (the Everyone publication, ADR-0060 §5). */
     public fun publishedEveryone(): Pair<Boolean?, String?> = doc.publishedPublic to doc.publishedName
 
     /** Record what the Everyone publication now holds. */
@@ -623,7 +623,7 @@ public class ReachManager internal constructor(
     }
 
     // -----------------------------------------------------------------
-    // Committer delegations (ADR-0058 §6)
+    // Committer delegations (ADR-0060 §6)
     // -----------------------------------------------------------------
 
     /** Keep the newest delegation envelope per (sender, added account) in a
@@ -672,7 +672,7 @@ public class ReachManager internal constructor(
 
     /**
      * The committer-delegation envelope a contact of [addedAccountKey] sends
-     * next to an Add it proposed (ADR-0058 §6): one delegation per committer
+     * next to an Add it proposed (ADR-0060 §6): one delegation per committer
      * candidate ([candidateKeys], owner first then admins by rank, at most
      * 16), each to that candidate's account key, living [ttlMs] (at most 24 h).
      * `null` when this device holds no `contact` grant for the added person.
@@ -749,7 +749,7 @@ public class ReachManager internal constructor(
     }
 }
 
-/** What a profile carries (ADR-0058 §3). SECRET grants. */
+/** What a profile carries (ADR-0060 §3). SECRET grants. */
 public data class ProfileGrants(val grants: List<FfiReachGrant>, val shareUsername: Boolean)
 
 /** [ReachKind] as the FFI's class. */

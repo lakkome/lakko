@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Fuzz target — `lakko_channels::member_card_epoch` +
-//! `open_member_card` (ADR-0058 section 3).
+//! `open_member_card` (ADR-0060 section 3).
 //!
 //! A member card is served by the channels server from a paged
 //! member list; the server (or any subscriber that uploaded one) can

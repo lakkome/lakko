@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 section 3 - the pure rules behind channel member cards, kept free
+ * ADR-0060 section 3 - the pure rules behind channel member cards, kept free
  * of the wasm loader and the network so they can be tested in bare node.
  *
  * A member card is the member's profile (v3) sealed under the channel's

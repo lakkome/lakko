@@ -21,7 +21,7 @@
 //!
 //! `epoch` and `unix_ms` are ASCII decimals, the nonce is 16 bytes and the
 //! signature 64, both base64url without padding. The sixth field is present
-//! exactly when `epoch` is [`REACH_EPOCH`] (a reach proof, [ADR-0058]) and
+//! exactly when `epoch` is [`REACH_EPOCH`] (a reach proof, [ADR-0060]) and
 //! carries the signer's 32-byte Ed25519 public key; a reach proof without it,
 //! or any other proof with it, does not parse.
 //!
@@ -58,7 +58,7 @@
 //! Key resolution and the nonce replay cache are the server's, since both
 //! are state; this crate is pure.
 //!
-//! # Reach proofs and delegations ([ADR-0058] section 2)
+//! # Reach proofs and delegations ([ADR-0060] section 2)
 //!
 //! A write to a claimed, closed identity mailbox is signed not by the
 //! identity key but by a **reach key** the owner registered
@@ -80,7 +80,7 @@
 //! [ADR-0057]: ../../../docs/adr/0057-journal-ownership.md
 //!
 //! [ADR-0053]: ../../../docs/adr/0053-ds-journal-authorisation.md
-//! [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 
 #![forbid(unsafe_code)]
 
@@ -123,13 +123,13 @@ pub const SIGNATURE_LEN: usize = 64;
 pub const PROOF_WINDOW_MS: u64 = 120_000;
 /// The epoch label a mailbox proof carries (a mailbox has no epochs).
 pub const MAILBOX_EPOCH: u64 = 0;
-/// The epoch label a reach-key proof carries ([ADR-0058] section 2).
+/// The epoch label a reach-key proof carries ([ADR-0060] section 2).
 ///
 /// A delegate's proof carries it too. `u64::MAX`: never a group epoch, never
 /// [`MAILBOX_EPOCH`], so a server cannot check a reach proof against the
 /// wrong key table.
 ///
-/// [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+/// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 pub const REACH_EPOCH: u64 = u64::MAX;
 /// Upper bound on the header's length; anything longer is refused unparsed.
 pub const MAX_HEADER_LEN: usize = 256;
@@ -452,13 +452,13 @@ impl DsProofSigner {
         }
     }
 
-    /// A reach-key signer ([ADR-0058] section 2), at [`REACH_EPOCH`]: signs a
+    /// A reach-key signer ([ADR-0060] section 2), at [`REACH_EPOCH`]: signs a
     /// write to a closed identity mailbox with a reach key the owner
     /// registered. A [`Delegation`]'s delegate signs with this too, over its
     /// own delegate seed. Its proofs name the signing key (the reach key, or
     /// the delegate key) automatically.
     ///
-    /// [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+    /// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
     #[must_use]
     pub fn for_reach(reach_seed: &[u8; 32]) -> Self {
         Self {

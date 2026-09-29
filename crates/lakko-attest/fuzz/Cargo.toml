@@ -68,7 +68,7 @@ doc = false
 bench = false
 
 # `UsernameCertificate::open` is the discovery-signed username certificate
-# parser (ADR-0058): a fixed-layout 153-byte Ed25519-signed blob carried opaquely
+# parser (ADR-0060): a fixed-layout 153-byte Ed25519-signed blob carried opaquely
 # inside a profile envelope any group member, channel subscriber or stranger can
 # craft, so a malformed envelope is fully attacker-controlled and reaches this
 # bounded parser before any state is consulted. Any panic / overflow /

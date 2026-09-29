@@ -139,7 +139,7 @@ public class DsClient(
      * `POST /ds/mailbox/{pseudonym_hex}/messages` — write into a person's
      * identity mailbox.
      *
-     * ADR-0058 §2 — a claimed mailbox is CLOSED unless its owner chose
+     * ADR-0060 §2 — a claimed mailbox is CLOSED unless its owner chose
      * Everyone: it stores a write only when [reach] signs it with a reach key
      * the owner registered (or with a delegate key next to a delegation). A
      * write with no [reach] to a closed mailbox is answered as stored and
@@ -192,7 +192,7 @@ public class DsClient(
     }
 
     /**
-     * ADR-0058 §2 — `POST /ds/rendezvous/{hex}/messages`: a write into a
+     * ADR-0060 §2 — `POST /ds/rendezvous/{hex}/messages`: a write into a
      * random rendezvous id (pairing, recovery, the welcome courier, the state
      * bundle). Open and never claimable; it carries no proof, no delegation
      * and no wake header (the server refuses any of them).
@@ -291,7 +291,7 @@ public class DsClient(
      * connection up to that many seconds — typical 30-60 for an
      * active poll loop. The server clamps to its own `MAX_WAIT_SECS`.
      *
-     * ADR-0053 / ADR-0058 §2: a personal mailbox is read only under its
+     * ADR-0053 / ADR-0060 §2: a personal mailbox is read only under its
      * identity key — [signer], else the registry's signer for this mailbox. An
      * unsigned read is `401` whether the mailbox is claimed or not; a refusal
      * claims the mailbox under the signer and retries once. Rendezvous ids are
@@ -317,7 +317,7 @@ public class DsClient(
     }
 
     /**
-     * ADR-0058 §2 — `GET /ds/rendezvous/{hex}/messages?after=&limit=&wait=`:
+     * ADR-0060 §2 — `GET /ds/rendezvous/{hex}/messages?after=&limit=&wait=`:
      * read a rendezvous id, unsigned.
      */
     public suspend fun fetchRendezvous(
@@ -489,7 +489,7 @@ public class DsClient(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0058 §2: reach keys
+    // ADR-0060 §2: reach keys
     // -----------------------------------------------------------------
 
     /**
@@ -549,7 +549,7 @@ public class DsClient(
      * `POST /ds/mailbox/{hex}/reach/check` — whether the reach key [reach]
      * signs with is registered and unexpired on [pseudonym]'s mailbox:
      * `true` on `204`, `false` on `401`. A searcher asks before showing a
-     * result (ADR-0058 §2), so a narrowed setting takes effect at once.
+     * result (ADR-0060 §2), so a narrowed setting takes effect at once.
      * Throws on anything else (a network failure is never "not found").
      */
     public suspend fun checkReach(pseudonym: ByteArray, reach: DsJournalSigner): Boolean {
@@ -1047,7 +1047,7 @@ public class DsProofRefusedError(
 }
 
 /**
- * ADR-0058 §2 — a write to someone's mailbox whose reach proof the server did
+ * ADR-0060 §2 — a write to someone's mailbox whose reach proof the server did
  * not accept: the key it was signed with is not (or no longer) registered.
  * The person changed who can find them, or revoked the link.
  */
@@ -1057,7 +1057,7 @@ public class DsReachRefusedError(
 ) : DsHttpError(status = 401, endpoint = endpoint, body = body, message = "ds $endpoint → 401: reach refused")
 
 /**
- * ADR-0058 §2 — what authorises one write into someone else's mailbox: a
+ * ADR-0060 §2 — what authorises one write into someone else's mailbox: a
  * reach-key signer (`DsProofSigner.forReach(seed)`), and, for a delegated
  * write, the delegation header value naming [signer]'s key.
  */

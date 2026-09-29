@@ -14,7 +14,7 @@ import Foundation
 /// soft timeout elapses.
 ///
 /// No new server endpoints — the existing anonymous
-/// `POST/GET /ds/rendezvous/{id_hex}/messages` route (ADR-0058) is
+/// `POST/GET /ds/rendezvous/{id_hex}/messages` route (ADR-0060) is
 /// exactly the rendezvous-mailbox contract.
 public enum WelcomeCourier {
 

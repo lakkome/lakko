@@ -20,7 +20,7 @@
 //!   (the expected outcome is `AeadOpen`).
 //!
 //! A fixed subscriber Ed25519 key (its X25519 secret derived,
-//! ADR-0058) drives the asymmetric
+//! ADR-0060) drives the asymmetric
 //! side so the fuzzer can in principle craft an envelope
 //! that opens; whether it succeeds or not, no panic is
 //! allowed.
@@ -41,7 +41,7 @@ fuzz_target!(|data: &[u8]| {
     // space narrows to "envelope bytes" — same as the
     // production code's perspective from the subscriber
     // side.
-    // Since ADR-0058 the subscriber key is Ed25519 and the
+    // Since ADR-0060 the subscriber key is Ed25519 and the
     // X25519 secret is derived from it.
     let secret = SigningKey::from_seed(&[0x42u8; 32]);
     let _ = open_seed(&secret, &FIXED_CHANNEL, EpochId::new(7), data);

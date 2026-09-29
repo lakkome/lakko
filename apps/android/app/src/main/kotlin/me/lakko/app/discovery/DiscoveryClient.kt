@@ -610,7 +610,7 @@ public class DiscoveryClient(
     }
 
     // -----------------------------------------------------------------
-    // ADR-0058 §5 — username certificate, Everyone, name search
+    // ADR-0060 §5 — username certificate, Everyone, name search
     // -----------------------------------------------------------------
 
     /**

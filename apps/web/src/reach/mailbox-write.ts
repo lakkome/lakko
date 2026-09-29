@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 section 6 - choosing the key a write to someone's account mailbox
+ * ADR-0060 section 6 - choosing the key a write to someone's account mailbox
  * is signed with.
  *
  * Every write to a person's mailbox now needs a key the person registered, or

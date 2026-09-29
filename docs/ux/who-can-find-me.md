@@ -8,7 +8,7 @@ ask to become their contact. Everything below is a requirement for all three
 clients. Where a platform genuinely has to differ, the difference is stated
 inline and marked **Per platform**.
 
-Architecture: [ADR-0058](../adr/0058-scoped-discovery.md).
+Architecture: [ADR-0060](../adr/0060-scoped-discovery.md).
 
 ## 1. The rule, as the maintainer set it
 

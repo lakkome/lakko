@@ -9,7 +9,7 @@
  * and the link secret rides in the URL fragment the server never sees. The
  * owner's "Invite links" list is built from the ledger's owner query, so
  * without a local copy of the secret a listed link could not be copied or
- * shared again. The link id (ADR-0058 section 6) is what `revokeLink` needs to
+ * shared again. The link id (ADR-0060 section 6) is what `revokeLink` needs to
  * remove exactly that link's reach key when the link is revoked.
  *
  * A link secret lets whoever holds it open the link, which is what the owner

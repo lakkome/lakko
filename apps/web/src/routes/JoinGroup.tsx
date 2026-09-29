@@ -238,7 +238,7 @@ export default function JoinGroup() {
           if (s.kind === "session") recordConversationKind(s.account.accountId, active.groupIdB64, "group");
         }
         setPhase("joined");
-        // ADR-0058 section 6: the Welcome landed, so the single-use reply key
+        // ADR-0060 section 6: the Welcome landed, so the single-use reply key
         // registered for this request goes.
         void reachSession()?.closeRepliesTo(journalHex(groupId));
         navigate(paths.chat(base64UrlEncodeNoPad(groupId)));

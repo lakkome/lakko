@@ -89,7 +89,7 @@ export function observeMembers(
 export interface MembershipChange {
   /** A person is present who was not (ADR-0048 trigger 3). */
   readonly grew: boolean;
-  /** A person who was present is gone (ADR-0058 section 3: this account's
+  /** A person who was present is gone (ADR-0060 section 3: this account's
    *  `group` and `member` keys for the group rotate). Never on the first-ever
    *  observation, and never on an empty (torn) roster. */
   readonly shrank: boolean;

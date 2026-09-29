@@ -179,7 +179,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             joinedGroupIds.push(active.groupIdB64);
             joined = true;
           } catch (err) {
-            // ADR-0058 — every device of the account reads the one account
+            // ADR-0060 — every device of the account reads the one account
             // mailbox, so a Welcome here may add ANOTHER device of ours, or be
             // a channel co-publisher's (opened by that flow under the account
             // identity). Neither holds a KeyPackage of this device, and that
@@ -245,7 +245,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     dispatch,
   });
 
-  // ADR-0058 section 6 — one inbound mailbox per person: every Welcome is
+  // ADR-0060 section 6 — one inbound mailbox per person: every Welcome is
   // addressed to the ACCOUNT mailbox (the device mailbox is claimed and
   // closed, and no longer polled; its cursor key `lakko.contacts.device-
   // mailbox.v1` is left unread).
@@ -266,7 +266,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       isPaused: isHidden,
       waitUntilResumed: (signal) => resume.wait(signal),
       tick: async (signal) => {
-        // Long-poll the account mailbox (ADR-0058: the one inbound mailbox).
+        // Long-poll the account mailbox (ADR-0060: the one inbound mailbox).
         await poller.poll(LONG_POLL_WAIT_SECS, signal);
         return 0;
       },
@@ -406,7 +406,7 @@ export function MailboxJoinFailureBanner(): JSX.Element {
 }
 
 /**
- * ADR-0058 — whether a Welcome refused by `joinFromWelcome` was simply not
+ * ADR-0060 — whether a Welcome refused by `joinFromWelcome` was simply not
  * sealed to any KeyPackage of this device (OpenMLS `NoMatchingKeyPackage`):
  * another device's Welcome, or a co-publisher's, read from the shared account
  * mailbox. Every other refusal is a real failed join.

@@ -94,7 +94,7 @@
 //! - `LAKKO_DISCOVERY_AUTHENTICATED_IP_RATE_LIMIT_PER_MINUTE` / `_BURST` —
 //!   per-IP ceiling for requests with one (default 600 / 100).
 //! - `LAKKO_DISCOVERY_USERNAME_CERT_SEED_HEX` — dev / e2e only: a fixed
-//!   64-hex seed for the username-certificate key (ADR-0058), so a test can
+//!   64-hex seed for the username-certificate key (ADR-0060), so a test can
 //!   pin its verifying key. Unset in production: the key is generated on
 //!   first boot and persisted. Set: a loud startup warning.
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec.
@@ -106,11 +106,11 @@
 //! - `GET    /version`
 //! - `POST   /discovery/oprf`      — apply server static `K` to a blinded element (token)
 //! - `POST   /discovery/register`  — bind OPRF-hashed username to account_id
-//! - `POST   /discovery/lookup`    — resolve OPRF-hashed username → account_id (Everyone only, ADR-0058)
-//! - `PUT    /discovery/visibility`  — enter / leave Everyone, publish name terms (ADR-0058)
-//! - `POST   /discovery/name/lookup` — accounts in Everyone with one name term (ADR-0058)
-//! - `GET    /discovery/username-certificate` — this account's username certificate (ADR-0058)
-//! - `GET    /.well-known/lakko-username-cert-key` — the certificate verifying key (ADR-0058)
+//! - `POST   /discovery/lookup`    — resolve OPRF-hashed username → account_id (Everyone only, ADR-0060)
+//! - `PUT    /discovery/visibility`  — enter / leave Everyone, publish name terms (ADR-0060)
+//! - `POST   /discovery/name/lookup` — accounts in Everyone with one name term (ADR-0060)
+//! - `GET    /discovery/username-certificate` — this account's username certificate (ADR-0060)
+//! - `GET    /.well-known/lakko-username-cert-key` — the certificate verifying key (ADR-0060)
 //! - `POST   /discovery/identity`           — upsert public identity bundle (Phase 1.16d3a)
 //! - `GET    /discovery/identity/{acct}`    — fetch public identity bundle (Phase 1.16d3a)
 //! - `POST   /discovery/keypackage`         — upsert one device's MLS KeyPackage (ADR-0050)
@@ -211,7 +211,7 @@ pub(crate) struct AppState {
     /// spent-set (`anon_token_spent`). Dormant (every token route 503)
     /// when `LAKKO_ANON_TOKEN_MASTER_SECRET` is unset.
     pub(crate) anon_tokens: TokenVerifier,
-    /// ADR-0058 — the dedicated Ed25519 key username certificates are signed
+    /// ADR-0060 — the dedicated Ed25519 key username certificates are signed
     /// with (`username_cert_signing_key`, or the dev override
     /// `LAKKO_DISCOVERY_USERNAME_CERT_SEED_HEX`).
     pub(crate) username_cert_key: Arc<lakko_crypto::signing::SigningKey>,
@@ -293,7 +293,7 @@ async fn main() -> Result<()> {
         .await
         .context("load OPRF server setup")?;
 
-    // ADR-0058 — the username-certificate signing key.
+    // ADR-0060 — the username-certificate signing key.
     let username_cert_key = visibility::load_or_init_cert_key(&pool)
         .await
         .context("load username certificate signing key")?;
@@ -418,7 +418,7 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
     // write limiter the verified account.
     Router::new()
         .route("/discovery/register", post(registry::register))
-        // ADR-0058 — enter or leave Everyone (username public flag + name
+        // ADR-0060 — enter or leave Everyone (username public flag + name
         // search terms), and fetch this account's username certificate.
         .route(
             "/discovery/visibility",
@@ -557,7 +557,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
     // is the OPRF evaluation above).
     let rate_limited = Router::new()
         .route("/discovery/lookup", post(registry::lookup))
-        // ADR-0058 — find people in Everyone by one name term.
+        // ADR-0060 — find people in Everyone by one name term.
         .route("/discovery/name/lookup", post(visibility::name_lookup))
         .route("/discovery/channel/lookup", post(channel_names::lookup))
         // The three invite ledgers' open fetch routes. Since the
@@ -603,7 +603,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
             get(identity_bundle::fetch),
         )
         .route("/discovery/keypackage/{account_id}", get(keypackage::fetch))
-        // ADR-0058 — the username-certificate verifying key.
+        // ADR-0060 — the username-certificate verifying key.
         .route(
             "/.well-known/lakko-username-cert-key",
             get(visibility::cert_key),

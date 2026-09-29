@@ -162,7 +162,7 @@ mod tests {
     /// silently narrowing the NSE peek.
     #[test]
     fn golden_pins_the_swift_prefilter_shape() {
-        // Profile v3 (ADR-0058): the certificate and two reach grants widen
+        // Profile v3 (ADR-0060): the certificate and two reach grants widen
         // the range at both ends.
         assert_eq!(profile_envelope_min_len(), 31);
         assert_eq!(profile_envelope_max_len(), 561);

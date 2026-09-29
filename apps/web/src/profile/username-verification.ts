@@ -6,7 +6,7 @@
  *
  * A received profile's `username` is the sender's CLAIM. It is shown only
  * after this module has resolved it and found it bound to the sender's
- * authenticated key. Since ADR-0058 section 5 the resolution is the
+ * authenticated key. Since ADR-0060 section 5 the resolution is the
  * discovery-signed username certificate the sender's own profile carries,
  * checked against `OPRF(username)` and the account id the profile claims
  * (`verifyUsernameBinding`, the key pinned or fetched once) — no lookup, so a
@@ -58,7 +58,7 @@ export type UsernameResolution =
   | { readonly kind: "unregistered" };
 
 export interface UsernameVerifierDeps {
-  /** Resolve a canonical username claimed by `keyB64`. ADR-0058: by the
+  /** Resolve a canonical username claimed by `keyB64`. ADR-0060: by the
    *  discovery-signed username certificate the person's profile carries (one
    *  OPRF evaluation, no lookup). Throws on a failure that says nothing about
    *  the answer (network, tokens). */

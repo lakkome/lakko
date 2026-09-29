@@ -4,7 +4,7 @@
 import Foundation
 import Security
 
-/// ADR-0058 — what this device keeps about reach, per account.
+/// ADR-0060 — what this device keeps about reach, per account.
 ///
 /// Held grant seeds are SECRET (whoever holds one can write to its owner's
 /// mailbox), and the owner's own reply and link scopes derive live keys, so
@@ -28,10 +28,10 @@ public struct ReachRecord: Codable, Equatable {
     public var held: [String: [ReachRules.HeldGrant]] = [:]
     /// Whether this account's name terms are published in discovery (Everyone).
     public var publishedEveryone: Bool?
-    /// This account's discovery-signed username certificate (ADR-0058 section
+    /// This account's discovery-signed username certificate (ADR-0060 section
     /// 5), carried in every profile v3 that names the username. Public.
     public var ownUsernameCertificateB64: String?
-    /// ADR-0058 section 4 — the newest introduction record each contact
+    /// ADR-0060 section 4 — the newest introduction record each contact
     /// offered (base64 record wire), keyed by the contact's account key.
     public var offers: [String: String] = [:]
     /// The newest introductions bundle each contact relayed.
@@ -95,7 +95,7 @@ public final class KeychainReachPersistence: ReachPersistence {
         ]
         let status = SecItemAdd(add as CFDictionary, nil)
         if status != errSecSuccess {
-            NSLog("ADR-0058: reach record not persisted (status \(status))")
+            NSLog("ADR-0060: reach record not persisted (status \(status))")
         }
     }
 

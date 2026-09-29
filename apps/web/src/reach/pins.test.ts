@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 — small rules the reach wiring rests on: the delegation header
+ * ADR-0060 — small rules the reach wiring rests on: the delegation header
  * name pinned against the core, the membership-shrink trigger, the setting's
  * stamp, and telling another leaf's Welcome from a failed join.
  */

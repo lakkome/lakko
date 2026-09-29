@@ -167,7 +167,7 @@ function ChannelInfoBody(props: {
   readonly isSubscriber: boolean;
   readonly onManage: () => void;
   readonly onUnsubscribe: () => void;
-  /** ADR-0058 section 3 / UX 6.3: how to open a member card of an epoch,
+  /** ADR-0060 section 3 / UX 6.3: how to open a member card of an epoch,
    *  and this device's own card key. Absent: the viewer cannot read cards
    *  (not yet subscribed), so the `Members` row is not offered. */
   readonly members?:
@@ -371,7 +371,7 @@ async function confirmStopFollowing(channelIdHex: string, name: string): Promise
     tone: "danger",
   });
   if (!ok) return false;
-  // ADR-0058 section 3: the member card goes with the subscription (signed
+  // ADR-0060 section 3: the member card goes with the subscription (signed
   // DELETE, best effort - the 90-day subscriber prune removes it anyway).
   const keys = channelsState.subscriberKeysByChannel().get(channelIdHex);
   if (keys !== undefined) void deleteOwnMemberCard(channelIdHex, keys);
@@ -387,7 +387,7 @@ function ownCardKeyHex(id: string): string | null {
 }
 
 /**
- * A publisher's member-card key (ADR-0058 section 3): make sure this device
+ * A publisher's member-card key (ADR-0060 section 3): make sure this device
  * holds a current Ed25519 subscriber key for `id` and that the channel knows
  * it. Regenerates a pre-flag-day X25519 key. Best effort.
  */
@@ -868,7 +868,7 @@ const ChannelView: Component = () => {
 
   const meta = (): ReturnType<typeof channelMetaOf> => channelMetaOf(params.id);
 
-  // ADR-0058 section 3: publishers upload a member card like anyone else,
+  // ADR-0060 section 3: publishers upload a member card like anyone else,
   // under a subscriber key registered on the channel. The key rides in the
   // same per-channel slot a reader's does; `isOwner()` keeps it from turning
   // this view into the reader's.
@@ -1104,7 +1104,7 @@ const ChannelSubscribe: Component = () => {
   }> {
     await awaitChannelsHydration();
     const existing = channelsState.subscriberKeysByChannel().get(params.id);
-    // ADR-0058: a key stored before the Ed25519 flag day is an X25519 pair;
+    // ADR-0060: a key stored before the Ed25519 flag day is an X25519 pair;
     // it is replaced, and the registration below puts the new public key on
     // the channel so the publisher reseals to it.
     if (existing !== undefined && (await isCurrentSubscriberKey(existing))) {
@@ -1208,7 +1208,7 @@ const ChannelSubscribe: Component = () => {
     return map?.size ?? 0;
   }
 
-  // ADR-0058 section 3: once reading, keep this device's member card
+  // ADR-0060 section 3: once reading, keep this device's member card
   // current (a new epoch after a catch-up, a renamed profile, a changed
   // setting).
   useOwnMemberCard({

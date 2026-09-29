@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target - introductions bundle and offer decode (ADR-0058 §4).
+//! Fuzz target - introductions bundle and offer decode (ADR-0060 §4).
 //!
 //! A bundle arrives from a contact in a 1:1 conversation, an offer from the
 //! owner of a record; both reach the dispatcher before any state is

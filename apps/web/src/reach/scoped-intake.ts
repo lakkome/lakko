@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 - what the receive loops do with a scoped-discovery envelope that
+ * ADR-0060 - what the receive loops do with a scoped-discovery envelope that
  * arrived in a conversation.
  *
  * - a **committer delegation** is kept, newest per (sender, added account),

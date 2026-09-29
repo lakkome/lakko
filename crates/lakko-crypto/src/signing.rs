@@ -19,7 +19,7 @@
 //! Montgomery `u`-coordinate. So `x25519(to_x25519_secret(sk)) ==
 //! to_x25519_public(pk(sk))` (pinned by a test and a golden vector). Used
 //! where one registered key must both sign and receive sealed envelopes
-//! (the ADR-0058 channel subscriber key).
+//! (the ADR-0060 channel subscriber key).
 
 use ed25519_dalek::{
     Signature as DalekSignature, Signer as _, SigningKey as DalekSigningKey, Verifier as _,

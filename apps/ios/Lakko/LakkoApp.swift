@@ -531,7 +531,7 @@ struct AppRoot: View, Equatable {
                 services.deviceGroupSync.clear()
                 // ADR-0048 — no account, no own profile to publish.
                 ProfileDirectory.shared.deactivate()
-                // ADR-0058 — no account, no reach keys to register.
+                // ADR-0060 — no account, no reach keys to register.
                 ReachCenter.shared.deactivate()
                 // No session, no call: end anything live and forget the
                 // session's call bookkeeping.
@@ -673,7 +673,7 @@ enum TabRoute: Hashable {
     case addDevice
     case recoveryFactors
     case antiCensorship
-    /// Settings > Privacy > Who can find me (ADR-0058).
+    /// Settings > Privacy > Who can find me (ADR-0060).
     case whoCanFindMe
     /// Deep links (`/i/`, `/g/`, `/c/`), pushed over the current tab rather
     /// than replacing the app (UX spec section 3).
@@ -963,7 +963,7 @@ private struct SessionRoot: View, Equatable {
                     accountIdB64: base64Encode(secrets.accountId),
                     username: account.username
                 )
-                // ADR-0058 — reach keys and the "who can find me" setting,
+                // ADR-0060 — reach keys and the "who can find me" setting,
                 // bound before the chat bootstrap for the same reason: a join
                 // publishes the own profile, which carries this account's
                 // grants.
@@ -998,7 +998,7 @@ private struct SessionRoot: View, Equatable {
                         .map { FfiScopeId(kind: .channel, id: $0) }
                     return groups + channels
                 }
-                // ADR-0058 section 5 — the username certificate every profile
+                // ADR-0060 section 5 — the username certificate every profile
                 // v3 carries beside the username. Fetched once per device (the
                 // server signs it on request); until it lands the profile
                 // carries the name alone.
@@ -1012,7 +1012,7 @@ private struct SessionRoot: View, Equatable {
                             ReachCenter.shared.setOwnUsernameCertificate(cert)
                             if cert != nil { await chatRepository.publishOwnProfileToAllGroups() }
                         } catch {
-                            NSLog("ADR-0058: username certificate not fetched: \(error)")
+                            NSLog("ADR-0060: username certificate not fetched: \(error)")
                         }
                     }
                 }
@@ -1244,7 +1244,7 @@ private struct SessionRoot: View, Equatable {
                 viewModel: ProfileSettingsViewModel(
                     publishToAllGroups: {
                         await chatRepository.publishOwnProfileToAllGroups()
-                        // ADR-0058 — a new name changes what Everyone publishes
+                        // ADR-0060 — a new name changes what Everyone publishes
                         // and what the introduction record is findable by.
                         ReachCenter.shared.sync()
                         await chatRepository.sendIntroductions()

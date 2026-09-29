@@ -93,7 +93,7 @@ export interface PendingCommitEntry {
   /** base64 of the recipient mailbox pseudonym — the `ds.publishMailbox`
    *  target for the second artifact. Absent when there is no second artifact. */
   secondArtifactMailboxB64?: string;
-  /** ADR-0058 — base64 of the ACCOUNT key the second artifact's mailbox is
+  /** ADR-0060 — base64 of the ACCOUNT key the second artifact's mailbox is
    *  named after, so a re-publish can sign the write with the key that
    *  reaches that account (the mailbox pseudonym is one-way). */
   secondArtifactAccountKeyB64?: string;

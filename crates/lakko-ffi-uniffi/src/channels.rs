@@ -57,7 +57,7 @@
 //! C-41:
 //!
 //! ```swift
-//! let kp        = ChannelSubscriberKeypair.generate()   // Ed25519 (ADR-0058)
+//! let kp        = ChannelSubscriberKeypair.generate()   // Ed25519 (ADR-0060)
 //! let envelope  = try sealSubscriberSeedEnvelope(
 //!     subscriberPub: kp.public(),                        // the Ed25519 public key
 //!     channelId:     channelIdBytes,
@@ -414,7 +414,7 @@ pub fn channel_exporter_label() -> String {
 
 const SUBSCRIBER_SEED_LEN: usize = 32;
 
-/// The subscriber's key pair (ADR-0058: Ed25519). The public
+/// The subscriber's key pair (ADR-0060: Ed25519). The public
 /// half is the subscriber identifier everywhere - what gets
 /// registered on `POST /v1/channels/:id/subscribers`, the
 /// envelope and member-card path key, and the key member-card
@@ -728,7 +728,7 @@ pub fn channel_meta_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: 
 }
 
 // =========================================================
-// Channel member card (ADR-0058 §3)
+// Channel member card (ADR-0060 §3)
 // =========================================================
 //
 // A subscriber's (or publisher's) profile envelope sealed under the channel's

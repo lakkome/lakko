@@ -6,7 +6,7 @@ import XCTest
 @testable import Lakko
 import LakkoCore
 
-/// ADR-0058 section 4 / UX section 6.1 — people search: introduction records
+/// ADR-0060 section 4 / UX section 6.1 — people search: introduction records
 /// composed and opened through the real core, the network faked, and every
 /// result reach-checked before it is shown.
 @MainActor

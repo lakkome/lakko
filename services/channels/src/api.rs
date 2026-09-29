@@ -10,7 +10,7 @@
 //! | `POST` | `/v1/channels` | Register a fresh channel. Body carries the 32-hex `channel_id`. |
 //! | `POST` | `/v1/channels/:channel_id/posts` | Publish an opaque ChannelPost. Body is application/octet-stream. |
 //! | `GET`  | `/v1/channels/:channel_id/posts?after=<cursor>&limit=<n>` | Cursor-paginated fetch. |
-//! | `PUT`  | `/v1/channels/:channel_id/members/:pubkey_hex` | Upload a member card (ADR-0058), signed by the subscriber key. |
+//! | `PUT`  | `/v1/channels/:channel_id/members/:pubkey_hex` | Upload a member card (ADR-0060), signed by the subscriber key. |
 //! | `DELETE` | `/v1/channels/:channel_id/members/:pubkey_hex` | Remove it, signed likewise. |
 //! | `GET`  | `/v1/channels/:channel_id/members?after=<pk_b64>&limit=<n>` | A page of member cards. |
 //!
@@ -44,7 +44,7 @@ use crate::storage::{ChannelId, ChannelStore, StorageError, StoredPost, Subscrib
 /// `lakko_channels::subscribe::SEED_ENVELOPE_LEN`, mirrored here and
 /// cross-checked by a `const _: () = assert!(...)` in the integration
 /// suite. (The service links `lakko-channels` only for the member-card
-/// frame reader, ADR-0058; see the Cargo.toml comment.)
+/// frame reader, ADR-0060; see the Cargo.toml comment.)
 pub const EXPECTED_ENVELOPE_LEN: usize = 80;
 
 /// Shared application state — config + storage handle.
@@ -139,7 +139,7 @@ pub struct FetchResponse {
 #[derive(Deserialize)]
 pub struct SubscribeRequest {
     /// 64-char lowercase hex of the subscriber's Ed25519
-    /// public key (ADR-0058; the seed envelope is sealed to
+    /// public key (ADR-0060; the seed envelope is sealed to
     /// its X25519 image).
     pub subscriber_pubkey_hex: String,
 }
@@ -443,7 +443,7 @@ async fn subscribe(
         )
             .into_response();
     };
-    // ADR-0058: the subscriber key is Ed25519. A key that is not a curve
+    // ADR-0060: the subscriber key is Ed25519. A key that is not a curve
     // point, or is of small order, is refused here - the one entry point to
     // the subscriber table - so every later path (envelope, member card)
     // holds only valid keys.
@@ -1013,7 +1013,7 @@ async fn rotate_commit(
 }
 
 // ---------------------------------------------------------
-// ADR-0058 section 3 — member cards
+// ADR-0060 section 3 — member cards
 // ---------------------------------------------------------
 
 /// The header carrying a subscriber's signature over a member-card write
@@ -1044,7 +1044,7 @@ pub fn member_card_signed_bytes(
 }
 
 /// Whether the request carries a valid signature by `subscriber` (its
-/// Ed25519 key, ADR-0058) over [`member_card_signed_bytes`].
+/// Ed25519 key, ADR-0060) over [`member_card_signed_bytes`].
 fn member_signature_valid(
     headers: &HeaderMap,
     channel: &ChannelId,
@@ -1145,7 +1145,7 @@ fn member_store_error(e: StorageError) -> Response {
 }
 
 /// `PUT /v1/channels/:channel_id/members/:pubkey_hex` — upload the
-/// subscriber's member card (ADR-0058). The body is the opaque card; the
+/// subscriber's member card (ADR-0060). The body is the opaque card; the
 /// server reads only its clear epoch. Signed by the subscriber key the path
 /// names ([`MEMBER_CARD_SIG_HEADER`] over [`member_card_signed_bytes`]).
 async fn put_member_card(
@@ -1241,7 +1241,7 @@ pub struct MembersResponse {
 }
 
 /// `GET /v1/channels/:channel_id/members` — a page of member cards
-/// (ADR-0058). Unauthenticated like every read here: a card opens only
+/// (ADR-0060). Unauthenticated like every read here: a card opens only
 /// under the channel's epoch seed.
 async fn list_member_cards(
     State(state): State<Arc<AppState>>,
@@ -1345,7 +1345,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(rotate_commit),
         )
         .route("/v1/channels/{channel_id}/epoch", get(fetch_epoch))
-        // ADR-0058 — channel member cards.
+        // ADR-0060 — channel member cards.
         .route("/v1/channels/{channel_id}/members", get(list_member_cards))
         .route(
             "/v1/channels/{channel_id}/members/{pubkey_hex}",

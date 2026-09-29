@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Slim ADR-0058 surface — the CLASSIFY half only, for the five "who can
+//! Slim ADR-0060 surface — the CLASSIFY half only, for the five "who can
 //! find me" service envelopes (ADR-0041 Phase 2).
 //!
 //! ## Why the NSE needs this at all
 //!
 //! Four new envelopes ride MLS application messages: the introduction offer
-//! and the introductions bundle (in 1:1 conversations, ADR-0058 §4), the
+//! and the introductions bundle (in 1:1 conversations, ADR-0060 §4), the
 //! "who can find me" setting and the reach-key state (on the owner's
 //! DeviceGroup, §7), and — since §6 — the committer-delegation envelope a
 //! proposer posts in a group beside its `Add` proposal. Unrecognised, each
@@ -118,7 +118,7 @@ const RANGE_MAX: usize = max2(
     DELEGATION_MAX,
 );
 
-/// Recognise one of the five ADR-0058 service envelopes (introduction offer,
+/// Recognise one of the five ADR-0060 service envelopes (introduction offer,
 /// introductions bundle, "who can find me" setting, reach state, committer
 /// delegation). `Ok(())`
 /// for a well-formed one — "this is a service envelope, render nothing". No
@@ -151,7 +151,7 @@ pub fn decode_scoped_discovery_envelope(plaintext: Vec<u8>) -> Result<(), FfiErr
         return Ok(());
     }
     Err(FfiError::Contacts(
-        "not an ADR-0058 service envelope".to_string(),
+        "not an ADR-0060 service envelope".to_string(),
     ))
 }
 

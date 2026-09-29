@@ -205,7 +205,7 @@ async fn fetch_respects_limit() {
     assert_eq!(body["posts"].as_array().unwrap().len(), 3);
 }
 
-// ADR-0058: a subscriber key is a valid Ed25519 public key (the RFC 8032
+// ADR-0060: a subscriber key is a valid Ed25519 public key (the RFC 8032
 // section 7.1 test 2 and test 1 keys, in ascending order).
 const SUB_HEX: &str = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
 

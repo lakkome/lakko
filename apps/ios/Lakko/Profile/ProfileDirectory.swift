@@ -116,7 +116,7 @@ public final class ProfileDirectory: ObservableObject {
     /// or `nil` without an active account. A guest publishes a name with no
     /// username.
     ///
-    /// ADR-0058 section 3 — profile v3 carries the grants of THIS
+    /// ADR-0060 section 3 — profile v3 carries the grants of THIS
     /// conversation: `contact` + `member` in a one-to-one, `member` (plus
     /// `group` where the setting allows it) in a group; and the username
     /// only where the setting lets this conversation's members find the
@@ -152,7 +152,7 @@ public final class ProfileDirectory: ObservableObject {
     /// envelope. An account id that is not exactly 16 bytes is sent as none —
     /// `composeProfileEnvelope` refuses any other length.
     ///
-    /// ADR-0058 section 5 — the username travels with its certificate, and
+    /// ADR-0060 section 5 — the username travels with its certificate, and
     /// only when this device holds one: a username without a certificate is
     /// never shown by a v3 receiver, so it is not sent either.
     func ownProfileForRequest() -> FfiProfile? {
@@ -188,7 +188,7 @@ public final class ProfileDirectory: ObservableObject {
     }
 
     /// Every received profile, by signature key (b64): what local people
-    /// search reads (ADR-0058 section 3).
+    /// search reads (ADR-0060 section 3).
     func receivedProfiles() -> [String: ProfileClaim] {
         received.all()
     }
@@ -266,7 +266,7 @@ public final class ProfileDirectory: ObservableObject {
         revision &+= 1
     }
 
-    // MARK: - ADR-0058 username certificate verification
+    // MARK: - ADR-0060 username certificate verification
 
     /// The pinned (or, when no key is pinned at build time, fetched) username
     /// certificate verifying key.

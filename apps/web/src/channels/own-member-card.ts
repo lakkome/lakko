@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 section 3 - keep this device's member card current while a
+ * ADR-0060 section 3 - keep this device's member card current while a
  * channel view is open.
  *
  * Re-runs when the channel's epoch, its seed, the own profile or the "who

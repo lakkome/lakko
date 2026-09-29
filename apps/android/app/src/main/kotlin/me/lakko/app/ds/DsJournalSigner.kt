@@ -34,7 +34,7 @@ import uniffi.lakko_ffi_uniffi.DsProofSignerInterface
  *  not need the native library). */
 public const val DS_PROOF_HEADER: String = "x-lakko-ds-proof"
 
-/** ADR-0058 §2 — the header a reach-key delegation travels in
+/** ADR-0060 §2 — the header a reach-key delegation travels in
  *  (`lakko_ds_proof::DELEGATION_HEADER_NAME`, `delegationHeaderName()` on the
  *  FFI), spelled here for the host tests. */
 public const val DS_DELEGATION_HEADER: String = "x-lakko-ds-delegation"
@@ -77,7 +77,7 @@ public class FfiDsJournalSigner(private val inner: DsProofSignerInterface) : DsJ
     override fun mailboxClaimBody(): String = inner.mailboxClaimBodyJson()
 }
 
-/** ADR-0058 §2 — the signer of a write authorised by a reach grant (or by a
+/** ADR-0060 §2 — the signer of a write authorised by a reach grant (or by a
  *  delegate seed): `DsProofSigner.forReach(seed)`. */
 public fun reachSigner(seed: ByteArray): DsJournalSigner =
     FfiDsJournalSigner(uniffi.lakko_ffi_uniffi.DsProofSigner.forReach(seed))

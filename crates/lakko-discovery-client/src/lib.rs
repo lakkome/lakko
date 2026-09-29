@@ -65,7 +65,7 @@
 //! and lookup alike. `@channel` handles ([`OprfBlinder::blind_channel`])
 //! are a separate namespace with their own (unchanged) policy.
 //!
-//! ## Display-name search (ADR-0058 section 5)
+//! ## Display-name search (ADR-0060 section 5)
 //!
 //! A name is found by word prefix, ignoring case, repeated spaces and
 //! accents. [`normalize_name_for_search`] is the one normalised form,

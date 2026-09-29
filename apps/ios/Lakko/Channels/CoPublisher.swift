@@ -241,7 +241,7 @@ public enum CoPublisher {
                 knockCursor = max(knockCursor, row.id)
                 _ = try? publisherGroup.processKnock(identity: identity, bytes: row.payload)
             }
-            // ADR-0058 section 6 — a co-publisher's attribution carries its
+            // ADR-0060 section 6 — a co-publisher's attribution carries its
             // `reply` grant, the only key its closed mailbox takes the Welcome
             // under. A co-publisher knocks with its account identity, so the
             // joiner key IS its account key.
@@ -304,7 +304,7 @@ public enum CoPublisher {
                 // The joiner's external-join proposal carried a KeyPackage under
                 // `proposalRef` (its account signature key — a co-publisher joins
                 // as its account), so its mailbox is the pseudonym of that key.
-                // ADR-0058 — written with the `reply` grant its attribution
+                // ADR-0060 — written with the `reply` grant its attribution
                 // carried; the mailbox is closed to anything else.
                 let mailbox = try IdentityPseudonym.fromIdentity(pubkey: proposalRef).asBytes()
                 let auth = await MainActor.run {
@@ -399,7 +399,7 @@ public enum CoPublisher {
         // ADR-0053 point 6 — the knock: a probe learns the registered epoch,
         // the proposal is built for it, a second knock carries the self-signed
         // attribution (OQ2, advisory) and the proposal. No journal read.
-        // ADR-0058 section 6 — the `reply` grant the owner writes the Welcome
+        // ADR-0060 section 6 — the `reply` grant the owner writes the Welcome
         // with, registered before the knock.
         let replyGrant = try await ReachCenter.shared.newReplyGrant(
             purpose: ReplyPurpose.groupJoin(groupId))

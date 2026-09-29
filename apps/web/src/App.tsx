@@ -98,7 +98,7 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     DeviceGroup handle + poll loop. MUST be inside AuthProvider
  *     so the auth-state subscription resolves.
  *
- *   <ReachProvider> — ADR-0058 scoped discovery: the session's reach keys
+ *   <ReachProvider> — ADR-0060 scoped discovery: the session's reach keys
  *     and the "who can find me" setting, synced to the account mailbox.
  *     Above ProfileProvider, which reads the grants a profile carries.
  *   <ProfileProvider> — ADR-0048 profile names: the own profile, the
@@ -174,7 +174,7 @@ const App: Component = () => (
            */}
           <ChannelsHydration />
           {/*
-           * ADR-0058 — what this account publishes to be found by (the
+           * ADR-0060 — what this account publishes to be found by (the
            * Everyone publication, the contacts-of-contacts record and the
            * relayed bundle). Whole-session, like the receivers above.
            */}

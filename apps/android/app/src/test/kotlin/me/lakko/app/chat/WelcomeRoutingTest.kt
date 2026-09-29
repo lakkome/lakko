@@ -10,7 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0058 section 6 — a Welcome goes to each added ACCOUNT's mailbox, once
+ * ADR-0060 section 6 — a Welcome goes to each added ACCOUNT's mailbox, once
  * per account, and a Welcome sealed to another device of this account is not
  * this device's failure.
  */

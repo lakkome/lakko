@@ -79,7 +79,7 @@ public struct PeopleSearchPorts {
     }
 }
 
-/// ADR-0058 search: local first, then the network (username, one name term,
+/// ADR-0060 search: local first, then the network (username, one name term,
 /// the introduction bundles), filtered by the whole query, reach-checked before
 /// a result is shown.
 public enum PeopleSearch {

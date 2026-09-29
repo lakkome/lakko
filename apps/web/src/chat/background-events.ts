@@ -86,7 +86,7 @@ export interface BackgroundEventPlan {
   readonly groupNames: readonly Of<"group-name">[];
   /** ADR-0052 decision 3 — shared pins, for the role-gated receive. */
   readonly pins: readonly Of<"pin">[];
-  /** ADR-0058 — scoped-discovery service envelopes, for their handlers. */
+  /** ADR-0060 — scoped-discovery service envelopes, for their handlers. */
   readonly scoped: readonly Of<"scopedDiscovery">[];
   /** Proposals the receipt gate STORED; a refused one is a pending request
    *  nowhere. */

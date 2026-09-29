@@ -58,7 +58,7 @@ public enum class VerifyOutcome { VERIFIED, FAILED, UNAVAILABLE }
 /** Single-flight, cached verifier. Thread-safe. */
 public class UsernameVerifier(
     private val store: UsernameVerificationStore,
-    /** ADR-0058 — resolves a claim knowing WHOSE it is (the certificate
+    /** ADR-0060 — resolves a claim knowing WHOSE it is (the certificate
      *  path needs the sender's stored profile). */
     private val resolveFor: suspend (username: String, signatureKeyB64: String) -> UsernameResolution,
     private val passesRule: (username: String) -> Boolean = { name ->

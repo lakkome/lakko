@@ -671,7 +671,7 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
-            // ADR-0058 — the five "who can find me" service envelopes
+            // ADR-0060 — the five "who can find me" service envelopes
             // (introduction offer, introductions bundle, visibility setting,
             // reach state, committer delegation). Never a timeline row, and
             // after the identity resolution: each is bound to exactly the
@@ -947,7 +947,7 @@ public final class ChatClient {
             // Envelope v2 — the sender's account id, or `nil` when it sent
             // none; what a group-call tile is matched on (ADR-0021).
             accountId: decoded.accountId,
-            // Envelope v3 (ADR-0058) — the username certificate and the reach
+            // Envelope v3 (ADR-0060) — the username certificate and the reach
             // grants of this conversation.
             usernameCertificate: decoded.usernameCertificate,
             grants: decoded.grants
@@ -1171,7 +1171,7 @@ public enum IncomingChatEvent: Equatable {
     /// `group.pendingExternalJoins()`, is the source of truth; this event is
     /// the nudge that a new request landed).
     case externalJoinRequest(messageId: Int64, joinerSignatureKey: Data, retained: Bool, createdAt: String)
-    /// ADR-0058 — one of the five "who can find me" service envelopes. Never
+    /// ADR-0060 — one of the five "who can find me" service envelopes. Never
     /// a timeline bubble. `senderKey` is the MLS sender resolved at receipt
     /// (C-68); a `nil` sender makes the receive side drop it.
     case scopedDiscovery(

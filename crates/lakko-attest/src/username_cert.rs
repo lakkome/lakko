@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Username certificate ([ADR-0058] section 5).
+//! Username certificate ([ADR-0060] section 5).
 //!
 //! A *username certificate* is a compact, domain-separated, Ed25519-signed
 //! statement by `services/discovery` that the OPRF output of a username was
@@ -58,7 +58,7 @@
 //! **Units: Unix milliseconds** for `issued_at`, matching
 //! [`BackupHead`](crate::BackupHead) and [`ReleaseManifest`](crate::ReleaseManifest).
 //!
-//! [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 //! [ADR-0015]: ../../../docs/adr/0015-device-removal-authorization.md
 //! [ADR-0048]: ../../../docs/adr/0048-profile-names.md
 //! [ADR-0054]: ../../../docs/adr/0054-anti-abuse-without-client-work.md
@@ -97,7 +97,7 @@ const ISSUED_AT_LEN: usize = 8;
 pub const USERNAME_CERT_LEN: usize =
     1 + OPRF_HASH_LEN + ACCOUNT_LEN + ISSUED_AT_LEN + SIGNATURE_LEN;
 
-// Pin the wire length to the ADR-0058 layout so a field-width change cannot
+// Pin the wire length to the ADR-0060 layout so a field-width change cannot
 // silently drift the format.
 const _: () = assert!(USERNAME_CERT_LEN == 153);
 

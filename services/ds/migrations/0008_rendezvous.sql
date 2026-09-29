@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0058: the rendezvous namespace, apart from personal mailboxes.
+-- ADR-0060: the rendezvous namespace, apart from personal mailboxes.
 --
 -- Pairing, recovery, the welcome courier and the state bundle meet at random
 -- 32-byte rendezvous ids that both sides know and that are read without a

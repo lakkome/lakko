@@ -4,7 +4,7 @@
 package me.lakko.app.chat
 
 /*
- * ADR-0058 section 6, "one inbound mailbox per person" (amending ADR-0050
+ * ADR-0060 section 6, "one inbound mailbox per person" (amending ADR-0050
  * section 2.7) — a Welcome goes to the added leaf's ACCOUNT mailbox, one write
  * per added account, and every device of that account reads the one mailbox.
  * The pure half: which accounts one Welcome is written to, and whether a

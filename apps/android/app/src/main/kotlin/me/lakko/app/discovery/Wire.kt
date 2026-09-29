@@ -67,25 +67,25 @@ data class RegisterRequest(
 @Serializable
 data class RegisterResponse(
     val ok: Boolean,
-    /** ADR-0058 §5 — standard base64 of the 153-byte username certificate
+    /** ADR-0060 §5 — standard base64 of the 153-byte username certificate
      *  binding the OPRF hash to the account. */
     val username_certificate_b64: String? = null,
 )
 
-/** Response of `GET /discovery/username-certificate` (ADR-0058 §5). */
+/** Response of `GET /discovery/username-certificate` (ADR-0060 §5). */
 @Serializable
 data class UsernameCertificateResponse(
     val username_certificate_b64: String,
 )
 
-/** Response of `GET /.well-known/lakko-username-cert-key` (ADR-0058 §5). */
+/** Response of `GET /.well-known/lakko-username-cert-key` (ADR-0060 §5). */
 @Serializable
 data class UsernameCertKeyResponse(
     val alg: String,
     val key_b64url: String,
 )
 
-/** Body of `PUT /discovery/visibility` (ADR-0058 §5): enter or leave
+/** Body of `PUT /discovery/visibility` (ADR-0060 §5): enter or leave
  *  Everyone. */
 @Serializable
 data class VisibilityRequest(
@@ -93,7 +93,7 @@ data class VisibilityRequest(
     val name_terms_b64: List<String> = emptyList(),
 )
 
-/** Body of `POST /discovery/name/lookup` (ADR-0058 §5). */
+/** Body of `POST /discovery/name/lookup` (ADR-0060 §5). */
 @Serializable
 data class NameLookupRequest(
     val oprf_hash_b64: String,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target - the reach-key version state envelope (ADR-0058 §7).
+//! Fuzz target - the reach-key version state envelope (ADR-0060 §7).
 //!
 //! Same carrier and threat as the setting envelope. The count is two bytes
 //! and each entry is length-prefixed, so the entry cap and the per-class

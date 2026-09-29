@@ -68,7 +68,7 @@ public class ProfileDirectory internal constructor(
     private suspend fun resolveViaAttached(username: String, signatureKeyB64: String): UsernameResolution {
         val certify = certificateVerifier
         if (certify != null) {
-            // ADR-0058 §5 — the username is shown only on its certificate. A
+            // ADR-0060 §5 — the username is shown only on its certificate. A
             // profile without one (or without the account id it binds) is not
             // a refusal: it is "not yet", so nothing is cached as failed and
             // a later profile carrying the certificate verifies.
@@ -88,7 +88,7 @@ public class ProfileDirectory internal constructor(
     )? = null
 
     /**
-     * ADR-0058 §5 — verify a claimed username by its certificate (one OPRF
+     * ADR-0060 §5 — verify a claimed username by its certificate (one OPRF
      * evaluation plus the certificate check, and the account's published key
      * compared with the sender's) instead of a public lookup, which a person
      * who is not in Everyone no longer answers. Replaces the lookup resolver.
@@ -283,7 +283,7 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
         val updatedAtMs: Long = 0L,
         /** Absent on a row written before ADR-0048 v2; reads as `null`. */
         val accountIdHex: String? = null,
-        /** ADR-0058 — the username certificate, hex; absent before v3. */
+        /** ADR-0060 — the username certificate, hex; absent before v3. */
         val usernameCertificateHex: String? = null,
     )
 

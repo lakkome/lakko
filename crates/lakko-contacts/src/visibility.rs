@@ -3,7 +3,7 @@
 
 //! "Who can find me" — the setting and the reach-key state, as envelopes
 //! the owner's own devices exchange
-//! ([ADR-0058](../../../docs/adr/0058-scoped-discovery.md) §7, UX spec
+//! ([ADR-0060](../../../docs/adr/0060-scoped-discovery.md) §7, UX spec
 //! `docs/ux/who-can-find-me.md` sections 1 and 3).
 //!
 //! ## The setting

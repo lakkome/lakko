@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0058 section 3: channels get a member list.
+-- ADR-0060 section 3: channels get a member list.
 --
 -- One member card per registered subscriber: the subscriber's profile
 -- envelope sealed under the channel's epoch seed

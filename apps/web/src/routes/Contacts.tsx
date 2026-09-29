@@ -238,7 +238,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     peerPubkey: Uint8Array,
     replyGrantB64: string | null = null,
   ): Promise<string> {
-    // ADR-0058 — accepting a request writes the 1:1 Welcome with the
+    // ADR-0060 — accepting a request writes the 1:1 Welcome with the
     // requester's `reply` grant; a contact we message later is reached with
     // the grants we keep for them.
     const result = await props.client.startGroupWith(requireIdentity(), peerAccountId, peerPubkey, {
@@ -309,7 +309,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   // ---- rename / remove ------------------------------------------
   function onRemoveAccepted(contact: AcceptedContact): void {
     setAccepted(removeAccepted(contact.signaturePubkeyB64));
-    // ADR-0058 section 1 — a removed contact keeps the `contact` key we handed
+    // ADR-0060 section 1 — a removed contact keeps the `contact` key we handed
     // them; rotating it (and the `fof` key) makes it stop working at once.
     void onContactRemoved(base64Decode(contact.signaturePubkeyB64));
   }

@@ -3339,7 +3339,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         } catch {
           // best-effort
         }
-        // ADR-0058 — the encrypted reach rows (this device's reach book, the
+        // ADR-0060 — the encrypted reach rows (this device's reach book, the
         // grants others handed us, the setting, the kept introductions and the
         // publication state), same contract. Never throws.
         await deleteReachRows(cached.accountIdB64);

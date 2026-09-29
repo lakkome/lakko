@@ -40,12 +40,12 @@
 //!   attempted.
 //! * `display_name` is unverifiable by construction and is shown as the
 //!   person's own statement.
-//! * `username_certificate` (v3, [ADR-0058](../../../docs/adr/0058-scoped-discovery.md)
+//! * `username_certificate` (v3, [ADR-0060](../../../docs/adr/0060-scoped-discovery.md)
 //!   §5) is opaque here: discovery signs `(OPRF(username), account_id)` and a
 //!   viewer verifies it (one OPRF evaluation plus the signature) in
 //!   `lakko-attest`, which owns the layout. This codec checks only its
 //!   length and that it never comes without a username.
-//! * `grants` (v3, ADR-0058 §3 and §6) are reach keys the sender hands to
+//! * `grants` (v3, ADR-0060 §3 and §6) are reach keys the sender hands to
 //!   the receivers of the envelope. Which classes travel where:
 //!
 //!   | Carrier | Grants |
@@ -79,7 +79,7 @@
 //!
 //! A length of `0` means "no name" / "no username" / "no account id" / "no
 //! certificate". Total length is between [`PROFILE_ENVELOPE_MIN_LEN`] and
-//! [`PROFILE_ENVELOPE_MAX_LEN`]. v3 (ADR-0058) is a flag day: v1 and v2 are
+//! [`PROFILE_ENVELOPE_MAX_LEN`]. v3 (ADR-0060) is a flag day: v1 and v2 are
 //! refused as [`ProfileError::UnknownVersion`].
 //!
 //! ## Bounds, and why a violation rejects the whole envelope
@@ -184,19 +184,19 @@ pub const PROFILE_VERSION_V1: u8 = 0x01;
 /// cannot name an account for the call roster.
 pub const PROFILE_VERSION_V2: u8 = 0x02;
 
-/// Schema version carried in the first payload byte since ADR-0058
+/// Schema version carried in the first payload byte since ADR-0060
 /// (2026-09-28): the username certificate and the reach grants follow the
 /// account id. v1 and v2 are refused (`UnknownVersion`) — a flag day, since
 /// nothing is deployed.
 pub const PROFILE_VERSION_V3: u8 = 0x03;
 
 /// Length of the discovery-signed username certificate a profile may carry
-/// (ADR-0058 §5). Opaque to this crate: `lakko-attest` defines the layout
+/// (ADR-0060 §5). Opaque to this crate: `lakko-attest` defines the layout
 /// with this same length, and verification (one OPRF evaluation plus the
 /// signature) happens there, never here.
 pub const USERNAME_CERT_LEN: usize = 153;
 
-/// Most reach grants one profile may carry (ADR-0058 §3, §6): the `group`
+/// Most reach grants one profile may carry (ADR-0060 §3, §6): the `group`
 /// and the `member` key of a group, the `contact` and the `member` key of a
 /// one-to-one conversation, or the `channel` key of a channel.
 pub const MAX_PROFILE_GRANTS: usize = 2;
@@ -232,7 +232,7 @@ pub const PROFILE_ENVELOPE_MAX_LEN: usize = PROFILE_ENVELOPE_MIN_LEN
     + USERNAME_CERT_LEN
     + MAX_PROFILE_GRANTS * REACH_GRANT_LEN;
 
-/// `true` for the reach classes a profile may hand out (ADR-0058 §3, §6):
+/// `true` for the reach classes a profile may hand out (ADR-0060 §3, §6):
 /// `contact` (in a one-to-one conversation's profile), `group`, `member`,
 /// `channel`. The others travel elsewhere — a `link` key inside an invite
 /// capability, a `reply` key inside a contact request or a `/g/` join
@@ -325,10 +325,10 @@ pub struct Profile {
     /// (C-68). `None` when the sender did not say (a guest, or a device
     /// that has no account id at hand).
     pub account_id: Option<[u8; ACCOUNT_ID_LEN]>,
-    /// The discovery-signed username certificate (ADR-0058 §5), exactly
+    /// The discovery-signed username certificate (ADR-0060 §5), exactly
     /// [`USERNAME_CERT_LEN`] bytes, opaque here. Requires `username`.
     pub username_certificate: Option<Vec<u8>>,
-    /// Reach grants handed to the receivers (ADR-0058 §3): at most
+    /// Reach grants handed to the receivers (ADR-0060 §3): at most
     /// [`MAX_PROFILE_GRANTS`], one per class, of a class
     /// [`is_profile_grant_class`] admits. Secret — see the module docs.
     pub grants: Vec<ReachGrant>,
@@ -1224,7 +1224,7 @@ mod tests {
         );
     }
 
-    // --- v3: certificate and grants (ADR-0058) ------------------------------
+    // --- v3: certificate and grants (ADR-0060) ------------------------------
 
     #[test]
     fn certificate_and_grants_round_trip() {

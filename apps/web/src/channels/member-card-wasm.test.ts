@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 section 3 against the real wasm core: the header name this client
+ * ADR-0060 section 3 against the real wasm core: the header name this client
  * sends is the core's, a card sealed for one subscriber opens only for it,
  * and the flag-day check tells an Ed25519 pair from any other.
  */

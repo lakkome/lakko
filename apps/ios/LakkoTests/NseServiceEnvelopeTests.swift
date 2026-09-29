@@ -269,13 +269,13 @@ final class NseServiceEnvelopeTests: XCTestCase {
     private static let pinEnvelopeLen = 31
 
     /// Stand-in for the slim FFI's `scopedDiscoveryEnvelopeMinLen()...MaxLen()`
-    /// (the NSE's pre-filter range for the five ADR-0058 envelopes). Wide on
+    /// (the NSE's pre-filter range for the five ADR-0060 envelopes). Wide on
     /// purpose: the exported bounds are pinned against composed envelopes by
     /// the Rust goldens in `crates/lakko-ffi-extension/src/scoped_discovery.rs`;
     /// this fixture only has to admit the envelopes this file composes.
     static let scopedDiscoveryEnvelopeLens: ClosedRange<Int> = 16...1_000_000
 
-    /// The ADR-0058 verdict, through the FULL core's dispatcher (the test target
+    /// The ADR-0060 verdict, through the FULL core's dispatcher (the test target
     /// links `LakkoCore`, not the slim NSE framework): one of the five "who can
     /// find me" kinds.
     static func decodesAsScopedDiscoveryReal(_ bytes: Data) -> Bool {
@@ -1162,7 +1162,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
         )
     }
 
-    // MARK: - Kind 8: the ADR-0058 "who can find me" envelopes
+    // MARK: - Kind 8: the ADR-0060 "who can find me" envelopes
 
     private func isService(_ bytes: Data) -> Bool {
         nseIsServiceEnvelope(

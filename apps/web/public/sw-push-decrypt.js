@@ -211,7 +211,7 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   to classify the row out of the preview path — the SW never stores a
  *   received pin (C-59). Optional so an older deps object still loads.
  * @property {(bytes: Uint8Array) => any} [dispatchIncomingEnvelope]
- *   ADR-0058 — the core's service-envelope dispatcher, whose `kind` names the
+ *   ADR-0060 — the core's service-envelope dispatcher, whose `kind` names the
  *   scoped-discovery envelopes (introduction offer / bundle, visibility,
  *   reach state, committer delegation) and the ADR-0057 registrar seed. Used
  *   ONLY to classify the row out of the preview path — the SW keeps no
@@ -811,7 +811,7 @@ function callNoticeFrom(wasm, processed, message, groupHex, nowMs) {
  * Nine arms below: call signaling, the ADR-0042 / ADR-0044 push-routing
  * secret, the ADR-0045 committer beacon, the ADR-0048 profile, the ADR-0048
  * profile request, the ADR-0051 group name, the ADR-0052 shared pin, the
- * ADR-0057 registrar seed, and the ADR-0058 scoped-discovery envelopes. Each arm is a cheap byte peek gating an
+ * ADR-0057 registrar seed, and the ADR-0060 scoped-discovery envelopes. Each arm is a cheap byte peek gating an
  * authoritative codec.
  *
  * Classification ONLY — no writes, no cursor advance (C-59 / ADR-0041).
@@ -843,7 +843,7 @@ function isServiceEnvelope(wasm, bytes) {
   // 8. Registrar seed (ADR-0057).
   if (isRegistrarSeedEnvelope(wasm, bytes)) return true;
 
-  // 9. Scoped discovery (ADR-0058).
+  // 9. Scoped discovery (ADR-0060).
   if (isScopedDiscoveryEnvelope(wasm, bytes)) return true;
   return false;
 }
@@ -903,7 +903,7 @@ const SCOPED_DISCOVERY_KINDS = [
 ];
 
 /**
- * Arm 9 of {@link isServiceEnvelope} — the ADR-0058 scoped-discovery
+ * Arm 9 of {@link isServiceEnvelope} — the ADR-0060 scoped-discovery
  * envelopes, classified by the core's `dispatchIncomingEnvelope` (which
  * answers `IntroMessage` for anything it does not recognise). Same cheap
  * first-byte peek as the other `lakko/...` arms. Classification ONLY (C-59).

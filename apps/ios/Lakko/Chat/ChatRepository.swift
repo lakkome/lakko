@@ -431,7 +431,7 @@ public final class ChatRepository: ObservableObject {
                     groupIdHex: groupIdHex, plaintextBytes: bytes)
             },
             envelope: { [weak self] groupIdHex in
-                // ADR-0058 section 3 — the grants of THIS conversation.
+                // ADR-0060 section 3 — the grants of THIS conversation.
                 guard let self, let record = self.groups[groupIdHex] else {
                     return ProfileDirectory.shared.ownProfileEnvelope()
                 }
@@ -942,7 +942,7 @@ public final class ChatRepository: ObservableObject {
                 accountIdB64: accountIdB64, groupIdHex: DsClient.pseudonymHex(try group.groupId()))
         }
 
-        // ADR-0058 section 6 — one inbound mailbox per person: the ONE
+        // ADR-0060 section 6 — one inbound mailbox per person: the ONE
         // Welcome goes to each added ACCOUNT's mailbox (the recipient's, and
         // this account's own when it has other devices), one write per
         // account, signed with the grant that reaches it.
@@ -1036,7 +1036,7 @@ public final class ChatRepository: ObservableObject {
         let groupIdHex = DsClient.pseudonymHex(groupId)
         groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
-        // ADR-0058 section 6 — a `/g/` request of ours was answered: its
+        // ADR-0060 section 6 — a `/g/` request of ours was answered: its
         // single-use `reply` key goes.
         ReachCenter.shared.retireReplies(purpose: ReplyPurpose.groupJoin(groupId))
         persistSnapshotBestEffort()
@@ -1664,7 +1664,7 @@ public final class ChatRepository: ObservableObject {
             }
         }
         let groupId = cap.groupId()
-        // ADR-0058 section 6 — the joiner's `reply` grant, registered before
+        // ADR-0060 section 6 — the joiner's `reply` grant, registered before
         // the knock: the committer that admits it writes the Welcome to this
         // account's closed mailbox with it. Without it nobody could.
         let replyGrant: FfiReachGrant
@@ -2241,7 +2241,7 @@ public final class ChatRepository: ObservableObject {
         ), !devices.isEmpty else {
             throw ChatError.argument("recipient has no KeyPackage uploaded yet")
         }
-        // ADR-0058 — remember whose leaves these are, so the Welcome of the
+        // ADR-0060 — remember whose leaves these are, so the Welcome of the
         // commit that adds them goes to the person's account mailbox.
         noteAddedLeafAccounts(keyPackages: devices.map(\.keyPackage))
 
@@ -2256,7 +2256,7 @@ public final class ChatRepository: ObservableObject {
         guard let outcome else {
             throw ChatError.argument("recipient has no KeyPackage uploaded yet")
         }
-        // ADR-0058 section 6 — under ADR-0045 another device may commit this
+        // ADR-0060 section 6 — under ADR-0045 another device may commit this
         // Add, and the added person's mailbox is closed to it unless it holds
         // a grant. Hand each committer candidate a delegation signed with this
         // device's grant for the person, in the group beside the proposal.
@@ -2368,7 +2368,7 @@ public final class ChatRepository: ObservableObject {
                 let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
                 let recipientPseudonym: Data
                 do {
-                    // ADR-0058 section 6 (amending ADR-0050 2.7) — the Welcome
+                    // ADR-0060 section 6 (amending ADR-0050 2.7) — the Welcome
                     // is addressed to the ACCOUNT mailbox of the leaf's owner,
                     // resolved through the leaf's device binding.
                     let accountKey = try keyPackageAccountKey(keyPackage: keyPackageBytes)
@@ -2424,7 +2424,7 @@ public final class ChatRepository: ObservableObject {
 
                 // Publish artifact 2 — the Welcome to the new member's mailbox
                 // (the SAME bytes stored in the outbox entry), signed with the
-                // grant that reaches them (ADR-0058).
+                // grant that reaches them (ADR-0060).
                 let welcomePublish: PublishResult
                 do {
                     welcomePublish = try await dsClient.publishMailbox(
@@ -3744,7 +3744,7 @@ public final class ChatRepository: ObservableObject {
         groupIdHex: String
     ) -> (@MainActor () async -> PushGroupRouting.PushRotationOutcome)? {
         guard let accountIdB64 = currentAccountIdB64 else { return nil }
-        // ADR-0058 section 3 — the removed member held this account's `group`
+        // ADR-0060 section 3 — the removed member held this account's `group`
         // and `member` keys for this group; this runs after the Remove was
         // published, so the rotated grants go out at the post-removal epoch.
         if let groupId = groups[groupIdHex]?.groupId {
@@ -3793,7 +3793,7 @@ public final class ChatRepository: ObservableObject {
         // subscribes to a `push_gid` nobody will ever notify, retires the old
         // one, and then throws at the broadcast — retrying on every chat-open.
         let selfEvicted = readIsActive { try record.group.isActive() } == false
-        // ADR-0058 section 3 — a departed member held this account's `group`
+        // ADR-0060 section 3 — a departed member held this account's `group`
         // and `member` keys for this group: rotate both (whatever this
         // device's role — every member owns its own keys), after the removal
         // was applied so the new grants are sealed at the post-removal epoch.
@@ -4815,7 +4815,7 @@ public final class ChatRepository: ObservableObject {
     private func persistKnownGroupBestEffort(groupIdHex: String) {
         guard let accountIdB64 = currentAccountIdB64 else { return }
         knownGroupsStore.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        // ADR-0058 — a new group needs its `member` (and, where the setting
+        // ADR-0060 — a new group needs its `member` (and, where the setting
         // allows, `group`) reach key registered before a co-member writes.
         ReachCenter.shared.sync()
     }
@@ -5444,7 +5444,7 @@ public final class ChatRepository: ObservableObject {
                 read: { record.cursor },
                 advance: { record.advanceCursor(to: $0) }
             ),
-            // ADR-0058 section 6 — each added leaf's Welcome goes to its
+            // ADR-0060 section 6 — each added leaf's Welcome goes to its
             // owner's ACCOUNT mailbox. Resolved here when this device can
             // (a `/g/` joiner's retained KeyPackage, a KeyPackage this device
             // fetched to propose the add); otherwise the leaf key itself is
@@ -6446,7 +6446,7 @@ public final class ChatRepository: ObservableObject {
             signer: authority.signer, journalId: record.groupId, pushGid: pushGid, ds: dsClient)
     }
 
-    // MARK: - ADR-0058 Welcome delivery
+    // MARK: - ADR-0060 Welcome delivery
 
     /// The account keys of leaves this device fetched to propose or add, by
     /// leaf signature key (b64): what resolves an added leaf to its owner's
@@ -6462,7 +6462,7 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0058 section 6 — post a committer-delegation envelope for the
+    /// ADR-0060 section 6 — post a committer-delegation envelope for the
     /// person `addedAccountKey` in `groupIdHex`: one delegation per committer
     /// candidate (the owner, then the admins), signed with the grant this
     /// device holds for them. Best effort; with no grant held there is nothing
@@ -6477,7 +6477,7 @@ public final class ChatRepository: ObservableObject {
         do {
             try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: envelope)
         } catch {
-            NSLog("ADR-0058: committer delegations not sent: \(error)")
+            NSLog("ADR-0060: committer delegations not sent: \(error)")
         }
     }
 
@@ -6493,7 +6493,7 @@ public final class ChatRepository: ObservableObject {
             fromAccountKeyB64: base64Encode(account), scopeHex: nil)
     }
 
-    /// ADR-0058 sections 3 and 6 — keep the reach grants a profile carried,
+    /// ADR-0060 sections 3 and 6 — keep the reach grants a profile carried,
     /// filed under the sender resolved at receipt (C-68) and scoped to this
     /// conversation. A `contact` grant is kept only from the other participant
     /// of a one-to-one conversation.
@@ -6512,7 +6512,7 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0058 — a "who can find me" service envelope received in a
+    /// ADR-0060 — a "who can find me" service envelope received in a
     /// conversation. A committer delegation is kept for the sweep; an
     /// introduction offer / bundle is kept only from the other participant of
     /// a one-to-one conversation (``IntroductionBook``); a setting or a reach
@@ -6597,7 +6597,7 @@ public final class ChatRepository: ObservableObject {
             signers.append(dsMailboxSigner(identity: device))
         }
         let client = dsClient
-        // ADR-0058 — the hooks the reach registration reads, wired before the
+        // ADR-0060 — the hooks the reach registration reads, wired before the
         // claim so the sync below sees this account's groups.
         ReachCenter.shared.groupIdsProvider = { [weak self] in
             self?.allGroupIds() ?? []
@@ -6620,7 +6620,7 @@ public final class ChatRepository: ObservableObject {
                     NSLog("ADR-0053: mailbox claim failed, retried on the next session: \(error)")
                 }
             }
-            // ADR-0058 section 2 — a claimed mailbox starts CLOSED. Register
+            // ADR-0060 section 2 — a claimed mailbox starts CLOSED. Register
             // this account's reach keys on it right after the claim, so the
             // people it handed keys to can write to it.
             await MainActor.run { ReachCenter.shared.sync() }
@@ -6628,7 +6628,7 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0058 section 4 — contacts of contacts. In each one-to-one
+    /// ADR-0060 section 4 — contacts of contacts. In each one-to-one
     /// conversation: this account's own introduction record as an
     /// IntroductionOffer (while 2.1 is on), and the records this account's
     /// contacts offered, as a padded Introductions bundle. Sent only when what
@@ -6656,12 +6656,12 @@ public final class ChatRepository: ObservableObject {
                     try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bundle)
                 }
             } catch {
-                NSLog("ADR-0058: introductions not sent: \(error)")
+                NSLog("ADR-0060: introductions not sent: \(error)")
             }
         }
     }
 
-    /// Every conversation group this device is in (ADR-0058: the `member` and
+    /// Every conversation group this device is in (ADR-0060: the `member` and
     /// `group` reach scopes).
     public func allGroupIds() -> [Data] {
         groups.values.map(\.groupId)
@@ -6718,7 +6718,7 @@ public final class ChatRepository: ObservableObject {
                     record.sawUnkeptExternalJoin = true
                 }
             }
-            // ADR-0058 section 6 — a joiner's attribution carries its `reply`
+            // ADR-0060 section 6 — a joiner's attribution carries its `reply`
             // grant: the Welcome of the sweep that admits it is written with
             // it. Filed under the joiner's ACCOUNT key, resolved through its
             // retained KeyPackage's device binding, so only after the
@@ -7848,7 +7848,7 @@ private final class GroupRecord {
                 // the only identity it may ever be stored under.
                 profileSink?(profile, senderKey)
             case .scopedDiscovery(_, let envelope, let senderKey, _):
-                // ADR-0058 — a "who can find me" service envelope. Not a
+                // ADR-0060 — a "who can find me" service envelope. Not a
                 // timeline row: routed out with the sender resolved at receipt.
                 scopedDiscoverySink?(envelope, senderKey)
             case .groupName(_, let name, let updatedAtMs, let senderLeaf, _):

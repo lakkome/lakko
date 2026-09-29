@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Reach keys ([ADR-0058](../../../docs/adr/0058-scoped-discovery.md) §1): the
+//! Reach keys ([ADR-0060](../../../docs/adr/0060-scoped-discovery.md) §1): the
 //! Ed25519 keys an identity mailbox accepts a write under.
 //!
 //! ## What a reach key is
@@ -22,11 +22,11 @@
 //!
 //! Every seed is derived from the account seed, so all of a person's devices
 //! compute the same keys and only the version counters need to travel
-//! between them (ADR-0058 §7). `scope_len` is a length prefix, so two
+//! between them (ADR-0060 §7). `scope_len` is a length prefix, so two
 //! `(scope_id, version)` pairs can never produce the same material.
 //!
 //! A **shared** key per class and scope, never one per contact: a per-contact
-//! key would tell the server how many contacts a person has (ADR-0058 §1).
+//! key would tell the server how many contacts a person has (ADR-0060 §1).
 //!
 //! ## The scope shape is checked
 //!
@@ -68,7 +68,7 @@ pub const MAX_REACH_SCOPE_ID_LEN: usize = 64;
 /// Wire length of a [`ReachGrant`]: `class(1) || version(4, BE) || seed(32)`.
 pub const REACH_GRANT_LEN: usize = 1 + 4 + REACH_SEED_LEN;
 
-/// Who a reach key is handed to (ADR-0058 §1). The byte values are frozen:
+/// Who a reach key is handed to (ADR-0060 §1). The byte values are frozen:
 /// they enter the key derivation and every wire that names a class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ReachClass {

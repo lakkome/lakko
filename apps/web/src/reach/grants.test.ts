@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 section 6 — which received grants are kept, under whose key, and
+ * ADR-0060 section 6 — which received grants are kept, under whose key, and
  * which one a write uses. Every "from" below is the sender's account key as
  * resolved at receipt (C-68).
  */

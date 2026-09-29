@@ -620,7 +620,7 @@ pub fn call_holds_capture(call_is_live: bool, unanswered_incoming_ring: bool) ->
 }
 
 // ============================================================================
-// "Who can find me" — the Settings transitions (UX section 11, ADR-0058 §7)
+// "Who can find me" — the Settings transitions (UX section 11, ADR-0060 §7)
 // ============================================================================
 //
 // Each takes the current setting and returns the next; none stamps

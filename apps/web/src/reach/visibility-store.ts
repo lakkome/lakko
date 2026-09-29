@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 section 7 / UX `who-can-find-me.md` - the "who can find me"
+ * ADR-0060 section 7 / UX `who-can-find-me.md` - the "who can find me"
  * setting of the signed-in account.
  *
  * The setting is a wasm `VisibilitySetting`; every change goes through a

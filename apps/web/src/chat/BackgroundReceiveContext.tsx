@@ -694,7 +694,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         profiles.ingest(p.senderKey, p.profile, { groupIdB64 });
       }
     }
-    // ADR-0058 — scoped-discovery service envelopes, to their handler.
+    // ADR-0060 — scoped-discovery service envelopes, to their handler.
     for (const e of plan.scoped) {
       void intakeScopedEnvelope({
         kind: e.envelope,
@@ -795,7 +795,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       groupNames.groupGrew(groupIdB64);
       pins.groupGrew(groupIdB64);
     }
-    // ADR-0058 section 3 — a person left: this account's reach keys for the
+    // ADR-0060 section 3 — a person left: this account's reach keys for the
     // group rotate and the profile carrying the new ones is republished.
     if (membership.shrank) void profiles.groupShrank(groupIdB64);
 

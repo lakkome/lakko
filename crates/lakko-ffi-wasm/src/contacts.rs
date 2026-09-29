@@ -113,7 +113,7 @@ fn contact_err(e: ContactError) -> JsError {
     JsError::new(&format!("{e}"))
 }
 
-/// A fresh random 16-byte link id (ADR-0058 §6): the scope of an `/i/` or
+/// A fresh random 16-byte link id (ADR-0060 §6): the scope of an `/i/` or
 /// `/c/` link's `link` reach grant. Mint one per link.
 #[wasm_bindgen(js_name = generateLinkId)]
 #[must_use]
@@ -460,7 +460,7 @@ impl ContactRequest {
     /// decoded and bounds-checked before sealing, so a recipient never
     /// receives a profile it would drop.
     ///
-    /// `replyGrant` (ADR-0058 §6) is the sender's `reply` reach grant, sealed
+    /// `replyGrant` (ADR-0060 §6) is the sender's `reply` reach grant, sealed
     /// beside the profile so the recipient can write the accept and the ack
     /// back to the sender's closed mailbox: `deriveReachGrant(accountSeed,
     /// ReachClass.Reply, replyId, 0)` over a fresh random 16-byte `replyId`,
@@ -631,7 +631,7 @@ impl OpenedContactRequest {
         self.profile.clone()
     }
 
-    /// The requester's `reply` reach grant (ADR-0058 §6), or `undefined`
+    /// The requester's `reply` reach grant (ADR-0060 §6), or `undefined`
     /// when it sent none. SECRET — store encrypted, never log. Sign the
     /// accept (the one-to-one Welcome, or a call Welcome) and the ack back to
     /// the requester's mailbox with `DsProofSigner.forReach(replyGrant.seed)`.
@@ -711,7 +711,7 @@ impl WasmProfile {
         self.account_id.clone()
     }
 
-    /// The 153-byte discovery-signed username certificate (ADR-0058 §5), or
+    /// The 153-byte discovery-signed username certificate (ADR-0060 §5), or
     /// `undefined`. Show the username only after `verifyUsernameBinding`
     /// accepts it for the OPRF of the claimed username and this account id.
     #[wasm_bindgen(getter, js_name = usernameCertificate)]
@@ -719,7 +719,7 @@ impl WasmProfile {
         self.username_certificate.clone()
     }
 
-    /// The reach grants handed to the receivers (ADR-0058 §3, §6), at most
+    /// The reach grants handed to the receivers (ADR-0060 §3, §6), at most
     /// two (`Contact` / `Group` / `Member` / `Channel`, one per class).
     /// SECRET: store encrypted, never log. Keep a `Contact` grant ONLY from
     /// the other participant of a one-to-one conversation.
@@ -740,7 +740,7 @@ impl WasmProfile {
 ///
 /// Throws an `Error` with a `profileError` code such as
 /// `"displayName.controlOrFormatCharacter"`, `"username.tooShort"`, or the
-/// ADR-0058 bounds `"certificate.length"`, `"certificate.withoutUsername"`,
+/// ADR-0060 bounds `"certificate.length"`, `"certificate.withoutUsername"`,
 /// `"grants.tooMany"`, `"grants.duplicateClass"`, `"grants.classNotAllowed"`.
 ///
 /// `usernameCertificate` (153 bytes) and `grants` (at most two, `Contact` /
@@ -1189,7 +1189,7 @@ impl InviteCapability {
     /// [`lakko_contacts::MAX_LABEL_LEN`] bytes UTF-8.
     ///
     /// `linkId` (16 random bytes, `generateLinkId()`) and `linkGrant`
-    /// (ADR-0058 §6) scope the link's reach key: derive the grant as
+    /// (ADR-0060 §6) scope the link's reach key: derive the grant as
     /// `deriveReachGrant(accountSeed, ReachClass.Link, linkId, version)`,
     /// register its public key with the Delivery Service BEFORE sharing the
     /// link, and remove it when the link is revoked or expires.
@@ -1346,13 +1346,13 @@ impl InviteCapability {
         self.inner.label.clone()
     }
 
-    /// The link's 16-byte reach scope id (ADR-0058 §6).
+    /// The link's 16-byte reach scope id (ADR-0060 §6).
     #[wasm_bindgen(getter, js_name = linkId)]
     pub fn link_id(&self) -> Vec<u8> {
         self.inner.link_id.to_vec()
     }
 
-    /// The link's `link` reach grant (ADR-0058 §6). SECRET — the joiner
+    /// The link's `link` reach grant (ADR-0060 §6). SECRET — the joiner
     /// writes its `ContactRequest` to the owner's mailbox with
     /// `DsProofSigner.forReach(linkGrant.seed)`, then drops it.
     #[wasm_bindgen(getter, js_name = linkGrant)]
@@ -1561,7 +1561,7 @@ pub fn compute_joiner_invite_tag(
 /// one-time `KeyPackage` minted via `Identity.createKeyPackage`;
 /// the joiner uses it to bootstrap a fresh MLS group for
 /// the call. `linkId` + `linkGrant` scope the link's reach key exactly as
-/// `InviteCapability.compose` does (ADR-0058 §6).
+/// `InviteCapability.compose` does (ADR-0060 §6).
 #[wasm_bindgen(js_name = composeCallInviteCapability)]
 #[allow(clippy::too_many_arguments)]
 pub fn compose_call_invite_capability(
@@ -1730,13 +1730,13 @@ impl CallInviteCapability {
         self.inner.label.clone()
     }
 
-    /// The link's 16-byte reach scope id (ADR-0058 §6).
+    /// The link's 16-byte reach scope id (ADR-0060 §6).
     #[wasm_bindgen(getter, js_name = linkId)]
     pub fn link_id(&self) -> Vec<u8> {
         self.inner.link_id.to_vec()
     }
 
-    /// The link's `link` reach grant (ADR-0058 §6). SECRET — the joiner
+    /// The link's `link` reach grant (ADR-0060 §6). SECRET — the joiner
     /// writes its `ContactRequest` to the owner's mailbox with
     /// `DsProofSigner.forReach(linkGrant.seed)`, then drops it.
     #[wasm_bindgen(getter, js_name = linkGrant)]
@@ -1964,23 +1964,23 @@ pub enum WasmIncomingEnvelopeKind {
     /// render it; keep it only when addressed to the own account key and
     /// the sender resolves (C-68) to the group's owner.
     RegistrarSeed = 10,
-    /// A contact's introduction record to relay (ADR-0058 §4). The record
+    /// A contact's introduction record to relay (ADR-0060 §4). The record
     /// wire rides the `introductionRecord` getter; `payload` is empty. Never
     /// render it; accept it only from the other participant of a 1:1
     /// conversation and keep the newest per contact.
     IntroductionOffer = 11,
-    /// A contact's bundle of introduction records (ADR-0058 §4), on the
+    /// A contact's bundle of introduction records (ADR-0060 §4), on the
     /// `introductions` getter. Keep the newest per contact via
     /// `bundleIsNewer`, search it locally, never re-relay it.
     Introductions = 12,
     /// The owner's "who can find me" setting from another of their devices
-    /// (ADR-0058 §7), on the `visibility` getter. Accept only on the owner's
+    /// (ADR-0060 §7), on the `visibility` getter. Accept only on the owner's
     /// DeviceGroup, keep via `visibilityIsNewer`.
     Visibility = 13,
-    /// The owner's reach-key version counters (ADR-0058 §7), on the
+    /// The owner's reach-key version counters (ADR-0060 §7), on the
     /// `reachState` getter. Same rules, ordered by `reachStateIsNewer`.
     ReachState = 14,
-    /// A proposer's committer delegations (ADR-0058 §6), on the
+    /// A proposer's committer delegations (ADR-0060 §6), on the
     /// `committerDelegation` getter; `payload` is empty. Never render it.
     /// Keep the newest per `(MLS sender resolved at receipt,
     /// addedAccountKey)`; when this device commits a sweep that added that
@@ -2093,35 +2093,35 @@ impl WasmIncomingEnvelope {
         self.pin.clone()
     }
 
-    /// Set only for `IntroductionOffer` (ADR-0058): the record wire,
+    /// Set only for `IntroductionOffer` (ADR-0060): the record wire,
     /// structurally checked and still sealed. `undefined` otherwise.
     #[wasm_bindgen(getter, js_name = introductionRecord)]
     pub fn introduction_record(&self) -> Option<Vec<u8>> {
         self.introduction_record.clone()
     }
 
-    /// Set only for `Introductions` (ADR-0058): the decoded bundle.
+    /// Set only for `Introductions` (ADR-0060): the decoded bundle.
     /// `undefined` otherwise.
     #[wasm_bindgen(getter)]
     pub fn introductions(&self) -> Option<IntroductionsBundle> {
         self.introductions.clone()
     }
 
-    /// Set only for `Visibility` (ADR-0058): the decoded setting. `undefined`
+    /// Set only for `Visibility` (ADR-0060): the decoded setting. `undefined`
     /// otherwise.
     #[wasm_bindgen(getter)]
     pub fn visibility(&self) -> Option<VisibilitySetting> {
         self.visibility.clone()
     }
 
-    /// Set only for `ReachState` (ADR-0058): the decoded reach state.
+    /// Set only for `ReachState` (ADR-0060): the decoded reach state.
     /// `undefined` otherwise.
     #[wasm_bindgen(getter, js_name = reachState)]
     pub fn reach_state(&self) -> Option<ReachState> {
         self.reach_state.clone()
     }
 
-    /// Set only for `CommitterDelegation` (ADR-0058 §6): the envelope,
+    /// Set only for `CommitterDelegation` (ADR-0060 §6): the envelope,
     /// structurally checked. `undefined` for every other kind.
     #[wasm_bindgen(getter, js_name = committerDelegation)]
     pub fn committer_delegation(&self) -> Option<CommitterDelegationEnvelope> {
@@ -2150,7 +2150,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
 }
 
 /// The committer-delegation field of a dispatched plaintext, for host tests
-/// of the ADR-0058 §6 surface in `scoped_discovery.rs`.
+/// of the ADR-0060 §6 surface in `scoped_discovery.rs`.
 #[cfg(test)]
 pub(crate) fn dispatch_incoming_envelope_for_tests(
     plaintext: &[u8],
@@ -3152,7 +3152,7 @@ impl GroupInviteCapability {
 /// is signed with it, so the admin can verify the attribution is authentic. The
 /// joiner posts this to the group journal alongside its external-join proposal.
 ///
-/// `replyGrant` (ADR-0058 §6, C-69) is the joiner's `reply` reach grant:
+/// `replyGrant` (ADR-0060 §6, C-69) is the joiner's `reply` reach grant:
 /// `deriveReachGrant(accountSeed, ReachClass.Reply, replyId, 0)` over a fresh
 /// random 16-byte `replyId`, its public key registered with a 7-day expiry
 /// BEFORE posting and removed once joined. Every member of the group can read
@@ -3224,7 +3224,7 @@ impl GroupJoinAttribution {
         self.inner.capability.expiry_ms
     }
 
-    /// The joiner's `reply` reach grant (ADR-0058 §6), inside the signed
+    /// The joiner's `reply` reach grant (ADR-0060 §6), inside the signed
     /// part. SECRET and readable by every member: the acting committer that
     /// sweeps the joiner's approved `Add` delivers the Welcome to the
     /// joiner's mailbox with `DsProofSigner.forReach(replyGrant.seed)`.
@@ -3324,7 +3324,7 @@ mod tests {
         assert_eq!(opened.intro_message(), b"hi bob");
     }
 
-    /// ADR-0058 §6: the joiner's reply grant rides the self-signed `/g/`
+    /// ADR-0060 §6: the joiner's reply grant rides the self-signed `/g/`
     /// attribution and comes out whole (success path only, see above).
     #[test]
     fn group_join_attribution_carries_the_reply_grant() {
@@ -3391,7 +3391,7 @@ mod tests {
         assert_eq!(opened.intro_message(), b"hi bob");
     }
 
-    /// ADR-0058: profile v3 carries the certificate and the grants across
+    /// ADR-0060: profile v3 carries the certificate and the grants across
     /// the boundary, both ways. Success paths only (a throw panics off
     /// wasm32); the refusal matrix is the core's.
     #[test]
@@ -3415,7 +3415,7 @@ mod tests {
         assert_eq!(decoded.grants(), grants);
         let dispatched = dispatch_incoming_envelope(&envelope).unwrap();
         assert_eq!(dispatched.profile(), Some(decoded));
-        // The ADR-0058 bounds refuse before any bytes exist.
+        // The ADR-0060 bounds refuse before any bytes exist.
         let mut too_many = grants.clone();
         too_many.push(derive_reach_grant(&[0x42; 32], ReachClass::Channel, &[1; 8], 1).unwrap());
         let p = prepare_profile(None, None, 1, None, None, Some(too_many)).unwrap();
@@ -3425,9 +3425,9 @@ mod tests {
         ));
     }
 
-    /// ADR-0058: the four envelopes S1 refused dispatch as their own kinds.
+    /// ADR-0060: the four envelopes S1 refused dispatch as their own kinds.
     #[test]
-    fn dispatch_surfaces_the_adr_0058_envelopes() {
+    fn dispatch_surfaces_the_adr_0060_envelopes() {
         use crate::scoped_discovery::{
             compose_reach_state_envelope, compose_visibility_envelope, default_visibility_setting,
             ReachClass, ReachStateEntry,
@@ -3478,7 +3478,7 @@ mod tests {
         assert_eq!(r.reach_state(), Some(state));
         assert_eq!(r.visibility(), None);
 
-        // A malformed ADR-0058 envelope is refused, never an intro message.
+        // A malformed ADR-0060 envelope is refused, never an intro message.
         let mut broken = compose_visibility_envelope(&default_visibility_setting()).unwrap();
         broken.push(0);
         assert!(dispatch_incoming_envelope_inner(&broken).is_err());

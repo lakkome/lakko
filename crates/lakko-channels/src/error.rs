@@ -67,7 +67,7 @@ pub enum ChannelError {
     },
 
     /// A member card's profile exceeds `MAX_MEMBER_CARD_PROFILE_LEN`
-    /// (ADR-0058).
+    /// (ADR-0060).
     #[error("member card profile exceeds {max} bytes (got {got})")]
     MemberCardTooLong {
         /// Configured maximum.
@@ -88,7 +88,7 @@ pub enum ChannelError {
     BadSenderKey,
 
     /// A subscriber key is not a valid Ed25519 verifying key (wrong
-    /// length, not a curve point) or is of small order (ADR-0058: the
+    /// length, not a curve point) or is of small order (ADR-0060: the
     /// subscriber key is Ed25519, its X25519 seed-envelope key derived).
     #[error("subscriber key is not a valid Ed25519 key of full order")]
     BadSubscriberKey,

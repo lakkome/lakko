@@ -1703,7 +1703,7 @@ function ChatView(props: {
     const change = untrack(() =>
       observeMembership(s.account.accountId, props.entry.groupIdB64, current),
     );
-    // ADR-0058 section 3 — a person left: rotate this account's reach keys
+    // ADR-0060 section 3 — a person left: rotate this account's reach keys
     // for the group and republish the profile carrying them.
     if (change.shrank) void profiles.groupShrank(props.entry.groupIdB64);
     const grew = change.grew;
@@ -3620,7 +3620,7 @@ function ChatView(props: {
         }
         continue;
       }
-      // ADR-0058 — a scoped-discovery service envelope: to its handler
+      // ADR-0060 — a scoped-discovery service envelope: to its handler
       // (a committer delegation, a contact's introduction offer or bundle),
       // never a timeline row.
       if (e.kind === "scopedDiscovery") {
@@ -8395,7 +8395,7 @@ function timelineRowToPersisted(
     return null;
   }
   if (row.event.kind === "scopedDiscovery") {
-    // ADR-0058 — a service envelope; its payload can hold secrets (a
+    // ADR-0060 — a service envelope; its payload can hold secrets (a
     // delegation, an introduction record). Never a row, never persisted.
     return null;
   }

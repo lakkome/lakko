@@ -65,7 +65,7 @@
 //! - [`scoped_discovery::decode_scoped_discovery_envelope`] +
 //!   [`scoped_discovery::scoped_discovery_envelope_min_len`] /
 //!   [`scoped_discovery::scoped_discovery_envelope_max_len`] — the same
-//!   filter question for the four ADR-0058 envelopes (introduction offer,
+//!   filter question for the four ADR-0060 envelopes (introduction offer,
 //!   introductions bundle, "who can find me" setting, reach state). Decode
 //!   returns nothing: those envelopes carry secret grants and the owner's
 //!   private configuration (C-59).

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! UniFFI exposure of ADR-0058 "who can find me" — scoped discovery.
+//! UniFFI exposure of ADR-0060 "who can find me" — scoped discovery.
 //!
 //! Mirror of `lakko-ffi-wasm/src/scoped_discovery.rs` over the same cores:
 //!
@@ -143,10 +143,10 @@ fn seed32(bytes: &[u8], what: &str) -> Result<[u8; REACH_SEED_LEN], FfiError> {
 }
 
 // ============================================================================
-// Reach keys — ADR-0058 §1
+// Reach keys — ADR-0060 §1
 // ============================================================================
 
-/// Who a reach key is handed to (ADR-0058 §1). Mirror of
+/// Who a reach key is handed to (ADR-0060 §1). Mirror of
 /// [`lakko_contacts::reach::ReachClass`]; the wire bytes live in the core.
 #[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FfiReachClass {
@@ -194,7 +194,7 @@ impl From<ReachClass> for FfiReachClass {
     }
 }
 
-/// A reach key handed to someone (ADR-0058 §1): class, version, seed. Mirror
+/// A reach key handed to someone (ADR-0060 §1): class, version, seed. Mirror
 /// of [`lakko_contacts::reach::ReachGrant`].
 ///
 /// **`seed` is secret**: whoever holds it can write to the owner's mailbox.
@@ -336,7 +336,7 @@ pub fn max_reach_scope_id_len() -> u32 {
 }
 
 // ============================================================================
-// Introductions — ADR-0058 §4 (contacts of contacts)
+// Introductions — ADR-0060 §4 (contacts of contacts)
 // ============================================================================
 
 /// What an introduction record reveals to a searcher who opens it. Mirror of
@@ -344,7 +344,7 @@ pub fn max_reach_scope_id_len() -> u32 {
 ///
 /// The payload is the introduced person's claim: bind the username only
 /// after [`verify_username_binding`], and run the DS reach check before
-/// showing the result (ADR-0058 §4).
+/// showing the result (ADR-0060 §4).
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct FfiIntroductionPayload {
     /// The introduced person's 32-byte identity (account) public key.
@@ -610,7 +610,7 @@ pub fn fof_tag_len() -> u32 {
 }
 
 // ============================================================================
-// The setting — ADR-0058 §7, UX sections 1 and 3
+// The setting — ADR-0060 §7, UX sections 1 and 3
 // ============================================================================
 
 /// The three positions (UX section 1).
@@ -944,7 +944,7 @@ pub fn max_reach_state_entries() -> u32 {
 }
 
 // ============================================================================
-// Username certificate — ADR-0058 §5 (verify only)
+// Username certificate — ADR-0060 §5 (verify only)
 // ============================================================================
 
 /// The authenticated claims of a verified username certificate.
@@ -1024,7 +1024,7 @@ pub fn username_certificate_len() -> u32 {
 }
 
 // ============================================================================
-// Committer delegations — ADR-0058 §6
+// Committer delegations — ADR-0060 §6
 // ============================================================================
 
 impl From<CommitterDelegationError> for FfiError {
@@ -1047,7 +1047,7 @@ fn delegation_error(e: &DelegationError) -> FfiError {
     FfiError::CommitterDelegation(format!("{code}: {e}"))
 }
 
-/// A proposer's committer delegations (ADR-0058 §6). Mirror of
+/// A proposer's committer delegations (ADR-0060 §6). Mirror of
 /// [`lakko_contacts::committer_delegation::CommitterDelegationEnvelope`].
 ///
 /// Under ADR-0045 the member who proposes an `Add` may not be the one who
@@ -1141,7 +1141,7 @@ impl From<&Delegation> for FfiDelegation {
 
 /// Compose a committer-delegation envelope: the plaintext of an MLS
 /// application message the proposer sends in the group beside its `Add`
-/// proposal (ADR-0058 §6). Structural checks only; build each blob with
+/// proposal (ADR-0060 §6). Structural checks only; build each blob with
 /// [`sign_delegation_blob`].
 ///
 /// # Errors
@@ -1173,7 +1173,7 @@ pub fn decode_committer_delegation_envelope(
     Ok(rust_decode_committer_delegation(&plaintext)?.into())
 }
 
-/// Parse and check every delegation of an envelope (ADR-0058 §6): each blob
+/// Parse and check every delegation of an envelope (ADR-0060 §6): each blob
 /// parses, names the added person's mailbox, and no two name the same
 /// delegate. Any failure refuses the whole envelope — keep the previous one.
 ///
@@ -1193,7 +1193,7 @@ pub fn check_committer_delegations(
         .collect())
 }
 
-/// The committer's side of ADR-0058 §6: after its sweep added the envelope's
+/// The committer's side of ADR-0060 §6: after its sweep added the envelope's
 /// person, the delegation naming `own_account_key` (this device's account
 /// signature key), as the `x-lakko-ds-delegation` header value to send with
 /// the Welcome's mailbox write — signed with
@@ -1281,7 +1281,7 @@ mod tests {
 
     const ACCOUNT_SEED: [u8; 32] = [0x42; 32];
 
-    /// ADR-0058 §6 end to end through this surface: the proposer signs one
+    /// ADR-0060 §6 end to end through this surface: the proposer signs one
     /// blob per candidate, the envelope rides the dispatcher, and each
     /// candidate finds exactly its own delegation as a header the DS checks.
     #[test]

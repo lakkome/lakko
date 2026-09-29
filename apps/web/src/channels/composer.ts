@@ -310,7 +310,7 @@ export async function decodeAndDecryptPost(
  * into IndexedDB encrypted under the device-group key.
  */
 export interface ChannelSubscriberKeys {
-  /** 32-byte Ed25519 seed (ADR-0058: the seed envelope's X25519 key is
+  /** 32-byte Ed25519 seed (ADR-0060: the seed envelope's X25519 key is
    *  derived from it inside the core). */
   readonly secret: Uint8Array;
   /** 32-byte Ed25519 public key - what the channel registers, and what
@@ -335,7 +335,7 @@ export async function freshSubscriberKeys(): Promise<ChannelSubscriberKeys> {
 }
 
 /**
- * `true` when `keys` is an ADR-0058 Ed25519 key pair: its stored public
+ * `true` when `keys` is an ADR-0060 Ed25519 key pair: its stored public
  * half is the Ed25519 public key of its secret. A pair stored before the
  * flag day is an X25519 pair and fails this; the caller regenerates it and
  * registers the new public key (no migration - nothing is deployed).

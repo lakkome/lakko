@@ -57,7 +57,7 @@ export interface StoredProfile {
    *  carried none (ADR-0048 v2). What the call roster derives the ADR-0021
    *  peer tag from; never an identity on its own — the signature key is. */
   readonly accountIdHex: string | null;
-  /** ADR-0058 — the username certificate the profile carried (standard
+  /** ADR-0060 — the username certificate the profile carried (standard
    *  base64), what `verifyUsernameBinding` checks the claimed username
    *  against; absent or `null` when none. Public (discovery signed it). */
   readonly usernameCertificateB64?: string | null;
@@ -70,7 +70,7 @@ export interface IncomingProfile {
   readonly updatedAtMs: bigint;
   /** Exactly 16 bytes, or absent. Anything else is stored as "none". */
   readonly accountId?: Uint8Array | undefined | null;
-  /** ADR-0058 — the username certificate, or absent. */
+  /** ADR-0060 — the username certificate, or absent. */
   readonly usernameCertificate?: Uint8Array | undefined | null;
 }
 

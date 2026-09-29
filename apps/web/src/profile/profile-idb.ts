@@ -118,7 +118,7 @@ export function decodeProfileRow(json: string): ProfileRow | null {
       // good, only the tag derivation has nothing to work from.
       const a = (raw as { a?: unknown }).a;
       const accountIdHex = typeof a === "string" && ACCOUNT_ID_HEX_RE.test(a) ? a : null;
-      // ADR-0058 — the username certificate; a malformed one drops the field.
+      // ADR-0060 — the username certificate; a malformed one drops the field.
       const c = (raw as { c?: unknown }).c;
       const usernameCertificateB64 = typeof c === "string" && /^[A-Za-z0-9+/=]+$/.test(c) ? c : null;
       profiles.set(key, {

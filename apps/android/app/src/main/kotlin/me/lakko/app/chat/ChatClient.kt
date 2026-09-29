@@ -842,7 +842,7 @@ internal fun toEvent(
                     createdAt = createdAt,
                 )
             } else if (me.lakko.app.reach.scopedEnvelopeKindOf(processed.data) != null) {
-                // ADR-0058 — a scoped-discovery service envelope. Never a
+                // ADR-0060 — a scoped-discovery service envelope. Never a
                 // timeline bubble: every domain ends in a NUL byte, so the
                 // prefix is a complete classification, and one that does not
                 // decode is dropped by the repository rather than rendered.
@@ -1509,7 +1509,7 @@ public sealed interface IncomingChatEvent {
         val createdAt: String,
     ) : IncomingChatEvent
 
-    /** ADR-0058 — one of the scoped-discovery service envelopes
+    /** ADR-0060 — one of the scoped-discovery service envelopes
      *  (introduction offer / bundle, committer delegation; a Visibility or
      *  ReachState that reached a conversation is dropped by the repository). Never a timeline row. [senderKey] is the
      *  sender's account key resolved at receipt (C-68); [bytes] the whole

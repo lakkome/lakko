@@ -125,7 +125,7 @@ pub fn login_handle(username: &str) -> Result<Vec<u8>, JsValue> {
 }
 
 // ============================================================================
-// Name search — ADR-0058 §5 (word prefixes)
+// Name search — ADR-0060 §5 (word prefixes)
 // ============================================================================
 
 /// Normalise a display name or a typed query for search (NFKD, lowercase,
@@ -278,7 +278,7 @@ impl OprfBlinder {
         })
     }
 
-    /// Blind one name term (ADR-0058 §5) in the name OPRF namespace, apart
+    /// Blind one name term (ADR-0060 §5) in the name OPRF namespace, apart
     /// from usernames and channel handles. A publisher blinds each of
     /// `nameSearchTerms`; `normalizedUsername` returns the term.
     ///

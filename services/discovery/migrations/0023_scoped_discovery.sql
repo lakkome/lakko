@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0058 section 5: who can find me.
+-- ADR-0060 section 5: who can find me.
 --
 -- A username binding answers `POST /discovery/lookup` only for a person who
 -- chose Everyone; for everyone else a lookup answers exactly as for an
@@ -19,7 +19,7 @@ ALTER TABLE usernames
 -- (`lakko_discovery_client::name_search_terms`, at most 64 per account). The
 -- server learns how many terms a public person has (roughly the name's
 -- length) and which public accounts share a term; that is what Everyone
--- means (ADR-0058 Residuals).
+-- means (ADR-0060 Residuals).
 CREATE TABLE IF NOT EXISTS display_names (
     oprf_hash   BINARY(64)  NOT NULL,
     account_id  BINARY(16)  NOT NULL,

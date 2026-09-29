@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 section 3 - channels list their members to their members.
+ * ADR-0060 section 3 - channels list their members to their members.
  *
  * Every member (subscribers and publishers alike) uploads a member card: its
  * profile (v3) sealed under the channel's CURRENT epoch seed, stored under
@@ -85,7 +85,7 @@ export interface OwnCardInput {
   readonly updatedAtMs: number;
   /** The 16-byte auth account id, or `null`. */
   readonly accountId: Uint8Array | null;
-  /** ADR-0058 section 5 — this account's username certificate, carried with
+  /** ADR-0060 section 5 — this account's username certificate, carried with
    *  the username so a member can verify it without a lookup. */
   readonly usernameCertificate?: Uint8Array | null;
 }

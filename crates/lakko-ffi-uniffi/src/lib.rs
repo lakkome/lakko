@@ -480,7 +480,7 @@ pub enum FfiError {
     InviteLinkDamaged(String),
 
     // ------------------------------------------------------------------
-    // ADR-0058 scoped discovery — appended, for the ordinal reason above.
+    // ADR-0060 scoped discovery — appended, for the ordinal reason above.
     //
     // Each message starts with the frozen `code()` of the core error (or,
     // where the core has none, a code this crate documents on the function)
@@ -518,7 +518,7 @@ pub enum FfiError {
     #[error("{0}")]
     UsernameCertificate(String),
 
-    /// A committer-delegation envelope (ADR-0058 §6) refused, structurally
+    /// A committer-delegation envelope (ADR-0060 §6) refused, structurally
     /// (`wrongDomain`, `unknownVersion`, `badCount`, `badLength`) or by the
     /// delegation check (`badAddedAccountKey`, `malformed`, `wrongMailbox`,
     /// `duplicateDelegate`), or a single delegation blob that does not parse
@@ -5230,7 +5230,7 @@ pub fn epoch_after_message(bytes: Vec<u8>) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// ADR-0058: a profile carries the discovery-signed username certificate
+    /// ADR-0060: a profile carries the discovery-signed username certificate
     /// opaquely under `lakko-contacts`' own length constant, and
     /// `lakko-attest` defines the layout. The two crates do not depend on
     /// each other, so the equality is pinned here, in a crate that links

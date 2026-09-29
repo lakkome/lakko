@@ -52,7 +52,7 @@ public struct ChatListScreen: View {
     /// introduction this field has no room for, so the name travels to
     /// Contacts rather than being half-answered here.
     public var onFoundPerson: (_ username: String) -> Void
-    /// ADR-0058 — "Search people" (`docs/ux/who-can-find-me.md` section 6.1):
+    /// ADR-0060 — "Search people" (`docs/ux/who-can-find-me.md` section 6.1):
     /// the network search for a username or a name, and the request to one of
     /// its results. `nil` hides the row.
     public var peopleSearch: PeopleSearchActions?
@@ -294,7 +294,7 @@ public struct ChatListScreen: View {
                     // swipe, because they are the same menu reached two ways.
                     .contextMenu { rowActions(row: row) }
                 }
-                // ADR-0058 — the network search stays offered under the local
+                // ADR-0060 — the network search stays offered under the local
                 // results (UX section 6.1).
                 if !query.isEmpty, let peopleSearch {
                     PeopleSearchSection(query: query, actions: peopleSearch)

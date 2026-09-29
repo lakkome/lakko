@@ -158,7 +158,7 @@ public object CoPublisher {
             val drained = me.lakko.app.chat.drainKnockRows(knocks.messages, 0L) { bytes ->
                 publisherGroup.processKnock(identity, bytes)
             }
-            // ADR-0058 §6 — keep each joiner's reply key from its attribution.
+            // ADR-0060 §6 — keep each joiner's reply key from its attribution.
             for (row in knocks.messages) {
                 val attr = try {
                     uniffi.lakko_ffi_uniffi.parseGroupJoinAttribution(row.payload)
@@ -314,7 +314,7 @@ public object CoPublisher {
         // same envelope a direct add uses; nothing is written to the journal
         // for a non-member to read.
         val joinerMailbox = IdentityPseudonym.fromIdentity(proposalRef).use { it.asBytes() }
-        // ADR-0058 §6 — written with the reply key the joiner's attribution
+        // ADR-0060 §6 — written with the reply key the joiner's attribution
         // carried: its mailbox is claimed and closed.
         val reach = joinerReplyGrants[me.lakko.app.reach.reachHex(proposalRef)]
             ?.let { me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(it.seed)) }
@@ -425,7 +425,7 @@ public object CoPublisher {
                 ds.knock(groupId, payloads).epoch
             },
             buildProposal = { epoch -> identity.createExternalJoinProposal(groupId, epoch) },
-            // ADR-0058 §6 — the reply key the owner writes the Welcome with,
+            // ADR-0060 §6 — the reply key the owner writes the Welcome with,
             // registered on this identity's own mailbox before the knock.
             buildAttribution = { composeGroupJoinAttribution(identity.ed25519Seed(), wire, replyGrant) },
         )
@@ -548,7 +548,7 @@ public object CoPublisher {
     }
 
     // -----------------------------------------------------------------
-    // ADR-0058 §6 — reply keys
+    // ADR-0060 §6 — reply keys
     // -----------------------------------------------------------------
 
     /** Each pending joiner's reply grant, by its leaf key (hex). SECRET;

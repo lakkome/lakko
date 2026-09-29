@@ -22,7 +22,7 @@
 //!   those bytes are exactly the input: the encoding is canonical, so an
 //!   accepted envelope has one spelling;
 //! * a decoded envelope is within the advertised length bounds;
-//! * the v3 bounds (ADR-0058): a certificate is exactly its length and
+//! * the v3 bounds (ADR-0060): a certificate is exactly its length and
 //!   never without a username, at most two grants, one per class, of a
 //!   class a profile may carry;
 //! * the order is total and panic-free, and a profile is never newer than
@@ -43,7 +43,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     assert!((PROFILE_ENVELOPE_MIN_LEN..=PROFILE_ENVELOPE_MAX_LEN).contains(&data.len()));
-    // v3 (ADR-0058): the certificate and grant bounds hold on anything
+    // v3 (ADR-0060): the certificate and grant bounds hold on anything
     // decoded.
     if let Some(cert) = &profile.username_certificate {
         assert_eq!(cert.len(), USERNAME_CERT_LEN);

@@ -23,7 +23,7 @@
 //!    recovering Alice's profile (if any) and the intro message.
 //! 4. Surfaces the request to UI: Accept / Decline / Block / Ignore.
 //!
-//! ## Sealed plaintext (ADR-0048 §2, ADR-0058 §6)
+//! ## Sealed plaintext (ADR-0048 §2, ADR-0060 §6)
 //!
 //! The bytes inside `sealed_envelope` are:
 //!
@@ -58,9 +58,9 @@
 //! public key and its own signing key can produce either, since the
 //! plaintext is AEAD-authenticated inside a signed request.
 //!
-//! ## The reply grant (ADR-0058 §6)
+//! ## The reply grant (ADR-0060 §6)
 //!
-//! Since ADR-0058 the requester's own mailbox is closed, so the recipient
+//! Since ADR-0060 the requester's own mailbox is closed, so the recipient
 //! could not answer — neither the accept (the one-to-one Welcome) nor the
 //! [`crate::ack`] — without a key. The requester therefore seals its
 //! **`reply` reach grant** into the request: derived as
@@ -90,7 +90,7 @@
 //!
 //! ## Wire format (manual codec)
 //!
-//! **v4** (current — ADR-0058, the reply grant in the sealed plaintext):
+//! **v4** (current — ADR-0060, the reply grant in the sealed plaintext):
 //!
 //! ```text
 //! u8           schema version (= 4)
@@ -130,7 +130,7 @@ use crate::profile::{compose_profile, decode_profile, Profile};
 use crate::pseudonym::{decode_pseudonym, PSEUDONYM_LEN};
 use crate::reach::{ReachClass, ReachGrant, REACH_GRANT_LEN};
 
-/// Current `compose`d schema version (ADR-0058 — the reply grant in the
+/// Current `compose`d schema version (ADR-0060 — the reply grant in the
 /// sealed plaintext). The only version accepted.
 const SCHEMA_VERSION: u8 = 4;
 
@@ -151,7 +151,7 @@ pub const MAX_PRIVACY_PASS_TOKEN_LEN: usize = 2048;
 pub const PROFILE_LEN_PREFIX_LEN: usize = 2;
 
 /// Byte length of the `reply_grant_len` prefix that follows the profile in
-/// the sealed plaintext (ADR-0058 §6). Its value is 0 or
+/// the sealed plaintext (ADR-0060 §6). Its value is 0 or
 /// [`REACH_GRANT_LEN`].
 pub const REPLY_GRANT_LEN_PREFIX_LEN: usize = 1;
 
@@ -204,7 +204,7 @@ pub struct OpenedRequest {
     /// The sender's profile (ADR-0048), or `None` when absent or invalid —
     /// a claim bound to the request's `from_pubkey` (module docs).
     pub profile: Option<Profile>,
-    /// The sender's `reply` reach grant (ADR-0058 §6), or `None` when the
+    /// The sender's `reply` reach grant (ADR-0060 §6), or `None` when the
     /// request carried none. SECRET: the recipient signs the accept (the
     /// one-to-one Welcome, or a call Welcome) and the [`crate::ack`] back
     /// to the sender's mailbox with it. Always class
@@ -220,7 +220,7 @@ pub struct OpenedRequest {
 /// The sender supplies their Ed25519 signing key (for authentication),
 /// the recipient's X25519 public key (for sealed-envelope encryption),
 /// an optional profile (ADR-0048), an optional `reply` reach grant
-/// (ADR-0058 §6, see the module docs), an optional intro message body, and
+/// (ADR-0060 §6, see the module docs), an optional intro message body, and
 /// an optional Privacy Pass
 /// attestation token (Phase 1.9b2). `from_pseudonym` should be
 /// freshly generated per-recipient (use
@@ -1082,7 +1082,7 @@ mod tests {
         ReachGrant::derive(&[0x3C; 32], ReachClass::Reply, &[0x9A; 16], 0).unwrap()
     }
 
-    /// ADR-0058 §6: the requester's reply grant rides the sealed plaintext
+    /// ADR-0060 §6: the requester's reply grant rides the sealed plaintext
     /// beside a profile and an intro, and comes out whole.
     #[test]
     fn a_reply_grant_round_trips_with_and_without_the_rest() {

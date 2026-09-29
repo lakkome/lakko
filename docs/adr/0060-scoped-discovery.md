@@ -3,10 +3,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Lakko Contributors
 -->
 
-# ADR-0058: Who can find me, and why knowing someone is not permission to reach them
+# ADR-0060: Who can find me, and why knowing someone is not permission to reach them
 
 - **Status:** Accepted (2026-09-28, the maintainer's call)
-- **Date:** 2026-09-28
+- **Date:** 2026-09-28 (numbered 0058 until 2026-09-29, renumbered because four
+  parallel branches had claimed 0058)
 - **Context:** Phase 3 (product); UX spec [`docs/ux/who-can-find-me.md`](../ux/who-can-find-me.md)
 - **Amends:** [ADR-0048](0048-profile-names.md) (profile envelope v3, username
   verification), [ADR-0053](0053-ds-journal-authorisation.md) (identity mailbox

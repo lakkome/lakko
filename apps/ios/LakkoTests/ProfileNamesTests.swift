@@ -665,7 +665,7 @@ final class ProfileDirectoryTests: XCTestCase {
         let envelope = try XCTUnwrap(directory.ownProfileEnvelope())
         let decoded = try decodeProfileEnvelope(plaintext: envelope)
         XCTAssertEqual(decoded.displayName, "Valentin")
-        // ADR-0058 section 5 — a username travels only with its certificate;
+        // ADR-0060 section 5 — a username travels only with its certificate;
         // this directory holds none, so the envelope names no username (a v3
         // receiver would never show one it cannot verify).
         XCTAssertNil(decoded.username)

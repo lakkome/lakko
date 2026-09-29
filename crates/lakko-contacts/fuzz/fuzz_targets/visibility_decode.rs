@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target - the "who can find me" setting envelope (ADR-0058 §7).
+//! Fuzz target - the "who can find me" setting envelope (ADR-0060 §7).
 //!
 //! It travels over the owner's DeviceGroup, so a compromised own device or
 //! a corrupt journal row can craft it. Asserted: no panic, whatever decodes

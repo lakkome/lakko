@@ -11,7 +11,7 @@
 //! [`ds_mailbox_signer`] for the device's own mailbox) and the two claim
 //! bodies, so `DsClient` neither derives a key nor spells a field name.
 //! `DsProofSigner.forReach(seed)` signs a write to someone else's closed
-//! mailbox under a reach key (ADR-0058 §2), and `signDelegation` hands one
+//! mailbox under a reach key (ADR-0060 §2), and `signDelegation` hands one
 //! such write to another key.
 //!
 //! The clock is `Date.now()` on wasm32 (there is no `SystemTime` in the
@@ -80,7 +80,7 @@ fn for_reach_inner(reach_seed: &[u8]) -> Option<DsProofSigner> {
 
 #[wasm_bindgen]
 impl DsProofSigner {
-    /// A reach-key signer (ADR-0058 §2) at `dsReachEpoch()`: signs a write to
+    /// A reach-key signer (ADR-0060 §2) at `dsReachEpoch()`: signs a write to
     /// a closed identity mailbox with a 32-byte reach seed the owner
     /// registered (or a delegate seed, next to a delegation). Its proof header
     /// names the signing key (a sixth field, inside the signed bytes) so the
@@ -224,7 +224,7 @@ fn signed_delegation(
     ))
 }
 
-/// Sign a delegation (ADR-0058 §2): the holder of the reach seed
+/// Sign a delegation (ADR-0060 §2): the holder of the reach seed
 /// `issuerSeed` authorises ONE write by `delegatePk` to the 32-byte `mailbox`
 /// pseudonym until `expiresAtMs`, under a fresh 16-byte `nonce` the DS
 /// consumes. Returns the `delegationHeaderName()` header value; the delegate
@@ -247,7 +247,7 @@ pub fn sign_delegation(
 }
 
 /// `signDelegation`, returning the raw 185-byte delegation instead of the
-/// header value: the blob a committer-delegation envelope carries (ADR-0058
+/// header value: the blob a committer-delegation envelope carries (ADR-0060
 /// §6, `composeCommitterDelegationEnvelope`). The proposer signs one per
 /// committer candidate, the delegate being that candidate's account
 /// signature key and the mailbox the added person's.

@@ -14,7 +14,7 @@ import LakkoCore
 /// never as "link invalid".
 @MainActor
 final class InviteLinkShapeTests: XCTestCase {
-    /// ADR-0058 section 6 — every `/i/` and `/c/` capability carries a link
+    /// ADR-0060 section 6 — every `/i/` and `/c/` capability carries a link
     /// id and its `link` grant; these tests only need a well-formed pair.
     static let testLinkId = Data(repeating: 0x4C, count: Int(linkIdLen()))
     static var testLinkGrant: FfiReachGrant {

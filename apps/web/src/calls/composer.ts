@@ -21,7 +21,7 @@
  *      `identity.createKeyPackage()` — the joiner consumes
  *      it to bootstrap the call MLS group.
  *   3. A fresh `linkId` and the link's `link` reach grant
- *      (ADR-0058 section 6), whose key is registered on the
+ *      (ADR-0060 section 6), whose key is registered on the
  *      owner's mailbox BEFORE the link exists — a link shared
  *      before its key is registered is a link that does not work.
  *   4. `composeCallInviteCapability(...)` via wasm — signs the
@@ -194,7 +194,7 @@ export async function composeAndUploadCallInvite(
   const mediaAudio = true; // every call carries audio
 
   // ---- 4. The link's reach key, registered first ----------
-  // ADR-0058 section 6: the joiner's first write to the owner's
+  // ADR-0060 section 6: the joiner's first write to the owner's
   // closed mailbox is signed with this link's key, so it must be
   // registered before the link can be shared. No session, or a
   // registration that failed, fails the mint.
@@ -281,7 +281,7 @@ export async function composeAndUploadCallInvite(
 
 /**
  * Revoke a call link the owner minted: the ledger row (owner-signed
- * delete) and the link's reach key (ADR-0058 section 6), so a joiner
+ * delete) and the link's reach key (ADR-0060 section 6), so a joiner
  * who already holds the link can neither fetch it nor write to the
  * owner's mailbox under it. The key goes even when the ledger answers
  * "not found" (the row may already be gone), and an inline link (no

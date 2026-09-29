@@ -73,7 +73,7 @@ final class UsernameVerifier {
     /// re-render names in place.
     var onChange: (() -> Void)?
 
-    /// ADR-0058 section 5 — verify `(signature key b64, username)` against the
+    /// ADR-0060 section 5 — verify `(signature key b64, username)` against the
     /// username certificate the profile carried: `true` verified, `false` a
     /// refusal, a throw a transient failure (retried after `retryAfterMs`).
     /// When set, it replaces ``resolve``.
@@ -153,7 +153,7 @@ final class UsernameVerifier {
         let bindingCheck = self.verifyBinding
         let task = Task<UsernameVerificationState, Never> {
             do {
-                // ADR-0058 section 5 — a certificate check, when wired, replaces
+                // ADR-0060 section 5 — a certificate check, when wired, replaces
                 // the lookup: a person hidden from search answers no lookup,
                 // and no endpoint confirms a guessed username for a known key.
                 if let bindingCheck {

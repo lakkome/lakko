@@ -323,7 +323,7 @@ describe("mailboxes", () => {
     expect(new TextDecoder().decode(sent[1]?.body)).toBe('{"identity_pk_b64":"m"}');
   });
 
-  it("a rendezvous id is read and written unsigned on its own route (ADR-0058)", async () => {
+  it("a rendezvous id is read and written unsigned on its own route (ADR-0060)", async () => {
     const reg = new DsAccessRegistry();
     reg.setMailboxSigner(fakeSigner(0n, "m"));
     const { fetchImpl, sent } = fakeFetch([EMPTY, { status: 201, json: { id: 2, created_at: "t" } }]);
@@ -338,7 +338,7 @@ describe("mailboxes", () => {
     expect(sent.map((s) => s.proof)).toEqual([undefined, undefined]);
   });
 
-  it("a mailbox write carries the reach proof, and the delegation beside it (ADR-0058)", async () => {
+  it("a mailbox write carries the reach proof, and the delegation beside it (ADR-0060)", async () => {
     const reg = new DsAccessRegistry();
     const created = { status: 201, json: { id: 1, created_at: "t" } };
     const { fetchImpl, sent } = fakeFetch([created, created, created]);

@@ -548,7 +548,7 @@ public final class ContactsClient {
         return (recipientAccountId, recipientSignaturePub)
     }
 
-    /// ADR-0058 — the identity bundle of an account a search found, through
+    /// ADR-0060 — the identity bundle of an account a search found, through
     /// the same G-4 pin gate every other identity fetch takes.
     public func resolveVerifiedBundle(
         accountId: Data
@@ -727,7 +727,7 @@ public final class ContactsClient {
                 validAfterMs: validAfterMs,
                 privacyPassToken: privacyPassToken,
                 profile: profile,
-                // ADR-0058 section 6 — the requester's single-use `reply`
+                // ADR-0060 section 6 — the requester's single-use `reply`
                 // grant: the recipient writes the accept and the ack with it.
                 replyGrant: replyGrant,
                 introMessage: introMessage
@@ -748,7 +748,7 @@ public final class ContactsClient {
         let envelope = wrapEnvelope(kind: .contactRequest, body: wireBytes)
         let publish: PublishResult
         do {
-            // ADR-0058 section 2 — signed with the grant that lets this
+            // ADR-0060 section 2 — signed with the grant that lets this
             // device reach the recipient (a link grant, a search result's
             // grant, a co-member's); unsigned only for an Everyone mailbox.
             publish = try await ds.publishMailbox(
@@ -815,7 +815,7 @@ public final class ContactsClient {
         let envelope = wrapEnvelope(kind: .contactAck, body: wireBytes)
         let publish: PublishResult
         do {
-            // ADR-0058 section 6 — written with the requester's `reply` grant.
+            // ADR-0060 section 6 — written with the requester's `reply` grant.
             publish = try await ds.publishMailbox(
                 pseudonym: senderMailbox,
                 payload: envelope,
@@ -855,7 +855,7 @@ public final class ContactsClient {
         do {
             // ADR-0053 point 1 — reading a claimed mailbox needs a proof under
             // the identity key it is named after.
-            // ADR-0058 section 2 — an unclaimed mailbox answers a read `401`
+            // ADR-0060 section 2 — an unclaimed mailbox answers a read `401`
             // too, so a refusal claims it (claim-on-open) and retries once.
             let ds = self.ds
             raw = try await ds.fetchMailbox(
@@ -974,9 +974,9 @@ public final class ContactsClient {
     }
 }
 
-// MARK: - ADR-0058 request reach
+// MARK: - ADR-0060 request reach
 
-/// How an outgoing contact request is authorised (ADR-0058 section 6): the
+/// How an outgoing contact request is authorised (ADR-0060 section 6): the
 /// requester's fresh `reply` grant (registered by the caller before it is
 /// returned) and the grant that lets this device write to the recipient.
 public struct ContactRequestReach {
@@ -1139,7 +1139,7 @@ public struct PublishedAck: Equatable {
 /// Discriminated mailbox event surfaced by
 /// ``ContactsClient/pollStrangerInbox(...)``.
 public enum IncomingMailboxEvent: Equatable {
-    /// A verified request, with the requester's `reply` grant (ADR-0058
+    /// A verified request, with the requester's `reply` grant (ADR-0060
     /// section 6) — SECRET, handed to ``ReachCenter`` at receipt and never
     /// persisted with the pending request.
     case contactRequest(IncomingContactRequest, replyGrant: FfiReachGrant? = nil)
@@ -1181,7 +1181,7 @@ public enum ContactsError: Error {
     /// ``DsClientError`` / UniFFI `FfiError`. The UI surfaces the
     /// wrapped message verbatim.
     case wrapped(Error)
-    /// ADR-0058 — the recipient's mailbox refused the request's key: they
+    /// ADR-0060 — the recipient's mailbox refused the request's key: they
     /// changed who can find them after this device found them.
     case requestRefused
 

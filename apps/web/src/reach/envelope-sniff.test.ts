@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 — the foreground sniff that keeps the scoped-discovery envelopes
+ * ADR-0060 — the foreground sniff that keeps the scoped-discovery envelopes
  * out of the chat parser, over the REAL core (composers and dispatcher).
  */
 import { beforeAll, describe, expect, it } from "vitest";

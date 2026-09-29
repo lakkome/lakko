@@ -11,7 +11,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0058 — the pure half of the reach rules: which keys the owner's mailbox
+ * ADR-0060 — the pure half of the reach rules: which keys the owner's mailbox
  * holds, what a registration sends, whose grants are kept (C-68), and which
  * held grant signs a write. Host JVM only; no native library.
  */

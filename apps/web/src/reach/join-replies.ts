@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 section 6 - the `/g/` joiner's `reply` grant, kept by an admin
+ * ADR-0060 section 6 - the `/g/` joiner's `reply` grant, kept by an admin
  * until the sweep that admits the joiner writes their Welcome with it.
  *
  * A join request's self-signed attribution carries the joiner's reply grant;

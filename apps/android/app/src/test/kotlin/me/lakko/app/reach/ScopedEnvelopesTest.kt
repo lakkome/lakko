@@ -10,7 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * ADR-0058 — the scoped-discovery envelopes are dispatched and never rendered,
+ * ADR-0060 — the scoped-discovery envelopes are dispatched and never rendered,
  * on the foreground classifier and in the background push filter alike.
  */
 class ScopedEnvelopesTest {

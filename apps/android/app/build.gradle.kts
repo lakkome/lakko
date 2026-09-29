@@ -104,7 +104,7 @@ android {
             "\"${project.findProperty("lakko.device.attest.key") as String? ?: ""}\"",
         )
 
-        // ADR-0058 section 5 - optional build-time pin of the discovery
+        // ADR-0060 section 5 - optional build-time pin of the discovery
         // username-certificate verifying key (base64url of the 32-byte Ed25519
         // key). When set, a claimed username is verified against it and the
         // `/.well-known/lakko-username-cert-key` endpoint is never consulted;

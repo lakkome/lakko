@@ -70,7 +70,7 @@
 //! - KT-log inclusion proof for `owner_signature_pubkey`
 //!   (TOFU until then, same as `invite.rs`).
 //!
-//! ## Wire format (manual codec, v2 — ADR-0058 §6)
+//! ## Wire format (manual codec, v2 — ADR-0060 §6)
 //!
 //! ```text
 //! u8           schema version (= 2)
@@ -94,9 +94,9 @@
 //! `link_grant` inclusive. v1 (no link grant) is refused — a
 //! flag day, nothing is deployed.
 //!
-//! ## The link grant (ADR-0058 §6)
+//! ## The link grant (ADR-0060 §6)
 //!
-//! The owner's mailbox is closed since ADR-0058, so the joiner's
+//! The owner's mailbox is closed since ADR-0060, so the joiner's
 //! cold-start message to the owner (the call Welcome of the first
 //! joiner, or the KeyPackage forward of a later one, both riding a
 //! [`crate::request::ContactRequest`] into the owner's mailbox) needs a
@@ -193,7 +193,7 @@ pub fn call_sign_revocation(
 /// ceiling.
 pub use crate::invite::REVOKE_REPLAY_WINDOW_MS as CALL_REVOKE_REPLAY_WINDOW_MS;
 
-/// Current schema version on the wire. v2 (ADR-0058) added the link id and
+/// Current schema version on the wire. v2 (ADR-0060) added the link id and
 /// the link reach grant; v1 is refused.
 const SCHEMA_VERSION: u8 = 2;
 
@@ -433,9 +433,9 @@ pub struct CallInviteCapability {
     /// Optional human-visible label, UTF-8, capped at
     /// [`MAX_LABEL_LEN`]. Empty string is allowed.
     pub label: String,
-    /// Random per-link id: the scope of [`Self::link_grant`] (ADR-0058 §6).
+    /// Random per-link id: the scope of [`Self::link_grant`] (ADR-0060 §6).
     pub link_id: [u8; LINK_ID_LEN],
-    /// The owner's `link` reach grant for this link (ADR-0058 §6). SECRET:
+    /// The owner's `link` reach grant for this link (ADR-0060 §6). SECRET:
     /// the joiner signs its cold-start message to the owner's mailbox with
     /// it. Always class `link`.
     pub link_grant: ReachGrant,
@@ -487,7 +487,7 @@ impl CallInviteCapability {
 /// # Errors
 ///
 /// `link_id` and `link_grant` are the link's reach scope and grant
-/// (ADR-0058 §6, see the module docs).
+/// (ADR-0060 §6, see the module docs).
 ///
 /// # Errors
 ///
@@ -754,7 +754,7 @@ mod tests {
         ReachGrant::derive(&[0x6E; 32], ReachClass::Link, &TEST_LINK_ID, 0).unwrap()
     }
 
-    /// The pre-ADR-0058 argument list, with the test link id and grant.
+    /// The pre-ADR-0060 argument list, with the test link id and grant.
     #[allow(clippy::too_many_arguments)]
     fn compose_t(
         owner_signing: &SigningKey,

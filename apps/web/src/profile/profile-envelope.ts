@@ -34,11 +34,11 @@ export interface ReceivedProfile {
    *  call roster derives the ADR-0021 peer tag from, and nothing else. Copied
    *  out of the wasm handle, so it outlives `free()`. */
   readonly accountId: Uint8Array | null;
-  /** ADR-0058 profile v3 — the discovery-signed username certificate the
+  /** ADR-0060 profile v3 — the discovery-signed username certificate the
    *  sender carries, or `null`. Verified by the viewer before the username
    *  is shown (`verifyUsernameBinding`). */
   readonly usernameCertificate?: Uint8Array | null;
-  /** ADR-0058 profile v3 — the reach grants the envelope carried, as
+  /** ADR-0060 profile v3 — the reach grants the envelope carried, as
    *  37-byte grant wires in base64 with their class byte and version.
    *  SECRET (each lets its holder write to the sender's mailbox): kept only
    *  under the rules of `reach/grant-rules.ts`, never logged. */

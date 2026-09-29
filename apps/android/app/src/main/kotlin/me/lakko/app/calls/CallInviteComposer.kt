@@ -99,7 +99,7 @@ public class CallInviteComposer(
         ownerAccountId: ByteArray,
         identity: Identity,
         callId: ByteArray,
-        /** ADR-0058 §6 — the `link` grant for the new link id, registered on
+        /** ADR-0060 §6 — the `link` grant for the new link id, registered on
          *  the owner's mailbox before the link is shared. */
         linkGrantFor: suspend (linkId: ByteArray, expiryMs: Long) -> uniffi.lakko_ffi_uniffi.FfiReachGrant,
         nowMs: Long = System.currentTimeMillis(),

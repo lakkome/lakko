@@ -71,7 +71,7 @@ public class ChannelsUiState(
         public const val SUBSCRIBER_KEYS_PREF_KEY: String =
             "lakko.channels.subscriber-keys.v1"
 
-        /** ADR-0058 - the subscriber key scheme a persisted row was made
+        /** ADR-0060 - the subscriber key scheme a persisted row was made
          *  under (Ed25519, the seed envelope's X25519 derived from it). */
         public const val SUBSCRIBER_KEY_SCHEME_ED25519: String = "ed25519"
 
@@ -141,7 +141,7 @@ public class ChannelsUiState(
         _subscriberKeysByChannel.asStateFlow()
 
     init {
-        // ADR-0058 - persist at once any key [loadSubscriberKeys] regenerated,
+        // ADR-0060 - persist at once any key [loadSubscriberKeys] regenerated,
         // so the new key survives a restart before its first subscribe.
         if (_subscriberKeysByChannel.value.isNotEmpty()) persistSubscriberKeys()
     }
@@ -514,7 +514,7 @@ public class ChannelsUiState(
             row.put("channelId", channelId)
             row.put("secretHex", ChannelsComposer.bytesToHex(keys.secret))
             row.put("publicHex", ChannelsComposer.bytesToHex(keys.publicKey))
-            // ADR-0058 section 3 - the key scheme: Ed25519 since the
+            // ADR-0060 section 3 - the key scheme: Ed25519 since the
             // member-card amendment. A row without it holds an older key.
             row.put("scheme", SUBSCRIBER_KEY_SCHEME_ED25519)
             arr.put(row)
@@ -530,7 +530,7 @@ public class ChannelsUiState(
             val row = arr.optJSONObject(i) ?: continue
             val channelId = row.optString("channelId").takeIf { it.isNotEmpty() } ?: continue
             if (row.optString("scheme") != SUBSCRIBER_KEY_SCHEME_ED25519) {
-                // ADR-0058 section 3 - a stored X25519 subscriber key cannot
+                // ADR-0060 section 3 - a stored X25519 subscriber key cannot
                 // sign a member card. A fresh Ed25519 key replaces it; the
                 // reader's idempotent re-subscribe registers it and the
                 // publisher reseals the seed to it at the next fanout. No

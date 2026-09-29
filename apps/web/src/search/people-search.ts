@@ -3,7 +3,7 @@
 
 /**
  * **Search people** - the network half (`docs/ux/who-can-find-me.md`
- * section 6.1, ADR-0058 "Client contract (S4 / S5)", Search).
+ * section 6.1, ADR-0060 "Client contract (S4 / S5)", Search).
  *
  * One search asks, in parallel:
  * - the **channel** namespace for the typed handle (kept from the old

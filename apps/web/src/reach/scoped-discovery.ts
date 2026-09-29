@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 section 5 - the discovery routes of scoped discovery: the username
+ * ADR-0060 section 5 - the discovery routes of scoped discovery: the username
  * certificate, the Everyone publication, the name lookup, and the OPRF of a
  * username or a name term.
  *

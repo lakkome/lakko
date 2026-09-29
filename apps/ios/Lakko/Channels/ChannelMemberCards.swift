@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-/// ADR-0058 section 3 — channels show their members: each subscriber uploads
+/// ADR-0060 section 3 — channels show their members: each subscriber uploads
 /// a member card (its profile v3, sealed under the channel's current epoch
 /// seed) signed by its Ed25519 subscriber key, re-uploads it after every epoch
 /// rotation, and deletes it on unsubscribe. A card carries the `channel` grant
@@ -44,7 +44,7 @@ enum ChannelMemberCards {
             uploaded.insert("\(channelId)|\(epoch)")
             ReachCenter.shared.sync()
         } catch {
-            NSLog("ADR-0058: member card not uploaded: \(error)")
+            NSLog("ADR-0060: member card not uploaded: \(error)")
         }
     }
 
@@ -59,7 +59,7 @@ enum ChannelMemberCards {
                 channelIdHex: channelId,
                 subscriberPubHex: ChannelsComposer.bytesToHex(kp.`public`()), sigHeader: sig)
         } catch {
-            NSLog("ADR-0058: member card not deleted: \(error)")
+            NSLog("ADR-0060: member card not deleted: \(error)")
         }
     }
 

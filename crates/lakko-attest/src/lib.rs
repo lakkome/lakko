@@ -76,7 +76,7 @@
 //! # Username certificate
 //!
 //! The crate also hosts a fifth attestation format, [`UsernameCertificate`]
-//! (see the [`username_cert`] module, [ADR-0058] section 5): a
+//! (see the [`username_cert`] module, [ADR-0060] section 5): a
 //! discovery-signed binding of a username's OPRF output to an account id, so a
 //! viewer verifies a claimed username with one OPRF evaluation and no lookup.
 //! It shares the fixed-layout binary discipline and carries its own distinct
@@ -86,7 +86,7 @@
 //! is signed by a dedicated discovery key and is permanent (no expiry,
 //! usernames are immutable).
 //!
-//! [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 
 #![forbid(unsafe_code)]
 
@@ -370,7 +370,7 @@ pub mod fuzz_api {
     /// Try to [`UsernameCertificate::open`] the bytes against a FIXED verifying
     /// key. The bytes are attacker-controlled — a username certificate rides
     /// opaquely inside a profile envelope any group member, channel subscriber
-    /// or stranger can craft (ADR-0058), reaching this bounded parser before any
+    /// or stranger can craft (ADR-0060), reaching this bounded parser before any
     /// state is consulted — and the parser must stay panic-free on any input.
     /// The fuzzer cannot forge a valid signature against the fixed key, so it
     /// exercises the length / version / field-slicing / signature-parse /

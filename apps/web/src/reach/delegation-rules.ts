@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 section 6 - the committer candidates a proposer delegates to.
+ * ADR-0060 section 6 - the committer candidates a proposer delegates to.
  *
  * Under ADR-0045 the member who proposes an Add may not be the one who
  * commits it, and the committer may hold no key for the added person. So the

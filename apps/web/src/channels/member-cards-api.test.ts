@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The member-card routes of `services/channels` (ADR-0058 section 3): the
+ * The member-card routes of `services/channels` (ADR-0060 section 3): the
  * method, path, signature header and body shape each client call sends, and
  * the decoding of a members page.
  */

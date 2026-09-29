@@ -151,11 +151,11 @@ public class ContactsClient(
         /** ADR-0048 §2 — the sender's own profile, carried inside the sealed
          *  envelope so the recipient sees who is asking. `null` = none. */
         senderProfile: FfiProfile? = null,
-        /** ADR-0058 §6 — mints (and registers) the sender's `reply` grant for
+        /** ADR-0060 §6 — mints (and registers) the sender's `reply` grant for
          *  the recipient named by their signature key, sealed in the request
          *  so the recipient can answer into the sender's closed mailbox. */
         mintReply: (suspend (recipientSignaturePubkey: ByteArray) -> FfiReachGrant?)? = null,
-        /** ADR-0058 §2 — the grant authorising a write into the recipient's
+        /** ADR-0060 §2 — the grant authorising a write into the recipient's
          *  mailbox (found through search), by their signature key. */
         reachFor: ((recipientSignaturePubkey: ByteArray) -> DsReachAuth?)? = null,
     ): SendResult {
@@ -387,9 +387,9 @@ public class ContactsClient(
         introMessage: ByteArray,
         /** ADR-0048 §2 — the sender's own profile; see [sendContactRequest]. */
         senderProfile: FfiProfile? = null,
-        /** ADR-0058 §6 — the sender's own `reply` grant, sealed in the request. */
+        /** ADR-0060 §6 — the sender's own `reply` grant, sealed in the request. */
         replyGrant: FfiReachGrant? = null,
-        /** ADR-0058 §2 — what authorises the write (a link grant from the
+        /** ADR-0060 §2 — what authorises the write (a link grant from the
          *  capability, or a grant found through search). */
         reach: DsReachAuth? = null,
     ): SendResult {
@@ -901,7 +901,7 @@ public class ContactsClient(
                 // sees only ciphertext. A profile the composer refuses throws
                 // here and the request is not sent (never a weakened form).
                 profile = senderProfile,
-                // ADR-0058 §6 — the sender's reply key, so the recipient can
+                // ADR-0060 §6 — the sender's reply key, so the recipient can
                 // write the accept (the 1:1 Welcome) and the ack back into the
                 // sender's closed mailbox.
                 replyGrant = replyGrant,
@@ -951,7 +951,7 @@ public class ContactsClient(
         accepterAccountId: ByteArray,
         accepterX25519Pubkey: ByteArray,
         originalRequest: IncomingContactRequest,
-        /** ADR-0058 §6 — the requester's `reply` grant, which authorises the
+        /** ADR-0060 §6 — the requester's `reply` grant, which authorises the
          *  ack into their closed mailbox. */
         reach: DsReachAuth? = null,
     ): PublishedAck {
@@ -1018,7 +1018,7 @@ public class ContactsClient(
         myX25519Secret: ByteArray,
         after: Long = 0,
         waitSecs: Int = 0,
-        /** ADR-0053 / ADR-0058 §2 — the identity proof signer of this mailbox:
+        /** ADR-0053 / ADR-0060 §2 — the identity proof signer of this mailbox:
          *  every read of a personal mailbox is signed (an unsigned one is
          *  `401`), and a refusal claims the mailbox and retries once. */
         mailboxSigner: DsJournalSigner? = null,
@@ -1111,7 +1111,7 @@ public class ContactsClient(
                         var replyGrant: FfiReachGrant? = null
                         val intro: String? = try {
                             val opened = req.openEnvelope(myX25519Secret)
-                            // ADR-0058 §6 — the requester's reply key, bound
+                            // ADR-0060 §6 — the requester's reply key, bound
                             // to the verified `from_pubkey`: kept by the
                             // repository for the accept and the ack.
                             replyGrant = opened.replyGrant
@@ -1121,7 +1121,7 @@ public class ContactsClient(
                                     username = p.username,
                                     updatedAtMs = p.updatedAtMs,
                                     accountIdHex = me.lakko.app.profile.accountIdHexOrNull(p.accountId),
-                    // ADR-0058 §5 — the username shows only on its certificate.
+                    // ADR-0060 §5 — the username shows only on its certificate.
                     usernameCertificateHex = p.usernameCertificate?.let { me.lakko.app.reach.reachHex(it) },
                                 )
                             }
@@ -1227,7 +1227,7 @@ public data class IncomingContactRequest(
      *  username is shown only once verified. `null` when none was carried, it
      *  failed its bounds, or the envelope did not open. */
     val profile: me.lakko.app.profile.PeerProfile? = null,
-    /** ADR-0058 §6 — the sender's `reply` grant from the sealed envelope,
+    /** ADR-0060 §6 — the sender's `reply` grant from the sealed envelope,
      *  bound to [fromPubkey]. SECRET: kept by the reach manager, never
      *  persisted with the pending row. `null` when none was carried. */
     val replyGrant: FfiReachGrant? = null,
@@ -1386,7 +1386,7 @@ public class ContactsError(
          *  surfaces the wrapped message verbatim. */
         public data class Wrapped(val cause: Throwable) : Variant
 
-        /** ADR-0058 §2 — the recipient's mailbox refused the grant the
+        /** ADR-0060 §2 — the recipient's mailbox refused the grant the
          *  request was signed with: they changed who can find them (or the
          *  link was revoked) since this device found them. */
         public data object ReachRefused : Variant

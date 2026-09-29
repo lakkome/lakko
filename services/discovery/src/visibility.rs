@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0058 section 5 - Everyone, name search and username certificates.
+//! ADR-0060 section 5 - Everyone, name search and username certificates.
 //!
 //! - **Everyone** is the only setting the server knows about. A person in
 //!   Everyone has `usernames.is_public` set and one `display_names` row per
@@ -9,7 +9,7 @@
 //!   `POST /discovery/name/lookup` finds them by name. Everyone else is
 //!   invisible to both: a lookup of their username answers exactly as for an
 //!   unregistered one. Who else can find them is decided by reach keys the
-//!   server never sees (ADR-0058 sections 1-4).
+//!   server never sees (ADR-0060 sections 1-4).
 //! - **Name terms** are OPRF outputs (`lakko_discovery_client::name`
 //!   normalises and splits the name client-side); the plaintext name never
 //!   reaches the server (invariant #1).
@@ -38,7 +38,7 @@ use crate::AppState;
 pub(crate) const MAX_NAME_TERMS: usize = 64;
 
 /// The most account ids one name lookup returns. Chosen, not measured
-/// (ADR-0058 open question 2); the client fetches each profile and filters
+/// (ADR-0060 open question 2); the client fetches each profile and filters
 /// by the whole query.
 pub(crate) const MAX_NAME_RESULTS: usize = 20;
 

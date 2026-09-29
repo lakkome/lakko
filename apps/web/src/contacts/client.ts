@@ -266,7 +266,7 @@ export interface IncomingContactRequest {
    *  signature authenticates): file it under that key and verify the
    *  username before showing it. */
   profile: ReceivedProfile | null;
-  /** ADR-0058 section 6 — the requester's `reply` grant (the 37-byte grant
+  /** ADR-0060 section 6 — the requester's `reply` grant (the 37-byte grant
    *  wire, base64), which the accept (the 1:1 Welcome) and the ContactAck are
    *  written with; `null` when the request carried none or did not decrypt.
    *  Secret: never logged, kept only until the request is answered. */
@@ -275,7 +275,7 @@ export interface IncomingContactRequest {
   createdAt: string;
 }
 
-/** Options of the contact-request senders (ADR-0058 section 6). */
+/** Options of the contact-request senders (ADR-0060 section 6). */
 export interface ContactRequestOptions {
   /** The grant this write is made under: an invite link's `link` grant when
    *  the request answers an `/i/` or `/c/` link. Without one, the request is
@@ -671,7 +671,7 @@ function sweepPortsFor(
 ): SweepPorts {
   const groupIdBytes = group.groupId;
   const groupIdB64 = base64Encode(groupIdBytes);
-  // ADR-0058 — the accounts one sweep's Welcome fan-out already reached.
+  // ADR-0060 — the accounts one sweep's Welcome fan-out already reached.
   const welcomedAccounts = new Map<string, number>();
   /** The leaves the staged sweep removes (set by `stagePendingProposals`). */
   let stagedRemovedLeaves = new Set<number>();
@@ -780,7 +780,7 @@ function sweepPortsFor(
         }));
       },
       publishGroup: async (bytes) => (await ds.publishGroup(groupIdBytes, bytes)).id,
-      // ADR-0058 section 6 — the sweep records each added LEAF's signature key
+      // ADR-0060 section 6 — the sweep records each added LEAF's signature key
       // (`welcomeMailbox` below); the Welcome is written, once per account,
       // to the account mailbox that leaf's binding names, read off the roster
       // after the merge. A leaf of an account already written to in this
@@ -875,7 +875,7 @@ function sweepPortsFor(
       },
     },
     cursor,
-    // ADR-0058 — the destination recorded is the added LEAF's key; the
+    // ADR-0060 — the destination recorded is the added LEAF's key; the
     // account mailbox it maps to is resolved at publish (see `publishMailbox`).
     welcomeMailbox: (signatureKey) => signatureKey,
     wrapWelcome: (welcome) => wrapEnvelope(KIND_WELCOME, welcome),
@@ -1430,7 +1430,7 @@ export class ContactsClient {
           // journal), so no echo re-arm — the committer never re-fetches it.
           const secondBytes = base64Decode(entry.secondArtifactB64);
           const pseudonym = base64Decode(entry.secondArtifactMailboxB64);
-          // ADR-0058 — signed with the key that reaches the account the
+          // ADR-0060 — signed with the key that reaches the account the
           // mailbox is named after (unsigned when the entry predates it).
           const write =
             entry.secondArtifactAccountKeyB64 === undefined
@@ -2018,7 +2018,7 @@ export class ContactsClient {
     const privacyPassToken = new Uint8Array(0);
     // ADR-0048 §2 — the sender's profile rides the sealed plaintext.
     const profileEnvelope = await this.profileEnvelopeForRequest();
-    // ADR-0058 section 6 — our `reply` grant rides the sealed request, so the
+    // ADR-0060 section 6 — our `reply` grant rides the sealed request, so the
     // accept (the 1:1 Welcome) and the ContactAck can land in our closed
     // mailbox. Registered (7-day expiry) before the request is sent: a request
     // whose answer could not arrive must not go out. No session (a signed-out
@@ -2063,7 +2063,7 @@ export class ContactsClient {
 
     // Publish to the DS, wrapped with the kind discriminator so
     // the receiver's pollMailbox can distinguish a
-    // ContactRequest from a Welcome (1.16e3). ADR-0058: signed with the
+    // ContactRequest from a Welcome (1.16e3). ADR-0060: signed with the
     // grant that lets us reach the recipient (a link's, or a kept one).
     const envelope = wrapEnvelope(KIND_CONTACT_REQUEST, wireBytes);
     const write = await resolveWriteAuth(recipientSignaturePubkey, {
@@ -2143,7 +2143,7 @@ export class ContactsClient {
     }
 
     const envelope = wrapEnvelope(KIND_CONTACT_ACK, wireBytes);
-    // ADR-0058 section 6 — written with the requester's `reply` grant.
+    // ADR-0060 section 6 — written with the requester's `reply` grant.
     const write = await resolveWriteAuth(originalRequest.fromPubkey, {
       explicit: originalRequest.replyGrantB64,
     });
@@ -2197,7 +2197,7 @@ export class ContactsClient {
     } = {},
   ): Promise<{ messageId: number; createdAt: string }> {
     const wasm = await loadWasm();
-    // ADR-0058 section 6 — one inbound mailbox per person: a Welcome goes to
+    // ADR-0060 section 6 — one inbound mailbox per person: a Welcome goes to
     // the added leaf's ACCOUNT mailbox, signed with the key that lets us
     // reach that account.
     const recipientPseudonym = wasm.IdentityPseudonym.fromIdentity(
@@ -2392,7 +2392,7 @@ export class ContactsClient {
           console.warn("ContactAck verify failed", message.id, err);
           continue;
         }
-        // ADR-0058 — they answered: the `reply` key our request handed them
+        // ADR-0060 — they answered: the `reply` key our request handed them
         // has done its job and is removed from our mailbox.
         void reachSession()?.closeRepliesTo(journalHex(ack.accepterPubkey));
         events.push({
@@ -2428,7 +2428,7 @@ export class ContactsClient {
       try {
         const opened = parsed.openEnvelope(myX25519Secret);
         intro = new TextDecoder("utf-8", { fatal: false }).decode(opened.introMessage);
-        // ADR-0058 section 6 — the requester's `reply` grant, the key our
+        // ADR-0060 section 6 — the requester's `reply` grant, the key our
         // accept and ack are written with. Only a `reply` class is kept.
         const reply = opened.replyGrant;
         if (reply !== undefined) {
@@ -2519,7 +2519,7 @@ export class ContactsClient {
     recipientAccountId: Uint8Array,
     recipientSignaturePubkey: Uint8Array,
     options: {
-      /** ADR-0058 — the requester's `reply` grant when this accepts their
+      /** ADR-0060 — the requester's `reply` grant when this accepts their
        *  contact request: the 1:1 Welcome is written with it. */
       readonly replyGrantB64?: string | null;
     } = {},
@@ -2605,7 +2605,7 @@ export class ContactsClient {
       }
       throw ContactsError.wrap(err instanceof JournalClaimFailedError ? err.cause : err);
     }
-    // ADR-0058 section 6 — one write per added ACCOUNT, to its account
+    // ADR-0060 section 6 — one write per added ACCOUNT, to its account
     // mailbox: the recipient's (with their reply grant when this accepts
     // their request) and, when we have other devices, our own.
     let firstWelcomeMessageId = 0;
@@ -2822,7 +2822,7 @@ export class ContactsClient {
       // `devices` is non-empty (checked above), so `outcome` is set.
       return outcome as MembershipOutcome;
     }).then(async (outcome) => {
-      // ADR-0058 section 6 — a proposed Add is committed by whoever sweeps,
+      // ADR-0060 section 6 — a proposed Add is committed by whoever sweeps,
       // who may hold no key that reaches the added person. Hand every
       // committer candidate a single-use delegation made with the key WE hold
       // for them. Outside the MLS lock: it is an ordinary application message.
@@ -2834,7 +2834,7 @@ export class ContactsClient {
   }
 
   /**
-   * ADR-0058 section 6 — post a committer-delegation envelope for an Add this
+   * ADR-0060 section 6 — post a committer-delegation envelope for an Add this
    * device proposed: one delegation per committer candidate (the owner, then
    * the admins by rank, at most `maxCommitterDelegations()`), each signed with
    * the grant this account keeps for the added person and naming the
@@ -2993,7 +2993,7 @@ export class ContactsClient {
     try {
       groupIdBytes = group.groupId;
       const wasm = await loadWasm();
-      // ADR-0058 section 6 (amending ADR-0050 section 2.7): the Welcome is
+      // ADR-0060 section 6 (amending ADR-0050 section 2.7): the Welcome is
       // sealed to THIS leaf's KeyPackage but addressed to the ACCOUNT mailbox
       // the leaf's binding names — one inbound mailbox per person.
       welcomeAccountKey = await accountKeyOfKeyPackage(keyPackageBytes);
@@ -3669,7 +3669,7 @@ export class ContactsClient {
         attr.free();
         continue;
       }
-      // ADR-0058 section 6 (C-69) — the joiner's `reply` grant rides the
+      // ADR-0060 section 6 (C-69) — the joiner's `reply` grant rides the
       // signed attribution; keep it so whichever committer sweeps the
       // approved `Add` can write the Welcome to the joiner's closed mailbox.
       const session = reachSession();
@@ -3947,7 +3947,7 @@ export class ContactsClient {
     }
     const groupId = cap.groupId;
     cap.free();
-    // ADR-0058 section 6 (C-69) — the committer that sweeps our approved `Add`
+    // ADR-0060 section 6 (C-69) — the committer that sweeps our approved `Add`
     // writes the Welcome to this account's closed mailbox under our `reply`
     // grant, which rides the signed attribution. Registered (7-day expiry)
     // before the knock: a request whose answer could not land must not go

@@ -463,7 +463,7 @@ export type IncomingChatEvent =
       createdAt: string;
     }
   | {
-      /** ADR-0058 — a scoped-discovery service envelope (an introduction offer
+      /** ADR-0060 — a scoped-discovery service envelope (an introduction offer
        *  or bundle, a committer delegation, and the DeviceGroup-only
        *  Visibility / ReachState / ADR-0057 RegistrarSeed kinds should one
        *  arrive in a conversation). Dispatched to its handler, never a
@@ -1535,7 +1535,7 @@ export async function toEvent(
         };
       }
     }
-    // ADR-0058 — the scoped-discovery service envelopes, before the chat
+    // ADR-0060 — the scoped-discovery service envelopes, before the chat
     // parser for the same reason as the arms above: rendered through the
     // lossy-UTF-8 fallback they would put domain bytes (and, for a
     // delegation or an introduction, secrets) in a bubble.

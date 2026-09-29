@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 - filing the reach grants a received profile carried.
+ * ADR-0060 - filing the reach grants a received profile carried.
  *
  * Called by the profile runtime for every profile that arrives in a
  * conversation, with the sender's account key resolved from the MLS sender

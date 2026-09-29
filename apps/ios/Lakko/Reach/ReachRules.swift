@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-/// ADR-0058 — the pure rules of "who can find me" on this client: which reach
+/// ADR-0060 — the pure rules of "who can find me" on this client: which reach
 /// keys the owner must have registered, which received grant may be kept, and
 /// which grant authorises a write to someone's mailbox.
 ///
@@ -14,7 +14,7 @@ import LakkoCore
 /// `allowsScope`, `allowsContactsOfContacts`): this file only decides WHICH
 /// keys, never HOW a key is derived.
 
-/// One reach key the owner registers with the Delivery Service (ADR-0058
+/// One reach key the owner registers with the Delivery Service (ADR-0060
 /// section 1): the class, its scope, its version and an optional expiry.
 public struct ReachKeySpec: Hashable {
     public let reachClass: FfiReachClass
@@ -33,7 +33,7 @@ public struct ReachKeySpec: Hashable {
     }
 }
 
-/// A live `/i/` or `/c/` link's reach scope (ADR-0058 section 6, "link").
+/// A live `/i/` or `/c/` link's reach scope (ADR-0060 section 6, "link").
 public struct LinkReach: Codable, Hashable {
     public let linkIdB64: String
     public let version: UInt32
@@ -50,7 +50,7 @@ public struct LinkReach: Codable, Hashable {
     }
 }
 
-/// One outgoing request's single-use `reply` scope (ADR-0058 section 6): a
+/// One outgoing request's single-use `reply` scope (ADR-0060 section 6): a
 /// random 16-byte id, registered with a 7-day expiry before the request goes
 /// out, removed once answered.
 public struct ReplyReach: Codable, Hashable {
@@ -82,10 +82,10 @@ public enum ReachRules {
     /// The version a `(class, scope)` starts at before any rotation.
     public static let initialVersion: UInt32 = 1
 
-    /// ADR-0058 section 6 — a `reply` key lives 7 days (chosen, not measured).
+    /// ADR-0060 section 6 — a `reply` key lives 7 days (chosen, not measured).
     public static let replyLifetimeMs: UInt64 = 7 * 24 * 60 * 60 * 1000
 
-    /// ADR-0058 section 2 — a delegation lives at most 24 hours; a proposer
+    /// ADR-0060 section 2 — a delegation lives at most 24 hours; a proposer
     /// issues it for less so a re-send is due well before it lapses.
     public static let delegationLifetimeMs: UInt64 = 20 * 60 * 60 * 1000
 
@@ -115,7 +115,7 @@ public enum ReachRules {
         FfiScopeId(kind: .group, id: groupId)
     }
 
-    /// Every reach key the owner must have registered right now (ADR-0058
+    /// Every reach key the owner must have registered right now (ADR-0060
     /// sections 1 and 6).
     ///
     /// - `contact`: always — every contact holds it.
@@ -167,7 +167,7 @@ public enum ReachRules {
                 expiresAtMs: reply.expiresAtMs))
         }
         // `channel` per channel the setting lets find the owner, versioned
-        // by the channel's current seed epoch (ADR-0058 section 3).
+        // by the channel's current seed epoch (ADR-0060 section 3).
         for channel in channels where !channel.id.isEmpty && channel.id.count <= 64 {
             if allowsScope(setting, FfiScopeId(kind: .channel, id: channel.id)) {
                 out.append(ReachKeySpec(
@@ -201,14 +201,14 @@ public enum ReachRules {
         return (add, remove)
     }
 
-    /// `open` is set only in Everyone (ADR-0058 section 2).
+    /// `open` is set only in Everyone (ADR-0060 section 2).
     public static func mailboxOpen(_ setting: FfiVisibilitySetting) -> Bool {
         setting.mode == .everyone
     }
 
     // MARK: - Received grants
 
-    /// Where a received grant arrived (ADR-0058 section 6, "A received
+    /// Where a received grant arrived (ADR-0060 section 6, "A received
     /// `contact` grant is kept only from the other participant of a 1:1
     /// conversation; `group` / `member` only from members of that group;
     /// `channel` only from that channel's member cards").
@@ -348,7 +348,7 @@ public enum ReachRules {
 
     // MARK: - Welcome targets
 
-    /// ADR-0058 section 6, "One inbound mailbox per person" — a Welcome is
+    /// ADR-0060 section 6, "One inbound mailbox per person" — a Welcome is
     /// addressed to each added leaf's ACCOUNT mailbox, one write per account.
     /// `resolve` maps an added leaf key to its account key (`nil` when this
     /// device cannot resolve it, in which case the leaf key itself is kept so a

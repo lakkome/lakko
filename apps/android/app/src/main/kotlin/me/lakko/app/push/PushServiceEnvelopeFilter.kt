@@ -256,7 +256,7 @@ private fun isServiceEnvelopeOtherThanCall(
         return true
     }
 
-    // Kind 9 — ADR-0058 scoped discovery (introduction offer / bundle,
+    // Kind 9 — ADR-0060 scoped discovery (introduction offer / bundle,
     // visibility, reach state, committer delegation). The same NUL-terminated-
     // prefix classification the foreground `ChatClient` uses
     // ([me.lakko.app.reach.scopedEnvelopeKindOf]), so the two paths cannot

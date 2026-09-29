@@ -893,7 +893,7 @@ private fun SessionRoot(
     // state (Keystore-backed key persistence) and one REST client.
     val channelsState = rememberChannelsUiState()
     val channelsClient = remember { me.lakko.app.channels.ChannelsClient() }
-    // ADR-0058 §1 — the channels this account is in: the setting decides
+    // ADR-0060 §1 — the channels this account is in: the setting decides
     // their `channel` keys on the account mailbox.
     LaunchedEffect(channelsState) {
         channelsState.channels.collect { list ->
@@ -974,7 +974,7 @@ private fun SessionRoot(
         }
     }
 
-    // ADR-0058 §6 (amending ADR-0050 §2.7) — Welcomes go to the ACCOUNT
+    // ADR-0060 §6 (amending ADR-0050 §2.7) — Welcomes go to the ACCOUNT
     // mailbox now, read by the loop below; this device's own mailbox stays
     // claimed and closed with no reach keys, and is no longer polled.
 

@@ -298,7 +298,7 @@ pub fn found_call(owner_identity: &Identity, call_id: [u8; 16]) -> Result<Founde
 /// or the stranger-inbox `wrap_call_kp_forward` for a cold start. The joiner
 /// never founds a group.
 ///
-/// On a cold start the owner's mailbox is closed to strangers (ADR-0058): the
+/// On a cold start the owner's mailbox is closed to strangers (ADR-0060): the
 /// joiner writes the `ContactRequest` carrying the forward under the
 /// capability's `link` grant, and puts its own `reply` grant inside that
 /// request (`lakko_contacts::request::compose`) so the Welcome can come back

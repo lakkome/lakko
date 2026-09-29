@@ -4,7 +4,7 @@
 import Foundation
 import LakkoCore
 
-/// ADR-0058 — the five "who can find me" service envelopes that ride MLS
+/// ADR-0060 — the five "who can find me" service envelopes that ride MLS
 /// application messages, classified by the core's dispatcher
 /// (`dispatchIncomingEnvelope`). None is ever rendered as a message.
 public enum ScopedDiscoveryEnvelope: Equatable {
@@ -19,7 +19,7 @@ public enum ScopedDiscoveryEnvelope: Equatable {
     /// A proposer's committer delegations for the person its Add names.
     case committerDelegation(FfiCommitterDelegationEnvelope)
 
-    /// First byte of every ADR-0058 domain (`lakko/...`): keeps an FFI call
+    /// First byte of every ADR-0060 domain (`lakko/...`): keeps an FFI call
     /// off the path for a chat envelope (which opens with `{`). Decides nothing.
     private static let firstByte: UInt8 = 0x6C
 

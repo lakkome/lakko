@@ -4,7 +4,7 @@
 package me.lakko.app.reach
 
 /*
- * ADR-0058 client contract, the last bullet — the five envelope kinds scoped
+ * ADR-0060 client contract, the last bullet — the five envelope kinds scoped
  * discovery adds are dispatched and NEVER rendered: on the foreground timeline
  * and in the background push-preview filter alike. (The ADR-0057 registrar
  * seed is not one of them: it has its own arm, `registrarSeedArm` in
@@ -19,7 +19,7 @@ package me.lakko.app.reach
  * as binary.
  */
 
-/** The service envelopes ADR-0058 adds to an MLS conversation or the
+/** The service envelopes ADR-0060 adds to an MLS conversation or the
  *  DeviceGroup. */
 public enum class ScopedEnvelopeKind(domain: String) {
     /** An introduction record a contact offers (1:1 conversation). */

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! Contacts of contacts: introduction records and the envelopes that relay
-//! them ([ADR-0058](../../../docs/adr/0058-scoped-discovery.md) §4).
+//! them ([ADR-0060](../../../docs/adr/0060-scoped-discovery.md) §4).
 //!
 //! ## The flow
 //!

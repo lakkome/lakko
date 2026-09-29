@@ -177,7 +177,7 @@ struct ChannelInfoSheet: View {
     /// order: forget the reader keypair and the seeds it recovered, then drop
     /// the channel from the local list.
     private func stopFollowing() {
-        // ADR-0058 section 3 — the member card goes with the subscription;
+        // ADR-0060 section 3 — the member card goes with the subscription;
         // signed by the subscriber key, so taken before the key is forgotten.
         if let keys = state.subscriberKeysByChannel[channelId] {
             let id = channelId

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0058 section 3 - channel member cards over the wire, against the
+//! ADR-0060 section 3 - channel member cards over the wire, against the
 //! in-memory store (the service's usual test pattern). The cards are real
 //! `lakko_channels::seal_member_card` output, so the server's frame reader is
 //! exercised on what a client actually uploads.

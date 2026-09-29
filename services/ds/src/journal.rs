@@ -78,7 +78,7 @@ pub(crate) enum Queue {
     /// `ds_group_knocks`, `(group_id, ...)` - ADR-0053 section 4, the
     /// non-member's requests to join, kept apart from the members' rows.
     Knock,
-    /// `ds_rendezvous_messages`, `(rendezvous_id, ...)` - ADR-0058: the
+    /// `ds_rendezvous_messages`, `(rendezvous_id, ...)` - ADR-0060: the
     /// pairing / recovery / courier meeting points, read and written without
     /// a proof, in their own table so a rendezvous id can never name a
     /// personal mailbox's rows.
@@ -248,7 +248,7 @@ pub(crate) async fn publish(
 }
 
 /// Answer a mailbox publish exactly as [`publish`] would, and store nothing
-/// (ADR-0058 section 2: a proofless write to a closed mailbox).
+/// (ADR-0060 section 2: a proofless write to a closed mailbox).
 ///
 /// The response must not tell the writer whether an account is behind the
 /// pseudonym, so it is not a made-up value: the row is inserted inside a
@@ -556,7 +556,7 @@ pub(crate) async fn post_mailbox(
             ),
         ));
     }
-    // ADR-0058 section 2: a claimed, closed mailbox takes a write only under
+    // ADR-0060 section 2: a claimed, closed mailbox takes a write only under
     // a reach key (or a delegation from one). An unclaimed mailbox - the
     // rendezvous inboxes - and an open one (Everyone) take any proofless
     // write, as ADR-0053 left them. A proofless write to a closed mailbox is
@@ -583,7 +583,7 @@ pub(crate) async fn get_mailbox(
     Query(q): Query<FetchQuery>,
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&device_hex)?;
-    // ADR-0053 + ADR-0058: a mailbox is personal and read by its owner only.
+    // ADR-0053 + ADR-0060: a mailbox is personal and read by its owner only.
     // An unclaimed mailbox has no owner key, so it answers the same 401 as a
     // claimed one read without (or with a failing) proof: the answer never
     // says whether a mailbox is claimed. Proofless meeting points are the
@@ -610,7 +610,7 @@ pub(crate) async fn get_mailbox(
 }
 
 // ============================================================================
-// Rendezvous (ADR-0058)
+// Rendezvous (ADR-0060)
 // ============================================================================
 
 /// The headers a rendezvous request must not carry: it is never claimable,

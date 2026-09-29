@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0058 section 2 - knowing a person's identifier is not permission to
+//! ADR-0060 section 2 - knowing a person's identifier is not permission to
 //! reach them.
 //!
 //! A claimed identity mailbox is **closed** unless its owner opened it (the
@@ -180,7 +180,7 @@ async fn check_delegated(
     Ok(())
 }
 
-/// Gate a mailbox write (ADR-0058 section 2). See the module documentation
+/// Gate a mailbox write (ADR-0060 section 2). See the module documentation
 /// for the table of answers.
 pub(crate) async fn gate_mailbox_write(
     state: &AppState,

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 — the BACKGROUND notification path (`public/sw-push-decrypt.js`)
+ * ADR-0060 — the BACKGROUND notification path (`public/sw-push-decrypt.js`)
  * suppresses the scoped-discovery envelopes (visibility, reach state,
  * introductions bundle, committer delegation), READ-ONLY (C-59), exactly as
  * it does the pin. The envelopes are composed by the real core and classified

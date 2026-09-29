@@ -84,7 +84,7 @@ public final class DsClient {
     /// `POST /ds/mailbox/{pseudonym_hex}/messages` — a write to someone's
     /// personal mailbox.
     ///
-    /// ADR-0058 section 2 — a claimed mailbox is CLOSED unless its owner chose
+    /// ADR-0060 section 2 — a claimed mailbox is CLOSED unless its owner chose
     /// Everyone, and a closed mailbox stores a write only when it is signed
     /// with a reach key the owner registered (`writeAuth`), or with a
     /// delegate key next to a delegation one of them signed. A write with no
@@ -129,7 +129,7 @@ public final class DsClient {
         return PublishResult(id: parsed.id, createdAt: parsed.createdAt)
     }
 
-    // MARK: - ADR-0058 rendezvous
+    // MARK: - ADR-0060 rendezvous
 
     /// `POST /ds/rendezvous/{id_hex}/messages` — pairing, recovery, the welcome
     /// courier and the state bundle. Open, never claimable, and refusing any
@@ -168,7 +168,7 @@ public final class DsClient {
         )
     }
 
-    // MARK: - ADR-0058 reach keys
+    // MARK: - ADR-0060 reach keys
 
     /// `PUT /ds/mailbox/{hex}/reach` — register and unregister reach public
     /// keys on this account's own mailbox, and set the Everyone flag. Signed
@@ -777,9 +777,9 @@ private struct ReachWireRequest: Encodable {
     enum CodingKeys: String, CodingKey { case add, remove, open }
 }
 
-// MARK: - ADR-0058 public types
+// MARK: - ADR-0060 public types
 
-/// How a write to someone else's closed mailbox is authorised (ADR-0058
+/// How a write to someone else's closed mailbox is authorised (ADR-0060
 /// section 2): the 32-byte reach seed the proof is signed with — a grant the
 /// owner handed out, or a delegate's own seed — and, for a delegated write,
 /// the `x-lakko-ds-delegation` header value the grant holder issued.

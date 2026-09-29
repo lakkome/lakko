@@ -277,7 +277,7 @@ export async function fetchEpoch(
   return fetchJson<ChannelEpoch>(`${base}/v1/channels/${channelIdHex}/epoch`);
 }
 
-/** Register a subscriber's Ed25519 public key (ADR-0058). */
+/** Register a subscriber's Ed25519 public key (ADR-0060). */
 export async function subscribe(
   channelIdHex: string,
   subscriberPubkeyHex: string,
@@ -552,7 +552,7 @@ export async function commitRotation(
 }
 
 // ---------------------------------------------------------
-// ADR-0058 section 3 — member cards
+// ADR-0060 section 3 — member cards
 // ---------------------------------------------------------
 
 /** The request header a member-card upload or delete carries its

@@ -218,7 +218,7 @@ export function TimelineBubble(
       return null;
     }
     if (ev.kind === "scopedDiscovery") {
-      // ADR-0058 — dispatched to its handler by the receive loop, never
+      // ADR-0060 — dispatched to its handler by the receive loop, never
       // pushed into `rows()`. Defensive.
       return null;
     }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target - introduction record parse + open (ADR-0058 §4).
+//! Fuzz target - introduction record parse + open (ADR-0060 §4).
 //!
 //! A record reaches a searcher inside a contact's bundle, and a relaying
 //! contact inside an offer; either peer can craft it. The input is run

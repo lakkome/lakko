@@ -3,7 +3,7 @@
 
 /**
  * People search, the pure half (`docs/ux/who-can-find-me.md` section 6.1,
- * ADR-0058 "Client contract (S4 / S5)", Search).
+ * ADR-0060 "Client contract (S4 / S5)", Search).
  *
  * What a result is, how the LOCAL half matches ("any part of any word",
  * letter case and accents never matter), how local and network results merge

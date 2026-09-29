@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! `committer_delegation::decode_committer_delegation` (ADR-0058 §6): a
+//! `committer_delegation::decode_committer_delegation` (ADR-0060 §6): a
 //! proposer's committer delegations ride an MLS application message on the
 //! group journal, so these bytes reach the parser from any member (or the
 //! zero-trust DS) before any state is consulted. Asserts no panic, that

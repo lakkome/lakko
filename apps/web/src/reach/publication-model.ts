@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 sections 4 and 5 - the pure decisions behind what this account
+ * ADR-0060 sections 4 and 5 - the pure decisions behind what this account
  * publishes for others to find it by:
  *
  * - the **Everyone** publication at discovery (the username's `public` flag

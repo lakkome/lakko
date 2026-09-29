@@ -2,7 +2,7 @@
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 -- Widen the sealed `/i/` and `/c/` columns to the v2 capabilities of
--- ADR-0058 section 6.
+-- ADR-0060 section 6.
 --
 -- Both capabilities now carry, inside their signed and sealed part, a
 -- 16-byte `link_id` and the link's 37-byte `link` reach grant, so the longest

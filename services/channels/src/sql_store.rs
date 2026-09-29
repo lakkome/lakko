@@ -6,7 +6,7 @@
 //! Mirror of [`crate::storage::InMemoryChannelStore`] —
 //! same trait, same opacity contract. The four tables
 //! (`channels`, `channel_posts`, `channel_subscribers`,
-//! `channel_envelopes`) live in `migrations/0001_init.sql`; the ADR-0058
+//! `channel_envelopes`) live in `migrations/0001_init.sql`; the ADR-0060
 //! member cards in `migrations/0005_member_cards.sql`.
 //!
 //! ## Opacity contract — pinned
@@ -927,7 +927,7 @@ impl ChannelStore for SqlChannelStore {
 }
 
 // ============================================================================
-// Tests - the ADR-0058 member-card paths against MariaDB, gated on
+// Tests - the ADR-0060 member-card paths against MariaDB, gated on
 // `LAKKO_CHANNELS_TEST_DATABASE_URL` and skipped silently without it.
 // ============================================================================
 

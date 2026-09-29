@@ -3,7 +3,7 @@
 
 /**
  * **Add contact** on a search result: send the contact request with the key
- * that found the person (`docs/ux/who-can-find-me.md` section 6.1, ADR-0058
+ * that found the person (`docs/ux/who-can-find-me.md` section 6.1, ADR-0060
  * section 6).
  *
  * The person may have changed who can find them between the search and the

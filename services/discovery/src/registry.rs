@@ -10,7 +10,7 @@
 //! body's `account_id` must equal the token's; it is counted per account
 //! by the write limiter and, since ADR-0054 S3, carries no proof of work.
 //! `/discovery/lookup` is anonymous and rate-limited per source address, and
-//! since ADR-0058 answers only for a person who chose Everyone;
+//! since ADR-0060 answers only for a person who chose Everyone;
 //! the enumeration step it follows (`/discovery/oprf`) spends an
 //! anonymous token.
 //!
@@ -72,7 +72,7 @@ pub(crate) struct RegisterRequest {
 #[derive(Serialize)]
 pub(crate) struct RegisterResponse {
     pub(crate) ok: bool,
-    /// ADR-0058: standard base64 of the 153-byte username certificate
+    /// ADR-0060: standard base64 of the 153-byte username certificate
     /// (`lakko_attest::username_cert`) binding this OPRF hash to the account.
     pub(crate) username_certificate_b64: String,
 }
@@ -160,7 +160,7 @@ pub(crate) struct LookupResponse {
 
 /// `POST /discovery/lookup` — resolve an OPRF-hashed username to its
 /// `account_id`. Returns **404 Not Found** for unknown hashes, and for a
-/// username whose owner is not in Everyone (ADR-0058: the same status and
+/// username whose owner is not in Everyone (ADR-0060: the same status and
 /// body, so a lookup cannot tell hidden from unregistered).
 ///
 /// Exact-match only: there is intentionally no prefix search /
@@ -173,7 +173,7 @@ pub(crate) async fn lookup(
 ) -> Result<Json<LookupResponse>, (StatusCode, String)> {
     let oprf_hash = decode_fixed::<OPRF_HASH_LEN>(&payload.oprf_hash, "oprf_hash")?;
 
-    // ADR-0058: only a person in Everyone answers; a hidden username gets the
+    // ADR-0060: only a person in Everyone answers; a hidden username gets the
     // very response an unregistered one does.
     let row: Option<(Vec<u8>,)> =
         sqlx::query_as("SELECT account_id FROM usernames WHERE oprf_hash = ? AND is_public = TRUE")

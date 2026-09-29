@@ -60,7 +60,7 @@
 //!     fresh ephemeral per envelope (`crate::envelope::seal`),
 //!     so we don't need the owner-side prekey here.
 //!
-//! ## Wire format (manual codec, v2 — ADR-0058 §6)
+//! ## Wire format (manual codec, v2 — ADR-0060 §6)
 //!
 //! ```text
 //! u8           schema version (= 2)
@@ -83,11 +83,11 @@
 //! pattern exactly.
 //!
 //! v1 (no link grant) is refused: a flag day, since nothing is deployed
-//! (ADR-0058).
+//! (ADR-0060).
 //!
-//! ## The link grant (ADR-0058 §6)
+//! ## The link grant (ADR-0060 §6)
 //!
-//! Since ADR-0058 the owner's mailbox is closed: knowing the owner's account
+//! Since ADR-0060 the owner's mailbox is closed: knowing the owner's account
 //! id no longer lets anyone write the contact request a link exists to
 //! carry. So the capability hands the link holder a **`link` reach grant**
 //! ([`crate::reach::ReachGrant`], class [`crate::reach::ReachClass::Link`]),
@@ -156,12 +156,12 @@ use crate::error::{ContactError, Result};
 use crate::reach::{ReachClass, ReachGrant, REACH_GRANT_LEN};
 use crate::request::ACCOUNT_ID_LEN;
 
-/// Current schema version on the wire. v2 (ADR-0058) added the link id and
+/// Current schema version on the wire. v2 (ADR-0060) added the link id and
 /// the link reach grant; v1 is refused.
 const SCHEMA_VERSION: u8 = 2;
 
 /// Length of the random per-link id an `/i/` or `/c/` capability carries:
-/// the scope of the link's reach grant (ADR-0058 §6). The owner mints one
+/// the scope of the link's reach grant (ADR-0060 §6). The owner mints one
 /// per link ([`generate_link_id`]) and removes exactly that link's key on
 /// revoke.
 pub const LINK_ID_LEN: usize = 16;
@@ -589,9 +589,9 @@ pub struct InviteCapability {
     /// [`MAX_LABEL_LEN`] bytes. Empty string is allowed — the
     /// UI fills in a default from the inviter's display name.
     pub label: String,
-    /// Random per-link id: the scope of [`Self::link_grant`] (ADR-0058 §6).
+    /// Random per-link id: the scope of [`Self::link_grant`] (ADR-0060 §6).
     pub link_id: [u8; LINK_ID_LEN],
-    /// The owner's `link` reach grant for this link (ADR-0058 §6). SECRET:
+    /// The owner's `link` reach grant for this link (ADR-0060 §6). SECRET:
     /// the holder signs the contact request's mailbox write with it. Always
     /// class [`ReachClass::Link`].
     pub link_grant: ReachGrant,
@@ -643,7 +643,7 @@ impl InviteCapability {
 /// keep the wire format predictable for the receiver).
 ///
 /// `link_id` and `link_grant` are the link's reach scope and grant
-/// (ADR-0058 §6; see the module docs): the owner derives the grant as
+/// (ADR-0060 §6; see the module docs): the owner derives the grant as
 /// `ReachGrant::derive(account_seed, ReachClass::Link, link_id, version)`
 /// and registers its public key before sharing the link.
 ///
@@ -863,7 +863,7 @@ mod tests {
         ReachGrant::derive(&[0x5E; 32], ReachClass::Link, &TEST_LINK_ID, 0).unwrap()
     }
 
-    /// The pre-ADR-0058 argument list, with the test link id and grant.
+    /// The pre-ADR-0060 argument list, with the test link id and grant.
     fn compose_t(
         signing: &SigningKey,
         account_id: &[u8; ACCOUNT_ID_LEN],
@@ -1753,7 +1753,7 @@ mod tests {
             1_700_000_000_000, // valid_after_ms
             b"",               // privacy_pass_token (empty for the test)
             None,              // profile (ADR-0048)
-            None,              // reply grant (ADR-0058)
+            None,              // reply grant (ADR-0060)
             intro,
         )
         .expect("Bob's ContactRequest compose must succeed");

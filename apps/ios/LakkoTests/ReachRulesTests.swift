@@ -5,7 +5,7 @@ import XCTest
 @testable import Lakko
 import LakkoCore
 
-/// ADR-0058 — the pure rules of "who can find me" on iOS (`Reach/ReachRules.swift`)
+/// ADR-0060 — the pure rules of "who can find me" on iOS (`Reach/ReachRules.swift`)
 /// and the ``ReachCenter`` decisions built on them, against the real core
 /// derivation and setting predicates.
 @MainActor
