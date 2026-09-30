@@ -294,7 +294,11 @@ now carries a grant, or a delegation to a key known in advance.
 
 - **Contact request (reply).** The sealed request carries the requester's
   `reply` grant. The recipient writes the accept (the 1:1 Welcome) and the
-  ack with it. Registered with a 7-day expiry, removed once answered.
+  ack with it, the Welcome FIRST: the requester closes the key when the ack
+  arrives, so an ack written first (or in parallel, as the natives did) let an
+  online requester close it before the Welcome landed, and the Welcome was
+  refused (seen live 2026-09-30). Registered with a 7-day expiry, removed once
+  answered.
 - **One-to-one conversation (contact).** A 1:1 conversation's profile carries
   the `contact` grant (and `member`); the receiver keeps it only from the
   other participant of a 1:1 conversation.

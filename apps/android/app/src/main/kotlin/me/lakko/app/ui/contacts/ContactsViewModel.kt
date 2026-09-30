@@ -479,26 +479,11 @@ public class ContactsViewModel(
         val pending = repo.state.value.pending.firstOrNull { it.messageId == messageId }
         if (pending == null) return
 
-        // 1.9b1: ship a ContactAck back to the original sender's
-        // mailbox so their UI can flip from "pending" to
-        // "accepted" without waiting on the Welcome arrival.
-        // Best-effort — a network failure here doesn't unwind
-        // the local accept (the user already trusted the peer);
-        // we swallow and move on. The signed ack is independent
-        // of MLS state, so the sender can light up their address
-        // book even if the group-creation step below stalls.
-        viewModelScope.launch {
-            try {
-                repo.sendContactAck(pending)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-        }
-
         if (chatRepo == null || pending.fromAccountId == null) {
             // No chat bridge wired OR v1 legacy envelope without
             // a sender account-id — fall back to the pre-1.15f4c
             // "purely local marker" semantics.
+            viewModelScope.launch { sendAckBestEffort(pending) }
             repo.acceptContactRequest(messageId)
             return
         }
@@ -522,6 +507,29 @@ public class ContactsViewModel(
                 null
             }
             repo.acceptContactRequest(messageId, groupIdHex = groupIdHex)
+            // AFTER the chat's Welcome, never before it: see [sendAckBestEffort].
+            sendAckBestEffort(pending)
+        }
+    }
+
+    /**
+     * 1.9b1: ship a ContactAck back to the original sender's mailbox so their
+     * UI can flip from "pending" to "accepted". Best-effort — a network
+     * failure here doesn't unwind the local accept.
+     *
+     * Sent once the 1:1 chat's Welcome has been written. Both are written with
+     * the requester's `reply` grant (ADR-0060 section 6), and a requester
+     * closes that key as soon as the ack arrives: an ack sent first (or in
+     * parallel) let an online requester close the key before the Welcome
+     * landed, and the Welcome was refused (seen live on web 2026-09-30).
+     */
+    private suspend fun sendAckBestEffort(pending: me.lakko.app.contacts.IncomingContactRequest) {
+        try {
+            repo.sendContactAck(pending)
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // best-effort
         }
     }
 

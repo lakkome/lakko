@@ -263,27 +263,12 @@ public final class ContactsViewModel: ObservableObject {
         let pending = repository.state.pending.first { $0.messageId == messageId }
         guard let pending = pending else { return }
 
-        // 1.9b1: ship a ContactAck back to the original sender's
-        // mailbox so their UI can flip from "pending" to
-        // "accepted" without waiting on the Welcome arrival.
-        // Best-effort — a network failure here doesn't unwind the
-        // local accept (the user already trusted the peer); we
-        // log and move on. The signed ack is independent of MLS
-        // state, so the sender can light up their address book
-        // even if the group-creation step below stalls.
-        Task {
-            do {
-                _ = try await repository.sendContactAck(request: pending)
-            } catch {
-                // best-effort
-            }
-        }
-
         guard let chatRepository = chatRepository,
               let fromAccountId = pending.fromAccountId else {
             // No chat bridge wired OR v1 legacy envelope without a
             // sender account-id — fall back to the local-marker
             // semantics.
+            Task { await sendAckBestEffort(pending) }
             repository.acceptContactRequest(messageId: messageId)
             return
         }
@@ -304,6 +289,27 @@ public final class ContactsViewModel: ObservableObject {
                 messageId: messageId,
                 groupIdHex: groupIdHex
             )
+            // AFTER the chat's Welcome, never before it: see
+            // ``sendAckBestEffort(_:)``.
+            await sendAckBestEffort(pending)
+        }
+    }
+
+    /// 1.9b1: ship a ContactAck back to the original sender's mailbox so
+    /// their UI can flip from "pending" to "accepted". Best-effort — a
+    /// network failure here doesn't unwind the local accept.
+    ///
+    /// Sent once the 1:1 chat's Welcome has been written. Both are written
+    /// with the requester's `reply` grant (ADR-0060 section 6), and a
+    /// requester closes that key as soon as the ack arrives: an ack sent
+    /// first (or in parallel) let an online requester close the key before
+    /// the Welcome landed, and the Welcome was refused (seen live on web
+    /// 2026-09-30).
+    private func sendAckBestEffort(_ pending: IncomingContactRequest) async {
+        do {
+            _ = try await repository.sendContactAck(request: pending)
+        } catch {
+            // best-effort
         }
     }
 

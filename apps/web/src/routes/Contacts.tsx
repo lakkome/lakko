@@ -276,19 +276,25 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     mailbox.removePending(req.messageId);
     setAcceptError(null);
 
-    // 1.9b1: ship a ContactAck back to the original sender's mailbox so
-    // their UI can flip from "pending" to "accepted". Best-effort — a
-    // failure here doesn't unwind the local accept.
-    try {
-      await props.client.sendContactAck(requireIdentity(), req);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("sendContactAck failed", err);
-    }
+    // The 1:1 chat (its Welcome) goes FIRST and the ContactAck after it. Both
+    // are written with the requester's `reply` grant (ADR-0060 section 6),
+    // and the requester closes that key as soon as the ack arrives: an ack
+    // sent first let a requester that is online close the key before the
+    // Welcome landed, and the Welcome was refused (seen live 2026-09-30).
+    // The ack is best-effort and always sent, the chat failing or not.
+    const sendAck = async (): Promise<void> => {
+      try {
+        await props.client.sendContactAck(requireIdentity(), req);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("sendContactAck failed", err);
+      }
+    };
 
     // 1.16e3b: Accept-driven group creation. Requires the v2 wire format —
     // surface a clean error for legacy senders.
     if (req.fromAccountId === null) {
+      await sendAck();
       setAcceptError(
         "This request came from an older version of Lakko. Ask them to update and send it again.",
       );
@@ -300,6 +306,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       // Don't unwind the acceptance; just surface the error.
       setAcceptError(formatContactsError(err, memberNameOf(profiles.resolve(req.fromPubkey))));
     }
+    await sendAck();
   }
 
   function onDecline(req: IncomingContactRequest): void {
