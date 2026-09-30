@@ -659,12 +659,28 @@ public class DeviceGroupSyncRepository(
      * the members as they were before the add.
      */
     public fun onLocalDeviceAdded(priorLeaves: List<UInt>) {
-        val accountIdB64 = activeAccountIdB64.get() ?: return
-        val accountId = activeAccountId.get() ?: return
+        if (!reopenAfterLocalChange()) return
+        onGrowth(priorLeaves)
+    }
+
+    /**
+     * This device changed the DeviceGroup on a handle of its own without
+     * adding anyone (`DeviceRemoval`: a removal, the attested-removal policy).
+     * Reopen the handle from the snapshot that change persisted: left alone,
+     * it stays an epoch behind for the rest of the session and every later
+     * row is refused as a wrong epoch.
+     */
+    public fun onLocalMembershipChanged() {
+        reopenAfterLocalChange()
+    }
+
+    private fun reopenAfterLocalChange(): Boolean {
+        val accountIdB64 = activeAccountIdB64.get() ?: return false
+        val accountId = activeAccountId.get() ?: return false
         pollJob?.cancel()
         pollJob = null
         openAndPoll(accountId, accountIdB64, seedState = false)
-        onGrowth(priorLeaves)
+        return true
     }
 
     // ------------------------------------------------------------

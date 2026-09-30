@@ -745,8 +745,13 @@ export function DeviceGroupSyncProvider(props: {
         // The snapshot and the position it has consumed, in one write. A
         // failure holds the cursor (the rows come back next poll) rather than
         // recording a position the durable state has not reached.
+        // A handle stopped while the batch was being applied (another handle
+        // on this device changed the group) must not write its state: it is
+        // an epoch behind what is on disk. Refusing holds the cursor.
         persist: (to) =>
-          persistDeviceGroupSnapshotWithCursor(id, accountIdB64, deviceKey, to),
+          signal.aborted
+            ? Promise.reject(new Error("DeviceGroup handle replaced; not persisting"))
+            : persistDeviceGroupSnapshotWithCursor(id, accountIdB64, deviceKey, to),
         onApplyError: (message, err) => {
           // eslint-disable-next-line no-console
           console.warn("DeviceGroup journal row not applied", message.id, err);

@@ -98,10 +98,11 @@ public enum DeviceRemoval {
     ///      latter shouldn't happen on this path).
     ///   2. Build the Remove commit. The local view advances
     ///      atomically inside `removeDeviceAt`.
-    ///   3. Broadcast the commit to the DeviceGroup DS journal
+    ///   3. Persist the resulting snapshot, before anything is
+    ///      published (G-7).
+    ///   4. Broadcast the commit to the DeviceGroup DS journal
     ///      so every other still-paired device advances to the
     ///      new epoch on its next poll.
-    ///   4. Persist the resulting snapshot.
     ///
     /// Throws inner errors verbatim:
     ///
@@ -152,7 +153,16 @@ public enum DeviceRemoval {
                     leafIndex: leafIndex
                 )
             },
-            prepare: { commitBytes in commitBytes },
+            // G-7 — the advanced state is on disk before the commit is
+            // published, so nothing that reads the snapshot (the sync
+            // runtime's reload, the next add) can see the pre-removal epoch.
+            prepare: { commitBytes in
+                DeviceGroupLifecycle.persistSnapshot(
+                    identity: ensured.identity,
+                    accountIdB64: accountIdB64
+                )
+                return commitBytes
+            },
             publish: { commitBytes, auth in
                 let envelope = DeviceGroupJournalEnvelope.encode(
                     message: commitBytes,
@@ -160,11 +170,6 @@ public enum DeviceRemoval {
                 )
                 return try await ds.publishGroup(groupId: groupId, payload: envelope, auth: auth)
             }
-        )
-
-        DeviceGroupLifecycle.persistSnapshot(
-            identity: ensured.identity,
-            accountIdB64: accountIdB64
         )
     }
 
@@ -199,16 +204,19 @@ public enum DeviceRemoval {
             accountIdB64: accountIdB64,
             ds: ds,
             create: { try ensured.group.setRequireAttestedRemovals(identity: ensured.identity) },
-            prepare: { commit in commit },
+            // G-7 — on disk before the publish (see `removeDeviceAt`).
+            prepare: { commit in
+                DeviceGroupLifecycle.persistSnapshot(
+                    identity: ensured.identity,
+                    accountIdB64: accountIdB64
+                )
+                return commit
+            },
             publish: { commit, auth in
                 // The policy commit removes nothing, so it carries no attestation.
                 let envelope = DeviceGroupJournalEnvelope.encode(message: commit, attestation: nil)
                 return try await ds.publishGroup(groupId: groupId, payload: envelope, auth: auth)
             }
-        )
-        DeviceGroupLifecycle.persistSnapshot(
-            identity: ensured.identity,
-            accountIdB64: accountIdB64
         )
     }
 }

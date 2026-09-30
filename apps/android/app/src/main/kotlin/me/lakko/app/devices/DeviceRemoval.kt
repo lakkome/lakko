@@ -5,6 +5,7 @@ package me.lakko.app.devices
 
 import android.content.Context
 import me.lakko.app.auth.DeviceIdentityStore
+import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.ds.DsClient
 
 /**
@@ -134,10 +135,11 @@ public object DeviceRemoval {
      *      latter shouldn't happen on this path).
      *   2. Build the Remove commit. The local view advances
      *      atomically inside `removeDeviceAt`.
-     *   3. Broadcast the commit to the DeviceGroup DS journal
+     *   3. Persist the resulting snapshot and reopen the sync
+     *      runtime's handle from it, before anything is published (G-7).
+     *   4. Broadcast the commit to the DeviceGroup DS journal
      *      so every other still-paired device advances to the
      *      new epoch on its next poll.
-     *   4. Persist the resulting snapshot.
      *
      * Throws inner errors verbatim:
      *
@@ -206,16 +208,22 @@ public object DeviceRemoval {
             // deterministic 32-byte group_id as opaque bytes. G-13
             // (ADR-0015): wrap the commit + removal attestation in the journal
             // envelope so peers can verify the removal under the policy.
-            val envelope = DeviceGroupJournalEnvelope.encode(commitBytes, attestation)
-            DsClient().use { ds ->
-                ds.publishGroup(groupId = groupId, payload = envelope, signer = commitSigner)
-            }
-
+            //
+            // G-7 — the advanced state is on disk, and the sync runtime has
+            // reopened its handle from it, before the commit is published.
+            // Otherwise its handle stays an epoch behind and the next add from
+            // this device reads a snapshot the removal never reached (the web
+            // twin registered an epoch the DS already held: 409, 2026-09-29).
             DeviceGroupLifecycle.persistSnapshot(
                 context = context,
                 identity = ensured.identity,
                 accountIdB64 = accountIdB64,
             )
+            DeviceGroupSyncRepository.active?.onLocalMembershipChanged()
+            val envelope = DeviceGroupJournalEnvelope.encode(commitBytes, attestation)
+            DsClient().use { ds ->
+                ds.publishGroup(groupId = groupId, payload = envelope, signer = commitSigner)
+            }
         } finally {
             try {
                 ensured.group.close()
@@ -271,13 +279,16 @@ public object DeviceRemoval {
                     after = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity),
                     root = DeviceGroupJournalAccess.rootOf(context, accountIdB64, ensured.group.groupId()),
                 )
+                // G-7 — on disk and the sync runtime reopened before the
+                // publish (see `removeDeviceAt`).
+                DeviceGroupLifecycle.persistSnapshot(
+                    context = context,
+                    identity = ensured.identity,
+                    accountIdB64 = accountIdB64,
+                )
+                DeviceGroupSyncRepository.active?.onLocalMembershipChanged()
                 ds.publishGroup(groupId = groupId, payload = envelope, signer = commitSigner)
             }
-            DeviceGroupLifecycle.persistSnapshot(
-                context = context,
-                identity = ensured.identity,
-                accountIdB64 = accountIdB64,
-            )
         } finally {
             try {
                 ensured.group.close()
