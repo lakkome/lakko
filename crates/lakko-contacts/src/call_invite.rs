@@ -70,10 +70,10 @@
 //! - KT-log inclusion proof for `owner_signature_pubkey`
 //!   (TOFU until then, same as `invite.rs`).
 //!
-//! ## Wire format (manual codec, frozen at v1)
+//! ## Wire format (manual codec, v2 — ADR-0060 §6)
 //!
 //! ```text
-//! u8           schema version (= 1)
+//! u8           schema version (= 2)
 //! [32 bytes]   owner_signature_pubkey            — Ed25519 verifying key
 //! [16 bytes]   owner_account_id                  — UUIDv7 raw
 //! [16 bytes]   call_id                           — 16 random bytes
@@ -84,19 +84,42 @@
 //! [kp_len]     key_package_bytes                  — opaque MLS KeyPackage wire bytes
 //! u16be        label_len
 //! [label_len]  label_bytes (UTF-8, ≤ MAX_LABEL_LEN)
+//! [16 bytes]   link_id                            — random, the reach scope of this link
+//! [37 bytes]   link_grant                         — ReachGrant, class `link` (SECRET)
 //! [64 bytes]   signature                          — Ed25519 over the above
 //! ```
 //!
 //! Multi-byte integers are big-endian. The signature
 //! covers everything from the schema-version byte through
-//! `label_bytes` inclusive.
+//! `link_grant` inclusive. v1 (no link grant) is refused — a
+//! flag day, nothing is deployed.
+//!
+//! ## The link grant (ADR-0060 §6)
+//!
+//! The owner's mailbox is closed since ADR-0060, so the joiner's
+//! cold-start message to the owner (the call Welcome of the first
+//! joiner, or the KeyPackage forward of a later one, both riding a
+//! [`crate::request::ContactRequest`] into the owner's mailbox) needs a
+//! key. The capability carries the owner's `link` reach grant, scoped to
+//! a random per-link `link_id` rather than to the `call_id`: several links
+//! can be minted for one call, and revoking one must remove exactly its
+//! key. Same rules as [`crate::invite`]: inside the signature and the link
+//! seal, class `link` or refused, the owner registers the public key
+//! (expiring with the link) before sharing it.
+//!
+//! The way back is the joiner's: its `ContactRequest` carries its own
+//! `reply` grant ([`crate::request`]), with which the owner (or the call's
+//! committer) delivers the Welcome to the joiner's closed mailbox.
 
 use lakko_crypto::signing::{
     Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN as ED25519_PUB_LEN, SIGNATURE_LEN,
 };
 
 use crate::error::{ContactError, Result};
-use crate::invite::{BLOB_ID_LEN, MAX_LABEL_LEN, NEVER_EXPIRES};
+use crate::invite::{
+    check_link_grant, decode_link_grant, BLOB_ID_LEN, LINK_ID_LEN, MAX_LABEL_LEN, NEVER_EXPIRES,
+};
+use crate::reach::{ReachGrant, REACH_GRANT_LEN};
 use crate::request::ACCOUNT_ID_LEN;
 
 // ============================================================================
@@ -170,8 +193,9 @@ pub fn call_sign_revocation(
 /// ceiling.
 pub use crate::invite::REVOKE_REPLAY_WINDOW_MS as CALL_REVOKE_REPLAY_WINDOW_MS;
 
-/// Current schema version on the wire.
-const SCHEMA_VERSION: u8 = 1;
+/// Current schema version on the wire. v2 (ADR-0060) added the link id and
+/// the link reach grant; v1 is refused.
+const SCHEMA_VERSION: u8 = 2;
 
 /// Length of `call_id` in bytes. Mirror of
 /// `lakko_calls::signaling::CallId`'s 16-byte shape.
@@ -253,8 +277,8 @@ pub const fn call_invite_expiry_ms(now_ms: u64) -> u64 {
 pub const CALL_INVITE_MAX_USES: u32 = u32::MAX;
 
 /// Longest capability wire [`compose`] can produce: the fixed fields, a
-/// [`MAX_KEY_PACKAGE_LEN`] KeyPackage, a [`MAX_LABEL_LEN`] label and the
-/// signature (4308 bytes).
+/// [`MAX_KEY_PACKAGE_LEN`] KeyPackage, a [`MAX_LABEL_LEN`] label, the link
+/// id, the link grant and the signature (4361 bytes).
 pub const MAX_WIRE_LEN: usize = 1
     + ED25519_PUB_LEN
     + ACCOUNT_ID_LEN
@@ -266,6 +290,8 @@ pub const MAX_WIRE_LEN: usize = 1
     + MAX_KEY_PACKAGE_LEN
     + 2
     + MAX_LABEL_LEN
+    + LINK_ID_LEN
+    + REACH_GRANT_LEN
     + SIGNATURE_LEN;
 
 /// Longest sealed `/c/` link blob (what the discovery ledger stores).
@@ -407,6 +433,12 @@ pub struct CallInviteCapability {
     /// Optional human-visible label, UTF-8, capped at
     /// [`MAX_LABEL_LEN`]. Empty string is allowed.
     pub label: String,
+    /// Random per-link id: the scope of [`Self::link_grant`] (ADR-0060 §6).
+    pub link_id: [u8; LINK_ID_LEN],
+    /// The owner's `link` reach grant for this link (ADR-0060 §6). SECRET:
+    /// the joiner signs its cold-start message to the owner's mailbox with
+    /// it. Always class `link`.
+    pub link_grant: ReachGrant,
 }
 
 impl CallInviteCapability {
@@ -454,10 +486,17 @@ impl CallInviteCapability {
 ///
 /// # Errors
 ///
+/// `link_id` and `link_grant` are the link's reach scope and grant
+/// (ADR-0060 §6, see the module docs).
+///
+/// # Errors
+///
 /// - [`ContactError::InvalidArgument`] when:
 ///   - `label.len() > MAX_LABEL_LEN`
 ///   - `one_time_key_package.len() == 0`
 ///   - `one_time_key_package.len() > MAX_KEY_PACKAGE_LEN`
+///   - `link_grant` is not class `link`
+#[allow(clippy::too_many_arguments)]
 pub fn compose(
     owner_signing: &SigningKey,
     owner_account_id: &[u8; ACCOUNT_ID_LEN],
@@ -467,6 +506,8 @@ pub fn compose(
     media: CallInviteMedia,
     one_time_key_package: &[u8],
     label: &str,
+    link_id: &[u8; LINK_ID_LEN],
+    link_grant: &ReachGrant,
 ) -> Result<Vec<u8>> {
     if label.len() > MAX_LABEL_LEN {
         return Err(ContactError::InvalidArgument(format!(
@@ -485,6 +526,7 @@ pub fn compose(
             one_time_key_package.len(),
         )));
     }
+    check_link_grant(link_grant)?;
 
     let owner_pubkey = owner_signing.verifying_key();
     let mut wire = encode_signing_prefix(
@@ -496,6 +538,8 @@ pub fn compose(
         media,
         one_time_key_package,
         label,
+        link_id,
+        link_grant,
     );
     let signature = owner_signing.sign(&wire);
     wire.extend_from_slice(&signature.to_bytes());
@@ -559,6 +603,8 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<CallInviteCapability> {
         )));
     }
     let label_bytes = take_n(&mut cur, label_len_usize)?.to_vec();
+    let link_id_bytes = take_n(&mut cur, LINK_ID_LEN)?;
+    let link_grant_bytes = take_n(&mut cur, REACH_GRANT_LEN)?;
     let signature_bytes = take_n(&mut cur, SIGNATURE_LEN)?;
     if !cur.is_empty() {
         return Err(ContactError::InvalidEncoding(format!(
@@ -603,6 +649,9 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<CallInviteCapability> {
     let media = CallInviteMedia::from_byte(media_byte);
     let label = String::from_utf8(label_bytes)
         .map_err(|e| ContactError::InvalidEncoding(format!("call-invite label not UTF-8: {e}")))?;
+    let mut link_id = [0_u8; LINK_ID_LEN];
+    link_id.copy_from_slice(link_id_bytes);
+    let link_grant = decode_link_grant(link_grant_bytes)?;
 
     Ok(CallInviteCapability {
         owner_signature_pubkey: owner_pubkey,
@@ -613,6 +662,8 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<CallInviteCapability> {
         media,
         one_time_key_package: key_package,
         label,
+        link_id,
+        link_grant,
     })
 }
 
@@ -630,6 +681,8 @@ fn encode_signing_prefix(
     media: CallInviteMedia,
     one_time_key_package: &[u8],
     label: &str,
+    link_id: &[u8; LINK_ID_LEN],
+    link_grant: &ReachGrant,
 ) -> Vec<u8> {
     let label_len_u16 =
         u16::try_from(label.len()).expect("label fits in u16; caller checked MAX_LABEL_LEN");
@@ -645,7 +698,9 @@ fn encode_signing_prefix(
             + 4
             + one_time_key_package.len()
             + 2
-            + label.len(),
+            + label.len()
+            + LINK_ID_LEN
+            + REACH_GRANT_LEN,
     );
     out.push(SCHEMA_VERSION);
     out.extend_from_slice(&owner_signature_pubkey.to_bytes());
@@ -658,6 +713,8 @@ fn encode_signing_prefix(
     out.extend_from_slice(one_time_key_package);
     out.extend_from_slice(&label_len_u16.to_be_bytes());
     out.extend_from_slice(label.as_bytes());
+    out.extend_from_slice(link_id);
+    out.extend_from_slice(&link_grant.encode());
     out
 }
 
@@ -689,6 +746,137 @@ fn take_n<'a>(cur: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reach::ReachClass;
+
+    const TEST_LINK_ID: [u8; LINK_ID_LEN] = [0x2D; LINK_ID_LEN];
+
+    fn test_link_grant() -> ReachGrant {
+        ReachGrant::derive(&[0x6E; 32], ReachClass::Link, &TEST_LINK_ID, 0).unwrap()
+    }
+
+    /// The pre-ADR-0060 argument list, with the test link id and grant.
+    #[allow(clippy::too_many_arguments)]
+    fn compose_t(
+        owner_signing: &SigningKey,
+        owner_account_id: &[u8; ACCOUNT_ID_LEN],
+        call_id: &[u8; CALL_ID_LEN],
+        expiry_ms: u64,
+        max_uses: u32,
+        media: CallInviteMedia,
+        one_time_key_package: &[u8],
+        label: &str,
+    ) -> Result<Vec<u8>> {
+        compose(
+            owner_signing,
+            owner_account_id,
+            call_id,
+            expiry_ms,
+            max_uses,
+            media,
+            one_time_key_package,
+            label,
+            &TEST_LINK_ID,
+            &test_link_grant(),
+        )
+    }
+
+    #[test]
+    fn the_link_id_and_grant_round_trip_inside_the_signature() {
+        let link_id = crate::invite::generate_link_id();
+        let grant = ReachGrant::derive(&[7; 32], ReachClass::Link, &link_id, 2).unwrap();
+        let wire = compose(
+            &fixture_signing(),
+            &fixture_account_id(),
+            &fixture_call_id(),
+            0,
+            0,
+            CallInviteMedia::audio_only(),
+            &fixture_kp(),
+            "",
+            &link_id,
+            &grant,
+        )
+        .unwrap();
+        let cap = decode_and_verify(&wire).unwrap();
+        assert_eq!(cap.link_id, link_id);
+        assert_eq!(cap.link_grant, grant);
+        let grant_at = wire.len() - SIGNATURE_LEN - REACH_GRANT_LEN;
+        for at in [grant_at - 1, grant_at + 5, wire.len() - SIGNATURE_LEN - 1] {
+            let mut bad = wire.clone();
+            bad[at] ^= 0x01;
+            assert!(decode_and_verify(&bad).is_err());
+        }
+    }
+
+    #[test]
+    fn a_grant_of_another_class_is_refused_by_compose_and_decode() {
+        for class in ReachClass::ALL {
+            if class == ReachClass::Link {
+                continue;
+            }
+            let scope: &[u8] = if class.is_account_wide() { b"" } else { b"s" };
+            let grant = ReachGrant::derive(&[7; 32], class, scope, 1).unwrap();
+            assert!(matches!(
+                compose(
+                    &fixture_signing(),
+                    &fixture_account_id(),
+                    &fixture_call_id(),
+                    0,
+                    0,
+                    CallInviteMedia::audio_only(),
+                    &fixture_kp(),
+                    "",
+                    &TEST_LINK_ID,
+                    &grant,
+                ),
+                Err(ContactError::InvalidArgument(_))
+            ));
+            // The same grant spliced into a validly re-signed wire.
+            let good = compose_t(
+                &fixture_signing(),
+                &fixture_account_id(),
+                &fixture_call_id(),
+                0,
+                0,
+                CallInviteMedia::audio_only(),
+                &fixture_kp(),
+                "",
+            )
+            .unwrap();
+            let body = good.len() - SIGNATURE_LEN;
+            let mut prefix = good[..body].to_vec();
+            prefix[body - REACH_GRANT_LEN..].copy_from_slice(&grant.encode());
+            let sig = fixture_signing().sign(&prefix);
+            prefix.extend_from_slice(&sig.to_bytes());
+            assert!(matches!(
+                decode_and_verify(&prefix),
+                Err(ContactError::InvalidEncoding(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_v1_capability_is_refused() {
+        let mut wire = compose_t(
+            &fixture_signing(),
+            &fixture_account_id(),
+            &fixture_call_id(),
+            0,
+            0,
+            CallInviteMedia::audio_only(),
+            &fixture_kp(),
+            "",
+        )
+        .unwrap();
+        wire[0] = 1;
+        let body = wire.len() - SIGNATURE_LEN;
+        let sig = fixture_signing().sign(&wire[..body]);
+        wire[body..].copy_from_slice(&sig.to_bytes());
+        assert!(matches!(
+            decode_and_verify(&wire),
+            Err(ContactError::InvalidEncoding(_))
+        ));
+    }
 
     fn fixture_signing() -> SigningKey {
         SigningKey::from_seed(&[0xAB; 32])
@@ -722,7 +910,7 @@ mod tests {
     /// opens under its secret only, and not behind another path.
     #[test]
     fn sealed_link_round_trips_and_refuses_a_wrong_secret() {
-        let wire = compose(
+        let wire = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &fixture_call_id(),
@@ -758,7 +946,7 @@ mod tests {
         let kp = fixture_kp();
         let label = "Alice's standup";
 
-        let wire = compose(
+        let wire = compose_t(
             &signing,
             &account_id,
             &call_id,
@@ -786,7 +974,7 @@ mod tests {
 
     #[test]
     fn audio_only_media_round_trips() {
-        let wire = compose(
+        let wire = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &fixture_call_id(),
@@ -803,7 +991,7 @@ mod tests {
 
     #[test]
     fn never_expires_is_valid_at_any_time() {
-        let wire = compose(
+        let wire = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &fixture_call_id(),
@@ -821,7 +1009,7 @@ mod tests {
 
     #[test]
     fn expired_capability_is_invalid_after_expiry() {
-        let wire = compose(
+        let wire = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &fixture_call_id(),
@@ -840,7 +1028,7 @@ mod tests {
 
     #[test]
     fn tampered_payload_rejected() {
-        let mut wire = compose(
+        let mut wire = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &fixture_call_id(),
@@ -863,7 +1051,7 @@ mod tests {
 
     #[test]
     fn truncated_wire_rejected() {
-        let wire = compose(
+        let wire = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &fixture_call_id(),
@@ -881,7 +1069,7 @@ mod tests {
 
     #[test]
     fn unsupported_schema_version_rejected() {
-        let mut wire = compose(
+        let mut wire = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &fixture_call_id(),
@@ -892,10 +1080,10 @@ mod tests {
             "",
         )
         .unwrap();
-        wire[0] = 2; // bump version byte
+        wire[0] = 3; // bump version byte
         match decode_and_verify(&wire) {
             Err(ContactError::InvalidEncoding(msg)) => {
-                assert!(msg.contains("schema version 2"), "got: {msg}");
+                assert!(msg.contains("schema version 3"), "got: {msg}");
             },
             other => panic!("expected unsupported-version, got {other:?}"),
         }
@@ -903,7 +1091,7 @@ mod tests {
 
     #[test]
     fn empty_key_package_rejected_at_compose() {
-        let err = compose(
+        let err = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &fixture_call_id(),
@@ -920,7 +1108,7 @@ mod tests {
     #[test]
     fn oversize_key_package_rejected_at_compose() {
         let too_big = vec![0_u8; MAX_KEY_PACKAGE_LEN + 1];
-        let err = compose(
+        let err = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &fixture_call_id(),
@@ -937,7 +1125,7 @@ mod tests {
     #[test]
     fn oversize_label_rejected_at_compose() {
         let too_long = "x".repeat(MAX_LABEL_LEN + 1);
-        let err = compose(
+        let err = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &fixture_call_id(),
@@ -957,7 +1145,7 @@ mod tests {
         // with another's — signature verify must fail.
         let signing_a = SigningKey::from_seed(&[0xAA; 32]);
         let signing_b = SigningKey::from_seed(&[0xBB; 32]);
-        let mut wire = compose(
+        let mut wire = compose_t(
             &signing_a,
             &fixture_account_id(),
             &fixture_call_id(),
@@ -985,7 +1173,7 @@ mod tests {
     fn owner_fingerprint_is_deterministic_per_pubkey() {
         // Same pubkey → same fingerprint, regardless of
         // the capability's other fields.
-        let cap_wire_a = compose(
+        let cap_wire_a = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &fixture_call_id(),
@@ -998,7 +1186,7 @@ mod tests {
         .unwrap();
         let mut another_call_id = fixture_call_id();
         another_call_id[0] = 0xFF;
-        let cap_wire_b = compose(
+        let cap_wire_b = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &another_call_id,
@@ -1023,7 +1211,7 @@ mod tests {
         let signing_a = SigningKey::from_seed(&[0xAA; 32]);
         let signing_b = SigningKey::from_seed(&[0xBB; 32]);
         let cap_a = decode_and_verify(
-            &compose(
+            &compose_t(
                 &signing_a,
                 &fixture_account_id(),
                 &fixture_call_id(),
@@ -1037,7 +1225,7 @@ mod tests {
         )
         .unwrap();
         let cap_b = decode_and_verify(
-            &compose(
+            &compose_t(
                 &signing_b,
                 &fixture_account_id(),
                 &fixture_call_id(),
@@ -1056,7 +1244,7 @@ mod tests {
     #[test]
     fn owner_fingerprint_matches_safety_number_format() {
         let cap = decode_and_verify(
-            &compose(
+            &compose_t(
                 &fixture_signing(),
                 &fixture_account_id(),
                 &fixture_call_id(),
@@ -1196,7 +1384,7 @@ mod tests {
         // different salts, so tags don't collide across
         // invite kinds even though one HMAC helper covers
         // both ecosystems.
-        let cap_a = compose(
+        let cap_a = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &fixture_call_id(),
@@ -1209,7 +1397,7 @@ mod tests {
         .unwrap();
         let mut other_call_id = fixture_call_id();
         other_call_id[0] = 0x99;
-        let cap_b = compose(
+        let cap_b = compose_t(
             &fixture_signing(),
             &fixture_account_id(),
             &other_call_id,

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Append-only journal handlers, shared by the per-group and per-device
-//! flows.
+//! Append-only journal handlers, shared by the per-group, per-device and
+//! rendezvous flows.
 //!
-//! The two queues (`ds_group_messages`, `ds_mailbox_messages`) have
-//! identical shape — `(id BIGINT AUTO_INCREMENT PK, owner_id BINARY(32),
+//! The queues (`ds_group_messages`, `ds_mailbox_messages`,
+//! `ds_group_knocks`, `ds_rendezvous_messages`) have identical shape — `(id BIGINT AUTO_INCREMENT PK, owner_id BINARY(32),
 //! payload LONGBLOB, created_at TIMESTAMP(3))` — so this module
 //! parameterises the SQL by table name and column name. Every handler
 //! is just a thin wrapper that picks the right `Queue`.
@@ -78,6 +78,11 @@ pub(crate) enum Queue {
     /// `ds_group_knocks`, `(group_id, ...)` - ADR-0053 section 4, the
     /// non-member's requests to join, kept apart from the members' rows.
     Knock,
+    /// `ds_rendezvous_messages`, `(rendezvous_id, ...)` - ADR-0060: the
+    /// pairing / recovery / courier meeting points, read and written without
+    /// a proof, in their own table so a rendezvous id can never name a
+    /// personal mailbox's rows.
+    Rendezvous,
 }
 
 impl Queue {
@@ -86,6 +91,7 @@ impl Queue {
             Queue::Group => "ds_group_messages",
             Queue::Mailbox => "ds_mailbox_messages",
             Queue::Knock => "ds_group_knocks",
+            Queue::Rendezvous => "ds_rendezvous_messages",
         }
     }
 
@@ -93,6 +99,7 @@ impl Queue {
         match self {
             Queue::Group | Queue::Knock => "group_id",
             Queue::Mailbox => "device_id",
+            Queue::Rendezvous => "rendezvous_id",
         }
     }
 }
@@ -234,6 +241,48 @@ pub(crate) async fn publish(
     // doing a fresh fetch will see the new row.
     notifiers.wake((queue, *owner_id));
 
+    Ok(Json(PublishResponse {
+        id,
+        created_at: row.0,
+    }))
+}
+
+/// Answer a mailbox publish exactly as [`publish`] would, and store nothing
+/// (ADR-0060 section 2: a proofless write to a closed mailbox).
+///
+/// The response must not tell the writer whether an account is behind the
+/// pseudonym, so it is not a made-up value: the row is inserted inside a
+/// transaction that is then rolled back. InnoDB does not hand an
+/// `AUTO_INCREMENT` value back on rollback, so the id is a real one from the
+/// same sequence a stored write draws from, and `created_at` is the same
+/// server clock. The payload is not written (an empty one is), so a dropped
+/// megabyte costs no undo log.
+pub(crate) async fn publish_dropped(
+    pool: &MySqlPool,
+    owner_id: &[u8; PSEUDONYM_LEN],
+) -> Result<Json<PublishResponse>, (StatusCode, String)> {
+    let db = |e: sqlx::Error| {
+        tracing::error!(error = %e, "dropped mailbox publish");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    };
+    let mut tx = pool.begin().await.map_err(db)?;
+    let result = sqlx::query("INSERT INTO ds_mailbox_messages (device_id, payload) VALUES (?, ?)")
+        .bind(&owner_id[..])
+        .bind(&[][..])
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
+    let id = result.last_insert_id();
+    let row: (DateTime<Utc>,) =
+        sqlx::query_as("SELECT created_at FROM ds_mailbox_messages WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db)?;
+    tx.rollback().await.map_err(db)?;
     Ok(Json(PublishResponse {
         id,
         created_at: row.0,
@@ -501,6 +550,8 @@ pub(crate) async fn get_group(
 pub(crate) async fn post_mailbox(
     State(state): State<AppState>,
     AxumPath(device_hex): AxumPath<String>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
@@ -516,9 +567,21 @@ pub(crate) async fn post_mailbox(
             ),
         ));
     }
-    // Deliberately ungated (ADR-0053 section 2): a mailbox is the cold inbox
-    // strangers are meant to reach; only reading it is the owner's.
-    let resp = publish(&state.db, &state.notifiers, Queue::Mailbox, &owner, &body).await?;
+    // ADR-0060 section 2: a claimed, closed mailbox takes a write only under
+    // a reach key (or a delegation from one). An unclaimed mailbox - the
+    // rendezvous inboxes - and an open one (Everyone) take any proofless
+    // write, as ADR-0053 left them. A proofless write to a closed mailbox is
+    // answered as if stored and dropped; a proof that fails is the uniform
+    // 401 whatever the mailbox's state.
+    let resp =
+        match crate::reach::gate_mailbox_write(&state, &owner, &method, &uri, &headers, &body)
+            .await?
+        {
+            crate::reach::MailboxWrite::Store => {
+                publish(&state.db, &state.notifiers, Queue::Mailbox, &owner, &body).await?
+            },
+            crate::reach::MailboxWrite::Drop => publish_dropped(&state.db, &owner).await?,
+        };
     Ok((StatusCode::CREATED, resp).into_response())
 }
 
@@ -531,7 +594,11 @@ pub(crate) async fn get_mailbox(
     Query(q): Query<FetchQuery>,
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&device_hex)?;
-    // ADR-0053: a claimed mailbox is read by its owner only.
+    // ADR-0053 + ADR-0060: a mailbox is personal and read by its owner only.
+    // An unclaimed mailbox has no owner key, so it answers the same 401 as a
+    // claimed one read without (or with a failing) proof: the answer never
+    // says whether a mailbox is claimed. Proofless meeting points are the
+    // rendezvous routes below.
     crate::access::gate_mailbox_read(&state, &owner, &method, &uri, &headers).await?;
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT);
     let wait = q.wait.unwrap_or(0);
@@ -543,6 +610,80 @@ pub(crate) async fn get_mailbox(
         q.after,
         limit,
         wait,
+    )
+    .await?;
+    let mut response = resp.into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
+}
+
+// ============================================================================
+// Rendezvous (ADR-0060)
+// ============================================================================
+
+/// The headers a rendezvous request must not carry: it is never claimable,
+/// so a proof or a delegation would gate nothing, and a client sending one
+/// has confused a rendezvous with a personal mailbox. Refused (400) rather
+/// than ignored, as the wake header is on a mailbox.
+fn refuse_rendezvous_headers(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
+    for name in [
+        lakko_ds_proof::PROOF_HEADER_NAME,
+        lakko_ds_proof::DELEGATION_HEADER_NAME,
+        crate::wake::WAKE_HEADER,
+    ] {
+        if headers.contains_key(name) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("{name} is not accepted on a rendezvous"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `POST /ds/rendezvous/{hex}/messages` - append to a rendezvous (pairing,
+/// recovery, the welcome courier, the state bundle). Anyone who knows the
+/// random id writes; no proof, no claim.
+pub(crate) async fn post_rendezvous(
+    State(state): State<AppState>,
+    AxumPath(rendezvous_hex): AxumPath<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, (StatusCode, String)> {
+    let owner = decode_pseudonym(&rendezvous_hex)?;
+    refuse_rendezvous_headers(&headers)?;
+    let resp = publish(
+        &state.db,
+        &state.notifiers,
+        Queue::Rendezvous,
+        &owner,
+        &body,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, resp).into_response())
+}
+
+/// `GET /ds/rendezvous/{hex}/messages` - `?after=<id>&limit=<n>&wait=<secs>`,
+/// the mailbox semantics, no proof.
+pub(crate) async fn get_rendezvous(
+    State(state): State<AppState>,
+    AxumPath(rendezvous_hex): AxumPath<String>,
+    headers: HeaderMap,
+    Query(q): Query<FetchQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    let owner = decode_pseudonym(&rendezvous_hex)?;
+    refuse_rendezvous_headers(&headers)?;
+    let resp = fetch_with_wait(
+        &state.db,
+        &state.notifiers,
+        Queue::Rendezvous,
+        &owner,
+        q.after,
+        q.limit.unwrap_or(DEFAULT_LIMIT),
+        q.wait.unwrap_or(0),
     )
     .await?;
     let mut response = resp.into_response();
@@ -569,11 +710,17 @@ pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
         loop {
             interval.tick().await;
             crate::access::prune_nonces(&pool).await;
+            crate::reach::prune_expired(&pool).await;
             crate::access::prune_group_access(&pool, RETENTION_SECS).await;
-            for queue in [Queue::Group, Queue::Mailbox, Queue::Knock] {
+            for queue in [
+                Queue::Group,
+                Queue::Mailbox,
+                Queue::Knock,
+                Queue::Rendezvous,
+            ] {
                 let retention = match queue {
                     Queue::Knock => crate::access::KNOCK_RETENTION_SECS,
-                    Queue::Group | Queue::Mailbox => RETENTION_SECS,
+                    Queue::Group | Queue::Mailbox | Queue::Rendezvous => RETENTION_SECS,
                 };
                 let sql = format!(
                     "DELETE FROM {} WHERE created_at < NOW(3) - INTERVAL ? SECOND",
@@ -639,6 +786,8 @@ mod tests {
         assert_eq!(Queue::Mailbox.owner_col(), "device_id");
         assert_eq!(Queue::Knock.table(), "ds_group_knocks");
         assert_eq!(Queue::Knock.owner_col(), "group_id");
+        assert_eq!(Queue::Rendezvous.table(), "ds_rendezvous_messages");
+        assert_eq!(Queue::Rendezvous.owner_col(), "rendezvous_id");
     }
 
     #[test]

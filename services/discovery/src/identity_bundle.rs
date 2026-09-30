@@ -1113,7 +1113,7 @@ mod tests {
             .connect(&url)
             .await
             .expect("connect test DB");
-        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        crate::anon_token_route_tests::migrate_once(&pool).await;
 
         // An isolated account so the test never collides with other rows.
         let acct = [0xB0u8; ACCOUNT_ID_LEN];

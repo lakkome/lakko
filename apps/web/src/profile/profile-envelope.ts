@@ -34,6 +34,24 @@ export interface ReceivedProfile {
    *  call roster derives the ADR-0021 peer tag from, and nothing else. Copied
    *  out of the wasm handle, so it outlives `free()`. */
   readonly accountId: Uint8Array | null;
+  /** ADR-0060 profile v3 — the discovery-signed username certificate the
+   *  sender carries, or `null`. Verified by the viewer before the username
+   *  is shown (`verifyUsernameBinding`). */
+  readonly usernameCertificate?: Uint8Array | null;
+  /** ADR-0060 profile v3 — the reach grants the envelope carried, as
+   *  37-byte grant wires in base64 with their class byte and version.
+   *  SECRET (each lets its holder write to the sender's mailbox): kept only
+   *  under the rules of `reach/grant-rules.ts`, never logged. */
+  readonly grants?: readonly ReceivedGrantWire[];
+}
+
+/** One grant from a profile, detached from the wasm handle. */
+export interface ReceivedGrantWire {
+  /** The class wire byte (1 contact .. 7 fof). */
+  readonly classByte: number;
+  readonly version: number;
+  /** Standard base64 of the 37-byte grant wire. */
+  readonly wireB64: string;
 }
 
 export type ProfileSniff =
@@ -48,8 +66,13 @@ export interface ProfileDecoder {
     readonly username: string | undefined;
     readonly updatedAtMs: bigint;
     readonly accountId?: Uint8Array | undefined;
+    readonly usernameCertificate?: Uint8Array | undefined;
+    readonly grants?: readonly { readonly class: number; readonly version: number; free?(): void }[];
     free?(): void;
   };
+  /** Encodes a grant to its 37-byte wire (`encodeReachGrant`); absent in a
+   *  decoder that never sees grants. */
+  encodeReachGrant?(grant: never): Uint8Array;
 }
 
 /** First byte every `lakko/…` service-envelope domain starts with. A cheap
@@ -73,11 +96,32 @@ export function sniffProfile(decoder: ProfileDecoder, bytes: Uint8Array): Profil
     // real message; let the chat parser have it.
     return code === undefined || code === "wrongDomain" ? { kind: "none" } : { kind: "malformed" };
   }
+  const grants: ReceivedGrantWire[] = [];
+  for (const g of decoded.grants ?? []) {
+    try {
+      if (decoder.encodeReachGrant !== undefined) {
+        grants.push({
+          classByte: g.class,
+          version: g.version,
+          wireB64: bytesToBase64(decoder.encodeReachGrant(g as never)),
+        });
+      }
+    } finally {
+      try {
+        g.free?.();
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
   const profile: ReceivedProfile = {
     displayName: decoded.displayName ?? null,
     username: decoded.username ?? null,
     updatedAtMs: decoded.updatedAtMs,
     accountId: decoded.accountId === undefined ? null : decoded.accountId.slice(),
+    usernameCertificate:
+      decoded.usernameCertificate === undefined ? null : decoded.usernameCertificate.slice(),
+    grants,
   };
   try {
     decoded.free?.();
@@ -85,4 +129,10 @@ export function sniffProfile(decoder: ProfileDecoder, bytes: Uint8Array): Profil
     // Freeing is best-effort.
   }
   return { kind: "profile", profile };
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] ?? 0);
+  return btoa(bin);
 }

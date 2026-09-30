@@ -484,7 +484,11 @@ extension LinkCallHost {
                     ownerSigningSeed: identity.ed25519Seed(),
                     ownerAccountId: secrets.accountId,
                     identity: identity,
-                    discoveryClient: DiscoveryClient(sessionToken: secrets.sessionToken)
+                    discoveryClient: DiscoveryClient(sessionToken: secrets.sessionToken),
+                    linkGrant: { linkId, expiresAtMs in
+                        try await ReachCenter.shared.newLinkGrant(
+                            linkId: linkId, expiresAtMs: expiresAtMs)
+                    }
                 ).url
             }
         ))

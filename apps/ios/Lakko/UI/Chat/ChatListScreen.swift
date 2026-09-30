@@ -55,6 +55,10 @@ public struct ChatListScreen: View {
     /// `docs/ux/chat-folders.md` 2.2 — Reorder folders / Edit folders open
     /// Settings > Chat folders (`true` = in its reorder state).
     public var onOpenFolderSettings: (_ reorder: Bool) -> Void
+    /// ADR-0060 — "Search people" (`docs/ux/who-can-find-me.md` section 6.1):
+    /// the network search for a username or a name, and the request to one of
+    /// its results. `nil` hides the row.
+    public var peopleSearch: PeopleSearchActions?
 
     /// Phase 2a3e2c-iOS — cross-device per-thread flags (pinned / muted /
     /// archived). The Combine subscription inside ``DeviceGroupSyncRepository``
@@ -75,7 +79,8 @@ public struct ChatListScreen: View {
         onCreate: @escaping (CreateChoice) -> Void,
         onFoundChannel: @escaping (String, String) -> Void,
         onFoundPerson: @escaping (String) -> Void,
-        onOpenFolderSettings: @escaping (Bool) -> Void = { _ in }
+        onOpenFolderSettings: @escaping (Bool) -> Void = { _ in },
+        peopleSearch: PeopleSearchActions? = nil
     ) {
         self.viewModel = viewModel
         self.channels = channels
@@ -84,6 +89,7 @@ public struct ChatListScreen: View {
         self.onFoundChannel = onFoundChannel
         self.onFoundPerson = onFoundPerson
         self.onOpenFolderSettings = onOpenFolderSettings
+        self.peopleSearch = peopleSearch
     }
 
     /// Spec section 4 — the field covers users, groups and channels. The local
@@ -335,6 +341,9 @@ public struct ChatListScreen: View {
                         Text("No results")
                             .foregroundStyle(Color.lakkoTextMuted)
                         lookupSection
+                        if let peopleSearch {
+                            PeopleSearchSection(query: query, actions: peopleSearch)
+                        }
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, 16)
@@ -379,6 +388,12 @@ public struct ChatListScreen: View {
                         rowActions(row: row, folder: folder, inMenu: true)
                         folderActions(row: row, folder: folder)
                     }
+                }
+                // ADR-0060 — the network search stays offered under the local
+                // results (UX section 6.1).
+                if !query.isEmpty, let peopleSearch {
+                    PeopleSearchSection(query: query, actions: peopleSearch)
+                        .listRowSeparator(.hidden)
                 }
             }
             .listStyle(.plain)

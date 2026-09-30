@@ -17,6 +17,7 @@
 
 import { loadWasm, type Wasm } from "../wasm";
 import { rethrowAsLegacyChannel } from "./legacy-v1";
+import { isStaleSubscriberKey } from "./member-card-rules";
 import { DsClient } from "../ds/client";
 import { claimOrReset } from "../ds/ownership";
 
@@ -297,7 +298,7 @@ export async function decodeAndDecryptPost(
 // ---------------------------------------------------------
 
 /**
- * Subscriber-side X25519 keypair. The public half is what
+ * Subscriber-side Ed25519 keypair. The public half is what
  * gets registered on `POST /v1/channels/:id/subscribers`;
  * the secret half stays on the device + unwraps the per-
  * subscriber HPKE seed envelopes the publisher fans out
@@ -309,13 +310,15 @@ export async function decodeAndDecryptPost(
  * into IndexedDB encrypted under the device-group key.
  */
 export interface ChannelSubscriberKeys {
-  /** 32-byte X25519 secret. */
+  /** 32-byte Ed25519 seed (ADR-0060: the seed envelope's X25519 key is
+   *  derived from it inside the core). */
   readonly secret: Uint8Array;
-  /** 32-byte X25519 public. */
+  /** 32-byte Ed25519 public key - what the channel registers, and what
+   *  member-card requests are signed under. */
   readonly public: Uint8Array;
 }
 
-/** Build a fresh X25519 keypair for joining a channel as
+/** Build a fresh Ed25519 keypair for joining a channel as
  *  a subscriber. Backed by `crypto.getRandomValues` via
  *  the `getrandom + js` feature on the wasm side. */
 export async function freshSubscriberKeys(): Promise<ChannelSubscriberKeys> {
@@ -332,8 +335,27 @@ export async function freshSubscriberKeys(): Promise<ChannelSubscriberKeys> {
 }
 
 /**
+ * `true` when `keys` is an ADR-0060 Ed25519 key pair: its stored public
+ * half is the Ed25519 public key of its secret. A pair stored before the
+ * flag day is an X25519 pair and fails this; the caller regenerates it and
+ * registers the new public key (no migration - nothing is deployed).
+ */
+export async function isCurrentSubscriberKey(keys: ChannelSubscriberKeys): Promise<boolean> {
+  const wasm = await loadWasm();
+  let kp: InstanceType<Wasm["ChannelSubscriberKeypair"]> | null = null;
+  try {
+    kp = new wasm.ChannelSubscriberKeypair(keys.secret);
+    return !isStaleSubscriberKey(keys.public, kp.public());
+  } catch {
+    return false;
+  } finally {
+    kp?.free();
+  }
+}
+
+/**
  * Seal a 32-byte content-key seed against a subscriber's
- * X25519 public key. Returns the 80-byte wire bytes ready
+ * Ed25519 public key (sealed to its X25519 image). Returns the 80-byte wire bytes ready
  * to base64url-encode and `POST
  * /v1/channels/:id/subscribers/:pk/envelope`.
  *

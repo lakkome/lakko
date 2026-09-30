@@ -147,6 +147,10 @@ public class DeviceGroupSyncRepository(
     private val activeAccountId = AtomicReference<ByteArray?>(null)
     @Volatile private var pollJob: Job? = null
 
+    /** The publisher this runtime installed on the reach manager, so a
+     *  teardown removes only its own. */
+    @Volatile private var reachPublisher: ((ByteArray) -> Unit)? = null
+
     /** The account whose forked DeviceGroup this session already re-founded
      *  ([repairFork]); the repair runs at most once per session per account. */
     @Volatile private var forkRepairedFor: String? = null
@@ -289,6 +293,7 @@ public class DeviceGroupSyncRepository(
             rootSigner = me.lakko.app.devices.DeviceGroupJournalAccess.rootOfSeed(accountIdentitySeed, groupId)
         }
         installJournalSigner(groupId)
+        installReachPublisher()
         pollJob = scope.launch {
             claimJournalBestEffort(groupId, refounded = true)
             val forkedAt = runPollLoop(
@@ -893,9 +898,20 @@ public class DeviceGroupSyncRepository(
                             val parsed = parseDevicegroupPayload(
                                 processed.`data`,
                             )
-                            // Every kind, the two ADR-0058 ones included, folds
-                            // through the one Rust fold.
-                            fold(parsed)
+                            val body = parsed.body
+                            if (body is DeviceGroupBody.ServiceEnvelope) {
+                                // ADR-0060 section 7 — the Visibility setting and
+                                // the ReachState counters from another of this
+                                // account's devices. The reach manager dispatches
+                                // the envelope, keeps it only when strictly newer,
+                                // and drops any other kind. Not a synced register.
+                                me.lakko.app.reach.ReachManager.get(applicationContext)
+                                    .adoptDeviceSync(body.envelope)
+                            } else {
+                                // Every other kind, the two ADR-0058 ones
+                                // included, folds through the one Rust fold.
+                                fold(parsed)
+                            }
                         } catch (cause: Throwable) {
                             // A refused FolderChanges / StateSnapshot is
                             // skipped; the next write of those registers from
@@ -991,6 +1007,49 @@ public class DeviceGroupSyncRepository(
         return DeviceGroupJournalAccess.signerOf(g, id)?.epoch
     }
 
+    /**
+     * ADR-0060 section 7 — send one `lakko-contacts` envelope (Visibility or
+     * ReachState, stamped by the reach manager and never re-stamped here) to
+     * the account's other devices as a DeviceGroup `ServiceEnvelope` body.
+     * The snapshot is persisted before the publish, so a crash in between
+     * never lets a later handle reuse this message's ratchet position.
+     */
+    private suspend fun sendServiceEnvelope(envelope: ByteArray) {
+        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
+        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+        val accountIdB64 = activeAccountIdB64.get()
+            ?: error("DeviceGroupSync not bootstrapped")
+        val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
+        DeviceGroupLifecycle.persistSnapshot(
+            context = applicationContext,
+            identity = id,
+            accountIdB64 = accountIdB64,
+        )
+        DsClient().use { ds ->
+            ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null))
+        }
+    }
+
+    /** Route the reach manager's outgoing sync envelopes through this
+     *  runtime's DeviceGroup handle. */
+    private fun installReachPublisher() {
+        val publisher: (ByteArray) -> Unit = { envelope ->
+            val copy = envelope.copyOf()
+            scope.launch {
+                try {
+                    sendServiceEnvelope(copy)
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (cause: Throwable) {
+                    Log.w(LOG_TAG, "reach sync envelope not sent: ${cause.javaClass.simpleName}")
+                }
+            }
+        }
+        reachPublisher = publisher
+        me.lakko.app.reach.ReachManager.get(applicationContext).deviceSyncPublisher = publisher
+    }
+
     /** ADR-0053 — install the DeviceGroup journal's signer source: derived
      *  from whatever handle this repository holds now. */
     private fun installJournalSigner(groupId: ByteArray) {
@@ -1078,6 +1137,12 @@ public class DeviceGroupSyncRepository(
         identity.set(null)
         group.set(null)
         rootSigner = null
+        reachPublisher?.let { installed ->
+            me.lakko.app.reach.ReachManager.peek()?.let { reach ->
+                if (reach.deviceSyncPublisher === installed) reach.deviceSyncPublisher = null
+            }
+        }
+        reachPublisher = null
         DsSignerRegistry.shared.clearOwner(DeviceGroupJournalAccess.REGISTRY_OWNER)
     }
 

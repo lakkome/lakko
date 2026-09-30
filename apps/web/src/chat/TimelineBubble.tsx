@@ -217,6 +217,11 @@ export function TimelineBubble(
       // `rows()`. Defensive.
       return null;
     }
+    if (ev.kind === "scopedDiscovery") {
+      // ADR-0060 — dispatched to its handler by the receive loop, never
+      // pushed into `rows()`. Defensive.
+      return null;
+    }
     if (ev.kind === "registrarSeed") {
       // ADR-0057 — consumed at receipt by the chat client, never a row.
       // Defensive.

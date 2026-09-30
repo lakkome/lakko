@@ -444,16 +444,22 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.AnonToken,
                 is FfiException.AnonTokenAlreadyFinalized,
                 -> null
-                // ADR-0049 section 2 (device-link PAKE) and the sealed invite
-                // links: not membership refusals.
-                is FfiException.DeviceLink,
+                // ADR-0049 device link, the sealed invite links of the
+                // 2026-09-28 security pass, and ADR-0060 scoped discovery:
+                // none is a membership refusal.
                 is FfiException.DeviceLinkWrongCode,
+                is FfiException.DeviceLink,
                 is FfiException.InviteLinkDamaged,
                 // ADR-0058 - a refused DeviceGroup folder / snapshot payload
                 // and a refused synced-state operation; not membership
                 // refusals.
                 is FfiException.DeviceGroupPayloadRefused,
                 is FfiException.SyncedState,
+                is FfiException.Reach,
+                is FfiException.Introduction,
+                is FfiException.Visibility,
+                is FfiException.UsernameCertificate,
+                is FfiException.CommitterDelegation,
                 -> null
 
                 // Everything that is NOT a membership refusal. Enumerated

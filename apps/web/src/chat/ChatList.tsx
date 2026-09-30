@@ -32,9 +32,8 @@ import { useCallHost } from "../calls/CallHostContext";
 import { quietCallKindLabel, quietCallOfferFor } from "../calls/quiet-call-offer";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { restoredKind } from "../auth/restore-marker";
-import { findByName, findByNameMessage } from "./find-by-name";
-import { DiscoveryClient } from "../discovery/client";
-import { bytesToHex } from "../channels/composer";
+import { personKeysOf } from "./person-key";
+import { PeopleSearch } from "../search/PeopleSearch";
 import { rowHasUnread, type ConversationRow } from "./conversation-list";
 import { createConversationRows } from "./conversation-rows";
 import { uiRules } from "./ui-rules";
@@ -308,58 +307,20 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
 
-  /**
-   * Look the typed name up on the network.
-   *
-   * Both namespaces, because the person does not know which one holds the
-   * name they were given. A channel can be opened straight away; a person
-   * leads into the contact request, which is Contacts' flow, so the name
-   * travels there rather than being half-answered here.
-   */
-  const [lookupBusy, setLookupBusy] = createSignal(false);
-  const [lookupNote, setLookupNote] = createSignal<string | null>(null);
-  const lookUp = async (): Promise<void> => {
-    if (lookupBusy()) return;
-    setLookupBusy(true);
-    setLookupNote(null);
-    const typed = query();
-    const rules = uiRules();
-    if (rules === null) {
-      setLookupBusy(false);
-      return;
-    }
-    try {
-      const client = new DiscoveryClient();
-      const found = await findByName(
-        typed,
-        {
-          channel: async (handle) => {
-            const found = await client.lookupChannel(handle);
-            return found.channel === null ? null : bytesToHex(found.channel);
-          },
-          person: async (username) => {
-            const found = await client.lookup(username);
-            return found.account === null ? null : found.normalisedUsername;
-          },
-        },
-        rules,
-      );
-      if (found.kind === "channel") {
-        setQuery("");
-        navigate(paths.channelSubscribe(found.channelIdHex), {
-          state: { handle: found.handle },
-        });
-        return;
-      }
-      if (found.kind === "person") {
-        setQuery("");
-        navigate(paths.contacts, { state: { username: found.username } });
-        return;
-      }
-      setLookupNote(findByNameMessage(found, typed, rules));
-    } finally {
-      setLookupBusy(false);
-    }
+  /** The people in this device's groups, as base64 account keys - what the
+   *  people half of the search field (`search/PeopleSearch.tsx`) matches
+   *  locally beside the contacts. */
+  const groupPeopleKeys = createMemo((): readonly string[] => {
+    const out = new Set<string>();
+    for (const g of chats.groups()) for (const k of personKeysOf(g.group)) out.add(k);
+    return [...out];
+  });
+
+  /** A channel the people search found by its handle opens its subscribe
+   *  page. */
+  const openFoundChannel = (channelIdHex: string, handle: string): void => {
+    setQuery("");
+    navigate(paths.channelSubscribe(channelIdHex), { state: { handle } });
   };
 
   /** ADR-0050 — a device that landed through a recovery route (three words,
@@ -513,9 +474,6 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         }
       >
         <div class="lk-pane-body">
-          <Show when={visibleRows().length === 0 && (searching() || currentFolder() === null)}>
-            <p class="lk-pane-nomatch">No results</p>
-          </Show>
           {/* UX 2.4 - one sentence whatever the filter; the person made it. */}
           <Show when={visibleRows().length === 0 && !searching() && currentFolder() !== null}>
             <div class="lk-folder-empty">
@@ -531,37 +489,6 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                 Edit folder
               </button>
             </div>
-          </Show>
-          {/* `docs/ux/navigation.md` section 4 - a group and a channel are
-              kinds of conversation, so finding one belongs here rather than
-              in Contacts, and so does finding a person to talk to. Offered
-              as ONE row for the whole name, never as partial matches: the
-              server answers the blinded name it was given and cannot answer
-              a prefix. */}
-          <Show
-            when={
-              visibleRows().length === 0 &&
-              uiRules()?.looksLikeAName(query()) === true
-            }
-          >
-            <button
-              type="button"
-              class="lk-pane-lookup"
-              disabled={lookupBusy()}
-              onClick={() => void lookUp()}
-            >
-              <Icon name="search" size={16} />
-              {lookupBusy()
-                ? "Looking up..."
-                : `Look up @${uiRules()?.bareName(query()) ?? query()}`}
-            </button>
-          </Show>
-          <Show when={lookupNote()}>
-            {(note) => (
-              <p class="lk-pane-nomatch" role="status">
-                {note()}
-              </p>
-            )}
           </Show>
           <For each={visibleRows()}>
             {(row) => {
@@ -773,6 +700,19 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               );
             }}
           </For>
+          {/* `docs/ux/who-can-find-me.md` section 6.1 - the people half of
+              the field: the people this device knows, matched as the person
+              types, and one Search people row that asks the network for the
+              username, the name and the channel handle, and adds what it
+              finds to the same list. `docs/ux/navigation.md` section 4. */}
+          <Show when={query().trim().length > 0}>
+            <PeopleSearch
+              query={query}
+              conversationMatches={() => visibleRows().length}
+              groupPeopleKeys={groupPeopleKeys}
+              onOpenChannel={openFoundChannel}
+            />
+          </Show>
         </div>
       </Show>
       <Show when={menu()}>

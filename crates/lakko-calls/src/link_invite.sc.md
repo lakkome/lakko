@@ -54,7 +54,7 @@ Because every member computes the same answer from the same snapshot, **failover
 
 - **Does not decode or verify the capability.** The caller runs `lakko_contacts::call_invite::decode_and_verify` first and passes the validated struct. This module trusts the `CallInviteCapability`.
 - **Does not check expiry.** `is_valid_now(now_ms)` is the caller's job; any capability is accepted here — expiry is treated as a UX concern.
-- **Does not deliver the Welcome / ferry any bytes.** Transport (SFU `signal-relay` for a live call, or the stranger-inbox `wrap_call_kp_forward` / `wrap_call_welcome` envelopes for cold start, routed by `owner_account_id`) is the platform's layer.
+- **Does not deliver the Welcome / ferry any bytes.** Transport (SFU `signal-relay` for a live call, or the stranger-inbox `wrap_call_kp_forward` / `wrap_call_welcome` envelopes for cold start, routed by `owner_account_id`) is the platform's layer. Since ADR-0060 §6 both mailboxes on a cold start are closed: the joiner writes the `ContactRequest` carrying its forward under the capability's `link` grant, and seals its own `reply` grant inside that request so the Welcome can come back. Neither key passes through this module.
 - **Does not enforce `max_uses` or per-joiner dedup.** The discovery `/c/<blob_id>` blob enforces `max_uses`; the acting committer dedups by `(call_id, joiner leaf key)` (ADR-0032, G-22). This module just founds / admits / joins.
 - **Does not verify that the caller is the elected committer.** `admit_joiner` will commit for anyone; the deterministic election is what keeps exactly one committer active — enforcing it is the orchestration layer's responsibility.
 

@@ -216,7 +216,11 @@ describe("sealed links: compose, upload shape, open, damaged (all three kinds)",
     return out;
   }
   function mintContact() {
-    const m = wasm.InviteCapability.compose(seedA, account, x25519, 0n, 0, false, "hi");
+    // ADR-0060 section 6: every /i/ and /c/ mint carries its link's reach grant.
+    const linkId = wasm.generateLinkId();
+    const grant = wasm.deriveReachGrant(seedA, wasm.ReachClass.Link, linkId, 0);
+    const m = wasm.InviteCapability.compose(seedA, account, x25519, 0n, 0, false, "hi", linkId, grant);
+    grant.free();
     const out = { sealed: m.sealed, secret: m.linkSecret, issuer: m.issuerPubkey };
     m.free();
     return out;
@@ -224,7 +228,22 @@ describe("sealed links: compose, upload shape, open, damaged (all three kinds)",
   function mintCall() {
     const identity = new wasm.Identity("alice");
     const kp = identity.createKeyPackage();
-    const m = wasm.composeCallInviteCapability(seedA, account, bytes(16, 0x3c), 0n, 0, true, false, kp, "");
+    const linkId = wasm.generateLinkId();
+    const grant = wasm.deriveReachGrant(seedA, wasm.ReachClass.Link, linkId, 0);
+    const m = wasm.composeCallInviteCapability(
+      seedA,
+      account,
+      bytes(16, 0x3c),
+      0n,
+      0,
+      true,
+      false,
+      kp,
+      "",
+      linkId,
+      grant,
+    );
+    grant.free();
     const out = { sealed: m.sealed, secret: m.linkSecret, issuer: m.issuerPubkey };
     m.free();
     identity.free();

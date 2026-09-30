@@ -841,6 +841,18 @@ internal fun toEvent(
                     senderLeaf = processed.senderLeaf,
                     createdAt = createdAt,
                 )
+            } else if (me.lakko.app.reach.scopedEnvelopeKindOf(processed.data) != null) {
+                // ADR-0060 — a scoped-discovery service envelope. Never a
+                // timeline bubble: every domain ends in a NUL byte, so the
+                // prefix is a complete classification, and one that does not
+                // decode is dropped by the repository rather than rendered.
+                IncomingChatEvent.ScopedDiscovery(
+                    messageId = messageId,
+                    kind = me.lakko.app.reach.scopedEnvelopeKindOf(processed.data)!!,
+                    bytes = processed.data,
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
             } else if (looksLikeProfileEnvelope(processed.data)) {
                 // ADR-0048 — a member's profile. Never a timeline bubble.
                 // The sender is resolved to its signature KEY here, one line
@@ -1514,6 +1526,19 @@ public sealed interface IncomingChatEvent {
         val wellFormed: Boolean,
         val senderKey: MemberIdentity?,
         val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** ADR-0060 — one of the scoped-discovery service envelopes
+     *  (introduction offer / bundle, committer delegation; a Visibility or
+     *  ReachState that reached a conversation is dropped by the repository). Never a timeline row. [senderKey] is the
+     *  sender's account key resolved at receipt (C-68); [bytes] the whole
+     *  plaintext, decoded by the repository. */
+    public class ScopedDiscovery(
+        public val messageId: Long,
+        public val kind: me.lakko.app.reach.ScopedEnvelopeKind,
+        public val bytes: ByteArray,
+        public val senderKey: MemberIdentity?,
+        public val createdAt: String,
     ) : IncomingChatEvent
 }
 

@@ -145,6 +145,7 @@ import { wipeChannelsForAccount } from "../state/channels-state";
 import { clearConversationKinds } from "../chat/conversation-kind-store";
 import { deleteProfileRow } from "../profile/profile-idb";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
+import { deleteReachRows } from "../reach/reach-store";
 import { deletePendingRootSeedRow, deleteRegistrarSeedRow } from "../ds/registrar-seed-idb";
 import { clearRootHeldAll } from "../ds/root-held";
 import { clearAppointmentRecords } from "../ds/appointments";
@@ -3377,6 +3378,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         } catch {
           // best-effort
         }
+        // ADR-0060 — the encrypted reach rows (this device's reach book, the
+        // grants others handed us, the setting, the kept introductions and the
+        // publication state), same contract. Never throws.
+        await deleteReachRows(cached.accountIdB64);
         // ADR-0024 — the encrypted read-watermark row, same contract.
         try {
           await deleteReadWatermarkRow(cached.accountIdB64);

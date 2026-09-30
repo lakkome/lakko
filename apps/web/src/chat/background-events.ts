@@ -87,6 +87,8 @@ export interface BackgroundEventPlan {
   readonly groupNames: readonly Of<"group-name">[];
   /** ADR-0052 decision 3 — shared pins, for the role-gated receive. */
   readonly pins: readonly Of<"pin">[];
+  /** ADR-0060 — scoped-discovery service envelopes, for their handlers. */
+  readonly scoped: readonly Of<"scopedDiscovery">[];
   /** Proposals the receipt gate STORED; a refused one is a pending request
    *  nowhere. */
   readonly storedProposals: readonly Of<"membershipProposal">[];
@@ -106,6 +108,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
   const beacons: Of<"committerBeacon">[] = [];
   const groupNames: Of<"group-name">[] = [];
   const pins: Of<"pin">[] = [];
+  const scoped: Of<"scopedDiscovery">[] = [];
   const readReceipts: Of<"op">[] = [];
   const messageOps: MessageOpEvent[] = [];
   const storedProposals: Of<"membershipProposal">[] = [];
@@ -161,6 +164,9 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
       case "pin":
         pins.push(e);
         break;
+      case "scopedDiscovery":
+        scoped.push(e);
+        break;
       case "registrarSeed":
         // ADR-0057 — consumed at receipt by the chat client and never handed
         // on; a stray one is dropped here rather than rendered.
@@ -189,6 +195,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
     messageOps,
     groupNames,
     pins,
+    scoped,
     storedProposals,
     sawCommit,
   };

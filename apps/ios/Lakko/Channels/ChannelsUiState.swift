@@ -462,6 +462,13 @@ public final class ChannelsUiState: ObservableObject {
             guard let secret = Data(hexString: row.secretHex),
                   let pub = Data(hexString: row.publicHex)
             else { continue }
+            // ADR-0060 section 3 — a subscriber key is Ed25519 now (it signs
+            // the member card). A row written before that holds an X25519
+            // pair, whose secret re-read as an Ed25519 seed names a different
+            // public key: drop it, so the channel is re-subscribed with a
+            // fresh Ed25519 key rather than read under one the server refuses.
+            guard let rebuilt = try? ChannelSubscriberKeypair.fromSecret(secret: secret),
+                  rebuilt.`public`() == pub else { continue }
             out[row.channelId] = ChannelSubscriberKeys(
                 secret: secret,
                 publicKey: pub

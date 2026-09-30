@@ -298,7 +298,7 @@ class CommitterSweepTest {
         outbox = outbox,
         cursor = cursor,
         actingCommitter = { acting },
-        welcomeMailbox = { key -> key },
+        welcomeTargets = { keys -> keys },
         wrapWelcome = { welcome -> welcome },
         markOwnPublished = {},
         persist = { persisted.add(Unit) },
@@ -360,7 +360,7 @@ class CommitterSweepTest {
                 outbox = recordingOutbox,
                 cursor = FakeCursor(),
                 actingCommitter = { ActingCommitter.Act },
-                welcomeMailbox = { it },
+                welcomeTargets = { it },
                 wrapWelcome = { it },
                 markOwnPublished = {},
                 persist = {},
@@ -449,7 +449,7 @@ class CommitterSweepTest {
                 id = "entry-restart",
                 commitB64 = "1",
                 welcomeEnvelopeB64 = "2",
-                welcomeMailboxesB64 = listOf("9"),
+                welcomeLeafKeysB64 = listOf("9"),
             ),
         )
 
@@ -563,7 +563,7 @@ class CommitterSweepTest {
                 outbox = FakeOutbox(),
                 cursor = FakeCursor(),
                 actingCommitter = { throw IllegalStateException("store unreadable") },
-                welcomeMailbox = { it },
+                welcomeTargets = { it },
                 wrapWelcome = { it },
                 markOwnPublished = {},
                 persist = {},
@@ -605,7 +605,7 @@ class CommitterSweepTest {
                     outbox = FakeOutbox(),
                     cursor = FakeCursor(),
                     actingCommitter = { ActingCommitter.Act },
-                    welcomeMailbox = { it },
+                    welcomeTargets = { it },
                     wrapWelcome = { it },
                     markOwnPublished = {},
                     persist = {},
@@ -954,7 +954,7 @@ class CommitterSweepTest {
             id = "entry-owed",
             commitB64 = "1",
             welcomeEnvelopeB64 = null,
-            welcomeMailboxesB64 = emptyList(),
+            welcomeLeafKeysB64 = emptyList(),
         )
         val journal = FakeJournal(rows = listOf(row(id = 50, tag = 7)))
         journal.nextId = 101
@@ -1083,7 +1083,7 @@ class CommitterSweepTest {
                 outbox = recordingOutbox,
                 cursor = FakeCursor(),
                 actingCommitter = { ActingCommitter.Act },
-                welcomeMailbox = { it },
+                welcomeTargets = { it },
                 wrapWelcome = { it },
                 markOwnPublished = {},
                 persist = {},
@@ -1109,7 +1109,7 @@ class CommitterSweepTest {
             id = "entry-owed",
             commitB64 = "1",
             welcomeEnvelopeB64 = "2",
-            welcomeMailboxesB64 = listOf("3"),
+            welcomeLeafKeysB64 = listOf("3"),
         )
         val outbox = FakeOutbox(owed = owed)
         // Belt to that braces: even with the marker wrongly present, a staged
@@ -1262,7 +1262,7 @@ class CommitterSweepTest {
                 outbox = recordingOutbox,
                 cursor = base.cursor,
                 actingCommitter = base.actingCommitter,
-                welcomeMailbox = base.welcomeMailbox,
+                welcomeTargets = base.welcomeTargets,
                 wrapWelcome = base.wrapWelcome,
                 markOwnPublished = base.markOwnPublished,
                 persist = base.persist,
@@ -1295,7 +1295,7 @@ class CommitterSweepTest {
                     outbox = base.outbox,
                     cursor = base.cursor,
                     actingCommitter = base.actingCommitter,
-                    welcomeMailbox = base.welcomeMailbox,
+                    welcomeTargets = base.welcomeTargets,
                     wrapWelcome = base.wrapWelcome,
                     markOwnPublished = base.markOwnPublished,
                     persist = base.persist,

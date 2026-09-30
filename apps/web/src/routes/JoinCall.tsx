@@ -142,6 +142,7 @@ export default function JoinCall() {
   const [decoded, { refetch }] = createResource(
     slugSignal,
     async ({ slug, hash }): Promise<DecodedCall | null> => {
+      let cap: import("../../wasm/lakko_ffi_wasm").CallInviteCapability | null = null;
       try {
         setRateLimited(false);
         setDamaged(false);
@@ -159,12 +160,15 @@ export default function JoinCall() {
           open: (sealed, secret) => wasm.CallInviteCapability.openLink(sealed, secret),
         });
         if (opened.kind === "not-found") return null;
-        const cap = opened.capability;
+        cap = opened.capability;
         const identity = chats.identity();
         const isOwner =
           identity !== null &&
           hexKey(identity.signaturePublicKey) ===
             hexKey(cap.ownerSignaturePubkey);
+        // The page carries only what the call needs. The link's reach grant
+        // is not kept: this web flow joins over the SFU relay and writes
+        // nothing to the owner's mailbox.
         return {
           callId: cap.callId,
           ownerAccountId: cap.ownerAccountId,
@@ -185,8 +189,10 @@ export default function JoinCall() {
           return null;
         }
         // eslint-disable-next-line no-console
-        console.warn("join-call: decode/verify failed", err);
+        console.warn("join-call: open/verify failed", err);
         return null;
+      } finally {
+        cap?.free();
       }
     },
   );
@@ -372,6 +378,10 @@ export default function JoinCall() {
             <button type="button" class="primary" onClick={() => void refetch()}>
               {INVITE_LINK_TRY_AGAIN}
             </button>
+            <A href={paths.home}>Open Lakko</A>
+          </Show>
+          <Show when={!decoded.loading && decoded() === null && damaged()}>
+            <p>{INVITE_LINK_DAMAGED}</p>
             <A href={paths.home}>Open Lakko</A>
           </Show>
           <Show

@@ -33,3 +33,4 @@ pub mod folder;
 pub mod info;
 pub mod lookup;
 pub mod ring;
+pub mod visibility;

@@ -62,6 +62,13 @@
 //!   filter question for the ADR-0052 shared-pin envelope. Decode returns the
 //!   operation (to word a preview); nothing here composes, orders or persists
 //!   one (C-59).
+//! - [`scoped_discovery::decode_scoped_discovery_envelope`] +
+//!   [`scoped_discovery::scoped_discovery_envelope_min_len`] /
+//!   [`scoped_discovery::scoped_discovery_envelope_max_len`] — the same
+//!   filter question for the four ADR-0060 envelopes (introduction offer,
+//!   introductions bundle, "who can find me" setting, reach state). Decode
+//!   returns nothing: those envelopes carry secret grants and the owner's
+//!   private configuration (C-59).
 //!
 //! There is deliberately **no compose / send / call / channel / transport
 //! surface**: the NSE only reads and decrypts, then discards. It NEVER writes
@@ -88,6 +95,7 @@ pub mod profile;
 pub mod profile_request;
 pub mod push_routing;
 pub mod registrar_seed;
+pub mod scoped_discovery;
 
 uniffi::setup_scaffolding!();
 

@@ -51,6 +51,7 @@ pub mod mnemonic;
 pub mod pairing;
 pub mod pow;
 pub mod release;
+pub mod scoped_discovery;
 pub mod sframe;
 pub mod sfu_signaling;
 pub mod shamir;
@@ -493,6 +494,54 @@ pub enum FfiError {
     /// decode.
     #[error("synced state refused: {0}")]
     SyncedState(String),
+
+    // ADR-0060 scoped discovery — appended, for the ordinal reason above.
+    //
+    // Each message starts with the frozen `code()` of the core error (or,
+    // where the core has none, a code this crate documents on the function)
+    // followed by `": "` and the reason, the `ChannelMeta` / `AnonToken`
+    // shape: a client branches on the code, never on the prose.
+    // ------------------------------------------------------------------
+    /// A reach derivation or a reach grant refused (`ReachError::code()`:
+    /// `unknownClass`, `scopeIdTooLong`, `scopeIdNotEmpty`, `scopeIdEmpty`,
+    /// `badLength`), or a reach / delegation seed or key of the wrong length
+    /// (`seedLength`, `keyLength`, `nonceLength`).
+    #[error("{0}")]
+    Reach(String),
+
+    /// An introduction record, offer or bundle refused
+    /// (`IntroductionError::code()`, for example `noTerms`, `duplicateTag`,
+    /// `badRecordCount`, `open`), or an argument of the wrong length
+    /// (`identityPkLength`, `accountIdLength`, `oprfLength`). A display-name
+    /// or username refusal in a payload surfaces as the typed
+    /// `DisplayName*` / `Username*` variants instead, as for a profile.
+    #[error("{0}")]
+    Introduction(String),
+
+    /// A "who can find me" setting or reach-state envelope refused, or a
+    /// Settings transition that would break the setting's rule
+    /// (`VisibilityError::code()`, for example `someWithNoPart`,
+    /// `tooManyChosen`, `duplicateEntry`, `reach.scopeIdEmpty`).
+    #[error("{0}")]
+    Visibility(String),
+
+    /// A username certificate refused: `badLength`, `badVersion`,
+    /// `badSignature`, `usernameMismatch`, `accountMismatch`, or an argument
+    /// that is not a key / hash / account id (`badVerifyingKey`,
+    /// `oprfHashLength`, `accountIdLength`). A client that sees any of these
+    /// does not show the username (invariant #4).
+    #[error("{0}")]
+    UsernameCertificate(String),
+
+    /// A committer-delegation envelope (ADR-0060 §6) refused, structurally
+    /// (`wrongDomain`, `unknownVersion`, `badCount`, `badLength`) or by the
+    /// delegation check (`badAddedAccountKey`, `malformed`, `wrongMailbox`,
+    /// `duplicateDelegate`), or a single delegation blob that does not parse
+    /// (`delegationMalformed`, `delegationUnknownVersion`). A receiver keeps
+    /// the envelope it already holds and uses none of this one. Appended
+    /// last so every earlier variant keeps its ordinal.
+    #[error("{0}")]
+    CommitterDelegation(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -1225,6 +1274,25 @@ pub enum DeviceGroupBody {
         /// The part.
         part: std::sync::Arc<synced_state::SyncedSnapshotPart>,
     },
+    /// An opaque `lakko-contacts` envelope the owner's devices exchange
+    /// (ADR-0060 section 7: the Visibility setting and the ReachState
+    /// counters), 1 to [`device_group_service_envelope_max_len`] bytes.
+    /// The core never interprets it: hand the bytes to
+    /// `dispatchIncomingEnvelope` and keep only Visibility / ReachState.
+    /// Appended last so the existing variants keep their positions.
+    ServiceEnvelope {
+        /// The envelope bytes, domain separator included.
+        envelope: Vec<u8>,
+    },
+}
+
+/// Longest envelope a DeviceGroup [`DeviceGroupBody::ServiceEnvelope`]
+/// carries (ADR-0060 section 7). Compose refuses a longer or empty one;
+/// parse refuses the whole payload.
+#[uniffi::export]
+#[must_use]
+pub fn device_group_service_envelope_max_len() -> u32 {
+    u32::try_from(lakko_mls::MAX_SERVICE_ENVELOPE_LEN).unwrap_or(u32::MAX)
 }
 
 /// Parsed envelope returned by
@@ -1238,7 +1306,7 @@ pub struct ParsedDeviceGroupPayload {
     /// Leaf index of the device that authored this payload.
     pub sender_leaf: u32,
     /// Concrete payload — one of `ReadCursor` / `Draft` /
-    /// `Flags` / `Order`.
+    /// `Flags` / `Order` / `ServiceEnvelope`.
     pub body: DeviceGroupBody,
 }
 
@@ -1284,6 +1352,7 @@ impl DeviceGroupBody {
                 Inner::FolderChanges(changes.into_core()?)
             },
             DeviceGroupBody::StateSnapshot { part } => Inner::StateSnapshot(part.inner.clone()),
+            DeviceGroupBody::ServiceEnvelope { envelope } => Inner::ServiceEnvelope { envelope },
         })
     }
 }
@@ -1330,6 +1399,7 @@ impl From<lakko_mls::device_group::DeviceGroupBody> for DeviceGroupBody {
             Inner::StateSnapshot(inner) => Self::StateSnapshot {
                 part: std::sync::Arc::new(synced_state::SyncedSnapshotPart { inner }),
             },
+            Inner::ServiceEnvelope { envelope } => Self::ServiceEnvelope { envelope },
         }
     }
 }
@@ -3030,6 +3100,28 @@ impl DeviceGroup {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let bytes = g.create_devicegroup_message(&identity.inner, body.into_mls()?, hlc)?;
         Ok(bytes)
+    }
+
+    /// Compose + encrypt a [`DeviceGroupBody::ServiceEnvelope`] carrying a
+    /// `lakko-contacts` envelope (ADR-0060 section 7: `composeVisibility` /
+    /// `composeReachState` output) verbatim. Same as
+    /// [`Self::create_devicegroup_message`] with that body.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Codec`] when `envelope` is empty or longer than
+    /// [`device_group_service_envelope_max_len`]; nothing is encrypted.
+    pub fn create_service_envelope_message(
+        &self,
+        identity: &Identity,
+        envelope: Vec<u8>,
+        hlc: u64,
+    ) -> Result<Vec<u8>, FfiError> {
+        self.create_devicegroup_message(
+            identity,
+            DeviceGroupBody::ServiceEnvelope { envelope },
+            hlc,
+        )
     }
 
     /// Decrypt / advance the state machine for an inbound
@@ -5232,6 +5324,20 @@ pub fn epoch_after_message(bytes: Vec<u8>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0060: a profile carries the discovery-signed username certificate
+    /// opaquely under `lakko-contacts`' own length constant, and
+    /// `lakko-attest` defines the layout. The two crates do not depend on
+    /// each other, so the equality is pinned here, in a crate that links
+    /// both: a layout change in one that the other missed would make every
+    /// certificate fail to travel in a profile.
+    #[test]
+    fn username_certificate_length_agrees_between_profile_and_attest() {
+        assert_eq!(
+            lakko_contacts::profile::USERNAME_CERT_LEN,
+            lakko_attest::USERNAME_CERT_LEN
+        );
+    }
 
     /// Mirror of the lakko-mls integration test driven through the FFI
     /// surface. Exercises the same lifecycle one Swift / Kotlin client would.

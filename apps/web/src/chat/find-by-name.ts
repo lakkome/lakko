@@ -27,6 +27,13 @@
  * iOS and Android; what this module owns is asking the two namespaces and
  * telling the difference between "no such name" and "no answer".
  *
+ * **Superseded in the Chats field by `search/people-search.ts`** (ADR-0060,
+ * `docs/ux/who-can-find-me.md` section 6.1): the Search people row asks the
+ * channel namespace the same way and replaces the person half with the
+ * username, name and contacts-of-contacts search, whose results need the
+ * account id and the OPRF output this function does not return. This one is
+ * kept for its tests (`tokens/token-copy.test.ts` pins its allowance copy).
+ *
  * Pure of the UI: the two lookups and the shared rules arrive as arguments,
  * so this can be run by a test - vitest has no jsdom, no Solid transform and
  * no wasm here.

@@ -86,6 +86,8 @@ import {
   INVITE_LINK_TRY_AGAIN,
   isInviteLinkDamaged,
 } from "../contacts/invite-link";
+import { reachSession } from "../reach/reach-service";
+import { journalHex } from "../ds/access";
 import { isDiscoveryRateLimited } from "../discovery/client";
 import {
   inviteHeadline,
@@ -97,8 +99,8 @@ import {
 type JoinPhase = "idle" | "requesting" | "waiting" | "joined" | "error";
 
 interface DecodedTicket {
-  /** The capability wire bytes — resolved from the ledger when the slug was a
-   *  pointer, or the inline bytes directly. */
+  /** The plaintext capability wire the sealed link opened to (the blob
+   *  fetched from the ledger for a pointer, the slug itself when inline). */
   wire: Uint8Array;
   /** Non-null only for the server-backed pointer form; drives the consume gate
    *  (ADR-0028 OQ1). */
@@ -236,6 +238,9 @@ export default function JoinGroup() {
           if (s.kind === "session") recordConversationKind(s.account.accountId, active.groupIdB64, "group");
         }
         setPhase("joined");
+        // ADR-0060 section 6: the Welcome landed, so the single-use reply key
+        // registered for this request goes.
+        void reachSession()?.closeRepliesTo(journalHex(groupId));
         navigate(paths.chat(base64UrlEncodeNoPad(groupId)));
       };
       pollTimer = window.setInterval(() => {

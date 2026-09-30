@@ -213,7 +213,7 @@ export async function publishStateBundle(
   options: { ds?: DsClient } = {},
 ): Promise<void> {
   const ds = options.ds ?? new DsClient();
-  await ds.publishMailbox(rendezvousPseudonym, wrapStateRow(sealed));
+  await ds.publishRendezvous(rendezvousPseudonym, wrapStateRow(sealed));
 }
 
 export type StateBundleOutcome =
@@ -243,7 +243,7 @@ export async function pollForStateBundle(
     );
     let result;
     try {
-      result = await ds.fetchMailbox(rendezvousPseudonym, { after: cursor, limit: 1, waitSecs });
+      result = await ds.fetchRendezvous(rendezvousPseudonym, { after: cursor, limit: 1, waitSecs });
     } catch (err) {
       if (err instanceof DsHttpError && err.status === 404) continue;
       if (err instanceof DsNetworkError) continue;

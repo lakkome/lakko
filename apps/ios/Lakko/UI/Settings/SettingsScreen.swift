@@ -111,6 +111,13 @@ struct SettingsScreen: View {
                 row("Profile", systemImage: "person.crop.circle") { onOpen(.profile) }
             }
 
+            // `docs/ux/who-can-find-me.md` section 2 — Privacy, after Profile.
+            Section("Privacy") {
+                row("Who can find me", systemImage: "person.2.badge.gearshape") {
+                    onOpen(.whoCanFindMe)
+                }
+            }
+
             Section("Security") {
                 row("Passkeys", systemImage: "person.badge.key") { onOpen(.passkeys) }
                 row("Devices", systemImage: "laptopcomputer.and.iphone") { onOpen(.devices) }

@@ -241,6 +241,19 @@ public enum CoPublisher {
                 knockCursor = max(knockCursor, row.id)
                 _ = try? publisherGroup.processKnock(identity: identity, bytes: row.payload)
             }
+            // ADR-0060 section 6 — a co-publisher's attribution carries its
+            // `reply` grant, the only key its closed mailbox takes the Welcome
+            // under. A co-publisher knocks with its account identity, so the
+            // joiner key IS its account key.
+            for row in knocks.messages {
+                guard let attr = try? parseGroupJoinAttribution(bytes: row.payload),
+                      attr.groupId == groupId else { continue }
+                await MainActor.run {
+                    _ = ReachCenter.shared.keep(
+                        attr.replyGrant, carrier: .request,
+                        fromAccountKeyB64: base64Encode(attr.joinerSignatureKey), scopeHex: nil)
+                }
+            }
         }
         return PollOutcome(
             pendingCount: try publisherGroup.pendingExternalJoins().count,
@@ -289,12 +302,18 @@ public enum CoPublisher {
                 _ = try await ds.publishGroup(
                     groupId: groupId, payload: added.commit, auth: DsAuth(signer: signerN))
                 // The joiner's external-join proposal carried a KeyPackage under
-                // `proposalRef` (its leaf signature key), so its mailbox is the
-                // pseudonym of that key. Unsigned: a mailbox is open for writes.
+                // `proposalRef` (its account signature key — a co-publisher joins
+                // as its account), so its mailbox is the pseudonym of that key.
+                // ADR-0060 — written with the `reply` grant its attribution
+                // carried; the mailbox is closed to anything else.
                 let mailbox = try IdentityPseudonym.fromIdentity(pubkey: proposalRef).asBytes()
+                let auth = await MainActor.run {
+                    ReachCenter.shared.writeAuth(toAccountKey: proposalRef)
+                }
                 _ = try await ds.publishMailbox(
                     pseudonym: mailbox,
-                    payload: wrapEnvelope(kind: .welcome, body: added.welcome))
+                    payload: wrapEnvelope(kind: .welcome, body: added.welcome),
+                    writeAuth: auth)
             }
         ).run()
         try await resealSubscribers(
@@ -380,6 +399,10 @@ public enum CoPublisher {
         // ADR-0053 point 6 — the knock: a probe learns the registered epoch,
         // the proposal is built for it, a second knock carries the self-signed
         // attribution (OQ2, advisory) and the proposal. No journal read.
+        // ADR-0060 section 6 — the `reply` grant the owner writes the Welcome
+        // with, registered before the knock.
+        let replyGrant = try await ReachCenter.shared.newReplyGrant(
+            purpose: ReplyPurpose.groupJoin(groupId))
         try await DsKnockJoin(
             knock: { payloads in
                 try await ds.knock(groupId: groupId, payloads: payloads).epoch
@@ -390,7 +413,8 @@ public enum CoPublisher {
             attribution: {
                 try? composeGroupJoinAttribution(
                     joinerSigningSeed: identity.ed25519Seed(),
-                    capabilityBytes: wire)
+                    capabilityBytes: wire,
+                    replyGrant: replyGrant)
             }
         ).run()
         return CoPublishRequest(

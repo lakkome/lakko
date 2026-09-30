@@ -18,6 +18,10 @@
 //!   journal while a peer is applying the commit, and one two behind does not.
 //! - [`ds_mailbox_signer`] - the identity key at [`ds_mailbox_epoch`], for the
 //!   device's own mailbox.
+//! - [`DsProofSigner::for_reach`] - a reach key (ADR-0060 §2) at
+//!   [`ds_reach_epoch`], for a write to someone else's closed mailbox; a
+//!   delegate signs with it too, over its own delegate seed, next to the
+//!   [`sign_delegation`] header the reach-key holder issued.
 //!
 //! `sign` reads the wall clock and a CSPRNG nonce here; the pure core takes
 //! both as arguments so the browser build can supply its own clock.
@@ -28,8 +32,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lakko_ds_proof::{
-    DsProofSigner as Inner, RequestParts, ACCESS_KEY_LABEL, MAILBOX_EPOCH, NONCE_LEN,
-    PROOF_HEADER_NAME,
+    sign_delegation as inner_sign_delegation, DsProofSigner as Inner, RequestParts,
+    ACCESS_KEY_LABEL, DELEGATION_HEADER_NAME, MAILBOX_EPOCH, MAX_DELEGATION_TTL_MS, NONCE_LEN,
+    PROOF_HEADER_NAME, REACH_EPOCH,
 };
 use lakko_mls::{Group as MlsGroup, Identity as MlsIdentity};
 
@@ -53,10 +58,41 @@ fn fresh_nonce() -> [u8; NONCE_LEN] {
     nonce
 }
 
+fn key32(bytes: &[u8], what: &str) -> Result<[u8; 32], FfiError> {
+    <[u8; 32]>::try_from(bytes).map_err(|_| {
+        FfiError::Reach(format!(
+            "keyLength: {what} must be 32 bytes, got {}",
+            bytes.len()
+        ))
+    })
+}
+
 #[uniffi::export]
 impl DsProofSigner {
+    /// A reach-key signer (ADR-0060 §2) at [`ds_reach_epoch`]: signs a write
+    /// to a closed identity mailbox with a 32-byte reach seed the owner
+    /// registered (or with a delegate seed, next to a delegation). Its proof
+    /// header names the signing key (a sixth field, inside the signed bytes)
+    /// so the DS checks exactly that key; nothing for the caller to add.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Reach`] `seedLength` — `reach_seed` is not 32 bytes.
+    #[uniffi::constructor]
+    pub fn for_reach(reach_seed: Vec<u8>) -> Result<Self, FfiError> {
+        let seed = <[u8; 32]>::try_from(reach_seed.as_slice()).map_err(|_| {
+            FfiError::Reach(format!(
+                "seedLength: reach seed must be 32 bytes, got {}",
+                reach_seed.len()
+            ))
+        })?;
+        Ok(Self {
+            inner: Inner::for_reach(&seed),
+        })
+    }
+
     /// The epoch this signer proves membership at (`dsMailboxEpoch()` for a
-    /// mailbox signer).
+    /// mailbox signer, `dsReachEpoch()` for a reach signer).
     pub fn epoch(&self) -> u64 {
         self.inner.epoch()
     }
@@ -114,6 +150,108 @@ pub fn ds_proof_header_name() -> String {
 #[uniffi::export]
 pub fn ds_mailbox_epoch() -> u64 {
     MAILBOX_EPOCH
+}
+
+/// The epoch label a reach-key proof carries (`u64::MAX`): never a group
+/// epoch, never [`ds_mailbox_epoch`].
+#[uniffi::export]
+pub fn ds_reach_epoch() -> u64 {
+    REACH_EPOCH
+}
+
+/// The request header a reach-key delegation travels in.
+#[uniffi::export]
+pub fn delegation_header_name() -> String {
+    DELEGATION_HEADER_NAME.to_string()
+}
+
+/// The longest a delegation may still have to live when the DS checks it,
+/// in ms (24 hours).
+#[uniffi::export]
+pub fn max_delegation_ttl_ms() -> u64 {
+    MAX_DELEGATION_TTL_MS
+}
+
+/// Sign a delegation (ADR-0060 §2): the holder of the reach seed
+/// `issuer_seed` authorises ONE write by `delegate_pk` to the 32-byte
+/// `mailbox` pseudonym until `expires_at_ms`, under a fresh 16-byte `nonce`
+/// the DS consumes. Returns the [`delegation_header_name`] header value.
+/// The delegate sends it with a proof signed by
+/// `DsProofSigner.forReach(delegateSeed)`. A delegation issued for longer
+/// than [`max_delegation_ttl_ms`] ahead is refused by the DS until it comes
+/// within range.
+///
+/// # Errors
+///
+/// [`FfiError::Reach`] `seedLength` / `keyLength` / `nonceLength` for an
+/// argument of the wrong length.
+#[uniffi::export]
+pub fn sign_delegation(
+    issuer_seed: Vec<u8>,
+    mailbox: Vec<u8>,
+    delegate_pk: Vec<u8>,
+    expires_at_ms: u64,
+    nonce: Vec<u8>,
+) -> Result<String, FfiError> {
+    Ok(
+        signed_delegation(&issuer_seed, &mailbox, &delegate_pk, expires_at_ms, &nonce)?
+            .to_header_value(),
+    )
+}
+
+/// [`sign_delegation`], returning the raw 185-byte delegation instead of the
+/// header value: the blob a committer-delegation envelope carries (ADR-0060
+/// §6, `composeCommitterDelegationEnvelope`). The proposer signs one per
+/// committer candidate, the delegate being that candidate's account
+/// signature key and the mailbox the added person's. The committer turns
+/// the one naming it back into a header with `delegationHeaderValue`.
+///
+/// # Errors
+///
+/// As [`sign_delegation`].
+#[uniffi::export]
+pub fn sign_delegation_blob(
+    issuer_seed: Vec<u8>,
+    mailbox: Vec<u8>,
+    delegate_pk: Vec<u8>,
+    expires_at_ms: u64,
+    nonce: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    Ok(
+        signed_delegation(&issuer_seed, &mailbox, &delegate_pk, expires_at_ms, &nonce)?
+            .encode()
+            .to_vec(),
+    )
+}
+
+fn signed_delegation(
+    issuer_seed: &[u8],
+    mailbox: &[u8],
+    delegate_pk: &[u8],
+    expires_at_ms: u64,
+    nonce: &[u8],
+) -> Result<lakko_ds_proof::Delegation, FfiError> {
+    let seed = <[u8; 32]>::try_from(issuer_seed).map_err(|_| {
+        FfiError::Reach(format!(
+            "seedLength: issuer seed must be 32 bytes, got {}",
+            issuer_seed.len()
+        ))
+    })?;
+    let mailbox = key32(mailbox, "mailbox pseudonym")?;
+    let delegate = key32(delegate_pk, "delegate key")?;
+    let nonce = <[u8; NONCE_LEN]>::try_from(nonce).map_err(|_| {
+        FfiError::Reach(format!(
+            "nonceLength: nonce must be {NONCE_LEN} bytes, got {}",
+            nonce.len()
+        ))
+    })?;
+    Ok(inner_sign_delegation(
+        &seed,
+        &mailbox,
+        &delegate,
+        expires_at_ms,
+        nonce,
+    ))
 }
 
 /// The signer for `identity`'s own mailbox: its identity key at
@@ -203,6 +341,65 @@ mod tests {
             vec![],
         );
         assert_ne!(header, again);
+    }
+
+    #[test]
+    fn a_delegate_writes_under_a_delegation_the_server_verifies() {
+        let reach_seed = vec![0x71u8; 32];
+        let delegate = DsProofSigner::for_reach(vec![0x72u8; 32]).unwrap();
+        assert_eq!(delegate.epoch(), ds_reach_epoch());
+        assert_ne!(ds_reach_epoch(), ds_mailbox_epoch());
+        let mailbox = vec![0x70u8; 32];
+        let expires = now_ms() + 60_000;
+        let header = sign_delegation(
+            reach_seed.clone(),
+            mailbox.clone(),
+            delegate.verifying_key(),
+            expires,
+            vec![0x73u8; 16],
+        )
+        .unwrap();
+        let d = lakko_ds_proof::Delegation::parse_header_value(&header).unwrap();
+        let mailbox_arr: [u8; 32] = mailbox.clone().try_into().unwrap();
+        lakko_ds_proof::verify_delegation(&d, &mailbox_arr, now_ms()).unwrap();
+        // The delegate's proof names the delegate key, as the DS requires.
+        let proof_header = delegate.sign(
+            "POST".into(),
+            "/ds/mailbox/00/messages".into(),
+            String::new(),
+            b"welcome".to_vec(),
+        );
+        assert_eq!(proof_header.split('.').count(), 6);
+        let proof = Proof::parse(&proof_header).unwrap();
+        lakko_ds_proof::verify_delegated_proof(
+            &d,
+            &proof,
+            &RequestParts {
+                method: "POST",
+                canonical_path: "/ds/mailbox/00/messages",
+                query: "",
+                body: b"welcome",
+            },
+            now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            d.issuer_pk.to_vec(),
+            DsProofSigner::for_reach(reach_seed.clone())
+                .unwrap()
+                .verifying_key()
+        );
+        assert_eq!(delegation_header_name(), "x-lakko-ds-delegation");
+        assert_eq!(max_delegation_ttl_ms(), 86_400_000);
+
+        assert!(matches!(
+            DsProofSigner::for_reach(vec![0; 31]),
+            Err(FfiError::Reach(_))
+        ));
+        assert!(matches!(
+            sign_delegation(reach_seed, mailbox, vec![0; 32], expires, vec![0; 15]),
+            Err(FfiError::Reach(_))
+        ));
     }
 
     #[test]

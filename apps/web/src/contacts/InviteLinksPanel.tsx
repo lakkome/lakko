@@ -6,10 +6,12 @@
  * active links, each a row with Copy, Share and Revoke, and a "Create link"
  * form. Never a raw URL in a textarea.
  *
- * The create path is the one that lived in `routes/Contacts.tsx`: compose and
+ * The create path is the one that lived in `routes/Contacts.tsx`: register
+ * the link's reach key (ADR-0060 section 6) before anything else, compose and
  * seal the capability in the core, upload the sealed blob to the discovery
  * service for the short pointer URL (the secret stays in the fragment and in
- * this device's `invite-link-secrets` record), fall back to the self-contained
+ * this device's `invite-link-secrets` record; the link's reach scope id is
+ * kept in `minted-links.ts` for the revoke), fall back to the self-contained
  * inline URL only on a network failure (a rejected upload is a real error; the same bytes would be
  * rejected again by whoever opens them). The list is the owner query the old
  * "Active invites" card made, run when this panel opens and after every
@@ -18,12 +20,14 @@
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
-import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64Encode, base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { DiscoveryClient, type ActiveInvite } from "../discovery/client";
 import { Icon } from "../ui/icons";
 import { loadWasm } from "../wasm";
 import { formatContactsError } from "./errors";
+import { reachSession } from "../reach/reach-service";
+import { forgetMintedLink, mintedLinkFor, rememberMintedLink, type MintedLink } from "./minted-links";
 import {
   appendInviteLinkSecret,
   composeSealedInviteLink,
@@ -82,6 +86,7 @@ function rowOf(
     describeInviteUses(invite.usedCount, invite.maxUses),
   ].filter((p) => p.length > 0);
   if (invite.bootstrapReferral) parts.push("For someone new to Lakko");
+  if (url === null) parts.push("Made on another device");
   return {
     key: invite.blobIdSlug,
     url,
@@ -99,6 +104,8 @@ export function InviteLinksPanel(): JSX.Element {
   discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
 
   const [invites, setInvites] = createSignal<ActiveInvite[]>([]);
+  /** The local half of each listed link this device minted, by ledger slug. */
+  const [minted, setMinted] = createSignal<ReadonlyMap<string, MintedLink>>(new Map());
   const [widths, setWidths] = createSignal<InviteLinkWidths | null>(null);
   const [loaded, setLoaded] = createSignal(false);
   const [inlineLink, setInlineLink] = createSignal<LinkRow | null>(null);
@@ -151,7 +158,15 @@ export function InviteLinksPanel(): JSX.Element {
       setWidths(inviteLinkWidths(await loadWasm()));
       const result = await discovery.listInvitesByOwner(secrets.accountId, id.ed25519Seed);
       // "not found or not owner" means no row matches this account: no links.
-      setInvites(result.kind === "list" ? result.invites : []);
+      const listed = result.kind === "list" ? result.invites : [];
+      const accountIdB64 = base64Encode(secrets.accountId);
+      const local = new Map<string, MintedLink>();
+      for (const invite of listed) {
+        const m = await mintedLinkFor(accountIdB64, "contact", invite.blobIdSlug);
+        if (m !== null) local.set(invite.blobIdSlug, m);
+      }
+      setMinted(local);
+      setInvites(listed);
       setLoaded(true);
     } catch (err) {
       setError(formatContactsError(err));
@@ -170,22 +185,41 @@ export function InviteLinksPanel(): JSX.Element {
       if (id === null || secrets === null) {
         throw new Error("Sign in again to create an invite link.");
       }
+      // ADR-0060 section 6: the link's reach key is registered before the
+      // link exists; a link shared before its key is registered does not
+      // work. No reach session, or a failed registration, fails the mint.
+      const session = reachSession();
+      if (session === null) {
+        throw new Error("Lakko is still starting up. Try again in a moment.");
+      }
       const wasm = await loadWasm();
       const widths = inviteLinkWidths(wasm);
       const expiryMs = expiryPresetToMs(expiry(), Date.now());
       const maxUsesValue = maxUsesPresetToValue(maxUses());
+      const linkId = wasm.generateLinkId();
+      const linkGrant = await session.newLink(linkId, expiryMs === 0n ? null : Number(expiryMs));
       // Sealed-link amendment of ADR-0028 (2026-09-28): the compose seals the
       // capability under a fresh link secret; the ledger gets the sealed blob
       // and the clear fields, the secret rides only in the link's fragment.
-      const mint = wasm.InviteCapability.compose(
-        id.ed25519Seed,
-        secrets.accountId,
-        id.x25519PublicKey,
-        expiryMs,
-        maxUsesValue,
-        bootstrapReferral(),
-        label(),
-      );
+      let mint: import("../../wasm/lakko_ffi_wasm").InviteLinkMint;
+      try {
+        mint = wasm.InviteCapability.compose(
+          id.ed25519Seed,
+          secrets.accountId,
+          id.x25519PublicKey,
+          expiryMs,
+          maxUsesValue,
+          bootstrapReferral(),
+          label(),
+          linkId,
+          linkGrant,
+        );
+      } catch (composeErr) {
+        await session.revokeLink(linkId).catch(() => undefined);
+        throw composeErr;
+      } finally {
+        linkGrant.free();
+      }
       const sealed = mint.sealed;
       const linkSecret = mint.linkSecret;
       const issuerPubkey = mint.issuerPubkey;
@@ -207,12 +241,24 @@ export function InviteLinksPanel(): JSX.Element {
           base64UrlEncodeNoPad(blobId),
           fragment,
         );
+        // ADR-0060 section 6: the link id is what removes this link's reach
+        // key on revoke.
+        await rememberMintedLink(
+          base64Encode(secrets.accountId),
+          "contact",
+          base64UrlEncodeNoPad(blobId),
+          { linkSecret, linkId },
+        );
         setInlineLink(null);
         await load();
       } catch (uploadErr) {
         const isNetwork =
           uploadErr instanceof Error && uploadErr.name === "DiscoveryNetworkError";
-        if (!isNetwork) throw uploadErr;
+        if (!isNetwork) {
+          // Nothing was handed out: the key goes with the failed link.
+          await session.revokeLink(linkId).catch(() => undefined);
+          throw uploadErr;
+        }
         // eslint-disable-next-line no-console
         console.warn("invite upload network-failed; falling back to the inline link");
         setInlineLink({
@@ -272,8 +318,17 @@ export function InviteLinksPanel(): JSX.Element {
     setBusyKey(row.key);
     try {
       const id = chats.identity();
-      if (id === null) throw new Error("Sign in again to revoke an invite link.");
-      const result = await discovery.revokeInvite(base64UrlDecodeNoPad(row.blobIdSlug), id.ed25519Seed);
+      const secrets = auth.identitySecrets();
+      if (id === null || secrets === null) throw new Error("Sign in again to revoke an invite link.");
+      const slug = row.blobIdSlug;
+      const result = await discovery.revokeInvite(base64UrlDecodeNoPad(slug), id.ed25519Seed);
+      // ADR-0060 section 6: the link's reach key goes with it, so a request
+      // written under the link is dropped even by a joiner who fetched it.
+      const local = minted().get(slug);
+      if (local !== undefined) {
+        await reachSession()?.revokeLink(local.linkId);
+        await forgetMintedLink(base64Encode(secrets.accountId), "contact", slug);
+      }
       // Both outcomes mean the row is gone server-side.
       setInvites(invites().filter((i) => i.blobIdSlug !== row.blobIdSlug));
       setNotice(

@@ -2,11 +2,13 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `/settings/:section?` — Profile · Security · Chat folders · Appearance · Media · About ·
- * Account (docs/ux/client-redesign.md section 5.5). A section list on the
+ * `/settings/:section?` — Profile · Privacy · Security · Chat folders · Appearance ·
+ * Media · About · Account (docs/ux/client-redesign.md section 5.5; Privacy is
+ * docs/ux/who-can-find-me.md). A section list on the
  * left, the section on the right; a narrow screen shows one of the two.
  * `/settings` lands on Profile. `recovery` (authenticator, email or phone) is
- * a page under Security rather than a section of its own. Account is last:
+ * a page under Security rather than a section of its own, and
+ * `privacy-groups` (the chosen groups and channels) a page under Privacy. Account is last:
  * it holds the export and the danger zone.
  */
 import { Show, type JSX } from "solid-js";
@@ -22,15 +24,25 @@ import { appLicense, appVersion } from "../ui/app-version";
 import { Avatar } from "../ui/Avatar";
 import { Icon, type IconName } from "../ui/icons";
 import { setTheme, useTheme, type Theme } from "../ui/theme";
+import { WhoCanFindMeList, WhoCanFindMeSection } from "../settings/WhoCanFindMe";
 import Profile from "./Profile";
 import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
 import { paths } from "./paths";
 
-type Section = "profile" | "security" | "folders" | "appearance" | "media" | "about" | "account";
-type Page = Section | "recovery";
+type Section =
+  | "profile"
+  | "privacy"
+  | "security"
+  | "folders"
+  | "appearance"
+  | "media"
+  | "about"
+  | "account";
+type Page = Section | "recovery" | "privacy-groups";
 
 const SECTIONS: ReadonlyArray<{ id: Section; label: string; icon: IconName }> = [
   { id: "profile", label: "Profile", icon: "user" },
+  { id: "privacy", label: "Privacy", icon: "eye" },
   { id: "security", label: "Security", icon: "shield" },
   // docs/ux/chat-folders.md section 4 - between Notifications (which the web
   // does not have) and Appearance.
@@ -43,6 +55,7 @@ const SECTIONS: ReadonlyArray<{ id: Section; label: string; icon: IconName }> = 
 
 function pageOf(s: string | undefined): Page | null {
   if (s === "recovery") return "recovery";
+  if (s === "privacy-groups") return "privacy-groups";
   // The former Data section: its export card now sits under Account.
   if (s === "data") return "account";
   return SECTIONS.some((x) => x.id === s) ? (s as Section) : null;
@@ -60,7 +73,8 @@ export default function Settings(): JSX.Element {
   // The list highlights the section a page belongs to.
   const highlighted = (): Section => {
     const p = shown();
-    return p === "recovery" ? "security" : p;
+    if (p === "recovery") return "security";
+    return p === "privacy-groups" ? "privacy" : p;
   };
 
   const username = (): string => {
@@ -108,6 +122,12 @@ export default function Settings(): JSX.Element {
           </A>
           <Show when={shown() === "profile"}>
             <Profile />
+          </Show>
+          <Show when={shown() === "privacy"}>
+            <WhoCanFindMeSection />
+          </Show>
+          <Show when={shown() === "privacy-groups"}>
+            <WhoCanFindMeList />
           </Show>
           <Show when={shown() === "security"}>
             <SecuritySection />

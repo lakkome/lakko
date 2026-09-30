@@ -47,6 +47,7 @@
  */
 
 import type { Wasm } from "../wasm";
+import { sealEachSkippingInvalid } from "./member-card-rules";
 import { loadWasm } from "../wasm";
 import { DsClient } from "../ds/client";
 import { scanJournal } from "../chat/journal-head-epoch";
@@ -80,6 +81,10 @@ import {
   openSealedInvite,
 } from "../contacts/invite-link";
 import { parseGroupInviteSlug, splitGroupInviteLink } from "../contacts/group-invite";
+import { reachSession } from "../reach/reach-service";
+import { resolveWriteAuth } from "../reach/mailbox-write";
+import { forgetJoinReply, joinReplyFor, rememberJoinReply } from "../reach/join-replies";
+import { journalHex } from "../ds/access";
 
 type Identity = InstanceType<Wasm["Identity"]>;
 type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
@@ -143,7 +148,9 @@ export function registerPublisherGroupAccess(
 /** Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`. A
  *  non-member opens it, requests to join, and the owner approves (reusing the
  *  ADR-0027/0028 external-join machinery). Inline link — the channel owner
- *  shares it out-of-band; `0n` = never expires. */
+ *  shares it out-of-band; `0n` = never expires. The capability is sealed under
+ *  a fresh link secret carried in the fragment (2026-09-28 security pass):
+ *  `<origin>/g/<sealed>#<secret>`. */
 export async function createCoPublisherLink(
   identity: Identity,
   publisherGroup: PublisherGroup,
@@ -221,6 +228,7 @@ export async function pollCoPublisherJournal(
   }
   // The APPLY — inside it.
   return withGroupMlsLock(groupIdB64, async () => {
+    const wasm = await loadWasm();
     for (const m of raw.messages) {
       try {
         publisherGroup.processIncomingVerifyingRoles(identity, m.payload);
@@ -242,7 +250,10 @@ export async function pollCoPublisherJournal(
           // stale-epoch proposal throws and is skipped.
           publisherGroup.processKnock(identity, k.payload);
         } catch {
-          // skip
+          // Not a proposal: it may be the joiner's attribution, which carries
+          // the `reply` grant the approve writes the Welcome under (ADR-0060
+          // section 6). Anything else is skipped.
+          rememberAttributionReply(wasm, groupId, k.payload);
         }
       }
     }
@@ -304,9 +315,17 @@ export async function approveCoPublisher(
       await ds.publishGroup(groupId, added.commit, { signer: signerN });
       // ADR-0053 contract point 8 — the Welcome goes to the joiner's own
       // mailbox (named after the joiner's signature key, `proposalRef`), the
-      // way a direct add delivers one; never to the journal.
+      // way a direct add delivers one; never to the journal. ADR-0060
+      // section 6: the mailbox is closed, so the write is signed under the
+      // `reply` grant the joiner's attribution carried (kept by the poll).
       const mailbox = wasm.IdentityPseudonym.fromIdentity(proposalRef).asBytes();
-      await ds.publishMailbox(mailbox, wrapEnvelope(KIND_WELCOME, added.welcome));
+      const write = await resolveWriteAuth(proposalRef, { explicit: joinReplyFor(proposalRef) });
+      try {
+        await ds.publishMailbox(mailbox, wrapEnvelope(KIND_WELCOME, added.welcome), write.auth);
+      } finally {
+        write.release();
+      }
+      forgetJoinReply(proposalRef);
     } finally {
       signerN?.free();
     }
@@ -377,18 +396,26 @@ export async function requestToCoPublish(
     throw new Error("co-publisher link does not target a channel PublisherGroup");
   }
   const channelIdHex = bytesToHex(channelIdBytes);
+  // ADR-0060 section 6 (C-69) — the owner writes the Welcome to this
+  // account's closed mailbox under our `reply` grant, which rides the signed
+  // attribution. Registered before the knock; closed when the Welcome joins.
+  const session = reachSession();
+  if (session === null) throw new Error("Lakko is still starting up. Try again in a moment.");
+  const replyGrant = (await session.newReply("group-join", journalHex(groupId))).grant;
+  let attribution: Uint8Array | null;
+  try {
+    attribution = wasm.composeGroupJoinAttribution(identity.ed25519Seed, wire, replyGrant);
+  } catch {
+    attribution = null;
+  } finally {
+    replyGrant.free();
+  }
   await knockToJoin({
     knock: (payloads) => ds.knock(groupId, payloads),
     buildProposal: (epoch) => identity.createExternalJoinProposal(groupId, epoch),
-    // Self-signed join attribution (OQ2) — advisory; a failure to build it
-    // never blocks the request.
-    buildAttribution: () => {
-      try {
-        return wasm.composeGroupJoinAttribution(identity.ed25519Seed, wire);
-      } catch {
-        return null;
-      }
-    },
+    // Self-signed join attribution (OQ2): advisory for the approval, and the
+    // only carrier of our reply grant.
+    buildAttribution: () => attribution,
   });
   return { groupId, channelIdHex, joinerKey: identity.signaturePublicKey };
 }
@@ -452,6 +479,8 @@ export async function pollForCoPublishWelcome(
   }
   if (group === null) return null;
   group.free();
+  // The Welcome landed: the single-use reply key of this request goes.
+  void reachSession()?.closeRepliesTo(journalHex(groupId));
   // Now an MLS member of the PublisherGroup — `freshPublisherKeys` opens the
   // (now-joined) group, derives the shared content-key seed, and reuses the
   // persisted per-device signing seed (or mints one) so this device can
@@ -481,29 +510,65 @@ async function resealSubscribers(
     throw new Error(`unexpected server epoch ${current.epoch}; cannot reseal`);
   }
   const subs = await listSubscribers(channelIdHex, apiBase);
-  const batch: RotateBatchEntry[] = [];
+  const bytesByHex = new Map<string, Uint8Array>();
   for (const subscriberHex of subs.subscribers) {
     const subscriberBytes = hexToBytes(subscriberHex);
     if (subscriberBytes === null) {
       throw new Error(`subscriber pubkey hex is not valid: ${subscriberHex}`);
     }
-    const envelope = wasm.sealSubscriberSeedEnvelope(
-      subscriberBytes,
+    bytesByHex.set(subscriberHex, subscriberBytes);
+  }
+  // ADR-0060: a subscriber key registered before the Ed25519 flag day may be
+  // one the core refuses to seal to; that subscriber could not open the
+  // envelope anyway, so it is skipped rather than aborting the reseal (the
+  // same rule as the rotation cron).
+  const { sealed, skipped } = sealEachSkippingInvalid([...bytesByHex.keys()], (hex) =>
+    wasm.sealSubscriberSeedEnvelope(
+      bytesByHex.get(hex) ?? new Uint8Array(0),
       channelIdBytes,
       newServerEpoch,
       newSeed,
-    );
-    batch.push({
-      subscriber_pubkey_hex: subscriberHex,
-      envelope_b64: base64Encode(envelope),
-    });
+    ),
+  );
+  if (skipped.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(`[channels] reseal skipped ${skipped.length} subscriber key(s) the core refused`);
   }
+  const batch: RotateBatchEntry[] = sealed.map((s) => ({
+    subscriber_pubkey_hex: s.subscriberHex,
+    envelope_b64: base64Encode(s.value),
+  }));
   await rotateChannel(channelIdHex, batch, apiBase);
 }
 
 // ---------------------------------------------------------
 // helpers (mirror rotation-cron.ts)
 // ---------------------------------------------------------
+
+/** Keep the `reply` grant of a join attribution read from this group's knock
+ *  queue (ADR-0060 section 6). Anything that is not an attribution for this
+ *  group is ignored. */
+function rememberAttributionReply(wasm: Wasm, groupId: Uint8Array, payload: Uint8Array): void {
+  const session = reachSession();
+  if (session === null) return;
+  let attr: import("../../wasm/lakko_ffi_wasm").GroupJoinAttribution;
+  try {
+    attr = wasm.GroupJoinAttribution.parse(payload);
+  } catch {
+    return;
+  }
+  try {
+    if (base64Encode(attr.groupId) !== base64Encode(groupId)) return;
+    const reply = attr.replyGrant;
+    try {
+      rememberJoinReply(attr.joinerSignatureKey, session.encodeGrant(reply));
+    } finally {
+      reply.free();
+    }
+  } finally {
+    attr.free();
+  }
+}
 
 function hexToBytes(hex: string): Uint8Array | null {
   if (hex.length === 0 || hex.length % 2 !== 0) return null;

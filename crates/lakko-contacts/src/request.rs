@@ -23,18 +23,21 @@
 //!    recovering Alice's profile (if any) and the intro message.
 //! 4. Surfaces the request to UI: Accept / Decline / Block / Ignore.
 //!
-//! ## Sealed plaintext (ADR-0048 §2)
+//! ## Sealed plaintext (ADR-0048 §2, ADR-0060 §6)
 //!
-//! The bytes inside `sealed_envelope` are a length-prefixed pair:
+//! The bytes inside `sealed_envelope` are:
 //!
 //! ```text
 //! u16be        profile_len          — 0 = no profile
 //! [..]         profile envelope     — crate::profile wire, `profile_len` bytes
+//! u8           reply_grant_len      — 0 = no reply grant, else exactly 37
+//! [37]         reply_grant          — crate::reach::ReachGrant, class `reply` (SECRET)
 //! [..]         intro message        — everything that remains (may be empty)
 //! ```
 //!
 //! There is no dual format: nothing is deployed, so a sealed plaintext
-//! without the prefix is simply malformed.
+//! without the prefixes is simply malformed, and the outer schema moved to
+//! v4 so a request framed the old way is refused before it is opened.
 //!
 //! **Who the profile belongs to.** The envelope carries no identity.
 //! The recipient binds the profile to `from_pubkey`, which the request
@@ -55,12 +58,42 @@
 //! public key and its own signing key can produce either, since the
 //! plaintext is AEAD-authenticated inside a signed request.
 //!
+//! ## The reply grant (ADR-0060 §6)
+//!
+//! Since ADR-0060 the requester's own mailbox is closed, so the recipient
+//! could not answer — neither the accept (the one-to-one Welcome) nor the
+//! [`crate::ack`] — without a key. The requester therefore seals its
+//! **`reply` reach grant** into the request: derived as
+//! `ReachGrant::derive(account_seed, Reply, reply_id, 0)` over a fresh
+//! random 16-byte `reply_id`, registered with the Delivery Service with a
+//! 7-day expiry, and removed once the request is answered. The recipient
+//! signs both writes back to the requester's mailbox
+//! (`BLAKE3(from_pubkey)`) with it (`DsProofSigner::for_reach(grant.seed)`).
+//! The same carrier serves the call links: a joiner's call Welcome or
+//! KeyPackage forward rides a `ContactRequest` to the owner, and the reply
+//! grant is how the owner (or the call's committer) delivers the Welcome
+//! back.
+//!
+//! **A malformed reply grant fails the open, unlike a malformed profile.**
+//! A `reply_grant_len` other than 0 or 37 is a framing error like any
+//! other. A grant of 37 bytes that does not decode, or decodes to a class
+//! other than `reply`, is refused the same way, with
+//! [`ContactError::InvalidEncoding`]: the profile is display data the
+//! recipient can do without, while the reply grant is the only way to
+//! answer. Opening the request without it would put an Accept button in
+//! front of a person that silently cannot deliver, and a grant of another
+//! class (`contact`, `group`) would hand the recipient reach the requester
+//! never meant to give. Neither is a state worth rendering, and both come
+//! only from a sender that is broken or hostile. An **absent** grant
+//! (`reply_grant_len` 0) opens normally: the requester's mailbox may be
+//! open (Everyone), and the recipient's client learns at write time.
+//!
 //! ## Wire format (manual codec)
 //!
-//! **v3** (current — Phase 1.9b2):
+//! **v4** (current — ADR-0060, the reply grant in the sealed plaintext):
 //!
 //! ```text
-//! u8           schema version (= 3)
+//! u8           schema version (= 4)
 //! [32 bytes]   from_pubkey                           — Ed25519 verifying key
 //! [16 bytes]   from_account_id                       — sender's UUIDv7
 //! [32 bytes]   from_pseudonym                        — fresh per-recipient pseudonym
@@ -72,49 +105,21 @@
 //! [64 bytes]   signature                             — Ed25519 over the prefix above
 //! ```
 //!
-//! **v2** (legacy — accepted on receive only — Phase 1.16e3b
-//! through 1.9b1): identical to v3 minus the
-//! `privacy_pass_token` length+bytes pair. Receivers decode v2
-//! envelopes for backwards-compat with the in-flight rolling-
-//! upgrade window; the resulting [`ContactRequest`] carries
-//! `privacy_pass_token: Vec::new()`. No `compose` path emits v2
-//! any more.
+//! The outer layout is the old v3's; only the sealed plaintext changed. v1
+//! to v3 are refused: their sealed plaintexts have no reply-grant field,
+//! and a flag day (nothing is deployed) is cheaper than a second splitter.
+//! [`ContactRequest::from_account_id`] stays an `Option` for the FFI
+//! surfaces' sake and is always `Some` since v4.
 //!
-//! **v1** (legacy — accepted on receive only): identical to v2
-//! minus the 16-byte `from_account_id` field. Receivers decode
-//! v1; the resulting [`ContactRequest`] carries
-//! `from_account_id: None` and `privacy_pass_token: Vec::new()`.
-//!
-//! The `from_account_id` extension (v2) lets the receiver drive
-//! the Accept-side of the group-creation handshake: the receiver
-//! needs `account_id` to fetch the sender's KeyPackage, but a v1
-//! ContactRequest only carried the Ed25519 pubkey.
-//!
-//! The `privacy_pass_token` extension (v3 — Phase 1.9b2) carries
-//! a Privacy Pass / App-Attest / Play-Integrity attestation blob
-//! through the envelope so `services/ds`'s ingest layer can lift
-//! the per-stranger rate-limit ceiling for clients that prove they
-//! run on attested hardware (RFC 9576). The token is opaque to
-//! `lakko-contacts` itself — the verification keypair and batch-
-//! size choreography live in the DS sub-sprint. In dev and on
-//! web builds the token field is empty bytes; production mobile
-//! builds populate it from the platform attestation API.
+//! The `privacy_pass_token` (Phase 1.9b2) carries a Privacy Pass /
+//! App-Attest / Play-Integrity attestation blob through the envelope. The
+//! token is opaque to `lakko-contacts` itself. In dev and on web builds the
+//! token field is empty bytes.
 //!
 //! Signature covers everything from the schema-version byte through
 //! the sealed-envelope bytes — i.e. the entire encoding except the
 //! trailing 64-byte signature itself. Bound to the token so a
 //! man-in-the-middle cannot strip / forge attestation.
-//!
-//! ## What's NOT in 1.9b2
-//!
-//! The plan also calls for `pow_token` (Equix proof-of-work). PoW
-//! is an anti-spam mechanism at the `services/ds` ingest path;
-//! gating it in the wire format itself is straightforward
-//! (extra field with its own length prefix), but spoke
-//! implementations belong in the PoW sub-sprint. The current
-//! wire format is structured so adding optional fields at the
-//! end stays backwards-compatible — a v4 schema bumps the
-//! version byte.
 
 use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
@@ -123,22 +128,11 @@ use crate::envelope;
 use crate::error::{ContactError, Result};
 use crate::profile::{compose_profile, decode_profile, Profile};
 use crate::pseudonym::{decode_pseudonym, PSEUDONYM_LEN};
+use crate::reach::{ReachClass, ReachGrant, REACH_GRANT_LEN};
 
-/// Current `compose`d schema version (Phase 1.9b2 — Privacy
-/// Pass token field).
-const SCHEMA_VERSION: u8 = 3;
-
-/// Legacy schema version (Phase 1.16e3b — `from_account_id`).
-/// Receivers still decode v2 for backwards-compat with envelopes
-/// in-flight at the moment of a rolling upgrade; no caller in
-/// this codebase should produce v2 any more.
-const LEGACY_SCHEMA_VERSION_V2: u8 = 2;
-
-/// Earliest legacy schema version. Receivers still decode v1 for
-/// backwards-compat with envelopes in-flight at the moment of a
-/// rolling upgrade; no caller in this codebase should produce v1
-/// any more.
-const LEGACY_SCHEMA_VERSION_V1: u8 = 1;
+/// Current `compose`d schema version (ADR-0060 — the reply grant in the
+/// sealed plaintext). The only version accepted.
+const SCHEMA_VERSION: u8 = 4;
 
 /// `from_account_id` length in bytes (UUIDv7 raw, matches
 /// `services/auth.accounts.id` and the rest of the Lakko stack).
@@ -156,6 +150,11 @@ pub const MAX_PRIVACY_PASS_TOKEN_LEN: usize = 2048;
 /// plaintext (see the module docs).
 pub const PROFILE_LEN_PREFIX_LEN: usize = 2;
 
+/// Byte length of the `reply_grant_len` prefix that follows the profile in
+/// the sealed plaintext (ADR-0060 §6). Its value is 0 or
+/// [`REACH_GRANT_LEN`].
+pub const REPLY_GRANT_LEN_PREFIX_LEN: usize = 1;
+
 /// AAD bound to the sealed envelope. Domain-separates this envelope
 /// from any future non-contact-request use of the same primitive.
 const ENVELOPE_AAD: &[u8] = b"lakko-contacts/v1/contact-request";
@@ -168,12 +167,10 @@ const ENVELOPE_AAD: &[u8] = b"lakko-contacts/v1/contact-request";
 pub struct ContactRequest {
     /// Sender's long-term Ed25519 identity public key.
     pub from_pubkey: VerifyingKey,
-    /// Sender's `account_id` (UUIDv7 raw bytes). Present for
-    /// v2 wire envelopes, `None` for v1. v1 acceptance exists
-    /// purely for backwards-compat — see the file-level
-    /// docstring; new senders always supply this so the
-    /// receiver can drive Accept-side group creation
-    /// (Phase 1.16e3b).
+    /// Sender's `account_id` (UUIDv7 raw bytes), so the receiver can
+    /// drive Accept-side group creation (Phase 1.16e3b). Always `Some`
+    /// since v4 (the older layouts that lacked it are refused); kept an
+    /// `Option` so the FFI surfaces did not change shape.
     pub from_account_id: Option<[u8; ACCOUNT_ID_LEN]>,
     /// Fresh per-recipient pseudonym chosen by the sender. Server
     /// uses it for routing; recipient stores it as the canonical
@@ -192,9 +189,8 @@ pub struct ContactRequest {
     /// verifiable token.
     ///
     /// **Empty `Vec` means "no token"** — accepted on the receive
-    /// path (v1/v2 envelopes always decode here; v3 envelopes
-    /// from clients without an attestation API also land empty
-    /// in dev). Production builds populate this from App Attest
+    /// path (clients without an attestation API send it empty in
+    /// dev). Production builds populate this from App Attest
     /// (iOS) / Play Integrity (Android) / a server-issued token
     /// (web fallback).
     pub privacy_pass_token: Vec<u8>,
@@ -202,11 +198,29 @@ pub struct ContactRequest {
     pub sealed_envelope: Vec<u8>,
 }
 
+/// What [`open_envelope`] recovers from a request's sealed plaintext.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenedRequest {
+    /// The sender's profile (ADR-0048), or `None` when absent or invalid —
+    /// a claim bound to the request's `from_pubkey` (module docs).
+    pub profile: Option<Profile>,
+    /// The sender's `reply` reach grant (ADR-0060 §6), or `None` when the
+    /// request carried none. SECRET: the recipient signs the accept (the
+    /// one-to-one Welcome, or a call Welcome) and the [`crate::ack`] back
+    /// to the sender's mailbox with it. Always class
+    /// [`ReachClass::Reply`] when present.
+    pub reply_grant: Option<ReachGrant>,
+    /// The intro message, possibly empty — itself possibly a call
+    /// envelope, classified with [`crate::incoming_envelope`].
+    pub intro: Vec<u8>,
+}
+
 /// Compose a `ContactRequest` and produce its signed wire-format bytes.
 ///
 /// The sender supplies their Ed25519 signing key (for authentication),
 /// the recipient's X25519 public key (for sealed-envelope encryption),
-/// an optional profile (ADR-0048), an optional intro message body, and
+/// an optional profile (ADR-0048), an optional `reply` reach grant
+/// (ADR-0060 §6, see the module docs), an optional intro message body, and
 /// an optional Privacy Pass
 /// attestation token (Phase 1.9b2). `from_pseudonym` should be
 /// freshly generated per-recipient (use
@@ -227,7 +241,9 @@ pub struct ContactRequest {
 ///   `privacy_pass_token.len() > MAX_PRIVACY_PASS_TOKEN_LEN`.
 /// * [`ContactError::InvalidArgument`] when `profile` violates a bound —
 ///   the same bounds the recipient's decoder enforces, so a conforming
-///   sender never seals a profile the recipient would drop.
+///   sender never seals a profile the recipient would drop — or when
+///   `reply_grant` is not class [`ReachClass::Reply`].
+#[allow(clippy::too_many_arguments)]
 pub fn compose(
     sender_signing: &SigningKey,
     sender_account_id: &[u8; ACCOUNT_ID_LEN],
@@ -236,6 +252,7 @@ pub fn compose(
     valid_after_ms: u64,
     privacy_pass_token: &[u8],
     profile: Option<&Profile>,
+    reply_grant: Option<&ReachGrant>,
     intro_message: &[u8],
 ) -> Result<Vec<u8>> {
     if privacy_pass_token.len() > MAX_PRIVACY_PASS_TOKEN_LEN {
@@ -244,7 +261,7 @@ pub fn compose(
             privacy_pass_token.len(),
         )));
     }
-    let sealed_plaintext = frame_sealed_plaintext(profile, intro_message)?;
+    let sealed_plaintext = frame_sealed_plaintext(profile, reply_grant, intro_message)?;
     let sealed_envelope = envelope::seal(recipient_x25519_pub, ENVELOPE_AAD, &sealed_plaintext)?;
 
     let from_pubkey = sender_signing.verifying_key();
@@ -277,10 +294,7 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<ContactRequest> {
     let mut cur = wire;
 
     let version = take_u8(&mut cur)?;
-    if version != SCHEMA_VERSION
-        && version != LEGACY_SCHEMA_VERSION_V2
-        && version != LEGACY_SCHEMA_VERSION_V1
-    {
+    if version != SCHEMA_VERSION {
         return Err(ContactError::InvalidEncoding(format!(
             "unsupported ContactRequest schema version {version}",
         )));
@@ -288,36 +302,22 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<ContactRequest> {
     let from_pubkey_bytes = take_n(&mut cur, PUBLIC_KEY_LEN)?;
     let from_pubkey = VerifyingKey::from_bytes(from_pubkey_bytes).map_err(ContactError::Crypto)?;
 
-    // v2+ inserts the 16-byte sender account_id between
-    // `from_pubkey` and `from_pseudonym`. v1 omits it.
-    let from_account_id: Option<[u8; ACCOUNT_ID_LEN]> = if version == LEGACY_SCHEMA_VERSION_V1 {
-        None
-    } else {
-        let mut buf = [0u8; ACCOUNT_ID_LEN];
-        buf.copy_from_slice(take_n(&mut cur, ACCOUNT_ID_LEN)?);
-        Some(buf)
-    };
+    let mut from_account_id = [0u8; ACCOUNT_ID_LEN];
+    from_account_id.copy_from_slice(take_n(&mut cur, ACCOUNT_ID_LEN)?);
 
     let from_pseudonym = decode_pseudonym(take_n(&mut cur, PSEUDONYM_LEN)?)?;
-    let valid_after_ms = u64::from_be_bytes(take_n(&mut cur, 8)?.try_into().unwrap());
+    let valid_after_ms = u64::from_be_bytes(take_array::<8>(&mut cur)?);
 
-    // v3 inserts a u16-length-prefixed Privacy Pass token here.
-    // v1/v2 envelopes omit the field — the resulting struct
-    // carries `privacy_pass_token: Vec::new()` to preserve the
-    // existing receive-side semantics.
-    let privacy_pass_token: Vec<u8> = if version == SCHEMA_VERSION {
-        let token_len = u16::from_be_bytes(take_n(&mut cur, 2)?.try_into().unwrap()) as usize;
-        if token_len > MAX_PRIVACY_PASS_TOKEN_LEN {
-            return Err(ContactError::InvalidEncoding(format!(
-                "privacy_pass_token over cap ({token_len} > {MAX_PRIVACY_PASS_TOKEN_LEN})",
-            )));
-        }
-        take_n(&mut cur, token_len)?.to_vec()
-    } else {
-        Vec::new()
-    };
+    let token_len = usize::from(u16::from_be_bytes(take_array::<2>(&mut cur)?));
+    if token_len > MAX_PRIVACY_PASS_TOKEN_LEN {
+        return Err(ContactError::InvalidEncoding(format!(
+            "privacy_pass_token over cap ({token_len} > {MAX_PRIVACY_PASS_TOKEN_LEN})",
+        )));
+    }
+    let privacy_pass_token = take_n(&mut cur, token_len)?.to_vec();
 
-    let sealed_len = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().unwrap()) as usize;
+    let sealed_len = usize::try_from(u32::from_be_bytes(take_array::<4>(&mut cur)?))
+        .map_err(|_| ContactError::InvalidEncoding("sealed length overflows usize".into()))?;
     let sealed_envelope = take_n(&mut cur, sealed_len)?.to_vec();
     let signature_bytes = take_n(&mut cur, SIGNATURE_LEN)?;
     let signature = Signature::from_bytes(signature_bytes).map_err(ContactError::Crypto)?;
@@ -330,47 +330,21 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<ContactRequest> {
     }
 
     // Re-encode the prefix exactly as the signer did and verify.
-    // The codec branch is keyed off the schema version we just
-    // peeled off the wire — a tampered version byte would have
-    // either failed parsing above or driven a mismatched
-    // signature here.
-    let signed_prefix = if version == SCHEMA_VERSION {
-        encode_signing_prefix(
-            &from_pubkey,
-            // SAFETY: v2/v3 path implies `Some(_)`.
-            from_account_id
-                .as_ref()
-                .ok_or_else(|| ContactError::InvalidEncoding("missing account_id".into()))?,
-            &from_pseudonym,
-            valid_after_ms,
-            &privacy_pass_token,
-            &sealed_envelope,
-        )
-    } else if version == LEGACY_SCHEMA_VERSION_V2 {
-        encode_signing_prefix_v2(
-            &from_pubkey,
-            from_account_id
-                .as_ref()
-                .ok_or_else(|| ContactError::InvalidEncoding("missing account_id".into()))?,
-            &from_pseudonym,
-            valid_after_ms,
-            &sealed_envelope,
-        )
-    } else {
-        encode_signing_prefix_v1(
-            &from_pubkey,
-            &from_pseudonym,
-            valid_after_ms,
-            &sealed_envelope,
-        )
-    };
+    let signed_prefix = encode_signing_prefix(
+        &from_pubkey,
+        &from_account_id,
+        &from_pseudonym,
+        valid_after_ms,
+        &privacy_pass_token,
+        &sealed_envelope,
+    );
     from_pubkey
         .verify(&signed_prefix, &signature)
         .map_err(|_| ContactError::BadSignature)?;
 
     Ok(ContactRequest {
         from_pubkey,
-        from_account_id,
+        from_account_id: Some(from_account_id),
         from_pseudonym,
         valid_after_ms,
         privacy_pass_token,
@@ -381,49 +355,98 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<ContactRequest> {
 /// Decrypt the sealed envelope on a previously-verified
 /// [`ContactRequest`] using the recipient's X25519 private key.
 ///
-/// Returns `(profile, intro_message)`. The profile, when present, is the
-/// sender's claim bound to `req.from_pubkey` — see the module docs. A
-/// profile that fails its bounds yields `None` with the intro intact.
+/// Returns the profile, the reply grant and the intro message. The
+/// profile, when present, is the sender's claim bound to `req.from_pubkey`
+/// — see the module docs. A profile that fails its bounds yields `None`
+/// with the rest intact; a reply grant that fails its bounds fails the
+/// open (module docs).
 ///
 /// # Errors
 ///
 /// - [`ContactError::WrongRecipient`] — envelope was sealed for a
 ///   different recipient (or tampered with after sealing).
 /// - [`ContactError::InvalidEncoding`] — envelope wire format is
-///   malformed, or the sealed plaintext's profile framing is.
+///   malformed, the sealed plaintext's framing is, or the reply grant
+///   does not decode or is not class `reply`.
 pub fn open_envelope(
     req: &ContactRequest,
     recipient_priv: &X25519SecretKey,
-) -> Result<(Option<Profile>, Vec<u8>)> {
+) -> Result<OpenedRequest> {
     let plaintext = envelope::open(recipient_priv, ENVELOPE_AAD, &req.sealed_envelope)?;
-    let (profile, intro) = split_sealed_plaintext(&plaintext)?;
-    Ok((profile, intro.to_vec()))
+    let (profile, reply_grant, intro) = split_sealed_plaintext(&plaintext)?;
+    Ok(OpenedRequest {
+        profile,
+        reply_grant,
+        intro: intro.to_vec(),
+    })
 }
 
-/// Build the sealed plaintext `profile_len ‖ profile ‖ intro`.
-fn frame_sealed_plaintext(profile: Option<&Profile>, intro_message: &[u8]) -> Result<Vec<u8>> {
+/// Build the sealed plaintext
+/// `profile_len ‖ profile ‖ reply_grant_len ‖ reply_grant ‖ intro`.
+fn frame_sealed_plaintext(
+    profile: Option<&Profile>,
+    reply_grant: Option<&ReachGrant>,
+    intro_message: &[u8],
+) -> Result<Vec<u8>> {
     let profile_bytes = match profile {
         Some(p) => compose_profile(p)
             .map_err(|e| ContactError::InvalidArgument(format!("profile: {e}")))?,
         None => Vec::new(),
     };
+    if let Some(grant) = reply_grant {
+        if grant.class != ReachClass::Reply {
+            return Err(ContactError::InvalidArgument(format!(
+                "a contact request carries a `reply` reach grant, not class {:#04x}",
+                grant.class.to_byte(),
+            )));
+        }
+    }
     // A composed profile is at most `PROFILE_ENVELOPE_MAX_LEN` bytes, far
     // below `u16::MAX`; checked rather than cast all the same.
     let profile_len = u16::try_from(profile_bytes.len())
         .map_err(|_| ContactError::InvalidArgument("profile envelope too large".to_string()))?;
-    let mut out =
-        Vec::with_capacity(PROFILE_LEN_PREFIX_LEN + profile_bytes.len() + intro_message.len());
+    let grant_len = if reply_grant.is_some() {
+        REACH_GRANT_LEN
+    } else {
+        0
+    };
+    let mut out = Vec::with_capacity(
+        PROFILE_LEN_PREFIX_LEN
+            + profile_bytes.len()
+            + REPLY_GRANT_LEN_PREFIX_LEN
+            + grant_len
+            + intro_message.len(),
+    );
     out.extend_from_slice(&profile_len.to_be_bytes());
     out.extend_from_slice(&profile_bytes);
+    match reply_grant {
+        Some(grant) => {
+            // REACH_GRANT_LEN is 37, a one-byte value by construction.
+            out.push(REPLY_GRANT_WIRE_LEN);
+            out.extend_from_slice(&grant.encode());
+        },
+        None => out.push(0),
+    }
     out.extend_from_slice(intro_message);
     Ok(out)
 }
 
-/// Split an opened sealed plaintext into `(profile, intro)`.
+/// [`REACH_GRANT_LEN`] as the one-byte `reply_grant_len` value.
+const REPLY_GRANT_WIRE_LEN: u8 = {
+    assert!(REACH_GRANT_LEN <= u8::MAX as usize);
+    #[allow(clippy::cast_possible_truncation)]
+    let len = REACH_GRANT_LEN as u8;
+    len
+};
+
+/// Split an opened sealed plaintext into `(profile, reply_grant, intro)`.
 ///
 /// Framing errors are errors; a well-framed but invalid profile is
-/// `None` (see the module docs for why the two differ).
-fn split_sealed_plaintext(plaintext: &[u8]) -> Result<(Option<Profile>, &[u8])> {
+/// `None`; a present but invalid reply grant is an error (see the module
+/// docs for why the three differ).
+pub(crate) fn split_sealed_plaintext(
+    plaintext: &[u8],
+) -> Result<(Option<Profile>, Option<ReachGrant>, &[u8])> {
     let mut cur = plaintext;
     let len_bytes: [u8; PROFILE_LEN_PREFIX_LEN] = take_n(&mut cur, PROFILE_LEN_PREFIX_LEN)?
         .try_into()
@@ -443,7 +466,45 @@ fn split_sealed_plaintext(plaintext: &[u8]) -> Result<(Option<Profile>, &[u8])> 
             },
         }
     };
-    Ok((profile, cur))
+    let reply_grant = match take_u8(&mut cur)? {
+        0 => None,
+        REPLY_GRANT_WIRE_LEN => {
+            let grant = ReachGrant::decode(take_n(&mut cur, REACH_GRANT_LEN)?)
+                .map_err(|e| ContactError::InvalidEncoding(format!("reply grant: {}", e.code())))?;
+            if grant.class != ReachClass::Reply {
+                return Err(ContactError::InvalidEncoding(
+                    "reply grant is not class `reply`".to_string(),
+                ));
+            }
+            Some(grant)
+        },
+        other => {
+            return Err(ContactError::InvalidEncoding(format!(
+                "reply grant length {other}, expected 0 or {REACH_GRANT_LEN}",
+            )));
+        },
+    };
+    Ok((profile, reply_grant, cur))
+}
+
+/// The fuzz oracle behind `fuzz_api::contact_request_plaintext`.
+pub(crate) fn fuzz_split(plain: &[u8]) -> Option<bool> {
+    let (profile, reply_grant, intro) = split_sealed_plaintext(plain).ok()?;
+    if reply_grant
+        .as_ref()
+        .is_some_and(|g| g.class != ReachClass::Reply)
+    {
+        return Some(false);
+    }
+    // Only a decoded profile re-frames byte-identically (an invalid one is
+    // dropped to `None` on purpose), so re-frame and compare only then or
+    // when the profile field was empty.
+    let profile_len = usize::from(u16::from_be_bytes([plain[0], plain[1]]));
+    if profile.is_none() && profile_len != 0 {
+        return Some(true);
+    }
+    let reframed = frame_sealed_plaintext(profile.as_ref(), reply_grant.as_ref(), intro).ok()?;
+    Some(reframed == plain)
 }
 
 // ============================================================================
@@ -486,57 +547,6 @@ fn encode_signing_prefix(
     out
 }
 
-/// Re-encode a legacy v2 signing prefix for signature
-/// verification on receive. Mirrors the 1.16e3b encoding — used
-/// only by `decode_and_verify` when the wire byte is
-/// `LEGACY_SCHEMA_VERSION_V2`. No `compose` path produces v2 any
-/// more.
-fn encode_signing_prefix_v2(
-    from_pubkey: &VerifyingKey,
-    from_account_id: &[u8; ACCOUNT_ID_LEN],
-    from_pseudonym: &[u8; PSEUDONYM_LEN],
-    valid_after_ms: u64,
-    sealed_envelope: &[u8],
-) -> Vec<u8> {
-    let sealed_len = u32::try_from(sealed_envelope.len())
-        .expect("sealed envelope under u32::MAX bytes — caller invariant");
-    let mut out = Vec::with_capacity(
-        1 + PUBLIC_KEY_LEN + ACCOUNT_ID_LEN + PSEUDONYM_LEN + 8 + 4 + sealed_envelope.len(),
-    );
-    out.push(LEGACY_SCHEMA_VERSION_V2);
-    out.extend_from_slice(&from_pubkey.to_bytes());
-    out.extend_from_slice(from_account_id);
-    out.extend_from_slice(from_pseudonym);
-    out.extend_from_slice(&valid_after_ms.to_be_bytes());
-    out.extend_from_slice(&sealed_len.to_be_bytes());
-    out.extend_from_slice(sealed_envelope);
-    out
-}
-
-/// Re-encode a legacy v1 signing prefix for signature
-/// verification on receive. Mirrors the pre-1.16e3b encoding
-/// — used only by `decode_and_verify` when the wire byte is
-/// `LEGACY_SCHEMA_VERSION_V1`. No `compose` path produces v1
-/// any more.
-fn encode_signing_prefix_v1(
-    from_pubkey: &VerifyingKey,
-    from_pseudonym: &[u8; PSEUDONYM_LEN],
-    valid_after_ms: u64,
-    sealed_envelope: &[u8],
-) -> Vec<u8> {
-    let sealed_len = u32::try_from(sealed_envelope.len())
-        .expect("sealed envelope under u32::MAX bytes — caller invariant");
-    let mut out =
-        Vec::with_capacity(1 + PUBLIC_KEY_LEN + PSEUDONYM_LEN + 8 + 4 + sealed_envelope.len());
-    out.push(LEGACY_SCHEMA_VERSION_V1);
-    out.extend_from_slice(&from_pubkey.to_bytes());
-    out.extend_from_slice(from_pseudonym);
-    out.extend_from_slice(&valid_after_ms.to_be_bytes());
-    out.extend_from_slice(&sealed_len.to_be_bytes());
-    out.extend_from_slice(sealed_envelope);
-    out
-}
-
 fn take_u8(cur: &mut &[u8]) -> Result<u8> {
     if cur.is_empty() {
         return Err(ContactError::InvalidEncoding("unexpected EOF".to_string()));
@@ -544,6 +554,13 @@ fn take_u8(cur: &mut &[u8]) -> Result<u8> {
     let b = cur[0];
     *cur = &cur[1..];
     Ok(b)
+}
+
+fn take_array<const N: usize>(cur: &mut &[u8]) -> Result<[u8; N]> {
+    let bytes = take_n(cur, N)?;
+    let mut out = [0u8; N];
+    out.copy_from_slice(bytes);
+    Ok(out)
 }
 
 fn take_n<'a>(cur: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
@@ -561,6 +578,7 @@ fn take_n<'a>(cur: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reach::ReachClass;
     use lakko_crypto::agreement::SecretKey as X25519SecretKey;
     use lakko_crypto::signing::SigningKey;
 
@@ -595,6 +613,7 @@ mod tests {
             1_000_000,
             b"",
             None,
+            None,
             b"hi bob",
         )
         .unwrap();
@@ -606,9 +625,10 @@ mod tests {
         assert_eq!(req.valid_after_ms, 1_000_000);
         assert!(req.privacy_pass_token.is_empty());
 
-        let (profile, intro) = open_envelope(&req, &bob).unwrap();
-        assert_eq!(profile, None);
-        assert_eq!(intro, b"hi bob");
+        let opened = open_envelope(&req, &bob).unwrap();
+        assert_eq!(opened.profile, None);
+        assert_eq!(opened.reply_grant, None);
+        assert_eq!(opened.intro, b"hi bob");
     }
 
     /// Phase 1.16e3b: v2 wire layout. `from_account_id` lands
@@ -630,6 +650,7 @@ mod tests {
             0,
             b"",
             None,
+            None,
             b"",
         )
         .unwrap();
@@ -647,40 +668,6 @@ mod tests {
         assert_eq!(&wire[acct_start..acct_end], &acct[..]);
     }
 
-    /// Phase 1.16e3b: v1 envelopes (no `from_account_id`) still
-    /// decode for backwards-compat. The synthesised v1 wire is
-    /// produced by stripping the schema-version byte and the
-    /// 16-byte account_id from a v2 wire and re-signing under
-    /// the v1 prefix shape.
-    #[test]
-    fn v1_envelopes_still_decode() {
-        let alice = sender();
-        let bob = recipient_x25519();
-        let pseudonym = [0xBBu8; PSEUDONYM_LEN];
-        let valid_after_ms = 12345_u64;
-        let intro = b"legacy hi";
-
-        let sealed_envelope = envelope::seal(
-            &bob.public_key(),
-            ENVELOPE_AAD,
-            &frame_sealed_plaintext(None, intro).unwrap(),
-        )
-        .unwrap();
-        let from_pubkey = alice.verifying_key();
-        let signed_prefix =
-            encode_signing_prefix_v1(&from_pubkey, &pseudonym, valid_after_ms, &sealed_envelope);
-        let signature = alice.sign(&signed_prefix);
-        let mut wire = signed_prefix;
-        wire.extend_from_slice(&signature.to_bytes());
-
-        let req = decode_and_verify(&wire).unwrap();
-        assert_eq!(req.from_account_id, None);
-        assert_eq!(req.from_pseudonym, pseudonym);
-        assert_eq!(req.valid_after_ms, valid_after_ms);
-        let (_, opened) = open_envelope(&req, &bob).unwrap();
-        assert_eq!(opened, intro);
-    }
-
     #[test]
     fn empty_intro_message_is_supported() {
         let alice = sender();
@@ -695,12 +682,12 @@ mod tests {
             0,
             b"",
             None,
+            None,
             b"",
         )
         .unwrap();
         let req = decode_and_verify(&wire).unwrap();
-        let (_, intro) = open_envelope(&req, &bob).unwrap();
-        assert_eq!(intro, b"");
+        assert_eq!(open_envelope(&req, &bob).unwrap().intro, b"");
     }
 
     #[test]
@@ -715,6 +702,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             b"",
+            None,
             None,
             b"intro",
         )
@@ -740,6 +728,7 @@ mod tests {
             pseudonym,
             0,
             b"",
+            None,
             None,
             b"intro",
         )
@@ -767,6 +756,7 @@ mod tests {
             0,
             b"",
             None,
+            None,
             b"secret",
         )
         .unwrap();
@@ -792,6 +782,7 @@ mod tests {
             0,
             b"",
             None,
+            None,
             b"private",
         )
         .unwrap();
@@ -812,6 +803,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             b"",
+            None,
             None,
             b"x",
         )
@@ -835,6 +827,7 @@ mod tests {
             0,
             b"",
             None,
+            None,
             b"x",
         )
         .unwrap();
@@ -855,6 +848,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             b"",
+            None,
             None,
             b"x",
         )
@@ -880,6 +874,7 @@ mod tests {
             0,
             b"",
             None,
+            None,
             b"intro",
         )
         .unwrap();
@@ -890,6 +885,7 @@ mod tests {
             pseudonym,
             0,
             b"",
+            None,
             None,
             b"intro",
         )
@@ -918,6 +914,7 @@ mod tests {
             0,
             token,
             None,
+            None,
             b"hello",
         )
         .unwrap();
@@ -925,8 +922,7 @@ mod tests {
         let req = decode_and_verify(&wire).unwrap();
         assert_eq!(req.privacy_pass_token.as_slice(), token);
 
-        let (_, opened) = open_envelope(&req, &bob).unwrap();
-        assert_eq!(opened, b"hello");
+        assert_eq!(open_envelope(&req, &bob).unwrap().intro, b"hello");
     }
 
     /// Tampering the on-wire token bytes invalidates the
@@ -945,6 +941,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             token,
+            None,
             None,
             b"",
         )
@@ -978,55 +975,11 @@ mod tests {
             0,
             &huge,
             None,
+            None,
             b"",
         )
         .unwrap_err();
         assert!(matches!(err, ContactError::InvalidEncoding(_)));
-    }
-
-    /// Phase 1.16e3b's v2 envelopes still decode on the v3
-    /// receiver. The `privacy_pass_token` slot lands empty —
-    /// matching the dev / web fallback path. Synthesised here
-    /// by hand-rolling the v2 signed prefix (the only place
-    /// `encode_signing_prefix_v2` is exercised outside its own
-    /// private decode branch).
-    #[test]
-    fn v2_envelopes_still_decode_with_empty_token() {
-        let alice = sender();
-        let bob = recipient_x25519();
-        let acct = [0xC3u8; ACCOUNT_ID_LEN];
-        let pseudonym = [0xD4u8; PSEUDONYM_LEN];
-        let valid_after_ms = 42_u64;
-        let intro = b"v2 envelope";
-
-        let sealed_envelope = envelope::seal(
-            &bob.public_key(),
-            ENVELOPE_AAD,
-            &frame_sealed_plaintext(None, intro).unwrap(),
-        )
-        .unwrap();
-        let from_pubkey = alice.verifying_key();
-        let signed_prefix = encode_signing_prefix_v2(
-            &from_pubkey,
-            &acct,
-            &pseudonym,
-            valid_after_ms,
-            &sealed_envelope,
-        );
-        let signature = alice.sign(&signed_prefix);
-        let mut wire = signed_prefix;
-        wire.extend_from_slice(&signature.to_bytes());
-
-        let req = decode_and_verify(&wire).unwrap();
-        assert_eq!(req.from_account_id, Some(acct));
-        assert_eq!(req.from_pseudonym, pseudonym);
-        assert_eq!(req.valid_after_ms, valid_after_ms);
-        assert!(
-            req.privacy_pass_token.is_empty(),
-            "v2 wire should produce an empty token on v3 decode",
-        );
-        let (_, opened) = open_envelope(&req, &bob).unwrap();
-        assert_eq!(opened, intro);
     }
 
     // ========================================================
@@ -1039,6 +992,8 @@ mod tests {
             username: Some("alice".to_string()),
             updated_at_ms: 1_700_000_000_000,
             account_id: None,
+            username_certificate: None,
+            grants: Vec::new(),
         }
     }
 
@@ -1073,13 +1028,14 @@ mod tests {
             0,
             b"",
             Some(&alice_profile()),
+            None,
             b"hi bob",
         )
         .unwrap();
         let req = decode_and_verify(&wire).unwrap();
-        let (profile, intro) = open_envelope(&req, &bob).unwrap();
-        assert_eq!(profile, Some(alice_profile()));
-        assert_eq!(intro, b"hi bob");
+        let opened = open_envelope(&req, &bob).unwrap();
+        assert_eq!(opened.profile, Some(alice_profile()));
+        assert_eq!(opened.intro, b"hi bob");
     }
 
     #[test]
@@ -1093,24 +1049,184 @@ mod tests {
             0,
             b"",
             Some(&alice_profile()),
+            None,
             b"",
         )
         .unwrap();
-        let (profile, intro) = open_envelope(&decode_and_verify(&wire).unwrap(), &bob).unwrap();
-        assert_eq!(profile, Some(alice_profile()));
-        assert!(intro.is_empty());
+        let opened = open_envelope(&decode_and_verify(&wire).unwrap(), &bob).unwrap();
+        assert_eq!(opened.profile, Some(alice_profile()));
+        assert!(opened.intro.is_empty());
     }
 
     #[test]
     fn sealed_plaintext_framing_is_pinned() {
-        let framed = frame_sealed_plaintext(Some(&alice_profile()), b"intro").unwrap();
+        let grant = reply_grant();
+        let framed =
+            frame_sealed_plaintext(Some(&alice_profile()), Some(&grant), b"intro").unwrap();
         let profile_wire = crate::profile::compose_profile(&alice_profile()).unwrap();
         let len = u16::try_from(profile_wire.len()).unwrap();
+        let p = profile_wire.len();
         assert_eq!(&framed[..2], &len.to_be_bytes());
-        assert_eq!(&framed[2..2 + profile_wire.len()], profile_wire.as_slice());
-        assert_eq!(&framed[2 + profile_wire.len()..], b"intro");
-        // No profile: a zero prefix, then the intro verbatim.
-        assert_eq!(frame_sealed_plaintext(None, b"x").unwrap(), b"\x00\x00x");
+        assert_eq!(&framed[2..2 + p], profile_wire.as_slice());
+        assert_eq!(framed[2 + p], 37);
+        assert_eq!(&framed[3 + p..3 + p + 37], &grant.encode());
+        assert_eq!(&framed[3 + p + 37..], b"intro");
+        // Nothing: two zero prefixes, then the intro verbatim.
+        assert_eq!(
+            frame_sealed_plaintext(None, None, b"x").unwrap(),
+            b"\x00\x00\x00x"
+        );
+    }
+
+    fn reply_grant() -> ReachGrant {
+        ReachGrant::derive(&[0x3C; 32], ReachClass::Reply, &[0x9A; 16], 0).unwrap()
+    }
+
+    /// ADR-0060 §6: the requester's reply grant rides the sealed plaintext
+    /// beside a profile and an intro, and comes out whole.
+    #[test]
+    fn a_reply_grant_round_trips_with_and_without_the_rest() {
+        let bob = recipient_x25519();
+        let grant = reply_grant();
+        for (profile, intro) in [
+            (Some(alice_profile()), b"hi bob".as_slice()),
+            (None, b"".as_slice()),
+            (Some(alice_profile()), b"".as_slice()),
+        ] {
+            let wire = compose(
+                &sender(),
+                &sender_account_id(),
+                &bob.public_key(),
+                [0u8; PSEUDONYM_LEN],
+                0,
+                b"",
+                profile.as_ref(),
+                Some(&grant),
+                intro,
+            )
+            .unwrap();
+            let opened = open_envelope(&decode_and_verify(&wire).unwrap(), &bob).unwrap();
+            assert_eq!(opened.profile, profile);
+            assert_eq!(opened.reply_grant.as_ref(), Some(&grant));
+            assert_eq!(opened.intro, intro);
+        }
+        // An intro that is itself a call envelope keeps its bytes exactly.
+        let welcome = crate::call_welcome::wrap_call_welcome(&[0xAB; 64]);
+        let wire = compose(
+            &sender(),
+            &sender_account_id(),
+            &bob.public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            b"",
+            None,
+            Some(&grant),
+            &welcome,
+        )
+        .unwrap();
+        let opened = open_envelope(&decode_and_verify(&wire).unwrap(), &bob).unwrap();
+        assert_eq!(opened.intro, welcome);
+    }
+
+    #[test]
+    fn compose_refuses_a_grant_of_another_class() {
+        for class in ReachClass::ALL {
+            if class == ReachClass::Reply {
+                continue;
+            }
+            let scope: &[u8] = if class.is_account_wide() { b"" } else { b"s" };
+            let grant = ReachGrant::derive(&[1; 32], class, scope, 1).unwrap();
+            let err = compose(
+                &sender(),
+                &sender_account_id(),
+                &recipient_x25519().public_key(),
+                [0u8; PSEUDONYM_LEN],
+                0,
+                b"",
+                None,
+                Some(&grant),
+                b"hi",
+            )
+            .unwrap_err();
+            assert!(matches!(err, ContactError::InvalidArgument(_)), "{class:?}");
+        }
+    }
+
+    /// The decision this carrier makes for the grant, unlike the profile: a
+    /// present but invalid reply grant fails the open.
+    #[test]
+    fn an_invalid_reply_grant_fails_the_open() {
+        let bob = recipient_x25519();
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        // Every other class.
+        for class in ReachClass::ALL {
+            if class == ReachClass::Reply {
+                continue;
+            }
+            let scope: &[u8] = if class.is_account_wide() { b"" } else { b"s" };
+            let grant = ReachGrant::derive(&[1; 32], class, scope, 1).unwrap();
+            let mut plain = vec![0, 0, 37];
+            plain.extend_from_slice(&grant.encode());
+            plain.extend_from_slice(b"hi");
+            cases.push(plain);
+        }
+        // An unknown class byte.
+        let mut unknown = reply_grant().encode();
+        unknown[0] = 0xEE;
+        let mut plain = vec![0, 0, 37];
+        plain.extend_from_slice(&unknown);
+        cases.push(plain);
+        // A length that is neither 0 nor 37.
+        for len in [1u8, 36, 38, 0xFF] {
+            let mut plain = vec![0, 0, len];
+            plain.extend_from_slice(&[3u8; 64]);
+            cases.push(plain);
+        }
+        // 37 declared, fewer carried.
+        let mut short = vec![0, 0, 37];
+        short.extend_from_slice(&reply_grant().encode()[..36]);
+        cases.push(short);
+        for plaintext in cases {
+            let req = signed_request_sealing(&plaintext);
+            assert!(
+                matches!(
+                    open_envelope(&req, &bob),
+                    Err(ContactError::InvalidEncoding(_))
+                ),
+                "{plaintext:?}"
+            );
+        }
+        // Control: the well-formed grant opens.
+        let mut good = vec![0, 0, 37];
+        good.extend_from_slice(&reply_grant().encode());
+        let opened = open_envelope(&signed_request_sealing(&good), &bob).unwrap();
+        assert_eq!(opened.reply_grant, Some(reply_grant()));
+        assert!(opened.intro.is_empty());
+    }
+
+    #[test]
+    fn older_schema_versions_are_refused() {
+        let bob = recipient_x25519();
+        let wire = compose(
+            &sender(),
+            &sender_account_id(),
+            &bob.public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            b"",
+            None,
+            None,
+            b"x",
+        )
+        .unwrap();
+        for version in [1u8, 2, 3] {
+            let mut old = wire.clone();
+            old[0] = version;
+            assert!(matches!(
+                decode_and_verify(&old),
+                Err(ContactError::InvalidEncoding(_))
+            ));
+        }
     }
 
     #[test]
@@ -1125,6 +1241,7 @@ mod tests {
             0,
             b"",
             Some(&bad),
+            None,
             b"hi",
         )
         .unwrap_err();
@@ -1150,11 +1267,16 @@ mod tests {
         for garbage in [bad_profile.clone(), b"not a profile at all".to_vec()] {
             let mut plaintext = u16::try_from(garbage.len()).unwrap().to_be_bytes().to_vec();
             plaintext.extend_from_slice(&garbage);
+            plaintext.push(37);
+            plaintext.extend_from_slice(&reply_grant().encode());
             plaintext.extend_from_slice(b"hi bob");
             let req = signed_request_sealing(&plaintext);
-            let (profile, intro) = open_envelope(&req, &bob).unwrap();
-            assert_eq!(profile, None);
-            assert_eq!(intro, b"hi bob");
+            let opened = open_envelope(&req, &bob).unwrap();
+            assert_eq!(opened.profile, None);
+            // The grant after an invalid profile is still found: the
+            // profile's length prefix, not its content, bounds it.
+            assert_eq!(opened.reply_grant, Some(reply_grant()));
+            assert_eq!(opened.intro, b"hi bob");
         }
     }
 
@@ -1166,6 +1288,8 @@ mod tests {
         for plaintext in [
             Vec::new(),
             vec![0x00],
+            // No reply-grant length after an empty profile.
+            vec![0x00, 0x00],
             // Declares 10 profile bytes, carries 3.
             vec![0x00, 0x0A, 1, 2, 3],
             // A raw, unframed intro: "le" reads as a 27749-byte profile.

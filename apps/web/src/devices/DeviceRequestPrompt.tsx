@@ -36,6 +36,7 @@ import {
   type ResponderView,
 } from "./device-link";
 import { runScanFlow } from "./orchestrator";
+import { currentServiceEnvelopes } from "../reach/service-envelope-outbox";
 import {
   PAIRING_NEEDS_USERNAME,
   PAIRING_UNSUPPORTED,
@@ -124,6 +125,9 @@ export function DeviceRequestPrompt(): JSX.Element {
         deviceAuthorizeStart: (): Promise<string> =>
           client.deviceAuthorizeStart(secrets.sessionToken),
       },
+      // ADR-0060 section 7: the new device starts with this account's
+      // "who can find me" setting and reach key versions.
+      serviceEnvelopes: await currentServiceEnvelopes(),
     });
     // ADR-0050 section 2.8 — not awaited: it waits for the device to land
     // and publish its KeyPackage, which is minutes.

@@ -212,8 +212,8 @@ public object RecoveryPayload {
         ds: DsClient = DsClient(),
     ) {
         ds.use { client ->
-            client.publishMailbox(
-                pseudonym = rendezvousPseudonym,
+            client.publishRendezvous(
+                rendezvous = rendezvousPseudonym,
                 payload = wrapRecoveryRow(sealedBlob),
             )
         }
@@ -268,8 +268,8 @@ public object RecoveryPayload {
             val waitSecs = minOf(PER_REQUEST_LONG_POLL_SECS, remainingSecs)
 
             val result = try {
-                client.fetchMailbox(
-                    pseudonym = rendezvousPseudonym,
+                client.fetchRendezvous(
+                    rendezvous = rendezvousPseudonym,
                     after = cursor,
                     limit = 1,
                     waitSecs = waitSecs,

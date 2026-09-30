@@ -158,6 +158,17 @@ public object CoPublisher {
             val drained = me.lakko.app.chat.drainKnockRows(knocks.messages, 0L) { bytes ->
                 publisherGroup.processKnock(identity, bytes)
             }
+            // ADR-0060 §6 — keep each joiner's reply key from its attribution.
+            for (row in knocks.messages) {
+                val attr = try {
+                    uniffi.lakko_ffi_uniffi.parseGroupJoinAttribution(row.payload)
+                } catch (_: Throwable) {
+                    continue
+                }
+                if (!attr.groupId.contentEquals(groupId)) continue
+                if (attr.replyGrant.`class` != uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY) continue
+                joinerReplyGrants[me.lakko.app.reach.reachHex(attr.joinerSignatureKey)] = attr.replyGrant
+            }
             applied += drained.accepted.count {
                 it.second is uniffi.lakko_ffi_uniffi.ProcessedMessage.ExternalJoinProposal
             }
@@ -303,7 +314,11 @@ public object CoPublisher {
         // same envelope a direct add uses; nothing is written to the journal
         // for a non-member to read.
         val joinerMailbox = IdentityPseudonym.fromIdentity(proposalRef).use { it.asBytes() }
-        ds.publishMailbox(joinerMailbox, wrapEnvelope(KIND_WELCOME, added.welcome))
+        // ADR-0060 §6 — written with the reply key the joiner's attribution
+        // carried: its mailbox is claimed and closed.
+        val reach = joinerReplyGrants[me.lakko.app.reach.reachHex(proposalRef)]
+            ?.let { me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(it.seed)) }
+        ds.publishMailbox(joinerMailbox, wrapEnvelope(KIND_WELCOME, added.welcome), reach = reach)
         resealSubscribers(channelsClient, identity, publisherGroup, channelIdHex)
     }
 
@@ -404,12 +419,15 @@ public object CoPublisher {
         // arrives in this identity's own mailbox ([pollForCoPublishWelcome]).
         // A group whose owner has not claimed it yet refuses with
         // [GroupNotAcceptingRequests]; nothing was stored.
+        val replyGrant = registerReplyKey(ds, identity)
         runLinkJoinKnock(
             knock = { payloads ->
                 ds.knock(groupId, payloads).epoch
             },
             buildProposal = { epoch -> identity.createExternalJoinProposal(groupId, epoch) },
-            buildAttribution = { composeGroupJoinAttribution(identity.ed25519Seed(), wire) },
+            // ADR-0060 §6 — the reply key the owner writes the Welcome with,
+            // registered on this identity's own mailbox before the knock.
+            buildAttribution = { composeGroupJoinAttribution(identity.ed25519Seed(), wire, replyGrant) },
         )
         lastCoPublishRequestMs = System.currentTimeMillis()
         return CoPublishRequest(
@@ -527,6 +545,46 @@ public object CoPublisher {
             )
         }
         channelsClient.rotateChannel(channelIdHex, batch)
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0060 §6 — reply keys
+    // -----------------------------------------------------------------
+
+    /** Each pending joiner's reply grant, by its leaf key (hex). SECRET;
+     *  process memory only — a restart re-reads the retained knocks. */
+    private val joinerReplyGrants =
+        java.util.concurrent.ConcurrentHashMap<String, uniffi.lakko_ffi_uniffi.FfiReachGrant>()
+
+    /**
+     * A `reply` key on [identity]'s own mailbox, registered (with its seven-day
+     * expiry) before the request that carries it leaves. [identity] is the
+     * channel publisher identity whose mailbox the owner's Welcome goes to.
+     */
+    private suspend fun registerReplyKey(
+        ds: DsClient,
+        identity: Identity,
+    ): uniffi.lakko_ffi_uniffi.FfiReachGrant {
+        val scope = ByteArray(me.lakko.app.reach.REPLY_SCOPE_LEN).also { java.security.SecureRandom().nextBytes(it) }
+        val grant = uniffi.lakko_ffi_uniffi.deriveReachGrant(
+            identity.ed25519Seed(),
+            uniffi.lakko_ffi_uniffi.FfiReachClass.REPLY,
+            scope,
+            0u,
+        )
+        val mailboxSigner = dsMailboxSigner(identity)
+        ds.putMailboxReach(
+            pseudonym = mailboxSigner.mailboxPseudonym(),
+            signer = FfiDsJournalSigner(mailboxSigner),
+            add = listOf(
+                me.lakko.app.ds.DsReachKeyAdd(
+                    uniffi.lakko_ffi_uniffi.reachVerifyingKey(grant.seed),
+                    me.lakko.app.reach.replyExpiry(System.currentTimeMillis()),
+                ),
+            ),
+            remove = emptyList(),
+        )
+        return grant
     }
 
     // -----------------------------------------------------------------

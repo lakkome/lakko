@@ -71,7 +71,15 @@
 //!   optional `x-lakko-wake: <push_gid b64url>;<message|call>`, ADR-0054)
 //! - `GET    /ds/group/{group_id_hex}/messages`    — `?after=<id>&limit=<n>&wait=<secs>`
 //! - `POST   /ds/mailbox/{device_id_hex}/messages` — publish to device mailbox
+//!   (a claimed, closed mailbox takes a write only under a reach key or a
+//!   delegation, ADR-0060; see `src/reach.rs`)
 //! - `GET    /ds/mailbox/{device_id_hex}/messages` — `?after=<id>&limit=<n>&wait=<secs>`
+//!   (personal: the identity proof, whether or not the mailbox is claimed,
+//!   ADR-0060)
+//! - `POST   /ds/rendezvous/{id_hex}/messages`     — append to a rendezvous
+//!   (pairing, recovery, courier, state bundle): no proof, never claimable,
+//!   its own table, so no rendezvous id names a mailbox's rows (ADR-0060)
+//! - `GET    /ds/rendezvous/{id_hex}/messages`     — `?after=<id>&limit=<n>&wait=<secs>`, no proof
 //! - `PUT    /ds/group/{group_id_hex}/claim`       — first claim, by the journal's root (ADR-0057)
 //! - `PUT    /ds/group/{group_id_hex}/reset`       — the root replaces the epoch chain
 //! - `PUT    /ds/group/{group_id_hex}/access`      — a registrar registers an epoch's access key
@@ -79,6 +87,8 @@
 //! - `PUT    /ds/group/{group_id_hex}/root`        — the root names a new root
 //! - `PUT    /ds/group/{group_id_hex}/push-binding` — root or admin binds one `push_gid`
 //! - `PUT    /ds/mailbox/{device_id_hex}/access`   — claim a mailbox under its identity key
+//! - `PUT    /ds/mailbox/{device_id_hex}/reach`    — register / remove reach keys, set open (ADR-0060)
+//! - `POST   /ds/mailbox/{device_id_hex}/reach/check` — is this reach key registered? (ADR-0060)
 //! - `POST   /ds/group/{group_id_hex}/knock`       — a non-member's request to join (token)
 //! - `GET    /ds/group/{group_id_hex}/knocks`      — the members read the knocks
 //!
@@ -89,6 +99,7 @@
 mod access;
 mod journal;
 mod ownership;
+mod reach;
 #[cfg(test)]
 mod test_support;
 mod wake;
@@ -270,8 +281,20 @@ pub(crate) fn build_app(state: AppState) -> Router {
             put(ownership::put_push_binding),
         )
         .route(
+            "/ds/rendezvous/{rendezvous_hex}/messages",
+            post(journal::post_rendezvous).get(journal::get_rendezvous),
+        )
+        .route(
             "/ds/mailbox/{device_hex}/access",
             put(access::put_mailbox_access),
+        )
+        .route(
+            "/ds/mailbox/{device_hex}/reach",
+            put(reach::put_mailbox_reach),
+        )
+        .route(
+            "/ds/mailbox/{device_hex}/reach/check",
+            post(reach::post_reach_check),
         )
         .route("/ds/group/{group_hex}/knock", post(access::post_knock))
         .route("/ds/group/{group_hex}/knocks", get(access::get_knocks))

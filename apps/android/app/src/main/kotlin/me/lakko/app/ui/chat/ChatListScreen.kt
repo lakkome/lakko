@@ -7,6 +7,8 @@ import android.text.format.DateFormat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -169,6 +171,15 @@ public fun ChatListScreen(
     onNewFolder: (firstRow: ConversationListRow?) -> Unit = {},
     /** UX spec 2.2 — Settings > Chat folders ("Edit folders", "Reorder folders"). */
     onOpenFolderSettings: () -> Unit = {},
+    /**
+     * `docs/ux/who-can-find-me.md` section 6.1 — people in the search field:
+     * the people this device knows as the person types, and the one **Search
+     * people** row (username, name, contacts of contacts, and the channel
+     * namespace). `null` keeps the plain lookup row (tests, previews).
+     */
+    peopleSearch: me.lakko.app.search.PeopleSearchService? = null,
+    /** A contact row of the people results: open their chat. */
+    onOpenContact: (keyB64: String) -> Unit = {},
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -378,6 +389,27 @@ public fun ChatListScreen(
                     // button does, not a different set of choices in a
                     // different place.
                     rows.isEmpty() && !showBar -> EmptyPanel(onStart = { createMenuOpen = true })
+                    // UX who-can-find-me 6.1 — the people half of the search
+                    // field replaces the plain lookup row when it is wired.
+                    searching && visible.isEmpty() && peopleSearch != null -> Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        PeopleSearchSection(
+                            query = query,
+                            service = peopleSearch,
+                            conversationMatches = 0,
+                            onOpenChannel = { id, handle ->
+                                query = ""
+                                onSubscribeToChannel(id, handle)
+                            },
+                            onOpenContact = { key ->
+                                query = ""
+                                onOpenContact(key)
+                            },
+                        )
+                    }
                     searching && visible.isEmpty() -> NoMatchPanel(
                         offerLookup = lookupOffered,
                         label = findByNameRowLabelSafely(query),
@@ -414,6 +446,27 @@ public fun ChatListScreen(
                         rows = visible,
                         folder = null,
                         handlers = rowHandlers,
+                        // UX who-can-find-me 6.1 — people under the matching
+                        // conversations.
+                        footer = if (searching && peopleSearch != null) {
+                            {
+                                PeopleSearchSection(
+                                    query = query,
+                                    service = peopleSearch,
+                                    conversationMatches = visible.size,
+                                    onOpenChannel = { id, handle ->
+                                        query = ""
+                                        onSubscribeToChannel(id, handle)
+                                    },
+                                    onOpenContact = { key ->
+                                        query = ""
+                                        onOpenContact(key)
+                                    },
+                                )
+                            }
+                        } else {
+                            null
+                        },
                     )
                     // Android: the list pages sideways in step with the tabs.
                     else -> HorizontalPager(
@@ -558,6 +611,8 @@ private fun ConversationList(
     rows: List<ConversationListRow>,
     folder: ChatFolder?,
     handlers: RowHandlers,
+    /** Drawn after the last row (the people search while searching). */
+    footer: (@Composable () -> Unit)? = null,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -586,6 +641,9 @@ private fun ConversationList(
                     onDeclineCall = handlers.onDeclineCall,
                 )
             }
+        }
+        if (footer != null) {
+            item(key = "people-search") { footer() }
         }
     }
 }

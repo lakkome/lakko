@@ -75,6 +75,53 @@ import {
 
 export { DS_WAKE_HEADER, dsWakeHeaderValue, type DsWake, type DsWakeKind } from "./wake";
 
+/** The header a reach-key delegation travels in (`delegationHeaderName()` on
+ *  the wasm surface; pinned against it by `client.reach.test.ts`). */
+export const DS_DELEGATION_HEADER = "x-lakko-ds-delegation";
+
+/**
+ * How a write to someone else's identity mailbox is authorised (ADR-0060
+ * section 2). `signer` is a reach signer (`DsProofSigner.forReach(seed)`) of a
+ * key the owner registered, or the delegate's signer next to `delegation`.
+ * Absent: the write is unsigned, which an open (Everyone) or unclaimed
+ * mailbox stores and a closed one silently drops.
+ */
+export interface MailboxWriteAuth {
+  readonly signer?: ProofSigner | null;
+  /** The `x-lakko-ds-delegation` header value. */
+  readonly delegation?: string | null;
+}
+
+/** One change to the reach keys of this device's own mailbox. */
+export interface MailboxReachUpdate {
+  readonly add?: readonly { readonly publicKey: Uint8Array; readonly expiresAtMs?: number | null }[];
+  readonly remove?: readonly Uint8Array[];
+  /** Set the Everyone flag; absent leaves it unchanged. */
+  readonly open?: boolean;
+}
+
+/** The JSON body of `PUT /ds/mailbox/{hex}/reach`. Exported for the test. */
+export function reachUpdateBody(update: MailboxReachUpdate): {
+  add: { reach_pk_b64: string; expires_at_ms?: number }[];
+  remove: string[];
+  open?: boolean;
+} {
+  const body: {
+    add: { reach_pk_b64: string; expires_at_ms?: number }[];
+    remove: string[];
+    open?: boolean;
+  } = {
+    add: (update.add ?? []).map((a) =>
+      a.expiresAtMs === undefined || a.expiresAtMs === null
+        ? { reach_pk_b64: base64Encode(a.publicKey) }
+        : { reach_pk_b64: base64Encode(a.publicKey), expires_at_ms: a.expiresAtMs },
+    ),
+    remove: (update.remove ?? []).map((k) => base64Encode(k)),
+  };
+  if (update.open !== undefined) body.open = update.open;
+  return body;
+}
+
 /** Default base URL — Vite dev proxy `/api/ds/*` →
  *  `127.0.0.1:8082`. Prod nginx routes the same path. */
 export const DEFAULT_BASE_URL = "/api/ds";
@@ -171,7 +218,7 @@ export function isDsNetworkFailure(err: unknown): boolean {
 
 /** How one request is proven (ADR-0053). */
 type SigningPlan =
-  /** Never signed: someone else's mailbox, a rendezvous mailbox, the knock. */
+  /** Never signed: a rendezvous id, the knock, a proofless mailbox write. */
   | { readonly kind: "none" }
   /** Signed by this signer (or unsigned when `null`), one attempt: the caller
    *  owns the group and knows exactly which key the request needs. */
@@ -547,12 +594,15 @@ export class DsClient implements StatementSender {
    * `POST /ds/mailbox/{pseudonym_hex}/messages` — publish a raw
    * payload to a mailbox. The body is sent as
    * `application/octet-stream`; the server caps the size at
-   * `MAX_MESSAGE_BYTES`. Never signed: a mailbox write is the open cold
-   * inbox (ADR-0053 section 2).
+   * `MAX_MESSAGE_BYTES`. ADR-0060: a claimed mailbox is closed unless its
+   * owner chose Everyone, so the write carries the reach grant (or the
+   * delegation) that authorises it; an unauthorised write to a closed
+   * mailbox is answered as stored and dropped.
    */
   async publishMailbox(
     pseudonym: Uint8Array,
     payload: Uint8Array,
+    auth?: MailboxWriteAuth | null,
   ): Promise<PublishResult> {
     if (pseudonym.length !== 32) {
       throw new DsClientArgError("pseudonym must be 32 bytes");
@@ -560,9 +610,84 @@ export class DsClient implements StatementSender {
     if (payload.length === 0) {
       throw new DsClientArgError("payload must be non-empty");
     }
-    return this.publish(`/ds/mailbox/${pseudonymHex(pseudonym)}/messages`, payload, {
+    const signer = auth?.signer ?? null;
+    const delegation = auth?.delegation ?? null;
+    if (delegation !== null && signer === null) {
+      // The DS refuses a delegation without the delegate's proof; say so here
+      // rather than as a 401.
+      throw new DsClientArgError("a delegation needs the delegate's proof signer");
+    }
+    return this.publish(
+      `/ds/mailbox/${pseudonymHex(pseudonym)}/messages`,
+      payload,
+      { kind: "explicit", signer },
+      delegation === null ? undefined : { [DS_DELEGATION_HEADER]: delegation },
+    );
+  }
+
+  /**
+   * `POST /ds/rendezvous/{hex}/messages` - a random rendezvous id (pairing,
+   * recovery, the welcome courier, the state bundle; ADR-0060 section 2).
+   * Never signed and never carries a delegation or wake header: the DS
+   * refuses all three there.
+   */
+  async publishRendezvous(id: Uint8Array, payload: Uint8Array): Promise<PublishResult> {
+    if (id.length !== 32) throw new DsClientArgError("rendezvous id must be 32 bytes");
+    if (payload.length === 0) throw new DsClientArgError("payload must be non-empty");
+    return this.publish(`/ds/rendezvous/${pseudonymHex(id)}/messages`, payload, {
       kind: "none",
     });
+  }
+
+  /** `GET /ds/rendezvous/{hex}/messages` - unsigned, like its write. */
+  async fetchRendezvous(
+    id: Uint8Array,
+    options: { after?: number; limit?: number; waitSecs?: number; signal?: AbortSignal } = {},
+  ): Promise<FetchResult> {
+    if (id.length !== 32) throw new DsClientArgError("rendezvous id must be 32 bytes");
+    return this.fetchJournal(`/ds/rendezvous/${pseudonymHex(id)}/messages`, options, {
+      kind: "none",
+    });
+  }
+
+  /**
+   * `PUT /ds/mailbox/{hex}/reach` (ADR-0060 section 2): add and remove reach
+   * public keys and set the Everyone flag, proven under the mailbox's
+   * identity key. `pseudonym` must be one of this device's own mailboxes (the
+   * registry holds its signer); the mailbox is claimed first when the DS says
+   * it is not.
+   */
+  async putMailboxReach(pseudonym: Uint8Array, update: MailboxReachUpdate): Promise<void> {
+    if (pseudonym.length !== 32) throw new DsClientArgError("pseudonym must be 32 bytes");
+    const body = new TextEncoder().encode(JSON.stringify(reachUpdateBody(update)));
+    await this.send({
+      method: "PUT",
+      path: `/ds/mailbox/${pseudonymHex(pseudonym)}/reach`,
+      query: "",
+      body,
+      contentType: "application/json",
+      plan: { kind: "mailbox", pseudonym },
+    });
+  }
+
+  /**
+   * `POST /ds/mailbox/{hex}/reach/check` with a reach proof: `true` when the
+   * key is registered and unexpired (204), `false` on the uniform refusal
+   * (401). Any other answer throws, so a network failure is never read as
+   * "not found" (UX section 6.1).
+   */
+  async reachCheck(pseudonym: Uint8Array, signer: ProofSigner): Promise<boolean> {
+    if (pseudonym.length !== 32) throw new DsClientArgError("pseudonym must be 32 bytes");
+    const req = {
+      method: "POST" as const,
+      path: `/ds/mailbox/${pseudonymHex(pseudonym)}/reach/check`,
+      query: "",
+      body: new Uint8Array(0),
+    };
+    const response = await this.attempt(req, signer);
+    if (response.status === 401) return false;
+    await this.finish(req, response);
+    return true;
   }
 
   /**
@@ -628,8 +753,8 @@ export class DsClient implements StatementSender {
   /**
    * `GET /ds/mailbox/{pseudonym_hex}/messages?after=&limit=&wait=`
    * — pull all messages newer than `after` for the given
-   * mailbox. Proven under the identity key when the mailbox is one of this
-   * device's own (ADR-0053); unsigned otherwise (a rendezvous mailbox).
+   * mailbox. Always proven under the identity key: only this device's own
+   * mailboxes are read here (ADR-0060; a rendezvous id has its own route).
    *
    * `wait` is the long-poll budget in seconds (0 returns
    * immediately whatever's there; non-zero holds the connection
@@ -651,12 +776,13 @@ export class DsClient implements StatementSender {
     if (pseudonym.length !== 32) {
       throw new DsClientArgError("pseudonym must be 32 bytes");
     }
+    // ADR-0060: every read of a personal mailbox carries the identity proof
+    // (an unproven read is 401 whether the mailbox is claimed or not);
+    // rendezvous ids are read through `fetchRendezvous`.
     const plan: SigningPlan =
       options.signer !== undefined
         ? { kind: "explicit", signer: options.signer }
-        : this.access.mailboxSigner(pseudonym) !== null
-          ? { kind: "mailbox", pseudonym }
-          : { kind: "none" };
+        : { kind: "mailbox", pseudonym };
     return this.fetchJournal(`/ds/mailbox/${pseudonymHex(pseudonym)}/messages`, options, plan);
   }
 

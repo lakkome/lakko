@@ -76,9 +76,9 @@ use crate::AppState;
 
 /// Server-side ceiling on the sealed blob: the longest sealed `/c/` link
 /// the codec can produce (`lakko_contacts::call_invite::MAX_SEALED_LEN`,
-/// 4338 bytes with a 4 KiB embedded KeyPackage), derived rather than written
+/// 4391 bytes with a 4 KiB embedded KeyPackage), derived rather than written
 /// as a literal. Pinned to `call_invites.sealed_capability` in
-/// `migrations/0022_sealed_invite_links.sql` by a test.
+/// `migrations/0024_link_grant_sealed_width.sql` by a test.
 const MAX_SEALED_BYTES: usize = MAX_SEALED_LEN;
 
 /// Sentinel for "unlimited" `max_uses` — matches
@@ -627,16 +627,16 @@ mod tests {
 
     /// The `MAX_SEALED_BYTES` constant pins the
     /// `call_invites.sealed_capability` width declared in
-    /// `0022_sealed_invite_links.sql`.
+    /// `0024_link_grant_sealed_width.sql` (ADR-0060 §6 widened it).
     #[test]
     fn max_sealed_bytes_matches_column_width() {
-        let migration = include_str!("../migrations/0022_sealed_invite_links.sql");
+        let migration = include_str!("../migrations/0024_link_grant_sealed_width.sql");
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             normalised.contains(&format!("sealed_capability VARBINARY({MAX_SEALED_BYTES})")),
             "MAX_SEALED_BYTES ({MAX_SEALED_BYTES}) must match call_invites.sealed_capability",
         );
-        assert_eq!(MAX_SEALED_BYTES, 4338);
+        assert_eq!(MAX_SEALED_BYTES, 4391);
     }
 
     #[test]
@@ -833,6 +833,14 @@ mod tests {
             CallInviteMedia::audio_video(),
             &vec![0xCD; MAX_KEY_PACKAGE_LEN],
             &"t".repeat(MAX_LABEL_LEN),
+            &[0x1C; 16],
+            &lakko_contacts::reach::ReachGrant::derive(
+                &[0x6E; 32],
+                lakko_contacts::reach::ReachClass::Link,
+                &[0x1C; 16],
+                0,
+            )
+            .unwrap(),
         )
         .unwrap();
         let secret = generate_link_secret();

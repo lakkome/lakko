@@ -1033,7 +1033,9 @@ public func nseIsServiceEnvelope(
     decodesAsPin: (Data) -> Bool,
     pinEnvelopeLen: Int,
     decodesAsRegistrarSeed: (Data) -> Bool,
-    registrarSeedEnvelopeLen: Int
+    registrarSeedEnvelopeLen: Int,
+    decodesAsScopedDiscovery: (Data) -> Bool,
+    scopedDiscoveryEnvelopeLens: ClosedRange<Int>
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
     if nseLooksLikePushRoutingSecret(bytes), decodesAsPushRoutingSecret(bytes) { return true }
@@ -1058,6 +1060,10 @@ public func nseIsServiceEnvelope(
        decodesAsRegistrarSeed(bytes) {
         return true
     }
+    if nseLooksLikeScopedDiscovery(bytes, envelopeLens: scopedDiscoveryEnvelopeLens),
+       decodesAsScopedDiscovery(bytes) {
+        return true
+    }
     return false
 }
 
@@ -1072,6 +1078,24 @@ private let registrarSeedEnvelopeFirstByte: UInt8 = 0x6C
 /// `decodeRegistrarSeedEnvelope` is the verdict.
 public func nseLooksLikeRegistrarSeed(_ bytes: Data, envelopeLen: Int) -> Bool {
     bytes.count == envelopeLen && bytes.first == registrarSeedEnvelopeFirstByte
+}
+
+/// First byte of every ADR-0060 domain separator (`lakko/introduction-offer/…`,
+/// `lakko/introductions/…`, `lakko/visibility/…`, `lakko/reach-state/…`,
+/// `lakko/committer-delegation/…`) — the same ASCII `l` as every other in-group
+/// envelope, kept as its own constant for the reason the others give.
+private let scopedDiscoveryEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for the five ADR-0060 "who can find me" envelopes: the
+/// first domain byte plus the length range the slim FFI exports
+/// (`scopedDiscoveryEnvelopeMinLen()` / `MaxLen()`), never a hand-copied
+/// number — a range too narrow fails in the dangerous direction and lets an
+/// introduction bundle reach a notification body as its domain plus binary.
+/// The peek decides nothing; `decodeScopedDiscoveryEnvelope` is the verdict,
+/// and it returns NOTHING of the envelope (C-59: the NSE never learns a grant,
+/// a setting or a delegation).
+public func nseLooksLikeScopedDiscovery(_ bytes: Data, envelopeLens: ClosedRange<Int>) -> Bool {
+    envelopeLens.contains(bytes.count) && bytes.first == scopedDiscoveryEnvelopeFirstByte
 }
 
 /// First byte of the frozen 25-byte ADR-0048 profile-request domain separator

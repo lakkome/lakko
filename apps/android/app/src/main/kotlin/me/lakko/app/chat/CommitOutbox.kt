@@ -178,13 +178,22 @@ public data class PendingCommitEntry(
      */
     val sweepWelcomesOwed: Boolean = false,
     /**
-     * ADR-0045 — base64 mailbox pseudonyms for a sweep's Welcome fan-out.
+     * ADR-0045 — base64 signature keys of the leaves a sweep adds, for its
+     * Welcome fan-out.
      *
      * A sweep commit can carry SEVERAL adds under ONE Welcome, where every
      * direct path has at most one destination ([secondArtifactMailboxB64]).
-     * Empty for a direct-path entry and for a sweep that added nobody.
+     * ADR-0060 §6 — each leaf is resolved to its ACCOUNT mailbox at publish
+     * time, after the merge. Empty for a direct-path entry and for a sweep
+     * that added nobody.
      */
-    val sweepWelcomeMailboxesB64: List<String> = emptyList(),
+    val sweepWelcomeLeafKeysB64: List<String> = emptyList(),
+    /**
+     * ADR-0060 §6 — base64 of the added person's account key for a direct
+     * add's [SecondArtifactKind.WELCOME]: what picks the reach grant the
+     * Welcome is written with on a restart re-publish. `null` otherwise.
+     */
+    val secondArtifactAccountKeyB64: String? = null,
     /**
      * ADR-0045 S7 — a sweep's group-journal `WelcomeRendezvous` envelopes, one
      * per member the sweep adds.

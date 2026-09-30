@@ -71,6 +71,10 @@ public class ChannelsUiState(
         public const val SUBSCRIBER_KEYS_PREF_KEY: String =
             "lakko.channels.subscriber-keys.v1"
 
+        /** ADR-0060 - the subscriber key scheme a persisted row was made
+         *  under (Ed25519, the seed envelope's X25519 derived from it). */
+        public const val SUBSCRIBER_KEY_SCHEME_ED25519: String = "ed25519"
+
         /** Storage key for publisher signing-seed persistence
          *  (G-29). Same name the iOS side keys its Keychain
          *  rows under so an on-device audit grep finds both
@@ -135,6 +139,12 @@ public class ChannelsUiState(
      *  map changes. */
     public val subscriberKeysByChannel: StateFlow<Map<String, ChannelSubscriberKeys>> =
         _subscriberKeysByChannel.asStateFlow()
+
+    init {
+        // ADR-0060 - persist at once any key [loadSubscriberKeys] regenerated,
+        // so the new key survives a restart before its first subscribe.
+        if (_subscriberKeysByChannel.value.isNotEmpty()) persistSubscriberKeys()
+    }
 
     private val _subscribedSeedsByChannel =
         MutableStateFlow<Map<String, Map<UInt, ByteArray>>>(emptyMap())
@@ -504,6 +514,9 @@ public class ChannelsUiState(
             row.put("channelId", channelId)
             row.put("secretHex", ChannelsComposer.bytesToHex(keys.secret))
             row.put("publicHex", ChannelsComposer.bytesToHex(keys.publicKey))
+            // ADR-0060 section 3 - the key scheme: Ed25519 since the
+            // member-card amendment. A row without it holds an older key.
+            row.put("scheme", SUBSCRIBER_KEY_SCHEME_ED25519)
             arr.put(row)
         }
         sink.edit().putString(SUBSCRIBER_KEYS_PREF_KEY, arr.toString()).apply()
@@ -516,6 +529,15 @@ public class ChannelsUiState(
         for (i in 0 until arr.length()) {
             val row = arr.optJSONObject(i) ?: continue
             val channelId = row.optString("channelId").takeIf { it.isNotEmpty() } ?: continue
+            if (row.optString("scheme") != SUBSCRIBER_KEY_SCHEME_ED25519) {
+                // ADR-0060 section 3 - a stored X25519 subscriber key cannot
+                // sign a member card. A fresh Ed25519 key replaces it; the
+                // reader's idempotent re-subscribe registers it and the
+                // publisher reseals the seed to it at the next fanout. No
+                // migration of the old key: there is no deployment to carry.
+                out[channelId] = ChannelsComposer.freshSubscriberKeys()
+                continue
+            }
             val secretHex = row.optString("secretHex")
             val publicHex = row.optString("publicHex")
             val secret = hexToBytes(secretHex) ?: continue

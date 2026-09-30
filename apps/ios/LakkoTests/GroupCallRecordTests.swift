@@ -648,7 +648,9 @@ final class GroupCallRecordTests: XCTestCase {
                     decodesAsPin: { _ in false },
                     pinEnvelopeLen: 31,
                     decodesAsRegistrarSeed: { _ in false },
-                    registrarSeedEnvelopeLen: 173
+                    registrarSeedEnvelopeLen: 173,
+                    decodesAsScopedDiscovery: { _ in false },
+                    scopedDiscoveryEnvelopeLens: 40...400
                 ),
                 name
             )

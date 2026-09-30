@@ -6,14 +6,20 @@
 //! A journal with a registration row (`ds_group_access` / `ds_mailbox_access`)
 //! is **claimed**: its gated routes answer only a request that carries a valid
 //! [`lakko_ds_proof`] header. A journal with no row keeps the Phase 1.3
-//! posture (anyone who names it) - which is every journal until its owner
-//! claims it, and the rendezvous mailboxes by design.
+//! posture (anyone who names it) - which is every group journal until its
+//! owner claims it. A mailbox is different since ADR-0060: it is personal, so
+//! its `GET messages` needs the identity proof whether or not it is claimed
+//! (an unclaimed one has no key and always answers the uniform `401`); the
+//! proofless meeting points moved to their own `/ds/rendezvous/` namespace.
 //!
 //! What is gated: a claimed group's `GET`/`POST messages` and `GET knocks`
-//! (write tier); a claimed mailbox's `GET messages`.
-//! What is not: a mailbox `POST` (the cold inbox strangers are meant to
-//! reach) and a group's `POST knock` (it spends an anonymous token instead,
-//! ADR-0054 S3).
+//! (write tier); every mailbox's `GET messages` (the identity proof, whether
+//! or not the mailbox is claimed, ADR-0060).
+//! A mailbox `POST` is gated by reach keys, not here (ADR-0060,
+//! `src/reach.rs`): ADR-0053 left it the open cold inbox, and a claimed
+//! mailbox is now closed to a stranger.
+//! What is not gated: a group's `POST knock` (it spends an anonymous token
+//! instead, ADR-0054 S3).
 //!
 //! **Who registers epoch keys is ADR-0057's, not this module's**
 //! (`src/ownership.rs`): a journal is claimed under a root key, and only the
@@ -205,7 +211,7 @@ async fn mailbox_key(
 /// Parse the proof header and verify it under `key_for_epoch`, touching no
 /// store. Every failure is [`refused`]. The nonce is not yet consumed: the
 /// caller does that with [`consume_nonce`] on the connection it decides on.
-fn verify_header(
+pub(crate) fn verify_header(
     headers: &HeaderMap,
     parts: &RequestParts<'_>,
     key_for_epoch: impl Fn(u64) -> Option<VerifyingKey>,
@@ -260,7 +266,7 @@ async fn check_proof(
     }
 }
 
-fn parts<'a>(method: &'a Method, uri: &'a Uri, body: &'a [u8]) -> RequestParts<'a> {
+pub(crate) fn parts<'a>(method: &'a Method, uri: &'a Uri, body: &'a [u8]) -> RequestParts<'a> {
     RequestParts {
         method: method.as_str(),
         canonical_path: uri.path(),
@@ -322,8 +328,11 @@ pub(crate) async fn gate_group(
     Ok(Gated::Proven { latest_epoch })
 }
 
-/// Gate a mailbox read: open when the mailbox is unclaimed, else a valid
-/// proof under the identity key at `MAILBOX_EPOCH`.
+/// Gate a mailbox read: a valid proof under the identity key at
+/// `MAILBOX_EPOCH`. An unclaimed mailbox has no key, so every read of it is
+/// the uniform [`refused`] - the same answer a claimed mailbox gives a read
+/// without a proof - and the answer never tells whether a mailbox is claimed
+/// (ADR-0060; proofless meeting points use `/ds/rendezvous/`).
 pub(crate) async fn gate_mailbox_read(
     state: &AppState,
     device_id: &[u8; PSEUDONYM_LEN],
@@ -332,7 +341,7 @@ pub(crate) async fn gate_mailbox_read(
     headers: &HeaderMap,
 ) -> Result<(), HandlerError> {
     let Some(key) = mailbox_key(&state.db, device_id).await? else {
-        return Ok(());
+        return Err(refused());
     };
     let req = parts(method, uri, &[]);
     check_proof(&state.db, device_id, headers, &req, |epoch| {
@@ -612,7 +621,7 @@ pub(crate) async fn prune_nonces(pool: &MySqlPool) {
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::test_support::*;
     use axum::body::Body;
@@ -941,7 +950,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_claimed_mailbox_is_read_by_its_owner_and_written_by_anyone() {
+    async fn a_claimed_mailbox_is_read_by_its_owner_only() {
         let Some((app, _pool)) = app().await else {
             return;
         };
@@ -981,7 +990,8 @@ mod tests {
             assert_eq!(status, StatusCode::NO_CONTENT);
         }
         let uri = messages_uri("mailbox", &device);
-        // Anyone still posts.
+        // A proofless post is answered as stored; since ADR-0060 a claimed,
+        // closed mailbox drops it (`src/reach.rs` covers the reach keys).
         let (status, _) = send(
             &app,
             Req {
@@ -1028,7 +1038,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(0));
     }
 
     #[tokio::test]

@@ -2748,6 +2748,30 @@ impl DeviceGroup {
         )
     }
 
+    /// Compose a `serviceEnvelope` cross-device payload carrying a
+    /// `lakko-contacts` envelope verbatim (ADR-0060 section 7: the output
+    /// of `composeVisibilityEnvelope` / `composeReachStateEnvelope`).
+    ///
+    /// # Errors
+    ///
+    /// Throws when `envelope` is empty or longer than
+    /// `deviceGroupServiceEnvelopeMaxLen()`; nothing is encrypted.
+    #[wasm_bindgen(js_name = createServiceEnvelopeMessage)]
+    pub fn create_service_envelope_message(
+        &self,
+        identity: &Identity,
+        envelope: &[u8],
+        hlc: u64,
+    ) -> Result<Vec<u8>, JsValue> {
+        self.create_devicegroup_body(
+            identity,
+            lakko_mls::device_group::DeviceGroupBody::ServiceEnvelope {
+                envelope: envelope.to_vec(),
+            },
+            hlc,
+        )
+    }
+
     /// Decrypt / advance the state machine for an inbound
     /// DeviceGroup wire message (Phase 2a3e2). JS layer reads
     /// `kind`:
@@ -2894,6 +2918,15 @@ const KIND_FLAGS: &str = "flags";
 const KIND_ORDER: &str = "order";
 const KIND_FOLDER_CHANGES: &str = "folderChanges";
 const KIND_STATE_SNAPSHOT: &str = "stateSnapshot";
+const KIND_SERVICE_ENVELOPE: &str = "serviceEnvelope";
+
+/// Longest envelope a DeviceGroup `serviceEnvelope` payload carries
+/// (ADR-0060 section 7).
+#[wasm_bindgen(js_name = deviceGroupServiceEnvelopeMaxLen)]
+#[must_use]
+pub fn device_group_service_envelope_max_len() -> u32 {
+    u32::try_from(lakko_mls::MAX_SERVICE_ENVELOPE_LEN).unwrap_or(u32::MAX)
+}
 
 /// JS-side projection of
 /// [`lakko_mls::device_group::ParsedDeviceGroupPayload`]
@@ -2927,6 +2960,7 @@ pub struct ParsedDeviceGroupPayload {
     order_group_ids_val: Vec<Vec<u8>>,
     /// The typed body, kept for `SyncedState.applyPayload` (ADR-0058).
     body_val: lakko_mls::device_group::DeviceGroupBody,
+    service_envelope_val: Vec<u8>,
 }
 
 impl ParsedDeviceGroupPayload {
@@ -2951,9 +2985,10 @@ impl ParsedDeviceGroupPayload {
     }
 
     /// One of `"readCursor"` / `"draft"` / `"flags"` /
-    /// `"order"` / `"folderChanges"` / `"stateSnapshot"`. JS reads this to
-    /// decide which other fields are meaningful. The last two carry no
-    /// flat fields: fold them with `SyncedState.applyPayload`.
+    /// `"order"` / `"folderChanges"` / `"stateSnapshot"` /
+    /// `"serviceEnvelope"`. JS reads this to decide which other fields are
+    /// meaningful. `folderChanges` / `stateSnapshot` carry no flat fields:
+    /// fold them with `SyncedState.applyPayload`.
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
         self.kind_val.to_string()
@@ -3044,6 +3079,15 @@ impl ParsedDeviceGroupPayload {
             _ => 0,
         }
     }
+
+    /// `serviceEnvelope` only: the `lakko-contacts` envelope bytes,
+    /// uninterpreted (ADR-0060 section 7). Hand them to
+    /// `dispatchIncomingEnvelope` and keep only Visibility / ReachState.
+    /// Empty for other kinds.
+    #[wasm_bindgen(getter, js_name = serviceEnvelope)]
+    pub fn service_envelope(&self) -> Vec<u8> {
+        self.service_envelope_val.clone()
+    }
 }
 
 /// Parse a DeviceGroup application-payload plaintext (the
@@ -3068,6 +3112,7 @@ pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPa
         unread_override_val: false,
         order_group_ids_val: Vec::new(),
         body_val: parsed.body.clone(),
+        service_envelope_val: Vec::new(),
     };
     match parsed.body {
         Body::ReadCursor {
@@ -3110,6 +3155,10 @@ pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPa
         },
         Body::FolderChanges(_) => out.kind_val = KIND_FOLDER_CHANGES,
         Body::StateSnapshot(_) => out.kind_val = KIND_STATE_SNAPSHOT,
+        Body::ServiceEnvelope { envelope } => {
+            out.kind_val = KIND_SERVICE_ENVELOPE;
+            out.service_envelope_val = envelope;
+        },
     }
     Ok(out)
 }

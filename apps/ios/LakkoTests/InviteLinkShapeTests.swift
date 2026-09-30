@@ -14,6 +14,16 @@ import LakkoCore
 /// never as "link invalid".
 @MainActor
 final class InviteLinkShapeTests: XCTestCase {
+    /// ADR-0060 section 6 — every `/i/` and `/c/` capability carries a link
+    /// id and its `link` grant; these tests only need a well-formed pair.
+    static let testLinkId = Data(repeating: 0x4C, count: Int(linkIdLen()))
+    static var testLinkGrant: FfiReachGrant {
+        // swiftlint:disable:next force_try
+        try! deriveReachGrant(
+            accountSeed: Data(repeating: 5, count: 32), class: .link,
+            scopeId: testLinkId, version: 1)
+    }
+
 
     private let issuerSeed = Data(repeating: 0x5A, count: 32)
     private let retiredId = Data(repeating: 0xAB, count: 32)
@@ -179,7 +189,8 @@ final class InviteLinkShapeTests: XCTestCase {
             callId: Data(repeating: 2, count: 16), expiryMs: 0, maxUses: 0,
             media: FfiCallInviteMedia(audio: true, video: false),
             oneTimeKeyPackage: try Identity.fromSeed(seed: Data(repeating: 9, count: 32)).createKeyPackage(),
-            label: "")
+            label: "",
+            linkId: Self.testLinkId, linkGrant: Self.testLinkGrant)
         XCTAssertThrowsError(try GroupInviteCapability.openLink(sealed: call.sealed, linkSecret: call.linkSecret))
         XCTAssertNoThrow(try CallInviteCapability.openLink(sealed: call.sealed, linkSecret: call.linkSecret))
     }
@@ -396,7 +407,8 @@ final class InviteLinkShapeTests: XCTestCase {
         let mint = try composeInviteCapability(
             ownerSigningSeed: owner.ed25519Seed(), ownerAccountId: Data(repeating: 4, count: 16),
             ownerX25519Pubkey: owner.x25519PublicKey(), expiryMs: 0, maxUses: 0,
-            bootstrapReferral: false, label: "")
+            bootstrapReferral: false, label: "",
+            linkId: Self.testLinkId, linkGrant: Self.testLinkGrant)
         XCTAssertEqual(mint.issuerPubkey, owner.signaturePublicKey())
         let cap = try InviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret)
         XCTAssertEqual(cap.ownerAccountId(), Data(repeating: 4, count: 16))

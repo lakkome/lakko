@@ -33,7 +33,7 @@ pub mod refusal;
 pub mod welcome_rendezvous;
 
 pub use device_binding::{account_key_of_credential, DeviceBinding, DEVICE_BINDING_LEN};
-pub use device_group::{AccountId, DeviceGroup};
+pub use device_group::{AccountId, DeviceGroup, MAX_SERVICE_ENVELOPE_LEN};
 pub use error::{Error, Result};
 pub use group::{
     epoch_after_message, epoch_of_message, is_external_join_proposal_for, Group, Incoming,
@@ -124,6 +124,23 @@ pub mod fuzz_api {
             .stamped_entries()
             .into_iter()
             .all(|(hlc, entry)| state.apply(hlc, entry).is_ok())
+    }
+
+    /// `true` unless `bytes` parse as a DeviceGroup payload whose
+    /// service envelope (ADR-0060 section 7) breaks its bound. The
+    /// `devicegroup_payload` fuzz target asserts it: an accepted
+    /// service envelope is always 1 to `MAX_SERVICE_ENVELOPE_LEN` bytes.
+    #[must_use]
+    pub fn devicegroup_service_envelope_within_bounds(bytes: &[u8]) -> bool {
+        match crate::DeviceGroup::parse_devicegroup_payload(bytes) {
+            Ok(parsed) => match parsed.body {
+                crate::device_group::DeviceGroupBody::ServiceEnvelope { envelope } => {
+                    !envelope.is_empty() && envelope.len() <= crate::MAX_SERVICE_ENVELOPE_LEN
+                },
+                _ => true,
+            },
+            Err(_) => true,
+        }
     }
 
     /// Try to decode a Welcome rendezvous envelope

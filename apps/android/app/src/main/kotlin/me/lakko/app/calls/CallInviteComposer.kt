@@ -99,6 +99,9 @@ public class CallInviteComposer(
         ownerAccountId: ByteArray,
         identity: Identity,
         callId: ByteArray,
+        /** ADR-0060 §6 — the `link` grant for the new link id, registered on
+         *  the owner's mailbox before the link is shared. */
+        linkGrantFor: suspend (linkId: ByteArray, expiryMs: Long) -> uniffi.lakko_ffi_uniffi.FfiReachGrant,
         nowMs: Long = System.currentTimeMillis(),
         origin: String = CALL_INVITE_DEFAULT_ORIGIN,
     ): Composed {
@@ -121,6 +124,8 @@ public class CallInviteComposer(
 
         // ---- 2. composeCallInviteCapability via UniFFI ---------
         val expiryMs = callInviteLinkExpiryMs(nowMs)
+        val linkId = uniffi.lakko_ffi_uniffi.generateLinkId()
+        val linkGrant = linkGrantFor(linkId, expiryMs)
         val maxUses = callInviteLinkMaxUses()
         val mint = composeCallInviteCapability(
             ownerSigningSeed = ownerSigningSeed,
@@ -131,6 +136,8 @@ public class CallInviteComposer(
             media = FfiCallInviteMedia(audio = true, video = CALL_INVITE_LINK_MEDIA_VIDEO),
             oneTimeKeyPackage = oneTimeKeyPackage,
             label = CALL_INVITE_LINK_LABEL,
+            linkId = linkId,
+            linkGrant = linkGrant,
         )
 
         // ---- 3. uploadCallInvite via HTTP ----------------------

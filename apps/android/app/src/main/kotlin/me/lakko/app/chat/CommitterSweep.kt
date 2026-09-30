@@ -276,7 +276,17 @@ internal data class SweepDurableEntry(
     val id: String,
     val commitB64: String,
     val welcomeEnvelopeB64: String?,
-    val welcomeMailboxesB64: List<String>,
+    /**
+     * base64 of the 32-byte signature key of every leaf the sweep ADDS.
+     *
+     * ADR-0060 §6 — the Welcome goes to each added leaf's ACCOUNT mailbox,
+     * and a leaf's account is read from its device binding in the roster,
+     * which holds the leaf only once the sweep merged. So the entry records
+     * the leaves, and [SweepPorts.welcomeTargets] resolves them to mailboxes
+     * at publish time (after the merge, on the first run and on a restart
+     * alike).
+     */
+    val welcomeLeafKeysB64: List<String>,
     /**
      * The DS id of the published commit, recorded alongside the welcomes-owed
      * marker. Diagnostics only — it is carried so the eventual ack can name the
@@ -313,7 +323,7 @@ internal interface SweepOutboxPort {
      * ## What a restart must, and must not, do with this
      *
      * MUST: re-publish the entry's Welcome to every mailbox in
-     * [SweepDurableEntry.welcomeMailboxesB64], then ack. MUST NOT: re-publish
+     * [SweepDurableEntry.welcomeLeafKeysB64] (resolved to account mailboxes), then ack. MUST NOT: re-publish
      * the commit, re-adjudicate, or apply another journal row — the verdict is
      * already known and the commit is already merged.
      *
@@ -372,8 +382,13 @@ internal class SweepPorts(
     val outbox: SweepOutboxPort,
     val cursor: SweepCursorRef,
     val actingCommitter: ActingCommitterOracle,
-    /** Derive a member's mailbox pseudonym from their 32-byte signature key. */
-    val welcomeMailbox: (ByteArray) -> ByteArray,
+    /**
+     * ADR-0060 §6 — the mailboxes one Welcome goes to, for the added leaves'
+     * 32-byte signature keys: one per added ACCOUNT (resolved through each
+     * leaf's device binding in the merged roster), deduplicated. Called only
+     * after the sweep merged.
+     */
+    val welcomeTargets: (List<ByteArray>) -> List<ByteArray>,
     /** Wrap the raw Welcome in the stranger-inbox envelope the recipient's
      *  mailbox poll expects (`wrapEnvelope(KIND_WELCOME, welcome)`). */
     val wrapWelcome: (ByteArray) -> ByteArray,
@@ -740,7 +755,7 @@ internal suspend fun resolveOwedWelcomes(ports: SweepPorts): SweepOutcome {
 
     return SweepOutcome.WelcomesRepublished(
         welcomeMessageIds = welcomeMessageIds,
-        addedCount = owed.welcomeMailboxesB64.size,
+        addedCount = owed.welcomeLeafKeysB64.size,
     )
 }
 
@@ -781,13 +796,13 @@ private suspend fun publishAndAdjudicate(
         // added member's mailbox and nowhere else. A `/g/` joiner now waits on
         // its own device mailbox, so no `WelcomeRendezvous` is written to the
         // group journal any more (C-69 amended).
-        val mailboxes = staged.addedSignatureKeys.map { ports.encodeB64(ports.welcomeMailbox(it)) }
+        val leaves = staged.addedSignatureKeys.map(ports.encodeB64)
         val wrapped = staged.welcome?.let(ports.wrapWelcome)
         entry = SweepDurableEntry(
             id = ports.outbox.newEntryId(),
             commitB64 = ports.encodeB64(staged.commit),
             welcomeEnvelopeB64 = wrapped?.let(ports.encodeB64),
-            welcomeMailboxesB64 = mailboxes,
+            welcomeLeafKeysB64 = leaves,
         )
         try {
             ports.outbox.record(entry)
@@ -860,7 +875,7 @@ private suspend fun publishAndAdjudicate(
     return SweepOutcome.Committed(
         commitMessageId = commitMessageId,
         welcomeMessageIds = welcomeMessageIds,
-        addedCount = entry.welcomeMailboxesB64.size,
+        addedCount = entry.welcomeLeafKeysB64.size,
     )
 }
 
@@ -972,8 +987,9 @@ private suspend fun publishWelcomes(
     val ids = mutableListOf<Long>()
     entry.welcomeEnvelopeB64?.let { envelopeB64 ->
         val bytes = ports.decodeB64(envelopeB64)
-        for (mailboxB64 in entry.welcomeMailboxesB64) {
-            ids.add(ports.journal.publishMailbox(ports.decodeB64(mailboxB64), bytes))
+        val leaves = entry.welcomeLeafKeysB64.map(ports.decodeB64)
+        for (mailbox in ports.welcomeTargets(leaves)) {
+            ids.add(ports.journal.publishMailbox(mailbox, bytes))
         }
     }
     return ids

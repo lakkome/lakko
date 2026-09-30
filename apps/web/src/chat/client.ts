@@ -101,6 +101,7 @@ import {
   markOwnPublished,
 } from "./own-published";
 import { sniffProfile, type ReceivedProfile } from "../profile/profile-envelope";
+import { sniffScopedEnvelope, type ScopedEnvelopeKind } from "../reach/envelope-sniff";
 import { sniffProfileRequest } from "../profile/profile-request";
 import { sniffGroupName } from "./group-name-envelope";
 import type { StoredGroupName } from "./group-name-store";
@@ -458,6 +459,21 @@ export type IncomingChatEvent =
       /** The sender's ACCOUNT key resolved at receipt (C-68), the key the
        *  ADR-0022 role table names. `undefined` ⇒ unverifiable in a group
        *  with a role table, dropped. */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0060 — a scoped-discovery service envelope (an introduction offer
+       *  or bundle, a committer delegation, and the DeviceGroup-only
+       *  Visibility / ReachState / ADR-0057 RegistrarSeed kinds should one
+       *  arrive in a conversation). Dispatched to its handler, never a
+       *  timeline row. `payload` is the plaintext, for the handler to decode. */
+      kind: "scopedDiscovery";
+      messageId: number;
+      envelope: ScopedEnvelopeKind;
+      payload: Uint8Array;
+      senderLeaf: number | undefined;
+      /** The sender's ACCOUNT key resolved at receipt (C-68). */
       senderKey: MemberIdentity | undefined;
       createdAt: string;
     }
@@ -1526,6 +1542,24 @@ export async function toEvent(
           kind: "pin",
           messageId,
           pin: sniff.kind === "pin" ? sniff.value : undefined,
+          senderLeaf,
+          senderKey,
+          createdAt,
+        };
+      }
+    }
+    // ADR-0060 — the scoped-discovery service envelopes, before the chat
+    // parser for the same reason as the arms above: rendered through the
+    // lossy-UTF-8 fallback they would put domain bytes (and, for a
+    // delegation or an introduction, secrets) in a bubble.
+    {
+      const kind = sniffScopedEnvelope(await loadWasm(), bytes);
+      if (kind !== null) {
+        return {
+          kind: "scopedDiscovery",
+          messageId,
+          envelope: kind,
+          payload: bytes,
           senderLeaf,
           senderKey,
           createdAt,

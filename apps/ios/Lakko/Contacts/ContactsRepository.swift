@@ -193,7 +193,8 @@ public final class ContactsRepository: ObservableObject {
             senderSignaturePubkey: identity.signaturePublicKey(),
             recipientUsername: recipientUsername,
             profile: ProfileDirectory.shared.ownProfileForRequest(),
-            introMessage: Data(introMessage.utf8)
+            introMessage: Data(introMessage.utf8),
+            reach: Self.requestReach()
         )
         let sent = SentContactRequest(
             recipientUsername: result.recipientUsername,
@@ -203,6 +204,80 @@ public final class ContactsRepository: ObservableObject {
         )
         state = state.with(sent: state.sent + [sent])
         return result
+    }
+
+    /// ADR-0060 — send a contact request to a person a search found: their
+    /// identity bundle through the pin gate (it must name the key the search
+    /// found), then the request, written with the key the search found them
+    /// under (`nil` for a person in Everyone, whose mailbox is open).
+    public func sendContactRequest(to person: FoundPerson, introMessage: String) async throws -> SendResult {
+        guard let secrets = authRepository.identitySecrets else {
+            throw ContactsError.wrap(
+                ContactsError.simple("no identity secrets — please re-enter your password"))
+        }
+        guard let accountId = person.accountId else {
+            throw ContactsError.wrap(ContactsError.simple("this person cannot be reached"))
+        }
+        let client = clientFactory()
+        let bundle = try await client.resolveVerifiedBundle(accountId: accountId)
+        guard bundle.signaturePubkey == person.accountKey else {
+            throw ContactsError.requestRefused
+        }
+        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+        let result = try await client.sendContactRequestToBundle(
+            senderSigningSeed: identity.ed25519Seed(),
+            senderAccountId: secrets.accountId,
+            senderSignaturePubkey: identity.signaturePublicKey(),
+            recipientAccountId: accountId,
+            recipientSignaturePubkey: bundle.signaturePubkey,
+            recipientX25519Pubkey: bundle.x25519Pubkey,
+            profile: ProfileDirectory.shared.ownProfileForRequest(),
+            introMessage: Data(introMessage.utf8),
+            reach: person.writeSeed.map { Self.requestReach(linkSeed: $0) } ?? Self.requestReach()
+        )
+        state = state.with(sent: state.sent + [SentContactRequest(
+            recipientUsername: person.username ?? "",
+            recipientAccountIdB64: base64Encode(accountId),
+            messageId: result.messageId,
+            createdAt: result.createdAt)])
+        return result
+    }
+
+    /// The production lookups a people search makes.
+    public func peopleSearchPorts() -> PeopleSearchPorts {
+        let factory = clientFactory
+        return PeopleSearchPorts(
+            lookupUsername: { try await DiscoveryClient().lookupPublic(lookupKey: $0) },
+            usernameOprf: { try await DiscoveryClient().usernameOprf($0) },
+            nameTermOprf: { try await DiscoveryClient().nameTermOprf($0) },
+            nameLookup: { try await DiscoveryClient().nameLookup(termLookupKey: $0) },
+            identityKey: { accountId in
+                try await factory().resolveVerifiedBundle(accountId: accountId).signaturePubkey
+            },
+            reachCheck: { accountKey, seed in
+                let mailbox = try IdentityPseudonym.fromIdentity(pubkey: accountKey).asBytes()
+                return try await DsClient().reachCheck(pseudonym: mailbox, reachSeed: seed)
+            },
+            verifyCertificate: { cert, lookupKey, accountId in
+                await ProfileDirectory.shared.verifyCertificate(
+                    certificate: cert, lookupKey: lookupKey, accountId: accountId)
+            })
+    }
+
+    /// ADR-0060 section 6 — an outgoing request carries a fresh `reply` grant
+    /// (registered first, retired when the recipient answers) and is written
+    /// with whatever grant this device holds for the recipient. `linkSeed` is
+    /// a link grant used for this one request and never kept.
+    static func requestReach(linkSeed: Data? = nil) -> ContactRequestReach {
+        ContactRequestReach(
+            replyGrant: { recipientAccountId in
+                try await ReachCenter.shared.newReplyGrant(
+                    purpose: ReplyPurpose.contact(recipientAccountId))
+            },
+            writeAuth: { recipientKey in
+                if let linkSeed { return DsMailboxWriteAuth(reachSeed: linkSeed) }
+                return ReachCenter.shared.writeAuth(toAccountKey: recipientKey)
+            })
     }
 
     /// Resolve `@username -> (accountId, signaturePubkey)` through the
@@ -285,11 +360,10 @@ public final class ContactsRepository: ObservableObject {
         // already moved past it, so it is never retried and the chat simply
         // never appears. Remember the failure so this poll's final state can
         // say so.
-        var welcomeJoinFailure: String?
-        // ADR-0050 — this DEVICE's mailbox (Welcomes sealed to this device's
-        // KeyPackages), long-polled alongside the account mailbox.
-        async let deviceWelcomes = pollDeviceMailboxWelcomes(
-            accountIdB64: base64Encode(secrets.accountId), waitSecs: waitSecs)
+        let welcomeJoinFailure: String? = nil
+        // ADR-0060 section 6 — one inbound mailbox per person: every Welcome,
+        // for any of this account's devices, lands in the ACCOUNT mailbox. The
+        // device mailbox stays claimed and closed and is no longer polled.
         do {
             let client = clientFactory()
             let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
@@ -304,8 +378,16 @@ public final class ContactsRepository: ObservableObject {
             var newPending: [IncomingContactRequest] = []
             for event in pollResult.events {
                 switch event {
-                case .contactRequest(let req):
+                case .contactRequest(let req, let replyGrant):
                     newPending.append(req)
+                    // ADR-0060 section 6 — the requester's `reply` grant, filed
+                    // under the key the request signature authenticated; the
+                    // accept (Welcome) and the ack are written with it.
+                    if let replyGrant {
+                        ReachCenter.shared.keep(
+                            replyGrant, carrier: .request,
+                            fromAccountKeyB64: base64Encode(req.fromPubkey), scopeHex: nil)
+                    }
                     // ADR-0048 §3 — a request's profile is bound to its
                     // `fromPubkey`, which the request signature authenticated.
                     // Kept only when strictly newer than what is held, so a
@@ -325,15 +407,14 @@ public final class ContactsRepository: ObservableObject {
                     // KeyPackage on success AND failure, so the directory
                     // never keeps serving a KeyPackage the Welcome consumed.
                     //
-                    // ADR-0053 — a failure HERE is logged and never surfaced
-                    // (the web client's rule). Since ADR-0050 every chat Welcome
-                    // is sealed to a DEVICE leaf and lands in the device
-                    // mailbox, whose failures still surface below. What reaches
-                    // the ACCOUNT mailbox is a Welcome sealed to the account
-                    // identity — a channel co-publisher Welcome, which
-                    // `CoPublisher.pollForCoPublishWelcome` joins itself — and
-                    // the chat identity cannot open it, so reporting it read as
-                    // a failed chat join that never was one.
+                    // ADR-0060 section 6 — every Welcome for this account now
+                    // lands here: a chat Welcome sealed to this device's leaf,
+                    // one sealed to another of this account's devices (which
+                    // this device cannot open), and a channel co-publisher
+                    // Welcome sealed to the account identity (which
+                    // `CoPublisher.pollForCoPublishWelcome` joins itself). A
+                    // failure is therefore logged, not surfaced: most failures
+                    // here are Welcomes that were never this device's to open.
                     if let chatRepository = chatRepository {
                         do {
                             _ = try await chatRepository
@@ -356,6 +437,9 @@ public final class ContactsRepository: ObservableObject {
                         $0.request.fromPubkey == ack.accepterPubkey
                     }
                     let accepterAccountIdB64 = base64Encode(ack.accepterAccountId)
+                    // ADR-0060 — the request was answered: its `reply` key goes.
+                    ReachCenter.shared.retireReplies(
+                        purpose: ReplyPurpose.contact(ack.accepterAccountId))
                     let remainingSent = state.sent.filter {
                         $0.recipientAccountIdB64 != accepterAccountIdB64
                     }
@@ -381,15 +465,6 @@ public final class ContactsRepository: ObservableObject {
                         sent: remainingSent
                     )
                     continue
-                }
-            }
-            for welcomeBytes in await deviceWelcomes {
-                guard let chatRepository else { break }
-                do {
-                    _ = try await chatRepository.joinGroupFromWelcome(welcomeBytes: welcomeBytes)
-                } catch {
-                    NSLog("contacts device mailbox: joining a chat from a Welcome failed: \(error)")
-                    welcomeJoinFailure = Self.welcomeJoinFailureMessage
                 }
             }
             // Keep a join failure visible across the background long-poll
@@ -440,41 +515,6 @@ public final class ContactsRepository: ObservableObject {
             // polling loop retries on its next iteration.
             NSLog("contacts inbox: poll failed: \(error)")
             state = state.with(refreshing: false, lastError: Self.inboxFetchFailureMessage)
-        }
-    }
-
-    /// ADR-0050 — poll this DEVICE's mailbox (the pseudonym of the device
-    /// leaf key) and return the Welcome bodies found there, oldest first. Only
-    /// Welcomes are read from a device mailbox; the cursor advances past
-    /// everything and is persisted per account, since a Welcome consumed once
-    /// cannot be opened again. Any failure yields no Welcomes (the next poll
-    /// retries from the same cursor).
-    private func pollDeviceMailboxWelcomes(accountIdB64: String, waitSecs: Int) async -> [Data] {
-        guard let deviceKey = chatRepository?.ownDeviceLeafKey,
-              // ADR-0053 — the device mailbox is named by the device leaf key.
-              let deviceSigner = chatRepository?.ownDeviceMailboxSigner else { return [] }
-        let cursorKey = "me.lakko.contacts.device-mailbox-cursor.v1." + accountIdB64
-        let after = Int64(UserDefaults.standard.integer(forKey: cursorKey))
-        do {
-            let result = try await clientFactory().pollStrangerInbox(
-                mySignaturePubkey: deviceKey,
-                // No contact request is addressed to a device mailbox, so no
-                // real X25519 secret is needed; a request found here fails to
-                // open and is dropped.
-                myX25519Secret: Data(count: 32),
-                after: after,
-                waitSecs: waitSecs,
-                mailboxSigner: deviceSigner
-            )
-            if result.cursor > after {
-                UserDefaults.standard.set(Int(result.cursor), forKey: cursorKey)
-            }
-            return result.events.compactMap { event in
-                if case .welcome(_, let welcomeBytes, _) = event { return welcomeBytes }
-                return nil
-            }
-        } catch {
-            return []
         }
     }
 
@@ -624,9 +664,19 @@ public final class ContactsRepository: ObservableObject {
     /// The mutation flows through `state`'s `didSet`, so the persisted
     /// accepted list and the name directory's renames follow.
     public func removeContact(messageId: Int64) {
+        let removed = state.accepted.filter { $0.request.messageId == messageId }
         let remaining = state.accepted.filter { $0.request.messageId != messageId }
         guard remaining.count != state.accepted.count else { return }
         state = state.with(accepted: remaining)
+        // ADR-0060 sections 1 and 4 — the removed person held this account's
+        // `contact` and `fof` keys: rotate both (the old keys are unregistered
+        // at once), and forget what they offered and relayed.
+        ReachCenter.shared.rotate(.contact)
+        ReachCenter.shared.rotate(.fof)
+        for contact in removed {
+            ReachCenter.shared.dropIntroductions(
+                fromAccountKeyB64: base64Encode(contact.request.fromPubkey))
+        }
     }
 
     /// Send a `ContactAck` back to the original sender's stranger
@@ -654,7 +704,8 @@ public final class ContactsRepository: ObservableObject {
             accepterSigningSeed: identity.ed25519Seed(),
             accepterAccountId: secrets.accountId,
             accepterX25519Pubkey: identity.x25519PublicKey(),
-            originalRequest: request
+            originalRequest: request,
+            writeAuth: ReachCenter.shared.writeAuth(toAccountKey: request.fromPubkey)
         )
     }
 
@@ -727,6 +778,17 @@ public final class ContactsRepository: ObservableObject {
         let expiryMs = nowMs + expiryMillisFromNow
 
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+        // ADR-0060 section 6 — the link carries a `link` grant scoped to this
+        // link, registered BEFORE the link exists, so revoking it removes
+        // exactly its key.
+        let linkId = generateLinkId()
+        let linkGrant: FfiReachGrant
+        do {
+            linkGrant = try await ReachCenter.shared.newLinkGrant(
+                linkId: linkId, expiresAtMs: UInt64(expiryMs))
+        } catch {
+            throw ContactsError.wrap(error)
+        }
         let mint: InviteLinkMint
         do {
             mint = try composeInviteCapability(
@@ -736,7 +798,9 @@ public final class ContactsRepository: ObservableObject {
                 expiryMs: UInt64(expiryMs),
                 maxUses: maxUses,
                 bootstrapReferral: bootstrapReferral,
-                label: label
+                label: label,
+                linkId: linkId,
+                linkGrant: linkGrant
             )
         } catch {
             throw ContactsError.wrap(error)
@@ -759,6 +823,9 @@ public final class ContactsRepository: ObservableObject {
             throw ContactsError.wrap(error)
         }
 
+        // ADR-0060 section 6 — the link key is registered; tie it to the ledger id
+        // so a revoke by blob id removes exactly its key.
+        ReachCenter.shared.attachBlob(linkId: linkId, blobId: blobId)
         let blobIdSlug = base64UrlEncodeNoPad(blobId)
         let url = InviteLinkSecret.link(
             base: "\(Self.inviteUrlPrefix)\(blobIdSlug)", secret: mint.linkSecret)
@@ -803,6 +870,8 @@ public final class ContactsRepository: ObservableObject {
         } catch {
             throw ContactsError.wrap(error)
         }
+        // ADR-0060 — the link's key goes with it (also on "already gone").
+        ReachCenter.shared.removeLink(blobId: blobId)
         if result == .revoked {
             state = state.with(
                 outstandingInvites: state.outstandingInvites
@@ -995,7 +1064,10 @@ public final class ContactsRepository: ObservableObject {
                 recipientSignaturePubkey: inviterSigPubkey,
                 recipientX25519Pubkey: inviterX25519Pubkey,
                 profile: ProfileDirectory.shared.ownProfileForRequest(),
-                introMessage: Data()
+                introMessage: Data(),
+                // ADR-0060 section 6 — written with the link's grant, used for
+                // this flow only and never kept.
+                reach: Self.requestReach(linkSeed: capability.linkGrant().seed)
             )
         } catch {
             return .failed(
@@ -1016,7 +1088,9 @@ public final class ContactsRepository: ObservableObject {
             do {
                 groupIdHex = try await chatRepository.startGroupWith(
                     recipientAccountId: inviterAccountId,
-                    recipientSignaturePubkey: inviterSigPubkey
+                    recipientSignaturePubkey: inviterSigPubkey,
+                    recipientWriteAuth: DsMailboxWriteAuth(
+                        reachSeed: capability.linkGrant().seed)
                 )
             } catch {
                 groupIdHex = nil

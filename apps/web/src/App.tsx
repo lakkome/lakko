@@ -45,6 +45,8 @@ import {
 } from "./contacts/MailboxContext";
 import { OneToOneContactAdoption } from "./contacts/OneToOneContactAdoption";
 import { ProfileProvider } from "./profile/ProfileContext";
+import { ReachProvider } from "./reach/ReachProvider";
+import { ScopedDiscoveryRuntime } from "./reach/ScopedDiscoveryRuntime";
 import { GroupNameProvider } from "./chat/GroupNameContext";
 import { JournalOwnershipProvider } from "./ds/JournalOwnershipContext";
 import { PinProvider } from "./chat/PinContext";
@@ -99,6 +101,9 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     DeviceGroup handle + poll loop. MUST be inside AuthProvider
  *     so the auth-state subscription resolves.
  *
+ *   <ReachProvider> — ADR-0060 scoped discovery: the session's reach keys
+ *     and the "who can find me" setting, synced to the account mailbox.
+ *     Above ProfileProvider, which reads the grants a profile carries.
  *   <ProfileProvider> — ADR-0048 profile names: the own profile, the
  *     received-profile store, username verification, publishing into groups
  *     and the one display resolver. Inside Auth + Chat (it reads the session
@@ -151,6 +156,7 @@ const App: Component = () => (
   <ChatProvider>
     <AuthProvider>
       <DeviceGroupSyncProvider>
+        <ReachProvider>
         <ProfileProvider>
         <JournalOwnershipProvider>
         <GroupNameProvider>
@@ -174,6 +180,12 @@ const App: Component = () => (
            * PublisherGroup open.
            */}
           <ChannelsHydration />
+          {/*
+           * ADR-0060 — what this account publishes to be found by (the
+           * Everyone publication, the contacts-of-contacts record and the
+           * relayed bundle). Whole-session, like the receivers above.
+           */}
+          <ScopedDiscoveryRuntime />
           {/*
            * A Welcome this device could not open. Top level for the same
            * reason as the update banner below: it is received for the whole
@@ -221,6 +233,7 @@ const App: Component = () => (
         </GroupNameProvider>
         </JournalOwnershipProvider>
         </ProfileProvider>
+        </ReachProvider>
       </DeviceGroupSyncProvider>
     </AuthProvider>
   </ChatProvider>

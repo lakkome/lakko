@@ -172,12 +172,15 @@ Top-level destinations, in this order, identical on the three clients:
    invite link.
 3. **Channels**: subscribed channels, discover / join, create.
 4. **Calls**: recent calls, "Create call link", join by link.
-5. **Settings**: Profile · Security · Notifications · Chat folders ·
+5. **Settings**: Profile · Privacy · Security · Notifications · Chat folders ·
    Appearance · Data · About.
 
 Settings sections:
 
 - **Profile**: avatar, display name, `@username`.
+- **Privacy**: who can find me by username or name, and so who can ask to
+  be a contact ([`docs/ux/who-can-find-me.md`](../../../docs/ux/who-can-find-me.md)).
+  About people, not keys, so not under Security.
 - **Security**: passkeys (list + add), linked devices (list, link new via
   QR, remove), recovery phrase (view once / verify), two-step (TOTP),
   recovery contact.

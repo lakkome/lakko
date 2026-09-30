@@ -210,6 +210,15 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   well-formed pin; `wrongDomain` is the only "not a pin" answer. Used ONLY
  *   to classify the row out of the preview path — the SW never stores a
  *   received pin (C-59). Optional so an older deps object still loads.
+ * @property {(bytes: Uint8Array) => any} [dispatchIncomingEnvelope]
+ *   ADR-0060 — the core's service-envelope dispatcher, whose `kind` names the
+ *   scoped-discovery envelopes (introduction offer / bundle, visibility,
+ *   reach state, committer delegation) and the ADR-0057 registrar seed. Used
+ *   ONLY to classify the row out of the preview path — the SW keeps no
+ *   grant, record or delegation (C-59). Optional so an older deps object
+ *   still loads.
+ * @property {Record<string, number>} [IncomingEnvelopeKind]
+ *   The dispatcher's kind enum (the same wasm namespace).
  * @property {(bytes: Uint8Array) => any} [parseCallSignaling]
  *   Phase 3a3 — the prost `CallSignalingPayload` codec. THROWS on bytes that
  *   are not one. Used to tell an OFFER (ring) and an END (stop ringing) apart
@@ -799,10 +808,10 @@ function callNoticeFrom(wasm, processed, message, groupHex, nowMs) {
  * kinds before its chat parse; this is the background mirror of that
  * same two-step peek, in the same order.
  *
- * Eight kinds, each its own arm below: call signaling, the ADR-0042 /
- * ADR-0044 push-routing secret, the ADR-0045 committer beacon, the
- * ADR-0048 profile, the ADR-0048 profile request, the ADR-0051 group name,
- * the ADR-0052 shared pin and the ADR-0057 registrar seed. Each arm is a cheap byte peek gating an
+ * Nine arms below: call signaling, the ADR-0042 / ADR-0044 push-routing
+ * secret, the ADR-0045 committer beacon, the ADR-0048 profile, the ADR-0048
+ * profile request, the ADR-0051 group name, the ADR-0052 shared pin, the
+ * ADR-0057 registrar seed, and the ADR-0060 scoped-discovery envelopes. Each arm is a cheap byte peek gating an
  * authoritative codec.
  *
  * Classification ONLY — no writes, no cursor advance (C-59 / ADR-0041).
@@ -833,6 +842,9 @@ function isServiceEnvelope(wasm, bytes) {
   if (isPinEnvelope(wasm, bytes)) return true;
   // 8. Registrar seed (ADR-0057).
   if (isRegistrarSeedEnvelope(wasm, bytes)) return true;
+
+  // 9. Scoped discovery (ADR-0060).
+  if (isScopedDiscoveryEnvelope(wasm, bytes)) return true;
   return false;
 }
 
@@ -874,6 +886,47 @@ function isRegistrarSeedEnvelope(wasm, bytes) {
   }
   freeQuietly(decoded);
   return true;
+}
+
+/**
+ * The dispatcher kinds arm 9 suppresses. Each carries secrets (a delegation,
+ * an introduction record, a registrar seed) or DeviceGroup-only state, and
+ * would otherwise be previewed as a notification body of domain bytes.
+ */
+const SCOPED_DISCOVERY_KINDS = [
+  "IntroductionOffer",
+  "Introductions",
+  "Visibility",
+  "ReachState",
+  "CommitterDelegation",
+  "RegistrarSeed",
+];
+
+/**
+ * Arm 9 of {@link isServiceEnvelope} — the ADR-0060 scoped-discovery
+ * envelopes, classified by the core's `dispatchIncomingEnvelope` (which
+ * answers `IntroMessage` for anything it does not recognise). Same cheap
+ * first-byte peek as the other `lakko/...` arms. Classification ONLY (C-59).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isScopedDiscoveryEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== 0x6c) return false;
+  if (typeof wasm.dispatchIncomingEnvelope !== "function" || wasm.IncomingEnvelopeKind === undefined) {
+    return false;
+  }
+  let env;
+  try {
+    env = wasm.dispatchIncomingEnvelope(bytes);
+  } catch {
+    return false;
+  }
+  const kind = env === null || env === undefined ? undefined : env.kind;
+  freeQuietly(env);
+  const kinds = /** @type {Record<string, number>} */ (wasm.IncomingEnvelopeKind);
+  return SCOPED_DISCOVERY_KINDS.some((name) => kinds[name] !== undefined && kinds[name] === kind);
 }
 
 /**

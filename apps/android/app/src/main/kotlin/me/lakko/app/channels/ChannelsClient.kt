@@ -11,9 +11,12 @@ import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.parameter
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
@@ -193,6 +196,30 @@ public class ChannelsClient(
             throw decodeError(response, "subscribe")
         }
         return response.body<SubscribeResp>().subscriber_id
+    }
+
+    /**
+     * `DELETE /v1/channels/:id/subscribers/:pk` — leave the channel
+     * (ADR-0060 §3): the server drops the subscriber row, its seed envelopes
+     * and its member card. Authenticated by [signatureHeaderName]
+     * (`unsubscribeSigHeaderName()`) carrying [signatureHeaderValue]
+     * (`ChannelSubscriberKeypair.unsubscribeRequestHeader`), signed by the
+     * subscriber key the path names. A `404` (channel or subscriber already
+     * gone) counts as done; any other non-2xx throws.
+     */
+    public suspend fun unsubscribe(
+        channelIdHex: String,
+        subscriberPubkeyHex: String,
+        signatureHeaderName: String,
+        signatureHeaderValue: String,
+    ) {
+        val response: HttpResponse = client.delete(
+            "$baseUrl/v1/channels/$channelIdHex/subscribers/$subscriberPubkeyHex"
+        ) {
+            header(signatureHeaderName, signatureHeaderValue)
+        }
+        if (response.status.isSuccess() || response.status.value == 404) return
+        throw decodeError(response, "unsubscribe")
     }
 
     /** `GET /v1/channels/:id/subscribers` — list registered
@@ -422,6 +449,92 @@ public class ChannelsClient(
     private data class EpochView(val epoch: UInt)
 
     // -----------------------------------------------------------------
+    // ADR-0060 §3 — member cards
+    // -----------------------------------------------------------------
+
+    @Serializable
+    private data class MemberCardJson(val subscriber_pk_b64: String, val card_b64: String)
+
+    @Serializable
+    private data class MemberCardsResp(val members: List<MemberCardJson>, val next_after: String? = null)
+
+    /**
+     * `PUT /v1/channels/:id/members/:subscriber_pk_hex` — upload this
+     * subscriber's sealed member card. [signature] is
+     * `ChannelSubscriberKeypair.memberCardRequestSignature(channelId, card)`,
+     * sent in [signatureHeaderName] (`memberCardSigHeaderName()`).
+     *
+     * Throws [ChannelsApiException]: `unknown-subscriber` (404, the key is not
+     * registered on the channel), `member-card-epoch-in-future` /
+     * `member-card-stale` (409), `bad-member-signature` (401),
+     * `bad-member-card` (400).
+     */
+    public suspend fun putMemberCard(
+        channelIdHex: String,
+        subscriberPubkeyHex: String,
+        card: ByteArray,
+        signatureHeaderName: String,
+        signature: String,
+    ) {
+        val response: HttpResponse = client.put(
+            "$baseUrl/v1/channels/$channelIdHex/members/$subscriberPubkeyHex"
+        ) {
+            header(signatureHeaderName, signature)
+            contentType(ContentType.Application.OctetStream)
+            setBody(card)
+        }
+        if (!response.status.isSuccess()) {
+            throw decodeError(response, "put member card")
+        }
+    }
+
+    /** `DELETE /v1/channels/:id/members/:subscriber_pk_hex` — remove this
+     *  subscriber's card. [signature] is the signature over the EMPTY card.
+     *  Idempotent. */
+    public suspend fun deleteMemberCard(
+        channelIdHex: String,
+        subscriberPubkeyHex: String,
+        signatureHeaderName: String,
+        signature: String,
+    ) {
+        val response: HttpResponse = client.delete(
+            "$baseUrl/v1/channels/$channelIdHex/members/$subscriberPubkeyHex"
+        ) {
+            header(signatureHeaderName, signature)
+        }
+        if (!response.status.isSuccess()) {
+            throw decodeError(response, "delete member card")
+        }
+    }
+
+    /** `GET /v1/channels/:id/members?after=&limit=` — one page of member
+     *  cards, ascending by subscriber key. [after] is the previous page's
+     *  [MemberCardPage.nextAfter]. An entry whose bytes do not decode is
+     *  skipped. */
+    public suspend fun listMemberCards(
+        channelIdHex: String,
+        after: String? = null,
+        limit: Int? = null,
+    ): MemberCardPage {
+        val response: HttpResponse = client.get("$baseUrl/v1/channels/$channelIdHex/members") {
+            if (after != null) parameter("after", after)
+            if (limit != null) parameter("limit", limit)
+        }
+        if (!response.status.isSuccess()) {
+            throw decodeError(response, "list member cards")
+        }
+        val body = response.body<MemberCardsResp>()
+        return MemberCardPage(
+            members = body.members.mapNotNull { m ->
+                val pk = ChannelsComposer.base64UrlDecodeOrNull(m.subscriber_pk_b64) ?: return@mapNotNull null
+                val card = ChannelsComposer.base64UrlDecodeOrNull(m.card_b64) ?: return@mapNotNull null
+                MemberCardEntry(subscriberPk = pk, card = card)
+            },
+            nextAfter = body.next_after,
+        )
+    }
+
+    // -----------------------------------------------------------------
     // Error envelope decoder
     // -----------------------------------------------------------------
 
@@ -479,6 +592,22 @@ public data class PostView(
 public data class FetchPostsResult(
     public val posts: List<PostView>,
     public val nextAfter: ULong,
+)
+
+/** One entry of `GET /v1/channels/:id/members`: the opaque sealed card
+ *  under the subscriber key it was uploaded for. */
+public class MemberCardEntry(
+    /** The 32-byte subscriber key (Ed25519). */
+    public val subscriberPk: ByteArray,
+    /** The sealed member card. */
+    public val card: ByteArray,
+)
+
+/** One page of member cards. */
+public class MemberCardPage(
+    public val members: List<MemberCardEntry>,
+    /** The `after` for the next page, `null` when this page was the last. */
+    public val nextAfter: String?,
 )
 
 /** Server-supplied error envelope — stable across releases. */

@@ -13,6 +13,10 @@
 //! bitfield bits, pin / order / register caps, snapshot part bounds). The
 //! harness ASSERTS that nothing the decoder accepts breaks one of them, and
 //! that the fold accepts every register of an accepted payload.
+//!
+//! ADR-0060 section 7 added the `ServiceEnvelope` body (field 20): an
+//! accepted one must be 1 to `MAX_SERVICE_ENVELOPE_LEN` bytes, asserted
+//! below, so a bound regression is a crash rather than a silent pass.
 
 #![no_main]
 
@@ -21,4 +25,5 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     let _ = lakko_mls::fuzz_api::parse_devicegroup_payload(data);
     assert!(lakko_mls::fuzz_api::devicegroup_payload_accepted_within_bounds(data));
+    assert!(lakko_mls::fuzz_api::devicegroup_service_envelope_within_bounds(data));
 });

@@ -110,6 +110,21 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// repair: at most one repair per session per account. Deliberately not
     /// reset by ``clear()``.
     private var forkRepairAttempted: Set<String> = []
+    /// ADR-0060 section 7 — service envelopes whose send failed or came
+    /// before the handle was ready, one per envelope kind (a newer one of the
+    /// same kind replaces an older). Retried by the poll loop. In memory: a
+    /// relaunch loses them, and the setting then reaches the other devices
+    /// with its next change.
+    private var pendingServiceEnvelopes: [String: Data] = [:]
+    /// Where the bytes a received `ServiceEnvelope` carries go. The default
+    /// hands them to ``ReachCenter``, which keeps a strictly newer Visibility,
+    /// merges a ReachState, and drops everything else.
+    var onServiceEnvelope: @MainActor (Data) -> Void = { envelope in
+        let outcome = ReachCenter.shared.adoptDeviceEnvelope(envelope)
+        if outcome == .foreign {
+            NSLog("ADR-0060: a DeviceGroup service envelope of another kind was dropped")
+        }
+    }
 
     public init() {
         restoreObserver = NotificationCenter.default.addObserver(
@@ -206,6 +221,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// handles, clear every reactive map.
     public func clear() {
         cancelPollAndDropHandles()
+        pendingServiceEnvelopes = [:]
         // Forget the snapshot too. Logout and forget-this-device both come
         // through here, and a draft left behind for the next account to sign
         // in on this device is the one piece of this state that reads as a
@@ -475,7 +491,59 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         refreshDerived()
     }
 
+    /// ADR-0060 section 7 — send a `lakko-contacts` envelope (the Visibility
+    /// setting or the ReachState counters) to the account's other devices as a
+    /// DeviceGroup `ServiceEnvelope`. The envelope bytes go verbatim, so the
+    /// receiver orders it by the stamp it was composed with; the HLC minted
+    /// here only orders the DeviceGroup row. Best effort: when the handle is
+    /// not ready or the publish fails, the envelope is kept (one per kind) and
+    /// retried by the poll loop.
+    public func sendServiceEnvelope(_ envelope: Data) async {
+        let slot = Self.serviceEnvelopeSlot(envelope)
+        pendingServiceEnvelopes[slot] = envelope
+        await flushPendingServiceEnvelopes()
+    }
+
+    /// The pending-send slot of `envelope`: its dispatched kind, so a newer
+    /// envelope of the same kind replaces an older unsent one.
+    static func serviceEnvelopeSlot(_ envelope: Data) -> String {
+        guard let kind = try? dispatchIncomingEnvelope(plaintext: envelope).kind else {
+            return envelope.base64EncodedString()
+        }
+        return String(describing: kind)
+    }
+
+    private func flushPendingServiceEnvelopes() async {
+        guard ready, group != nil, !deviceRemoved else { return }
+        for (slot, envelope) in pendingServiceEnvelopes {
+            do {
+                try await publish { group, identity in
+                    try group.createServiceEnvelopeMessage(
+                        identity: identity, envelope: envelope, hlc: Hlc.mint())
+                }
+                // A newer envelope may have taken the slot during the await.
+                if pendingServiceEnvelopes[slot] == envelope {
+                    pendingServiceEnvelopes[slot] = nil
+                }
+            } catch {
+                NSLog("ADR-0060: DeviceGroup service envelope not sent, retried: %@",
+                      error.localizedDescription)
+                return
+            }
+        }
+    }
+
     private func sendBody(_ body: DeviceGroupBody, hlc: UInt64) async throws {
+        try await publish { group, identity in
+            try group.createDevicegroupMessage(identity: identity, body: body, hlc: hlc)
+        }
+    }
+
+    /// Encrypt with `compose` under the DeviceGroup's current epoch and
+    /// publish it on the DeviceGroup journal.
+    private func publish(
+        _ compose: (DeviceGroup, Identity) throws -> Data
+    ) async throws {
         if deviceRemoved {
             throw NSError(
                 domain: "DeviceGroupSync",
@@ -491,11 +559,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 userInfo: [NSLocalizedDescriptionKey: "Sync not ready"]
             )
         }
-        let wireBytes = try group.createDevicegroupMessage(
-            identity: identity,
-            body: body,
-            hlc: hlc
-        )
+        let wireBytes = try compose(group, identity)
         let groupId = try group.groupId()
         let ds = DsClient()
         // G-13 (ADR-0015): wrap in the journal envelope (application messages
@@ -522,6 +586,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         let ds = DsClient()
         var cursor: Int64 = startCursor
         while !Task.isCancelled {
+            if !pendingServiceEnvelopes.isEmpty {
+                await flushPendingServiceEnvelopes()
+            }
             let result: FetchResult
             // ADR-0053 point 1 — the read is signed under the DeviceGroup's
             // current epoch.
@@ -619,7 +686,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     // ignored here.
                     do {
                         let parsed = try parseDevicegroupPayload(plaintext: data)
-                        applyReceived(parsed)
+                        applyParsed(parsed)
                     } catch {
                         NSLog("DeviceGroupSync parseDevicegroupPayload failed: %@", error.localizedDescription)
                     }
@@ -814,6 +881,18 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// Fold one payload another device sent. Every kind goes through the one
     /// fold, the ADR-0058 catch-up parts included; a payload that changes
     /// nothing (older, or already held) is a no-op.
+    func applyParsed(_ parsed: ParsedDeviceGroupPayload) {
+        if case .serviceEnvelope(let envelope) = parsed.body {
+            // ADR-0060 section 7 — the Visibility setting and the ReachState
+            // counters, ordered by the envelope's own stamp, not by the
+            // DeviceGroup HLC: a setting is kept only when strictly newer,
+            // counters are merged by the core; any other kind is dropped.
+            onServiceEnvelope(envelope)
+            return
+        }
+        applyReceived(parsed)
+    }
+
     private func applyReceived(_ parsed: ParsedDeviceGroupPayload) {
         do {
             if try syncedState.applyPayload(payload: parsed) {

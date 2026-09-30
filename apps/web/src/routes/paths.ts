@@ -53,14 +53,18 @@ export const paths = {
   contact(keyB64Url: string): string {
     return `/contacts/${keyB64Url}`;
   },
-  /** Settings — Profile · Security · Appearance · Media · About · Account. */
+  /** Settings — Profile · Privacy · Security · Chat folders · Appearance · Media · About ·
+   *  Account. */
   settings: "/settings",
   /** Settings sub-sections; `settings` itself lands on Profile. `recovery`
    *  is reached from Security (authenticator, email or phone), not from the
-   *  section list. */
+   *  section list; `privacy-groups` (the chosen groups and channels) from
+   *  Privacy. */
   settingsSection(
     section:
       | "profile"
+      | "privacy"
+      | "privacy-groups"
       | "security"
       | "folders"
       | "appearance"
@@ -105,13 +109,13 @@ export const paths = {
     return `/groups/${groupIdB64Url}`;
   },
   /**
-   * Build an invite-link URL for a capability slug
-   * (1.18c). `slug` is the base64url-no-pad encoding of the
-   * `InviteCapability.compose(...)` wire bytes — see
-   * `contacts/invite.ts::composeInviteUrl` for the canonical
-   * builder that prepends the origin. The route handler at
-   * `/i/:slug` decodes + verifies the capability and drives
-   * the joiner-side ContactRequest send.
+   * Build the path of an invite link for a slug (1.18c): the
+   * 8-character ledger id of the sealed capability, or the sealed
+   * blob itself. The link secret is NOT part of the path: it rides
+   * in the fragment (`contacts/invite.ts::composePointerInviteUrl`
+   * builds the whole URL). The route handler at `/i/:slug` opens the
+   * link with the fragment's secret and drives the joiner-side
+   * ContactRequest send.
    */
   invite(slug: string): string {
     return `/i/${slug}`;
@@ -199,8 +203,10 @@ export const inviteRoutePattern = "/i/:slug" as const;
 
 /**
  * The matchable pattern for the group join-ticket route (ADR-0028, G-3) — the
- * `/g/<slug>` link an owner mints for a non-member to request to join. `slug`
- * is the base64url-no-pad of the `GroupInviteCapability` wire bytes.
+ * `/g/<slug>#<secret>` link an owner mints for a non-member to request to
+ * join. `slug` is the 8-character ledger id of the sealed capability, or the
+ * sealed blob itself (inline); the fragment is the link secret it opens
+ * under (2026-09-28 security pass).
  */
 export const groupJoinRoutePattern = "/g/:slug" as const;
 
@@ -214,8 +220,8 @@ export const callRoutePattern = "/call/:id" as const;
 /**
  * The matchable pattern for the multi-joiner call-invite landing route
  * (ADR-0032, G-21/G-22) — must stay in sync with `paths.joinCall(...)`.
- * `slug` is the base64url-no-pad of a `CallInviteCapability` blob_id or the
- * inline capability bytes.
+ * `slug` is the 8-character ledger id of a sealed `CallInviteCapability`, or
+ * the sealed blob itself (inline); the fragment is the link secret.
  */
 export const callJoinRoutePattern = "/c/:slug" as const;
 

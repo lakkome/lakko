@@ -139,9 +139,11 @@ struct ChannelInfoSheet: View {
                             Text("Stop following")
                         }
                     } footer: {
-                        // Deliberately about THIS DEVICE. `services/channels`
-                        // has no route that retires a subscriber, so the copy
-                        // must never claim the channel has been told.
+                        // Deliberately about THIS DEVICE: the subscription is
+                        // this device's subscriber key. ADR-0060 section 3's
+                        // signed DELETE retires it on the server too, but best
+                        // effort, so the copy still claims nothing about the
+                        // channel having been told. Same words as web.
                         Text(
                             "Takes the channel off your list and stops this device "
                                 + "reading it. You can subscribe again later."
@@ -177,6 +179,15 @@ struct ChannelInfoSheet: View {
     /// order: forget the reader keypair and the seeds it recovered, then drop
     /// the channel from the local list.
     private func stopFollowing() {
+        // ADR-0060 section 3 — leave on the server too (the subscriber row,
+        // its seed envelopes and its member card). Signed by the subscriber
+        // key, so the keys are captured before they are forgotten; the local
+        // state goes whatever the network does (a failure is logged).
+        if let keys = state.subscriberKeysByChannel[channelId] {
+            let id = channelId
+            Task { await ChannelUnsubscribe.run(keys: keys, channelId: id) }
+        }
+        ChannelMemberCards.forgetUploads(channelId: channelId)
         state.clearSubscriberKeys(channelId)
         state.removeChannel(channelId)
         onUnsubscribed()

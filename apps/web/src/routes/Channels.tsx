@@ -35,6 +35,7 @@ import {
   createSignal,
   For,
   Match,
+  on,
   onCleanup,
   onMount,
   Show,
@@ -61,6 +62,7 @@ import {
   decodeAndDecryptPost,
   freshPublisherKeys,
   freshSubscriberKeys,
+  isCurrentSubscriberKey,
   openSubscriberSeedEnvelope,
   utf8Encode,
 } from "../channels/composer";
@@ -75,6 +77,10 @@ import { channelInfoSections, infoHeading, infoOpenLabel } from "../chat/convers
 import { uiRules } from "../chat/ui-rules";
 import { foldChannelMeta, publishChannelMeta } from "../channels/channel-meta";
 import { ManagePanel } from "../channels/ManagePanel";
+import { MembersPanel } from "../channels/MembersPanel";
+import { forgetUploadedCard } from "../channels/member-cards";
+import { leaveChannelOnServer } from "../channels/unsubscribe";
+import { useOwnMemberCard } from "../channels/own-member-card";
 import { isHiddenPostDecode, PostCard, toPostDecode, type PostDecode } from "../channels/PostCard";
 import { PublishComposer } from "../channels/PublishComposer";
 import { DsClient } from "../ds/client";
@@ -90,6 +96,7 @@ import { paths } from "./paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { ModalLayer } from "../ui/ModalLayer";
+import { MembersCanFindMeSwitch } from "../settings/MembersCanFindMeSwitch";
 import { requestConfirm } from "../ui/confirm-dialog";
 
 // ============================================================================
@@ -161,8 +168,18 @@ function ChannelInfoBody(props: {
   readonly isSubscriber: boolean;
   readonly onManage: () => void;
   readonly onUnsubscribe: () => void;
+  /** ADR-0060 section 3 / UX 6.3: how to open a member card of an epoch,
+   *  and this device's own card key. Absent: the viewer cannot read cards
+   *  (not yet subscribed), so the `Members` row is not offered. */
+  readonly members?:
+    | {
+        readonly seedForEpoch: (epoch: number) => Uint8Array | undefined;
+        readonly ownSubscriberPkHex: string | null;
+      }
+    | undefined;
 }): JSX.Element {
   const meta = (): ReturnType<typeof channelMetaOf> => channelMetaOf(props.id);
+  const [membersOpen, setMembersOpen] = createSignal(false);
   const subscribers = (): number | null => knownSubscriberCount(props.id);
   const sections = createMemo(() =>
     channelInfoSections(uiRules(), {
@@ -176,7 +193,19 @@ function ChannelInfoBody(props: {
   );
 
   return (
-    <>
+    <Show
+      when={!(membersOpen() && props.members !== undefined)}
+      fallback={
+        <MembersPanel
+          channelIdHex={props.id}
+          seedForEpoch={(e): Uint8Array | undefined => props.members?.seedForEpoch(e)}
+          ownSubscriberPkHex={props.members?.ownSubscriberPkHex ?? null}
+          onBack={(): void => {
+            setMembersOpen(false);
+          }}
+        />
+      }
+    >
       <header class="lk-contact-head">
         <Avatar label={meta().name} id={props.id} size="xl" />
         <h1>{meta().name}</h1>
@@ -196,6 +225,33 @@ function ChannelInfoBody(props: {
           )}
         </Show>
       </header>
+
+      {/* UX 6.3 — a channel lists its members to its members. The core
+          decides the block; `members` is what this device needs to open the
+          cards (without it the block has nothing to show). */}
+      <Show when={sections().includes("channel-members") && props.members !== undefined}>
+        <section class="lk-card">
+          <div class="lk-card-row">
+            <span class="lk-card-row-icon">
+              <Icon name="groups" size={18} />
+            </span>
+            <div class="lk-card-row-body">
+              <span class="lk-card-row-title">Members</span>
+              <span class="lk-card-row-sub">Who reads this channel and shared a card.</span>
+            </div>
+            <button
+              type="button"
+              class="lk-card-row-action"
+              style={{ color: "var(--accent)" }}
+              onClick={(): void => {
+                setMembersOpen(true);
+              }}
+            >
+              Open
+            </button>
+          </div>
+        </section>
+      </Show>
 
       <Show when={sections().includes("manage-channel")}>
         <section class="lk-card">
@@ -221,6 +277,7 @@ function ChannelInfoBody(props: {
         </section>
       </Show>
 
+      <MembersCanFindMeSwitch kind="channel" idHex={props.id} />
       <Show when={sections().includes("unsubscribe")}>
         <section class="lk-card danger">
           <div class="lk-card-row">
@@ -244,7 +301,7 @@ function ChannelInfoBody(props: {
           </div>
         </section>
       </Show>
-    </>
+    </Show>
   );
 }
 
@@ -297,13 +354,15 @@ function PostList(props: {
 }
 
 /**
- * Stop following a channel on this device: forget the reader keypair and the
+ * Stop following a channel on this device: leave it on the server (ADR-0060
+ * section 3 - the signed `DELETE` removes the subscriber row, its seed
+ * envelopes and its member card), then forget the reader keypair and the
  * seeds it recovered, and drop the channel from the local list.
  *
- * Local by design AND by what exists - `services/channels` has no route that
- * retires a subscriber, so nothing here can claim the publisher was told.
- * The copy says what actually happens: the channel leaves the list and this
- * device stops reading it.
+ * The local half happens whatever the server said: a request that never
+ * arrived or was refused is logged, and the row it leaves behind goes with
+ * the 90-day subscriber prune. The copy says what the person sees: the
+ * channel leaves the list and this device stops reading it.
  */
 async function confirmStopFollowing(channelIdHex: string, name: string): Promise<boolean> {
   const ok = await requestConfirm({
@@ -316,9 +375,47 @@ async function confirmStopFollowing(channelIdHex: string, name: string): Promise
     tone: "danger",
   });
   if (!ok) return false;
+  const keys = channelsState.subscriberKeysByChannel().get(channelIdHex);
+  if (keys !== undefined) {
+    const outcome = await leaveChannelOnServer(channelIdHex, keys);
+    forgetUploadedCard(channelIdHex, keys);
+    if (outcome.kind !== "left") {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[channels] leaving on the server failed; dropped locally",
+        outcome.kind === "refused" ? `${outcome.status} ${outcome.code}` : outcome.kind,
+      );
+    }
+  }
   channelsActions.clearSubscriberKeys(channelIdHex);
   channelsActions.removeChannel(channelIdHex);
   return true;
+}
+
+/** This device's registered subscriber key for `id`, as hex, or `null`. */
+function ownCardKeyHex(id: string): string | null {
+  const keys = channelsState.subscriberKeysByChannel().get(id);
+  return keys === undefined ? null : bytesToHex(keys.public);
+}
+
+/**
+ * A publisher's member-card key (ADR-0060 section 3): make sure this device
+ * holds a current Ed25519 subscriber key for `id` and that the channel knows
+ * it. Regenerates a pre-flag-day X25519 key. Best effort.
+ */
+async function ensureCardKey(id: string): Promise<void> {
+  await awaitChannelsHydration();
+  const existing = channelsState.subscriberKeysByChannel().get(id);
+  if (existing !== undefined && (await isCurrentSubscriberKey(existing))) return;
+  const fresh = await freshSubscriberKeys();
+  channelsActions.setSubscriberKeys(id, fresh);
+  try {
+    await subscribe(id, bytesToHex(fresh.public));
+  } catch (err) {
+    // The card upload re-registers on `unknown-subscriber`.
+    // eslint-disable-next-line no-console
+    console.warn("[channels] registering the card key failed", apiError.is(err) ? err.code : "error");
+  }
 }
 
 /** Metadata for a channel id (ADR-0051 §5): the shared record first, then
@@ -783,6 +880,30 @@ const ChannelView: Component = () => {
 
   const meta = (): ReturnType<typeof channelMetaOf> => channelMetaOf(params.id);
 
+  // ADR-0060 section 3: publishers upload a member card like anyone else,
+  // under a subscriber key registered on the channel. The key rides in the
+  // same per-channel slot a reader's does; `isOwner()` keeps it from turning
+  // this view into the reader's.
+  createEffect(
+    on(
+      () => [isOwner(), params.id] as const,
+      ([owner, id]) => {
+        if (owner) void ensureCardKey(id);
+      },
+    ),
+  );
+  useOwnMemberCard({
+    channelIdHex: () => params.id,
+    keys: () => channelsState.subscriberKeysByChannel().get(params.id),
+    epoch: () => channelsState.epochByChannel().get(params.id),
+    seed: () => channelsState.keysByChannel().get(params.id)?.seed,
+    enabled: isOwner,
+  });
+  const ownerSeedForEpoch = (epoch: number): Uint8Array | undefined =>
+    epoch === channelsState.epochByChannel().get(params.id)
+      ? channelsState.keysByChannel().get(params.id)?.seed
+      : channelsActions.currentSeed(params.id, epoch);
+
   async function onPublish(): Promise<void> {
     if (publishBusy()) return;
     const text = composeText().trim();
@@ -890,7 +1011,15 @@ const ChannelView: Component = () => {
             <ChannelInfoBody
               id={params.id}
               isPublisher={isOwner()}
-              isSubscriber={isSubscriber()}
+              isSubscriber={isSubscriber() && !isOwner()}
+              members={
+                isOwner()
+                  ? {
+                      seedForEpoch: ownerSeedForEpoch,
+                      ownSubscriberPkHex: ownCardKeyHex(params.id),
+                    }
+                  : undefined
+              }
               onManage={(): void => {
                 setInfoOpen(false);
                 setManageOpen(true);
@@ -951,7 +1080,7 @@ const ChannelView: Component = () => {
 
 // ============================================================================
 // ChannelSubscribe — `/channels/:id/subscribe`
-//   Subscriber-side view: generate (or restore) an X25519 keypair, register
+//   Subscriber-side view: generate (or restore) an Ed25519 keypair, register
 //   it on the channel, poll for a seed envelope, open it, then render decoded
 //   posts using the recovered seed.
 // ============================================================================
@@ -987,7 +1116,10 @@ const ChannelSubscribe: Component = () => {
   }> {
     await awaitChannelsHydration();
     const existing = channelsState.subscriberKeysByChannel().get(params.id);
-    if (existing !== undefined) {
+    // ADR-0060: a key stored before the Ed25519 flag day is an X25519 pair;
+    // it is replaced, and the registration below puts the new public key on
+    // the channel so the publisher reseals to it.
+    if (existing !== undefined && (await isCurrentSubscriberKey(existing))) {
       return existing;
     }
     const fresh = await freshSubscriberKeys();
@@ -1087,6 +1219,20 @@ const ChannelSubscribe: Component = () => {
     }
     return map?.size ?? 0;
   }
+
+  // ADR-0060 section 3: once reading, keep this device's member card
+  // current (a new epoch after a catch-up, a renamed profile, a changed
+  // setting).
+  useOwnMemberCard({
+    channelIdHex: () => params.id,
+    keys: () => channelsState.subscriberKeysByChannel().get(params.id),
+    epoch: () => channelsState.epochByChannel().get(params.id),
+    seed: () => {
+      const epoch = channelsState.epochByChannel().get(params.id);
+      return epoch === undefined ? undefined : channelsActions.currentSeed(params.id, epoch);
+    },
+    enabled: () => bootstrap() === "active",
+  });
 
   // First-load: drive the bootstrap.
   void bootstrap_();
@@ -1192,6 +1338,15 @@ const ChannelSubscribe: Component = () => {
             id={params.id}
             isPublisher={false}
             isSubscriber={channelsState.subscriberKeysByChannel().get(params.id) !== undefined}
+            members={
+              bootstrap() === "active"
+                ? {
+                    seedForEpoch: (epoch): Uint8Array | undefined =>
+                      channelsActions.currentSeed(params.id, epoch),
+                    ownSubscriberPkHex: ownCardKeyHex(params.id),
+                  }
+                : undefined
+            }
             onManage={(): void => undefined}
             onUnsubscribe={(): void => {
               void confirmStopFollowing(params.id, meta().name).then((done) => {

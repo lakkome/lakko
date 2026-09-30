@@ -89,6 +89,8 @@ import {
 import { decodeJournalEntry, encodeJournalEntry } from "../journal-envelope";
 import { fetchDeviceAttestKey } from "../../auth/device-attest-key";
 import { mintHlc, observeHlc } from "./hlc";
+import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
+import { registerServiceEnvelopeSender } from "../../reach/service-envelope-outbox";
 import {
   groupIdHex,
   type DraftState,
@@ -247,6 +249,9 @@ export function DeviceGroupSyncProvider(props: {
   let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
   let outboxTimer: ReturnType<typeof setTimeout> | null = null;
   let draining = false;
+  /** ADR-0060 section 7 - unregisters this provider as the carrier of the
+   *  Visibility / ReachState envelopes. */
+  let unregisterServiceSender: (() => void) | null = null;
   /** DS ids of the journal rows THIS provider published this page lifetime.
    *  The DS does not de-duplicate, so each comes straight back on the next
    *  poll; the loop skips it by id instead of handing OpenMLS a message it
@@ -468,6 +473,14 @@ export function DeviceGroupSyncProvider(props: {
     refresh();
     setReady(true);
 
+    // ADR-0060 section 7 - the "who can find me" setting and the reach key
+    // version counters ride this DeviceGroup as `ServiceEnvelope` bodies.
+    unregisterServiceSender?.();
+    unregisterServiceSender = registerServiceEnvelopeSender(async (envelope) => {
+      if (group === null || identity === null) throw new Error("DeviceGroupSyncProvider is not ready");
+      await publishGroupMessage(group.createServiceEnvelopeMessage(identity, envelope, mintHlc()));
+    });
+
     startPollLoop(accountIdB64, deviceKey);
     void drainFolderOutbox();
   }
@@ -547,6 +560,8 @@ export function DeviceGroupSyncProvider(props: {
   }
 
   function teardown(): void {
+    unregisterServiceSender?.();
+    unregisterServiceSender = null;
     if (pollAbort !== null) {
       pollAbort.abort();
       pollAbort = null;
@@ -1043,6 +1058,13 @@ export function DeviceGroupSyncProvider(props: {
   }
 
   function applyParsed(parsed: ParsedDeviceGroupPayload): void {
+    if (parsed.kind === "serviceEnvelope") {
+      // ADR-0060 section 7 - a Visibility or ReachState envelope from another
+      // device of this account, ordered by its own stamp (not the HLC) and not
+      // a synced register; anything else inside is dropped by the intake.
+      void receiveServiceEnvelope(parsed.serviceEnvelope);
+      return;
+    }
     if (synced === null) return;
     // Every kind - the four maps, folder changes, a catch-up snapshot - folds
     // through the one Rust fold, with its bytewise tiebreak on equal stamps.

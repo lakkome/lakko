@@ -143,6 +143,11 @@ targets:
         #   * LakkoTransparencyWitnessThreshold — the K-of-N threshold
         #     (default 1). Only consulted when the key set is non-empty; a
         #     threshold above the pinned-key count refuses every root.
+        # ADR-0060 section 5 — base64url of the 32-byte Ed25519 key discovery
+        # signs username certificates with, pinned out-of-band at build time.
+        # Empty -> fetched from `/.well-known/lakko-username-cert-key` (the
+        # transition posture; a pin defends a compromised serving tier).
+        LakkoUsernameCertKey: ""
         LakkoTransparencyUrl: ""
         LakkoTransparencyOperatorKey: ""
         LakkoTransparencyWitnessKey: ""

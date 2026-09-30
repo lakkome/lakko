@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import SwiftUI
 
 /// `@main` entry point for the iOS / iPadOS app.
@@ -186,6 +187,12 @@ struct LakkoApp: App {
             )
         )
         let sync = DeviceGroupSyncRepository()
+        // ADR-0060 section 7 — a local change of the "who can find me"
+        // setting or of a reach-key version goes to the account's other
+        // devices over the DeviceGroup.
+        ReachCenter.shared.onDeviceEnvelope = { [weak sync] envelope in
+            Task { @MainActor in await sync?.sendServiceEnvelope(envelope) }
+        }
         let intake = InviteIntake()
         self._deviceGroupSync = StateObject(wrappedValue: sync)
         self._inviteIntake = StateObject(wrappedValue: intake)
@@ -556,6 +563,8 @@ struct AppRoot: View, Equatable {
                 services.deviceGroupSync.clear()
                 // ADR-0048 — no account, no own profile to publish.
                 ProfileDirectory.shared.deactivate()
+                // ADR-0060 — no account, no reach keys to register.
+                ReachCenter.shared.deactivate()
                 // No session, no call: end anything live and forget the
                 // session's call bookkeeping.
                 services.callHost.reset()
@@ -705,6 +714,8 @@ enum TabRoute: Hashable {
     /// `docs/ux/chat-folders.md` section 4 — Settings > Chat folders, opened
     /// in its reorder state from a folder tab's Reorder folders.
     case chatFolders(reorder: Bool)
+    /// Settings > Privacy > Who can find me (ADR-0060).
+    case whoCanFindMe
     /// Deep links (`/i/`, `/g/`, `/c/`), pushed over the current tab rather
     /// than replacing the app (UX spec section 3).
     case inviteLanding(slug: String)
@@ -848,7 +859,43 @@ private struct SessionRoot: View, Equatable {
                     onFoundPerson: { handOffToContacts(username: $0) },
                     onOpenFolderSettings: { reorder in
                         push(.chatFolders(reorder: reorder), on: .chats)
-                    }
+                    },
+                    peopleSearch: PeopleSearchActions(
+                        search: { [contactsRepository, chatRepository] query in
+                            // Local first (web `localPeople`): contacts and
+                            // the members of this device's groups and
+                            // channels, with or without a grant.
+                            let own = ReachCenter.shared.ownAccountKey
+                            let contacts = contactsRepository.state.accepted.map {
+                                (accountKey: $0.request.fromPubkey, accountId: $0.request.fromAccountId)
+                            }
+                            let contactKeys = Set(contacts.map { $0.accountKey.base64EncodedString() })
+                            let local = PeopleSearch.local(
+                                query: query,
+                                candidates: PeopleSearchWiring.localCandidates(
+                                    contacts: contacts,
+                                    groupPeopleKeys: chatRepository.allMemberAccountKeys(),
+                                    profiles: ProfileDirectory.shared.receivedProfiles()),
+                                ownAccountKey: own)
+                            let network = await PeopleSearch.network(
+                                query: query,
+                                records: IntroductionBook.shared.relayedRecords()
+                                    + IntroductionBook.shared.offeredRecords(),
+                                known: {
+                                    PeopleSearchWiring.known(
+                                        keyB64: $0.base64EncodedString(), contactKeys: contactKeys)
+                                },
+                                ownAccountKey: own,
+                                ports: contactsRepository.peopleSearchPorts())
+                            if case .found(let people) = network {
+                                return .found(PeopleSearch.merge([local, people], ownAccountKey: own))
+                            }
+                            return local.isEmpty ? network : .found(local)
+                        },
+                        sendRequest: { [contactsRepository] person, intro in
+                            _ = try await contactsRepository.sendContactRequest(
+                                to: person, introMessage: intro)
+                        })
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .chats) }
             }
@@ -978,6 +1025,59 @@ private struct SessionRoot: View, Equatable {
                     accountIdB64: base64Encode(secrets.accountId),
                     username: account.username
                 )
+                // ADR-0060 — reach keys and the "who can find me" setting,
+                // bound before the chat bootstrap for the same reason: a join
+                // publishes the own profile, which carries this account's
+                // grants.
+                if let accountIdentity = try? Identity.fromSeed(seed: secrets.accountIdentitySeed) {
+                    ReachCenter.shared.activate(
+                        accountIdB64: base64Encode(secrets.accountId),
+                        accountIdentity: accountIdentity)
+                }
+                ReachCenter.shared.sessionTokenProvider = { [authRepository] in
+                    authRepository.identitySecrets?.sessionToken
+                }
+                ReachCenter.shared.ownNameProvider = {
+                    let profiles = ProfileDirectory.shared
+                    let accountId = profiles.accountIdB64.flatMap { Data(base64Encoded: $0) }
+                    return (profiles.ownProfile?.displayName, profiles.ownUsername, accountId)
+                }
+                ReachCenter.shared.channelEpochsProvider = { [channelsState] in
+                    channelsState.channels.compactMap { channel -> (id: Data, epoch: UInt32)? in
+                        guard let id = CoPublisher.hexToData(channel.id),
+                              let epoch = channelsState.subscribedSeeds(channelId: channel.id).keys.max()
+                        else { return nil }
+                        return (id, epoch)
+                    }
+                }
+                ReachCenter.shared.allScopesProvider = { [chatRepository, channelsState] in
+                    let groups = chatRepository.state.threads
+                        .filter { chatRepository.conversationKind(groupIdHex: $0.groupIdHex) == .group }
+                        .compactMap { CoPublisher.hexToData($0.groupIdHex) }
+                        .map { FfiScopeId(kind: .group, id: $0) }
+                    let channels = channelsState.channels
+                        .compactMap { CoPublisher.hexToData($0.id) }
+                        .map { FfiScopeId(kind: .channel, id: $0) }
+                    return groups + channels
+                }
+                // ADR-0060 section 5 — the username certificate every profile
+                // v3 carries beside the username. Fetched once per device (the
+                // server signs it on request); until it lands the profile
+                // carries the name alone.
+                if !account.username.isEmpty,
+                   ReachCenter.shared.ownUsernameCertificate == nil {
+                    let token = secrets.sessionToken
+                    Task { @MainActor in
+                        do {
+                            let cert = try await DiscoveryClient(sessionToken: token)
+                                .fetchUsernameCertificate()
+                            ReachCenter.shared.setOwnUsernameCertificate(cert)
+                            if cert != nil { await chatRepository.publishOwnProfileToAllGroups() }
+                        } catch {
+                            NSLog("ADR-0060: username certificate not fetched: \(error)")
+                        }
+                    }
+                }
                 // `docs/ux/navigation.md` section 6.2 — the flat Calls index.
                 // Bound here for the same reason the profile directory is: the
                 // writer is the call hosts' record port, built once at the
@@ -1204,7 +1304,13 @@ private struct SessionRoot: View, Equatable {
             // published into every group this device is in.
             ProfileSettingsScreen(
                 viewModel: ProfileSettingsViewModel(
-                    publishToAllGroups: { await chatRepository.publishOwnProfileToAllGroups() }
+                    publishToAllGroups: {
+                        await chatRepository.publishOwnProfileToAllGroups()
+                        // ADR-0060 — a new name changes what Everyone publishes
+                        // and what the introduction record is findable by.
+                        ReachCenter.shared.sync()
+                        await chatRepository.sendIntroductions()
+                    }
                 )
             )
         case .passkeys:
@@ -1259,6 +1365,26 @@ private struct SessionRoot: View, Equatable {
         case .chatFolders(let reorder):
             ChatFoldersSettingsScreen(
                 startInReorder: reorder, viewModel: chatListVM, channels: channelsState)
+        case .whoCanFindMe:
+            WhoCanFindMeScreen(
+                reach: ReachCenter.shared,
+                groups: chatRepository.state.threads
+                    .filter { chatRepository.conversationKind(groupIdHex: $0.groupIdHex) == .group }
+                    .compactMap { thread -> VisibilityScopeRow? in
+                        guard let id = CoPublisher.hexToData(thread.groupIdHex) else { return nil }
+                        return VisibilityScopeRow(
+                            id: thread.groupIdHex,
+                            scope: FfiScopeId(kind: .group, id: id),
+                            title: chatRepository.groupName(groupIdHex: thread.groupIdHex) ?? "Group")
+                    },
+                channels: channelsState.channels.compactMap { channel -> VisibilityScopeRow? in
+                    guard let id = CoPublisher.hexToData(channel.id) else { return nil }
+                    let name = channel.sharedName.isEmpty ? channel.localName : channel.sharedName
+                    return VisibilityScopeRow(
+                        id: channel.id,
+                        scope: FfiScopeId(kind: .channel, id: id),
+                        title: name.isEmpty ? "@" + channel.handle : name)
+                })
         case .inviteLanding(let slug):
             InviteLandingScreen(
                 viewModel: InviteLandingViewModel(

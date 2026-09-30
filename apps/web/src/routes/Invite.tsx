@@ -100,6 +100,7 @@ const DAMAGED = "damaged" as const;
 
 export default function Invite(): JSX.Element {
   const params = useParams<{ slug: string }>();
+  const location = useLocation();
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
@@ -111,7 +112,6 @@ export default function Invite(): JSX.Element {
   // imperative juggling. Source signal is the raw slug —
   // re-runs on navigation, no stale capability across
   // /i/<a> → /i/<b> transitions.
-  const location = useLocation();
   // The fragment is the link secret (sealed-link amendment): re-run on it too.
   const slugSignal = createMemo(() => ({ slug: params.slug, hash: location.hash }));
   // Used for the pointer-form path. Created once per route
@@ -397,13 +397,22 @@ function ConnectPanel(props: {
       }
 
       const introBytes = new TextEncoder().encode(intro());
-      await props.client.sendContactRequestToBundle(
-        auth.identitySecrets(),
-        cap.ownerAccountId,
-        cap.ownerSignaturePubkey,
-        cap.ownerX25519Pubkey,
-        introBytes,
-      );
+      // ADR-0060 section 6: the request is written to the owner's closed
+      // mailbox under this link's `link` grant. Used for this one write and
+      // freed; never kept.
+      const linkGrant = cap.linkGrant;
+      try {
+        await props.client.sendContactRequestToBundle(
+          auth.identitySecrets(),
+          cap.ownerAccountId,
+          cap.ownerSignaturePubkey,
+          cap.ownerX25519Pubkey,
+          introBytes,
+          { writeGrant: linkGrant },
+        );
+      } finally {
+        linkGrant.free();
+      }
       setNotice(`Request sent to ${labelOrFingerprint}.`);
       // Brief pause so the user reads the notice; then navigate
       // to /contacts where the accepted-state UI lives.

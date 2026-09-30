@@ -125,7 +125,8 @@ public enum CallInviteComposer {
         identity: KeyPackageMinting,
         discoveryClient: DiscoveryClient,
         nowMs: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000),
-        origin: String = CallInviteUrl.defaultOrigin
+        origin: String = CallInviteUrl.defaultOrigin,
+        linkGrant: (_ linkId: Data, _ expiresAtMs: UInt64) async throws -> FfiReachGrant
     ) async throws -> Composed {
         // ---- 0. Local validation -----------------------------
         guard ownerSigningSeed.count == 32 else {
@@ -148,6 +149,10 @@ public enum CallInviteComposer {
         // ---- 2. The values every link carries ----------------
         // Fixed, not asked (`docs/ux/call-links.md` section 4).
         let expiryMs = CallInviteValues.expiryMs(nowMs: nowMs)
+        // ADR-0060 section 6 — a `/c/` link carries a `link` grant scoped to
+        // it, registered by the caller BEFORE the link exists.
+        let linkId = generateLinkId()
+        let grant = try await linkGrant(linkId, expiryMs)
         let mint = try composeCallInviteCapability(
             ownerSigningSeed: ownerSigningSeed,
             ownerAccountId: ownerAccountId,
@@ -157,7 +162,9 @@ public enum CallInviteComposer {
             media: FfiCallInviteMedia(
                 audio: CallInviteValues.audio, video: CallInviteValues.video),
             oneTimeKeyPackage: oneTimeKeyPackage,
-            label: CallInviteValues.label
+            label: CallInviteValues.label,
+            linkId: linkId,
+            linkGrant: grant
         )
         // The plaintext capability, for the caller that reads it back.
         let capabilityBytes = try CallInviteCapability

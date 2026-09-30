@@ -1,0 +1,374 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.search
+
+import java.util.Collections
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import uniffi.lakko_ffi_uniffi.OprfResult
+
+/*
+ * **Search people** - the network half (`docs/ux/who-can-find-me.md` section
+ * 6.1, ADR-0060 "Client contract (S4 / S5)", Search). The Android twin of
+ * `apps/web/src/search/people-search.ts`, rule for rule.
+ *
+ * One search asks, in parallel:
+ * - the **channel** namespace for the typed handle (the person does not know
+ *   which namespace a name they were given lives in);
+ * - the **username** (`/discovery/lookup`, which answers for people in
+ *   Everyone only);
+ * - **one name term** (`nameQueryTerm` -> `/discovery/name/lookup`), people in
+ *   Everyone whose published name carries it;
+ * then, with the OPRF outputs of the username and the term, the kept
+ * **introductions** (contacts of contacts).
+ *
+ * Every OPRF round yields two values: the `lookupKey` is what discovery is
+ * asked with and what a username certificate binds; the `output` opens
+ * records and never leaves the device.
+ *
+ * Everything is filtered by the WHOLE query (the network matched one term), a
+ * username is shown only when verified, an introduction counts only when the
+ * identity bundle for its account id serves its key, and a result found
+ * through a grant is shown only after the DS reach check says the grant still
+ * opens the person's mailbox. A check that says no drops the result silently:
+ * the searcher must not be able to tell "hidden" from "does not exist".
+ *
+ * **What a person in Everyone is called.** Both lookups return, beside each
+ * account id, the person's PUBLIC RECORD (ADR-0060 section 5). It is opened
+ * with the OUTPUT of the round that found the hit and counts only when it
+ * names both the hit's account id and the key the identity bundle serves for
+ * that account ([acceptPublicRecord]). A name this device already holds wins
+ * over the record's. A name hit nothing names is dropped; a username match
+ * without a usable record is shown under its username.
+ */
+
+/** What this device knows about a person, by account key (base64). */
+public data class KnownPerson(
+    /** A name this device holds (rename or profile); `null` for none. */
+    val name: String?,
+    val verifiedUsername: String?,
+    val isContact: Boolean,
+    val keptGrantWireB64: String?,
+)
+
+/** One lookup hit: an account in Everyone and its public record (`null`
+ *  when discovery sent none). */
+public class LookupHit(public val accountId: ByteArray, public val publicRecord: ByteArray?)
+
+/** The fields of an opened public record the search reads. */
+public class OpenedPublicRecord(
+    public val identityPk: ByteArray,
+    public val accountId: ByteArray,
+    public val displayName: String?,
+)
+
+/** A channel the typed handle names. */
+public data class FoundChannel(val idHex: String, val handle: String)
+
+/** Everything a search asks the outside world. */
+public interface PeopleSearchDeps {
+    /** The canonical username the text could be, or `null` (`looksLikeAName`
+     *  + `bareName` + `validateUsername`). */
+    public fun canonicalUsername(typed: String): String?
+
+    /** `nameQueryTerm`: the one term looked up, `null` when not searchable. */
+    public fun queryTerm(query: String): String?
+
+    /** `nameMatchesQuery`: the post-filter over the whole query. */
+    public fun nameMatches(displayName: String, query: String): Boolean
+
+    /** The channel namespace; `null` when not a channel. */
+    public suspend fun lookupChannel(handle: String): String?
+
+    /** One OPRF round over a username (one anonymous token). */
+    public suspend fun usernameOprf(username: String): OprfResult
+
+    /** `/discovery/lookup` by the username's LOOKUP KEY. */
+    public suspend fun accountOfUsernameLookupKey(lookupKey: ByteArray): LookupHit?
+
+    /** One OPRF round over a name term (one anonymous token). */
+    public suspend fun nameTermOprf(term: String): OprfResult
+
+    /** `/discovery/name/lookup` by the term's LOOKUP KEY. */
+    public suspend fun accountsOfNameTermLookupKey(lookupKey: ByteArray): List<LookupHit>
+
+    /** `openPublicRecord(record, oprfOutput)`, or `null`. Never throws. */
+    public fun openPublicRecord(record: ByteArray, oprfOutput: ByteArray): OpenedPublicRecord?
+
+    /** The account key the identity bundle publishes, `null` for none. */
+    public suspend fun identityKeyOf(accountId: ByteArray): ByteArray?
+
+    /** What this device knows about a person. */
+    public fun known(keyB64: String): KnownPerson
+
+    /** Open the kept introduction records with these probes. */
+    public suspend fun openIntroductions(probes: List<IntroductionProbe>): List<OpenedIntroduction>
+
+    /** `verifyUsernameBinding` against the pinned / fetched key: `true` only
+     *  when the certificate binds the username's `lookupKey` (never its OPRF
+     *  output) to [accountId]. Never throws. */
+    public suspend fun verifyUsername(certificate: ByteArray, usernameLookupKey: ByteArray, accountId: ByteArray): Boolean
+
+    /** The DS reach check of the person's account mailbox with a grant wire. */
+    public suspend fun reachCheck(identityPk: ByteArray, grantWireB64: String): Boolean
+
+    /** How a failed question ended (the used-up allowance is its own state). */
+    public fun legOutcomeOf(error: Throwable): LegOutcome
+
+    public val ownKeyHex: String?
+}
+
+/** What one search came back with. */
+public data class PeopleSearchOutcome(
+    val people: List<PersonResult>,
+    val channel: FoundChannel?,
+    val state: PeopleSearchState,
+)
+
+/** At most this many usernames of introduction results are verified per
+ *  search beyond the typed one: each costs an OPRF evaluation, i.e. one
+ *  anonymous token. The rest show their name without a username. */
+public const val MAX_EXTRA_USERNAME_CHECKS: Int = 3
+
+/**
+ * The display name a public record gives a lookup hit, or `null`. The record
+ * is opened with the OPRF OUTPUT of the round that found the hit, and counts
+ * only when it names the hit's account id AND the key the identity bundle
+ * serves for that account: any person in Everyone can seal a record naming
+ * anyone. Never throws.
+ */
+public fun acceptPublicRecord(
+    open: (ByteArray, ByteArray) -> OpenedPublicRecord?,
+    hit: LookupHit,
+    oprfOutput: ByteArray,
+    bundleKey: ByteArray,
+): String? {
+    val record = hit.publicRecord ?: return null
+    val opened = try {
+        open(record, oprfOutput)
+    } catch (_: Throwable) {
+        null
+    } ?: return null
+    if (!opened.accountId.contentEquals(hit.accountId)) return null
+    if (!opened.identityPk.contentEquals(bundleKey)) return null
+    return opened.displayName?.trim()?.takeIf { it.isNotEmpty() }
+}
+
+/** A result built from what is known locally, over a network finding. */
+private fun resultFor(
+    deps: PeopleSearchDeps,
+    keyB64: String,
+    keyHex: String,
+    accountIdHex: String?,
+    foundReach: PersonReach,
+    foundName: String?,
+    foundUsername: String?,
+    grantWireB64: String?,
+): PersonResult? {
+    val k = deps.known(keyB64)
+    val reach = if (k.isContact) PersonReach.CONTACT else foundReach
+    val name = k.name ?: foundName ?: return null
+    return PersonResult(
+        keyB64 = keyB64,
+        keyHex = keyHex,
+        accountIdHex = accountIdHex,
+        name = name,
+        username = shownUsername(foundUsername ?: k.verifiedUsername, reach),
+        reach = reach,
+        grantWireB64 = if (reach == PersonReach.GRANT) grantWireB64 else null,
+    )
+}
+
+private class BundleKey(val b64: String, val hex: String, val bytes: ByteArray)
+
+private suspend fun identityKey(deps: PeopleSearchDeps, accountId: ByteArray): BundleKey? {
+    val key = deps.identityKeyOf(accountId) ?: return null
+    if (key.size != IDENTITY_KEY_LEN) return null
+    return BundleKey(searchKeyB64(key), searchHex(key), key)
+}
+
+private const val IDENTITY_KEY_LEN = 32
+
+/** Run one search. Never throws (a cancellation is let through). */
+public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSearchOutcome = coroutineScope {
+    val legs: MutableList<LegOutcome> = Collections.synchronizedList(mutableListOf())
+    val probes: MutableList<IntroductionProbe> = Collections.synchronizedList(mutableListOf())
+    val username = deps.canonicalUsername(query)
+    val term = deps.queryTerm(query)
+    var usernameRound: OprfResult? = null
+
+    // ---- the channel namespace ----------------------------------------
+    val channelLeg = async {
+        if (username == null) return@async null
+        try {
+            val idHex = deps.lookupChannel(username)
+            legs += LegOutcome.ANSWERED
+            idHex?.let { FoundChannel(it, username) }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (err: Throwable) {
+            legs += deps.legOutcomeOf(err)
+            null
+        }
+    }
+
+    // ---- the username -------------------------------------------------
+    val usernameLeg = async {
+        if (username == null) return@async emptyList<PersonResult>()
+        try {
+            val round = deps.usernameOprf(username)
+            usernameRound = round
+            probes += IntroductionProbe(round.output, ProbeVia.USERNAME)
+            val hit = deps.accountOfUsernameLookupKey(round.lookupKey)
+            if (hit == null) {
+                legs += LegOutcome.ANSWERED
+                return@async emptyList()
+            }
+            // The key comes from the identity bundle discovery serves for the
+            // account, never from a profile's CLAIMED account id.
+            val key = identityKey(deps, hit.accountId)
+            legs += LegOutcome.ANSWERED
+            if (key == null) return@async emptyList()
+            val published = acceptPublicRecord(deps::openPublicRecord, hit, round.output, key.bytes)
+            // Discovery itself resolved this username to this account: that
+            // is the binding a certificate would prove, so the username shows.
+            listOfNotNull(
+                resultFor(
+                    deps, key.b64, key.hex, searchHex(hit.accountId), PersonReach.OPEN,
+                    published ?: "@$username", username, null,
+                ),
+            )
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (err: Throwable) {
+            legs += deps.legOutcomeOf(err)
+            emptyList()
+        }
+    }
+
+    // ---- one name term ------------------------------------------------
+    val nameLeg = async {
+        if (term == null) return@async emptyList<PersonResult>()
+        try {
+            val round = deps.nameTermOprf(term)
+            probes += IntroductionProbe(round.output, ProbeVia.TERM)
+            val out = mutableListOf<PersonResult>()
+            for (hit in deps.accountsOfNameTermLookupKey(round.lookupKey)) {
+                val key = identityKey(deps, hit.accountId) ?: continue
+                // A name this device holds, else the one the person published;
+                // an unnamed hit is dropped.
+                val published = acceptPublicRecord(deps::openPublicRecord, hit, round.output, key.bytes)
+                val name = deps.known(key.b64).name ?: published ?: continue
+                if (!deps.nameMatches(name, query)) continue
+                resultFor(
+                    deps, key.b64, key.hex, searchHex(hit.accountId), PersonReach.OPEN,
+                    published, null, null,
+                )?.let { out += it }
+            }
+            legs += LegOutcome.ANSWERED
+            out
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (err: Throwable) {
+            legs += deps.legOutcomeOf(err)
+            emptyList()
+        }
+    }
+
+    val channel = channelLeg.await()
+    val byUsername = usernameLeg.await()
+    val byName = nameLeg.await()
+
+    // ---- contacts of contacts ----------------------------------------
+    val byIntroduction = mutableListOf<PersonResult>()
+    var introFailed = false
+    val probeList = synchronized(probes) { probes.toList() }
+    if (probeList.isNotEmpty()) {
+        val opened = try {
+            deps.openIntroductions(probeList)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        var extraChecks = 0
+        for (intro in opened) {
+            val matches = when (intro.via) {
+                ProbeVia.USERNAME -> username != null && intro.username == username
+                ProbeVia.TERM -> intro.displayName != null && deps.nameMatches(intro.displayName, query)
+            }
+            if (!matches) continue
+            // The record is the introduced person's own claim: its account id
+            // must be the account the identity bundle publishes this key for,
+            // or a record could pair its author's key with someone else's
+            // account id - and that account's username certificate.
+            val bound = try {
+                val published = deps.identityKeyOf(intro.accountId)
+                published != null && published.contentEquals(intro.identityPk)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (_: Throwable) {
+                introFailed = true
+                continue
+            }
+            if (!bound) continue
+            var verified: String? = null
+            val claimed = intro.username
+            val certificate = intro.usernameCertificate
+            if (claimed != null && certificate != null) {
+                val round = usernameRound
+                val lookupKey: ByteArray? = if (claimed == username && round != null) {
+                    round.lookupKey
+                } else if (extraChecks < MAX_EXTRA_USERNAME_CHECKS) {
+                    extraChecks += 1
+                    try {
+                        deps.usernameOprf(claimed).lookupKey
+                    } catch (cancel: CancellationException) {
+                        throw cancel
+                    } catch (_: Throwable) {
+                        null
+                    }
+                } else {
+                    null
+                }
+                if (lookupKey != null && deps.verifyUsername(certificate, lookupKey, intro.accountId)) {
+                    verified = claimed
+                }
+            }
+            val keyB64 = searchKeyB64(intro.identityPk)
+            val name = intro.displayName
+                ?: verified?.let { "@$it" }
+                ?: me.lakko.app.profile.fingerprintLabel(intro.identityPk)
+            resultFor(
+                deps, keyB64, searchHex(intro.identityPk), searchHex(intro.accountId), PersonReach.GRANT,
+                name, verified, java.util.Base64.getEncoder().encodeToString(intro.fofWire),
+            )?.let { byIntroduction += it }
+        }
+    }
+
+    // ---- one list, then the reach check -------------------------------
+    val merged = mergePeople(listOf(byUsername, byName, byIntroduction), deps.ownKeyHex)
+    val people = mutableListOf<PersonResult>()
+    var checkFailed = false
+    for (p in merged) {
+        if (p.reach != PersonReach.GRANT) {
+            people += p
+            continue
+        }
+        val grant = p.grantWireB64 ?: continue
+        try {
+            val pk = java.util.Base64.getDecoder().decode(p.keyB64)
+            if (deps.reachCheck(pk, grant)) people += p
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            checkFailed = true
+        }
+    }
+    val allLegs = synchronized(legs) { legs.toMutableList() }
+    if (checkFailed || introFailed) allLegs += LegOutcome.FAILED
+    val found = people.size + (if (channel == null) 0 else 1)
+    PeopleSearchOutcome(people, channel, foldSearch(found, allLegs))
+}

@@ -260,13 +260,14 @@ public final class DiscoveryClient {
             OprfRequest(blinded: blinder.blindedB64())
         )
 
-        let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
-        let oprfHashB64 = base64Encode(oprfHashBytes)
+        // ADR-0060 §5: only the lookup key goes to discovery; the OPRF
+        // output never leaves the device.
+        let lookupKey = try blinder.finalize(evaluatedB64: oprfResp.evaluated).lookupKey
 
         let resp = try await register(
             RegisterRequest(
                 accountId: base64Encode(accountId),
-                oprfHash: oprfHashB64
+                oprfHash: base64Encode(lookupKey)
             )
         )
         guard resp.ok else {
@@ -298,11 +299,10 @@ public final class DiscoveryClient {
             OprfRequest(blinded: blinder.blindedB64())
         )
 
-        let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
-        let oprfHashB64 = base64Encode(oprfHashBytes)
+        let lookupKey = try blinder.finalize(evaluatedB64: oprfResp.evaluated).lookupKey
 
         guard let resp = try await lookupRaw(
-            LookupRequest(oprfHash: oprfHashB64)
+            LookupRequest(oprfHash: base64Encode(lookupKey))
         ) else {
             return LookupResult(
                 normalisedUsername: normalisedUsername,
@@ -313,6 +313,125 @@ public final class DiscoveryClient {
             normalisedUsername: normalisedUsername,
             account: base64Decode(resp.accountId)
         )
+    }
+
+    // MARK: - ADR-0060 scoped discovery
+
+    /// One OPRF round over `username` (one `discovery-lookup` token). The
+    /// result carries both halves (ADR-0060 §5): `lookupKey` is what a
+    /// username certificate binds and the only one that may go to discovery;
+    /// `output` never leaves the device and is the key an introduction record
+    /// is opened under. Throws on a name outside the rule.
+    public func usernameOprf(_ username: String) async throws -> OprfResult {
+        _ = try requireValidUsername(
+            username, emptyError: DiscoveryClientError.argument("username must be non-empty"))
+        let blinder = try OprfBlinder.blind(username: username)
+        let evaluated = try await oprfEvaluate(OprfRequest(blinded: blinder.blindedB64()))
+        return try blinder.finalize(evaluatedB64: evaluated.evaluated)
+    }
+
+    /// One OPRF round over a name search term, in the name domain
+    /// (`OprfBlinder.blindNameTerm`, one `discovery-lookup` token). As with
+    /// ``usernameOprf(_:)``: `lookupKey` for discovery, `output` for records.
+    public func nameTermOprf(_ term: String) async throws -> OprfResult {
+        let blinder = try OprfBlinder.blindNameTerm(term: term)
+        let evaluated = try await oprfEvaluate(OprfRequest(blinded: blinder.blindedB64()))
+        return try blinder.finalize(evaluatedB64: evaluated.evaluated)
+    }
+
+    /// `GET /discovery/username-certificate` (bearer) — this account's
+    /// username certificate, signed now; `nil` when the account has no
+    /// username (`404`).
+    public func fetchUsernameCertificate() async throws -> Data? {
+        let endpoint = "/discovery/username-certificate"
+        var request = URLRequest(url: try buildURL(endpoint: endpoint))
+        request.httpMethod = "GET"
+        attachAuthorizationHeader(to: &request)
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
+        } catch {
+            throw DiscoveryClientError.network(endpoint: endpoint, underlying: error)
+        }
+        guard let http = raw.1 as? HTTPURLResponse else {
+            throw DiscoveryClientError.http(status: 0, endpoint: endpoint, body: "non-HTTP response")
+        }
+        if http.statusCode == 404 { return nil }
+        guard (200..<300).contains(http.statusCode) else {
+            throw DiscoveryClientError.http(
+                status: http.statusCode, endpoint: endpoint,
+                body: Self.truncate(String(data: raw.0, encoding: .utf8) ?? "<binary>"))
+        }
+        let parsed = try decoder.decode(UsernameCertificateWire.self, from: raw.0)
+        return base64Decode(parsed.usernameCertificateB64)
+    }
+
+    /// `PUT /discovery/visibility` (bearer) — enter Everyone with the lookup
+    /// keys (`OprfResult.lookupKey`, never the OPRF output) of every name
+    /// search term and the public record (`composePublicRecord`, sealed under
+    /// the OPRF outputs), or leave it (`public == false`, no terms, no record).
+    public func putVisibility(
+        public isPublic: Bool, nameTermLookupKeys: [Data], publicRecord: Data?
+    ) async throws {
+        let endpoint = "/discovery/visibility"
+        var request = URLRequest(url: try buildURL(endpoint: endpoint))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        attachAuthorizationHeader(to: &request)
+        request.httpBody = try encoder.encode(VisibilityWireRequest(
+            isPublic: isPublic, nameTermsB64: nameTermLookupKeys.map { base64Encode($0) },
+            publicRecordB64: publicRecord.map { base64Encode($0) }))
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
+        } catch {
+            throw DiscoveryClientError.network(endpoint: endpoint, underlying: error)
+        }
+        guard let http = raw.1 as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let status = (raw.1 as? HTTPURLResponse)?.statusCode ?? 0
+            throw DiscoveryClientError.http(
+                status: status, endpoint: endpoint,
+                body: Self.truncate(String(data: raw.0, encoding: .utf8) ?? "<binary>"))
+        }
+    }
+
+    /// `POST /discovery/name/lookup` (anonymous) — the people (at most 20) in
+    /// Everyone who published the name term whose lookup key
+    /// (`OprfResult.lookupKey`, never the OPRF output) is `termLookupKey`,
+    /// each with the public record the searcher opens with the term's OPRF
+    /// output.
+    public func nameLookup(termLookupKey: Data) async throws -> [PublicAccountHit] {
+        let resp: NameLookupWireResponse = try await postAnonymous(
+            endpoint: "/discovery/name/lookup",
+            body: NameLookupWireRequest(oprfHashB64: base64Encode(termLookupKey)),
+            context: nil)
+        return resp.results.compactMap { row in
+            guard let accountId = base64Decode(row.accountIdB64) else { return nil }
+            return PublicAccountHit(
+                accountId: accountId, publicRecord: base64Decode(row.publicRecordB64))
+        }
+    }
+
+    /// `POST /discovery/lookup` (anonymous) for a username whose OPRF round
+    /// the caller already ran: `lookupKey` is `OprfResult.lookupKey`. `nil`
+    /// when the name is not registered or its owner is not in Everyone.
+    public func lookupPublic(lookupKey: Data) async throws -> PublicAccountHit? {
+        guard let resp = try await lookupRaw(LookupRequest(oprfHash: base64Encode(lookupKey))),
+              let accountId = base64Decode(resp.accountId) else { return nil }
+        return PublicAccountHit(
+            accountId: accountId, publicRecord: resp.publicRecord.flatMap { base64Decode($0) })
+    }
+
+    /// `GET /.well-known/lakko-username-cert-key` — the username-certificate
+    /// verifying key, used only when no key is pinned at build time.
+    public func fetchUsernameCertKey() async throws -> Data? {
+        let endpoint = "/.well-known/lakko-username-cert-key"
+        guard let resp: CertKeyWire = try await getNullableOn404Public(endpoint: endpoint) else {
+            return nil
+        }
+        return base64UrlDecodeNoPad(resp.keyB64url)
     }
 
     // MARK: - Channel discovery (G4-5, ADR-0010)
@@ -355,12 +474,11 @@ public final class DiscoveryClient {
             OprfRequest(blinded: blinder.blindedB64())
         )
 
-        let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
-        let oprfHashB64 = base64Encode(oprfHashBytes)
+        let lookupKey = try blinder.finalize(evaluatedB64: oprfResp.evaluated).lookupKey
 
         let resp = try await channelRegister(
             ChannelRegisterRequest(
-                oprfHash: oprfHashB64,
+                oprfHash: base64Encode(lookupKey),
                 channelId: base64Encode(channelId)
             )
         )
@@ -382,11 +500,10 @@ public final class DiscoveryClient {
             OprfRequest(blinded: blinder.blindedB64())
         )
 
-        let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
-        let oprfHashB64 = base64Encode(oprfHashBytes)
+        let lookupKey = try blinder.finalize(evaluatedB64: oprfResp.evaluated).lookupKey
 
         guard let resp = try await channelLookupRaw(
-            ChannelLookupRequest(oprfHash: oprfHashB64)
+            ChannelLookupRequest(oprfHash: base64Encode(lookupKey))
         ) else {
             return nil
         }
@@ -1794,6 +1911,20 @@ public struct RegisterResult: Equatable {
 }
 
 /// Result of ``DiscoveryClient/lookup(username:)``.
+/// A person in Everyone found by discovery (ADR-0060 section 5): the account id
+/// and the public record, opened with the OPRF **output** of the username or
+/// name term that found it (`openPublicRecord`). `publicRecord` is `nil` only
+/// when the server sent none or it did not decode.
+public struct PublicAccountHit: Equatable {
+    public let accountId: Data
+    public let publicRecord: Data?
+
+    public init(accountId: Data, publicRecord: Data?) {
+        self.accountId = accountId
+        self.publicRecord = publicRecord
+    }
+}
+
 public struct LookupResult: Equatable {
     public let normalisedUsername: String
     /// Raw 16-byte account_id, or `nil` if the username is not
@@ -1957,4 +2088,53 @@ public struct DeviceKeyPackage: Equatable {
         self.deviceId = deviceId
         self.keyPackage = keyPackage
     }
+}
+
+// MARK: - ADR-0060 wire shapes
+
+private struct UsernameCertificateWire: Decodable {
+    let usernameCertificateB64: String
+    enum CodingKeys: String, CodingKey { case usernameCertificateB64 = "username_certificate_b64" }
+}
+
+private struct VisibilityWireRequest: Encodable {
+    let isPublic: Bool
+    let nameTermsB64: [String]
+    let publicRecordB64: String?
+    enum CodingKeys: String, CodingKey {
+        case isPublic = "public"
+        case nameTermsB64 = "name_terms_b64"
+        case publicRecordB64 = "public_record_b64"
+    }
+
+    // The server refuses the field outside Everyone, so a nil record is
+    // omitted rather than sent as null.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(isPublic, forKey: .isPublic)
+        try c.encode(nameTermsB64, forKey: .nameTermsB64)
+        try c.encodeIfPresent(publicRecordB64, forKey: .publicRecordB64)
+    }
+}
+
+private struct NameLookupWireRequest: Encodable {
+    let oprfHashB64: String
+    enum CodingKeys: String, CodingKey { case oprfHashB64 = "oprf_hash_b64" }
+}
+
+private struct NameLookupWireResponse: Decodable {
+    struct Row: Decodable {
+        let accountIdB64: String
+        let publicRecordB64: String
+        enum CodingKeys: String, CodingKey {
+            case accountIdB64 = "account_id_b64"
+            case publicRecordB64 = "public_record_b64"
+        }
+    }
+    let results: [Row]
+}
+
+private struct CertKeyWire: Decodable {
+    let keyB64url: String
+    enum CodingKeys: String, CodingKey { case keyB64url = "key_b64url" }
 }

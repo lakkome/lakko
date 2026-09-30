@@ -3572,6 +3572,14 @@ private fun MembersSheet(
                         canRename = InfoSection.RENAME_GROUP in sections,
                     )
                     Spacer(Modifier.height(12.dp))
+                    // docs/ux/who-can-find-me.md section 5 — this group's
+                    // `Members can find me` switch (absent unless the setting
+                    // includes groups).
+                    me.lakko.app.ui.settings.MembersCanFindMeRow(
+                        reach = me.lakko.app.reach.ReachManager.get(androidx.compose.ui.platform.LocalContext.current),
+                        kind = me.lakko.app.ui.settings.FindMeScopeKind.GROUP,
+                        idHex = viewModel.groupIdHex,
+                    )
                 }
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees the
                 // add affordance; a plain member's add would be refused by peers.

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import XCTest
 
 /// Unit tests for the NSE service-envelope filter — the background half of the
@@ -267,6 +268,30 @@ final class NseServiceEnvelopeTests: XCTestCase {
     /// keeps this fixture honest against the envelope this file builds.
     private static let pinEnvelopeLen = 31
 
+    /// Stand-in for the slim FFI's `scopedDiscoveryEnvelopeMinLen()...MaxLen()`
+    /// (the NSE's pre-filter range for the five ADR-0060 envelopes). Wide on
+    /// purpose: the exported bounds are pinned against composed envelopes by
+    /// the Rust goldens in `crates/lakko-ffi-extension/src/scoped_discovery.rs`;
+    /// this fixture only has to admit the envelopes this file composes.
+    static let scopedDiscoveryEnvelopeLens: ClosedRange<Int> = 16...1_000_000
+
+    /// The ADR-0060 verdict, through the FULL core's dispatcher (the test target
+    /// links `LakkoCore`, not the slim NSE framework): one of the five "who can
+    /// find me" kinds.
+    static func decodesAsScopedDiscoveryReal(_ bytes: Data) -> Bool {
+        guard let env = try? dispatchIncomingEnvelope(plaintext: bytes) else { return false }
+        switch env.kind {
+        case .introductionOffer, .introductions, .visibility, .reachState, .committerDelegation:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func decodesAsScopedDiscovery(_ bytes: Data) -> Bool {
+        Self.decodesAsScopedDiscoveryReal(bytes)
+    }
+
     /// A well-formed pin envelope:
     /// `domain(13) || version(1)=0x01 || updated_at_ms(8, BE) || action(1) || message_id(8, BE)`.
     private func pinEnvelope(
@@ -357,7 +382,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: Self.pinEnvelopeLen,
                 decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
             ),
             "a registrar seed must never be rendered"
         )
@@ -378,7 +405,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsPin: decodesAsPin,
                     pinEnvelopeLen: Self.pinEnvelopeLen,
                     decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                    decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                    scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
                 ))
         }
     }
@@ -404,7 +433,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsPin: decodesAsPin,
                     pinEnvelopeLen: Self.pinEnvelopeLen,
                     decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                    decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                    scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
                 ),
                 "a pin envelope must never be rendered"
             )
@@ -453,7 +484,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsPin: decodesAsPin,
                     pinEnvelopeLen: Self.pinEnvelopeLen,
                     decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                    decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                    scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
                 ))
         }
     }
@@ -490,7 +523,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: Self.pinEnvelopeLen,
                 decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
             ),
             "a profile request must never be rendered"
         )
@@ -533,7 +568,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsPin: decodesAsPin,
                     pinEnvelopeLen: Self.pinEnvelopeLen,
                     decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                    decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                    scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
                 ))
         }
     }
@@ -579,7 +616,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsPin: decodesAsPin,
                     pinEnvelopeLen: Self.pinEnvelopeLen,
                     decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                    decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                    scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
                 ),
                 "a group-name envelope of \(envelope.count) bytes must never be rendered"
             )
@@ -626,7 +665,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: Self.pinEnvelopeLen,
                 decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
             ))
     }
 
@@ -667,7 +708,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: Self.pinEnvelopeLen,
                 decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
             ),
             "a v2 push-routing-secret envelope must never be rendered"
         )
@@ -715,7 +758,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: Self.pinEnvelopeLen,
                 decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
             ),
             "the codec, not the peek, is the authority"
         )
@@ -744,7 +789,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: Self.pinEnvelopeLen,
                 decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
             )
         )
     }
@@ -776,7 +823,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsPin: decodesAsPin,
                     pinEnvelopeLen: Self.pinEnvelopeLen,
                     decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                    decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                    scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
                 ),
                 "call signaling must never be rendered"
             )
@@ -809,7 +858,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: Self.pinEnvelopeLen,
                 decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
             ),
             "a committer beacon must never be rendered"
         )
@@ -914,7 +965,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: Self.pinEnvelopeLen,
                 decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
             ),
             "the codec, not the peek, is the authority"
         )
@@ -938,7 +991,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: Self.pinEnvelopeLen,
                 decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
             )
         )
     }
@@ -976,7 +1031,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsPin: decodesAsPin,
                     pinEnvelopeLen: Self.pinEnvelopeLen,
                     decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                    decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                    scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
                 ),
                 "a \(envelope.count)-byte profile must never be rendered"
             )
@@ -1029,7 +1086,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: Self.pinEnvelopeLen,
                 decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
             ),
             "the codec, not the peek, is the authority"
         )
@@ -1074,7 +1133,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: Self.pinEnvelopeLen,
                 decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
             ),
             "a chat envelope must still render"
         )
@@ -1093,10 +1154,69 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: Self.pinEnvelopeLen,
                 decodesAsRegistrarSeed: decodesAsRegistrarSeed,
-                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
             ),
             "empty bytes are not a service envelope"
         )
+    }
+
+    // MARK: - Kind 8: the ADR-0060 "who can find me" envelopes
+
+    private func isService(_ bytes: Data) -> Bool {
+        nseIsServiceEnvelope(
+            bytes,
+            decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+            decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+            committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+            decodesAsProfile: decodesAsProfile,
+            profileEnvelopeLens: Self.profileEnvelopeLens,
+            decodesAsGroupName: decodesAsGroupName,
+            groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
+            decodesAsProfileRequest: decodesAsProfileRequest,
+            profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+            decodesAsPin: decodesAsPin,
+            pinEnvelopeLen: Self.pinEnvelopeLen,
+            decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+            registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+            decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+            scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens
+        )
+    }
+
+    /// WITHOUT THE ARM a "who can find me" setting reaches `parseBodyEnvelope`
+    /// and a notification reads `lakko/visibility/...` plus binary.
+    func testVisibilityEnvelopeIsAServiceEnvelope() throws {
+        var setting = defaultVisibilitySetting()
+        setting.updatedAtMs = 1_700_000_000_000
+        XCTAssertTrue(isService(try composeVisibilityEnvelope(setting: setting)))
+    }
+
+    func testReachStateEnvelopeIsAServiceEnvelope() throws {
+        let state = FfiReachState(
+            entries: [FfiReachStateEntry(class: .contact, scopeId: Data(), version: 2)],
+            updatedAtMs: 5)
+        XCTAssertTrue(isService(try composeReachStateEnvelope(state: state)))
+    }
+
+    func testCommitterDelegationEnvelopeIsAServiceEnvelope() throws {
+        let mailbox = Data(repeating: 7, count: 32)
+        let blob = try signDelegationBlob(
+            issuerSeed: Data(repeating: 1, count: 32), mailbox: mailbox,
+            delegatePk: try reachVerifyingKey(seed: Data(repeating: 2, count: 32)),
+            expiresAtMs: 1_700_000_000_000, nonce: Data(repeating: 3, count: 16))
+        let envelope = try composeCommitterDelegationEnvelope(
+            envelope: FfiCommitterDelegationEnvelope(
+                addedAccountKey: Data(repeating: 9, count: 32), delegations: [blob]))
+        XCTAssertTrue(isService(envelope))
+    }
+
+    /// A chat body and a profile are never classified as one of the five.
+    func testChatBodyIsNotAScopedDiscoveryEnvelope() {
+        XCTAssertFalse(Self.decodesAsScopedDiscoveryReal(Data("{\"v\":1,\"text\":\"hi\"}".utf8)))
+        XCTAssertFalse(Self.decodesAsScopedDiscoveryReal(pinEnvelope()))
+        XCTAssertFalse(nseLooksLikeScopedDiscovery(Data(), envelopeLens: 1...10))
     }
 
     // MARK: - Pipeline: the filter drops the row and the loop falls back
@@ -1148,7 +1268,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsPin: decodesAsPin,
                 pinEnvelopeLen: NseServiceEnvelopeTests.pinEnvelopeLen,
                 decodesAsRegistrarSeed: NseServiceEnvelopeTests.decodesAsRegistrarSeedDouble,
-                registrarSeedEnvelopeLen: NseServiceEnvelopeTests.registrarSeedEnvelopeLen
+                registrarSeedEnvelopeLen: NseServiceEnvelopeTests.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: NseServiceEnvelopeTests.decodesAsScopedDiscoveryReal,
+                scopedDiscoveryEnvelopeLens: NseServiceEnvelopeTests.scopedDiscoveryEnvelopeLens
             ) {
                 suppressed += 1
                 return nil

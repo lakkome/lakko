@@ -52,6 +52,12 @@ public final class ProfileDirectory: ObservableObject {
         self.verifier = verifier ?? UsernameVerifier(resolve: ProfileDirectory.discoveryResolve)
         self.ownStore = ownStore
         self.verifier.onChange = { [weak self] in self?.bump() }
+        if verifier == nil {
+            self.verifier.verifyBinding = { [weak self] keyB64, username in
+                guard let self else { return false }
+                return try await self.verifyCertificate(signatureKeyB64: keyB64, username: username)
+            }
+        }
         setRenames(from: AcceptedContactsStore.load())
     }
 
@@ -106,10 +112,25 @@ public final class ProfileDirectory: ObservableObject {
         return saved
     }
 
-    /// The own profile as an envelope ready to publish, or `nil` without an
-    /// active account. A guest publishes a name with no username.
-    func ownProfileEnvelope() -> Data? {
-        guard let profile = ownProfileForRequest() else { return nil }
+    /// The own profile as an envelope ready to publish into one conversation,
+    /// or `nil` without an active account. A guest publishes a name with no
+    /// username.
+    ///
+    /// ADR-0060 section 3 — profile v3 carries the grants of THIS
+    /// conversation: `contact` + `member` in a one-to-one, `member` (plus
+    /// `group` where the setting allows it) in a group; and the username
+    /// only where the setting lets this conversation's members find the
+    /// owner (UX section 6.2), always with its certificate.
+    func ownProfileEnvelope(groupId: Data? = nil, oneToOne: Bool = false) -> Data? {
+        guard var profile = ownProfileForRequest() else { return nil }
+        if let groupId {
+            let reach = ReachCenter.shared
+            profile.grants = reach.profileGrants(groupId: groupId, oneToOne: oneToOne)
+            if !oneToOne, !reach.allowsGroup(groupId) {
+                profile.username = nil
+                profile.usernameCertificate = nil
+            }
+        }
         do {
             return try composeProfileEnvelope(profile: profile)
         } catch {
@@ -130,13 +151,21 @@ public final class ProfileDirectory: ObservableObject {
     /// holds the identity bundle; here it only travels inside the E2EE
     /// envelope. An account id that is not exactly 16 bytes is sent as none —
     /// `composeProfileEnvelope` refuses any other length.
+    ///
+    /// ADR-0060 section 5 — the username travels with its certificate, and
+    /// only when this device holds one: a username without a certificate is
+    /// never shown by a v3 receiver, so it is not sent either.
     func ownProfileForRequest() -> FfiProfile? {
         guard let accountIdB64 else { return nil }
+        let cert = ReachCenter.shared.ownUsernameCertificate
+        let username = cert == nil ? nil : ownUsername
         return FfiProfile(
             displayName: ownProfile?.displayName,
-            username: ownUsername,
+            username: username,
             updatedAtMs: ownProfile?.updatedAtMs ?? 0,
-            accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil }
+            accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil },
+            usernameCertificate: username == nil ? nil : cert,
+            grants: []
         )
     }
 
@@ -146,7 +175,9 @@ public final class ProfileDirectory: ObservableObject {
     /// the carrier authenticated (C-68). Kept only when strictly newer.
     @discardableResult
     func acceptReceived(_ claim: ProfileClaim, signatureKeyB64: String?) -> ProfileAcceptance {
-        let outcome = received.accept(claim, signatureKeyB64: signatureKeyB64)
+        // Grants are scoped to the conversation they arrived in and handed to
+        // ``ReachCenter`` by the caller; the profile store never holds them.
+        let outcome = received.accept(claim.withoutGrants, signatureKeyB64: signatureKeyB64)
         if outcome == .stored {
             bump()
             if let key = signatureKeyB64, let username = claim.username {
@@ -154,6 +185,12 @@ public final class ProfileDirectory: ObservableObject {
             }
         }
         return outcome
+    }
+
+    /// Every received profile, by signature key (b64): what local people
+    /// search reads (ADR-0060 section 3).
+    func receivedProfiles() -> [String: ProfileClaim] {
+        received.all()
     }
 
     func storedProfile(signatureKeyB64: String) -> ProfileClaim? {
@@ -227,6 +264,70 @@ public final class ProfileDirectory: ObservableObject {
 
     private func bump() {
         revision &+= 1
+    }
+
+    // MARK: - ADR-0060 username certificate verification
+
+    /// The pinned (or, when no key is pinned at build time, fetched) username
+    /// certificate verifying key.
+    private var certKey: Data?
+
+    /// Verify the username a stored profile claims against the certificate it
+    /// carried: the certificate's signature under the discovery key, bound to
+    /// the lookup key of the claimed username (one evaluation) and to the
+    /// account id the profile arrived with. No certificate, or no account id,
+    /// is a refusal: the username is never shown (invariant #4).
+    func verifyCertificate(signatureKeyB64: String, username: String) async throws -> Bool {
+        guard let claim = received.profile(signatureKeyB64: signatureKeyB64),
+              claim.username == username,
+              let cert = claim.usernameCertificate,
+              let accountId = claim.accountId else { return false }
+        guard case .valid(let canonical) = checkUsername(username) else { return false }
+        let key = try await usernameCertKey()
+        // The certificate binds the LOOKUP KEY of the username (ADR-0060
+        // section 5), never the OPRF output.
+        let lookupKey = try await DiscoveryClient().usernameOprf(canonical).lookupKey
+        do {
+            _ = try verifyUsernameBinding(
+                certificate: cert, verifyingKey: key, expectedOprfHash: lookupKey,
+                expectedAccountId: accountId)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Verify one username certificate for an already-computed lookup key
+    /// (`OprfResult.lookupKey`, never the output) and account id (a search
+    /// result). `false` on any failure.
+    func verifyCertificate(certificate: Data, lookupKey: Data, accountId: Data) async -> Bool {
+        guard let key = try? await usernameCertKey() else { return false }
+        return (try? verifyUsernameBinding(
+            certificate: certificate, verifyingKey: key, expectedOprfHash: lookupKey,
+            expectedAccountId: accountId)) != nil
+    }
+
+    private func usernameCertKey() async throws -> Data {
+        if let certKey { return certKey }
+        if let pinned = Self.pinnedUsernameCertKey {
+            certKey = pinned
+            return pinned
+        }
+        guard let fetched = try await DiscoveryClient().fetchUsernameCertKey(), fetched.count == 32
+        else { throw DisplayNameRuleViolation(message: "username certificate key unavailable") }
+        certKey = fetched
+        return fetched
+    }
+
+    /// Info.plist `LakkoUsernameCertKey` — base64url (or base64) of the 32-byte
+    /// Ed25519 key discovery signs username certificates with, pinned at build
+    /// time (the ADR-0015 pattern). Empty -> fetched from
+    /// `/.well-known/lakko-username-cert-key`.
+    nonisolated static var pinnedUsernameCertKey: Data? {
+        guard let raw = Bundle.main.object(forInfoDictionaryKey: "LakkoUsernameCertKey") as? String,
+              !raw.isEmpty else { return nil }
+        let key = base64UrlDecodeNoPad(raw) ?? Data(base64Encoded: raw)
+        return key?.count == 32 ? key : nil
     }
 
     // MARK: - Production username resolution

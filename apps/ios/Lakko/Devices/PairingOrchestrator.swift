@@ -790,6 +790,31 @@ public enum PairingOrchestrator {
             }
         )
 
+        // ADR-0060 section 7 — the device that admits a new one sends it the
+        // current "who can find me" setting and reach-key versions, verbatim
+        // (their original stamps), as DeviceGroup service envelopes under the
+        // post-add epoch the new device joins at. Best effort: without them
+        // the new device keeps the default until the next change arrives.
+        let serviceEnvelopes = await ReachCenter.shared.deviceEnvelopes(accountIdB64: accountIdB64)
+        for envelope in serviceEnvelopes {
+            do {
+                let wire = try ensured.group.createServiceEnvelopeMessage(
+                    identity: ensured.identity, envelope: envelope, hlc: Hlc.mint())
+                _ = try await ds.publishGroup(
+                    groupId: groupId,
+                    payload: DeviceGroupJournalEnvelope.encode(message: wire, attestation: nil),
+                    auth: DeviceGroupDsAccess.auth(
+                        group: ensured.group, identity: ensured.identity,
+                        accountIdB64: accountIdB64, ds: ds))
+            } catch {
+                NSLog("ADR-0060: setting not sent to the new device: %@", error.localizedDescription)
+            }
+        }
+        if !serviceEnvelopes.isEmpty {
+            DeviceGroupLifecycle.persistSnapshot(
+                identity: ensured.identity, accountIdB64: accountIdB64)
+        }
+
         // Phase 2a3d8-ui — best-effort history catch-up bundle.
         // Read the local message log, derive the post-add
         // exporter secret, seal the bundle, publish as the

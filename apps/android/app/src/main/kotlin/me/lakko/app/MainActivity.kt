@@ -207,6 +207,20 @@ class MainActivity : ComponentActivity() {
             appContext = applicationContext,
             chatRepo = chatRepository,
         )
+        // ADR-0060 §4 / §5 — contacts of contacts: an offer or a bundle a
+        // contact sent is kept, and the relay re-runs; a changed setting
+        // re-runs the offer. Re-attached on every activity recreate, like the
+        // call host above.
+        chatRepository.introductionSink = { sender, kind, bytes ->
+            me.lakko.app.reach.IntroductionIntake.keepInBackground(
+                reach = me.lakko.app.reach.ReachManager.get(applicationContext),
+                senderKey = sender,
+                kind = kind,
+                bytes = bytes,
+                then = { chatRepository.runIntroductionsBestEffort() },
+            )
+        }
+        chatRepository.visibilityListener = { chatRepository.runIntroductionsBestEffort() }
         // Phase 2a3e2b-Android — process-scoped cross-device
         // sync runtime. Bootstrapped from `SessionRoot` once
         // identitySecrets land; cleared on logout /
@@ -897,7 +911,19 @@ private fun SessionRoot(
     // route, Manage, New channel, Join as co-publisher): one local channels
     // state (Keystore-backed key persistence) and one REST client.
     val channelsState = rememberChannelsUiState()
+    // ADR-0060 — people search (who-can-find-me.md section 6.1).
+    val peopleSearchContext = LocalContext.current.applicationContext
+    val peopleSearch = remember(contactsRepository) {
+        me.lakko.app.search.PeopleSearchService(peopleSearchContext, contactsRepository)
+    }
     val channelsClient = remember { me.lakko.app.channels.ChannelsClient() }
+    // ADR-0060 §1 — the channels this account is in: the setting decides
+    // their `channel` keys on the account mailbox.
+    LaunchedEffect(channelsState) {
+        channelsState.channels.collect { list ->
+            me.lakko.app.reach.ReachManager.peek()?.setChannels(list.map { it.id }.toSet())
+        }
+    }
     // Bind the channels state to the account once the identity secrets land:
     // load this account's persisted channel list + subscriber seeds, restore
     // the publisher MLS provider snapshot, and re-open the publisher keys of
@@ -972,28 +998,9 @@ private fun SessionRoot(
         }
     }
 
-    // ADR-0050 section 2.7 — this DEVICE's mailbox, where Welcomes sealed to
-    // this device's own KeyPackages arrive (a contact's new chat, the pairing
-    // fan-out, a re-admission). Long-polled while the app is in the foreground,
-    // whatever screen is showing.
-    LaunchedEffect(lifecycleOwner, chatRepository) {
-        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
-            while (true) {
-                val startedAt = android.os.SystemClock.elapsedRealtime()
-                try {
-                    chatRepository.pollDeviceMailbox(waitSecs = APP_LONG_POLL_SECS)
-                } catch (cancel: kotlinx.coroutines.CancellationException) {
-                    throw cancel
-                } catch (_: Throwable) {
-                    kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
-                }
-                val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
-                if (elapsed < APP_POLL_MIN_ITERATION_MS) {
-                    kotlinx.coroutines.delay(APP_POLL_MIN_ITERATION_MS - elapsed)
-                }
-            }
-        }
-    }
+    // ADR-0060 §6 (amending ADR-0050 §2.7) — Welcomes go to the ACCOUNT
+    // mailbox now, read by the loop below; this device's own mailbox stays
+    // claimed and closed with no reach keys, and is no longer polled.
 
     // The ACCOUNT mailbox, for the whole session rather than one screen.
     //
@@ -1285,6 +1292,21 @@ private fun SessionRoot(
                         // conversation's call never takes the screen over, so
                         // the list offers it on that chat's own row instead.
                         callHost = me.lakko.app.calls.AppCallHost.instance,
+                        // docs/ux/who-can-find-me.md section 6.1 — people in
+                        // the search field, local and network.
+                        peopleSearch = peopleSearch,
+                        onOpenContact = { keyB64 ->
+                            val key = runCatching { java.util.Base64.getDecoder().decode(keyB64) }.getOrNull()
+                            val chat = key?.let { k ->
+                                contactsRepository.state.value.accepted
+                                    .firstOrNull { it.request.fromPubkey.contentEquals(k) }?.groupIdHex
+                            }
+                            if (chat != null) {
+                                navController.navigate(Routes.chat(chat))
+                            } else {
+                                navController.navigateToTab(Routes.CONTACTS)
+                            }
+                        },
                     )
                 }
                 // Channels (ADR-0010) — docs/ux/client-redesign.md section 5.4.
@@ -1521,6 +1543,45 @@ private fun SessionRoot(
                         onOpenChatFolders = { navController.navigate(Routes.FOLDERS) },
                         onLogout = logout,
                         onForgetDevice = forgetDevice,
+                        onOpenWhoCanFindMe = { navController.navigate(Routes.WHO_CAN_FIND_ME) },
+                    )
+                }
+
+                composable(Routes.WHO_CAN_FIND_ME) {
+                    // docs/ux/who-can-find-me.md — Settings > Privacy > Who can
+                    // find me. The groups and channels this account is in are
+                    // what "Only the ones I choose" lists.
+                    val chatState by chatRepository.state.collectAsStateWithLifecycle()
+                    val channels by channelsState.channels.collectAsStateWithLifecycle()
+                    val ctx = chatRepository.context
+                    val scopes = remember(chatState.threads, channels) {
+                        val groups = chatState.threads
+                            .filterNot { it.membershipEnded }
+                            .filter {
+                                me.lakko.app.chat.ConversationKindStore.stored(ctx, it.groupIdHex) ==
+                                    me.lakko.app.chat.ConversationKind.Group
+                            }
+                            .map { thread ->
+                                me.lakko.app.ui.settings.FindMeScope(
+                                    kind = me.lakko.app.ui.settings.FindMeScopeKind.GROUP,
+                                    idHex = thread.groupIdHex,
+                                    name = chatRepository.groupName(thread.groupIdHex)?.name
+                                        ?.takeIf { it.isNotBlank() } ?: "Group",
+                                )
+                            }
+                        val chans = channels.map { handle ->
+                            me.lakko.app.ui.settings.FindMeScope(
+                                kind = me.lakko.app.ui.settings.FindMeScopeKind.CHANNEL,
+                                idHex = handle.id,
+                                name = handle.sharedName.ifBlank { handle.localName }.ifBlank { "Channel" },
+                            )
+                        }
+                        groups + chans
+                    }
+                    me.lakko.app.ui.settings.WhoCanFindMeScreen(
+                        reach = me.lakko.app.reach.ReachManager.get(ctx),
+                        scopes = scopes,
+                        onBack = { navController.popBackStack() },
                     )
                 }
 
@@ -1854,6 +1915,7 @@ private object Routes {
     const val CHANNEL_MANAGE = "channel/{channelId}/manage"
     fun channelManage(channelId: String): String = "channel/$channelId/manage"
     const val PROFILE = "settings/profile"
+    const val WHO_CAN_FIND_ME = "settings/privacy/who-can-find-me"
     const val PASSKEYS = "settings/passkeys"
     const val DEVICES = "settings/devices"
     const val DEVICES_ADD = "settings/devices/add"

@@ -16,9 +16,10 @@
 //!   * [`OprfBlinder`] — the OPRF dance handle. Construct with
 //!     `OprfBlinder::blind(username)`, read `blinded_b64` for the
 //!     `/discovery/oprf` request body, then call `finalize` with
-//!     the server's `evaluated` response to obtain the 64-byte
-//!     OPRF hash (consumed by `/discovery/lookup` /
-//!     `/discovery/register` as `oprf_hash`).
+//!     the server's `evaluated` response to obtain an [`OprfResult`]:
+//!     the OPRF output, which stays on the device, and its lookup key,
+//!     which `/discovery/lookup` / `/discovery/register` consume as
+//!     `oprf_hash`.
 //!
 //! ## "Consume on `finalize`" model
 //!
@@ -34,11 +35,52 @@
 use std::sync::Mutex;
 
 use lakko_discovery_client::{
-    login_handle as inner_login_handle, normalize_username as inner_normalize,
-    validate_username as inner_validate, DiscoveryClientError, OprfBlinder as InnerBlinder,
+    discovery_lookup_key as inner_lookup_key, is_name_term as inner_is_name_term,
+    login_handle as inner_login_handle, name_matches_query as inner_name_matches_query,
+    name_query_term as inner_name_query_term, name_search_terms as inner_name_search_terms,
+    normalize_name_for_search as inner_normalize_name_for_search,
+    normalize_username as inner_normalize, validate_username as inner_validate,
+    DiscoveryClientError, OprfBlinder as InnerBlinder, MAX_NAME_TERMS, NAME_INPUT_MAX_BYTES,
+    NAME_SEARCH_MIN_CHARS, NAME_TERM_MAX_CHARS, NAME_TERM_MIN_CHARS, OPRF_HASH_LEN,
 };
 
 use crate::FfiError;
+
+/// What one OPRF round yields ([ADR-0060] section 5).
+///
+/// Two values on purpose, so each call site names the one it uses:
+/// `lookup_key` is the `oprf_hash` of every discovery request (register,
+/// lookup, name register and lookup, channel handles) and what a username
+/// certificate binds; `output` never leaves the device, because a public
+/// record and an introduction record are sealed under keys derived from it.
+///
+/// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct OprfResult {
+    /// The 64-byte OPRF output. Never send it to the server.
+    pub output: Vec<u8>,
+    /// The 64-byte lookup key derived from `output`.
+    pub lookup_key: Vec<u8>,
+}
+
+/// The lookup key of an OPRF output ([ADR-0060] section 5), for a caller
+/// that kept an output from an earlier round.
+///
+/// # Errors
+///
+/// [`FfiError::Discovery`] when `output` is not 64 bytes.
+///
+/// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+#[uniffi::export]
+pub fn discovery_lookup_key(output: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    let output = <[u8; OPRF_HASH_LEN]>::try_from(output.as_slice()).map_err(|_| {
+        FfiError::Discovery(format!(
+            "an OPRF output must be {OPRF_HASH_LEN} bytes, got {}",
+            output.len()
+        ))
+    })?;
+    Ok(inner_lookup_key(&output).to_vec())
+}
 
 impl From<DiscoveryClientError> for FfiError {
     fn from(e: DiscoveryClientError) -> Self {
@@ -102,6 +144,87 @@ pub fn normalize_username(input: String) -> String {
     inner_normalize(&input)
 }
 
+// ============================================================================
+// Name search — ADR-0060 §5 (word prefixes)
+// ============================================================================
+
+/// Normalise a display name or a typed query for search (NFKD, lowercase,
+/// marks dropped, whitespace collapsed, trimmed). `None` when the input is
+/// not searchable: over 1024 bytes, or under 2 characters normalised.
+#[uniffi::export]
+#[must_use]
+pub fn normalize_name_for_search(input: String) -> Option<String> {
+    inner_normalize_name_for_search(&input)
+}
+
+/// The search terms a display name publishes or seals under: every prefix
+/// of 3 to 16 characters of every normalised word (a shorter word whole), at
+/// most 64, in order. Blind each with [`OprfBlinder::blind_name_term`].
+#[uniffi::export]
+#[must_use]
+pub fn name_search_terms(display_name: String) -> Vec<String> {
+    inner_name_search_terms(&display_name)
+}
+
+/// The one term a typed query looks up: its longest normalised word, cut to
+/// 16 characters. `None` when the query is not searchable.
+#[uniffi::export]
+#[must_use]
+pub fn name_query_term(query: String) -> Option<String> {
+    inner_name_query_term(&query)
+}
+
+/// The post-filter a lookup's candidates pass through: every word of the
+/// query is a prefix of some word of the name.
+#[uniffi::export]
+#[must_use]
+pub fn name_matches_query(display_name: String, query: String) -> bool {
+    inner_name_matches_query(&display_name, &query)
+}
+
+/// Whether `term` is a name term: 1 to 16 characters, no whitespace, already
+/// normalised.
+#[uniffi::export]
+#[must_use]
+pub fn is_name_term(term: String) -> bool {
+    inner_is_name_term(&term)
+}
+
+/// Fewest characters a normalised query needs to be searched: 2.
+#[uniffi::export]
+#[must_use]
+pub fn name_search_min_chars() -> u32 {
+    u32::try_from(NAME_SEARCH_MIN_CHARS).unwrap_or(u32::MAX)
+}
+
+/// Longest input the normaliser accepts, in bytes: 1024.
+#[uniffi::export]
+#[must_use]
+pub fn name_input_max_bytes() -> u32 {
+    u32::try_from(NAME_INPUT_MAX_BYTES).unwrap_or(u32::MAX)
+}
+
+/// Shortest prefix a word publishes as a term: 3.
+#[uniffi::export]
+#[must_use]
+pub fn name_term_min_chars() -> u32 {
+    u32::try_from(NAME_TERM_MIN_CHARS).unwrap_or(u32::MAX)
+}
+
+/// Longest term: 16.
+#[uniffi::export]
+#[must_use]
+pub fn name_term_max_chars() -> u32 {
+    u32::try_from(NAME_TERM_MAX_CHARS).unwrap_or(u32::MAX)
+}
+
+/// Most name terms one person publishes: 64.
+#[uniffi::export]
+#[must_use]
+pub fn max_name_terms() -> u32 {
+    u32::try_from(MAX_NAME_TERMS).unwrap_or(u32::MAX)
+}
+
 /// Client-side OPRF blinder handle — Swift / Kotlin exposure of
 /// [`lakko_discovery_client::OprfBlinder`].
 ///
@@ -113,8 +236,9 @@ pub fn normalize_username(input: String) -> String {
 /// val blinder = OprfBlinder.blind("alice")
 /// val request = OprfChallengeRequest(blinded = blinder.blindedB64())
 /// // POST /discovery/oprf → response.evaluated
-/// val hash = blinder.finalize(response.evaluated)  // 64-byte ByteArray
-/// // hash → oprf_hash field on /discovery/lookup
+/// val done = blinder.finalize(response.evaluated)
+/// // done.lookupKey → oprf_hash field on /discovery/lookup
+/// // done.output stays on the device (records are sealed under it)
 /// ```
 #[derive(uniffi::Object)]
 pub struct OprfBlinder {
@@ -173,6 +297,42 @@ impl OprfBlinder {
         })
     }
 
+    /// Blind one name term (ADR-0060 §5) in the name OPRF namespace, apart
+    /// from usernames and channel handles. A publisher blinds each of
+    /// [`name_search_terms`]; the finalised hash is one search term of an
+    /// introduction record or a public name row. `normalized_username`
+    /// returns the term.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Discovery`] when `term` is not a name term
+    /// ([`is_name_term`]), or on an OPRF blind failure.
+    #[uniffi::constructor]
+    pub fn blind_name_term(term: String) -> Result<Self, FfiError> {
+        let (blinder, blinded_b64) = InnerBlinder::blind_name_term(&term)?;
+        Ok(Self {
+            inner: Mutex::new(Some(blinder)),
+            blinded_b64,
+        })
+    }
+
+    /// Blind the one term a typed name query looks up ([`name_query_term`]
+    /// of `query`). Filter what the lookup returns with
+    /// [`name_matches_query`].
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Discovery`] when the query is not searchable, or on an
+    /// OPRF blind failure.
+    #[uniffi::constructor]
+    pub fn blind_name(query: String) -> Result<Self, FfiError> {
+        let (blinder, blinded_b64) = InnerBlinder::blind_name(&query)?;
+        Ok(Self {
+            inner: Mutex::new(Some(blinder)),
+            blinded_b64,
+        })
+    }
+
     /// Base64-encoded blinded element. Goes into the `blinded`
     /// field of the `/discovery/oprf` request body. Cheap to
     /// read; the cached string is cloned per call.
@@ -196,7 +356,8 @@ impl OprfBlinder {
 
     /// Finalise the OPRF dance with the server's evaluation.
     ///
-    /// Returns the 64-byte OPRF hash. Single-use: a second call
+    /// Returns the OPRF output and its lookup key ([`OprfResult`]); only
+    /// the lookup key goes to the server. Single-use: a second call
     /// on the same instance returns
     /// [`FfiError::DiscoveryAlreadyFinalized`] rather than
     /// producing a second hash.
@@ -209,17 +370,73 @@ impl OprfBlinder {
     ///   `EvaluationElement`, or the underlying `voprf`
     ///   finalisation rejected the math (wire corruption in
     ///   the non-verifiable mode we use).
-    pub fn finalize(&self, evaluated_b64: String) -> Result<Vec<u8>, FfiError> {
+    pub fn finalize(&self, evaluated_b64: String) -> Result<OprfResult, FfiError> {
         let mut guard = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let blinder = guard.take().ok_or(FfiError::DiscoveryAlreadyFinalized)?;
-        let hash = blinder.finalize(&evaluated_b64)?;
-        Ok(hash.to_vec())
+        let done = blinder.finalize(&evaluated_b64)?;
+        Ok(OprfResult {
+            output: done.output().to_vec(),
+            lookup_key: done.lookup_key().to_vec(),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn name_search_rules_cross_the_boundary() {
+        assert_eq!(
+            normalize_name_for_search("  Anna  W\u{e9}ber ".to_string()),
+            Some("anna weber".to_string())
+        );
+        assert_eq!(normalize_name_for_search("a".to_string()), None);
+        let terms = name_search_terms("Anna Weber".to_string());
+        assert_eq!(
+            terms,
+            ["ann", "anna", "web", "webe", "weber"].map(String::from)
+        );
+        assert_eq!(
+            name_query_term("anna weber".to_string()),
+            Some("weber".to_string())
+        );
+        assert!(name_matches_query(
+            "Anna Weber".to_string(),
+            "we an".to_string()
+        ));
+        assert!(!name_matches_query(
+            "Anna Weber".to_string(),
+            "ber".to_string()
+        ));
+        assert!(is_name_term("ann".to_string()) && !is_name_term("Ann".to_string()));
+        assert_eq!(
+            (
+                name_search_min_chars(),
+                name_input_max_bytes(),
+                name_term_min_chars(),
+                name_term_max_chars(),
+                max_name_terms()
+            ),
+            (2, 1024, 3, 16, 64)
+        );
+    }
+
+    #[test]
+    fn name_blinders_normalise_and_refuse() {
+        let b = OprfBlinder::blind_name("Anna  W\u{e9}ber".to_string()).unwrap();
+        assert_eq!(b.normalized_username().unwrap(), "weber");
+        let t = OprfBlinder::blind_name_term("ann".to_string()).unwrap();
+        assert_eq!(t.normalized_username().unwrap(), "ann");
+        assert!(matches!(
+            OprfBlinder::blind_name_term("Anna".to_string()),
+            Err(FfiError::Discovery(_))
+        ));
+        assert!(matches!(
+            OprfBlinder::blind_name("a".to_string()),
+            Err(FfiError::Discovery(_))
+        ));
+    }
 
     #[test]
     fn normalize_strips_at_and_trims() {
