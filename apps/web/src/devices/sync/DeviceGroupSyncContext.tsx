@@ -80,6 +80,12 @@ import {
 } from "../device-group-snapshot-store";
 import { applyDeviceJournalBatch, startingCursor } from "./journal-batch";
 import { forkVerdict } from "./fork-verdict";
+import {
+  forkRepairAllowed,
+  isDeviceRemoved,
+  pollStepAfterBatch,
+  readDeviceGroupActive,
+} from "./removed-device";
 import { decodeJournalEntry, encodeJournalEntry } from "../journal-envelope";
 import { fetchDeviceAttestKey } from "../../auth/device-attest-key";
 import { mintHlc, observeHlc } from "./hlc";
@@ -146,6 +152,12 @@ export interface DeviceGroupSyncApi {
   /** Reactive: a folder edit made here has not reached the other devices
    *  yet (UX spec section 6). */
   readonly pendingFolderSync: Accessor<boolean>;
+  /** Reactive: another device removed this one from the account, and this
+   *  device has applied that removal (its DeviceGroup is inactive). The poll
+   *  loop has stopped for good; the app shell shows "This device was
+   *  removed" (docs/ux/second-device.md section 3.1). Reset on sign-out and
+   *  on an account switch. */
+  readonly deviceRemoved: Accessor<boolean>;
 
   /** Convenience helper — return the draft for `groupId` or
    *  `undefined` if none. `groupId` is the raw bytes. */
@@ -215,6 +227,7 @@ export function DeviceGroupSyncProvider(props: {
   const [folders, setFolders] = createSignal<readonly FolderModel[]>([]);
   const [outbox, setOutbox] = createSignal<readonly OutboxBatch[]>([]);
   const [ready, setReady] = createSignal(false);
+  const [deviceRemoved, setDeviceRemoved] = createSignal(false);
   /** Bumped on every change worth writing to disk. */
   const [stateVersion, setStateVersion] = createSignal(0);
 
@@ -414,6 +427,14 @@ export function DeviceGroupSyncProvider(props: {
     identity = ensured.identity;
     group = ensured.group;
 
+    // Removed while the app was closed: the persisted snapshot already
+    // carries the commit that removed this device. Nothing is polled, folded
+    // or persisted for it; the shell shows the removed screen.
+    if (isDeviceRemoved(readDeviceGroupActive(group))) {
+      markRemoved();
+      return;
+    }
+
     // Seed the fold from this device's own disk BEFORE the poll starts - this
     // client resumes the journal from a persisted cursor, so the rows behind
     // it are never read again. The stored state is a head start, not an
@@ -452,9 +473,33 @@ export function DeviceGroupSyncProvider(props: {
   }
 
   function startPollLoop(accountIdB64: string, deviceKey: CryptoKey): void {
-    if (group === null || identity === null) return;
+    if (group === null || identity === null || deviceRemoved()) return;
     pollAbort = new AbortController();
     pollDone = runPollLoop(group, identity, accountIdB64, deviceKey, pollAbort.signal);
+  }
+
+  /**
+   * This device was removed from the account (docs/ux/second-device.md
+   * section 3.1): stop the poll loop for good this session and every timer
+   * that would send or persist, and publish `deviceRemoved`. The handles stay
+   * held until `teardown` frees them on sign-out.
+   */
+  function markRemoved(): void {
+    if (!deviceRemoved()) {
+      // eslint-disable-next-line no-console
+      console.warn("DeviceGroup: this device was removed from the account; sync stopped");
+    }
+    setDeviceRemoved(true);
+    if (pollAbort !== null) {
+      pollAbort.abort();
+      pollAbort = null;
+    }
+    if (snapshotTimer !== null) clearTimeout(snapshotTimer);
+    snapshotTimer = null;
+    if (outboxTimer !== null) clearTimeout(outboxTimer);
+    outboxTimer = null;
+    if (persistTimer !== null) clearTimeout(persistTimer);
+    persistTimer = null;
   }
 
   /**
@@ -466,6 +511,7 @@ export function DeviceGroupSyncProvider(props: {
     const account = activeAccountIdB64;
     const accountBytes = accountIdBytesActive;
     if (account === null || accountBytes === null || group === null) return;
+    if (deviceRemoved()) return;
     reloading = true;
     try {
       pollAbort?.abort();
@@ -486,6 +532,10 @@ export function DeviceGroupSyncProvider(props: {
       group = ensured.group;
       identity = ensured.identity;
       ownPublishedIds.clear();
+      if (isDeviceRemoved(readDeviceGroupActive(group))) {
+        markRemoved();
+        return;
+      }
       startPollLoop(account, deviceKey);
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -536,6 +586,7 @@ export function DeviceGroupSyncProvider(props: {
     accountIdBytesActive = null;
     ownPublishedIds.clear();
     setReady(false);
+    setDeviceRemoved(false);
     setDrafts({});
     setFlags({});
     setReadCursors({});
@@ -561,13 +612,13 @@ export function DeviceGroupSyncProvider(props: {
     stateVersion();
     const pending = outbox();
     const account = activeAccountIdB64;
-    if (account === null || synced === null) return;
+    if (account === null || synced === null || deviceRemoved()) return;
     if (persistTimer !== null) clearTimeout(persistTimer);
     persistTimer = setTimeout(() => {
       persistTimer = null;
       void (async () => {
         try {
-          if (synced === null || activeAccountIdB64 !== account) return;
+          if (synced === null || activeAccountIdB64 !== account || deviceRemoved()) return;
           const bytes = synced.toBytes();
           const deviceKey = await getDeviceKey(account);
           await saveSyncState(account, deviceKey, { synced: bytes, pending });
@@ -614,7 +665,7 @@ export function DeviceGroupSyncProvider(props: {
   /** Every part of the fold, each its own message with a fresh envelope
    *  stamp; the registers inside keep their ORIGINAL stamps. */
   async function sendSnapshot(): Promise<void> {
-    if (synced === null || group === null || identity === null) return;
+    if (synced === null || group === null || identity === null || deviceRemoved()) return;
     const parts = synced.snapshotParts();
     try {
       for (const part of parts) {
@@ -783,6 +834,15 @@ export function DeviceGroupSyncProvider(props: {
       // ADR-0057 obligation 6 — no heal on apply: the device that committed
       // registered the epoch with the account's root before publishing.
 
+      // A row in this batch removed THIS device (docs/ux/second-device.md
+      // section 3.1). The batch that carried the removal was persisted above,
+      // so the next launch finds the inactive snapshot and shows the same
+      // screen; nothing after it is polled or persisted.
+      if (!signal.aborted && pollStepAfterBatch(readDeviceGroupActive(g)) === "stop-removed") {
+        markRemoved();
+        return;
+      }
+
       // A device joined in this batch: the lowest prior leaf re-sends.
       const membersAfter = membersOf(g);
       if (membersBefore !== null && membersAfter !== null) {
@@ -819,7 +879,12 @@ export function DeviceGroupSyncProvider(props: {
           ? ({ kind: "in-sync" } as const)
           : forkVerdict(localEpoch, drained, latestEpoch, suspectSince, Date.now());
       suspectSince = verdict.kind === "suspect" ? verdict.since : undefined;
-      if (verdict.kind === "forked") {
+      // The repair re-founds the account's DeviceGroup; it never runs on a
+      // removed device. An inactive group cannot reach this point anyway (it
+      // stopped above, and its epoch comes from a DS signer an inactive group
+      // cannot derive, so `localEpoch` is null and the verdict in-sync); the
+      // guard keeps it so if either of those changes.
+      if (verdict.kind === "forked" && forkRepairAllowed(readDeviceGroupActive(g))) {
         if (forkRepaired.has(accountIdB64)) {
           if (!forkReported) {
             // eslint-disable-next-line no-console
@@ -883,6 +948,7 @@ export function DeviceGroupSyncProvider(props: {
     const accountBytes = accountIdBytesActive;
     if (activeAccountIdB64 !== account || accountBytes === null || group === null) return;
     if (forkRepaired.has(account)) return;
+    if (deviceRemoved() || !forkRepairAllowed(readDeviceGroupActive(group))) return;
     forkRepaired.add(account);
     reloading = true;
     try {
@@ -925,7 +991,7 @@ export function DeviceGroupSyncProvider(props: {
     deviceKey: CryptoKey,
     headCursor: number,
   ): Promise<void> {
-    if (activeAccountIdB64 !== account || group !== null) return;
+    if (activeAccountIdB64 !== account || group !== null || deviceRemoved()) return;
     let ensured;
     try {
       const seed = await ensureDeviceIdentitySeed(account, deviceKey);
@@ -994,6 +1060,9 @@ export function DeviceGroupSyncProvider(props: {
   async function publishGroupMessage(wireBytes: Uint8Array): Promise<void> {
     if (group === null || identity === null || activeAccountIdB64 === null || reloading) {
       throw new Error("DeviceGroupSyncProvider is not ready");
+    }
+    if (deviceRemoved()) {
+      throw new Error("this device was removed from the account");
     }
     const ds = new DsClient();
     // G-13 (ADR-0015): wrap in the journal envelope (application messages
@@ -1114,7 +1183,7 @@ export function DeviceGroupSyncProvider(props: {
   }
 
   function scheduleOutboxRetry(): void {
-    if (outboxTimer !== null) return;
+    if (outboxTimer !== null || deviceRemoved()) return;
     outboxTimer = setTimeout(() => {
       outboxTimer = null;
       void drainFolderOutbox();
@@ -1122,7 +1191,7 @@ export function DeviceGroupSyncProvider(props: {
   }
 
   async function drainFolderOutbox(): Promise<void> {
-    if (draining || outbox().length === 0) return;
+    if (draining || outbox().length === 0 || deviceRemoved()) return;
     if (group === null || identity === null || reloading) {
       scheduleOutboxRetry();
       return;
@@ -1169,6 +1238,7 @@ export function DeviceGroupSyncProvider(props: {
     order,
     folders,
     pendingFolderSync: () => outbox().length > 0,
+    deviceRemoved,
     getDraft(groupId) {
       return drafts()[groupIdHex(groupId)];
     },

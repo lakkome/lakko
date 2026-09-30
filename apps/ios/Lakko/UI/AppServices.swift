@@ -49,3 +49,25 @@ final class AppServices {
         self.inviteIntake = inviteIntake
     }
 }
+
+extension AppServices {
+    /// Settings' "Forget this device", and the removed-device screen's Sign
+    /// out (docs/ux/second-device.md section 3.1): this device's keys and
+    /// local history for the account go, then the login screen.
+    ///
+    /// ADR-0050 section 2.10 — take this device's KeyPackage out of the
+    /// directory BEFORE the wipe, while the bearer token still exists: the
+    /// account's other devices retire this device's leaves when their
+    /// scheduled check sees the row gone.
+    func forgetThisDevice() {
+        // This device's calls go with the device. The transcript rows in each
+        // conversation are the message log's to wipe, not this index's.
+        CallHistoryStore.shared.clear()
+        Task { @MainActor in
+            if let own = chatRepository.ownDeviceLeafKey {
+                await chatRepository.deleteDirectoryKeyPackage(deviceKey: own)
+            }
+            authRepository.forgetDevice()
+        }
+    }
+}

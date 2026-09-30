@@ -421,6 +421,12 @@ struct AppRoot: View, Equatable {
     /// dropped on confirm.
     @State private var pendingSignupPhrase: String?
 
+    /// Mirror of ``DeviceGroupSyncRepository/deviceRemoved`` (UX spec
+    /// second-device section 3.1). Received rather than observed: observing
+    /// the sync repository would re-run this body on every draft and read
+    /// cursor it publishes (see ``AppServices``).
+    @State private var deviceRemoved = false
+
     init(services: AppServices) {
         self.services = services
         self._authRepository = ObservedObject(wrappedValue: services.authRepository)
@@ -454,6 +460,9 @@ struct AppRoot: View, Equatable {
             // AppRoot appear (view identity is stable across auth-state flips).
             .task {
                 await releaseChecker.checkOnLaunch()
+            }
+            .onReceive(services.deviceGroupSync.$deviceRemoved.removeDuplicates()) { removed in
+                if deviceRemoved != removed { deviceRemoved = removed }
             }
             // ADR-0037 §6 (G-11) — a rolled-back / tampered backup was refused
             // at restore. User-visible alarm; the served (older / altered) state
@@ -573,6 +582,12 @@ struct AppRoot: View, Equatable {
                 onDone: { pendingSignupPhrase = nil }
             )
             .id(account.accountIdB64)
+
+        case .session where deviceRemoved:
+            // docs/ux/second-device.md section 3.1 — another device removed
+            // this one. The removed screen replaces the whole signed-in app:
+            // no tabs, no banners, no call overlay behind it.
+            RemovedDeviceScreen(onSignOut: { services.forgetThisDevice() })
 
         case .session(let account):
             VStack(spacing: 0) {
@@ -1310,20 +1325,9 @@ private struct SessionRoot: View, Equatable {
         }
     }
 
-    /// ADR-0050 section 2.10 — take this device's KeyPackage out of the
-    /// directory BEFORE the wipe, while the bearer token still exists: the
-    /// account's other devices retire this device's leaves when their
-    /// scheduled check sees the row gone.
+    /// Settings' "Forget this device" (``AppServices/forgetThisDevice()``).
     private func forgetDevice() {
-        // This device's calls go with the device. The transcript rows in each
-        // conversation are the message log's to wipe, not this index's.
-        CallHistoryStore.shared.clear()
-        Task { @MainActor in
-            if let own = chatRepository.ownDeviceLeafKey {
-                await chatRepository.deleteDirectoryKeyPackage(deviceKey: own)
-            }
-            authRepository.forgetDevice()
-        }
+        services.forgetThisDevice()
     }
 
     // MARK: - Path plumbing

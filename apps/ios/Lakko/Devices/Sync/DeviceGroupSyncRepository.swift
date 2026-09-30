@@ -73,6 +73,13 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// waiting to reach the other devices (this device is offline).
     @Published public private(set) var pendingSync: Bool = false
 
+    /// Another device removed this one from the account, and this device has
+    /// applied that removal (its DeviceGroup is inactive). The poll loop has
+    /// stopped for good; the app root shows "This device was removed"
+    /// (docs/ux/second-device.md section 3.1). Reset on sign-out and on an
+    /// account switch.
+    @Published public private(set) var deviceRemoved: Bool = false
+
     // MARK: - Internals
 
     private var identity: Identity?
@@ -128,6 +135,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if activeAccountIdB64 != nil {
             cancelPollAndDropHandles()
         }
+        deviceRemoved = false
         activeAccountIdB64 = accountIdB64
         activeAccountId = secrets.accountId
         let seed: Data
@@ -154,6 +162,13 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
         identity = ensured.identity
         group = ensured.group
+
+        // Removed while the app was closed: the persisted snapshot already
+        // carries the commit that removed this device. Nothing is polled,
+        // folded or persisted for it; the app root shows the removed screen.
+        if noteDeviceGroupActivity(RemovedDevice.readActive { try ensured.group.isActive() }) {
+            return
+        }
 
         // Seed the fold from this device's own disk BEFORE the poll starts.
         // The journal cannot refill it: the poll runs from cursor 0, but the
@@ -201,6 +216,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         activeAccountIdB64 = nil
         activeAccountId = nil
         ready = false
+        deviceRemoved = false
         syncedState = SyncedState()
         pending?.clear()
         pending = nil
@@ -227,6 +243,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// AES seal plus a file replace.
     private func scheduleSyncStatePersist() {
         persistTask?.cancel()
+        if deviceRemoved { return }
         persistTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 500_000_000)
             guard !Task.isCancelled else { return }
@@ -237,7 +254,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// Write the fold to disk. Best-effort: the in-memory state stays good
     /// and the next change rewrites the envelope.
     private func persistSyncState() {
-        guard let accountIdB64 = activeAccountIdB64 else { return }
+        guard !deviceRemoved, let accountIdB64 = activeAccountIdB64 else { return }
         SyncedStateStore.save(syncedState, accountIdB64: accountIdB64)
     }
 
@@ -284,7 +301,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
 
     /// Fold a restored backup state in, when it is this account's.
     private func foldRestored(bytes: Data, accountIdB64: String) {
-        guard accountIdB64 == activeAccountIdB64,
+        guard accountIdB64 == activeAccountIdB64, !deviceRemoved,
               let incoming = try? SyncedState.fromBytes(bytes: bytes) else { return }
         if SyncedStateMerge.merge(incoming, into: syncedState) {
             if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
@@ -302,6 +319,40 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         identity = nil
         group = nil
         forkSuspectSince = nil
+    }
+
+    // MARK: - Removed device (docs/ux/second-device.md section 3.1)
+
+    /// Act on a read of `DeviceGroup.isActive()` for the held handle. An
+    /// explicit `false` means another device removed this one: stop the poll
+    /// loop for good this session and every task that would send or persist,
+    /// and publish ``deviceRemoved``. The handles stay held until ``clear()``
+    /// drops them on sign-out. `true` and a failed read (`nil`) change
+    /// nothing. Returns whether the device is now removed.
+    @discardableResult
+    func noteDeviceGroupActivity(_ active: Bool?) -> Bool {
+        guard RemovedDevice.pollStepAfterBatch(active) == .stopRemoved else { return deviceRemoved }
+        if !deviceRemoved {
+            NSLog("DeviceGroupSync: this device was removed from the account; sync stopped")
+        }
+        deviceRemoved = true
+        pollTask?.cancel()
+        pollTask = nil
+        resendTask?.cancel()
+        resendTask = nil
+        persistTask?.cancel()
+        persistTask = nil
+        forkSuspectSince = nil
+        return true
+    }
+
+    /// Whether a poll loop is running for this session.
+    var isPolling: Bool { pollTask != nil }
+
+    /// Test seam: stand in for the poll loop ``bootstrap(secrets:)`` starts,
+    /// so a test can observe that a removal stops it.
+    func adoptPollTaskForTesting(_ task: Task<Void, Never>) {
+        pollTask = task
     }
 
     // MARK: - Lookup helpers
@@ -391,7 +442,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// write: it has already happened here, and it travels with the re-send
     /// after the next poll fetch that succeeds.
     private func write(_ body: DeviceGroupBody) async throws {
-        guard ready, activeAccountIdB64 != nil else {
+        guard ready, !deviceRemoved, activeAccountIdB64 != nil else {
             throw NSError(
                 domain: "DeviceGroupSync",
                 code: 1,
@@ -425,6 +476,13 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     }
 
     private func sendBody(_ body: DeviceGroupBody, hlc: UInt64) async throws {
+        if deviceRemoved {
+            throw NSError(
+                domain: "DeviceGroupSync",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "This device was removed from the account"]
+            )
+        }
         guard let group = group, let identity = identity,
               let accountIdB64 = activeAccountIdB64 else {
             throw NSError(
@@ -584,6 +642,15 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
             }
 
+            // A row in this batch removed THIS device (docs/ux/second-device.md
+            // section 3.1). The batch that carried the removal was persisted
+            // above, so the next launch finds the inactive snapshot and shows
+            // the same screen; nothing after it is polled or persisted.
+            if !Task.isCancelled, let g = group,
+               noteDeviceGroupActivity(RemovedDevice.readActive { try g.isActive() }) {
+                return
+            }
+
             // Live walk 2026-09-30 — a DeviceGroup that forked from the one
             // on the DS (``DeviceGroupFork``) repairs itself, once.
             let drained = result.messages.isEmpty && !result.hasMore
@@ -605,6 +672,16 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     forkSuspectSince = since
                 case .forked:
                     forkSuspectSince = nil
+                    // The repair re-founds the account's DeviceGroup; it never
+                    // runs on a removed device. An inactive group cannot reach
+                    // this point anyway (the loop stopped above, and its epoch
+                    // comes from a DS signer an inactive group cannot derive -
+                    // the exporter refuses - so `localEpoch` is nil and no
+                    // verdict is taken); the guard keeps it so if either of
+                    // those changes.
+                    guard let g = group,
+                          RemovedDevice.forkRepairAllowed(RemovedDevice.readActive({ try g.isActive() }))
+                    else { break }
                     if await repairForkedDeviceGroup(
                         accountIdB64: accountIdB64,
                         groupId: groupId,
@@ -659,6 +736,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         latestEpoch: UInt64,
         cursor: Int64
     ) async -> Bool {
+        guard !deviceRemoved,
+              let held = group,
+              RemovedDevice.forkRepairAllowed(RemovedDevice.readActive({ try held.isActive() }))
+        else { return false }
         guard !forkRepairAttempted.contains(accountIdB64) else {
             NSLog("DeviceGroupSync fork persists (local epoch %llu, DS epoch %llu); already repaired this session",
                   localEpoch, latestEpoch)
@@ -770,6 +851,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// that cannot be sent marks the state pending, so the next successful
     /// poll re-sends it.
     private func sendSnapshot() async {
+        if deviceRemoved { return }
         let parts: [SyncedSnapshotPart]
         do {
             parts = try syncedState.snapshotParts()
@@ -795,7 +877,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// before its own commit.
     public func reloadAfterLocalMembershipChange(secrets: IdentitySecrets) {
         guard let accountIdB64 = activeAccountIdB64,
-              accountIdB64 == base64Encode(secrets.accountId) else { return }
+              accountIdB64 == base64Encode(secrets.accountId),
+              !deviceRemoved else { return }
         let before = (try? group?.devices()) ?? []
         do {
             let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
@@ -805,6 +888,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 deviceIdentitySeed: seed)
             identity = ensured.identity
             group = ensured.group
+            if noteDeviceGroupActivity(RemovedDevice.readActive { try ensured.group.isActive() }) {
+                return
+            }
             noteMembershipChange(before: before, group: ensured.group)
         } catch {
             NSLog("DeviceGroupSync reload failed: %@", error.localizedDescription)

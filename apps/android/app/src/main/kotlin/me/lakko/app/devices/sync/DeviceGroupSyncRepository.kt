@@ -116,6 +116,16 @@ public class DeviceGroupSyncRepository(
     private val mutablePending: MutableStateFlow<Boolean> = MutableStateFlow(false)
     public val pendingSync: StateFlow<Boolean> = mutablePending.asStateFlow()
 
+    /**
+     * docs/ux/second-device.md section 3.1 — another device removed this one
+     * from the account, and this device has applied that removal (its
+     * DeviceGroup is inactive). The poll loop has stopped for good; the
+     * signed-in root shows "This device was removed". Reset on sign-out and
+     * on an account switch.
+     */
+    private val mutableDeviceRemoved: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    public val deviceRemoved: StateFlow<Boolean> = mutableDeviceRemoved.asStateFlow()
+
     /** Bumped on every change to the folded state; the persistence writer
      *  watches it. */
     private val stateVersion: MutableStateFlow<Long> = MutableStateFlow(0L)
@@ -177,6 +187,8 @@ public class DeviceGroupSyncRepository(
         if (existing != null) {
             cancelPollAndDropHandles()
         }
+        // An account switch: the removal belonged to the account left behind.
+        mutableDeviceRemoved.value = false
         activeAccountIdB64.set(accountIdB64)
         activeAccountId.set(secrets.accountId.copyOf())
         openAndPoll(secrets.accountId, accountIdB64, seedState = true, accountIdentitySeed = secrets.accountIdentitySeed)
@@ -221,6 +233,15 @@ public class DeviceGroupSyncRepository(
 
         identity.set(ensured.identity)
         group.set(ensured.group)
+
+        // Removed while the app was closed (or by the batch a reopen follows):
+        // the persisted snapshot already carries the commit that removed this
+        // device. Nothing is polled, folded or persisted for it; the root
+        // shows the removed screen.
+        if (RemovedDevice.isRemoved(RemovedDevice.readActive { ensured.group.isActive() })) {
+            markRemoved()
+            return
+        }
 
         // Seed the folded state from this device's own disk BEFORE the poll
         // starts. It used to begin empty on every launch, and the journal
@@ -314,6 +335,11 @@ public class DeviceGroupSyncRepository(
      */
     private fun repairFork(accountIdBytes: ByteArray, accountIdB64: String, headCursor: Long) {
         if (activeAccountIdB64.get() != accountIdB64) return
+        // Never re-found the DeviceGroup of a removed device, nor of a handle
+        // whose state cannot be read (docs/ux/second-device.md section 3.1).
+        if (mutableDeviceRemoved.value) return
+        val held = group.get() ?: return
+        if (!RemovedDevice.forkRepairAllowed(RemovedDevice.readActive { held.isActive() })) return
         // Nothing may go out on the forked handle while the new one is made.
         group.set(null)
         identity.set(null)
@@ -364,6 +390,26 @@ public class DeviceGroupSyncRepository(
         mutableOrder.value = null
         mutableFolders.value = emptyList()
         mutablePending.value = false
+        mutableDeviceRemoved.value = false
+    }
+
+    /**
+     * This device was removed from the account (docs/ux/second-device.md
+     * section 3.1): stop the poll loop for good this session and the
+     * persistence writer, and publish [deviceRemoved]. The handles stay held
+     * until [clear] drops them on sign-out; every send path refuses from now
+     * on. Safe to call from inside the poll loop itself: the caller returns
+     * right after, and the cancellation lands at its next suspension.
+     */
+    private fun markRemoved() {
+        if (!mutableDeviceRemoved.value) {
+            Log.w(LOG_TAG, "this device was removed from the account; sync stopped")
+        }
+        mutableDeviceRemoved.value = true
+        persistJob?.cancel()
+        persistJob = null
+        pollJob?.cancel()
+        pollJob = null
     }
 
     /**
@@ -619,6 +665,8 @@ public class DeviceGroupSyncRepository(
     }
 
     private suspend fun publishOrMarkPending(body: DeviceGroupBody, hlc: ULong) {
+        // A removed device sends nothing and records nothing as waiting.
+        if (mutableDeviceRemoved.value) return
         try {
             sendBody(body, hlc)
         } catch (cancellation: CancellationException) {
@@ -631,6 +679,7 @@ public class DeviceGroupSyncRepository(
     }
 
     private suspend fun sendBody(body: DeviceGroupBody, hlc: ULong) {
+        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
         val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
         val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
         val accountIdB64 = activeAccountIdB64.get()
@@ -668,6 +717,7 @@ public class DeviceGroupSyncRepository(
     /** Re-send everything this device holds if a write of ours is still
      *  waiting. Called when the network is known to work again. */
     private suspend fun flushPendingIfAny() {
+        if (mutableDeviceRemoved.value) return
         val flag = pendingFlag ?: return
         if (!flag.pending) return
         val generation = flag.generation
@@ -689,6 +739,7 @@ public class DeviceGroupSyncRepository(
      * and drafts it could not decrypt from the journal.
      */
     private fun onGrowth(priorLeaves: List<UInt>) {
+        if (mutableDeviceRemoved.value) return
         val g = group.get() ?: return
         val ownLeaf = runCatching { g.ownLeafIndex() }.getOrNull() ?: return
         val send = runCatching { shouldSendSnapshot(ownLeaf, priorLeaves) }.getOrDefault(false)
@@ -734,6 +785,7 @@ public class DeviceGroupSyncRepository(
     }
 
     private fun reopenAfterLocalChange(): Boolean {
+        if (mutableDeviceRemoved.value) return false
         val accountIdB64 = activeAccountIdB64.get() ?: return false
         val accountId = activeAccountId.get() ?: return false
         pollJob?.cancel()
@@ -810,6 +862,10 @@ public class DeviceGroupSyncRepository(
                     cursor = message.id
                     val g = group.get() ?: return null
                     val id = identity.get() ?: return null
+                    // A commit earlier in this batch removed this device: the
+                    // group is frozen, nothing after it decrypts. Stop reading
+                    // the batch; the check after the persist below stops the loop.
+                    if (RemovedDevice.isRemoved(RemovedDevice.readActive { g.isActive() })) break
                     // Unwrap the journal envelope (MLS message + any attestation).
                     val entry = try {
                         DeviceGroupJournalEnvelope.decode(message.payload)
@@ -868,6 +924,17 @@ public class DeviceGroupSyncRepository(
                     }
                 }
 
+                // A row in this batch removed THIS device (docs/ux/second-device.md
+                // section 3.1). The batch that carried the removal was persisted
+                // above, so the next launch finds the inactive snapshot and shows
+                // the same screen; nothing after it is polled or persisted.
+                val held = group.get() ?: return null
+                val step = RemovedDevice.pollStepAfterBatch(RemovedDevice.readActive { held.isActive() })
+                if (step == PollStep.StopRemoved) {
+                    markRemoved()
+                    return null
+                }
+
                 // A drained journal whose chain is ahead of this device means
                 // its DeviceGroup forked. A handle that derives no signer (a
                 // removed device's inactive group) is never suspected.
@@ -891,7 +958,16 @@ public class DeviceGroupSyncRepository(
                             LOG_TAG,
                             "DeviceGroup forked: local epoch $localEpoch, DS epoch ${result.latestEpoch}",
                         )
-                        if (forkRepairedFor != accountIdB64 && rootSigner != null) {
+                        // The repair re-founds the account's DeviceGroup; it never
+                        // runs on a removed device. An inactive group cannot
+                        // reach this point anyway (it stopped above, and its
+                        // epoch comes from a DS signer an inactive group cannot
+                        // derive, so `localEpoch` is null and the verdict
+                        // in-sync); the guard keeps it so if either changes.
+                        val repairAllowed = RemovedDevice.forkRepairAllowed(
+                            group.get()?.let { h -> RemovedDevice.readActive { h.isActive() } },
+                        )
+                        if (repairAllowed && forkRepairedFor != accountIdB64 && rootSigner != null) {
                             forkRepairedFor = accountIdB64
                             return cursor
                         }

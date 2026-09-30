@@ -2947,6 +2947,15 @@ impl DeviceGroup {
         Ok(g.own_leaf_index())
     }
 
+    /// Whether THIS device is still in its account's DeviceGroup: `false`
+    /// once it has applied a commit that removes its own leaf. The client
+    /// then shows "This device was removed" and stops polling (UX
+    /// `second-device.md` section 3.1).
+    pub fn is_active(&self) -> Result<bool, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.is_active())
+    }
+
     /// Revoke a device leaf (Phase 2a3c). Returns the encoded
     /// Commit bytes that the caller MUST broadcast to every
     /// remaining device via the DS group journal so they

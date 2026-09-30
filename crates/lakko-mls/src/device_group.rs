@@ -556,6 +556,18 @@ impl DeviceGroup {
         self.inner.members()
     }
 
+    /// Whether THIS device is still a member of its account's DeviceGroup.
+    ///
+    /// `false` once a commit that removes this device's own leaf has been
+    /// applied: the group is then frozen at the removing epoch and nothing
+    /// new can be decrypted in it (see [`crate::group::Group::is_active`]).
+    /// A client shows the "This device was removed" state on it rather than
+    /// polling a journal it can no longer read.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.inner.is_active()
+    }
+
     /// Leaf index of THIS device inside the DeviceGroup.
     ///
     /// UI uses this to render the "(this device)" badge next
@@ -1719,8 +1731,13 @@ mod tests {
         // removal. OpenMLS surfaces a "removed self" outcome
         // as a normal Commit — the next state query reports
         // the leaf gone.
+        assert!(group_b.is_active(), "B is active until it applies its removal");
         let incoming = group_b.process_incoming(&id_b, &commit_bytes).unwrap();
         assert!(matches!(incoming, Incoming::Commit));
+        // The removed device knows it was removed; the remover does not
+        // think it was.
+        assert!(!group_b.is_active(), "B is inactive after its own removal");
+        assert!(group_a.is_active(), "the remover stays active");
     }
 
     #[test]

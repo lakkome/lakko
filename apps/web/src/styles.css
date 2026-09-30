@@ -1064,7 +1064,8 @@ a.lk-row.active {
   flex-direction: column;
   gap: 14px;
 }
-.auth-card form button.primary {
+.auth-card form button.primary,
+.auth-card > button.primary {
   min-height: 44px;
   margin-top: 4px;
 }

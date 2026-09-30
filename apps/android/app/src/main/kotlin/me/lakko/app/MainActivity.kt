@@ -660,11 +660,16 @@ private fun AppRoot(
             )
         }
         // ADR-0049 section 2 — "confirm on another device": this signed-in
-        // device answers a sign-in request while it is in the foreground.
-        me.lakko.app.ui.devices.DeviceLinkRequestHost(
-            authRepository = authRepository,
-            chatRepository = chatRepository,
-        )
+        // device answers a sign-in request while it is in the foreground. A
+        // device removed from the account (docs/ux/second-device.md section
+        // 3.1) no longer belongs to it and confirms nothing.
+        val removedFromAccount by deviceGroupSync.deviceRemoved.collectAsStateWithLifecycle()
+        if (!removedFromAccount) {
+            me.lakko.app.ui.devices.DeviceLinkRequestHost(
+                authRepository = authRepository,
+                chatRepository = chatRepository,
+            )
+        }
         // The group call's and the call-link call's in-call screens.
         me.lakko.app.ui.call.GroupCallOverlay(
             host = me.lakko.app.calls.AppCallHost.group,
@@ -1178,6 +1183,17 @@ private fun SessionRoot(
         // docstring for the ordering rationale.
         chatRepository.forgetDevice()
         authRepository.forgetDevice()
+    }
+
+    // docs/ux/second-device.md section 3.1 — another device removed this one.
+    // The removed screen replaces the whole app, tab bar, call bar and notices
+    // included; its one button is "Forget this device" above.
+    val deviceRemoved by deviceGroupSync.deviceRemoved.collectAsStateWithLifecycle()
+    if (deviceRemoved) {
+        InsetRoot {
+            me.lakko.app.ui.devices.RemovedDeviceScreen(onSignOut = forgetDevice)
+        }
+        return
     }
 
     Scaffold(
