@@ -12,6 +12,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -19,8 +20,10 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performTouchInput
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.test.StandardTestDispatcher
 import me.lakko.app.media.ChatMediaHub
 import me.lakko.app.media.InlineKind
 import me.lakko.app.media.MediaAllowlist
@@ -72,11 +75,30 @@ import java.util.concurrent.TimeUnit
  * with the app by construction and would not notice the copy drifting away
  * from the spec.
  */
+@OptIn(ExperimentalTestApi::class, ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class SilentMicrophoneUiTest {
 
+    /**
+     * **The effect dispatcher has to DISPATCH, as the app's main dispatcher does.**
+     * Left to its default the rule runs effect coroutines on an unconfined test
+     * dispatcher, and the controller's tick samples the level with
+     * `withContext(RecorderThread.dispatcher)`: under an unconfined dispatcher
+     * the rest of the tick resumes on the `lakko-recorder` thread, not the main
+     * one. It then writes the silence fold, `micSilent` and `elapsedMs` and
+     * dispatches into the reducer from that thread while this test reads and
+     * writes the same state from the main thread — a race no production run
+     * has, since the app's scope hands every continuation back to main.
+     *
+     * It showed as two unrelated-looking failures, only in the full suite and
+     * never alone: a take whose clock stopped at its first tick, and a warning
+     * that survived [RecordController.onLevelSample] because a tick in flight on
+     * the recorder thread folded its stale silence back in after it. A standard
+     * test dispatcher queues the recorder thread's resumption and runs it on
+     * the thread that advances the clock, so every tick runs on main.
+     */
     @get:Rule
-    val compose = createAndroidComposeRule<ComponentActivity>()
+    val compose = createAndroidComposeRule<ComponentActivity>(StandardTestDispatcher())
 
     private lateinit var scope: CoroutineScope
     private lateinit var hub: ChatMediaHub
@@ -126,11 +148,12 @@ class SilentMicrophoneUiTest {
      *
      * The rule is about elapsed time inside the take, and the take's clock does
      * not start when this helper does: the controller's tick loop is launched a
-     * coroutine later, so the first level sample lands some ticks in, and under
-     * a loaded full-suite run it lands later still. A fixed step count plus a
-     * slack constant therefore measured the HOST, not the rule, and failed about
-     * one full run in two while passing alone every time. Driving to the take's
-     * own reading removes the host from the question.
+     * coroutine later and the recorder starts on its own thread, so the first
+     * level sample lands some ticks in, and how many depends on the host. A
+     * fixed step count plus a slack constant therefore measured the HOST, not
+     * the rule. Driving to the take's own reading removes the host from the
+     * question. (The full-suite-only failures once blamed on that were the
+     * thread race described on [compose].)
      */
     private fun advanceTakeTo(ms: Long) {
         // Bounded so a take that never starts fails as a test rather than hanging.
