@@ -381,6 +381,8 @@ private struct ChannelOwnerView: View {
             )
             _ = try await client.publishPost(channelIdHex: channelId, payload: wire)
             composeText = ""
+            // The author's own post goes into the feed now, not at the next sync.
+            ChannelPostSync.requestSync()
             await refresh()
         } catch {
             NSLog("Channels: publish failed: %@", String(describing: error))

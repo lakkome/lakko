@@ -79,6 +79,7 @@ struct FeedScreen: View {
         .onAppear {
             model.start()
             model.discover.onOpen = { card in onOpenFoundChannel(card.channelIdHex, card.handle) }
+            model.discover.onOpenChannel = { onOpenChannel($0) }
         }
         .onDisappear { model.stop() }
     }

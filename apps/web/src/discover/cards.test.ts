@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  cardRelation,
   cardsFromItems,
   mixSuggestions,
   rankCards,
@@ -168,5 +169,18 @@ describe("suggestions mixed into a feed", () => {
 
   it("runs out of cards quietly", () => {
     expect(mixSuggestions(100, 1, "rarely").filter((s) => s.kind === "card")).toHaveLength(1);
+  });
+});
+
+describe("cardRelation", () => {
+  it("names a channel this device publishes as its own, before following", () => {
+    expect(cardRelation(ID_A, new Set([ID_A]), new Set([ID_A]))).toBe("own");
+  });
+  it("names a channel only in the list as followed", () => {
+    expect(cardRelation(ID_B, new Set([ID_A]), new Set([ID_A, ID_B]))).toBe("following");
+  });
+  it("leaves any other channel to Subscribe, whatever the case of its id", () => {
+    expect(cardRelation(ID_C, new Set([ID_A]), new Set([ID_B]))).toBe("none");
+    expect(cardRelation(ID_A.toUpperCase(), new Set([ID_A]), new Set())).toBe("own");
   });
 });

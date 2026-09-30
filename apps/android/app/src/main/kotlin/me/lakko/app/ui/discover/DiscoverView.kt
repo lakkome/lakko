@@ -47,6 +47,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
+import me.lakko.app.discover.CardRelation
 import me.lakko.app.discover.DirectoryCard
 import me.lakko.app.discover.DiscoverCopy
 import me.lakko.app.discover.DiscoverModel
@@ -54,6 +55,7 @@ import me.lakko.app.discover.SearchState
 import me.lakko.app.discover.languageLabel
 import me.lakko.app.discover.languageOptions
 import me.lakko.app.discover.reasonLine
+import me.lakko.app.discover.relationLine
 import me.lakko.app.ui.components.LakkoAvatar
 
 /**
@@ -69,6 +71,10 @@ public fun DiscoverView(
     /** The ranked suggestions (buckets + group-shared), computed by the caller. */
     cards: List<DirectoryCard>,
     onSubscribe: (channelIdHex: String, handle: String) -> Unit,
+    /** How this device stands to a card's channel (own / followed / neither). */
+    relationOf: (channelIdHex: String) -> CardRelation = { CardRelation.NONE },
+    /** Open a channel this device already holds. */
+    onOpenChannel: (channelIdHex: String) -> Unit = {},
 ) {
     val prefs by model.prefs.collectAsStateWithLifecycle()
     val loaded by model.loaded.collectAsStateWithLifecycle()
@@ -145,7 +151,7 @@ public fun DiscoverView(
                     }
                 } else {
                     for (c in cards) {
-                        item(key = "card:" + c.channelIdHex) { DiscoverCardView(c, model, onSubscribe) }
+                        item(key = "card:" + c.channelIdHex) { DiscoverCardView(c, model, onSubscribe, relationOf(c.channelIdHex), onOpenChannel) }
                     }
                 }
             }
@@ -156,7 +162,7 @@ public fun DiscoverView(
                     item(key = "none") { Text(DiscoverCopy.NO_RESULTS, color = muted, modifier = Modifier.padding(24.dp)) }
                 } else {
                     for (c in s.cards) {
-                        item(key = "result:" + c.channelIdHex) { DiscoverCardView(c, model, onSubscribe) }
+                        item(key = "result:" + c.channelIdHex) { DiscoverCardView(c, model, onSubscribe, relationOf(c.channelIdHex), onOpenChannel) }
                     }
                 }
             }
@@ -170,6 +176,8 @@ public fun DiscoverCardView(
     card: DirectoryCard,
     model: DiscoverModel,
     onSubscribe: (channelIdHex: String, handle: String) -> Unit,
+    relation: CardRelation = CardRelation.NONE,
+    onOpenChannel: (channelIdHex: String) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var busy by remember(card.channelIdHex) { mutableStateOf(false) }
@@ -213,26 +221,37 @@ public fun DiscoverCardView(
             if (facts.isNotEmpty()) {
                 Text(facts.joinToString("  ·  "), style = MaterialTheme.typography.labelSmall, color = muted)
             }
-            Text(reasonLine(card, model::topicName), style = MaterialTheme.typography.labelSmall, color = muted)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    enabled = !busy,
-                    onClick = {
-                        busy = true
-                        scope.launch {
-                            try {
-                                model.subscribe(card, onSubscribe)
-                            } finally {
-                                busy = false
+            Text(
+                relationLine(relation) ?: reasonLine(card, model::topicName),
+                style = MaterialTheme.typography.labelSmall,
+                color = muted,
+            )
+            if (relation != CardRelation.NONE) {
+                // A channel this device already holds (search results can
+                // include one): only Open, no Subscribe / Not interested /
+                // Hide this topic (UX spec section 6.2).
+                Button(onClick = { onOpenChannel(card.channelIdHex) }) { Text("Open") }
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        enabled = !busy,
+                        onClick = {
+                            busy = true
+                            scope.launch {
+                                try {
+                                    model.subscribe(card, onSubscribe)
+                                } finally {
+                                    busy = false
+                                }
                             }
-                        }
-                    },
-                ) { Text("Subscribe") }
-                OutlinedButton(onClick = { model.notInterested(card.channelIdHex) }) { Text("Not interested") }
-            }
-            val topic = card.topic
-            if (topic != null) {
-                TextButton(onClick = { model.hideTopic(topic) }) { Text("Hide this topic") }
+                        },
+                    ) { Text("Subscribe") }
+                    OutlinedButton(onClick = { model.notInterested(card.channelIdHex) }) { Text("Not interested") }
+                }
+                val topic = card.topic
+                if (topic != null) {
+                    TextButton(onClick = { model.hideTopic(topic) }) { Text("Hide this topic") }
+                }
             }
         }
     }

@@ -55,6 +55,7 @@ import {
   type ChannelPostView,
   channelErrorText,
 } from "../channels/api";
+import { requestChannelPostSync } from "../feed/ChannelPostSync";
 import {
   bytesToHex,
   composePost,
@@ -794,6 +795,8 @@ const ChannelView: Component = () => {
       const wire = await composePost(keys, params.id, epoch, counter, utf8Encode(text));
       await publishPost(params.id, wire);
       setComposeText("");
+      // The author's own post goes into the feed now, not at the next sync.
+      requestChannelPostSync();
       await refetch();
     } catch (err) {
       if (apiError.is(err)) {

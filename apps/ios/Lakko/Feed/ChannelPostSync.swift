@@ -26,6 +26,16 @@ final class ChannelPostSync: ObservableObject {
     /// Between foreground syncs (chosen).
     static let intervalSeconds: UInt64 = 60
 
+    /// Posted by ``requestSync()``; a started sync runs on it.
+    static let syncRequested = Notification.Name("lakko.feed.channelPostSyncRequested")
+
+    /// Sync now rather than at the next tick. Called after this device
+    /// publishes a post, so the author sees it in the feed at once instead of
+    /// up to a minute later. A no-op while no sync is started.
+    static func requestSync() {
+        NotificationCenter.default.post(name: syncRequested, object: nil)
+    }
+
     /// The log as last read or written; the feed observes it.
     @Published private(set) var log: ChannelPostLogPayload
 
@@ -51,12 +61,18 @@ final class ChannelPostSync: ObservableObject {
         self.log = store.get(accountIdB64: accountIdB64) ?? ChannelPostLogPayload(channels: [:])
     }
 
-    /// Start the timer and the became-active trigger. Idempotent.
+    /// Start the timer, the became-active trigger and the request trigger.
+    /// Idempotent.
     func start() {
         guard loop == nil else { return }
         let center = NotificationCenter.default
         observers.append(center.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.syncNow() }
+        })
+        observers.append(center.addObserver(
+            forName: Self.syncRequested, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.syncNow() }
         })

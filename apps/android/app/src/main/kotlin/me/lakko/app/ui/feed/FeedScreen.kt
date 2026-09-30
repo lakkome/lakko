@@ -166,6 +166,13 @@ public fun FeedScreen(
     val channelList by channels.channels.collectAsStateWithLifecycle()
     val ownChannelKeys by channels.keysByChannel.collectAsStateWithLifecycle()
     val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
+    // UX spec section 6.2 — a Discover card for a channel this device holds
+    // says so and offers only Open.
+    val relationOf: (String) -> me.lakko.app.discover.CardRelation = remember(ownChannelKeys, channelList) {
+        val publishes = ownChannelKeys.keys
+        val inList = channelList.map { it.id }
+        ({ id -> me.lakko.app.discover.cardRelation(id, publishes, inList) })
+    }
     val postsVersion by FeedSealedStore.channelPostsChanged.collectAsStateWithLifecycle()
     val directory = remember(chatRepository) { ProfileDirectory.get(chatRepository.context) }
     val nameVersion by directory.version.collectAsStateWithLifecycle()
@@ -599,7 +606,13 @@ public fun FeedScreen(
             }
 
             if (selection == DISCOVER) {
-                DiscoverView(model = discover, cards = discoverCards, onSubscribe = onSubscribeChannel)
+                DiscoverView(
+                    model = discover,
+                    cards = discoverCards,
+                    onSubscribe = onSubscribeChannel,
+                    relationOf = relationOf,
+                    onOpenChannel = onOpenChannel,
+                )
             } else {
             if (!bannerDismissed && input.candidates.isNotEmpty()) {
                 Surface(
@@ -698,7 +711,13 @@ public fun FeedScreen(
                         cardAfter[index]?.let { discoverCards.getOrNull(it) }?.let { card ->
                             item(key = "$key/suggestion:${card.channelIdHex}") {
                                 Box(Modifier.padding(horizontal = 12.dp)) {
-                                    DiscoverCardView(card = card, model = discover, onSubscribe = onSubscribeChannel)
+                                    DiscoverCardView(
+                                        card = card,
+                                        model = discover,
+                                        onSubscribe = onSubscribeChannel,
+                                        relation = relationOf(card.channelIdHex),
+                                        onOpenChannel = onOpenChannel,
+                                    )
                                 }
                             }
                         }

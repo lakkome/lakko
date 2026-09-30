@@ -326,4 +326,32 @@ final class DiscoverTests: XCTestCase {
         XCTAssertEqual(kept?.listed, true)
         XCTAssertEqual(kept?.language, "fr")
     }
+
+    // MARK: - Relation of a card to this device (UX spec section 6.2)
+
+    func testACardThisDevicePublishesIsItsOwnEvenWhenAlsoInTheList() {
+        XCTAssertEqual(
+            DiscoverCards.relation(channelIdHex: hex(1), publishes: [hex(1)], inList: [hex(1)]), .own)
+        XCTAssertEqual(DiscoverCards.relationLine(.own), "Your channel")
+    }
+
+    func testACardOnlyInTheListIsFollowed() {
+        XCTAssertEqual(
+            DiscoverCards.relation(channelIdHex: hex(2), publishes: [hex(1)], inList: [hex(1), hex(2)]),
+            .following)
+        XCTAssertEqual(DiscoverCards.relationLine(.following), "You follow this channel")
+    }
+
+    func testAnyOtherCardIsLeftToSubscribe() {
+        XCTAssertEqual(
+            DiscoverCards.relation(channelIdHex: hex(3), publishes: [hex(1)], inList: [hex(2)]), .none)
+        XCTAssertNil(DiscoverCards.relationLine(.none))
+    }
+
+    func testTheCaseOfTheHexIdDoesNotMatter() {
+        let upper = String(repeating: "AB", count: 16)
+        let lower = upper.lowercased()
+        XCTAssertEqual(DiscoverCards.relation(channelIdHex: upper, publishes: [lower], inList: []), .own)
+        XCTAssertEqual(DiscoverCards.relation(channelIdHex: lower, publishes: [], inList: [upper]), .following)
+    }
 }

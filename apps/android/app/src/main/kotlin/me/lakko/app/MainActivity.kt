@@ -1152,7 +1152,8 @@ private fun SessionRoot(
     // ADR-0058 section 4 — channels join the foreground poll: while the app is
     // started, the posts of every readable channel are filed into the
     // channel-post log the feed ranks. At once on start (and on every return
-    // to the foreground), then every minute.
+    // to the foreground), then every minute, and at once after this device
+    // publishes a post.
     val channelPostSync = remember(channelsState, channelsClient) {
         me.lakko.app.feed.ChannelPostSync(backupContext, channelsState, channelsClient)
     }
@@ -1162,7 +1163,8 @@ private fun SessionRoot(
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {
                 channelPostSync.syncOnce()
-                kotlinx.coroutines.delay(me.lakko.app.feed.CHANNEL_POST_SYNC_INTERVAL_MS)
+                // The interval, or sooner when this device just published.
+                me.lakko.app.feed.awaitChannelPostSyncTick()
             }
         }
     }

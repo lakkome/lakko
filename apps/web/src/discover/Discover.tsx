@@ -32,6 +32,8 @@ import {
   cardsFromItems,
   rankCards,
   reasonLine,
+  cardRelation,
+  type CardRelation,
   verifyDecision,
   type CardContext,
   type DecodedListing,
@@ -141,6 +143,10 @@ export interface DiscoverModel {
   openCard(card: DirectoryCard): Promise<void>;
   /** Verify the handle, then go to the subscribe screen. */
   subscribe(card: DirectoryCard): Promise<void>;
+  /** Whether the card's channel is this device's own, followed, or neither. */
+  relation(channelIdHex: string): CardRelation;
+  /** Open a channel this device already holds. */
+  openChannel(channelIdHex: string): void;
 }
 
 export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
@@ -396,6 +402,13 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
     clearSearch: () => setSearch({ kind: "idle" }),
     openCard,
     subscribe,
+    relation: (id) =>
+      cardRelation(
+        id,
+        new Set(channelsState.keysByChannel().keys()),
+        new Set(channelsState.channels().map((c) => c.id)),
+      ),
+    openChannel: (id) => navigate(paths.channel(id)),
   };
 }
 
@@ -413,6 +426,7 @@ export function searchErrorText(err: unknown): string {
 export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly model: DiscoverModel }): JSX.Element {
   const [busy, setBusy] = createSignal(false);
   const c = (): DirectoryCard => props.card;
+  const relation = (): CardRelation => props.model.relation(c().channelIdHex);
   return (
     <article class="lk-feed-item lk-discover-card" aria-label={`Suggested channel ${c().name}`}>
       <div class="lk-discover-card-body">
@@ -451,8 +465,24 @@ export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly
             <span>{c().band} subscribers</span>
           </Show>
         </div>
-        <div class="lk-feed-why">{reasonLine(c(), (id) => props.model.topicName(id))}</div>
+        <div class="lk-feed-why">
+          {relation() === "own"
+            ? "Your channel"
+            : relation() === "following"
+              ? "You follow this channel"
+              : reasonLine(c(), (id) => props.model.topicName(id))}
+        </div>
       </div>
+      <Show
+        when={relation() === "none"}
+        fallback={
+          <div class="lk-discover-actions">
+            <button type="button" class="primary" onClick={() => props.model.openChannel(c().channelIdHex)}>
+              Open
+            </button>
+          </div>
+        }
+      >
       <div class="lk-discover-actions">
         <button
           type="button"
@@ -474,6 +504,7 @@ export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly
           </button>
         </Show>
       </div>
+      </Show>
     </article>
   );
 }

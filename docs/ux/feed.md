@@ -205,6 +205,13 @@ time: "Searches are sent to Lakko's server." Results are channel cards.
 Search is Discover's own: the global search of `navigation.md` section 4
 (exact names only) is unchanged.
 
+Search results can include channels this device already holds, which the
+suggestions leave out. Such a card says so instead of offering to
+subscribe: the reason line reads "Your channel" (a channel this device can
+post to, as owner or co-publisher) or "You follow this channel", and its
+only action is **Open**, which opens the channel; no Subscribe, no Not
+interested, no Hide this topic.
+
 ### 6.3 Channels people in your groups follow
 
 Group info gains a switch, **Share my channels with this group**, off by

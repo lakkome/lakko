@@ -172,6 +172,31 @@ public fun rankCards(cards: List<DirectoryCard>, ctx: CardContext): List<Directo
         .map { it.first }
 }
 
+/** How this device stands to a card's channel (UX spec section 6.2). */
+public enum class CardRelation { OWN, FOLLOWING, NONE }
+
+/**
+ * A channel this device can post to is its own (owner or co-publisher); one it
+ * only holds in its list is followed. Hex case does not matter on either side.
+ */
+public fun cardRelation(
+    channelIdHex: String,
+    publishes: Collection<String>,
+    inList: Collection<String>,
+): CardRelation {
+    val id = channelIdHex.lowercase()
+    if (publishes.any { it.lowercase() == id }) return CardRelation.OWN
+    if (inList.any { it.lowercase() == id }) return CardRelation.FOLLOWING
+    return CardRelation.NONE
+}
+
+/** The reason line for a held channel, or null to use [reasonLine]. */
+public fun relationLine(relation: CardRelation): String? = when (relation) {
+    CardRelation.OWN -> "Your channel"
+    CardRelation.FOLLOWING -> "You follow this channel"
+    CardRelation.NONE -> null
+}
+
 /** The reason line under a card (UX spec section 6). Names only contacts. */
 public fun reasonLine(card: DirectoryCard, topicName: (Int) -> String): String {
     val f = card.followers

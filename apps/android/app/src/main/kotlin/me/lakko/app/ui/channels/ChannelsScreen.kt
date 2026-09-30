@@ -710,6 +710,9 @@ private fun OwnerChannelView(
                         )
                         client.publishPost(channelId, wire)
                         composeText = ""
+                        // The author's own post goes into the feed now, not
+                        // at the next sync (ADR-0058).
+                        me.lakko.app.feed.requestChannelPostSync()
                         refresh()
                     } catch (e: Throwable) {
                         Log.w(TAG, "publish failed", e)

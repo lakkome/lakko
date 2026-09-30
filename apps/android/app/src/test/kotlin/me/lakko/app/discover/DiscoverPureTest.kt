@@ -226,4 +226,30 @@ class DiscoverPureTest {
         assertEquals(101uL, nextListingStamp(100, 100uL))
         assertNotEquals(0uL, nextListingStamp(-5, 0uL))
     }
+
+    // --- held channels in search results (UX spec section 6.2) -------------
+
+    private val idA = "aa".repeat(16)
+    private val idB = "bb".repeat(16)
+    private val idC = "cc".repeat(16)
+
+    @Test
+    fun `a channel this device publishes is its own, before following`() {
+        assertEquals(CardRelation.OWN, cardRelation(idA, setOf(idA), setOf(idA)))
+        assertEquals("Your channel", relationLine(CardRelation.OWN))
+    }
+
+    @Test
+    fun `a channel only in the list is followed`() {
+        assertEquals(CardRelation.FOLLOWING, cardRelation(idB, setOf(idA), setOf(idA, idB)))
+        assertEquals("You follow this channel", relationLine(CardRelation.FOLLOWING))
+    }
+
+    @Test
+    fun `any other channel is left to Subscribe, whatever the case of its id`() {
+        assertEquals(CardRelation.NONE, cardRelation(idC, setOf(idA), setOf(idB)))
+        assertNull(relationLine(CardRelation.NONE))
+        assertEquals(CardRelation.OWN, cardRelation(idA.uppercase(), setOf(idA), emptySet()))
+        assertEquals(CardRelation.FOLLOWING, cardRelation(idB, emptySet(), setOf(idB.uppercase())))
+    }
 }

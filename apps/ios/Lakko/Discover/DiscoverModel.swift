@@ -53,6 +53,8 @@ final class DiscoverModel: ObservableObject {
         var ownKeyB64: @MainActor () -> String?
         /// Channels this device already follows or publishes.
         var following: @MainActor () -> Set<String>
+        /// Channels this device can post to (holds publisher keys).
+        var publishing: @MainActor () -> Set<String>
         /// Resolve a handle through the OPRF channel lookup.
         var resolveHandle: (_ handle: String) async throws -> String?
     }
@@ -67,6 +69,8 @@ final class DiscoverModel: ObservableObject {
     /// Opens the subscribe screen for a verified card. Set by the Feed
     /// screen, which owns the navigation.
     var onOpen: ((DirectoryCard) -> Void)?
+    /// Opens a channel this device already holds. Set by the Feed screen.
+    var onOpenChannel: ((String) -> Void)?
 
     let topics: [FfiChannelTopic]
 
@@ -108,6 +112,12 @@ final class DiscoverModel: ObservableObject {
     }
 
     var language: String { prefs.language ?? DiscoverLanguages.appLanguage() }
+
+    /// Whether a card's channel is this device's own, followed, or neither.
+    func relation(_ channelIdHex: String) -> CardRelation {
+        DiscoverCards.relation(
+            channelIdHex: channelIdHex, publishes: deps.publishing(), inList: deps.following())
+    }
 
     func topicName(_ id: Int) -> String {
         guard (0...255).contains(id) else { return "Other" }

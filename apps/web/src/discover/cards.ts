@@ -175,6 +175,22 @@ export function rankCards(cards: readonly DirectoryCard[], ctx: CardContext): Di
     .map((x) => x.c);
 }
 
+/** How this device stands to a card's channel (UX spec section 6.2). */
+export type CardRelation = "own" | "following" | "none";
+
+/** A channel this device can post to is its own (owner or co-publisher);
+ *  one it only holds in its list is followed. */
+export function cardRelation(
+  channelIdHex: string,
+  publishes: ReadonlySet<string>,
+  inList: ReadonlySet<string>,
+): CardRelation {
+  const id = channelIdHex.toLowerCase();
+  if (publishes.has(id)) return "own";
+  if (inList.has(id)) return "following";
+  return "none";
+}
+
 /** The reason line under a card (UX spec section 6). Names only contacts. */
 export function reasonLine(card: DirectoryCard, topicName: (id: number) => string): string {
   const f = card.followers;

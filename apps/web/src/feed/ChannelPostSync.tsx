@@ -50,6 +50,18 @@ import {
 /** Between foreground syncs (chosen). */
 const SYNC_INTERVAL_MS = 60_000;
 
+/** Callbacks of the mounted sync, for {@link requestChannelPostSync}. */
+const syncRequests = new Set<() => void>();
+
+/**
+ * Sync now rather than at the next tick. Called after this device publishes
+ * a post, so the author sees it in the feed at once instead of up to a
+ * minute later. A no-op while no sync is mounted.
+ */
+export function requestChannelPostSync(): void {
+  for (const f of syncRequests) f();
+}
+
 interface ReadableChannel {
   readonly idHex: string;
   readonly seedForEpoch: (epoch: number) => Uint8Array | undefined;
@@ -176,7 +188,9 @@ export const ChannelPostSync: Component = () => {
       if (document.visibilityState === "visible") run();
     };
     document.addEventListener("visibilitychange", onVisible);
+    syncRequests.add(run);
     onCleanup(() => {
+      syncRequests.delete(run);
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     });

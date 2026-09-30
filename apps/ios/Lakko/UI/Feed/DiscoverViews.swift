@@ -175,37 +175,54 @@ struct DiscoverCardView: View {
                     .font(.subheadline)
             }
             facts
-            Text(DiscoverCards.reasonLine(card, topicName: model.topicName))
+            // A channel this device already holds says so and only opens
+            // (UX spec section 6.2): no Subscribe, no Not interested.
+            let relation = model.relation(card.channelIdHex)
+            Text(DiscoverCards.relationLine(relation)
+                ?? DiscoverCards.reasonLine(card, topicName: model.topicName))
                 .font(.caption)
                 .foregroundStyle(Color.lakkoAccent)
-            HStack(spacing: 12) {
+            if relation != .none {
                 Button {
-                    busy = true
-                    Task {
-                        await model.subscribe(card)
-                        busy = false
-                    }
+                    model.onOpenChannel?(card.channelIdHex)
                 } label: {
-                    Text("Subscribe")
+                    Text("Open")
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Color.lakkoAccent)
-                .disabled(busy)
-                Button("Not interested") { model.notInterested(card.channelIdHex) }
-                if let topic = card.topic {
-                    Button("Hide this topic") { model.hideTopic(topic) }
+                .font(.subheadline)
+            } else {
+                HStack(spacing: 12) {
+                    Button {
+                        busy = true
+                        Task {
+                            await model.subscribe(card)
+                            busy = false
+                        }
+                    } label: {
+                        Text("Subscribe")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.lakkoAccent)
+                    .disabled(busy)
+                    Button("Not interested") { model.notInterested(card.channelIdHex) }
+                    if let topic = card.topic {
+                        Button("Hide this topic") { model.hideTopic(topic) }
+                    }
                 }
+                .font(.subheadline)
             }
-            .font(.subheadline)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: LakkoRadius.card).fill(Color.lakkoSurface))
         .overlay(RoundedRectangle(cornerRadius: LakkoRadius.card).strokeBorder(Color.lakkoBorder))
         .contextMenu {
-            Button("Not interested") { model.notInterested(card.channelIdHex) }
-            if let topic = card.topic {
-                Button("Hide this topic") { model.hideTopic(topic) }
+            if model.relation(card.channelIdHex) == .none {
+                Button("Not interested") { model.notInterested(card.channelIdHex) }
+                if let topic = card.topic {
+                    Button("Hide this topic") { model.hideTopic(topic) }
+                }
             }
         }
         .accessibilityElement(children: .contain)

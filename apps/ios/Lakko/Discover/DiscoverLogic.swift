@@ -291,6 +291,13 @@ enum MixedSlot: Equatable {
     case card(Int)
 }
 
+/// How this device stands to a card's channel (UX spec section 6.2).
+enum CardRelation: Equatable {
+    case own
+    case following
+    case none
+}
+
 enum DiscoverCards {
     /// The published subscriber bands, smallest first (ADR-0059 section 4).
     static let subscriberBands = ["<10", "10+", "100+", "1k+", "10k+", "100k+"]
@@ -372,6 +379,25 @@ enum DiscoverCards {
                 return a.0.channelIdHex < b.0.channelIdHex
             }
             .map { $0.0 }
+    }
+
+    /// How this device stands to a card's channel (UX spec section 6.2). A
+    /// channel this device can post to (owner or co-publisher) is its own;
+    /// one it only holds in its list is followed. Ids compare lowercased.
+    static func relation(channelIdHex: String, publishes: Set<String>, inList: Set<String>) -> CardRelation {
+        let id = channelIdHex.lowercased()
+        if publishes.contains(where: { $0.lowercased() == id }) { return .own }
+        if inList.contains(where: { $0.lowercased() == id }) { return .following }
+        return .none
+    }
+
+    /// The reason line for a card the device already holds, `nil` otherwise.
+    static func relationLine(_ relation: CardRelation) -> String? {
+        switch relation {
+        case .own: return "Your channel"
+        case .following: return "You follow this channel"
+        case .none: return nil
+        }
     }
 
     /// The reason line under a card (UX spec section 6). Names only contacts.

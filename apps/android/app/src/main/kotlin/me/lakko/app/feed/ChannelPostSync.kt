@@ -7,6 +7,8 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -33,6 +35,24 @@ import me.lakko.app.channels.classifyChannelPlaintext
  * without a seed is past the retained window and is passed over.
  */
 public const val CHANNEL_POST_SYNC_INTERVAL_MS: Long = 60_000L
+
+/** Pending "sync now" requests; conflated, so a burst is one extra sync. */
+private val syncRequests = Channel<Unit>(Channel.CONFLATED)
+
+/**
+ * Sync now rather than at the next tick. Called after this device publishes
+ * a post, so the author sees it in the feed at once instead of up to a minute
+ * later. Picked up by [awaitChannelPostSyncTick]; while no sync loop runs the
+ * request waits for the next one, which syncs at once on start anyway.
+ */
+public fun requestChannelPostSync() {
+    syncRequests.trySend(Unit)
+}
+
+/** Wait until the next sync is due: the interval passes or a sync is requested. */
+public suspend fun awaitChannelPostSyncTick() {
+    withTimeoutOrNull(CHANNEL_POST_SYNC_INTERVAL_MS) { syncRequests.receive() }
+}
 
 public class ChannelPostSync(
     private val context: Context,
