@@ -228,19 +228,41 @@ internal fun DeleteFolderDialog(folder: ChatFolder, onDismiss: () -> Unit, onCon
 
 /**
  * The selected tab: a per-device fact, never synced (UX spec 2.5). A phone
- * left on "Family" does not flip the laptop to "Family".
+ * left on "Family" does not flip the laptop to "Family". The folders it
+ * names belong to the signed-in account, so the choice is kept per account
+ * (`selected-folder.v2:<accountIdB64>`): a second account on the same phone
+ * does not open on the first account's folder. With no account bound (see
+ * [me.lakko.app.contacts.AcceptedContactsStore]) nothing is read or written.
+ * The device-wide `selected-folder` key of earlier builds is never read.
  */
 internal object FolderTabPrefs {
     private const val PREFS = "lakko-chat-folders"
-    private const val KEY = "selected-folder"
+    private const val KEY_PREFIX = "selected-folder.v2:"
+    private const val RETIRED_KEY = "selected-folder"
 
-    fun load(context: Context): String? =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
+    private fun key(accountIdB64: String): String =
+        KEY_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+
+    private fun bound(): String? = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64
+
+    fun load(context: Context): String? {
+        val account = bound() ?: return null
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(key(account), null)
             ?.takeIf { it.isNotEmpty() }
+    }
 
     fun save(context: Context, folderIdHex: String?) {
+        val account = bound() ?: return
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY, folderIdHex ?: "")
+            .putString(key(account), folderIdHex ?: "")
+            .apply()
+    }
+
+    /** Forget device: drop [accountIdB64]'s choice and the retired key. */
+    fun deleteAccount(context: Context, accountIdB64: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .remove(key(accountIdB64))
+            .remove(RETIRED_KEY)
             .apply()
     }
 }

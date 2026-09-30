@@ -555,9 +555,41 @@ export async function deleteRoute(pushGidHex: string): Promise<void> {
 }
 
 /**
+ * Forget device: wipe `accountId`'s push-routing secrets and the reverse-index
+ * entries that name it, in one transaction. Another account's rows on this
+ * browser are left alone (2026-09-30 — Forget device used to call
+ * {@link clearAllGroupRouting}, which stopped every other account's wakes
+ * until each re-provisioned). Whole-row deletes of an account that is being
+ * wiped, so, like `clearAllGroupRouting`, it does not take the per-row lock.
+ */
+export async function clearGroupRoutingForAccount(accountId: string): Promise<void> {
+  const db = await openPushRoutingDb();
+  try {
+    const tx = db.transaction([SECRETS_STORE, ROUTES_STORE], "readwrite");
+    const secrets = tx.objectStore(SECRETS_STORE);
+    const secretRows = secrets.getAll();
+    secretRows.onsuccess = (): void => {
+      for (const row of (secretRows.result ?? []) as SecretRow[]) {
+        if (row.accountId === accountId) secrets.delete(row.key);
+      }
+    };
+    const routes = tx.objectStore(ROUTES_STORE);
+    const routeRows = routes.getAll();
+    routeRows.onsuccess = (): void => {
+      for (const row of (routeRows.result ?? []) as RouteRow[]) {
+        if (row.accountId === accountId) routes.delete(row.pushGidHex);
+      }
+    };
+    await awaitTx(tx);
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * Wipe every push-routing secret + reverse-index entry, regardless of
- * account. Called from `AuthProvider.logout` / `forgetDevice` so a device
- * wipe leaves no push-routing residue (mirrors `clearAllMlsSnapshots`).
+ * account. Not called by `AuthProvider.forgetDevice`, which clears only the
+ * forgotten account's rows ({@link clearGroupRoutingForAccount}).
  */
 export async function clearAllGroupRouting(): Promise<void> {
   const db = await openPushRoutingDb();

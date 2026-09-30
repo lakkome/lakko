@@ -230,18 +230,24 @@ final class VoipPushRegistrar: NSObject {
     /// Every failure to resolve the conversation answers "not muted", so the
     /// call rings: an unknown wake must ring rather than be swallowed.
     /// `defaults` is the App Group suite the mute mirror lives in, a parameter
-    /// only so a test can supply its own.
+    /// only so a test can supply its own. The mirror is per account: the push
+    /// route names the account; a wake that misses the route (a raw group id)
+    /// is read for `signedInAccountIdB64`, the account signed in here.
     static func wakeIsMuted(
         _ wake: VoipWakePayload,
         routes: PushRoutingStore = PushRoutingStore(),
+        signedInAccountIdB64: String? = AcceptedContactsStore.boundAccountIdB64,
         defaults: UserDefaults? = SharedStorage.sharedDefaults()
     ) -> Bool {
         guard let wakeHex = wake.groupHex else { return false }
         // ADR-0042 — `g` is an opaque `push_gid`; the reverse index turns it
         // back into the real group. A miss falls back to reading it as a raw
         // group id, which is what the pre-Sprint-3 wake carried.
-        let groupIdHex = routes.lookupRoute(pushGidHex: wakeHex)?.groupIdHex ?? wakeHex
-        let muted = ConversationMuteMirror.isMuted(groupIdHex: groupIdHex, defaults: defaults)
+        let route = routes.lookupRoute(pushGidHex: wakeHex)
+        let groupIdHex = route?.groupIdHex ?? wakeHex
+        let muted = ConversationMuteMirror.isMuted(
+            accountIdB64: route?.accountIdB64 ?? signedInAccountIdB64,
+            groupIdHex: groupIdHex, defaults: defaults)
         return LakkoCore.ringDecision(muted: muted, offerAgeMs: 0) == .silent
     }
 

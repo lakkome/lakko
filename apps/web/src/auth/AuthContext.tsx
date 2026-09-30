@@ -123,7 +123,12 @@ import {
 } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
 import { deleteMlsSnapshot, saveMlsSnapshot } from "../chat/mls-store";
-import { clearAllGroupRouting } from "../push/group-routing-store";
+import { clearGroupRoutingForAccount } from "../push/group-routing-store";
+import { clearKnockCursorsForAccount } from "../chat/knock-cursor";
+import { clearInboxForAccount } from "../contacts/inbox-store";
+import { clearKnownGroupIds } from "../devices/state-bundle";
+import { clearRotationStatesForAccount } from "../channels/rotation-state-store";
+import { clearUnconfirmedFoundingsForAccount } from "../channels/composer";
 import { deleteOutboxForAccount } from "../chat/commit-outbox";
 // ADR-0045 — the pending-request observation store follows the outbox's
 // hygiene: a prior session's request ages must never be read by a later one.
@@ -3440,15 +3445,28 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // `lastUploadAtMs` that throttles the first backup of a new session
         // and a group key describing groups it no longer has.
         clearAutoBackupState(cached.accountIdB64);
-        // ADR-0042: wipe the push-routing secrets + the push_gid reverse
-        // index. The secret is wrapped under the device-root key just
-        // wiped, but a stale reverse-index row (plaintext push_gid →
-        // group_id) would leave push-routing residue behind — full reset.
+        // ADR-0042: wipe this account's push-routing secrets + the push_gid
+        // reverse-index rows that name it. The secret is wrapped under the
+        // device-root key just wiped, but a stale reverse-index row
+        // (plaintext push_gid → group_id) would leave push-routing residue
+        // behind. Another account's rows on this browser are its own.
         try {
-          await clearAllGroupRouting();
+          await clearGroupRoutingForAccount(cached.accountIdB64);
         } catch {
           // best-effort
         }
+        // Per-account localStorage rows keyed by the account since
+        // 2026-09-30 (they were device-wide): the admin's knock-queue
+        // cursors, the pairing bundle's known group ids, the channel
+        // rotation schedules and the unconfirmed-founding markers. Each
+        // clear also drops that store's retired device-wide rows.
+        clearKnockCursorsForAccount(cached.accountIdB64);
+        clearKnownGroupIds(cached.accountIdB64);
+        clearRotationStatesForAccount(cached.accountIdB64);
+        clearUnconfirmedFoundingsForAccount(cached.accountIdB64);
+        // The stranger-inbox cursor + pending list: kept by Log out (a
+        // re-login must not re-poll requests already declined), dropped here.
+        clearInboxForAccount(cached.accountIdB64);
         // Phase 2a2c2: drop the cached export key. Same posture
         // as the snapshot / session-token rows above — leaving
         // ciphertext behind is safe (the wrap key is gone) but a

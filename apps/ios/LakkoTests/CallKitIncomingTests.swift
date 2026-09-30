@@ -280,33 +280,56 @@ final class CallKitIncomingTests: XCTestCase {
 
     func testTheMirrorReadsBackWhatTheAppWrote() {
         let defaults = transientDefaults()
-        CallPeerNameMirror.mirror(groupIdHex: "AA11", name: "Anna", defaults: defaults)
+        CallPeerNameMirror.mirror(accountIdB64: "acct", groupIdHex: "AA11", name: "Anna", defaults: defaults)
         // Keyed case-insensitively, because the group hex reaches the two
         // processes from different places.
-        XCTAssertEqual(CallPeerNameMirror.name(groupIdHex: "aa11", defaults: defaults), "Anna")
+        XCTAssertEqual(
+            CallPeerNameMirror.name(accountIdB64: "acct", groupIdHex: "aa11", defaults: defaults), "Anna")
     }
 
     func testABlankNameRemovesTheRowRatherThanStoringEmptiness() {
         let defaults = transientDefaults()
-        CallPeerNameMirror.mirror(groupIdHex: "aa11", name: "Anna", defaults: defaults)
-        CallPeerNameMirror.mirror(groupIdHex: "aa11", name: "   ", defaults: defaults)
-        XCTAssertNil(CallPeerNameMirror.name(groupIdHex: "aa11", defaults: defaults))
+        CallPeerNameMirror.mirror(accountIdB64: "acct", groupIdHex: "aa11", name: "Anna", defaults: defaults)
+        CallPeerNameMirror.mirror(accountIdB64: "acct", groupIdHex: "aa11", name: "   ", defaults: defaults)
+        XCTAssertNil(CallPeerNameMirror.name(accountIdB64: "acct", groupIdHex: "aa11", defaults: defaults))
     }
 
-    func testClearAllLeavesNoNameBehind() {
+    /// Two accounts on one phone: one account's lock screen never shows the
+    /// name the other mirrored, even for the same group, and no account reads
+    /// nothing.
+    func testTwoAccountsNeverSeeEachOthersNames() {
         let defaults = transientDefaults()
-        CallPeerNameMirror.mirror(groupIdHex: "aa11", name: "Anna", defaults: defaults)
-        CallPeerNameMirror.mirror(groupIdHex: "bb22", name: "Bo", defaults: defaults)
-        CallPeerNameMirror.clearAll(defaults: defaults)
-        XCTAssertNil(CallPeerNameMirror.name(groupIdHex: "aa11", defaults: defaults))
-        XCTAssertNil(CallPeerNameMirror.name(groupIdHex: "bb22", defaults: defaults))
+        CallPeerNameMirror.mirror(accountIdB64: "acct-A", groupIdHex: "aa11", name: "Anna", defaults: defaults)
+        XCTAssertNil(CallPeerNameMirror.name(accountIdB64: "acct-B", groupIdHex: "aa11", defaults: defaults))
+        XCTAssertNil(CallPeerNameMirror.name(accountIdB64: nil, groupIdHex: "aa11", defaults: defaults))
+        CallPeerNameMirror.mirror(accountIdB64: "acct-B", groupIdHex: "aa11", name: "Bo", defaults: defaults)
+        XCTAssertEqual(
+            CallPeerNameMirror.name(accountIdB64: "acct-A", groupIdHex: "aa11", defaults: defaults), "Anna")
+        XCTAssertEqual(
+            CallPeerNameMirror.name(accountIdB64: "acct-B", groupIdHex: "aa11", defaults: defaults), "Bo")
+    }
+
+    /// Forget-device drops the forgotten account's names (and the old
+    /// device-wide rows) and nothing else.
+    func testForgetLeavesNoNameOfThatAccountBehind() {
+        let defaults = transientDefaults()
+        CallPeerNameMirror.mirror(accountIdB64: "acct-A", groupIdHex: "aa11", name: "Anna", defaults: defaults)
+        CallPeerNameMirror.mirror(accountIdB64: "acct-A", groupIdHex: "bb22", name: "Bo", defaults: defaults)
+        CallPeerNameMirror.mirror(accountIdB64: "acct-B", groupIdHex: "aa11", name: "Cy", defaults: defaults)
+        defaults.set("Old", forKey: CallPeerNameMirror.legacyKeyPrefix + "aa11")
+        CallPeerNameMirror.clear(accountIdB64: "acct-A", defaults: defaults)
+        XCTAssertNil(CallPeerNameMirror.name(accountIdB64: "acct-A", groupIdHex: "aa11", defaults: defaults))
+        XCTAssertNil(CallPeerNameMirror.name(accountIdB64: "acct-A", groupIdHex: "bb22", defaults: defaults))
+        XCTAssertEqual(
+            CallPeerNameMirror.name(accountIdB64: "acct-B", groupIdHex: "aa11", defaults: defaults), "Cy")
+        XCTAssertNil(defaults.object(forKey: CallPeerNameMirror.legacyKeyPrefix + "aa11"))
     }
 
     func testAnUnprovisionedAppGroupIsNotAFailure() {
         // A build without the App Group entitlement has no shared suite; the
         // mirror is then simply empty and the alert unnamed.
-        CallPeerNameMirror.mirror(groupIdHex: "aa11", name: "Anna", defaults: nil)
-        XCTAssertNil(CallPeerNameMirror.name(groupIdHex: "aa11", defaults: nil))
+        CallPeerNameMirror.mirror(accountIdB64: "acct", groupIdHex: "aa11", name: "Anna", defaults: nil)
+        XCTAssertNil(CallPeerNameMirror.name(accountIdB64: "acct", groupIdHex: "aa11", defaults: nil))
     }
 
     private func transientDefaults() -> UserDefaults {

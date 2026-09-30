@@ -79,6 +79,7 @@ import { base64Decode, base64Encode } from "../auth/account-id";
 import { withGroupMlsLock } from "../mls/group-lock";
 
 import { readKnockCursor, takeKnockReadSlot, writeKnockCursor } from "./knock-cursor";
+import { boundContactsAccount } from "../contacts/local-store";
 import { PUSH_GID_LEN, type DsWake } from "../ds/wake";
 import { loadWasm } from "../wasm";
 import type {
@@ -1076,13 +1077,23 @@ export class ChatClient {
     // poll period of latency, which the approval it waits on dwarfs. A failed
     // read is logged and retried next poll; it never fails the journal poll.
     const groupIdB64 = base64Encode(groupId);
-    let knocks: { after: number; rows: FetchResult } | null = null;
-    if (readsKnocks(group, myIdentity) && takeKnockReadSlot(groupIdB64, Date.now())) {
-      const knockAfter = readKnockCursor(groupIdB64);
+    let knocks: { after: number; rows: FetchResult; owner: string } | null = null;
+    // The knock cursor is the signed-in account's (`knock-cursor.ts`), pinned
+    // here so the read and the write of one batch name the same account. With
+    // no account bound there is nowhere to record progress, so the queue is
+    // not read at all rather than re-fed on every poll.
+    const knockOwner = boundContactsAccount();
+    if (
+      knockOwner !== null &&
+      readsKnocks(group, myIdentity) &&
+      takeKnockReadSlot(groupIdB64, Date.now())
+    ) {
+      const knockAfter = readKnockCursor(groupIdB64, knockOwner);
       try {
         knocks = {
           after: knockAfter,
           rows: await this.ds.fetchKnocks(groupId, { after: knockAfter, waitSecs: 0 }),
+          owner: knockOwner,
         };
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -1094,7 +1105,13 @@ export class ChatClient {
     return withGroupMlsLock(groupIdB64, async () => {
       const result = await this.applyPolledBatch(myIdentity, group, after, raw, cursorRef);
       if (knocks === null || result.outcome !== "applied") return result;
-      const knockEvents = await this.applyKnocks(myIdentity, group, knocks.after, knocks.rows);
+      const knockEvents = await this.applyKnocks(
+        myIdentity,
+        group,
+        knocks.after,
+        knocks.rows,
+        knocks.owner,
+      );
       return knockEvents.length === 0
         ? result
         : { ...result, events: [...result.events, ...knockEvents] };
@@ -1115,10 +1132,11 @@ export class ChatClient {
     group: WasmGroup,
     after: number,
     raw: FetchResult,
+    owner: string,
   ): Promise<IncomingChatEvent[]> {
     const groupIdB64 = base64Encode(group.groupId);
     // A concurrent poll consumed this batch already.
-    if (readKnockCursor(groupIdB64) !== after) return [];
+    if (readKnockCursor(groupIdB64, owner) !== after) return [];
     const events: IncomingChatEvent[] = [];
     let last = after;
     for (const row of raw.messages) {
@@ -1160,7 +1178,7 @@ export class ChatClient {
       console.warn("ChatClient: knock batch not persisted; cursor held", err);
       return events;
     }
-    writeKnockCursor(groupIdB64, last);
+    writeKnockCursor(groupIdB64, last, owner);
     return events;
   }
 

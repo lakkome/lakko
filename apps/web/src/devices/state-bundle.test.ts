@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { bindContactsAccount } from "../contacts/local-store";
 import {
+  applyStateBundle,
+  clearKnownGroupIds,
   decodeStateBundle,
+  loadKnownGroupIds,
+  pendingKnownGroups,
+  saveKnownGroupIds,
   encodeStateBundle,
   isStateRow,
   unwrapStateRow,
@@ -48,5 +54,66 @@ describe("state bundle codec (ADR-0050 section 2.9)", () => {
     expect(unwrapStateRow(row)).toEqual(sealed);
     expect(isStateRow(sealed)).toBe(false);
     expect(unwrapStateRow(sealed)).toBeNull();
+  });
+});
+
+describe("known group ids belong to the paired account (2026-09-30)", () => {
+  const CARA = "Y2FyYS1hY2NvdW50LTAwMDA=";
+  const EVE = "ZXZlLWFjY291bnQtMDAwMDA=";
+  let data: Map<string, string>;
+
+  beforeEach(() => {
+    data = new Map();
+    (globalThis as unknown as { localStorage: Storage }).localStorage = {
+      get length() {
+        return data.size;
+      },
+      clear: () => data.clear(),
+      getItem: (k: string) => data.get(k) ?? null,
+      key: (i: number) => [...data.keys()][i] ?? null,
+      removeItem: (k: string) => void data.delete(k),
+      setItem: (k: string, v: string) => void data.set(k, String(v)),
+    };
+  });
+
+  afterEach(() => bindContactsAccount(null));
+
+  it("a bundle applied into one account never shows another account as synchronizing", () => {
+    applyStateBundle(bundle, CARA);
+    bindContactsAccount(EVE);
+    expect(loadKnownGroupIds()).toEqual([]);
+    expect(pendingKnownGroups([])).toBe(0);
+    bindContactsAccount(CARA);
+    expect(loadKnownGroupIds()).toEqual(["Z3JvdXA="]);
+    expect(pendingKnownGroups([])).toBe(1);
+  });
+
+  it("with no account a read is empty and a write is a no-op", () => {
+    saveKnownGroupIds(["Z3JvdXA="]);
+    expect(data.size).toBe(0);
+    expect(loadKnownGroupIds()).toEqual([]);
+    expect(pendingKnownGroups([])).toBe(0);
+  });
+
+  it("the list clears itself for its own account once every group is held", () => {
+    saveKnownGroupIds(["a", "b"], CARA);
+    saveKnownGroupIds(["a"], EVE);
+    expect(pendingKnownGroups(["a", "b"], CARA)).toBe(0);
+    expect(loadKnownGroupIds(CARA)).toEqual([]);
+    expect(loadKnownGroupIds(EVE)).toEqual(["a"]);
+  });
+
+  it("the retired device-wide list is not read, and Forget device drops only the own account's", () => {
+    data.set("lakko.pairing.known-groups.v1", JSON.stringify(["old"]));
+    saveKnownGroupIds(["a"], CARA);
+    saveKnownGroupIds(["b"], EVE);
+    bindContactsAccount(CARA);
+    expect(loadKnownGroupIds()).toEqual(["a"]);
+
+    clearKnownGroupIds(CARA);
+
+    expect(loadKnownGroupIds(CARA)).toEqual([]);
+    expect(loadKnownGroupIds(EVE)).toEqual(["b"]);
+    expect(data.has("lakko.pairing.known-groups.v1")).toBe(false);
   });
 });

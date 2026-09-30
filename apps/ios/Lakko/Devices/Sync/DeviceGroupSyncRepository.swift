@@ -221,23 +221,35 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// Tear down the runtime — cancel poll loop, drop FFI
     /// handles, clear every reactive map.
     public func clear() {
+        // The persisted state stays for the next sign-in of the same account
+        // (2026-09-30): it is filed per account (``SyncedStateStore``, the
+        // pending flag of ``PendingSyncTracker``), so no other account can
+        // read it, and deleting it here lost the account's folders, flags and
+        // drafts on every logout, since the restored DeviceGroup snapshot has
+        // already consumed the journal rows a re-login would re-poll. A
+        // debounced write still in flight is flushed rather than dropped.
+        // ``forget(accountIdB64:)`` is what deletes them.
+        if let closing = activeAccountIdB64, persistTask != nil, !deviceRemoved {
+            SyncedStateStore.save(syncedState, accountIdB64: closing)
+        }
         cancelPollAndDropHandles()
         pendingServiceEnvelopes = [:]
-        // Forget the snapshot too. Logout and forget-this-device both come
-        // through here, and a draft left behind for the next account to sign
-        // in on this device is the one piece of this state that reads as a
-        // message.
-        if let closing = activeAccountIdB64 {
-            SyncedStateStore.delete(accountIdB64: closing)
-        }
         activeAccountIdB64 = nil
         activeAccountId = nil
         ready = false
         deviceRemoved = false
         syncedState = SyncedState()
-        pending?.clear()
         pending = nil
         refreshDerived()
+    }
+
+    /// Forget-device: tear the runtime down and delete what this device keeps
+    /// for `accountIdB64` — the folded synced state and its pending-sync flag.
+    /// Other accounts' state is untouched.
+    public func forget(accountIdB64: String) {
+        clear()
+        SyncedStateStore.delete(accountIdB64: accountIdB64)
+        PendingSyncTracker(accountIdB64: accountIdB64).clear()
     }
 
     /// Publish the muted set into the App Group container
@@ -250,7 +262,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// muted to ring anyway. Whole-set rather than per-row, because an unmute
     /// on a sibling device has to REMOVE a row.
     private func mirrorMutedConversations() {
+        // Per account: a `nil` account (the sign-out teardown empties the
+        // flags after unbinding) writes nothing, so logout keeps the rows.
         ConversationMuteMirror.replaceAll(
+            accountIdB64: activeAccountIdB64,
             mutedGroupIdsHex: Set(flags.filter { $0.value.muted }.keys))
     }
 

@@ -176,11 +176,16 @@ beforeEach(() => {
   DBS.clear();
   failPutStore = null;
   (globalThis as unknown as { indexedDB: unknown }).indexedDB = fakeIndexedDB;
+  // The signed-in account the owner-less reads mean (`entry()` defaults to it).
+  bindContactsAccount("acct-a");
 });
 
 afterEach(() => {
+  bindContactsAccount(null);
   delete (globalThis as unknown as { indexedDB?: unknown }).indexedDB;
 });
+
+import { bindContactsAccount } from "../contacts/local-store";
 
 import {
   deleteEntry,
@@ -239,8 +244,26 @@ describe("commit-outbox store — round-trip", () => {
     await putEntryDurable(entry({ id: "a", accountId: "acct-a" }));
     await putEntryDurable(entry({ id: "b", accountId: "acct-b" }));
     await deleteOutboxForAccount("acct-a");
-    const all = await loadUnacked();
+    expect(await loadUnacked()).toEqual([]);
+    const all = await loadUnacked(undefined, "acct-b");
     expect(all.map((e) => e.id)).toEqual(["b"]);
+  });
+
+  it("two accounts in one group never see each other's pending commits", async () => {
+    await putEntryDurable(entry({ id: "a", accountId: "acct-a", groupId: "g1" }));
+    await putEntryDurable(entry({ id: "b", accountId: "acct-b", groupId: "g1" }));
+
+    expect((await loadUnacked("g1")).map((e) => e.id)).toEqual(["a"]);
+    bindContactsAccount("acct-b");
+    expect((await loadUnacked("g1")).map((e) => e.id)).toEqual(["b"]);
+    expect((await loadUnacked(undefined, "acct-a")).map((e) => e.id)).toEqual(["a"]);
+  });
+
+  it("with no signed-in account the read is empty", async () => {
+    await putEntryDurable(entry({ id: "a", groupId: "g1" }));
+    bindContactsAccount(null);
+    expect(await loadUnacked("g1")).toEqual([]);
+    expect(await loadUnacked()).toEqual([]);
   });
 
   it("preserves the two-artifact fields (add / approve coverage)", async () => {

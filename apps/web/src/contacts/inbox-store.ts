@@ -138,7 +138,23 @@ export function saveInbox(
   );
 }
 
-/** Drop every account's inbox row (forget-device). */
+/** Forget device: drop `accountIdB64`'s inbox row (cursor + pending list).
+ *  Log out keeps it, so a re-login does not re-poll requests already
+ *  declined; another account's row on this browser is left alone. */
+export function clearInboxForAccount(
+  accountIdB64: string,
+  storage: StorageLike | null = defaultStorage(),
+): void {
+  if (storage === null) return;
+  try {
+    storage.removeItem(storageKey(accountIdB64));
+  } catch {
+    // best-effort, like the rest of the forget-device wipe
+  }
+}
+
+/** Drop every account's inbox row. Not used by Forget device, which drops
+ *  only the forgotten account's ({@link clearInboxForAccount}). */
 export function clearAllInboxes(storage: StorageLike | null = defaultStorage()): void {
   if (storage === null) return;
   try {

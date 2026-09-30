@@ -20,6 +20,7 @@ import { rethrowAsLegacyChannel } from "./legacy-v1";
 import { isStaleSubscriberKey } from "./member-card-rules";
 import { DsClient } from "../ds/client";
 import { claimOrReset } from "../ds/ownership";
+import { boundContactsAccount } from "../contacts/local-store";
 
 /** wasm-bindgen-generated Identity handle. Re-exported
  *  here as a type-only alias so caller signatures stay
@@ -456,6 +457,7 @@ export async function openOrFoundPublisherGroup(
   identity: WasmIdentity,
   channelId: Uint8Array,
   storage: UnconfirmedFoundingStorage | null = defaultFoundingStorage(),
+  owner: string | null = boundContactsAccount(),
 ): Promise<InstanceType<Wasm["PublisherGroup"]>> {
   let existed = false;
   try {
@@ -473,7 +475,7 @@ export async function openOrFoundPublisherGroup(
     rethrowAsLegacyChannel(err);
   }
   const groupId = publisher.groupId();
-  const key = foundingKey(groupId);
+  const key = foundingKey(owner, groupId);
   if (!existed || isUnconfirmedFounding(storage, key)) {
     markUnconfirmedFounding(storage, key);
     try {
@@ -500,14 +502,33 @@ export async function openOrFoundPublisherGroup(
   return publisher;
 }
 
-/** Where the unconfirmed-founding marker lives (group ids only). */
+/**
+ * Where the unconfirmed-founding marker lives (group ids only).
+ *
+ * One marker per (account, group):
+ * `lakko/publisher-group-unclaimed/v2/<accountIdB64>/<groupIdHex>`. The
+ * founded group sits in that ACCOUNT's provider and the claim is made with
+ * that account's root, so the marker is the account's: the v1 row, keyed by
+ * the group alone, let a second account signed in on the same browser clear
+ * the first account's marker by claiming the same channel, after which the
+ * first took its never-claimed group as claimed (2026-09-30). The account is
+ * the `owner` argument of {@link openOrFoundPublisherGroup} (default: the
+ * signed-in account bound through `bindContactsAccount`). With no account
+ * there is nowhere to record a confirmation, so every open claims again
+ * (fail-closed; a same-root claim is idempotent) and nothing is written.
+ * Forget device drops the account's markers
+ * ({@link clearUnconfirmedFoundingsForAccount}).
+ */
 export interface UnconfirmedFoundingStorage {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
   removeItem(key: string): void;
 }
 
-const FOUNDING_PREFIX = "lakko/publisher-group-unclaimed/v1/";
+const FOUNDING_PREFIX = "lakko/publisher-group-unclaimed/v2/";
+/** The retired device-wide markers (`<prefix><groupIdHex>`). Never read;
+ *  dropped by Forget device. */
+const RETIRED_FOUNDING_PREFIX = "lakko/publisher-group-unclaimed/v1/";
 
 function defaultFoundingStorage(): UnconfirmedFoundingStorage | null {
   try {
@@ -517,13 +538,34 @@ function defaultFoundingStorage(): UnconfirmedFoundingStorage | null {
   }
 }
 
-function foundingKey(groupId: Uint8Array): string {
+/** The marker key, or `null` with no account. */
+function foundingKey(owner: string | null, groupId: Uint8Array): string | null {
+  if (owner === null || owner.length === 0) return null;
   let hex = "";
   for (let i = 0; i < groupId.length; i++) hex += (groupId[i] ?? 0).toString(16).padStart(2, "0");
-  return FOUNDING_PREFIX + hex;
+  return `${FOUNDING_PREFIX}${owner}/${hex}`;
 }
 
-function isUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: string): boolean {
+/** Forget device: drop every unconfirmed-founding marker of `accountIdB64`
+ *  and the retired device-wide ones. Another account's are left alone. */
+export function clearUnconfirmedFoundingsForAccount(accountIdB64: string): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const own = `${FOUNDING_PREFIX}${accountIdB64}/`;
+    const doomed: string[] = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i);
+      if (k !== null && (k.startsWith(own) || k.startsWith(RETIRED_FOUNDING_PREFIX))) doomed.push(k);
+    }
+    for (const k of doomed) localStorage.removeItem(k);
+  } catch {
+    /* storage unavailable: nothing to clear */
+  }
+}
+
+function isUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: string | null): boolean {
+  // No account: nothing could have recorded a confirmation, so claim again.
+  if (key === null) return true;
   try {
     return storage?.getItem(key) !== null && storage?.getItem(key) !== undefined;
   } catch {
@@ -531,7 +573,8 @@ function isUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: 
   }
 }
 
-function markUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: string): void {
+function markUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: string | null): void {
+  if (key === null) return;
   try {
     storage?.setItem(key, "1");
   } catch {
@@ -539,7 +582,8 @@ function markUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key
   }
 }
 
-function clearUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: string): void {
+function clearUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: string | null): void {
+  if (key === null) return;
   try {
     storage?.removeItem(key);
   } catch {

@@ -92,6 +92,14 @@ class FakeStore {
     });
     return req;
   }
+  getAll(): FakeReq<Row[]> {
+    const req = new FakeReq<Row[]>();
+    this.tx.enqueue(() => {
+      req.result = [...this.backing.values()];
+      req.onsuccess?.();
+    });
+    return req;
+  }
 }
 
 class FakeTx {
@@ -174,6 +182,7 @@ afterEach(() => {
 
 import {
   clearAllGroupRouting,
+  clearGroupRoutingForAccount,
   deleteRoute,
   getGroupRoutingRecord,
   getGroupRoutingSecret,
@@ -328,6 +337,44 @@ describe("group-routing-store — round-trip", () => {
 
     expect(await hasGroupRoutingSecret(ACCT, GROUP)).toBe(false);
     expect(await lookupPushRoute(PUSH_GID_HEX)).toBeNull();
+  });
+
+  it("clearGroupRoutingForAccount wipes only the forgotten account's rows", async () => {
+    const deviceKey = await makeDeviceKey();
+    const OTHER_ACCT = "b3RoZXItYWNjb3VudC0wMDAwMA==";
+    const OTHER_GID_HEX =
+      "abababababababababababababababababababababababababababababababab";
+    await putGroupRouting(
+      {
+        accountId: ACCT,
+        groupIdB64: GROUP,
+        secret: new Uint8Array(32).fill(2),
+        pushGidHex: PUSH_GID_HEX,
+        distributed: true,
+        mintEpoch: 0n,
+      },
+      deviceKey,
+    );
+    await putGroupRouting(
+      {
+        accountId: OTHER_ACCT,
+        groupIdB64: GROUP,
+        secret: new Uint8Array(32).fill(4),
+        pushGidHex: OTHER_GID_HEX,
+        distributed: true,
+        mintEpoch: 0n,
+      },
+      deviceKey,
+    );
+
+    await clearGroupRoutingForAccount(ACCT);
+
+    expect(await hasGroupRoutingSecret(ACCT, GROUP)).toBe(false);
+    expect(await lookupPushRoute(PUSH_GID_HEX)).toBeNull();
+    expect(await hasGroupRoutingSecret(OTHER_ACCT, GROUP)).toBe(true);
+    expect(await lookupPushRoute(OTHER_GID_HEX)).toEqual(
+      expect.objectContaining({ accountId: OTHER_ACCT, groupIdB64: GROUP }),
+    );
   });
 });
 

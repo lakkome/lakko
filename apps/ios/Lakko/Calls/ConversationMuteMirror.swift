@@ -31,56 +31,80 @@ import Foundation
 ///
 /// ## What it carries
 ///
-/// One `true` per MUTED conversation, keyed by group id, and nothing else. It
+/// One `true` per MUTED conversation, keyed by account and group id, and nothing else. It
 /// is not the conversation list: an unmuted conversation has no row, so the
 /// container learns nothing about it — not that it exists, not its name, not
 /// when it was last active. A group id is already in this container (the
 /// routing reverse index is keyed on one), so the mirror adds no identifier
 /// that was not there.
 ///
+/// ## Per account (2026-09-30)
+///
+/// One row per `(account, muted group)`: `me.lakko.conversation-muted.v2.
+/// <account>.<group>`. The set used to be device-wide and was wiped on every
+/// logout, so a second account signed in on the same phone could never read the
+/// first one's mutes; it is now keyed by the account the flag belongs to, the
+/// same way ``AcceptedContactsStore`` keys the contact list. Each reader names
+/// the account it is ringing for (the push route carries it; the app passes the
+/// signed-in account). No account: nothing is muted and nothing is written.
+/// Logout keeps the rows for the next sign-in of the same account; forget-device
+/// removes that account's rows through ``clear(accountIdB64:defaults:)``.
+///
 /// ## What it is not
 ///
 /// Not a source of truth. ``DeviceGroupSyncRepository/flags`` is, and it
 /// publishes the whole snapshot on every change, which is why
-/// ``replaceAll(mutedGroupIdsHex:defaults:)`` is the write the app makes: an
-/// unmute on a sibling device has to REMOVE a row here, and a per-row write
-/// would leave the old one behind and go on silencing a conversation the
+/// ``replaceAll(accountIdB64:mutedGroupIdsHex:defaults:)`` is the write the app
+/// makes: an unmute on a sibling device has to REMOVE a row here, and a per-row
+/// write would leave the old one behind and go on silencing a conversation the
 /// person un-silenced.
 public enum ConversationMuteMirror {
 
-    /// Per-group key prefix in the App Group shared suite.
-    private static let keyPrefix = "me.lakko.conversation-muted.v1."
+    /// Key prefix in the App Group shared suite; the account and the group
+    /// follow.
+    private static let keyPrefix = "me.lakko.conversation-muted.v2."
+    /// The device-wide prefix this mirror used before it was per account.
+    /// Never read; removed by ``clear(accountIdB64:defaults:)``.
+    static let legacyKeyPrefix = "me.lakko.conversation-muted.v1."
 
-    private static func key(_ groupIdHex: String) -> String {
-        keyPrefix + groupIdHex.lowercased()
+    private static func accountPrefix(_ accountIdB64: String) -> String {
+        keyPrefix + accountIdB64 + "."
     }
 
-    /// Has this device mirrored `groupIdHex` as muted?
+    private static func key(_ accountIdB64: String, _ groupIdHex: String) -> String {
+        accountPrefix(accountIdB64) + groupIdHex.lowercased()
+    }
+
+    /// Has this device mirrored `groupIdHex` as muted for `accountIdB64`?
     ///
-    /// `false` for everything else, including every failure: see "Which way it
-    /// fails" above.
+    /// `false` for everything else, including every failure and a `nil`
+    /// account: see "Which way it fails" above.
     public static func isMuted(
+        accountIdB64: String?,
         groupIdHex: String,
         defaults: UserDefaults? = SharedStorage.sharedDefaults()
     ) -> Bool {
-        guard let defaults else { return false }
-        return defaults.bool(forKey: key(groupIdHex))
+        guard let defaults, let accountIdB64 else { return false }
+        return defaults.bool(forKey: key(accountIdB64, groupIdHex))
     }
 
-    /// Replace the whole mirrored set. App-side only.
+    /// Replace one account's whole mirrored set. App-side only.
     ///
-    /// `mutedGroupIdsHex` is every conversation currently muted; anything else
-    /// with a row loses it. Writes only what changed, so the common case — the
-    /// app re-publishing an unchanged flag snapshot — costs a read and no
-    /// write.
+    /// `mutedGroupIdsHex` is every conversation of `accountIdB64` currently
+    /// muted; any other row of that account loses it. Other accounts' rows are
+    /// untouched. Writes only what changed, so the common case — the app
+    /// re-publishing an unchanged flag snapshot — costs a read and no write.
+    /// A `nil` account writes nothing.
     public static func replaceAll(
+        accountIdB64: String?,
         mutedGroupIdsHex: Set<String>,
         defaults: UserDefaults? = SharedStorage.sharedDefaults()
     ) {
-        guard let defaults else { return }
-        let wanted = Set(mutedGroupIdsHex.map { key($0) })
+        guard let defaults, let accountIdB64 else { return }
+        let prefix = accountPrefix(accountIdB64)
+        let wanted = Set(mutedGroupIdsHex.map { key(accountIdB64, $0) })
         for (storageKey, _) in defaults.dictionaryRepresentation()
-        where storageKey.hasPrefix(keyPrefix) && !wanted.contains(storageKey) {
+        where storageKey.hasPrefix(prefix) && !wanted.contains(storageKey) {
             defaults.removeObject(forKey: storageKey)
         }
         for storageKey in wanted where defaults.bool(forKey: storageKey) == false {
@@ -88,13 +112,16 @@ public enum ConversationMuteMirror {
         }
     }
 
-    /// Drop every mirrored row. Called on logout / forget-device, beside the
-    /// other per-device push state: a row left behind would silence the next
-    /// account's calls in a conversation it has never heard of.
-    public static func clearAll(defaults: UserDefaults? = SharedStorage.sharedDefaults()) {
+    /// Forget-device: drop one account's rows, and the old device-wide rows
+    /// nothing reads any more. Other accounts' rows stay.
+    public static func clear(
+        accountIdB64: String,
+        defaults: UserDefaults? = SharedStorage.sharedDefaults()
+    ) {
         guard let defaults else { return }
+        let prefix = accountPrefix(accountIdB64)
         for (storageKey, _) in defaults.dictionaryRepresentation()
-        where storageKey.hasPrefix(keyPrefix) {
+        where storageKey.hasPrefix(prefix) || storageKey.hasPrefix(legacyKeyPrefix) {
             defaults.removeObject(forKey: storageKey)
         }
     }

@@ -1118,7 +1118,7 @@ public class AuthRepository(
                     // admitted to the account's chats by its other devices or its
                     // contacts; the chat list says "Synchronizing..." until the
                     // first chat arrives.
-                    me.lakko.app.devices.StateBundle.markRestored(applicationContext)
+                    me.lakko.app.devices.StateBundle.markRestored(applicationContext, accountIdB64)
                     val restoredBackup = restoreFromServerBackupBestEffort(
                         sessionToken = result.sessionToken,
                         accountId = accountIdBytes,

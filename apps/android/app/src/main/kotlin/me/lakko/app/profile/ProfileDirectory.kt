@@ -40,6 +40,9 @@ import java.util.Base64
 public class ProfileDirectory internal constructor(
     persistence: ProfilePersistence,
     private val scope: CoroutineScope,
+    /** Where the retired device-wide rows live, removed on forget; `null`
+     *  in host tests. */
+    private val persistenceContext: Context? = null,
     isNewer: (ULong, ULong) -> Boolean =
         { incoming, stored -> uniffi.lakko_ffi_uniffi.profileIsNewer(incoming, stored) },
     passesRule: ((String) -> Boolean)? = null,
@@ -184,10 +187,22 @@ public class ProfileDirectory internal constructor(
      */
     public fun accountIdsByKey(): Map<String, String> = profiles.accountIdsByKey()
 
-    /** Forget every learned profile and verification (forget device). */
-    public fun clear() {
-        profiles.clear()
-        verifications.clear()
+    /** Forget every profile and verification learned by [accountIdB64]
+     *  (forget device). Other accounts' names stay. */
+    public fun forgetAccount(accountIdB64: String) {
+        val account = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+        profiles.clear(account)
+        verifications.clear(account)
+        SharedPrefsProfilePersistence.deleteRetiredGlobalRows(persistenceContext)
+        bump()
+    }
+
+    /**
+     * Re-read the names for the account now signed in: a session landing or
+     * ending changes which account's profiles resolve. The stores reload on
+     * their next read by themselves; this bumps [version] so screens re-read.
+     */
+    public fun onAccountChanged() {
         bump()
     }
 
@@ -206,6 +221,7 @@ public class ProfileDirectory internal constructor(
                 instance ?: ProfileDirectory(
                     persistence = SharedPrefsProfilePersistence(context.applicationContext),
                     scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+                    persistenceContext = context.applicationContext,
                     initialRenames = renamesFromAcceptedContacts(context.applicationContext),
                 ).also { instance = it }
             }
@@ -269,20 +285,30 @@ public class ProfileNameSnapshot private constructor(
     public fun isKnown(signatureKeyB64: String): Boolean = !resolve(signatureKeyB64).isPlaceholder
 
     public companion object {
-        /** Load a snapshot. Never writes. The contact renames are
-         *  [accountIdB64]'s (the bound account's when `null`). */
+        /** Load a snapshot. Never writes. The profiles, verifications and
+         *  contact renames are [accountIdB64]'s (the bound account's when
+         *  `null`); with neither, the snapshot is empty. */
         public fun load(context: Context, accountIdB64: String? = null): ProfileNameSnapshot {
             val persistence = SharedPrefsProfilePersistence(context.applicationContext)
+            val account = accountIdB64?.let { me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(it) }
+                ?: persistence.currentAccount()
             return ProfileNameSnapshot(
-                profiles = persistence.loadProfiles(),
-                verifications = persistence.loadVerifications(),
+                profiles = account?.let { persistence.loadProfiles(it) } ?: emptyMap(),
+                verifications = account?.let { persistence.loadVerifications(it) } ?: emptyMap(),
                 renames = ProfileDirectory.renamesFromAcceptedContacts(context.applicationContext, accountIdB64),
             )
         }
     }
 }
 
-/** [ProfilePersistence] over plain `SharedPreferences` (JSON). */
+/**
+ * [ProfilePersistence] over plain `SharedPreferences` (JSON), one pair of rows
+ * per account: `profiles.v2:<accountIdB64>` and `verifications.v2:<accountIdB64>`
+ * (standard base64). The account is the one bound in
+ * [me.lakko.app.contacts.AcceptedContactsStore] (the signed-in one). The
+ * device-wide `profiles.v1` / `verifications.v1` rows of builds before
+ * 2026-09-30 are never read; forget device removes them.
+ */
 internal class SharedPrefsProfilePersistence(private val context: Context) : ProfilePersistence {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -300,8 +326,10 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
 
     private fun prefs() = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    override fun loadProfiles(): Map<String, PeerProfile> {
-        val raw = prefs().getString(KEY_PROFILES, null) ?: return emptyMap()
+    override fun currentAccount(): String? = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64
+
+    override fun loadProfiles(account: String): Map<String, PeerProfile> {
+        val raw = prefs().getString(profilesKey(account), null) ?: return emptyMap()
         return try {
             json.decodeFromString<Map<String, StoredProfile>>(raw).mapValues { (_, s) ->
                 PeerProfile(
@@ -317,15 +345,19 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
         }
     }
 
-    override fun saveProfiles(profiles: Map<String, PeerProfile>) {
+    override fun saveProfiles(account: String, profiles: Map<String, PeerProfile>) {
+        if (profiles.isEmpty()) {
+            prefs().edit().remove(profilesKey(account)).apply()
+            return
+        }
         val stored = profiles.mapValues { (_, p) ->
             StoredProfile(p.displayName, p.username, p.updatedAtMs.toLong(), p.accountIdHex, p.usernameCertificateHex)
         }
-        prefs().edit().putString(KEY_PROFILES, json.encodeToString(stored)).apply()
+        prefs().edit().putString(profilesKey(account), json.encodeToString(stored)).apply()
     }
 
-    override fun loadVerifications(): Map<String, UsernameVerification> {
-        val raw = prefs().getString(KEY_VERIFICATIONS, null) ?: return emptyMap()
+    override fun loadVerifications(account: String): Map<String, UsernameVerification> {
+        val raw = prefs().getString(verificationsKey(account), null) ?: return emptyMap()
         return try {
             json.decodeFromString<Map<String, String>>(raw).mapNotNull { (k, v) ->
                 val result = UsernameVerification.entries.firstOrNull { it.name == v }
@@ -337,14 +369,41 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
         }
     }
 
-    override fun saveVerifications(verifications: Map<String, UsernameVerification>) {
+    override fun saveVerifications(account: String, verifications: Map<String, UsernameVerification>) {
+        if (verifications.isEmpty()) {
+            prefs().edit().remove(verificationsKey(account)).apply()
+            return
+        }
         val stored = verifications.mapValues { (_, v) -> v.name }
-        prefs().edit().putString(KEY_VERIFICATIONS, json.encodeToString(stored)).apply()
+        prefs().edit().putString(verificationsKey(account), json.encodeToString(stored)).apply()
     }
 
-    private companion object {
+    companion object {
         const val PREFS = "lakko-peer-profiles"
-        const val KEY_PROFILES = "profiles.v1"
-        const val KEY_VERIFICATIONS = "verifications.v1"
+
+        /** The rows one account's names live under. Visible for tests. */
+        fun profilesKey(account: String): String =
+            "profiles.v2:" + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(account)
+
+        fun verificationsKey(account: String): String =
+            "verifications.v2:" + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(account)
+
+        /** The device-wide rows of builds before 2026-09-30. Never read. */
+        private const val RETIRED_PROFILES = "profiles.v1"
+        private const val RETIRED_VERIFICATIONS = "verifications.v1"
+
+        /** Remove the retired device-wide rows, if a pre-2026-09-30 build left
+         *  them. Best-effort; no-op without a [context]. */
+        fun deleteRetiredGlobalRows(context: Context?) {
+            val ctx = context ?: return
+            try {
+                ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .remove(RETIRED_PROFILES)
+                    .remove(RETIRED_VERIFICATIONS)
+                    .apply()
+            } catch (_: Throwable) {
+                // best-effort
+            }
+        }
     }
 }

@@ -1281,12 +1281,23 @@ public final class AuthRepository: ObservableObject {
             // sign-in of the same account; forget-device is what drops them.
             AcceptedContactsStore.clear(accountIdB64: cached.accountIdB64)
             PeerPinStore.clear(ownerAccountIdB64: cached.accountIdB64)
-            // The account's channel list + subscriber-side recovered content
-            // seeds. Same clean-wipe rationale. (The three per-installation
-            // channel Keychain blobs — publisher seeds, publish counters,
-            // subscriber keypairs — are not per-account and are left as they
-            // were before this store existed.)
-            ChannelLogStore().delete(accountIdB64: cached.accountIdB64)
+            // The account's channels: the channel list + subscriber-side
+            // recovered content seeds, and (per account since 2026-09-30) the
+            // three channel Keychain blobs — publisher seeds, publish
+            // counters, subscriber keypairs — plus the rotation state. Same
+            // clean-wipe rationale; other accounts' channels stay.
+            ChannelsUiState.forget(accountIdB64: cached.accountIdB64)
+            // The rest of the account data that used to sit under device-wide
+            // keys and is now filed per account (2026-09-30): the lock-screen
+            // name mirror and the muted set the call paths read, the pairing's
+            // known group ids, the channels this account co-publishes, and the
+            // played marks on its voice messages and video notes. Logout keeps
+            // them; forget-device is what drops them.
+            CallPeerNameMirror.clear(accountIdB64: cached.accountIdB64)
+            ConversationMuteMirror.clear(accountIdB64: cached.accountIdB64)
+            StateBundle.clearKnownGroupIds(accountIdB64: cached.accountIdB64)
+            CoPublishedJournals.shared.clear(accountIdB64: cached.accountIdB64)
+            MediaPrefs().clearPlayed(accountIdB64: cached.accountIdB64)
         }
         sessionStore.clear()
         // ADR-0054 S3 — the push unregister below spends a token; take it

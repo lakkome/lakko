@@ -45,7 +45,9 @@ import uniffi.lakko_ffi_uniffi.composeInviteCapability
  * read or written for an unbound account. The inbox cursor is saved after
  * each successful poll batch has landed in state, the pending list and the
  * accepted list after each of their mutations. Log out keeps the accepted
- * list for the next login of the same account; Forget device deletes it.
+ * list and the inbox cursor + pending list for the next login of the same
+ * account (deleting the inbox there brought every declined request back);
+ * Forget device deletes them.
  * The sent log + outstanding invites stay in memory (no server mirror to
  * rehydrate from).
  *
@@ -220,6 +222,8 @@ public class ContactsRepository(
             }
             boundAccountB64 = accountB64
         }
+        // The learned names are per account too: screens re-read them.
+        profileDirectory?.onAccountChanged()
         if (acceptedGrew) persistAccepted() else pushRenamesToDirectory()
     }
 
@@ -1475,14 +1479,18 @@ public class ContactsRepository(
     }
 
     /** Forget-device: the account's contact list, the identity pins it
-     *  holds and the invite-link secrets this device kept leave with it;
-     *  other accounts' lists stay. Call BEFORE [clear] (it reads the
-     *  session). */
+     *  holds, the stranger-inbox cursor and pending requests, and the
+     *  invite-link secrets this device kept leave with it; other accounts'
+     *  data stays. Call BEFORE [clear] (it reads the session). */
     public fun forgetDevice() {
         val accountB64 = boundAccountB64
             ?: authRepo.identitySecrets.value?.let { base64Encode(it.accountId) }
             ?: return
         inviteSecretStore.clearForAccount(accountB64)
+        // The inbox cursor + pending list are per account; only forgetting
+        // the device drops them (log out keeps them, so a declined request
+        // stays declined after the next login).
+        inboxStore?.delete(accountB64)
         appCtx?.let { ctx ->
             AcceptedContactsStore.delete(ctx, accountB64)
             try {
@@ -1494,19 +1502,13 @@ public class ContactsRepository(
     }
 
     /** Clear the in-memory state and unbind the account. Called when the
-     *  session ends (log out and forget device alike). The persisted
-     *  accepted list stays for the next login of the SAME account — only
-     *  [forgetDevice] deletes it — and is never written here, so a list
-     *  cannot be emptied by a sign-out. The pending requests + sent log do
-     *  not persist across logouts. */
+     *  session ends (log out and forget device alike). Nothing persisted is
+     *  written or deleted here: the accepted list and the stranger-inbox
+     *  cursor + pending list stay for the next login of the SAME account
+     *  (a request declined before logging out stays declined) — only
+     *  [forgetDevice] deletes them. The sent log does not persist. */
     public fun clear() {
-        // The persisted inbox (cursor + pending) goes with the session.
-        // Resolve the account BEFORE the state reset drops the binding; fall
-        // back to the live secrets for a session that never bound.
         synchronized(bindLock) {
-            val accountB64 = boundAccountB64
-                ?: authRepo.identitySecrets.value?.let { base64Encode(it.accountId) }
-            if (accountB64 != null) inboxStore?.delete(accountB64)
             boundAccountB64 = null
             // Wipe any decrypted intro plaintext on the way out.
             // Best-effort: the `String` contents may still live in
@@ -1514,8 +1516,10 @@ public class ContactsRepository(
             // drops here.
             mutableState.value = ContactsState()
         }
-        // The name directory stops carrying this account's renames.
+        // The name directory stops carrying this account's renames, and the
+        // names it learned stop resolving.
         pushRenamesToDirectory()
+        profileDirectory?.onAccountChanged()
     }
 
     /**

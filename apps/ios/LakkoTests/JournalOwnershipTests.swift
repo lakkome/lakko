@@ -176,7 +176,8 @@ final class JournalOwnershipTests: XCTestCase {
         let marks = JournalFoundingMarks(
             defaults: try XCTUnwrap(UserDefaults(suiteName: "marks-\(UUID().uuidString)")))
         let coPublished = CoPublishedJournals(
-            defaults: try XCTUnwrap(UserDefaults(suiteName: "copub-\(UUID().uuidString)")))
+            defaults: try XCTUnwrap(UserDefaults(suiteName: "copub-\(UUID().uuidString)")),
+            accountIdB64: { "acct" })
 
         coPublished.mark(journalIdHex: hex)
         XCTAssertTrue(coPublished.contains(journalIdHex: hex.uppercased()))
@@ -191,7 +192,8 @@ final class JournalOwnershipTests: XCTestCase {
 
         let owner = FakeStatementDs()
         let ownerMarks = CoPublishedJournals(
-            defaults: try XCTUnwrap(UserDefaults(suiteName: "copub-\(UUID().uuidString)")))
+            defaults: try XCTUnwrap(UserDefaults(suiteName: "copub-\(UUID().uuidString)")),
+            accountIdB64: { "acct" })
         await CoPublisher.claimJournal(
             ds: owner, identity: identity, publisherGroup: group, marks: marks, coPublished: ownerMarks)
         XCTAssertEqual(owner.segments, ["claim"], "the channel owner claims")

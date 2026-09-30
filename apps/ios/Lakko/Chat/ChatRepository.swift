@@ -1167,8 +1167,10 @@ public final class ChatRepository: ObservableObject {
     /// screen an old name, and the system call screen is corrected by a call
     /// update as soon as the app decrypts the offer.
     public func mirrorCallPeerNames() {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
         for groupIdHex in groups.keys {
             CallPeerNameMirror.mirror(
+                accountIdB64: accountIdB64,
                 groupIdHex: groupIdHex,
                 name: conversationTitle(groupIdHex: groupIdHex)
             )

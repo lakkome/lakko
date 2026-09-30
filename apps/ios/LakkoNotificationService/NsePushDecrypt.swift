@@ -357,7 +357,7 @@ public protocol NsePushDecryptDeps {
     ///
     /// Defaulted so the decrypt core keeps compiling against a dependency
     /// object that predates calls; `nil` simply means the alert is unnamed.
-    func callerName(groupIdHex: String) -> String?
+    func callerName(accountIdB64: String, groupIdHex: String) -> String?
 
     /// `docs/ux/calls.md` section 2.1 — does this conversation carry the mute
     /// flag? Read from the App Group mirror the APP writes
@@ -368,12 +368,12 @@ public protocol NsePushDecryptDeps {
     /// an unprovisioned suite or a dependency object that predates mute all
     /// answer "not muted", so the call rings. Failing the other way would
     /// swallow calls because a file was not there.
-    func isMuted(groupIdHex: String) -> Bool
+    func isMuted(accountIdB64: String, groupIdHex: String) -> Bool
 }
 
 public extension NsePushDecryptDeps {
-    func callerName(groupIdHex: String) -> String? { nil }
-    func isMuted(groupIdHex: String) -> Bool { false }
+    func callerName(accountIdB64: String, groupIdHex: String) -> String? { nil }
+    func isMuted(accountIdB64: String, groupIdHex: String) -> Bool { false }
 }
 
 /// Produce a real decrypted notification preview for a GroupMessage wake, or
@@ -539,13 +539,13 @@ public func decryptPushOutcome(
     if let latestCall, let callIdHex = latestCall.row.callIdHex {
         switch latestCall.row.kind {
         case .callOffer(let video):
-            let title = deps.callerName(groupIdHex: realGroupHex) ?? nseUnknownCallerTitle
+            let title = deps.callerName(accountIdB64: account.accountIdB64, groupIdHex: realGroupHex) ?? nseUnknownCallerTitle
             // `docs/ux/calls.md` section 2.1, through the one rule every
             // client runs. The age is the DS row's own stamp — this fetch is a
             // catch-up from the app's cursor, so the newest call row here can
             // easily be an offer from a call that is long over.
             let verdict = nseRingVerdict(
-                muted: deps.isMuted(groupIdHex: realGroupHex),
+                muted: deps.isMuted(accountIdB64: account.accountIdB64, groupIdHex: realGroupHex),
                 createdAt: latestCall.createdAt,
                 nowMs: nowMs)
             switch verdict {

@@ -143,8 +143,8 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
     /// lock screen, from the App Group mirror the APP writes
     /// (``CallPeerNameMirror``). READ-ONLY; this process resolves no names and
     /// writes nothing (C-59). Absent → the alert is unnamed.
-    func callerName(groupIdHex: String) -> String? {
-        CallPeerNameMirror.name(groupIdHex: groupIdHex)
+    func callerName(accountIdB64: String, groupIdHex: String) -> String? {
+        CallPeerNameMirror.name(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
     }
 
     /// `docs/ux/calls.md` section 2.1 — the App Group muted-conversation
@@ -152,8 +152,8 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
     /// process holds no thread flags and writes none (C-59). Absent → not
     /// muted → the call rings, which is the only direction a missing mirror
     /// may fail in.
-    func isMuted(groupIdHex: String) -> Bool {
-        ConversationMuteMirror.isMuted(groupIdHex: groupIdHex)
+    func isMuted(accountIdB64: String, groupIdHex: String) -> Bool {
+        ConversationMuteMirror.isMuted(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
     }
 
     /// Decode a lowercase-hex string into bytes. `nil` on any malformed input

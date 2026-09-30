@@ -576,16 +576,14 @@ struct AppRoot: View, Equatable {
                 services.callHost.reset()
                 services.groupCallHost.reset()
                 services.linkCallHost.reset()
-                // …and with it anything the phone is still showing as a call,
-                // plus the names mirrored for a lock screen that now belongs to
-                // no account (``CallPeerNameMirror``) and the muted set that
-                // decided which of its calls were allowed to ring
-                // (``ConversationMuteMirror``) — left behind, it would silence
-                // the next account's calls in a conversation it never had.
+                // …and with it anything the phone is still showing as a call.
+                // The lock-screen name mirror (``CallPeerNameMirror``) and the
+                // muted set (``ConversationMuteMirror``) are per account since
+                // 2026-09-30, so they stay for the next sign-in of the same
+                // account and can never reach another; forget-device removes
+                // the account's rows (``AuthRepository/forgetDevice()``).
                 CallKitProvider.shared.endAll()
                 CallKitCallRegistry.shared.reset()
-                CallPeerNameMirror.clearAll()
-                ConversationMuteMirror.clearAll()
             }
 
         case .session(let account) where pendingSignupPhrase != nil:

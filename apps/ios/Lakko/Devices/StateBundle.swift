@@ -40,7 +40,15 @@ public enum StateBundle {
     public static let pollTimeoutSeconds: TimeInterval = 20
     static let perRequestLongPollSeconds = 5
     static let maxBundleBytes = 1 << 20
-    static let knownGroupsKey = "lakko.pairing.known-groups.v1"
+    /// Per-account prefix of the known group ids; the account id follows.
+    static let knownGroupsKeyPrefix = "lakko.pairing.known-groups.v2."
+    /// The device-wide key the known group ids used before they were per
+    /// account. Never read; removed by ``clearKnownGroupIds(accountIdB64:defaults:)``.
+    static let legacyKnownGroupsKey = "lakko.pairing.known-groups.v1"
+
+    static func knownGroupsKey(accountIdB64: String) -> String {
+        knownGroupsKeyPrefix + accountIdB64
+    }
 
     // MARK: - Wire shape (field names match the web bundle)
 
@@ -222,7 +230,7 @@ public enum StateBundle {
                 pins += 1
             }
         }
-        saveKnownGroupIds(bundle.knownGroupIdsB64)
+        saveKnownGroupIds(bundle.knownGroupIdsB64, accountIdB64: accountIdB64)
         // The contacts ride in the notification too: a live repository merges
         // them into its state (whose next save would otherwise overwrite the
         // store write above).
@@ -233,31 +241,58 @@ public enum StateBundle {
     }
 
     // MARK: - Known group ids (drives the one "Synchronizing..." label)
+    //
+    // Per account (2026-09-30): the ids name the groups of the account that was
+    // paired, so they are filed under it, the way ``AcceptedContactsStore``
+    // files the contacts. They used to sit under one device-wide key, so a
+    // second account signed in on the same phone showed "Synchronizing..." for
+    // the first account's groups. A caller that does not name the account acts
+    // on the bound one (``AcceptedContactsStore/boundAccountIdB64``); with none,
+    // reads are empty and writes do nothing.
 
-    public static func saveKnownGroupIds(_ idsB64: [String], defaults: UserDefaults = .standard) {
+    static func saveKnownGroupIds(
+        _ idsB64: [String],
+        accountIdB64: String? = AcceptedContactsStore.boundAccountIdB64,
+        defaults: UserDefaults = .standard
+    ) {
+        guard let accountIdB64 else { return }
+        let key = knownGroupsKey(accountIdB64: accountIdB64)
         if idsB64.isEmpty {
-            defaults.removeObject(forKey: knownGroupsKey)
+            defaults.removeObject(forKey: key)
         } else {
-            defaults.set(idsB64, forKey: knownGroupsKey)
+            defaults.set(idsB64, forKey: key)
         }
     }
 
-    public static func loadKnownGroupIds(defaults: UserDefaults = .standard) -> [String] {
-        defaults.stringArray(forKey: knownGroupsKey) ?? []
+    static func loadKnownGroupIds(
+        accountIdB64: String? = AcceptedContactsStore.boundAccountIdB64,
+        defaults: UserDefaults = .standard
+    ) -> [String] {
+        guard let accountIdB64 else { return [] }
+        return defaults.stringArray(forKey: knownGroupsKey(accountIdB64: accountIdB64)) ?? []
+    }
+
+    /// Forget-device: drop one account's known group ids (and the old
+    /// device-wide row, which nothing reads any more).
+    static func clearKnownGroupIds(accountIdB64: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: knownGroupsKey(accountIdB64: accountIdB64))
+        defaults.removeObject(forKey: legacyKnownGroupsKey)
     }
 
     /// How many known groups this device has not joined yet. Clears the stored
     /// list once every known group is held, so the label cannot outlive its
     /// cause. `joinedGroupIdHexes` are this device's hex group ids.
-    public static func pendingKnownGroups(
+    static func pendingKnownGroups(
         joinedGroupIdHexes: [String],
+        accountIdB64: String? = AcceptedContactsStore.boundAccountIdB64,
         defaults: UserDefaults = .standard
     ) -> Int {
-        let known = loadKnownGroupIds(defaults: defaults)
+        guard let accountIdB64 else { return 0 }
+        let known = loadKnownGroupIds(accountIdB64: accountIdB64, defaults: defaults)
         guard !known.isEmpty else { return 0 }
         let joined = Set(joinedGroupIdHexes.compactMap { hexDecode($0) }.map { base64Encode($0) })
         let pending = known.filter { !joined.contains($0) }
-        if pending.isEmpty { saveKnownGroupIds([], defaults: defaults) }
+        if pending.isEmpty { saveKnownGroupIds([], accountIdB64: accountIdB64, defaults: defaults) }
         return pending.count
     }
 

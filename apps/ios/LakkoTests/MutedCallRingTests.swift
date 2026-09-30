@@ -39,21 +39,24 @@ final class MutedCallRingTests: XCTestCase {
 
     // MARK: - The mirror
 
+    private let acct = "acct-A"
+    private let other = "acct-B"
+
     /// The one that matters most. A missing mirror must ring: an unwanted ring
     /// is an annoyance, a swallowed call is a call the person never finds out
     /// about, and "the file is not there yet" is an ordinary state on a fresh
     /// install and in an unprovisioned App Group.
     func testAMissingMirrorRings() {
-        XCTAssertFalse(ConversationMuteMirror.isMuted(groupIdHex: "aa11", defaults: defaults))
-        XCTAssertFalse(ConversationMuteMirror.isMuted(groupIdHex: "aa11", defaults: nil))
-        ConversationMuteMirror.replaceAll(mutedGroupIdsHex: ["aa11"], defaults: nil)
-        XCTAssertFalse(ConversationMuteMirror.isMuted(groupIdHex: "aa11", defaults: nil))
+        XCTAssertFalse(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "aa11", defaults: defaults))
+        XCTAssertFalse(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "aa11", defaults: nil))
+        ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: ["aa11"], defaults: nil)
+        XCTAssertFalse(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "aa11", defaults: nil))
     }
 
     func testAMirroredConversationReadsAsMuted() {
-        ConversationMuteMirror.replaceAll(mutedGroupIdsHex: ["aa11"], defaults: defaults)
-        XCTAssertTrue(ConversationMuteMirror.isMuted(groupIdHex: "aa11", defaults: defaults))
-        XCTAssertFalse(ConversationMuteMirror.isMuted(groupIdHex: "bb22", defaults: defaults))
+        ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: ["aa11"], defaults: defaults)
+        XCTAssertTrue(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "aa11", defaults: defaults))
+        XCTAssertFalse(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "bb22", defaults: defaults))
     }
 
     /// The reason the write is whole-set and not per-row: an unmute, including
@@ -61,37 +64,62 @@ final class MutedCallRingTests: XCTestCase {
     /// REMOVE the row. A per-row write would leave the old one behind and go
     /// on silencing a conversation the person un-silenced.
     func testUnmutingRemovesTheRowRatherThanLeavingItBehind() {
-        ConversationMuteMirror.replaceAll(mutedGroupIdsHex: ["aa11", "bb22"], defaults: defaults)
-        ConversationMuteMirror.replaceAll(mutedGroupIdsHex: ["bb22"], defaults: defaults)
-        XCTAssertFalse(ConversationMuteMirror.isMuted(groupIdHex: "aa11", defaults: defaults))
-        XCTAssertTrue(ConversationMuteMirror.isMuted(groupIdHex: "bb22", defaults: defaults))
+        ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: ["aa11", "bb22"], defaults: defaults)
+        ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: ["bb22"], defaults: defaults)
+        XCTAssertFalse(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "aa11", defaults: defaults))
+        XCTAssertTrue(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "bb22", defaults: defaults))
 
-        ConversationMuteMirror.replaceAll(mutedGroupIdsHex: [], defaults: defaults)
-        XCTAssertFalse(ConversationMuteMirror.isMuted(groupIdHex: "bb22", defaults: defaults))
+        ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: [], defaults: defaults)
+        XCTAssertFalse(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "bb22", defaults: defaults))
     }
 
     /// The writer and the readers reach the key from different places — the
     /// sync repository's flag map, a DS row's group hex, a push route — and
     /// nothing guarantees they agree on case.
     func testTheKeyIsCaseInsensitive() {
-        ConversationMuteMirror.replaceAll(mutedGroupIdsHex: ["AA11"], defaults: defaults)
-        XCTAssertTrue(ConversationMuteMirror.isMuted(groupIdHex: "aa11", defaults: defaults))
+        ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: ["AA11"], defaults: defaults)
+        XCTAssertTrue(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "aa11", defaults: defaults))
     }
 
-    /// A row left behind after a logout would silence the next account's calls
-    /// in a conversation it has never heard of.
-    func testClearAllLeavesNothingBehind() {
-        ConversationMuteMirror.replaceAll(mutedGroupIdsHex: ["aa11", "bb22"], defaults: defaults)
-        ConversationMuteMirror.clearAll(defaults: defaults)
-        XCTAssertFalse(ConversationMuteMirror.isMuted(groupIdHex: "aa11", defaults: defaults))
-        XCTAssertFalse(ConversationMuteMirror.isMuted(groupIdHex: "bb22", defaults: defaults))
+    /// Two accounts on one phone never see each other's mutes: a mute one
+    /// account set does not silence the other's call in the same group, and
+    /// one account republishing its set leaves the other's rows alone.
+    func testTwoAccountsNeverSeeEachOthersMutes() {
+        ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: ["aa11"], defaults: defaults)
+        XCTAssertFalse(ConversationMuteMirror.isMuted(accountIdB64: other, groupIdHex: "aa11", defaults: defaults))
+
+        ConversationMuteMirror.replaceAll(accountIdB64: other, mutedGroupIdsHex: ["bb22"], defaults: defaults)
+        XCTAssertTrue(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "aa11", defaults: defaults))
+        XCTAssertFalse(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "bb22", defaults: defaults))
+        XCTAssertTrue(ConversationMuteMirror.isMuted(accountIdB64: other, groupIdHex: "bb22", defaults: defaults))
+    }
+
+    /// No account: nothing is muted and nothing is written.
+    func testNoAccountReadsNothingAndWritesNothing() {
+        ConversationMuteMirror.replaceAll(accountIdB64: nil, mutedGroupIdsHex: ["aa11"], defaults: defaults)
+        XCTAssertFalse(ConversationMuteMirror.isMuted(accountIdB64: nil, groupIdHex: "aa11", defaults: defaults))
+        XCTAssertTrue(defaults.dictionaryRepresentation().keys
+            .filter { $0.hasPrefix("me.lakko.conversation-muted.") }.isEmpty)
+    }
+
+    /// Forget-device removes the forgotten account's rows (and the old
+    /// device-wide rows) and nothing else.
+    func testForgetClearsOnlyThatAccount() {
+        ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: ["aa11", "bb22"], defaults: defaults)
+        ConversationMuteMirror.replaceAll(accountIdB64: other, mutedGroupIdsHex: ["aa11"], defaults: defaults)
+        defaults.set(true, forKey: ConversationMuteMirror.legacyKeyPrefix + "aa11")
+        ConversationMuteMirror.clear(accountIdB64: acct, defaults: defaults)
+        XCTAssertFalse(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "aa11", defaults: defaults))
+        XCTAssertFalse(ConversationMuteMirror.isMuted(accountIdB64: acct, groupIdHex: "bb22", defaults: defaults))
+        XCTAssertTrue(ConversationMuteMirror.isMuted(accountIdB64: other, groupIdHex: "aa11", defaults: defaults))
+        XCTAssertNil(defaults.object(forKey: ConversationMuteMirror.legacyKeyPrefix + "aa11"))
     }
 
     /// It carries the muted set and nothing else — not the conversation list.
     /// An unmuted conversation leaves no row, so the shared container learns
     /// nothing about it.
     func testOnlyMutedConversationsLeaveARow() {
-        ConversationMuteMirror.replaceAll(mutedGroupIdsHex: ["aa11"], defaults: defaults)
+        ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: ["aa11"], defaults: defaults)
         let keys = defaults.dictionaryRepresentation().keys
             .filter { $0.hasPrefix("me.lakko.conversation-muted.") }
         XCTAssertEqual(keys.count, 1)
@@ -195,14 +223,18 @@ final class MutedCallRingTests: XCTestCase {
     /// a call be reported.
     func testTheVoipWakeIsSilentOnlyForAMutedConversation() {
         let group = String(repeating: "a", count: 64)
-        ConversationMuteMirror.replaceAll(mutedGroupIdsHex: [group], defaults: defaults)
+        ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: [group], defaults: defaults)
 
         XCTAssertTrue(VoipPushRegistrar.wakeIsMuted(
             VoipWakePayload(groupHex: group, pointer: 7, isCallWake: true),
-            defaults: defaults))
+            signedInAccountIdB64: acct, defaults: defaults))
         XCTAssertFalse(VoipPushRegistrar.wakeIsMuted(
             VoipWakePayload(groupHex: String(repeating: "b", count: 64), pointer: 7, isCallWake: true),
-            defaults: defaults))
+            signedInAccountIdB64: acct, defaults: defaults))
+        // Another account's mute never silences this one's call.
+        XCTAssertFalse(VoipPushRegistrar.wakeIsMuted(
+            VoipWakePayload(groupHex: group, pointer: 7, isCallWake: true),
+            signedInAccountIdB64: other, defaults: defaults))
     }
 
     /// A wake that names no conversation rings. There is nothing to look up,

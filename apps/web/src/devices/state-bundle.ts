@@ -22,6 +22,7 @@
  */
 import { DsClient, DsHttpError, DsNetworkError } from "../ds/client";
 import {
+  boundContactsAccount,
   loadAccepted,
   readPin,
   setPin,
@@ -38,7 +39,10 @@ export const STATE_EXPORTER_KEY_LENGTH = 32;
 const STATE_ROW_MAGIC = new TextEncoder().encode("lakko/state-bundle-row/v1\0");
 const STATE_POLL_TIMEOUT_MS = 20_000;
 const PER_REQUEST_LONG_POLL_SECS = 5;
-const KNOWN_GROUPS_KEY = "lakko.pairing.known-groups.v1";
+/** Prefix of the per-account known-group list; the account id follows. */
+const KNOWN_GROUPS_PREFIX = "lakko.pairing.known-groups.v2.";
+/** The retired device-wide list. Never read; dropped by Forget device. */
+const RETIRED_KNOWN_GROUPS_KEY = "lakko.pairing.known-groups.v1";
 const MAX_BUNDLE_BYTES = 1 << 20;
 
 /** A pinned account key as carried in the bundle. */
@@ -161,24 +165,43 @@ export function applyStateBundle(
       // not ours to force.
     }
   }
-  saveKnownGroupIds(bundle.knownGroupIdsB64);
+  saveKnownGroupIds(bundle.knownGroupIdsB64, ownerAccountIdB64);
   return { contacts, pins };
 }
 
 // ---- known group ids (drives the one "Synchronizing..." label) -------------
+//
+// The list belongs to the account the bundle was paired into, not to the
+// browser: `lakko.pairing.known-groups.v2.<accountIdB64>`. It used to be one
+// device-wide row, so a second account signed in on the same browser showed
+// "Synchronizing..." for the first account's groups (2026-09-30).
+//
+// Which account a call means: the trailing `owner` argument, otherwise the
+// signed-in account bound through `bindContactsAccount`. With no account a
+// read is empty and a write is a no-op. Log out keeps the list; Forget device
+// drops it ({@link clearKnownGroupIds}).
 
-export function saveKnownGroupIds(idsB64: readonly string[]): void {
+function knownGroupsOwner(owner: string | undefined): string | null {
+  const account = owner ?? boundContactsAccount();
+  return account === null || account.length === 0 ? null : account;
+}
+
+export function saveKnownGroupIds(idsB64: readonly string[], owner?: string): void {
+  const account = knownGroupsOwner(owner);
+  if (account === null) return;
   try {
-    if (idsB64.length === 0) localStorage.removeItem(KNOWN_GROUPS_KEY);
-    else localStorage.setItem(KNOWN_GROUPS_KEY, JSON.stringify(idsB64));
+    if (idsB64.length === 0) localStorage.removeItem(KNOWN_GROUPS_PREFIX + account);
+    else localStorage.setItem(KNOWN_GROUPS_PREFIX + account, JSON.stringify(idsB64));
   } catch {
     /* storage unavailable: the label falls back to "no chats yet" */
   }
 }
 
-export function loadKnownGroupIds(): string[] {
+export function loadKnownGroupIds(owner?: string): string[] {
+  const account = knownGroupsOwner(owner);
+  if (account === null) return [];
   try {
-    const raw = localStorage.getItem(KNOWN_GROUPS_KEY);
+    const raw = localStorage.getItem(KNOWN_GROUPS_PREFIX + account);
     if (raw === null) return [];
     const parsed: unknown = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
@@ -187,15 +210,29 @@ export function loadKnownGroupIds(): string[] {
   }
 }
 
-/** The known groups this device has not joined yet. Clears the stored list
- *  once every known group is held, so the label cannot outlive its cause. */
-export function pendingKnownGroups(joinedIdsB64: readonly string[]): number {
-  const known = loadKnownGroupIds();
+/** The known groups this device has not joined yet, for `owner` (default:
+ *  the signed-in account). Clears the stored list once every known group is
+ *  held, so the label cannot outlive its cause. */
+export function pendingKnownGroups(joinedIdsB64: readonly string[], owner?: string): number {
+  const account = knownGroupsOwner(owner);
+  if (account === null) return 0;
+  const known = loadKnownGroupIds(account);
   if (known.length === 0) return 0;
   const joined = new Set(joinedIdsB64);
   const pending = known.filter((id) => !joined.has(id));
-  if (pending.length === 0) saveKnownGroupIds([]);
+  if (pending.length === 0) saveKnownGroupIds([], account);
   return pending.length;
+}
+
+/** Forget device: drop `accountIdB64`'s list and the retired device-wide
+ *  one. Another account's list on this browser is left alone. */
+export function clearKnownGroupIds(accountIdB64: string): void {
+  try {
+    localStorage.removeItem(KNOWN_GROUPS_PREFIX + accountIdB64);
+    localStorage.removeItem(RETIRED_KNOWN_GROUPS_KEY);
+  } catch {
+    /* storage unavailable: nothing to clear */
+  }
 }
 
 // ---- the tagged mailbox row ------------------------------------------------

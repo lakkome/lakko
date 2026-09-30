@@ -154,6 +154,7 @@ public fun rememberChannelsUiState(): ChannelsUiState {
             publisherPrefs = ChannelPublisherKeyStore.encryptedPrefs(context),
             logStore = SharedPreferencesChannelLogStore(subscriberPrefs),
             publisher = ChannelPublisherIdentity.onDevice(context),
+            coPublishedMarks = CoPublishedJournals.onDevice(context),
         )
     }
 }
@@ -1554,7 +1555,7 @@ public fun ChannelManageScreen(
             // the approve path register epochs on it, and a registration ahead
             // of the claim is refused on a journal still unclaimed.
             try {
-                val coPublished = CoPublishedJournals.onDevice(context)
+                val coPublished = CoPublishedJournals.onDevice(context) { state.boundAccount }
                 pub.withIdentity(persist = false) { id ->
                     DsClient().use { ds -> CoPublisher.claimJournal(ds, id, opened, coPublished) }
                 }
@@ -2123,7 +2124,7 @@ public fun JoinCoPublisherScreen(
     val context = LocalContext.current
     // ADR-0057 — marks the channel's journal as co-published, so this device
     // never claims it.
-    val coPublished = remember(context) { CoPublishedJournals.onDevice(context) }
+    val coPublished = remember(context, state) { CoPublishedJournals.onDevice(context) { state.boundAccount } }
 
     Scaffold(topBar = { ChannelTopBar(title = "Join as co-publisher", onBack = onBack) }) { inner ->
         Column(

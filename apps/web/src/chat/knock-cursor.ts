@@ -8,7 +8,7 @@
  * Its own cursor, separate from the journal's: the knock queue is a different
  * DS table with its own id sequence, so a journal id means nothing in it.
  *
- * Persisted per group in `localStorage` rather than kept in memory, because
+ * Persisted per account and group in `localStorage` rather than kept in memory, because
  * re-feeding every knock after a reload would resurface a request the admin
  * already REJECTED (a reject is a local discard of the retained proposal; the
  * knock row stays on the DS for its seven days, and at an unchanged epoch the
@@ -17,12 +17,45 @@
  * by the quarantine — so a failed write costs nothing worse than a re-read.
  */
 
-const KEY_PREFIX = "lakko.ds.knock-cursor.v1:";
+import { boundContactsAccount } from "../contacts/local-store";
 
-/** The last knock id this device consumed for `groupIdB64`, `0` when none. */
-export function readKnockCursor(groupIdB64: string): number {
+/**
+ * One row per (account, group): `lakko.ds.knock-cursor.v2:<account>:<group>`.
+ *
+ * The cursor is the reading ACCOUNT's progress, not the browser's: two
+ * accounts that both administer one group each read its knock queue with
+ * their own MLS state, and a request one of them rejected is not rejected by
+ * the other. The v1 row was keyed by the group alone, so a second account
+ * signed in on the same browser started where the first had stopped and
+ * never saw the requests the first had consumed (2026-09-30).
+ *
+ * Which account a call means: the trailing `owner` argument, otherwise the
+ * signed-in account bound through `bindContactsAccount`
+ * (`contacts/local-store.ts`). With no account a read is `0` and a write is
+ * a no-op. Log out keeps the rows; Forget device drops the account's
+ * ({@link clearKnockCursorsForAccount}).
+ */
+const KEY_PREFIX = "lakko.ds.knock-cursor.v2:";
+/** The retired device-wide rows (`<prefix><group>`). Never read; dropped by
+ *  Forget device. */
+const RETIRED_PREFIX = "lakko.ds.knock-cursor.v1:";
+
+function accountOf(owner: string | undefined): string | null {
+  const account = owner ?? boundContactsAccount();
+  return account === null || account.length === 0 ? null : account;
+}
+
+function keyFor(account: string, groupIdB64: string): string {
+  return `${KEY_PREFIX}${account}:${groupIdB64}`;
+}
+
+/** The last knock id `owner` (default: the signed-in account) consumed for
+ *  `groupIdB64` on this browser, `0` when none or with no account. */
+export function readKnockCursor(groupIdB64: string, owner?: string): number {
+  const account = accountOf(owner);
+  if (account === null) return 0;
   try {
-    const raw = globalThis.localStorage?.getItem(`${KEY_PREFIX}${groupIdB64}`);
+    const raw = globalThis.localStorage?.getItem(keyFor(account, groupIdB64));
     const n = raw === null || raw === undefined ? 0 : Number(raw);
     return Number.isFinite(n) && n >= 0 ? n : 0;
   } catch {
@@ -30,14 +63,35 @@ export function readKnockCursor(groupIdB64: string): number {
   }
 }
 
-/** Record that knocks up to `id` were consumed. Never moves backward. */
-export function writeKnockCursor(groupIdB64: string, id: number): void {
+/** Record that knocks up to `id` were consumed. Never moves backward. A
+ *  no-op with no account. */
+export function writeKnockCursor(groupIdB64: string, id: number, owner?: string): void {
+  const account = accountOf(owner);
+  if (account === null) return;
   if (!Number.isFinite(id) || id < 0) return;
-  if (id <= readKnockCursor(groupIdB64)) return;
+  if (id <= readKnockCursor(groupIdB64, account)) return;
   try {
-    globalThis.localStorage?.setItem(`${KEY_PREFIX}${groupIdB64}`, String(id));
+    globalThis.localStorage?.setItem(keyFor(account, groupIdB64), String(id));
   } catch {
     /* storage unavailable: the next poll re-reads, which is harmless */
+  }
+}
+
+/** Forget device: drop every knock cursor of `accountIdB64` and the retired
+ *  device-wide rows. Another account's cursors are left alone. */
+export function clearKnockCursorsForAccount(accountIdB64: string): void {
+  try {
+    const store = globalThis.localStorage;
+    if (store === undefined) return;
+    const own = `${KEY_PREFIX}${accountIdB64}:`;
+    const victims: string[] = [];
+    for (let i = 0; i < store.length; i += 1) {
+      const k = store.key(i);
+      if (k !== null && (k.startsWith(own) || k.startsWith(RETIRED_PREFIX))) victims.push(k);
+    }
+    for (const k of victims) store.removeItem(k);
+  } catch {
+    /* storage unavailable: nothing to clear */
   }
 }
 

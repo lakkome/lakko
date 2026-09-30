@@ -168,7 +168,7 @@ public final class NotificationService: UNNotificationServiceExtension {
         // anywhere supported: the gateway wakes every device the same way, and
         // nothing on this path had ever read the mute flag. A muted chat rang
         // a closed phone at full volume for as long as that sentence stood.
-        // The flag is now read (``NsePushDecryptDeps/isMuted(groupIdHex:)``,
+        // The flag is now read (``NsePushDecryptDeps/isMuted(accountIdB64:groupIdHex:)``,
         // through the App Group mirror) and a muted call lands in
         // ``deliverSilentCallAlert(_:into:)`` instead.
         best.interruptionLevel = .timeSensitive

@@ -78,8 +78,8 @@ final class NseCallAlertTests: XCTestCase {
         ) async throws -> [NseFetchedRow] { rows }
         func startCursor(accountIdB64: String, groupHex: String) -> Int64? { nil }
         func isAntiCensorshipArmed() -> Bool { false }
-        func callerName(groupIdHex: String) -> String? { mirroredName }
-        func isMuted(groupIdHex: String) -> Bool { muted }
+        func callerName(accountIdB64: String, groupIdHex: String) -> String? { mirroredName }
+        func isMuted(accountIdB64: String, groupIdHex: String) -> Bool { muted }
     }
 
     /// A parser that answers from a canned table keyed on the row's first byte.

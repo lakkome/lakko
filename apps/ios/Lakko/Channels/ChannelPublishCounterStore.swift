@@ -32,7 +32,7 @@ import Security
 ///
 /// ## Posture
 ///
-///   * `kSecClassGenericPassword`, one item holding the whole JSON-encoded
+///   * `kSecClassGenericPassword`, one item per account holding the whole JSON-encoded
 ///     `[PersistedPublishCounter]` blob keyed per channel (the same single-blob
 ///     shape ``ChannelPublisherKeyStore`` uses).
 ///   * `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` — device-bound,
@@ -44,17 +44,24 @@ public enum ChannelPublishCounterStore {
     /// Service tag — versioned so a future layout change can land beside v1.
     public static let serviceTag: String = "me.lakko.channel-publish-counters.v1"
 
-    /// Single account slot — the blob is global to the install, keyed per
-    /// channel inside (matching the ``ChannelPublisherKeyStore`` shape).
-    private static let account: String = "publish-counters"
+    /// The item's account slot is `"publish-counters|<accountIdB64>"`: one blob per
+    /// Lakko ACCOUNT, keyed per channel inside (2026-09-30). The blob used to
+    /// be global to the install (slot `"publish-counters"`), so a second account signed
+    /// in on the same phone inherited the first one's channel keys. That
+    /// device-wide item is never read now; ``deleteLegacy()`` removes it.
+    static let legacyAccount: String = "publish-counters"
+
+    static func itemAccount(_ accountIdB64: String) -> String {
+        legacyAccount + "|" + accountIdB64
+    }
 
     /// Persist the encoded counter `blob`, replacing any existing item.
-    public static func save(_ blob: Data) {
-        delete()
+    public static func save(_ blob: Data, accountIdB64: String) {
+        delete(accountIdB64: accountIdB64)
         let addQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: serviceTag,
-            kSecAttrAccount: account,
+            kSecAttrAccount: itemAccount(accountIdB64),
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecValueData: blob,
         ]
@@ -65,11 +72,11 @@ public enum ChannelPublishCounterStore {
     }
 
     /// Read the persisted counter blob, or `nil` when absent.
-    public static func load() -> Data? {
+    public static func load(accountIdB64: String) -> Data? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: serviceTag,
-            kSecAttrAccount: account,
+            kSecAttrAccount: itemAccount(accountIdB64),
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne,
         ]
@@ -83,11 +90,22 @@ public enum ChannelPublishCounterStore {
 
     /// Delete the persisted blob (remove-channel / reset / logout /
     /// `forgetDevice`).
-    public static func delete() {
+    public static func delete(accountIdB64: String) {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: serviceTag,
-            kSecAttrAccount: account,
+            kSecAttrAccount: itemAccount(accountIdB64),
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
+    /// Delete the device-wide item this store used before it was per account.
+    /// Nothing reads it; forget-device removes it.
+    public static func deleteLegacy() {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: serviceTag,
+            kSecAttrAccount: legacyAccount,
         ]
         SecItemDelete(query as CFDictionary)
     }

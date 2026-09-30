@@ -5728,8 +5728,9 @@ public class ChatRepository(
     public fun isSynchronizing(): Boolean {
         val joined = joinedGroupIdsHex()
         val bundle = me.lakko.app.devices.StateBundle
-        if (bundle.pendingKnownGroups(applicationContext, joined) > 0) return true
-        return bundle.restoredAwaitingChats(applicationContext, joined.size)
+        val account = currentAccountIdB64.get()
+        if (bundle.pendingKnownGroups(applicationContext, account, joined) > 0) return true
+        return bundle.restoredAwaitingChats(applicationContext, account, joined.size)
     }
 
     /** What a device fan-out did, per chat. */
@@ -6130,7 +6131,7 @@ public class ChatRepository(
         // ADR-0048 — the names learned on this device and this account's own
         // profile go with the device.
         try {
-            profileDirectory.clear()
+            if (accountIdB64 != null) profileDirectory.forgetAccount(accountIdB64)
             if (rawAccountId != null) {
                 me.lakko.app.profile.OwnProfileStore.delete(applicationContext, rawAccountId)
             }
@@ -6167,6 +6168,19 @@ public class ChatRepository(
             } catch (_: Throwable) {
                 // Best-effort wipe — same posture as
                 // snapshotStore.deleteSnapshot above.
+            }
+            // The account's local presentation facts go with the device too:
+            // the pairing known-group ids and restored marker, the persisted
+            // conversation kinds, the created-as-group flags, the selected
+            // folder tab and the played marks. Other accounts' stay.
+            try {
+                me.lakko.app.devices.StateBundle.forgetAccount(applicationContext, accountIdB64)
+                ConversationKindStore.deleteAccount(applicationContext, accountIdB64)
+                me.lakko.app.ui.chat.GroupPresentationStore.deleteAccount(applicationContext, accountIdB64)
+                me.lakko.app.ui.chat.FolderTabPrefs.deleteAccount(applicationContext, accountIdB64)
+                me.lakko.app.media.MediaPrefs.get(applicationContext).forgetAccount(accountIdB64)
+            } catch (_: Throwable) {
+                // best-effort
             }
             // Phase 2a3f1 — drop the plaintext message log
             // too. The Keystore wrap key is shared across

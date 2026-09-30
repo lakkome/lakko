@@ -10,11 +10,15 @@
  *   - contract point 7, members read knocks: an owner / admin also reads the
  *     group's knock queue and feeds each row to the same receive path, which
  *     turns an external-join proposal into the `externalJoinRequest` event
- *     the members panel lists; a plain member does not read it.
+ *     the members panel lists; a plain member does not read it;
+ *   - the knock cursor is the signed-in account's: with no account bound the
+ *     queue is not read at all, and one account's progress is not another's.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChatClient } from "./client";
+import { bindContactsAccount } from "../contacts/local-store";
+import { resetKnockReadSlotsForTests } from "./knock-cursor";
 import type { DsClient } from "../ds/client";
 import { fakeAccessSigner } from "../ds/access-test-doubles";
 import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
@@ -105,7 +109,32 @@ function chat(ds: DsClient): ChatClient {
 /** Let anything fire-and-forget settle. */
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
+/** The signed-in account the knock cursor is recorded for. */
+const ACCOUNT_A = "YWNjb3VudC1hLTAwMDAwMA==";
+const ACCOUNT_B = "YWNjb3VudC1iLTAwMDAwMA==";
+
+/** A working in-memory `localStorage` (the node global has no `getItem`). */
+function installLocalStorage(): void {
+  const data = new Map<string, string>();
+  (globalThis as unknown as { localStorage: Storage }).localStorage = {
+    get length() {
+      return data.size;
+    },
+    clear: () => data.clear(),
+    getItem: (k: string) => data.get(k) ?? null,
+    key: (i: number) => [...data.keys()][i] ?? null,
+    removeItem: (k: string) => void data.delete(k),
+    setItem: (k: string, v: string) => void data.set(k, String(v)),
+  };
+}
+
+beforeEach(() => {
+  installLocalStorage();
+  bindContactsAccount(ACCOUNT_A);
+});
+
 afterEach(() => {
+  bindContactsAccount(null);
   vi.clearAllMocks();
 });
 
@@ -173,5 +202,39 @@ describe("ADR-0053 contract point 7 — an owner or admin reads the knock queue"
 
     expect(knockReads).toEqual([]);
     expect(result.events).toEqual([]);
+  });
+
+  it("with no signed-in account the knock queue is not read, so nothing is re-fed", async () => {
+    bindContactsAccount(null);
+    const g = fakeGroup(0);
+    const { ds, knockReads } = fakeDs([], [row(1, [0x1b, 0x42])]);
+
+    const result = await chat(ds).pollMessages(null, g.group, 0);
+
+    expect(knockReads).toEqual([]);
+    expect(result.events).toEqual([]);
+  });
+
+  it("one account's knock progress is not another's on the same browser", async () => {
+    const g = fakeGroup(0);
+    const first = fakeDs([], [row(4, [0x1b, 0x42])]);
+    await chat(first.ds).pollMessages(null, g.group, 0);
+    expect(first.knockReads).toEqual([0]);
+
+    // Account B signs in on the same browser and administers the same group:
+    // it starts from its own cursor, not from where A stopped.
+    bindContactsAccount(ACCOUNT_B);
+    resetKnockReadSlotsForTests();
+    const second = fakeDs([], [row(4, [0x1b, 0x43])]);
+    const result = await chat(second.ds).pollMessages(null, g.group, 0);
+    expect(second.knockReads).toEqual([0]);
+    expect(result.events.filter((e) => e.kind === "externalJoinRequest")).toHaveLength(1);
+
+    // And A, signed in again, resumes after the row it consumed.
+    bindContactsAccount(ACCOUNT_A);
+    resetKnockReadSlotsForTests();
+    const third = fakeDs([], []);
+    await chat(third.ds).pollMessages(null, g.group, 0);
+    expect(third.knockReads).toEqual([4]);
   });
 });

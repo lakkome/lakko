@@ -591,29 +591,57 @@ public enum CoPublisherError: Error, LocalizedError {
     }
 }
 
-/// ADR-0057 — PublisherGroup journals this device joined as a CO-publisher.
-/// Only the channel owner claims a PublisherGroup journal: a co-publisher's
-/// root is derived from its own account seed, so its claim would squat the
-/// journal against the owner. A PublisherGroup exposes no role table, so the
-/// device remembers that it asked to co-publish. Plain `UserDefaults`: a
-/// journal id is a public DS address.
+/// ADR-0057 — PublisherGroup journals an ACCOUNT on this device joined as a
+/// CO-publisher. Only the channel owner claims a PublisherGroup journal: a
+/// co-publisher's root is derived from its own account seed, so its claim
+/// would squat the journal against the owner. A PublisherGroup exposes no role
+/// table, so the device remembers that the account asked to co-publish. Plain
+/// `UserDefaults`: a journal id is a public DS address.
+///
+/// Per account (2026-09-30): "co-publisher" is a fact about the account, not
+/// the phone — the owner of a channel signed in on a phone where another
+/// account co-publishes it must still claim. The set is filed under the
+/// account (`me.lakko.ds.co-published.v2.<account>`), resolved at each call
+/// from `accountIdB64` (by default the account ``AcceptedContactsStore`` has
+/// bound). No account: nothing is marked and nothing reads as marked. Logout
+/// keeps it; forget-device drops it through ``clear(accountIdB64:)``.
 public final class CoPublishedJournals {
     public static let shared = CoPublishedJournals()
 
     private let defaults: UserDefaults
-    private static let key = "me.lakko.ds.co-published.v1"
+    private let accountIdB64: () -> String?
+    private static let prefix = "me.lakko.ds.co-published.v2."
+    /// The device-wide key this set used before it was per account. Never
+    /// read; removed by ``clear(accountIdB64:)``.
+    static let legacyKey = "me.lakko.ds.co-published.v1"
 
-    public init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        accountIdB64: @escaping () -> String? = { AcceptedContactsStore.boundAccountIdB64 }
+    ) {
         self.defaults = defaults
+        self.accountIdB64 = accountIdB64
+    }
+
+    private func key() -> String? {
+        accountIdB64().map { Self.prefix + $0 }
     }
 
     public func mark(journalIdHex: String) {
-        var set = Set(defaults.stringArray(forKey: Self.key) ?? [])
+        guard let key = key() else { return }
+        var set = Set(defaults.stringArray(forKey: key) ?? [])
         guard set.insert(journalIdHex.lowercased()).inserted else { return }
-        defaults.set(Array(set).sorted(), forKey: Self.key)
+        defaults.set(Array(set).sorted(), forKey: key)
     }
 
     public func contains(journalIdHex: String) -> Bool {
-        (defaults.stringArray(forKey: Self.key) ?? []).contains(journalIdHex.lowercased())
+        guard let key = key() else { return false }
+        return (defaults.stringArray(forKey: key) ?? []).contains(journalIdHex.lowercased())
+    }
+
+    /// Forget-device: drop one account's set (and the old device-wide row).
+    public func clear(accountIdB64: String) {
+        defaults.removeObject(forKey: Self.prefix + accountIdB64)
+        defaults.removeObject(forKey: Self.legacyKey)
     }
 }

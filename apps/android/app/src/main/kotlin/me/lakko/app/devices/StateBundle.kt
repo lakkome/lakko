@@ -275,6 +275,7 @@ public object StateBundle {
         }
         saveKnownGroupIds(
             context,
+            accountIdB64,
             bundle.knownGroupIdsB64.mapNotNull {
                 try {
                     hexOf(dec.decode(it))
@@ -289,63 +290,105 @@ public object StateBundle {
     private const val BUNDLE_ID_BASE: Long = 1L shl 40
 
     // ---- known group ids (drives the one "Synchronizing..." label) ---------
+    //
+    // Both facts below belong to the ACCOUNT the pairing or recovery was for,
+    // not to the device: until 2026-09-30 they lived under one device-wide
+    // key, so a second account signed in on the same phone showed the first
+    // account's "Synchronizing..." for groups it would never join. Keys are
+    // `known-groups.v2:<accountIdB64>` and `restored.v2:<accountIdB64>`
+    // (standard base64); with no account a read is empty and a write is
+    // dropped. The device-wide `known-groups.v1` / `restored.v1` rows are
+    // never read; [forgetAccount] removes them.
 
     private const val PREFS = "lakko-pairing-known-groups"
-    private const val KEY = "known-groups.v1"
+    private const val KNOWN_PREFIX = "known-groups.v2:"
+    private const val RESTORED_PREFIX = "restored.v2:"
+    private const val RETIRED_KNOWN_KEY = "known-groups.v1"
+    private const val RETIRED_RESTORED_KEY = "restored.v1"
 
-    public fun saveKnownGroupIds(context: Context, idsHex: Collection<String>) {
+    /** The row key of [accountIdB64]'s known group ids. Visible for tests. */
+    internal fun knownKey(accountIdB64: String): String =
+        KNOWN_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+
+    /** The row key of [accountIdB64]'s restored marker. Visible for tests. */
+    internal fun restoredKey(accountIdB64: String): String =
+        RESTORED_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+
+    public fun saveKnownGroupIds(context: Context, accountIdB64: String, idsHex: Collection<String>) {
         try {
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             if (idsHex.isEmpty()) {
-                prefs.edit().remove(KEY).apply()
+                prefs.edit().remove(knownKey(accountIdB64)).apply()
             } else {
-                prefs.edit().putStringSet(KEY, idsHex.toSet()).apply()
+                prefs.edit().putStringSet(knownKey(accountIdB64), idsHex.toSet()).apply()
             }
         } catch (_: Throwable) {
             // storage unavailable: the label falls back to "no chats yet"
         }
     }
 
-    /** The known groups this device has not joined yet. Clears the stored list
-     *  once every known group is held, so the label cannot outlive its cause. */
-    public fun pendingKnownGroups(context: Context, joinedIdsHex: Collection<String>): Int {
+    /** The known groups [accountIdB64] has not joined on this device yet; `0`
+     *  with no account. Clears the stored list once every known group is
+     *  held, so the label cannot outlive its cause. */
+    public fun pendingKnownGroups(context: Context, accountIdB64: String?, joinedIdsHex: Collection<String>): Int {
+        if (accountIdB64 == null) return 0
         val known = try {
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getStringSet(KEY, emptySet()).orEmpty()
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getStringSet(knownKey(accountIdB64), emptySet()).orEmpty()
         } catch (_: Throwable) {
             emptySet()
         }
         if (known.isEmpty()) return 0
         val joined = joinedIdsHex.toSet()
         val pending = known.count { it !in joined }
-        if (pending == 0) saveKnownGroupIds(context, emptyList())
+        if (pending == 0) saveKnownGroupIds(context, accountIdB64, emptyList())
         return pending
     }
 
     // ---- the restored-device marker ------------------------------------------
 
-    private const val RESTORED_KEY = "restored.v1"
-
-    /** Record that this device landed through a recovery route (pairing join,
-     *  recover): until its first chat arrives it is being admitted by its other
-     *  devices or its contacts, which the chat list says as "Synchronizing...". */
-    public fun markRestored(context: Context) {
+    /** Record that [accountIdB64] landed on this device through a recovery
+     *  route (pairing join, recover): until its first chat arrives it is being
+     *  admitted by its other devices or its contacts, which the chat list says
+     *  as "Synchronizing...". */
+    public fun markRestored(context: Context, accountIdB64: String) {
         try {
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(RESTORED_KEY, true).apply()
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putBoolean(restoredKey(accountIdB64), true)
+                .apply()
         } catch (_: Throwable) {
             // best-effort
         }
     }
 
-    /** Whether the marker is set; clears it once [joinedCount] is non-zero. */
-    public fun restoredAwaitingChats(context: Context, joinedCount: Int): Boolean {
+    /** Whether [accountIdB64]'s marker is set (`false` with no account);
+     *  clears it once [joinedCount] is non-zero. */
+    public fun restoredAwaitingChats(context: Context, accountIdB64: String?, joinedCount: Int): Boolean {
+        if (accountIdB64 == null) return false
         val prefs = try {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         } catch (_: Throwable) {
             return false
         }
-        val set = prefs.getBoolean(RESTORED_KEY, false)
-        if (set && joinedCount > 0) prefs.edit().remove(RESTORED_KEY).apply()
+        val key = restoredKey(accountIdB64)
+        val set = prefs.getBoolean(key, false)
+        if (set && joinedCount > 0) prefs.edit().remove(key).apply()
         return set && joinedCount == 0
+    }
+
+    /** Forget device: drop [accountIdB64]'s known group ids and restored
+     *  marker, and the retired device-wide rows. Other accounts' stay. */
+    public fun forgetAccount(context: Context, accountIdB64: String) {
+        try {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .remove(knownKey(accountIdB64))
+                .remove(restoredKey(accountIdB64))
+                .remove(RETIRED_KNOWN_KEY)
+                .remove(RETIRED_RESTORED_KEY)
+                .apply()
+        } catch (_: Throwable) {
+            // best-effort
+        }
     }
 
     // ---- the tagged mailbox row --------------------------------------------

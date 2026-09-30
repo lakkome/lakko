@@ -20,8 +20,14 @@ import me.lakko.app.profile.ProfileDirectory
 public typealias ConversationKind = me.lakko.app.chat.ConversationKind
 
 /**
- * Local, per-device presentation facts about groups this device created: the
- * "created as a group" flag, in plain `SharedPreferences`.
+ * Local presentation facts about groups the signed-in account created on this
+ * device: the "created as a group" flag, in plain `SharedPreferences`, one
+ * string set per account (`created-as-group.v2:<accountIdB64>`). Until
+ * 2026-09-30 the set was device-wide, so a second account on the same phone
+ * inherited it; the device-wide `created-as-group` set of earlier builds is
+ * never read, and [deleteAccount] removes it. With no account bound (see
+ * [me.lakko.app.contacts.AcceptedContactsStore]) a read is `false` and nothing
+ * is written.
  *
  * The group NAME no longer lives here. Since ADR-0051 a name is a fact shared
  * inside the group — sent as an encrypted envelope, accepted from the owner or
@@ -31,23 +37,38 @@ public typealias ConversationKind = me.lakko.app.chat.ConversationKind
  */
 public object GroupPresentationStore {
     private const val PREFS = "lakko-group-presentation"
-    private const val KEY_CREATED = "created-as-group"
+    private const val KEY_PREFIX = "created-as-group.v2:"
+    private const val RETIRED_KEY = "created-as-group"
 
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+    private fun key(accountIdB64: String): String =
+        KEY_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+
+    private fun bound(): String? = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64
+
     public fun markCreatedAsGroup(context: Context, groupIdHex: String) {
+        val account = bound() ?: return
         val p = prefs(context)
-        val set = p.getStringSet(KEY_CREATED, emptySet()).orEmpty().toMutableSet()
+        val set = p.getStringSet(key(account), emptySet()).orEmpty().toMutableSet()
         set += groupIdHex.lowercase()
-        p.edit().putStringSet(KEY_CREATED, set).apply()
+        p.edit().putStringSet(key(account), set).apply()
         // The persisted kind is what both lists read; the flag above is kept
         // for the title rule and for entries written before the kind existed.
         ConversationKindStore.set(context, groupIdHex, ConversationKind.Group)
     }
 
-    public fun wasCreatedAsGroup(context: Context, groupIdHex: String): Boolean =
-        prefs(context).getStringSet(KEY_CREATED, emptySet()).orEmpty().contains(groupIdHex.lowercase())
+    public fun wasCreatedAsGroup(context: Context, groupIdHex: String): Boolean {
+        val account = bound() ?: return false
+        return prefs(context).getStringSet(key(account), emptySet()).orEmpty().contains(groupIdHex.lowercase())
+    }
+
+    /** Forget device: drop [accountIdB64]'s set and the retired device-wide
+     *  one. Other accounts' sets stay. */
+    public fun deleteAccount(context: Context, accountIdB64: String) {
+        prefs(context).edit().remove(key(accountIdB64)).remove(RETIRED_KEY).apply()
+    }
 
     /** The input cap for a group name (ADR-0051 §1: 1 to 64 scalars). */
     public const val MAX_NAME_CHARS: Int = 64

@@ -164,6 +164,10 @@ describe("a channel's PublisherGroup: the claim lands before the handle is retur
     };
   }
 
+  /** The signed-in account the founding marker is recorded for. */
+  const ACCOUNT = "Y2FyYS1hY2NvdW50LTAwMDA=";
+  const OTHER_ACCOUNT = "ZXZlLWFjY291bnQtMDAwMDA=";
+
   it("a failed claim throws; the unconfirmed founding makes the next open claim again", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x41));
@@ -172,13 +176,13 @@ describe("a channel's PublisherGroup: the claim lands before the handle is retur
     try {
       const failing = vi.fn(async () => new Response("{}", { status: 500 }));
       vi.stubGlobal("fetch", failing);
-      await expect(openOrFoundPublisherGroup(wasm, owner, channelId, st)).rejects.toBeDefined();
+      await expect(openOrFoundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).rejects.toBeDefined();
       expect(st.data.size).toBe(1);
 
       // The group now exists locally; the next open still claims.
       const ok = vi.fn(async () => new Response(null, { status: 204 }));
       vi.stubGlobal("fetch", ok);
-      const handle = await openOrFoundPublisherGroup(wasm, owner, channelId, st);
+      const handle = await openOrFoundPublisherGroup(wasm, owner, channelId, st, ACCOUNT);
       expect(ok).toHaveBeenCalledTimes(1);
       expect(st.data.size).toBe(0);
       handle.free();
@@ -186,8 +190,59 @@ describe("a channel's PublisherGroup: the claim lands before the handle is retur
       // Claimed and confirmed: a later open claims nothing.
       const later = vi.fn(async () => new Response(null, { status: 204 }));
       vi.stubGlobal("fetch", later);
-      (await openOrFoundPublisherGroup(wasm, owner, channelId, st)).free();
+      (await openOrFoundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).free();
       expect(later).not.toHaveBeenCalled();
+    } finally {
+      owner.free();
+      warn.mockRestore();
+    }
+  });
+
+  it("the marker is the account's: another account on the browser neither reads nor clears it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x51));
+    const channelId = new Uint8Array(16).fill(0x52);
+    const st = mem();
+    try {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
+      await expect(
+        openOrFoundPublisherGroup(wasm, owner, channelId, st, ACCOUNT),
+      ).rejects.toBeDefined();
+      expect([...st.data.keys()]).toEqual([
+        expect.stringContaining(`lakko/publisher-group-unclaimed/v2/${ACCOUNT}/`),
+      ]);
+
+      // Another account's open does not see the first account's marker.
+      const other = vi.fn(async () => new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", other);
+      (await openOrFoundPublisherGroup(wasm, owner, channelId, st, OTHER_ACCOUNT)).free();
+      expect(other).not.toHaveBeenCalled();
+      expect(st.data.size).toBe(1);
+
+      // The first account still owes its claim.
+      const again = vi.fn(async () => new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", again);
+      (await openOrFoundPublisherGroup(wasm, owner, channelId, st, ACCOUNT)).free();
+      expect(again).toHaveBeenCalledTimes(1);
+      expect(st.data.size).toBe(0);
+    } finally {
+      owner.free();
+      warn.mockRestore();
+    }
+  });
+
+  it("with no account nothing is written and every open claims again", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x61));
+    const channelId = new Uint8Array(16).fill(0x62);
+    const st = mem();
+    try {
+      const ok = vi.fn(async () => new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", ok);
+      (await openOrFoundPublisherGroup(wasm, owner, channelId, st, null)).free();
+      (await openOrFoundPublisherGroup(wasm, owner, channelId, st, null)).free();
+      expect(ok).toHaveBeenCalledTimes(2);
+      expect(st.data.size).toBe(0);
     } finally {
       owner.free();
       warn.mockRestore();

@@ -63,9 +63,22 @@ extension AppServices {
         // This device's calls go with the device. The transcript rows in each
         // conversation are the message log's to wipe, not this index's.
         CallHistoryStore.shared.clear()
+        let accountIdB64 = authRepository.identitySecrets.map { base64Encode($0.accountId) }
         Task { @MainActor in
             if let own = chatRepository.ownDeviceLeafKey {
                 await chatRepository.deleteDirectoryKeyPackage(deviceKey: own)
+            }
+            // The account's chat state on this device: the MLS snapshot, the
+            // message log, known groups, read cursors, the push routing
+            // secrets and the rest ``ChatRepository/forgetDevice()`` lists.
+            // Its documentation always said AuthRepository called it; nothing
+            // did, so a forgotten account's chats stayed on disk.
+            chatRepository.forgetDevice()
+            // The account's folded cross-device state (folders, flags,
+            // drafts, read cursors) and its pending-sync flag; logout keeps
+            // them since 2026-09-30.
+            if let accountIdB64 {
+                deviceGroupSync.forget(accountIdB64: accountIdB64)
             }
             authRepository.forgetDevice()
         }

@@ -23,9 +23,12 @@ import me.lakko.app.ds.claimOrReset
  * Welcome is joined. Kotlin mirror of iOS `CoPublishedJournals`
  * (`apps/ios/Lakko/Channels/CoPublisher.swift`).
  *
- * Keyed on the journal id alone, not on the account, like the iOS store: a
- * mark that outlives an account switch can only suppress a claim (the owner's
- * other devices still claim), never cause one, which is the safe direction.
+ * Keyed per ACCOUNT: the mark says that THIS account asked to co-publish on
+ * this device. Until 2026-09-30 it was keyed on the journal id alone, so a
+ * second account on the same phone inherited the first account's marks; a
+ * channel the second account owns, co-published by the first, then never got
+ * a claim from this device. With no account a read is `false` and a mark is
+ * dropped (no claim can run then either: the publisher identity is unbound).
  * A journal id is a public DS address, so plain `SharedPreferences`.
  */
 public interface CoPublishedJournalMarks {
@@ -48,26 +51,47 @@ public class InMemoryCoPublishedJournalMarks : CoPublishedJournalMarks {
         synchronized(marks) { journalIdHex.lowercase() in marks }
 }
 
-/** The on-device [CoPublishedJournalMarks]. */
+/**
+ * The on-device [CoPublishedJournalMarks] of the account [account] names at
+ * the time of each call: one string set per account under
+ * `co-published.v2:<accountIdB64>`. The device-wide `co-published.v1` set of
+ * earlier builds is never read; [deleteAccount] removes it.
+ */
 public class SharedPreferencesCoPublishedJournalMarks(
     private val prefs: SharedPreferences,
+    private val account: () -> String?,
 ) : CoPublishedJournalMarks {
     override fun mark(journalIdHex: String) {
+        val acct = account() ?: return
         synchronized(LOCK) {
-            val current = prefs.getStringSet(KEY, emptySet()).orEmpty()
+            val key = keyOf(acct)
+            val current = prefs.getStringSet(key, emptySet()).orEmpty()
             val hex = journalIdHex.lowercase()
             if (hex in current) return
             // A fresh set: the one `getStringSet` returns must not be mutated.
-            prefs.edit().putStringSet(KEY, current + hex).apply()
+            prefs.edit().putStringSet(key, current + hex).apply()
         }
     }
 
-    override fun contains(journalIdHex: String): Boolean =
-        journalIdHex.lowercase() in prefs.getStringSet(KEY, emptySet()).orEmpty()
+    override fun contains(journalIdHex: String): Boolean {
+        val acct = account() ?: return false
+        return journalIdHex.lowercase() in prefs.getStringSet(keyOf(acct), emptySet()).orEmpty()
+    }
+
+    /** Forget device: drop [accountIdB64]'s marks and the retired set. */
+    public fun deleteAccount(accountIdB64: String) {
+        synchronized(LOCK) {
+            prefs.edit().remove(keyOf(accountIdB64)).remove(RETIRED_KEY).apply()
+        }
+    }
 
     private companion object {
-        const val KEY: String = "co-published.v1"
+        const val KEY_PREFIX: String = "co-published.v2:"
+        const val RETIRED_KEY: String = "co-published.v1"
         val LOCK: Any = Any()
+
+        fun keyOf(accountIdB64: String): String =
+            KEY_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
     }
 }
 
@@ -75,10 +99,15 @@ public class SharedPreferencesCoPublishedJournalMarks(
 public object CoPublishedJournals {
     private const val PREFS: String = "me.lakko.ds.co-published"
 
-    /** The on-device store (application-scoped preferences). */
-    public fun onDevice(context: Context): CoPublishedJournalMarks =
+    /** The on-device store (application-scoped preferences) of the account
+     *  [account] names; by default the signed-in one. */
+    public fun onDevice(
+        context: Context,
+        account: () -> String? = { me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64 },
+    ): SharedPreferencesCoPublishedJournalMarks =
         SharedPreferencesCoPublishedJournalMarks(
             context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE),
+            account,
         )
 }
 

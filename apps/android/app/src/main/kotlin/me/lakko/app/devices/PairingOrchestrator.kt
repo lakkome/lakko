@@ -176,7 +176,7 @@ public object PairingOrchestrator {
             group = joined
             // ADR-0050 — a device joining by pairing is admitted to the
             // account's chats by the scanning device; say so until they land.
-            StateBundle.markRestored(context)
+            StateBundle.markRestored(context, account.accountIdB64)
             DeviceGroupLifecycle.persistSnapshot(
                 context = context,
                 identity = identity,
@@ -276,7 +276,7 @@ public object PairingOrchestrator {
                                     DeviceIdentityStore.putDeviceIdentitySeed(context, accountIdB64, seed)
                                     // ADR-0050 — the scanning device admits this one to
                                     // the account's chats; say so until they land.
-                                    StateBundle.markRestored(context)
+                                    StateBundle.markRestored(context, accountIdB64)
                                     DeviceGroupLifecycle.persistSnapshot(
                                         context = context,
                                         identity = identity,
