@@ -60,20 +60,32 @@ public struct FoundPerson: Equatable, Identifiable {
 
 /// What this device knows about a person, by account key (web `KnownPerson`).
 public struct KnownPerson: Equatable {
-    /// A name this device holds (a rename or a profile), `nil` for none. A
-    /// contact is always named (their fingerprint at worst).
+    /// A name this device holds (a rename or a profile), `nil` for none.
     public var name: String?
+    /// The name of last resort: a contact's fingerprint when no name is held.
+    /// A contact is always named, but a name the person published (their
+    /// public record, an introduction) beats this one, so a name search finds
+    /// them by the name they chose rather than dropping a row that reads as a
+    /// fingerprint. `nil` for anyone who is not a contact.
+    public var fallbackName: String?
     public var verifiedUsername: String?
     public var isContact: Bool
     /// The best grant seed kept for them, `nil` for none.
     public var keptSeed: Data?
 
-    public init(name: String?, verifiedUsername: String?, isContact: Bool, keptSeed: Data?) {
+    public init(
+        name: String?, fallbackName: String? = nil, verifiedUsername: String?, isContact: Bool,
+        keptSeed: Data?
+    ) {
         self.name = name
+        self.fallbackName = fallbackName
         self.verifiedUsername = verifiedUsername
         self.isContact = isContact
         self.keptSeed = keptSeed
     }
+
+    /// The name a local listing shows: the held name, else the fallback.
+    public var shownName: String? { name ?? fallbackName }
 
     public static let unknown = KnownPerson(name: nil, verifiedUsername: nil, isContact: false, keptSeed: nil)
 }
@@ -212,7 +224,7 @@ public enum PeopleSearch {
         var out: [FoundPerson] = []
         for c in candidates {
             guard c.accountKey != ownAccountKey, !seen.contains(c.accountKey),
-                  let name = c.known.name else { continue }
+                  let name = c.known.shownName else { continue }
             let result = localResult(c, name: name)
             let byName = localMatches(name, query: query)
             let byUsername = result.username.map { !bare.isEmpty && localMatches($0, query: bare) } ?? false
@@ -277,13 +289,14 @@ public enum PeopleSearch {
 
     /// A result built from what is known locally, over a network finding
     /// (web `resultFor`): a contact stays a contact, a name this device holds
-    /// wins over the found one, and a person with no name is dropped.
+    /// wins over the found one, the found one wins over a contact's
+    /// fingerprint, and a person with no name at all is dropped.
     static func result(
         key: Data, accountId: Data?, known: KnownPerson, foundReach: PersonReach,
         foundName: String?, foundUsername: String?, seed: Data?
     ) -> FoundPerson? {
         let reach: PersonReach = known.isContact ? .contact : foundReach
-        guard let name = known.name ?? foundName else { return nil }
+        guard let name = known.name ?? foundName ?? known.fallbackName else { return nil }
         return FoundPerson(
             accountKey: key, accountId: accountId, displayName: name,
             username: foundUsername ?? known.verifiedUsername, writeSeed: seed, reach: reach)
@@ -357,7 +370,7 @@ public enum PeopleSearch {
                         Self.openPublic($0, output: oprf.output, accountId: hit.accountId, identityKey: key)
                     }?.displayName
                     let k = known(key)
-                    guard let name = k.name ?? published,
+                    guard let name = k.name ?? published ?? k.fallbackName,
                           nameMatchesQuery(displayName: name, query: query),
                           let r = result(
                               key: key, accountId: hit.accountId, known: k, foundReach: .open,
@@ -469,17 +482,26 @@ public enum PeopleSearch {
 enum PeopleSearchWiring {
 
     /// What this device knows about the person with account key `keyB64`
-    /// (web `knownPerson`): a contact is always named (their fingerprint at
-    /// worst); anyone else only by a name this device holds.
+    /// (web `knownPerson`): anyone, a contact included, is named by a name
+    /// this device holds; a contact with none keeps a name of last resort
+    /// (``contactFallbackName(_:)``), which a published name beats.
     static func known(keyB64: String, contactKeys: Set<String>) -> KnownPerson {
         let isContact = contactKeys.contains(keyB64)
         let resolved = ProfileDirectory.shared.resolve(signatureKeyB64: keyB64)
         let named = resolved?.source == .localRename || resolved?.source == .profileName
         return KnownPerson(
-            name: named || isContact ? resolved?.name : nil,
+            name: named ? resolved?.name : nil,
+            fallbackName: isContact && !named ? resolved.map(contactFallbackName) : nil,
             verifiedUsername: resolved?.verifiedUsername,
             isContact: isContact,
             keptSeed: ReachCenter.shared.heldSeed(forAccountKeyB64: keyB64, groupIdHex: nil))
+    }
+
+    /// A contact's name of last resort: their verified username when one is
+    /// known, else their fingerprint — never the neutral "Member" placeholder,
+    /// which would name every such contact alike.
+    static func contactFallbackName(_ resolved: ResolvedDisplayName) -> String {
+        resolved.source == .verifiedUsername ? resolved.name : resolved.fingerprint
     }
 
     /// The people this device already knows (web `localCandidates`): its

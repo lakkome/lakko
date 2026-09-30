@@ -296,7 +296,7 @@ public class AuthRepository(
             is SessionRestoreDecision.Restored -> {
                 // Secrets first, then state: an observer that reacts to the
                 // Session flip must already find the secrets it needs.
-                mutableIdentitySecrets.value = decision.secrets
+                publishIdentitySecrets(decision.secrets)
                 mutableState.value = AuthState.Session(account = decision.account)
                 // ADR-0054 UX section 3 - a push registration that failed
                 // (a used-up allowance, no network) is retried silently at the
@@ -368,6 +368,17 @@ public class AuthRepository(
                 cause,
             )
         }
+        publishIdentitySecrets(secrets)
+    }
+
+    /**
+     * The one place a live session's secrets are published. Binds the
+     * per-account contact list ([me.lakko.app.contacts.AcceptedContactsStore])
+     * to the landing account FIRST, so an observer of [identitySecrets] never
+     * reads another account's contacts; [clearIdentitySecrets] unbinds it.
+     */
+    private fun publishIdentitySecrets(secrets: IdentitySecrets) {
+        me.lakko.app.contacts.AcceptedContactsStore.bind(secrets.accountId)
         mutableIdentitySecrets.value = secrets
     }
 
@@ -2792,8 +2803,9 @@ public class AuthRepository(
             // a negative messageId (never collides with a real DS id), a zero
             // pseudonym, no intro.
             try {
+                // The RESTORED account's list, whatever session is bound.
                 val existing =
-                    me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext)
+                    me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext, accountIdB64)
                 val restored =
                     me.lakko.app.contacts.reconstructRestoredContacts(
                         existing,
@@ -2803,6 +2815,7 @@ public class AuthRepository(
                 if (restored.isNotEmpty()) {
                     me.lakko.app.contacts.AcceptedContactsStore.save(
                         applicationContext,
+                        accountIdB64,
                         existing + restored,
                     )
                     Log.i(
@@ -2907,7 +2920,7 @@ public class AuthRepository(
             // displayName stays null/"" when unset so a restore does not promote
             // the fingerprint fallback into a "chosen" name.
             val contactRecords =
-                me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext).map { c ->
+                me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext, accountIdB64).map { c ->
                     uniffi.lakko_ffi_uniffi.BackupContactRecord(
                         ed25519Pubkey = c.request.fromPubkey,
                         x25519Pubkey = ByteArray(32),
@@ -3095,6 +3108,9 @@ public class AuthRepository(
             secrets.accountId.fill(0)
         }
         mutableIdentitySecrets.value = null
+        // No session, no contact list: an account-less read is empty and an
+        // account-less write is refused until the next landing binds again.
+        me.lakko.app.contacts.AcceptedContactsStore.unbind()
     }
 
     /** ADR-0017 — drop any parked fresh-device fail-safe context,

@@ -367,7 +367,7 @@ public object PairingOrchestrator {
             val bundle = bundles.stateBundle
             if (bundle != null) {
                 try {
-                    val (contacts, pins) = StateBundle.apply(context, bundle)
+                    val (contacts, pins) = StateBundle.apply(context, accountIdB64, bundle)
                     android.util.Log.i("PairingOrchestrator", "state bundle: $contacts contacts, $pins pins")
                 } catch (cause: Throwable) {
                     android.util.Log.w("PairingOrchestrator", "state bundle apply failed", cause)
@@ -422,7 +422,7 @@ public object PairingOrchestrator {
                     )
                     val bundle = StateBundle.decode(openWithKey(key, sealed))
                     if (bundle != null) {
-                        val (contacts, pins) = StateBundle.apply(context, bundle)
+                        val (contacts, pins) = StateBundle.apply(context, accountIdB64, bundle)
                         android.util.Log.i(
                             "PairingOrchestrator",
                             "state bundle: $contacts contacts, $pins pins",
@@ -828,7 +828,7 @@ public object PairingOrchestrator {
                 var key: ByteArray? = null
                 try {
                     val known = me.lakko.app.chat.KnownGroupsStore(context).load(accountIdB64)
-                    val bundle = StateBundle.build(context, known)
+                    val bundle = StateBundle.build(context, accountIdB64, known)
                     key = ensured.group.exportSecret(
                         ensured.identity,
                         StateBundle.EXPORTER_LABEL,

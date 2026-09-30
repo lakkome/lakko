@@ -60,9 +60,11 @@ export function knownPerson(
     }
   }
   return {
-    // A contact is always named (their fingerprint at worst); anyone else
-    // only by a name this device holds.
-    name: named || isContact ? resolved.name : null,
+    // Only a name this device holds counts as a name. A contact nothing
+    // names still shows (their username or fingerprint), but as a stand-in:
+    // a name they published beats it, so a name search finds them.
+    name: named ? resolved.name : null,
+    contactFallbackName: isContact && !named ? resolved.name : null,
     verifiedUsername: resolved.username === null ? null : resolved.username.replace(/^@+/, ""),
     isContact,
     keptGrantWireB64,
@@ -100,7 +102,8 @@ export function localCandidates(
     out.push({
       keyB64,
       keyHex,
-      name: k.name,
+      name: k.name ?? k.contactFallbackName,
+      ...(k.name === null && k.contactFallbackName !== null ? { nameIsFallback: true } : {}),
       verifiedUsername: k.verifiedUsername,
       isContact: k.isContact,
       // A claimed account id only locates the identity bundle; the send path

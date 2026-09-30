@@ -117,9 +117,12 @@ public final class AuthRepository: ObservableObject {
     /// Every change is mirrored into ``AmbientSessionToken`` (the bearer
     /// source a few repositories read) and into ``AnonTokenPool/shared``
     /// (ADR-0054 S3): the pool draws anonymous tokens with this session and
-    /// is cleared on logout and on an account switch.
+    /// is cleared on logout and on an account switch. It also binds the
+    /// account the contact list and its identity pins are read for
+    /// (``AcceptedContactsStore``, ``PeerPinStore``): no session, no contacts.
     @Published public private(set) var identitySecrets: IdentitySecrets? {
         didSet {
+            AcceptedContactsStore.bind(accountIdB64: identitySecrets.map { base64Encode($0.accountId) })
             AmbientSessionToken.shared.set(identitySecrets?.sessionToken)
             AnonTokenPool.shared.configure(
                 accountKey: identitySecrets.map { base64Encode($0.accountId) },
@@ -1273,6 +1276,11 @@ public final class AuthRepository: ObservableObject {
             // clean-wipe rationale; the live `ContactsRepository` unbinds on
             // the `identitySecrets = nil` below, so nothing re-writes the row.
             ContactsInboxStore().clear(accountIdB64: cached.accountIdB64)
+            // The account's accepted contacts (with their local renames) and
+            // the identity pins kept for them. Logout keeps both for the next
+            // sign-in of the same account; forget-device is what drops them.
+            AcceptedContactsStore.clear(accountIdB64: cached.accountIdB64)
+            PeerPinStore.clear(ownerAccountIdB64: cached.accountIdB64)
             // The account's channel list + subscriber-side recovered content
             // seeds. Same clean-wipe rationale. (The three per-installation
             // channel Keychain blobs — publisher seeds, publish counters,
@@ -2555,14 +2563,21 @@ public final class AuthRepository: ObservableObject {
         // metadata, so reconstruct an IncomingContactRequest with sentinels:
         // a negative messageId (never collides with a real DS id), a zero
         // pseudonym, no intro.
-        let existingContacts = AcceptedContactsStore.load()
+        // Written into the RESTORED account's list, named explicitly: the
+        // session may not be installed yet when a restore runs.
+        let existingContacts = AcceptedContactsStore.load(accountIdB64: accountIdB64)
         let restoredContacts = reconstructRestoredContacts(
             existing: existingContacts,
             restored: parsed.acceptedContacts,
             createdAtMs: parsed.createdAtMs
         )
         if !restoredContacts.isEmpty {
-            AcceptedContactsStore.save(existingContacts + restoredContacts)
+            AcceptedContactsStore.save(existingContacts + restoredContacts, accountIdB64: accountIdB64)
+            // A live repository already bound to this account merges them
+            // (its next save would otherwise overwrite the write above).
+            NotificationCenter.default.post(
+                name: .lakkoStateBundleApplied, object: restoredContacts,
+                userInfo: [StateBundle.appliedAccountKey: accountIdB64])
             NSLog("backup restore (\(context)): merged \(restoredContacts.count) contact(s)")
         }
         // The index the snapshot cannot supply: `restoreStorage` lays down a
@@ -2657,7 +2672,7 @@ public final class AuthRepository: ObservableObject {
         // carries ed25519 + display name + the 16-byte account_id. displayName
         // stays "" when unset so a restore does not promote the fingerprint
         // fallback into a "chosen" name.
-        let contactRecords = AcceptedContactsStore.load().map { c in
+        let contactRecords = AcceptedContactsStore.load(accountIdB64: accountIdB64).map { c in
             BackupContactRecord(
                 ed25519Pubkey: c.request.fromPubkey,
                 x25519Pubkey: Data(count: 32),

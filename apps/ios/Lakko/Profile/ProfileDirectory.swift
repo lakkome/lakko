@@ -10,7 +10,8 @@ import LakkoCore
 /// renames the resolver ranks first.
 ///
 /// One instance per process (``shared``), in the same posture as the other
-/// process-scoped stores the app reads statically (``AcceptedContactsStore``):
+/// process-scoped stores the app reads statically (``AcceptedContactsStore``,
+/// whose rows are per account like everything here):
 /// names appear on a dozen surfaces owned by different view models, and a
 /// single observable ``revision`` lets every one of them re-render in place
 /// when a profile or a verdict arrives. The decision logic lives in the pure,
@@ -64,6 +65,8 @@ public final class ProfileDirectory: ObservableObject {
                 return try await self.verifyCertificate(signatureKeyB64: keyB64, username: username)
             }
         }
+        // The renames of whichever account is bound; empty before a session.
+        // ``activate(accountIdB64:username:)`` reloads them per account.
         setRenames(from: AcceptedContactsStore.load())
     }
 
@@ -78,6 +81,8 @@ public final class ProfileDirectory: ObservableObject {
         received.activate(accountIdB64: accountIdB64)
         verifier.activate(accountIdB64: accountIdB64)
         ownProfile = ownStore.load(accountIdB64: accountIdB64)
+        // This account's own names for its contacts, never the previous one's.
+        setRenames(from: AcceptedContactsStore.load(accountIdB64: accountIdB64))
         bump()
     }
 
@@ -86,6 +91,7 @@ public final class ProfileDirectory: ObservableObject {
         accountIdB64 = nil
         ownUsername = nil
         ownProfile = nil
+        setRenames(from: [])
         received.activate(accountIdB64: nil)
         verifier.activate(accountIdB64: nil)
         bump()

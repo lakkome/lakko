@@ -298,7 +298,7 @@ export async function prepareJoinFlow(args: {
               opts.welcomeCursor,
             );
             if (bundle !== null) {
-              const applied = applyStateBundle(bundle);
+              const applied = applyStateBundle(bundle, args.accountIdB64);
               // eslint-disable-next-line no-console
               console.info(`state bundle: ${applied.contacts} contacts, ${applied.pins} pins`);
             }
@@ -675,7 +675,7 @@ export async function prepareAnonymousJoinFlow(args: {
         }
       }
       if (pendingState !== null) {
-        const applied = applyStateBundle(pendingState);
+        const applied = applyStateBundle(pendingState, account.b64);
         pendingState = null;
         // eslint-disable-next-line no-console
         console.info(`state bundle: ${applied.contacts} contacts, ${applied.pins} pins`);
@@ -936,7 +936,7 @@ export async function runScanFlow(args: {
       try {
         const wasm = await loadWasm();
         const snapshot = await loadMlsSnapshot(args.accountIdB64, args.deviceKey);
-        const bundle = buildStateBundle(snapshot?.knownGroupIds ?? []);
+        const bundle = buildStateBundle(snapshot?.knownGroupIds ?? [], args.accountIdB64);
         key = ensured.group.exportSecret(
           ensured.identity,
           STATE_EXPORTER_LABEL,

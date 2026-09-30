@@ -81,14 +81,21 @@ internal fun buildBackgroundDecryptDeps(
     val appContext = context.applicationContext
     val knownGroups = KnownGroupsStore(appContext)
     val pushRoutes = PushRouteStore(appContext)
-    // ADR-0048 — READ-ONLY names for the notification title: loaded once from
-    // what the app already stored. No write, no verification, no network
-    // (C-59). A load failure just means the generic title.
-    val names: me.lakko.app.profile.ProfileNameSnapshot? = try {
-        me.lakko.app.profile.ProfileNameSnapshot.load(appContext)
-    } catch (_: Throwable) {
-        null
-    }
+    // ADR-0048 — READ-ONLY names for the notification title: loaded from what
+    // the app already stored, for the account the wake belongs to (the
+    // contact renames are per account; this process may hold no session at
+    // all). No write, no verification, no network (C-59). A load failure just
+    // means the generic title.
+    var decryptAccountB64: String? = null
+    val namesByAccount = HashMap<String?, me.lakko.app.profile.ProfileNameSnapshot?>()
+    fun namesFor(accountIdB64: String?): me.lakko.app.profile.ProfileNameSnapshot? =
+        namesByAccount.getOrPut(accountIdB64) {
+            try {
+                me.lakko.app.profile.ProfileNameSnapshot.load(appContext, accountIdB64)
+            } catch (_: Throwable) {
+                null
+            }
+        }
     return object : PushDecryptDeps {
         override fun lookupRoute(pushGidHex: String): Pair<String, String>? =
             try {
@@ -120,6 +127,8 @@ internal fun buildBackgroundDecryptDeps(
 
         override fun loadSnapshot(accountIdB64: String): ByteArray? =
             try {
+                // The account whose group [openThrowawayGroup] opens next.
+                decryptAccountB64 = accountIdB64
                 // A snapshot taken under another leaf identity would restore
                 // groups this identity cannot open; treat it as absent.
                 val recorded = IdentitySnapshotStore.getSnapshotLeafKey(appContext, accountIdB64)
@@ -160,7 +169,7 @@ internal fun buildBackgroundDecryptDeps(
                     identity.close()
                     null
                 } else {
-                    RealThrowawayGroup(identity, group, names)
+                    RealThrowawayGroup(identity, group, namesFor(decryptAccountB64))
                 }
             } catch (_: Throwable) {
                 try {

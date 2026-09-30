@@ -23,10 +23,12 @@ import LakkoCore
 /// plus `startGroupWith`-on-accept (1.14f4) — all wired.
 ///
 /// **Persistence.** The accepted list lives in ``AcceptedContactsStore``
-/// (process-wide); the account-inbox cursor and the pending requests live
-/// in ``ContactsInboxStore``, one row per account, loaded when the
+/// and the account-inbox cursor and the pending requests in
+/// ``ContactsInboxStore``, each one row per account, loaded when the
 /// repository binds to a session's account and written back on every
-/// change. Only the sent log and the session's generated invites stay
+/// change. With no account bound the list is empty and nothing is written:
+/// a second account signed in on the same device never sees the first
+/// account's contacts. Only the sent log and the session's generated invites stay
 /// in memory (there is no server-side mirror to rebuild them from).
 @MainActor
 public final class ContactsRepository: ObservableObject {
@@ -38,7 +40,11 @@ public final class ContactsRepository: ObservableObject {
             // Persist the accepted list so it survives a relaunch
             // (ADR-0021 group-call name resolution needs it).
             if state.accepted != oldValue.accepted {
-                AcceptedContactsStore.save(state.accepted)
+                // Filed under the bound account only; while logged out (or
+                // mid-switch, see `bind`) the list belongs to nobody.
+                if let accountIdB64 = boundAccountIdB64 {
+                    AcceptedContactsStore.save(state.accepted, accountIdB64: accountIdB64)
+                }
                 // ADR-0048 — a local rename is the first rung of the display
                 // name precedence everywhere, so the resolver must see it.
                 ProfileDirectory.shared.setRenames(from: state.accepted)
@@ -99,38 +105,57 @@ public final class ContactsRepository: ObservableObject {
     /// safe.
     public weak var chatRepository: ChatRepository?
 
-    public init(
+    public convenience init(
         authRepository: AuthRepository,
         clientFactory: @escaping () -> ContactsClient = { ContactsClient() },
         discoveryClientFactory: @escaping () -> DiscoveryClient = { DiscoveryClient() },
         inboxStore: ContactsInboxStore = ContactsInboxStore()
     ) {
+        self.init(
+            authRepository: authRepository,
+            clientFactory: clientFactory,
+            discoveryClientFactory: discoveryClientFactory,
+            inboxStore: inboxStore,
+            accountBinding: authRepository.$identitySecrets
+                .map { $0.map { base64Encode($0.accountId) } }
+                .eraseToAnyPublisher()
+        )
+    }
+
+    /// - Parameter accountBinding: the signed-in account (base64 id), `nil`
+    ///   while logged out. Production follows ``AuthRepository/identitySecrets``;
+    ///   tests drive it directly so two accounts can be switched without a
+    ///   network session.
+    init(
+        authRepository: AuthRepository,
+        clientFactory: @escaping () -> ContactsClient = { ContactsClient() },
+        discoveryClientFactory: @escaping () -> DiscoveryClient = { DiscoveryClient() },
+        inboxStore: ContactsInboxStore = ContactsInboxStore(),
+        accountBinding: AnyPublisher<String?, Never>
+    ) {
         self.authRepository = authRepository
         self.clientFactory = clientFactory
         self.discoveryClientFactory = discoveryClientFactory
         self.inboxStore = inboxStore
-        // Rehydrate the persisted accepted list (ADR-0021). If the
-        // `didSet` fires for this set it harmlessly re-saves the same
-        // list, so the round-trip is idempotent.
-        let persisted = AcceptedContactsStore.load()
-        if !persisted.isEmpty {
-            state = state.with(accepted: persisted)
-        }
-        // ADR-0050 section 2.9 — contacts carried by a pairing state bundle.
+        // ADR-0050 section 2.9 — contacts carried by a pairing state bundle
+        // (or a backup restore), merged only into the account they belong to.
         stateBundleObserver = NotificationCenter.default.addObserver(
             forName: .lakkoStateBundleApplied, object: nil, queue: .main
         ) { [weak self] note in
-            guard let contacts = note.object as? [AcceptedContact], !contacts.isEmpty else { return }
-            Task { @MainActor in self?.mergeBundledContacts(contacts) }
+            guard let contacts = note.object as? [AcceptedContact], !contacts.isEmpty,
+                  let accountIdB64 = note.userInfo?[StateBundle.appliedAccountKey] as? String
+            else { return }
+            Task { @MainActor in self?.mergeBundledContacts(contacts, accountIdB64: accountIdB64) }
         }
-        // Follow the session: bind the persisted inbox of whichever account is
-        // live, unbind on logout / forgetDevice. `@Published` on a
+        // Follow the session: bind the persisted accepted list and inbox of
+        // whichever account is live, unbind on logout / forgetDevice. The
+        // accepted list is rehydrated here (ADR-0021), not at init: before a
+        // session there is no account to read it for. `@Published` on a
         // `@MainActor` class fires on the main actor, and this class is main
         // actor too, so the hop is an assertion rather than a dispatch.
         // `refreshInbox` binds on its own as well, so a poll that starts
         // before this emission is delivered is not left on the wrong cursor.
-        authRepository.$identitySecrets
-            .map { $0.map { base64Encode($0.accountId) } }
+        accountBinding
             .removeDuplicates()
             .sink { [weak self] accountIdB64 in
                 MainActor.assumeIsolated { self?.bind(accountIdB64: accountIdB64) }
@@ -142,25 +167,30 @@ public final class ContactsRepository: ObservableObject {
 
     // MARK: - Account binding
 
-    /// Point `state.pending` / `state.cursor` at one account's persisted
-    /// inbox (or at nothing, for `nil`). Idempotent for the already-bound
-    /// account. The bound marker is switched FIRST so the `didSet` that
-    /// follows never writes the outgoing account's rows under the incoming
-    /// one, and never writes the incoming account's freshly loaded rows
-    /// back out as an empty inbox for the outgoing one.
+    /// Point `state.accepted`, `state.pending` and `state.cursor` at one
+    /// account's persisted rows (or at nothing, for `nil`). Idempotent for
+    /// the already-bound account. The bound marker is switched FIRST so the
+    /// `didSet` that follows never writes the outgoing account's rows under
+    /// the incoming one, and never writes the incoming account's freshly
+    /// loaded rows back out as an empty list for the outgoing one.
     private func bind(accountIdB64: String?) {
         guard boundAccountIdB64 != accountIdB64 else { return }
         boundAccountIdB64 = nil
         guard let accountIdB64 else {
-            // Logged out: the in-memory inbox belongs to nobody now. The
-            // persisted row stays (logout keeps per-account state for a
-            // cheap re-login; `forgetDevice` is what wipes it).
-            state = state.with(pending: [], cursor: 0)
+            // Logged out: the in-memory contacts and inbox belong to nobody
+            // now. The persisted rows stay (logout keeps per-account state
+            // for a cheap re-login; `forgetDevice` is what wipes them). The
+            // sent log and generated invites were the outgoing account's too.
+            state = state.with(
+                pending: [], accepted: [], sent: [], outstandingInvites: [], cursor: 0)
             return
         }
         let persisted = inboxStore.load(accountIdB64: accountIdB64)
+        let accepted = AcceptedContactsStore.load(accountIdB64: accountIdB64)
         boundAccountIdB64 = accountIdB64
-        state = state.with(pending: persisted.pending, cursor: persisted.cursor)
+        state = state.with(
+            pending: persisted.pending, accepted: accepted, sent: [], outstandingInvites: [],
+            cursor: persisted.cursor)
     }
 
     // MARK: - Send
@@ -425,6 +455,10 @@ public final class ContactsRepository: ObservableObject {
                     }
                     continue
                 case .contactAck(let ack):
+                    // The session ended (or changed account) while this
+                    // batch was in flight: the ack belongs to the old
+                    // account, never to whoever is bound now.
+                    guard boundAccountIdB64 == pollAccountIdB64 else { continue }
                     // The recipient of one of our outgoing requests pressed
                     // Accept. The signature was verified in the UniFFI layer,
                     // so this is the moment the person becomes a contact on
@@ -522,7 +556,10 @@ public final class ContactsRepository: ObservableObject {
     /// bundle: contacts not already present (by signature key) are appended.
     /// Returns how many were added.
     @discardableResult
-    public func mergeBundledContacts(_ contacts: [AcceptedContact]) -> Int {
+    public func mergeBundledContacts(_ contacts: [AcceptedContact], accountIdB64: String) -> Int {
+        // Contacts filed for another account (a pairing or restore that
+        // finished after a switch) are not this list's to show.
+        guard boundAccountIdB64 == accountIdB64 else { return 0 }
         let have = Set(state.accepted.map { $0.request.fromPubkey })
         let fresh = contacts.filter { !have.contains($0.request.fromPubkey) }
         guard !fresh.isEmpty else { return 0 }

@@ -70,19 +70,28 @@ public class PeopleSearchService(
         } catch (_: IllegalArgumentException) {
             ByteArray(0)
         }
-        // A contact is always named (their fingerprint at worst); anyone else
-        // only by a name this device holds.
-        val name = when {
-            named -> resolved.primary
-            isContact -> if (resolved.isPlaceholder) resolved.fingerprint else resolved.primary
-            else -> null
+        // Only a rename or a profile name is a held name. A contact without
+        // one keeps a fallback (their fingerprint, or their username), which
+        // a name the person published beats in the search; anyone else is
+        // named only by a name this device holds.
+        val name = if (named) resolved.primary else null
+        val fallback = when {
+            named || !isContact -> null
+            resolved.isPlaceholder -> resolved.fingerprint
+            else -> resolved.primary
         }
         val kept = try {
             reach().bestHeldGrantWire(keyBytes)?.let { Base64.getEncoder().encodeToString(it) }
         } catch (_: Throwable) {
             null
         }
-        return KnownPerson(name = name, verifiedUsername = verified, isContact = isContact, keptGrantWireB64 = kept)
+        return KnownPerson(
+            name = name,
+            verifiedUsername = verified,
+            isContact = isContact,
+            keptGrantWireB64 = kept,
+            fallbackName = fallback,
+        )
     }
 
     /**
@@ -108,7 +117,9 @@ public class PeopleSearchService(
             LocalCandidate(
                 keyB64 = keyB64,
                 keyHex = keyHex,
-                name = k.name,
+                // The local half has no published name to prefer: a contact
+                // shows by its fallback.
+                name = k.name ?: k.fallbackName,
                 verifiedUsername = k.verifiedUsername,
                 isContact = k.isContact,
                 accountIdHex = accountIdHex,

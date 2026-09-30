@@ -494,7 +494,9 @@ export class BackupClient {
   ): Promise<Uint8Array> {
     const wasm = await loadWasm();
 
-    const accepted = loadAccepted();
+    // The contacts of the account this backup is for, never whichever
+    // account happens to be bound.
+    const accepted = loadAccepted(base64Encode(accountId));
     const contacts: WasmBackupContact[] = accepted.map((c) => {
       const ed = base64Decode(c.signaturePubkeyB64);
       const x = c.x25519PubkeyB64 === undefined
@@ -542,8 +544,11 @@ export class BackupClient {
 /** Convenience: upsert each contact from a restore result into
  *  `localStorage`. The route layer uses this after a successful
  *  `restore()` to land the address book on the new device. */
-export function applyRestoredContacts(contacts: AcceptedContact[]): void {
+export function applyRestoredContacts(
+  contacts: AcceptedContact[],
+  accountIdB64: string,
+): void {
   for (const c of contacts) {
-    upsertAccepted(c);
+    upsertAccepted(c, accountIdB64);
   }
 }

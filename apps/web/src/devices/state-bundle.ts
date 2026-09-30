@@ -58,14 +58,19 @@ export interface StateBundleV1 {
   readonly knownGroupIdsB64: readonly string[];
 }
 
-/** Read this browser's contacts, pins and the given group ids into a bundle. */
-export function buildStateBundle(knownGroupIdsB64: readonly string[]): StateBundleV1 {
-  const contacts = loadAccepted();
+/** Read the account's contacts, pins and the given group ids into a bundle.
+ *  `ownerAccountIdB64` is the account being paired (the contacts are that
+ *  account's, never another account's on this browser). */
+export function buildStateBundle(
+  knownGroupIdsB64: readonly string[],
+  ownerAccountIdB64: string,
+): StateBundleV1 {
+  const contacts = loadAccepted(ownerAccountIdB64);
   const pins: CarriedPin[] = [];
   for (const c of contacts) {
     const accountIdB64 = accountIdB64OfHex(c.accountIdHex);
     if (accountIdB64 === null) continue;
-    const pin = readPin(accountIdB64);
+    const pin = readPin(accountIdB64, ownerAccountIdB64);
     if (pin === undefined) continue;
     pins.push({
       accountIdB64,
@@ -129,21 +134,28 @@ export function decodeStateBundle(bytes: Uint8Array): StateBundleV1 | null {
   return { v: 1, contacts, pins, knownGroupIdsB64 };
 }
 
-/** Merge a bundle into this browser: contacts that are not here yet, pins
- *  through the monotone setter, the known group ids for the chat list. */
-export function applyStateBundle(bundle: StateBundleV1): { contacts: number; pins: number } {
-  const have = new Set(loadAccepted().map((c) => c.signaturePubkeyB64));
+/** Merge a bundle into this browser, into the list of `ownerAccountIdB64`
+ *  (the account the new device joined): contacts that are not here yet, pins
+ *  through the monotone setter, the known group ids for the chat list. The
+ *  new device may run this before its session lands, so the account is
+ *  named, not taken from the binding. */
+export function applyStateBundle(
+  bundle: StateBundleV1,
+  ownerAccountIdB64: string,
+): { contacts: number; pins: number } {
+  const have = new Set(loadAccepted(ownerAccountIdB64).map((c) => c.signaturePubkeyB64));
   let contacts = 0;
   for (const c of bundle.contacts) {
     if (have.has(c.signaturePubkeyB64)) continue;
-    upsertAccepted(c);
+    upsertAccepted(c, ownerAccountIdB64);
     contacts += 1;
   }
   let pins = 0;
   for (const p of bundle.pins) {
     try {
-      setPin(p.accountIdB64, p.pinnedSignaturePubkeyB64, p.rotationMarker);
-      pins += 1;
+      if (setPin(p.accountIdB64, p.pinnedSignaturePubkeyB64, p.rotationMarker, ownerAccountIdB64) === "set") {
+        pins += 1;
+      }
     } catch {
       // A pin the setter refuses (a lower marker than one already held) is
       // not ours to force.

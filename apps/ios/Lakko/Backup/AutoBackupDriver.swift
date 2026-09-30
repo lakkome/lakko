@@ -129,7 +129,7 @@ public final class AutoBackupDriver {
         // Read at upload time rather than watched: the list is small, the tick
         // is slow, and a snapshot taken now is by definition the one being
         // uploaded.
-        let contacts = AcceptedContactsStore.load().map { c in
+        let contacts = AcceptedContactsStore.load(accountIdB64: accountIdB64).map { c in
             BackupContactRecord(
                 ed25519Pubkey: c.request.fromPubkey,
                 x25519Pubkey: Data(count: 32),

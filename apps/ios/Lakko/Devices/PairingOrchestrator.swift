@@ -388,7 +388,7 @@ public enum PairingOrchestrator {
                 rendezvousPseudonym: rendezvous,
                 afterCursor: cursor
             ) {
-                let applied = StateBundle.apply(bundle)
+                let applied = StateBundle.apply(bundle, accountIdB64: accountIdB64)
                 NSLog("state bundle: %d contacts, %d pins", applied.contacts, applied.pins)
             }
         }
@@ -538,7 +538,7 @@ public enum PairingOrchestrator {
             }
             if let bundle = stateBundle {
                 stateBundle = nil
-                let applied = StateBundle.apply(bundle)
+                let applied = StateBundle.apply(bundle, accountIdB64: accountIdB64)
                 NSLog("state bundle: %d contacts, %d pins", applied.contacts, applied.pins)
             }
         }

@@ -32,15 +32,20 @@ import uniffi.lakko_ffi_uniffi.composeInviteCapability
  * single [StateFlow] of [ContactsState] for the ViewModel to
  * `collectAsStateWithLifecycle` against.
  *
- * **Persistence** — three stores, all per device: the accepted list
- * ([AcceptedContactsStore]), and — since the 2026-09-16 live finding that a
- * relaunch re-fetched the whole inbox from cursor `0` (accepted people back
- * under "Requests", duplicate pending rows, declined requests returning) —
- * the stranger-inbox cursor + the pending list ([ContactsInboxStore], keyed
- * per account). The inbox store is loaded when the repository binds to the
- * account ([bindInbox], from the session bootstrap and lazily from every
- * inbox operation), the cursor is saved after each successful poll batch
- * has landed in state, and the pending list after each of its mutations.
+ * **Persistence** — every store is keyed on the signed-in ACCOUNT: the
+ * accepted list with its renames ([AcceptedContactsStore], per account since
+ * 2026-09-30 — before that one device-wide list leaked a first account's
+ * contacts into a second account signed in on the same phone), and — since
+ * the 2026-09-16 live finding that a relaunch re-fetched the whole inbox from
+ * cursor `0` (accepted people back under "Requests", duplicate pending rows,
+ * declined requests returning) — the stranger-inbox cursor + the pending list
+ * ([ContactsInboxStore]). Both are loaded when the repository binds to the
+ * account ([bindAccount], from construction when a session is already live,
+ * from the session bootstrap, and lazily from every operation); nothing is
+ * read or written for an unbound account. The inbox cursor is saved after
+ * each successful poll batch has landed in state, the pending list and the
+ * accepted list after each of their mutations. Log out keeps the accepted
+ * list for the next login of the same account; Forget device deletes it.
  * The sent log + outstanding invites stay in memory (no server mirror to
  * rehydrate from).
  *
@@ -86,7 +91,11 @@ public class ContactsRepository(
             // persistent PeerPinStore in production, ephemeral
             // InMemoryPinStore when no Context is supplied (tests). The
             // verify gate is therefore never silently disabled.
-            pinStore = appContext?.let { PeerPinStore(it) } ?: InMemoryPinStore(),
+            // Scoped to the signed-in account: a second account on this
+            // phone neither reads nor inherits the first account's pins.
+            pinStore = appContext?.let { ctx ->
+                authRepo.identitySecrets.value?.let { PeerPinStore(ctx, base64Encode(it.accountId)) }
+            } ?: InMemoryPinStore(),
             // KT-log S3e — persistent no-rollback high-water-mark store in
             // production (so a relaunch can't re-arm a rollback by
             // forgetting the highest log_size); ephemeral in tests. The log
@@ -140,72 +149,90 @@ public class ContactsRepository(
     private val appCtx: Context? = appContext
 
     private val mutableState: MutableStateFlow<ContactsState> =
-        // Rehydrate the persisted accepted list (ADR-0021). The inbox cursor +
-        // pending list are per account, so they load in [bindInbox] once the
-        // account is known — the accepted store is not account-keyed.
-        MutableStateFlow(
-            ContactsState(
-                accepted = appContext?.let { AcceptedContactsStore.load(it) } ?: emptyList(),
-            ),
-        )
+        // Empty until [bindAccount]: the accepted list, the inbox cursor and
+        // the pending list are all per account, so they load once the
+        // account is known (at the end of construction when a session is
+        // already live).
+        MutableStateFlow(ContactsState())
 
     public val state: StateFlow<ContactsState> = mutableState.asStateFlow()
 
     // -----------------------------------------------------------------
-    // Stranger-inbox persistence (cursor + pending), per account
+    // Per-account persistence (accepted list + inbox cursor + pending)
     // -----------------------------------------------------------------
 
-    private val inboxBindLock = Any()
+    private val bindLock = Any()
 
-    /** The account whose inbox snapshot is loaded into [state]; `null` until
-     *  [bindInbox] ran (or when there is no store). Read by the persist
-     *  helpers, so nothing is written for an unbound account. */
+    /** The account whose accepted list and inbox snapshot are loaded into
+     *  [state]; `null` until [bindAccount] ran, and again after [clear].
+     *  Read by the persist helpers, so nothing is written for an unbound
+     *  account and never into another account's list. */
     @Volatile
-    private var boundInboxAccountB64: String? = null
+    private var boundAccountB64: String? = null
 
     /**
-     * Load the persisted inbox cursor + pending list for [accountId] into
-     * [state]. Idempotent per account; a no-op without a store. Called from
-     * the session bootstrap and lazily from every inbox operation, so the
-     * first poll after a relaunch resumes from the saved cursor instead of
-     * re-fetching the whole inbox.
+     * Load [accountId]'s persisted accepted list, inbox cursor and pending
+     * list into [state]. Idempotent per account. Called at construction when
+     * a session is already live, from the session bootstrap, and lazily from
+     * every operation, so the first poll after a relaunch resumes from the
+     * saved cursor instead of re-fetching the whole inbox.
+     *
+     * Binding a DIFFERENT account than the one bound starts from an empty
+     * state: nothing of the previous account's survives into the new one.
+     * On a first bind, contacts already in memory (a mutation that ran
+     * before the bind) are merged into the stored list and persisted.
      *
      * Rows the persisted snapshot holds for people who are accepted by now
      * (a pairing bundle or a backup restore may have grown the accepted list
      * while the snapshot was stale) are dropped on load; anything already in
      * memory is merged under the same dedupe rule.
      */
-    public fun bindInbox(accountId: ByteArray) {
-        val store = inboxStore ?: return
+    public fun bindAccount(accountId: ByteArray) {
         val accountB64 = base64Encode(accountId)
-        synchronized(inboxBindLock) {
-            if (boundInboxAccountB64 == accountB64) return
-            val snapshot = store.load(accountB64)
-            mutableState.update { state ->
+        var acceptedGrew = false
+        synchronized(bindLock) {
+            if (boundAccountB64 == accountB64) return
+            val switching = boundAccountB64 != null
+            val storedAccepted = appCtx?.let { AcceptedContactsStore.load(it, accountB64) }
+            val snapshot = inboxStore?.load(accountB64) ?: ContactsInboxSnapshot()
+            mutableState.update { current ->
+                // `update` may re-run the lambda on a lost CAS.
+                acceptedGrew = false
+                val state = if (switching) ContactsState() else current
+                val accepted = if (storedAccepted == null) {
+                    state.accepted
+                } else {
+                    val known = storedAccepted.mapTo(HashSet()) { it.request.fromPubkey.toList() }
+                    val extra = state.accepted.filter { known.add(it.request.fromPubkey.toList()) }
+                    acceptedGrew = extra.isNotEmpty()
+                    storedAccepted + extra
+                }
                 val merged = mergeFetchedRequests(
                     pending = emptyList(),
-                    accepted = state.accepted,
+                    accepted = accepted,
                     fetched = snapshot.pending + state.pending,
                 )
                 state.copy(
+                    accepted = accepted,
                     pending = merged.pending,
                     cursor = advanceInboxCursor(state.cursor, snapshot.cursor),
                 )
             }
-            boundInboxAccountB64 = accountB64
+            boundAccountB64 = accountB64
         }
+        if (acceptedGrew) persistAccepted() else pushRenamesToDirectory()
     }
 
-    /** [bindInbox] for the current session's account, when there is one. */
-    private fun bindInboxIfSignedIn() {
-        authRepo.identitySecrets.value?.let { bindInbox(it.accountId) }
+    /** [bindAccount] for the current session's account, when there is one. */
+    private fun bindAccountIfSignedIn() {
+        authRepo.identitySecrets.value?.let { bindAccount(it.accountId) }
     }
 
     /** Persist the current pending list for the bound account. Called after
      *  every mutation of [ContactsState.pending] has landed in state. */
     private fun persistInboxPending() {
         val store = inboxStore ?: return
-        val accountB64 = boundInboxAccountB64 ?: return
+        val accountB64 = boundAccountB64 ?: return
         store.savePending(accountB64, mutableState.value.pending)
     }
 
@@ -213,7 +240,7 @@ public class ContactsRepository(
      *  after a successful poll batch has landed in state, never before. */
     private fun persistInboxCursor() {
         val store = inboxStore ?: return
-        val accountB64 = boundInboxAccountB64 ?: return
+        val accountB64 = boundAccountB64 ?: return
         store.saveCursor(accountB64, mutableState.value.cursor)
     }
 
@@ -222,13 +249,28 @@ public class ContactsRepository(
         // live accepted list (and from there the store), never beside it: a
         // store-only write would be overwritten by the next [persistAccepted].
         if (appContext != null) {
-            me.lakko.app.devices.StateBundle.contactsSink = { incoming -> mergeAccepted(incoming) }
+            me.lakko.app.devices.StateBundle.contactsSink = { accountIdB64, incoming ->
+                mergeAcceptedFor(accountIdB64, incoming)
+            }
         }
+    }
+
+    /** [mergeAccepted] into [accountIdB64]'s live list, or `null` when this
+     *  repository is not bound to that account (the caller then writes the
+     *  store for that account directly). */
+    public fun mergeAcceptedFor(accountIdB64: String, incoming: List<AcceptedContact>): Int? {
+        bindAccountIfSignedIn()
+        if (boundAccountB64 != AcceptedContactsStore.canonicalAccountB64(accountIdB64)) return null
+        return mergeAccepted(incoming)
     }
 
     /** Add the [incoming] contacts not already accepted (by signature key) and
      *  persist. Returns how many were added. */
     public fun mergeAccepted(incoming: List<AcceptedContact>): Int {
+        bindAccountIfSignedIn()
+        // No account, no list to merge into: a write that landed now would
+        // be carried into whichever account binds next.
+        if (boundAccountB64 == null) return 0
         var added = 0
         var pendingChanged = false
         mutableState.update { state ->
@@ -248,10 +290,15 @@ public class ContactsRepository(
         return added
     }
 
-    /** Persist the current accepted list (best-effort; no-op in tests
-     *  where no Context was supplied). Called after every accept. */
+    /** Persist the current accepted list for the bound account (best-effort;
+     *  no-op in tests where no Context was supplied, and for an unbound
+     *  account). Called after every mutation of the accepted list. */
     private fun persistAccepted() {
-        appCtx?.let { AcceptedContactsStore.save(it, mutableState.value.accepted) }
+        val ctx = appCtx
+        val accountB64 = boundAccountB64
+        if (ctx != null && accountB64 != null) {
+            AcceptedContactsStore.save(ctx, accountB64, mutableState.value.accepted)
+        }
         pushRenamesToDirectory()
     }
 
@@ -274,6 +321,9 @@ public class ContactsRepository(
         nowMs: ULong,
         createdAt: String,
     ): Boolean {
+        bindAccountIfSignedIn()
+        // No account, no list (see [mergeAccepted]).
+        if (boundAccountB64 == null) return false
         var changed = false
         mutableState.update { state ->
             // `update` may re-run the lambda on a lost CAS; the verdict is the
@@ -313,6 +363,13 @@ public class ContactsRepository(
         profileDirectory?.attachCertificateVerifier { username, certHex, accountHex, keyB64 ->
             verifyByCertificate(username, certHex, accountHex, keyB64)
         }
+    }
+
+    init {
+        // A session already live at construction (a cold-start restore lands
+        // before the repository is built): its contacts are the ones shown.
+        // Placed after [profileDirectory] so the renames reach the directory.
+        bindAccountIfSignedIn()
     }
 
     /** The username-certificate verifying key: the build-time pin, else the
@@ -613,7 +670,7 @@ public class ContactsRepository(
         }
         // Resume from the persisted cursor (and show the persisted pending
         // rows) BEFORE the cursor is read below; idempotent once bound.
-        bindInbox(secrets.accountId)
+        bindAccount(secrets.accountId)
         val accountB64 = base64Encode(secrets.accountId)
         val isManualRefresh = waitSecs == 0
         if (isManualRefresh) {
@@ -721,7 +778,7 @@ public class ContactsRepository(
                     // The session ended (or switched) during the poll: this batch
                     // belongs to the previous account's inbox. `clear()` already
                     // reset the state; do not land the rows or the cursor in it.
-                    if (boundInboxAccountB64 != accountB64) return@useClientWith
+                    if (boundAccountB64 != accountB64) return@useClientWith
 
                     var dropped: List<IncomingContactRequest> = emptyList()
                     var acceptedChanged = false
@@ -806,7 +863,7 @@ public class ContactsRepository(
      * the Welcome-forwarding side).
      */
     public fun acceptContactRequest(messageId: Long, groupIdHex: String? = null) {
-        bindInboxIfSignedIn()
+        bindAccountIfSignedIn()
         mutableState.update { state ->
             val (accepted, remaining) = state.pending.partition { it.messageId == messageId }
             if (accepted.isEmpty()) return@update state
@@ -835,6 +892,7 @@ public class ContactsRepository(
      * accepted list so the change survives a relaunch.
      */
     public fun renameContact(messageId: Long, newDisplayName: String) {
+        bindAccountIfSignedIn()
         val trimmed = newDisplayName.trim()
         mutableState.update { state ->
             state.copy(
@@ -919,6 +977,7 @@ public class ContactsRepository(
      * list and the name directory's renames follow.
      */
     public fun removeContact(messageId: Long) {
+        bindAccountIfSignedIn()
         var changed = false
         var removedKey: ByteArray? = null
         mutableState.update { state ->
@@ -959,7 +1018,7 @@ public class ContactsRepository(
      *  Decline semantics — server doesn't get told, the row
      *  just disappears locally. */
     public fun declineContactRequest(messageId: Long) {
-        bindInboxIfSignedIn()
+        bindAccountIfSignedIn()
         mutableState.update { state ->
             state.copy(pending = state.pending.filterNot { it.messageId == messageId })
         }
@@ -1162,7 +1221,7 @@ public class ContactsRepository(
                 intro = null,
                 createdAt = sendResult.createdAt,
             )
-            bindInbox(secrets.accountId)
+            bindAccount(secrets.accountId)
             val accepted = AcceptedContact(request = syntheticRequest, groupIdHex = groupIdHex)
             mutableState.update { state ->
                 state.copy(
@@ -1415,35 +1474,48 @@ public class ContactsRepository(
         }.toMap()
     }
 
-    /** Forget-device: the invite-link secrets this device kept for the
-     *  account leave with it. Call BEFORE [clear] (it reads the session). */
+    /** Forget-device: the account's contact list, the identity pins it
+     *  holds and the invite-link secrets this device kept leave with it;
+     *  other accounts' lists stay. Call BEFORE [clear] (it reads the
+     *  session). */
     public fun forgetDevice() {
-        val accountB64 = authRepo.identitySecrets.value?.let { base64Encode(it.accountId) } ?: return
+        val accountB64 = boundAccountB64
+            ?: authRepo.identitySecrets.value?.let { base64Encode(it.accountId) }
+            ?: return
         inviteSecretStore.clearForAccount(accountB64)
+        appCtx?.let { ctx ->
+            AcceptedContactsStore.delete(ctx, accountB64)
+            try {
+                PeerPinStore.deleteForOwner(ctx, accountB64)
+            } catch (cause: Throwable) {
+                Log.w(TAG, "forgetDevice: pin wipe failed: ${cause.javaClass.simpleName}")
+            }
+        }
     }
 
-    /** Clear the in-memory state. Called from the AuthRepository
-     *  when the session ends — pending requests + sent log do
+    /** Clear the in-memory state and unbind the account. Called when the
+     *  session ends (log out and forget device alike). The persisted
+     *  accepted list stays for the next login of the SAME account — only
+     *  [forgetDevice] deletes it — and is never written here, so a list
+     *  cannot be emptied by a sign-out. The pending requests + sent log do
      *  not persist across logouts. */
     public fun clear() {
-        // The persisted inbox (cursor + pending) goes with the session, the
-        // same way the accepted list below does. Resolve the account BEFORE
-        // the state reset drops the binding; fall back to the live secrets
-        // for a session that never bound (no inbox operation ran).
-        synchronized(inboxBindLock) {
-            val accountB64 = boundInboxAccountB64
+        // The persisted inbox (cursor + pending) goes with the session.
+        // Resolve the account BEFORE the state reset drops the binding; fall
+        // back to the live secrets for a session that never bound.
+        synchronized(bindLock) {
+            val accountB64 = boundAccountB64
                 ?: authRepo.identitySecrets.value?.let { base64Encode(it.accountId) }
             if (accountB64 != null) inboxStore?.delete(accountB64)
-            boundInboxAccountB64 = null
+            boundAccountB64 = null
+            // Wipe any decrypted intro plaintext on the way out.
+            // Best-effort: the `String` contents may still live in
+            // heap if some collector cached them, but our reference
+            // drops here.
+            mutableState.value = ContactsState()
         }
-        // Wipe any decrypted intro plaintext on the way out.
-        // Best-effort: the `String` contents may still live in
-        // heap if some collector cached them, but our reference
-        // drops here.
-        mutableState.value = ContactsState()
-        // Wipe the persisted accepted list too — Android contacts state
-        // does not survive a logout (ADR-0021 store follows that intent).
-        persistAccepted()
+        // The name directory stops carrying this account's renames.
+        pushRenamesToDirectory()
     }
 
     /**

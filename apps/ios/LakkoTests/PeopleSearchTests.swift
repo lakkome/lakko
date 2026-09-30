@@ -206,6 +206,72 @@ final class PeopleSearchTests: XCTestCase {
         XCTAssertEqual(people.first?.displayName, "Anna W")
     }
 
+    /// A contact this device holds no name for (only a fingerprint) is found
+    /// by a name search under the name they published, and stays a contact;
+    /// the row carries nothing about why they were found.
+    func testAPublishedNameBeatsAContactsFingerprint() async throws {
+        let record = try annaPublicRecord()
+        let hit = PublicAccountHit(accountId: annaAccount, publicRecord: record)
+        let key = annaKey.signaturePublicKey()
+        let fingerprint = displayFingerprint(key)
+        let outcome = await PeopleSearch.network(
+            query: "anna", records: [],
+            known: { $0 == key
+                ? KnownPerson(name: nil, fallbackName: fingerprint, verifiedUsername: nil,
+                              isContact: true, keptSeed: nil)
+                : .unknown },
+            ports: ports(identityKey: { _ in key }, nameLookup: { _ in [hit] }))
+        guard case .found(let people) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertEqual(people.map(\.accountKey), [key])
+        XCTAssertEqual(people.first?.displayName, "Anna Weber")
+        XCTAssertEqual(people.first?.reach, .contact)
+        XCTAssertNil(people.first?.writeSeed)
+    }
+
+    /// With neither a held nor a published name, a contact still shows, by
+    /// fingerprint — never dropped, never named "Member".
+    func testAContactWithNothingElseKnownShowsByFingerprint() {
+        let key = annaKey.signaturePublicKey()
+        let fingerprint = displayFingerprint(key)
+        let known = KnownPerson(
+            name: nil, fallbackName: fingerprint, verifiedUsername: nil, isContact: true, keptSeed: nil)
+
+        let found = PeopleSearch.result(
+            key: key, accountId: annaAccount, known: known, foundReach: .open,
+            foundName: nil, foundUsername: nil, seed: nil)
+        XCTAssertEqual(found?.displayName, fingerprint)
+        XCTAssertEqual(found?.reach, .contact)
+
+        let local = PeopleSearch.local(
+            query: String(fingerprint.prefix(4)),
+            candidates: [LocalCandidate(accountKey: key, accountId: annaAccount, known: known)],
+            ownAccountKey: nil)
+        XCTAssertEqual(local.map(\.displayName), [fingerprint])
+
+        // A held name still wins over a found one.
+        let held = KnownPerson(
+            name: "Anna W", fallbackName: nil, verifiedUsername: nil, isContact: true, keptSeed: nil)
+        XCTAssertEqual(PeopleSearch.result(
+            key: key, accountId: annaAccount, known: held, foundReach: .open,
+            foundName: "Anna Weber", foundUsername: nil, seed: nil)?.displayName, "Anna W")
+    }
+
+    /// The fallback a contact gets from the name resolver: a verified
+    /// username when there is one, else the fingerprint, never the neutral
+    /// placeholder.
+    func testAContactsFallbackNameIsItsUsernameElseItsFingerprint() {
+        let key = annaKey.signaturePublicKey()
+        let nothing = resolveDisplayName(signatureKey: key, localRename: nil, profile: nil, verification: nil)
+        XCTAssertEqual(nothing.source, .placeholder)
+        XCTAssertEqual(PeopleSearchWiring.contactFallbackName(nothing), displayFingerprint(key))
+
+        let withUsername = resolveDisplayName(
+            signatureKey: key, localRename: nil,
+            profile: ProfileClaim(displayName: nil, username: "anna_w", updatedAtMs: 1),
+            verification: .verified)
+        XCTAssertEqual(PeopleSearchWiring.contactFallbackName(withUsername), "@anna_w")
+    }
+
     /// A public record served beside another account id is not trusted.
     func testAPublicRecordForAnotherAccountIsIgnored() async throws {
         let record = try annaPublicRecord()

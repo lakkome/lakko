@@ -119,7 +119,8 @@ public class AutoBackupDriver(
         // Read at upload time rather than watched: the list is small, the tick
         // is slow, and a snapshot taken now is by definition the one being
         // uploaded.
-        val contacts = AcceptedContactsStore.load(applicationContext).map { c ->
+        // This account's list, whatever is bound when the tick runs.
+        val contacts = AcceptedContactsStore.load(applicationContext, accountIdB64).map { c ->
             BackupContactRecord(
                 ed25519Pubkey = c.request.fromPubkey,
                 x25519Pubkey = ByteArray(32),

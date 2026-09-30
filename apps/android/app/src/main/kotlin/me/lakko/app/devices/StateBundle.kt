@@ -175,10 +175,15 @@ public object StateBundle {
 
     // ---- build / apply ------------------------------------------------------
 
-    /** Read this device's contacts, pins and group ids into a bundle. */
-    public fun build(context: Context, knownGroupIdsHex: Collection<String>): Bundle {
-        val accepted = me.lakko.app.contacts.AcceptedContactsStore.load(context)
-        val pinStore = me.lakko.app.contacts.PeerPinStore(context)
+    /** Read [accountIdB64]'s contacts and pins and this device's group ids
+     *  into a bundle. Only that account's list is read: a bundle never
+     *  carries another account's contacts to a new device. */
+    public fun build(context: Context, accountIdB64: String, knownGroupIdsHex: Collection<String>): Bundle {
+        val accepted = me.lakko.app.contacts.AcceptedContactsStore.load(context, accountIdB64)
+        val pinStore = me.lakko.app.contacts.PeerPinStore(
+            context,
+            me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64),
+        )
         val enc = Base64.getEncoder()
         val contacts = accepted.map { c ->
             CarriedContact(
@@ -205,15 +210,18 @@ public object StateBundle {
     /**
      * The receiving half: set by the process-lived contacts repository so a
      * bundle's contacts reach the live list (the store alone would be
-     * overwritten by the repository's next persist).
+     * overwritten by the repository's next persist). Called with the account
+     * the bundle belongs to; returns `null` when the repository is not bound
+     * to that account, and the bundle is then written to that account's
+     * store directly.
      */
     @Volatile
-    public var contactsSink: ((List<me.lakko.app.contacts.AcceptedContact>) -> Int)? = null
+    public var contactsSink: ((String, List<me.lakko.app.contacts.AcceptedContact>) -> Int?)? = null
 
-    /** Merge [bundle] into this device: contacts not here yet, pins through the
-     *  monotone setter, the known group ids for the chat list. Returns the
-     *  number of contacts and pins applied. */
-    public fun apply(context: Context, bundle: Bundle): Pair<Int, Int> {
+    /** Merge [bundle] into [accountIdB64]'s state on this device: contacts
+     *  not here yet, pins through the monotone setter, the known group ids
+     *  for the chat list. Returns the number of contacts and pins applied. */
+    public fun apply(context: Context, accountIdB64: String, bundle: Bundle): Pair<Int, Int> {
         val dec = Base64.getDecoder()
         val incoming = bundle.contacts.mapIndexedNotNull { idx, c ->
             val pubkey = try {
@@ -243,19 +251,19 @@ public object StateBundle {
                 displayName = c.displayName.ifEmpty { null },
             )
         }
-        val sink = contactsSink
-        val contactsApplied = if (sink != null) {
-            sink(incoming)
-        } else {
-            val existing = me.lakko.app.contacts.AcceptedContactsStore.load(context)
+        val contactsApplied = contactsSink?.invoke(accountIdB64, incoming) ?: run {
+            val existing = me.lakko.app.contacts.AcceptedContactsStore.load(context, accountIdB64)
             val known = existing.map { it.request.fromPubkey.toList() }.toHashSet()
             val fresh = incoming.filter { known.add(it.request.fromPubkey.toList()) }
             if (fresh.isNotEmpty()) {
-                me.lakko.app.contacts.AcceptedContactsStore.save(context, existing + fresh)
+                me.lakko.app.contacts.AcceptedContactsStore.save(context, accountIdB64, existing + fresh)
             }
             fresh.size
         }
-        val pinStore = me.lakko.app.contacts.PeerPinStore(context)
+        val pinStore = me.lakko.app.contacts.PeerPinStore(
+            context,
+            me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64),
+        )
         var pins = 0
         for (p in bundle.pins) {
             try {

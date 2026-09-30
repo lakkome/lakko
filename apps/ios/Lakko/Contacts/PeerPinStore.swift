@@ -43,19 +43,39 @@ import Foundation
 /// survives app relaunch and process termination, which is all
 /// rule #3/#4 require.
 ///
-/// One JSON blob under a single versioned key holds the whole
-/// `account_id (base64) → pin` map, matching the web's one-row
-/// schema. A junk / malformed entry is dropped on read rather than
-/// mis-trusted.
+/// One JSON blob per signed-in ACCOUNT holds that account's whole
+/// `account_id (base64) → pin` map (`me.lakko.contacts.pins.v2.<owner>`).
+/// A junk / malformed entry is dropped on read rather than mis-trusted.
+///
+/// ## Per account (2026-09-30)
+///
+/// The map used to live under one device-wide key, so a second account
+/// signed in on the same phone inherited the first account's trust
+/// decisions (and, through them, the fact of who it talked to). The pins
+/// belong to the contact list they sit beside (``AcceptedContactsStore``),
+/// so they are keyed the same way: by the account that holds them. A store
+/// built without an owner acts on the account ``AcceptedContactsStore``
+/// has bound, resolved at each call; with none bound, reads are empty and
+/// writes are dropped — never filed under a shared key.
 public final class PeerPinStore {
 
-    /// Versioned storage key — a future schema change can land
-    /// alongside v1 without collision.
-    private static let storageKey = "me.lakko.contacts.pins.v1"
+    /// Versioned storage-key prefix; the owning account id follows.
+    private static let prefix = "me.lakko.contacts.pins.v2."
+    /// The device-wide key this store used before it was per account. Never
+    /// read; removed by ``clear(ownerAccountIdB64:defaults:)``.
+    static let legacyGlobalKey = "me.lakko.contacts.pins.v1"
 
     /// The backing store. Injectable so tests can use an isolated
     /// `UserDefaults(suiteName:)` instead of `.standard`.
     private let defaults: UserDefaults
+    /// The account whose pins this store holds; `nil` = the bound account,
+    /// read at each call.
+    private let ownerAccountIdB64: String?
+
+    /// The key of the owning account's map, `nil` when no account is known.
+    private var storageKey: String? {
+        (ownerAccountIdB64 ?? AcceptedContactsStore.boundAccountIdB64).map { Self.prefix + $0 }
+    }
 
     /// One pinned AccountIdentity pubkey for a peer, keyed (in the
     /// map) on the peer's stable `account_id` (base64). The value,
@@ -128,10 +148,22 @@ public final class PeerPinStore {
         case rejectedBackward
     }
 
-    /// - Parameter defaults: the backing `UserDefaults`. Defaults to
-    ///   `.standard`; tests inject an isolated suite.
-    public init(defaults: UserDefaults = .standard) {
+    /// - Parameters:
+    ///   - defaults: the backing `UserDefaults`. Defaults to `.standard`;
+    ///     tests inject an isolated suite.
+    ///   - ownerAccountIdB64: the signed-in account whose pins these are.
+    ///     `nil` (the default) follows the account ``AcceptedContactsStore``
+    ///     has bound.
+    public init(defaults: UserDefaults = .standard, ownerAccountIdB64: String? = nil) {
         self.defaults = defaults
+        self.ownerAccountIdB64 = ownerAccountIdB64
+    }
+
+    /// Forget-device: drop one account's pin map (and the old device-wide
+    /// map, which nothing reads any more). Other accounts are untouched.
+    public static func clear(ownerAccountIdB64: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: prefix + ownerAccountIdB64)
+        defaults.removeObject(forKey: legacyGlobalKey)
     }
 
     // MARK: - Read / write the whole map
@@ -139,7 +171,7 @@ public final class PeerPinStore {
     /// Load the `account_id (base64) → pin` map, dropping any
     /// structurally-malformed entry rather than mis-trusting it.
     private func loadMap() -> [String: AccountPubkeyPin] {
-        guard let raw = defaults.data(forKey: Self.storageKey) else {
+        guard let storageKey, let raw = defaults.data(forKey: storageKey) else {
             return [:]
         }
         // A decode failure (corrupt blob / future schema we can't
@@ -152,6 +184,12 @@ public final class PeerPinStore {
     }
 
     private func saveMap(_ map: [String: AccountPubkeyPin]) {
+        guard let storageKey else {
+            // No signed-in account: a pin with no owner would be a shared
+            // trust decision, which is what this store exists not to keep.
+            NSLog("PeerPinStore: no account bound; pin not written")
+            return
+        }
         guard let encoded = try? JSONEncoder().encode(map) else {
             // Encoding a `[String: AccountPubkeyPin]` cannot fail in
             // practice (only String keys + Codable values); if it
@@ -160,7 +198,7 @@ public final class PeerPinStore {
             NSLog("PeerPinStore: pin-map encode failed; leaving prior state")
             return
         }
-        defaults.set(encoded, forKey: Self.storageKey)
+        defaults.set(encoded, forKey: storageKey)
     }
 
     // MARK: - Public API (mirror of the web local-store pin surface)
@@ -349,9 +387,10 @@ public final class PeerPinStore {
         saveMap(map)
     }
 
-    /// Wipe the entire pin map. Called from a device-wipe flow
-    /// (mirror of the web `clearAll`'s pin half). No-op when absent.
+    /// Wipe the owning account's whole pin map (mirror of the web
+    /// `clearAll`'s pin half). No-op when absent or when no account is known.
     public func clearAll() {
-        defaults.removeObject(forKey: Self.storageKey)
+        guard let storageKey else { return }
+        defaults.removeObject(forKey: storageKey)
     }
 }

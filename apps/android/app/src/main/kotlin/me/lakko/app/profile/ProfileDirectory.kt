@@ -211,10 +211,20 @@ public class ProfileDirectory internal constructor(
             }
         }
 
-        /** Renames keyed by signature key, from the accepted-contact store. */
-        internal fun renamesFromAcceptedContacts(context: Context): Map<String, String> =
+        /** Renames keyed by signature key, from [accountIdB64]'s accepted
+         *  contacts, or the bound (signed-in) account's when `null`; empty
+         *  when neither names an account. */
+        internal fun renamesFromAcceptedContacts(
+            context: Context,
+            accountIdB64: String? = null,
+        ): Map<String, String> =
             try {
-                me.lakko.app.contacts.AcceptedContactsStore.load(context)
+                val contacts = if (accountIdB64 != null) {
+                    me.lakko.app.contacts.AcceptedContactsStore.load(context, accountIdB64)
+                } else {
+                    me.lakko.app.contacts.AcceptedContactsStore.load(context)
+                }
+                contacts
                     .mapNotNull { c ->
                         val name = c.displayName?.trim()?.takeIf { it.isNotEmpty() }
                             ?: return@mapNotNull null
@@ -259,13 +269,14 @@ public class ProfileNameSnapshot private constructor(
     public fun isKnown(signatureKeyB64: String): Boolean = !resolve(signatureKeyB64).isPlaceholder
 
     public companion object {
-        /** Load a snapshot. Never writes. */
-        public fun load(context: Context): ProfileNameSnapshot {
+        /** Load a snapshot. Never writes. The contact renames are
+         *  [accountIdB64]'s (the bound account's when `null`). */
+        public fun load(context: Context, accountIdB64: String? = null): ProfileNameSnapshot {
             val persistence = SharedPrefsProfilePersistence(context.applicationContext)
             return ProfileNameSnapshot(
                 profiles = persistence.loadProfiles(),
                 verifications = persistence.loadVerifications(),
-                renames = ProfileDirectory.renamesFromAcceptedContacts(context.applicationContext),
+                renames = ProfileDirectory.renamesFromAcceptedContacts(context.applicationContext, accountIdB64),
             )
         }
     }

@@ -32,7 +32,13 @@ const round = (prefix: string, text: string) => ({
 /** A lookup hit with no public record unless one is given. */
 const hit = (accountId: Uint8Array, publicRecord: Uint8Array | null = null) => ({ accountId, publicRecord });
 
-const NOBODY: KnownPerson = { name: null, verifiedUsername: null, isContact: false, keptGrantWireB64: null };
+const NOBODY: KnownPerson = {
+  name: null,
+  contactFallbackName: null,
+  verifiedUsername: null,
+  isContact: false,
+  keptGrantWireB64: null,
+};
 
 function deps(over: Partial<PeopleSearchDeps> = {}, known: Record<string, KnownPerson> = {}): PeopleSearchDeps {
   const bundles = new Map<string, Uint8Array>([
@@ -316,5 +322,39 @@ describe("searchPeople: one list", () => {
       deps({ accountOfUsernameLookupKey: async () => hit(ANNA_ACC), ownKeyHex: toHex(ANNA_KEY) }),
     );
     expect(out.people).toEqual([]);
+  });
+});
+
+describe("searchPeople: a contact nothing names", () => {
+  const FP = "b1b1 b1b1";
+  const unnamedBo: Record<string, KnownPerson> = {
+    [base64Encode(BO_KEY)]: { ...NOBODY, isContact: true, contactFallbackName: FP },
+  };
+
+  it("an introduction's name beats the fingerprint", async () => {
+    const out = await searchPeople(
+      "bo lind",
+      deps({ openIntroductions: async () => [intro()] }, unnamedBo),
+    );
+    expect(out.people[0]).toMatchObject({ name: "Bo Lind", reach: "contact" });
+    expect(out.people[0]?.nameIsFallback).toBeUndefined();
+  });
+
+  it("an unnamed name hit is dropped, never listed by a fingerprint the query did not match", async () => {
+    const out = await searchPeople(
+      "bo",
+      deps({ accountsOfNameTermLookupKey: async () => [hit(BO_ACC)] }, unnamedBo),
+    );
+    expect(out.people).toEqual([]);
+  });
+
+  it("a held name still wins over a published one", async () => {
+    const out = await searchPeople(
+      "bo",
+      deps({ openIntroductions: async () => [intro({ displayName: "Bo Lind" })] }, {
+        [base64Encode(BO_KEY)]: { ...NOBODY, name: "Bo", isContact: true },
+      }),
+    );
+    expect(out.people[0]).toMatchObject({ name: "Bo", reach: "contact" });
   });
 });

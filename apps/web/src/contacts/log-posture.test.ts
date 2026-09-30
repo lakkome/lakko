@@ -95,9 +95,8 @@ function chainResult(
 // Import AFTER the mock is registered.
 const { ContactsClient, SupersessionRefused, LogRollbackDetected } =
   await import("./client");
-const { readPin, readLogStatus, readLogReset, readLogVersion } = await import(
-  "./local-store"
-);
+const { bindContactsAccount, readPin, readLogStatus, readLogReset, readLogVersion } =
+  await import("./local-store");
 
 /** In-memory `localStorage` shim. */
 class MemoryStorage {
@@ -171,6 +170,8 @@ beforeAll(async () => {
 beforeEach(() => {
   (globalThis as unknown as { localStorage: Storage }).localStorage =
     new MemoryStorage() as unknown as Storage;
+  // Pins belong to the signed-in account.
+  bindContactsAccount("dmlld2VyLWFjY291bnQ=");
   verifyIdentityInLogMock.mockReset();
   verifyRotationChainMock.mockReset();
   lookupServedKeyResetMock.mockReset();
@@ -182,6 +183,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  bindContactsAccount(null);
   delete (globalThis as unknown as { localStorage?: Storage }).localStorage;
   vi.restoreAllMocks();
 });

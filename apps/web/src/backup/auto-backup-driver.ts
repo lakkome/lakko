@@ -114,7 +114,9 @@ export function startAutoBackup(inputs: AutoBackupDriverInputs): () => void {
       });
   };
 
-  const unsubscribe = subscribeAcceptedChanged(() => {
+  const unsubscribe = subscribeAcceptedChanged((change) => {
+    // Another account being bound changes what is read, not what is kept.
+    if (change === "account-changed") return;
     const id = inputs.accountIdB64();
     if (id !== null) markBackupDirty(id);
   });

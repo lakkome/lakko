@@ -5,8 +5,12 @@ import Foundation
 import LakkoCore
 
 extension Notification.Name {
-    /// Posted after a pairing state bundle merged contacts into
-    /// ``AcceptedContactsStore``, so a live ``ContactsRepository`` reloads them.
+    /// Posted after a pairing state bundle (or a backup restore) merged
+    /// contacts into ``AcceptedContactsStore``, so a live
+    /// ``ContactsRepository`` reloads them. The object is the merged
+    /// `[AcceptedContact]`; `userInfo[StateBundle.appliedAccountKey]` names
+    /// the account they were filed under, and a repository bound to any other
+    /// account ignores them.
     static let lakkoStateBundleApplied = Notification.Name("me.lakko.state-bundle-applied")
 }
 
@@ -22,6 +26,10 @@ extension Notification.Name {
 /// state polls each skip the rows that are not theirs, sealed under the
 /// DeviceGroup exporter at the post-add epoch.
 public enum StateBundle {
+
+    /// `userInfo` key of ``Notification/Name/lakkoStateBundleApplied``: the
+    /// base64 account id the merged contacts belong to.
+    public static let appliedAccountKey = "accountIdB64"
 
     /// Exporter label; the context is the 32-byte rendezvous pseudonym.
     public static let exporterLabel = "lakko/state-bundle/v1"
@@ -157,8 +165,9 @@ public enum StateBundle {
     }
 
     /// Read this device's contacts, pins and known group ids into a bundle.
-    public static func build(accountIdB64: String, pinStore: PeerPinStore = PeerPinStore()) -> V1 {
-        let contacts = AcceptedContactsStore.load()
+    public static func build(accountIdB64: String, pinStore: PeerPinStore? = nil) -> V1 {
+        let pinStore = pinStore ?? PeerPinStore(ownerAccountIdB64: accountIdB64)
+        let contacts = AcceptedContactsStore.load(accountIdB64: accountIdB64)
         var pins: [CarriedPin] = []
         for contact in contacts {
             guard let accountId = contact.request.fromAccountId else { continue }
@@ -178,13 +187,17 @@ public enum StateBundle {
 
     /// Merge a bundle into this device: contacts not already present (by
     /// signature key), pins through the monotone setter, the known group ids
-    /// for the chat list's "Synchronizing..." label.
+    /// for the chat list's "Synchronizing..." label. `accountIdB64` is the
+    /// account the bundle belongs to (the one being paired): its contacts and
+    /// pins are filed under it, never under whoever else is signed in.
     @discardableResult
     public static func apply(
         _ bundle: V1,
-        pinStore: PeerPinStore = PeerPinStore()
+        accountIdB64: String,
+        pinStore: PeerPinStore? = nil
     ) -> (contacts: Int, pins: Int) {
-        var current = AcceptedContactsStore.load()
+        let pinStore = pinStore ?? PeerPinStore(ownerAccountIdB64: accountIdB64)
+        var current = AcceptedContactsStore.load(accountIdB64: accountIdB64)
         let have = Set(current.map { $0.request.fromPubkey })
         var fresh: [AcceptedContact] = []
         for carried in bundle.contacts {
@@ -196,7 +209,7 @@ public enum StateBundle {
         let added = fresh.count
         if added > 0 {
             current.append(contentsOf: fresh)
-            AcceptedContactsStore.save(current)
+            AcceptedContactsStore.save(current, accountIdB64: accountIdB64)
         }
         var pins = 0
         for pin in bundle.pins {
@@ -213,7 +226,9 @@ public enum StateBundle {
         // The contacts ride in the notification too: a live repository merges
         // them into its state (whose next save would otherwise overwrite the
         // store write above).
-        NotificationCenter.default.post(name: .lakkoStateBundleApplied, object: fresh)
+        NotificationCenter.default.post(
+            name: .lakkoStateBundleApplied, object: fresh,
+            userInfo: [appliedAccountKey: accountIdB64])
         return (added, pins)
     }
 

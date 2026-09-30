@@ -5938,7 +5938,7 @@ public class ChatRepository(
         }
         val people = roster.map { it.personKey }.toSet()
         val lookups = mutableListOf(ownPerson to account.accountId)
-        for (c in me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext)) {
+        for (c in me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext, account.accountId)) {
             val id = c.request.fromAccountId ?: continue
             val person = outboxB64(c.request.fromPubkey)
             if (person in people && person != ownPerson) lookups += person to id

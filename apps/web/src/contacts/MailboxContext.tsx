@@ -197,7 +197,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             // ADR-0048 — the name comes from the resolver; a re-delivered ack
             // must not wipe a rename the user already gave this contact.
             displayName:
-              loadAccepted().find(
+              loadAccepted(accountIdB64).find(
                 (c) => c.signaturePubkeyB64 === base64Encode(ev.ack.accepterPubkey),
               )?.displayName ?? "",
             acceptedAtMs: Date.now(),
@@ -205,7 +205,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             // roster can resolve to this contact's name.
             accountIdHex: groupIdHex(ev.ack.accepterAccountId),
           };
-          upsertAccepted(accepter);
+          upsertAccepted(accepter, accountIdB64);
           setAcceptedVersion(acceptedVersion() + 1);
         }
       }
@@ -263,7 +263,8 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     activeAccount = accountIdB64;
     const opened = createPendingInbox({
       accountIdB64,
-      isAccepted: (keyB64) => loadAccepted().some((c) => c.signaturePubkeyB64 === keyB64),
+      isAccepted: (keyB64) =>
+        loadAccepted(accountIdB64).some((c) => c.signaturePubkeyB64 === keyB64),
       onChange: () => setPending(opened.pending()),
     });
     inbox = opened;

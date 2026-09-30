@@ -174,6 +174,49 @@ class PeopleSearchTest {
     }
 
     @Test
+    fun `a contact held only by fingerprint is found and shown under the name they published`() = runTest {
+        val fake = Fake(
+            nameHits = listOf(LookupHit(aliceAccount, "rec".toByteArray())),
+            bundleKeys = mapOf(searchHex(aliceAccount) to aliceKey),
+            opened = mapOf("rec|out:n:anna" to OpenedPublicRecord(aliceKey, aliceAccount, "Anna Weber")),
+            known = mapOf(
+                searchKeyB64(aliceKey) to KnownPerson(
+                    name = null,
+                    verifiedUsername = null,
+                    isContact = true,
+                    keptGrantWireB64 = null,
+                    fallbackName = "a1a1 a1a1",
+                ),
+            ),
+        )
+        val p = searchPeople("anna", fake).people.single()
+        assertEquals("Anna Weber", p.name)
+        assertEquals(PersonReach.CONTACT, p.reach)
+    }
+
+    @Test
+    fun `a name the device holds for a contact still beats the published one`() = runTest {
+        val fake = Fake(
+            nameHits = listOf(LookupHit(aliceAccount, "rec".toByteArray())),
+            bundleKeys = mapOf(searchHex(aliceAccount) to aliceKey),
+            opened = mapOf("rec|out:n:anna" to OpenedPublicRecord(aliceKey, aliceAccount, "Anna Weber")),
+            known = mapOf(
+                searchKeyB64(aliceKey) to KnownPerson("Anna from work", null, true, null, fallbackName = null),
+            ),
+        )
+        assertEquals("Anna from work", searchPeople("anna", fake).people.single().name)
+    }
+
+    @Test
+    fun `the label rule - held name, then the found name, then a contact's fingerprint`() {
+        val contactByFingerprint = KnownPerson(null, null, true, null, fallbackName = "a1a1 a1a1")
+        assertEquals("Anna Weber", resultName(contactByFingerprint, "Anna Weber"))
+        assertEquals("a1a1 a1a1", resultName(contactByFingerprint, null))
+        assertEquals("Anna", resultName(KnownPerson("Anna", null, true, null, "a1a1 a1a1"), "Anna Weber"))
+        assertNull(resultName(KnownPerson(null, null, false, null), null))
+    }
+
+    @Test
     fun `a network failure is never not found`() = runTest {
         val fake = Fake(nameLookupThrows = IllegalStateException("offline"))
         assertEquals(PeopleSearchState.FAILED, searchPeople("an", fake).state)

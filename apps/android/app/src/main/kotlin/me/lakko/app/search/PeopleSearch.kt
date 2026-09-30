@@ -42,6 +42,14 @@ import uniffi.lakko_ffi_uniffi.OprfResult
  * that account ([acceptPublicRecord]). A name this device already holds wins
  * over the record's. A name hit nothing names is dropped; a username match
  * without a usable record is shown under its username.
+ *
+ * **A contact with no held name.** A contact this device knows only by key
+ * (no rename, no profile name) has a [KnownPerson.fallbackName] — its
+ * fingerprint, or its username — and nothing more. A name the person
+ * published (the public record, an introduction) is used INSTEAD of that
+ * fallback, so a name search finds the contact under that name; with neither,
+ * the contact is still shown by the fallback. The row never says why it was
+ * found.
  */
 
 /** What this device knows about a person, by account key (base64). */
@@ -51,7 +59,17 @@ public data class KnownPerson(
     val verifiedUsername: String?,
     val isContact: Boolean,
     val keptGrantWireB64: String?,
+    /** What a CONTACT is shown as when nothing better is known (the
+     *  fingerprint, or a verified username); `null` for anyone else. Loses
+     *  to a held [name] AND to a name found by the search. */
+    val fallbackName: String? = null,
 )
+
+/** The label a result is shown under: a held name, else the name the search
+ *  found (the person's own published one), else a contact's fallback; `null`
+ *  (dropped) when none exists. */
+public fun resultName(known: KnownPerson, foundName: String?): String? =
+    known.name ?: foundName ?: known.fallbackName
 
 /** One lookup hit: an account in Everyone and its public record (`null`
  *  when discovery sent none). */
@@ -169,7 +187,7 @@ private fun resultFor(
 ): PersonResult? {
     val k = deps.known(keyB64)
     val reach = if (k.isContact) PersonReach.CONTACT else foundReach
-    val name = k.name ?: foundName ?: return null
+    val name = resultName(k, foundName) ?: return null
     return PersonResult(
         keyB64 = keyB64,
         keyHex = keyHex,
@@ -257,8 +275,9 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
             val out = mutableListOf<PersonResult>()
             for (hit in deps.accountsOfNameTermLookupKey(round.lookupKey)) {
                 val key = identityKey(deps, hit.accountId) ?: continue
-                // A name this device holds, else the one the person published;
-                // an unnamed hit is dropped.
+                // A name this device holds, else the one the person published
+                // (also for a contact held only by fingerprint); an unnamed
+                // hit is dropped.
                 val published = acceptPublicRecord(deps::openPublicRecord, hit, round.output, key.bytes)
                 val name = deps.known(key.b64).name ?: published ?: continue
                 if (!deps.nameMatches(name, query)) continue

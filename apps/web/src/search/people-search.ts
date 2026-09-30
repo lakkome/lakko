@@ -57,6 +57,11 @@ import { foldSearch, legOutcomeOf, type LegOutcome, type PeopleSearchState } fro
 export interface KnownPerson {
   /** A name this device holds (rename or profile); `null` for none. */
   readonly name: string | null;
+  /** For a contact nothing names: what they are shown by anyway (their
+   *  verified username, else their fingerprint). A name they published wins
+   *  over it; with none, the contact still shows by it. `null` for anyone
+   *  who is not a contact, and for a contact with a held `name`. */
+  readonly contactFallbackName: string | null;
   readonly verifiedUsername: string | null;
   readonly isContact: boolean;
   readonly keptGrantWireB64: string | null;
@@ -167,13 +172,17 @@ function resultFor(
 ): PersonResult | null {
   const k = deps.known(keyB64);
   const reach: PersonReach = k.isContact ? "contact" : foundReach;
-  const name = k.name ?? foundName;
+  // A held name, else the name found (published), else a contact's
+  // fingerprint / username stand-in.
+  const name = k.name ?? foundName ?? k.contactFallbackName;
   if (name === null) return null;
+  const nameIsFallback = k.name === null && foundName === null;
   return {
     keyB64,
     keyHex,
     accountIdHex,
     name,
+    ...(nameIsFallback ? { nameIsFallback: true } : {}),
     username: shownUsername(foundUsername ?? k.verifiedUsername, reach),
     reach,
     grantWireB64: reach === "grant" ? grantWireB64 : null,

@@ -823,10 +823,12 @@ private fun SessionRoot(
         // the message-log parse, the DeviceGroup restore. The shell now draws
         // first and these populate it; `bootstrap` hops onto the repository's
         // own dispatcher, the two stores below are hopped here.
-        // The stranger-inbox cursor + pending list are per account: load them
-        // now so the Contacts tab shows the saved requests before its first
-        // poll, which then resumes from the saved cursor.
-        contactsRepository.bindInbox(secrets.accountId)
+        // The accepted contacts, the stranger-inbox cursor and the pending
+        // list are per account: load this account's now, so the Contacts tab
+        // shows its contacts and saved requests before its first poll, which
+        // then resumes from the saved cursor. Idempotent when the repository
+        // already bound this account at construction.
+        contactsRepository.bindAccount(secrets.accountId)
         chatRepository.bootstrap(secrets)
         // ADR-0048 — make sure this account's own profile exists and states
         // its current username (normalised; `null` for a guest). Republished
@@ -1179,8 +1181,10 @@ private fun SessionRoot(
     }
     val forgetDevice = {
         me.lakko.app.calls.AppCallHost.reset()
-        // The invite-link secrets this device kept (UX 5.3) go with it; read
-        // before clear() drops the session binding.
+        // The account's contact list and identity pins and the invite-link
+        // secrets this device kept (UX 5.3) go with it; read before clear()
+        // drops the session binding. Log out above keeps the contact list for
+        // the next login of the same account.
         contactsRepository.forgetDevice()
         contactsRepository.clear()
         // The account's channel log + publisher provider snapshot go with the

@@ -117,7 +117,10 @@ import {
 import { loadWasm, type Wasm } from "../wasm";
 import { accountKey as transparencyAccountKey } from "../transparency/account-key";
 import { DiscoveryClient } from "../discovery/client";
-import { clearAll as clearContactsStore } from "../contacts/local-store";
+import {
+  bindContactsAccount,
+  clearAccountContacts,
+} from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
 import { deleteMlsSnapshot, saveMlsSnapshot } from "../chat/mls-store";
 import { clearAllGroupRouting } from "../push/group-routing-store";
@@ -723,7 +726,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // Start in `loading` so the very first paint doesn't snap to
   // `/login`; the onMount hook reads localStorage + IDB, then
   // resolves to either `session` (full restore) or `anon`.
-  const [state, setState] = createSignal<AuthState>({ kind: "loading" });
+  const [state, setStateSignal] = createSignal<AuthState>({ kind: "loading" });
+  // The contact list belongs to the signed-in account (`contacts/local-store`):
+  // bind that account the moment a session lands and unbind it on every other
+  // state, BEFORE the signal moves, so nothing the new state renders can read
+  // the previous account's contacts. Every state change goes through here.
+  const setState = (next: AuthState): void => {
+    bindContactsAccount(next.kind === "session" ? next.account.accountId : null);
+    setStateSignal(next);
+  };
   // 1.16d3c: in-memory Identity secrets. Filled on signup /
   // login / recover, dropped on logout, NOT populated on a
   // session restore from IDB (the export key isn't persisted).
@@ -3480,10 +3491,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       }
       clearPersisted();
-      // 1.16d3d: drop the on-device contacts cache too —
-      // "forget device" should leave nothing per-account
-      // behind on this browser.
-      clearContactsStore();
+      // 1.16d3d: drop this account's contacts too — "forget device"
+      // should leave nothing of this account behind on this browser.
+      // Another account's contacts on the same browser are its own.
+      clearAccountContacts(cached?.accountIdB64);
       // 1.20b: full wipe of push state too — unsubscribe on the
       // browser side, drop the push pseudonym from localStorage,
       // tell `push-gw` to drop the token. Awaited because

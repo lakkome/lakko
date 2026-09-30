@@ -36,7 +36,13 @@ const TERM_KEY = bytes64(0x32);
 const USER_OUT = bytes64(0x41);
 const USER_KEY = bytes64(0x42);
 
-const NOBODY: KnownPerson = { name: null, verifiedUsername: null, isContact: false, keptGrantWireB64: null };
+const NOBODY: KnownPerson = {
+  name: null,
+  contactFallbackName: null,
+  verifiedUsername: null,
+  isContact: false,
+  keptGrantWireB64: null,
+};
 
 /** A public record as the person publishes it: over their name term and
  *  username outputs. */
@@ -162,5 +168,39 @@ describe("a username hit", () => {
       deps({ accountOfUsernameLookupKey: async () => ({ accountId: ANNA_ACC, publicRecord: record }) }),
     );
     expect(out.people[0]).toMatchObject({ name: "@anna", username: "anna" });
+  });
+});
+
+describe("a contact nothing names (only a fingerprint)", () => {
+  const ANNA_FP = "a1a1 a1a1";
+  const unnamedContact = (k: string): KnownPerson =>
+    k === base64Encode(ANNA_KEY)
+      ? { ...NOBODY, isContact: true, contactFallbackName: ANNA_FP }
+      : NOBODY;
+
+  it("is found by the name they published, and shown by it", async () => {
+    const record = publicRecord(ANNA_KEY, ANNA_ACC, "Anna Weber");
+    const out = await searchPeople(
+      "anna w",
+      deps({
+        accountsOfNameTermLookupKey: async () => [{ accountId: ANNA_ACC, publicRecord: record }],
+        known: unnamedContact,
+      }),
+    );
+    expect(out.people).toHaveLength(1);
+    expect(out.people[0]).toMatchObject({ name: "Anna Weber", reach: "contact" });
+  });
+
+  it("keeps the fingerprint when an introduction names nobody and nothing else does", async () => {
+    // A username hit whose record does not open names the contact by the
+    // username; the fingerprint is the last resort, never beaten by nothing.
+    const out = await searchPeople(
+      "anna",
+      deps({
+        accountOfUsernameLookupKey: async () => ({ accountId: ANNA_ACC, publicRecord: null }),
+        known: unnamedContact,
+      }),
+    );
+    expect(out.people[0]).toMatchObject({ name: "@anna", reach: "contact" });
   });
 });

@@ -191,6 +191,29 @@ describe("mergePeople", () => {
     expect(merged[0]).toMatchObject({ reach: "contact", grantWireB64: null });
   });
 
+  it("a contact's fingerprint stand-in gives way to a name another list found", () => {
+    const merged = mergePeople(
+      [
+        [person({ keyHex: "aa", reach: "contact", name: "a1b2 c3d4", nameIsFallback: true })],
+        [person({ keyHex: "aa", reach: "open", name: "Anna Weber" })],
+      ],
+      null,
+    );
+    expect(merged[0]).toMatchObject({ reach: "contact", name: "Anna Weber" });
+    expect(merged[0]?.nameIsFallback).toBeUndefined();
+  });
+
+  it("a contact with nothing better keeps the fingerprint", () => {
+    const merged = mergePeople(
+      [
+        [person({ keyHex: "aa", reach: "contact", name: "a1b2 c3d4", nameIsFallback: true })],
+        [person({ keyHex: "aa", reach: "open", name: "@anna", nameIsFallback: true })],
+      ],
+      null,
+    );
+    expect(merged[0]).toMatchObject({ name: "a1b2 c3d4", nameIsFallback: true });
+  });
+
   it("drops the viewer and keeps first-seen order", () => {
     const merged = mergePeople(
       [[person({ keyHex: "bb" }), person({ keyHex: "self" })], [person({ keyHex: "aa" })]],

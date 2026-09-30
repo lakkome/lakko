@@ -82,6 +82,10 @@ export interface PersonResult {
   readonly accountIdHex: string | null;
   /** The name to show. */
   readonly name: string;
+  /** `true` when `name` is only a contact's stand-in (their fingerprint or
+   *  username) because nothing names them: a merge then prefers a name
+   *  another list found (the one they published). Never shown. */
+  readonly nameIsFallback?: boolean;
   /** A VERIFIED username, already passed through `shownUsername`. */
   readonly username: string | null;
   readonly reach: PersonReach;
@@ -113,6 +117,9 @@ export interface LocalCandidate {
   /** The resolved name (a local rename, their profile name, or their
    *  username); `null` when this device holds no name for them. */
   readonly name: string | null;
+  /** `true` when `name` is only a contact's stand-in (fingerprint or
+   *  username), see {@link PersonResult.nameIsFallback}. */
+  readonly nameIsFallback?: boolean;
   /** Their username, when verified. */
   readonly verifiedUsername: string | null;
   readonly isContact: boolean;
@@ -130,6 +137,7 @@ export function localResult(c: LocalCandidate, name: string): PersonResult {
     keyHex: c.keyHex,
     accountIdHex: c.accountIdHex,
     name,
+    ...(c.nameIsFallback === true ? { nameIsFallback: true } : {}),
     username: shownUsername(c.verifiedUsername, reach),
     reach,
     grantWireB64: reach === "grant" ? c.keptGrantWireB64 : null,
@@ -167,7 +175,8 @@ export function localPeople(
 /**
  * Merge result lists into one, keyed on the account key: the strongest reach
  * wins, the first list's name is kept (the local one, which respects a
- * rename), and a username is kept from whichever list verified one - then
+ * rename) unless it is only a contact's stand-in and a later list has a real
+ * name (the one the person published), and a username is kept from whichever list verified one - then
  * gated again by the merged reach. The own account never appears.
  */
 export function mergePeople(
@@ -191,7 +200,9 @@ export function mergePeople(
         keyB64: held.keyB64,
         keyHex: held.keyHex,
         accountIdHex: held.accountIdHex ?? p.accountIdHex,
-        name: held.name,
+        ...(held.nameIsFallback === true && p.nameIsFallback !== true
+          ? { name: p.name }
+          : { name: held.name, ...(held.nameIsFallback === true ? { nameIsFallback: true } : {}) }),
         username: shownUsername(held.username ?? p.username, reach),
         reach,
         grantWireB64:
