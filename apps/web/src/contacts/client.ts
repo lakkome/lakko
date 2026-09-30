@@ -326,9 +326,26 @@ export interface IncomingContactAck {
  *  1.16e3). Callers `switch` on it to dispatch to the right
  *  handler. */
 export type IncomingMailboxEvent =
-  | { kind: "contact-request"; request: IncomingContactRequest }
+  | {
+      kind: "contact-request";
+      request: IncomingContactRequest;
+      /** The DS row the request was decoded from, exactly as received. The
+       *  mailbox keeps it (not the decoded request) until Accept or Decline,
+       *  so a request survives a reload the cursor has already skipped past
+       *  (`contacts/inbox-store.ts`). */
+      row: MailboxRow;
+    }
   | { kind: "welcome"; welcome: IncomingWelcome }
   | { kind: "contact-ack"; ack: IncomingContactAck };
+
+/** One account-mailbox row as the DS served it. `payload` is the envelope
+ *  (kind byte + wire bytes): a signed ContactRequest whose intro and profile
+ *  are sealed to this account's X25519 key. */
+export interface MailboxRow {
+  readonly messageId: number;
+  readonly payload: Uint8Array;
+  readonly createdAt: string;
+}
 
 /** Result of `ContactsClient.pollMailbox`. */
 /** ADR-0050 — every leaf index in `group` whose account is the account of
@@ -2328,72 +2345,43 @@ export class ContactsClient {
         continue;
       }
       // env.kind === KIND_CONTACT_REQUEST
-      let parsed;
-      try {
-        parsed = wasm.ContactRequest.decodeAndVerify(env.body);
-      } catch (err) {
-        // Bad signature, malformed wire bytes, or some other
-        // verifier failure. Drop and move on — the cursor
-        // advances so we won't re-process the same row.
-        // eslint-disable-next-line no-console
-        console.warn("ContactRequest verify failed", message.id, err);
-        continue;
-      }
-
-      let intro: string | null = null;
-      let profile: ReceivedProfile | null = null;
-      try {
-        const opened = parsed.openEnvelope(myX25519Secret);
-        intro = new TextDecoder("utf-8", { fatal: false }).decode(opened.introMessage);
-        // ADR-0048 — a profile out of bounds arrives as `undefined` with the
-        // intro intact; the request itself is still a valid request.
-        const p = opened.profile;
-        if (p !== undefined) {
-          profile = {
-            displayName: p.displayName ?? null,
-            username: p.username ?? null,
-            updatedAtMs: p.updatedAtMs,
-            // Copied before `free()`: the getter's view dies with the handle.
-            accountId: p.accountId === undefined ? null : p.accountId.slice(),
-          };
-          p.free();
-        }
-        opened.free();
-      } catch (err) {
-        // Envelope didn't decrypt for our X25519 secret. Could
-        // be a malicious request, could be a bug; either way
-        // we still surface the request to the user (signature
-        // is verified) but with no intro body.
-        // eslint-disable-next-line no-console
-        console.warn(
-          "ContactRequest envelope unseal failed",
-          message.id,
-          err,
-        );
-      }
-
-      // `fromAccountId` is `Uint8Array | undefined` on the
-      // wasm-bindgen surface — normalise to `null` for the
-      // discriminated TS API (the UI distinguishes
-      // present-but-empty from absent).
-      const fromAccountId =
-        parsed.fromAccountId === undefined ? null : parsed.fromAccountId;
+      const request = decodeContactRequestBody(
+        wasm,
+        message.id,
+        env.body,
+        message.createdAt,
+        myX25519Secret,
+      );
+      if (request === null) continue;
       events.push({
         kind: "contact-request",
-        request: {
-          messageId: message.id,
-          fromPubkey: parsed.fromPubkey,
-          fromAccountId,
-          fromPseudonym: parsed.fromPseudonym,
-          validAfterMs: parsed.validAfterMs,
-          intro,
-          profile,
-          createdAt: message.createdAt,
-        },
+        request,
+        row: { messageId: message.id, payload: message.payload, createdAt: message.createdAt },
       });
     }
 
     return { events, cursor, hasMore: raw.hasMore };
+  }
+
+  /**
+   * Rebuild pending contact requests from account-mailbox rows kept on this
+   * device (`contacts/inbox-store.ts`), through the same verify-and-open path
+   * `pollMailbox` runs. One result per row, in order; `null` for a row that no
+   * longer decodes as a verified ContactRequest (the caller drops it).
+   */
+  async decodePendingRequestRows(
+    identity: IdentitySecrets | null,
+    rows: readonly MailboxRow[],
+  ): Promise<(IncomingContactRequest | null)[]> {
+    if (rows.length === 0) return [];
+    const wasm = await loadWasm();
+    const myIdentity = await this.resolveAccountIdentity(identity);
+    const x25519Secret = myIdentity.x25519SecretKey;
+    return rows.map((row) => {
+      const env = parseEnvelope(row.payload);
+      if (env.kind !== KIND_CONTACT_REQUEST) return null;
+      return decodeContactRequestBody(wasm, row.messageId, env.body, row.createdAt, x25519Secret);
+    });
   }
 
   /**
@@ -3847,4 +3835,75 @@ export class ContactsClient {
       outcome,
     };
   }
+}
+
+/**
+ * Verify and open one ContactRequest body (the envelope with its kind byte
+ * already stripped). Shared by the live poll and by the reload path that
+ * rebuilds pending requests from the rows `contacts/inbox-store.ts` kept, so
+ * a restored request passes exactly the checks a freshly polled one did.
+ *
+ * Returns `null` when the signature or the wire fails verification. An
+ * envelope that does not open for `x25519Secret` still yields a request
+ * (the signature is verified) with no intro and no profile.
+ */
+function decodeContactRequestBody(
+  wasm: Wasm,
+  messageId: number,
+  body: Uint8Array,
+  createdAt: string,
+  x25519Secret: Uint8Array,
+): IncomingContactRequest | null {
+  let parsed;
+  try {
+    parsed = wasm.ContactRequest.decodeAndVerify(body);
+  } catch (err) {
+    // Bad signature, malformed wire bytes, or some other verifier failure.
+    // Dropped; the caller's cursor still advances past the row.
+    // eslint-disable-next-line no-console
+    console.warn("ContactRequest verify failed", messageId, err);
+    return null;
+  }
+
+  let intro: string | null = null;
+  let profile: ReceivedProfile | null = null;
+  try {
+    const opened = parsed.openEnvelope(x25519Secret);
+    intro = new TextDecoder("utf-8", { fatal: false }).decode(opened.introMessage);
+    // ADR-0048 — a profile out of bounds arrives as `undefined` with the
+    // intro intact; the request itself is still a valid request.
+    const p = opened.profile;
+    if (p !== undefined) {
+      profile = {
+        displayName: p.displayName ?? null,
+        username: p.username ?? null,
+        updatedAtMs: p.updatedAtMs,
+        // Copied before `free()`: the getter's view dies with the handle.
+        accountId: p.accountId === undefined ? null : p.accountId.slice(),
+      };
+      p.free();
+    }
+    opened.free();
+  } catch (err) {
+    // Envelope didn't decrypt for our X25519 secret. Could be a malicious
+    // request, could be a bug; either way the request is still surfaced (the
+    // signature is verified) but with no intro body.
+    // eslint-disable-next-line no-console
+    console.warn("ContactRequest envelope unseal failed", messageId, err);
+  }
+
+  // `fromAccountId` is `Uint8Array | undefined` on the wasm-bindgen surface —
+  // normalise to `null` for the discriminated TS API (the UI distinguishes
+  // present-but-empty from absent).
+  const fromAccountId = parsed.fromAccountId === undefined ? null : parsed.fromAccountId;
+  return {
+    messageId,
+    fromPubkey: parsed.fromPubkey,
+    fromAccountId,
+    fromPseudonym: parsed.fromPseudonym,
+    validAfterMs: parsed.validAfterMs,
+    intro,
+    profile,
+    createdAt,
+  };
 }

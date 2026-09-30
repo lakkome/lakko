@@ -379,6 +379,19 @@ export function reorderEdit(folders: readonly FolderModel[], from: number, to: n
   return { t: "order", folderIdsHex: ids };
 }
 
+/**
+ * The order register a CREATE writes beside the new folder's registers: the
+ * folders as the bar shows them, then the new one. Without it the new folder
+ * sits outside the order, where the fold places it by the stamp of its
+ * CURRENT meta register (ADR-0058), so every later rename moved it to the end
+ * of the bar (seen live 2026-09-30).
+ */
+export function appendToOrderEdit(folders: readonly FolderModel[], newFolderIdHex: string): RegisterEdit {
+  const ids = folders.map((f) => f.idHex).filter((id) => id !== newFolderIdHex);
+  ids.push(newFolderIdHex);
+  return { t: "order", folderIdsHex: ids };
+}
+
 // ---------- the Suggested list (UX spec section 4) -------------------------
 
 export interface Suggestion {

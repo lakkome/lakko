@@ -194,6 +194,11 @@ tiebreak are exactly where clients disagree silently). Its home is
   meta register, then by folder id. (The first draft said "first meta
   register"; the first one is not held after a rename, so it cannot converge
   through a snapshot.) A concurrent create and reorder lose neither.
+  **Every create therefore also writes the order** (the folders as listed,
+  the new one last), in the same change set: without it a folder lives
+  outside the order and each rename moves it to the end of the bar, which is
+  what the first build did (seen live 2026-09-30). The appended-by-stamp rule
+  is left for what it was for, a create racing a reorder on another device.
 - **Existing maps:** the four synced maps fold exactly as they do today
   (`shouldApply`, strictly newer by stamp), plus the same bytewise tiebreak,
   which today's clients lack (an exact HLC tie is currently decided by arrival

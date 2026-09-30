@@ -131,15 +131,20 @@ final class ChatFoldersTests: XCTestCase {
         var draft = ChatFolders.Draft.new(prefill: ref(groupA))
         draft.name = "  Work "
         draft.includeKinds = ChatFolders.Include.channels
+        let earlier = Data(repeating: 1, count: 16), later = Data(repeating: 2, count: 16)
         let c = ChatFolders.changes(
-            original: nil, draft: draft, folderId: folderId, mintHlc: counter())
+            original: nil, draft: draft, folderId: folderId,
+            listedFolderIds: [earlier, later], mintHlc: counter())
         XCTAssertEqual(c.metas.count, 1)
         XCTAssertEqual(c.metas[0].name, "Work")
         XCTAssertEqual(c.metas[0].excludeFlags, ChatFolders.Exclude.archived)
         XCTAssertEqual(c.members.count, 1)
         XCTAssertEqual(c.members[0].state, .included)
-        XCTAssertNil(c.order)
+        XCTAssertEqual(c.order?.folderIds, [earlier, later, folderId],
+                       "a new folder takes its place at the end of the bar order")
         XCTAssertTrue(c.pins.isEmpty)
+        let stamps = c.metas.map(\.hlc) + c.members.map(\.hlc) + [c.order?.hlc ?? 0]
+        XCTAssertEqual(Set(stamps).count, stamps.count, "every register gets its own stamp")
     }
 
     func testRenameWritesOnlyTheMeta() {
@@ -149,9 +154,11 @@ final class ChatFoldersTests: XCTestCase {
         var draft = ChatFolders.Draft.editing(original)
         draft.name = "Office"
         let c = ChatFolders.changes(
-            original: original, draft: draft, folderId: folderId, mintHlc: counter())
+            original: original, draft: draft, folderId: folderId,
+            listedFolderIds: [folderId], mintHlc: counter())
         XCTAssertEqual(c.metas.map(\.name), ["Office"])
         XCTAssertTrue(c.members.isEmpty, "unchanged members must not be rewritten")
+        XCTAssertNil(c.order, "a rename never rewrites the bar order")
     }
 
     func testMemberEditsWriteOnlyTheChangedRegistersWithFreshStamps() {
@@ -164,7 +171,8 @@ final class ChatFoldersTests: XCTestCase {
         draft.included.append(ref(groupB))
         draft.excluded.append(ref(groupC, .group))
         let c = ChatFolders.changes(
-            original: original, draft: draft, folderId: folderId, mintHlc: counter())
+            original: original, draft: draft, folderId: folderId,
+            listedFolderIds: [folderId], mintHlc: counter())
         XCTAssertTrue(c.metas.isEmpty)
         let states = Dictionary(uniqueKeysWithValues: c.members.map {
             (ChatFolders.rowId($0.conversation), $0.state)
@@ -181,7 +189,7 @@ final class ChatFoldersTests: XCTestCase {
         let original = folder(include: ChatFolders.Include.groups, included: [ref(groupA)])
         let c = ChatFolders.changes(
             original: original, draft: .editing(original), folderId: folderId,
-            mintHlc: counter())
+            listedFolderIds: [folderId], mintHlc: counter())
         XCTAssertTrue(ChatFolders.isEmpty(c))
     }
 
@@ -259,6 +267,32 @@ final class ChatFoldersTests: XCTestCase {
         let a = Data([1]), b = Data([2]), c = Data([3])
         XCTAssertEqual(ChatFolders.moved([a, b, c], from: IndexSet(integer: 0), to: 3), [b, c, a])
         XCTAssertEqual(ChatFolders.moved([a, b, c], from: IndexSet(integer: 2), to: 0), [c, a, b])
+    }
+
+    func testAppendedToOrderPutsTheNewFolderLast() {
+        let a = Data([1]), b = Data([2]), n = Data([9])
+        XCTAssertEqual(ChatFolders.appendedToOrder([a, b], newFolderId: n), [a, b, n])
+    }
+
+    func testAppendedToOrderOnAnEmptyBar() {
+        let n = Data([9])
+        XCTAssertEqual(ChatFolders.appendedToOrder([], newFolderId: n), [n])
+    }
+
+    func testAppendedToOrderNeverListsTheNewFolderTwice() {
+        let a = Data([1]), b = Data([2]), n = Data([9])
+        XCTAssertEqual(ChatFolders.appendedToOrder([a, n, b], newFolderId: n), [a, b, n])
+    }
+
+    func testCreatingAPresetAlsoWritesTheBarOrder() {
+        let a = Data([1]), b = Data([2])
+        let preset = ChatFolders.presets[2]
+        let c = ChatFolders.create(
+            preset: preset, folderId: folderId, listedFolderIds: [a, b], mintHlc: counter())
+        XCTAssertEqual(c.metas.map(\.name), [preset.name])
+        XCTAssertEqual(c.metas.first?.folderId, folderId)
+        XCTAssertEqual(c.order?.folderIds, [a, b, folderId])
+        XCTAssertNotEqual(c.order?.hlc, c.metas.first?.hlc)
     }
 
     func testMissingPresetsCompareByRule() {

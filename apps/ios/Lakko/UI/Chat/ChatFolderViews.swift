@@ -137,8 +137,9 @@ struct FolderBar: View {
 
 struct FolderEditorScreen: View {
     let request: FolderEditorRequest
-    /// How many folders exist, for the 20-folder limit on a new one.
-    let folderCount: Int
+    /// The folders in bar order: their count is the 20-folder limit on a new
+    /// one, and a new folder is appended to this order when saved.
+    let listedFolderIds: [Data]
     let onSave: (FolderChangeSet) -> Void
     /// Called after the person confirmed the deletion.
     let onDelete: (FolderView) -> Void
@@ -158,12 +159,12 @@ struct FolderEditorScreen: View {
 
     init(
         request: FolderEditorRequest,
-        folderCount: Int,
+        listedFolderIds: [Data],
         onSave: @escaping (FolderChangeSet) -> Void,
         onDelete: @escaping (FolderView) -> Void
     ) {
         self.request = request
-        self.folderCount = folderCount
+        self.listedFolderIds = listedFolderIds
         self.onSave = onSave
         self.onDelete = onDelete
         let start = request.folder.map(ChatFolders.Draft.editing)
@@ -186,7 +187,7 @@ struct FolderEditorScreen: View {
     }
 
     private var atFolderLimit: Bool {
-        request.folder == nil && folderCount >= ChatFolders.maxFolders
+        request.folder == nil && listedFolderIds.count >= ChatFolders.maxFolders
     }
 
     var body: some View {
@@ -374,7 +375,8 @@ struct FolderEditorScreen: View {
     private func save() {
         let folderId = request.folder?.folderId ?? LakkoCore.mintFolderId()
         let changes = ChatFolders.changes(
-            original: request.folder, draft: draft, folderId: folderId, mintHlc: Hlc.mint)
+            original: request.folder, draft: draft, folderId: folderId,
+            listedFolderIds: listedFolderIds, mintHlc: Hlc.mint)
         onSave(changes)
         dismiss()
     }
@@ -576,7 +578,7 @@ struct ChatFoldersSettingsScreen: View {
         .sheet(item: $editor) { request in
             FolderEditorScreen(
                 request: request,
-                folderCount: folders.count,
+                listedFolderIds: folders.map(\.folderId),
                 onSave: { changes in publish(changes) },
                 onDelete: { folder in
                     publish(ChatFolders.remove(folderId: folder.folderId, hlc: sync.mintHlc()))
@@ -591,7 +593,8 @@ struct ChatFoldersSettingsScreen: View {
 
     private func add(_ preset: ChatFolders.Preset) {
         publish(ChatFolders.create(
-            preset: preset, folderId: LakkoCore.mintFolderId(), hlc: sync.mintHlc()))
+            preset: preset, folderId: LakkoCore.mintFolderId(),
+            listedFolderIds: sync.folders.map(\.folderId), mintHlc: Hlc.mint))
     }
 
     private func publish(_ changes: FolderChangeSet) {

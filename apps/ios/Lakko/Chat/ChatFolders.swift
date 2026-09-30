@@ -296,6 +296,17 @@ public enum ChatFolders {
         return out
     }
 
+    /// The folder order a CREATE writes beside the new folder's registers:
+    /// the folders as the bar lists them, then the new one, never twice.
+    ///
+    /// Without it the new folder sits outside the order register, where the
+    /// fold places it by the stamp of its CURRENT meta register (ADR-0058),
+    /// so every later rename moved the folder to the end of the bar (seen
+    /// live on web 2026-09-30).
+    public static func appendedToOrder(_ listedFolderIds: [Data], newFolderId: Data) -> [Data] {
+        listedFolderIds.filter { $0 != newFolderId } + [newFolderId]
+    }
+
     // MARK: - The editor
 
     /// What the editor holds while the person edits.
@@ -368,13 +379,16 @@ public enum ChatFolders {
     /// The registers an editor Save writes: only the ones the edit changed,
     /// each with a fresh stamp from `mintHlc`.
     ///
-    /// For a new folder (`original == nil`) that is the meta register and one
-    /// member register per hand-set chat. The order is not written: a live
-    /// folder absent from the order is appended by the fold.
+    /// For a new folder (`original == nil`) that is the meta register, one
+    /// member register per hand-set chat, and the order register: the folders
+    /// in `listedFolderIds` (the bar order) with the new one appended, see
+    /// ``appendedToOrder(_:newFolderId:)``. An edit of an existing folder
+    /// never writes the order, and ignores `listedFolderIds`.
     public static func changes(
         original: FolderView?,
         draft: Draft,
         folderId: Data,
+        listedFolderIds: [Data],
         mintHlc: () -> UInt64
     ) -> FolderChangeSet {
         var metas: [FolderMetaRegister] = []
@@ -409,7 +423,12 @@ public enum ChatFolders {
             members.append(FolderMemberRegister(
                 hlc: mintHlc(), folderId: folderId, conversation: ref, state: new))
         }
-        return FolderChangeSet(metas: metas, members: members, pins: [], removed: [], order: nil)
+        let order = original == nil
+            ? FolderOrderRegister(
+                hlc: mintHlc(),
+                folderIds: appendedToOrder(listedFolderIds, newFolderId: folderId))
+            : nil
+        return FolderChangeSet(metas: metas, members: members, pins: [], removed: [], order: order)
     }
 
     /// Whether a change set writes anything at all.
@@ -456,13 +475,20 @@ public enum ChatFolders {
         }
     }
 
-    /// The registers that create a preset as a new folder.
-    public static func create(preset: Preset, folderId: Data, hlc: UInt64) -> FolderChangeSet {
+    /// The registers that create a preset as a new folder: its meta register
+    /// and the order register that places it at the end of the bar
+    /// (`listedFolderIds` is the bar order before the create).
+    public static func create(
+        preset: Preset, folderId: Data, listedFolderIds: [Data], mintHlc: () -> UInt64
+    ) -> FolderChangeSet {
         FolderChangeSet(
             metas: [FolderMetaRegister(
-                hlc: hlc, folderId: folderId, name: preset.name,
+                hlc: mintHlc(), folderId: folderId, name: preset.name,
                 includeKinds: preset.includeKinds, excludeFlags: preset.excludeFlags)],
-            members: [], pins: [], removed: [], order: nil)
+            members: [], pins: [], removed: [],
+            order: FolderOrderRegister(
+                hlc: mintHlc(),
+                folderIds: appendedToOrder(listedFolderIds, newFolderId: folderId)))
     }
 
     // MARK: - The selected tab (per device, never synced; UX spec 2.5)

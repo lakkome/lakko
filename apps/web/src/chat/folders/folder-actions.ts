@@ -16,6 +16,7 @@ import { createSignal } from "solid-js";
 import type { DeviceGroupSyncApi } from "../../devices/sync/DeviceGroupSyncContext";
 import { requestConfirm } from "../../ui/confirm-dialog";
 import {
+  appendToOrderEdit,
   bytesToHex,
   MAX_FOLDERS,
   openSuggestions,
@@ -76,7 +77,8 @@ export async function addSuggestion(
 ): Promise<void> {
   if (!canCreateFolder(sync.folders())) return;
   if (!openSuggestions(sync.folders()).some((o) => o.key === s.key)) return;
-  await sync.applyFolderEdits([suggestionEdit(newFolderIdHex(mint), s)]);
+  const idHex = newFolderIdHex(mint);
+  await sync.applyFolderEdits([suggestionEdit(idHex, s), appendToOrderEdit(sync.folders(), idHex)]);
 }
 
 /** Delete a folder, after the confirmation of UX 3.5. Resolves `true` when

@@ -40,7 +40,7 @@ public class FolderActions(
     /** Save the editor: create when [original] is `null`. */
     public suspend fun save(original: ChatFolder?, draft: FolderDraft): Boolean {
         val id = original?.id ?: mintFolderId()
-        return deliver(saveChanges(id, original, draft, stamp))
+        return deliver(saveChanges(id, original, draft, listedFolderIds(), stamp))
     }
 
     public suspend fun delete(folder: ChatFolder): Boolean = deliver(deleteChanges(folder.id, stamp))
@@ -64,7 +64,10 @@ public class FolderActions(
     }
 
     public suspend fun addSuggestion(s: FolderSuggestion): Boolean =
-        deliver(suggestionChanges(mintFolderId(), s, stamp))
+        deliver(suggestionChanges(mintFolderId(), s, listedFolderIds(), stamp))
+
+    /** The folders as the fold lists them now: what a creation appends to. */
+    private fun listedFolderIds(): List<ByteArray> = sync.folders.value.map { it.folderId }
 
     /**
      * Mark all as read (UX spec 2.2): for each unread conversation, the path

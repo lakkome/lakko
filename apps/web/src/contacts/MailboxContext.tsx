@@ -24,6 +24,10 @@
  *     behind `mailbox-poller.ts`, which is what keeps the loop and the Refresh
  *     button from dispatching the same batch twice.
  *
+ * The account cursor and the pending requests are persisted together per
+ * account by `inbox-store.ts` (raw rows, re-decoded on load), so a request
+ * the cursor has already passed survives a reload until Accept or Decline.
+ *
  * After every Welcome attempt, joined or not, the account's KeyPackage is
  * republished: processing a Welcome consumes the KeyPackage it was built on,
  * and a failed attempt may have consumed it too. See
@@ -60,13 +64,8 @@ import {
   type IncomingMailboxEvent,
 } from "./client";
 import { useProfiles } from "../profile/ProfileContext";
-import {
-  loadAccepted,
-  loadCursor,
-  saveCursor,
-  upsertAccepted,
-  type AcceptedContact,
-} from "./local-store";
+import { loadAccepted, upsertAccepted, type AcceptedContact } from "./local-store";
+import { createPendingInbox, type FetchedRequest, type PendingInbox } from "./inbox-store";
 import { createMailboxPoller, type MailboxPoller } from "./mailbox-poller";
 
 /** Copy for a Welcome this device could not open. */
@@ -75,8 +74,9 @@ export const JOIN_FAILURE_MESSAGE =
   "this device. Ask the person who added you to add you again.";
 
 export interface MailboxApi {
-  /** Contact requests awaiting Accept / Decline, oldest first. In memory
-   *  only — the intro plaintext never goes to localStorage. */
+  /** Contact requests awaiting Accept / Decline, oldest first. Kept across
+   *  reloads as the raw (sealed) mailbox rows — the intro plaintext never
+   *  goes to localStorage. */
   readonly pending: Accessor<readonly IncomingContactRequest[]>;
   /** A user-initiated `refresh()` is in flight. */
   readonly busy: Accessor<boolean>;
@@ -91,7 +91,8 @@ export interface MailboxApi {
   dismissJoinFailure(): void;
   /** Fetch the mailbox now (no long poll). */
   refresh(): Promise<void>;
-  /** Drop a request from the pending list (after Accept or Decline). */
+  /** Drop a request from the pending list for good (after Accept or
+   *  Decline). */
   removePending(messageId: number): void;
 }
 
@@ -122,9 +123,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const [acceptedVersion, setAcceptedVersion] = createSignal(0);
   const [joinFailure, setJoinFailure] = createSignal<string | null>(null);
 
-  // The single-account mailbox cursor (`lakko.contacts.v2`), mirrored in
-  // memory so the poller's cursor re-read is synchronous.
-  let cursor = loadCursor();
+  // The signed-in account's mailbox cursor + pending requests, persisted
+  // together (`inbox-store.ts`). `null` while signed out.
+  let inbox: PendingInbox | null = null;
   // Welcome rows already joined in this page lifetime. A batch whose cursor
   // write was HELD (the post-join persist failed) is fetched again; without
   // this, the second pass would try to open a Welcome whose KeyPackage the
@@ -139,8 +140,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     const s = auth.state();
     if (s.kind !== "session") throw new Error("mailbox dispatch without a session");
     const accountIdB64 = s.account.accountId;
-    const seen = new Set(pending().map((r) => r.messageId));
-    const fresh: IncomingContactRequest[] = [];
+    const target = inbox;
+    if (target === null) throw new Error("mailbox dispatch without an inbox");
+    const fresh: FetchedRequest[] = [];
     let welcomeAttempted = false;
     let joined = false;
     const joinedGroupIds: string[] = [];
@@ -154,10 +156,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           if (ev.request.profile !== null) {
             profiles.ingest(base64Encode(ev.request.fromPubkey), ev.request.profile);
           }
-          if (!seen.has(ev.request.messageId)) {
-            seen.add(ev.request.messageId);
-            fresh.push(ev.request);
-          }
+          fresh.push({ request: ev.request, row: ev.row });
         } else if (ev.kind === "welcome") {
           if (joinedWelcomeIds.has(ev.welcome.messageId)) continue;
           welcomeAttempted = true;
@@ -209,7 +208,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           setAcceptedVersion(acceptedVersion() + 1);
         }
       }
-      if (fresh.length > 0) setPending([...pending(), ...fresh]);
+      // Persisted with the cursor it was fetched under; a failed write throws
+      // here, which holds the cursor so the rows are fetched again.
+      if (fresh.length > 0) target.addFetched(fresh);
       if (joined) {
         // The joined group lives only in memory until a snapshot lands, and
         // the Welcome cannot be opened a second time in this page lifetime.
@@ -234,10 +235,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   const poller: MailboxPoller = createMailboxPoller<IncomingMailboxEvent>({
-    readCursor: () => cursor,
+    readCursor: () => inbox?.cursor() ?? 0,
     writeCursor: (next) => {
-      cursor = next;
-      saveCursor(next);
+      // One write for the cursor and the pending rows; a failure throws and
+      // leaves the in-memory cursor where it was.
+      if (inbox === null) throw new Error("mailbox cursor write without an inbox");
+      inbox.advanceCursor(next);
     },
     fetch: async (after, waitSecs, signal) =>
       client.pollMailbox(auth.identitySecrets(), after, waitSecs, signal),
@@ -280,7 +283,21 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     if (activeAccount === accountIdB64 && loopAbort !== null) return;
     stop();
     activeAccount = accountIdB64;
-    cursor = loadCursor();
+    const opened = createPendingInbox({
+      accountIdB64,
+      isAccepted: (keyB64) => loadAccepted().some((c) => c.signaturePubkeyB64 === keyB64),
+      onChange: () => setPending(opened.pending()),
+    });
+    inbox = opened;
+    setPending(opened.pending());
+    // Requests kept from an earlier page load: back through the poller's own
+    // verify-and-open path before they are listed.
+    void opened
+      .restore((rows) => client.decodePendingRequestRows(auth.identitySecrets(), rows))
+      .catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("contacts inbox: restoring pending requests failed", err);
+      });
     const controller = new AbortController();
     loopAbort = controller;
     void runLongPollLoop(controller.signal, {
@@ -310,6 +327,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     if (loopAbort !== null) {
       loopAbort.abort();
       loopAbort = null;
+    }
+    if (inbox !== null) {
+      inbox.dispose();
+      inbox = null;
     }
     if (activeAccount !== null) {
       activeAccount = null;
@@ -364,7 +385,8 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       }
     },
     removePending(messageId) {
-      setPending(pending().filter((r) => r.messageId !== messageId));
+      if (inbox !== null) inbox.remove(messageId);
+      else setPending(pending().filter((r) => r.messageId !== messageId));
     },
   };
 

@@ -313,13 +313,15 @@ public data class FolderDraft(
  * moved, one member register per chat whose place moved. A chat the draft
  * still holds keeps its register untouched.
  *
- * A created folder writes no order register: the fold appends a folder the
- * order does not name, so the person's existing order is not rewritten.
+ * A created folder ALSO writes the order register: [listedFolderIds] (the
+ * folders as the fold lists them now) with the new id appended - see
+ * [appendToOrder]. Ignored when editing an existing folder.
  */
 public fun saveChanges(
     folderId: ByteArray,
     original: ChatFolder?,
     draft: FolderDraft,
+    listedFolderIds: List<ByteArray>,
     stamp: StampSource,
 ): FolderChangeSet {
     val name = draft.name.trim()
@@ -364,7 +366,27 @@ public fun saveChanges(
             members += FolderMemberRegister(stamp(), folderId, value.first, FolderMemberState.NONE)
         }
     }
-    return changeSet(metas = metas, members = members)
+    val order = if (original == null) appendToOrder(listedFolderIds, folderId, stamp) else null
+    return changeSet(metas = metas, members = members, order = order)
+}
+
+/**
+ * The order register a folder CREATION carries in the same change set: the
+ * folders as currently listed ([listedFolderIds], the fold's `folders()`
+ * order) with [newFolderId] appended at the end, never listed twice.
+ *
+ * Without it the fold places a folder the order does not name by the stamp
+ * of its CURRENT meta register, so every later rename would move the folder
+ * to the end of the folder bar. Writing the listed order is safe here: it is
+ * exactly what this device shows, so it rewrites nothing the person sees.
+ */
+public fun appendToOrder(
+    listedFolderIds: List<ByteArray>,
+    newFolderId: ByteArray,
+    stamp: StampSource,
+): FolderOrderRegister {
+    val ids = listedFolderIds.filterNot { it.contentEquals(newFolderId) } + newFolderId.copyOf()
+    return FolderOrderRegister(stamp(), ids)
 }
 
 /** Delete a folder. Final on every device (ADR-0058 section 3). */
@@ -498,10 +520,16 @@ public fun suggestionsNotHeld(folders: List<ChatFolder>): List<FolderSuggestion>
         }
     }
 
-/** Create a suggestion as is. */
-public fun suggestionChanges(folderId: ByteArray, s: FolderSuggestion, stamp: StampSource): FolderChangeSet =
+/** Create a suggestion as is, appended to the folder order ([appendToOrder]). */
+public fun suggestionChanges(
+    folderId: ByteArray,
+    s: FolderSuggestion,
+    listedFolderIds: List<ByteArray>,
+    stamp: StampSource,
+): FolderChangeSet =
     changeSet(
         metas = listOf(FolderMetaRegister(stamp(), folderId, s.name, s.includeKinds, s.excludeFlags)),
+        order = appendToOrder(listedFolderIds, folderId, stamp),
     )
 
 // ---------------------------------------------------------------------------

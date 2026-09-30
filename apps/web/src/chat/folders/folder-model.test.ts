@@ -29,6 +29,7 @@ import {
   openSuggestions,
   refOfRow,
   reorderEdit,
+  appendToOrderEdit,
   ruleIdOfRef,
   ruleInputsOf,
   ruleRowId,
@@ -248,6 +249,24 @@ describe("pins and order", () => {
     });
     expect(reorderEdit(fs, 1, 1)).toBeNull();
     expect(reorderEdit(fs, 0, 3)).toBeNull();
+  });
+
+  it("a create puts the new folder at the end of the written order", () => {
+    // Without the order a rename moved the folder to the end (live 2026-09-30).
+    const fs = ["01", "02"].map((x) => folder({ idHex: x.repeat(16) }));
+    expect(appendToOrderEdit(fs, "03".repeat(16))).toEqual({
+      t: "order",
+      folderIdsHex: ["01".repeat(16), "02".repeat(16), "03".repeat(16)],
+    });
+    expect(appendToOrderEdit([], "03".repeat(16))).toEqual({
+      t: "order",
+      folderIdsHex: ["03".repeat(16)],
+    });
+    // Never listed twice.
+    expect(appendToOrderEdit(fs, "02".repeat(16))).toEqual({
+      t: "order",
+      folderIdsHex: ["01".repeat(16), "02".repeat(16)],
+    });
   });
 });
 

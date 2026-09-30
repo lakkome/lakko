@@ -35,6 +35,7 @@ import {
 import {
   chatCountLabel,
   clipFolderName,
+  appendToOrderEdit,
   diffFolderDraft,
   draftCanSave,
   draftIsDirty,
@@ -159,10 +160,12 @@ function FolderEditor(props: { request: EditorRequest }): JSX.Element {
       ? newFolderIdHex(() => rules.mintFolderId())
       : (original as FolderModel).idHex;
     const edits = diffFolderDraft(folderIdHex, baseline, draft());
+    // A new folder also takes its place at the end of the bar order.
+    const all = creating ? [...edits, appendToOrderEdit(sync.folders(), folderIdHex)] : edits;
     setBusy(true);
     setError(null);
     try {
-      await sync.applyFolderEdits(edits);
+      await sync.applyFolderEdits(all);
       closeFolderEditor();
     } catch (err) {
       // eslint-disable-next-line no-console

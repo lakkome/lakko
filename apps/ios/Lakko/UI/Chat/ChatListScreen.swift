@@ -128,7 +128,7 @@ public struct ChatListScreen: View {
             .sheet(item: $editor) { request in
                 FolderEditorScreen(
                     request: request,
-                    folderCount: deviceGroupSync.folders.count,
+                    listedFolderIds: deviceGroupSync.folders.map(\.folderId),
                     onSave: { changes in
                         Task { try? await deviceGroupSync.applyFolderChanges(changes) }
                     },

@@ -206,28 +206,67 @@ class ChatFoldersTest {
     // ---- edits -> change sets ---------------------------------------------
 
     @Test
-    fun creating_a_folder_writes_its_meta_and_its_hand_entries_and_no_order() {
+    fun creating_a_folder_writes_its_meta_its_hand_entries_and_the_order_with_it_appended() {
+        val existing = listOf(ByteArray(16) { 1 }, ByteArray(16) { 2 })
+        val newId = ByteArray(16) { 3 }
         val draft = FolderDraft.empty(ref(groupA, FolderConversationKind.GROUP)).copy(name = " Work ")
-        val cs = saveChanges(ByteArray(16), null, draft, counter())
+        val cs = saveChanges(newId, null, draft, existing, counter())
         assertEquals(1, cs.metas.size)
         assertEquals("Work", cs.metas[0].name)
         assertEquals(ExcludeFlag.ARCHIVED, cs.metas[0].excludeFlags)
         assertEquals(1, cs.members.size)
         assertEquals(FolderMemberState.INCLUDED, cs.members[0].state)
-        assertNull(cs.order)
+        assertEquals(listOf("01".repeat(16), "02".repeat(16), "03".repeat(16)), cs.order!!.folderIds.map(::hexOf))
         assertTrue(cs.pins.isEmpty() && cs.removed.isEmpty())
+    }
+
+    @Test
+    fun editing_an_existing_folder_never_writes_the_order() {
+        val f = folder()
+        val cs = saveChanges(f.id, f, FolderDraft.of(f).copy(name = "Job"), listOf(ByteArray(16) { 1 }, f.id), counter())
+        assertNull(cs.order)
+    }
+
+    @Test
+    fun append_to_order_appends_the_new_folder_at_the_end() {
+        val listed = listOf(ByteArray(16) { 1 }, ByteArray(16) { 2 })
+        val reg = appendToOrder(listed, ByteArray(16) { 3 }, counter())
+        assertEquals(listOf("01".repeat(16), "02".repeat(16), "03".repeat(16)), reg.folderIds.map(::hexOf))
+    }
+
+    @Test
+    fun append_to_order_on_an_empty_list_is_just_the_new_folder() {
+        val reg = appendToOrder(emptyList(), ByteArray(16) { 3 }, counter())
+        assertEquals(listOf("03".repeat(16)), reg.folderIds.map(::hexOf))
+    }
+
+    @Test
+    fun append_to_order_never_lists_the_new_folder_twice() {
+        val listed = listOf(ByteArray(16) { 1 }, ByteArray(16) { 2 })
+        val reg = appendToOrder(listed, ByteArray(16) { 2 }, counter())
+        assertEquals(listOf("01".repeat(16), "02".repeat(16)), reg.folderIds.map(::hexOf))
+    }
+
+    @Test
+    fun adding_a_suggestion_writes_its_meta_and_the_order_with_it_appended() {
+        val newId = ByteArray(16) { 9 }
+        val cs = suggestionChanges(newId, FOLDER_SUGGESTIONS[1], listOf(ByteArray(16) { 1 }), counter())
+        assertEquals(1, cs.metas.size)
+        assertEquals("Personal", cs.metas[0].name)
+        assertEquals(listOf("01".repeat(16), "09".repeat(16)), cs.order!!.folderIds.map(::hexOf))
+        assertTrue(cs.metas[0].hlc != cs.order!!.hlc)
     }
 
     @Test
     fun saving_an_unchanged_folder_writes_nothing() {
         val f = folder(include = IncludeKind.GROUPS, included = listOf(ref(chat1, FolderConversationKind.ONE_TO_ONE)))
-        assertTrue(saveChanges(f.id, f, FolderDraft.of(f), counter()).isEmpty())
+        assertTrue(saveChanges(f.id, f, FolderDraft.of(f), listOf(f.id), counter()).isEmpty())
     }
 
     @Test
     fun a_rename_writes_the_meta_register_only() {
         val f = folder(included = listOf(ref(chat1, FolderConversationKind.ONE_TO_ONE)))
-        val cs = saveChanges(f.id, f, FolderDraft.of(f).copy(name = "Job"), counter())
+        val cs = saveChanges(f.id, f, FolderDraft.of(f).copy(name = "Job"), listOf(f.id), counter())
         assertEquals(1, cs.metas.size)
         assertTrue(cs.members.isEmpty())
     }
@@ -246,7 +285,7 @@ class ChatFoldersTest {
             included = listOf(unresolved, ref(groupA, FolderConversationKind.GROUP), ref(groupB, FolderConversationKind.GROUP)),
             excluded = emptyList(),
         )
-        val cs = saveChanges(f.id, f, draft, counter())
+        val cs = saveChanges(f.id, f, draft, listOf(f.id), counter())
         assertTrue(cs.metas.isEmpty())
         val byId = cs.members.associate { rowIdOf(it.conversation) to it.state }
         assertEquals(
@@ -268,7 +307,7 @@ class ChatFoldersTest {
     fun excluded_by_hand_beats_included_by_hand_in_one_draft() {
         val a = ref(groupA, FolderConversationKind.GROUP)
         val draft = FolderDraft.empty().copy(name = "X", includeKinds = IncludeKind.GROUPS, included = listOf(a), excluded = listOf(a))
-        val cs = saveChanges(ByteArray(16), null, draft, counter())
+        val cs = saveChanges(ByteArray(16), null, draft, emptyList(), counter())
         assertEquals(listOf(FolderMemberState.EXCLUDED), cs.members.map { it.state })
     }
 
