@@ -69,6 +69,20 @@ export function joinList(items: readonly string[]): string {
   );
 }
 
+/**
+ * Short facts shown on one line ("Created 16 Sep · Used up", "@news · 40
+ * subscribers"), joined pair by pair through `common.fact_pair`. Empty items
+ * are skipped; empty for none.
+ */
+export function joinFacts(items: readonly string[]): string {
+  return items
+    .filter((item) => item.length > 0)
+    .reduce(
+      (acc, item) => (acc.length === 0 ? item : t("common.fact_pair", { first: acc, second: item })),
+      "",
+    );
+}
+
 export const currentLanguage = runtime.language;
 export const isRtl = runtime.rtl;
 export const selectedLanguage = runtime.selected;

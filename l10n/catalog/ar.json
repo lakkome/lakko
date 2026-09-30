@@ -330,6 +330,474 @@
       "text": "يمكنك مغادرة هذه الشاشة؛ ستنضم عند السماح لك بالدخول.",
       "status": "machine"
     },
+    "channels.back": {
+      "text": "العودة إلى القنوات",
+      "status": "machine"
+    },
+    "channels.compose.label": {
+      "text": "منشور جديد",
+      "status": "machine"
+    },
+    "channels.compose.placeholder": {
+      "text": "اكتب منشورًا",
+      "status": "machine"
+    },
+    "channels.compose.publish": {
+      "text": "نشر",
+      "status": "machine"
+    },
+    "channels.compose.publishing": {
+      "text": "جارٍ النشر...",
+      "status": "machine"
+    },
+    "channels.copublishers.desc": {
+      "text": "الأشخاص الذين يمكنهم النشر في هذه القناة. شارك رابطًا، ثم وافق عليهم عندما يطلبون.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.approve": {
+      "text": "تعذّرت الموافقة على الطلب. حاول مجددًا.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.poll": {
+      "text": "تعذّر التحقق من الطلبات. حاول مجددًا.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.reject": {
+      "text": "تعذّر رفض الطلب. حاول مجددًا.",
+      "status": "machine"
+    },
+    "channels.copublishers.link": {
+      "text": "رابط دعوة الناشرين المشاركين",
+      "status": "machine"
+    },
+    "channels.copublishers.request_row": {
+      "text": "طلب أحدهم النشر المشترك",
+      "status": "machine"
+    },
+    "channels.copublishers.requests": {
+      "text": "الطلبات ({count})",
+      "status": "machine"
+    },
+    "channels.copublishers.title": {
+      "text": "الناشرون المشاركون",
+      "status": "machine"
+    },
+    "channels.empty.action": {
+      "text": "إنشاء قناة",
+      "status": "machine"
+    },
+    "channels.empty.title": {
+      "text": "لا توجد قنوات بعد",
+      "status": "machine"
+    },
+    "channels.error.empty_post": {
+      "text": "اكتب شيئًا لنشره.",
+      "status": "machine"
+    },
+    "channels.error.not_let_in": {
+      "text": "لم تسمح القناة لهذا الجهاز بالدخول بعد. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "channels.error.post_too_large": {
+      "text": "هذا المنشور أطول من أن يُنشر.",
+      "status": "machine"
+    },
+    "channels.error.refused": {
+      "text": "رفض الخادم الطلب. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "channels.error.sign_in": {
+      "text": "سجّل الدخول مجددًا لاستخدام القنوات.",
+      "status": "machine"
+    },
+    "channels.error.unknown_channel": {
+      "text": "هذه القناة غير موجودة على الخادم.",
+      "status": "machine"
+    },
+    "channels.error.unreachable": {
+      "text": "خدمة القنوات غير متاحة حاليًا. حاول مجددًا بعد قليل.",
+      "status": "machine"
+    },
+    "channels.fallback_name": {
+      "text": "قناة",
+      "status": "machine"
+    },
+    "channels.field.description_optional": {
+      "text": "الوصف (اختياري)",
+      "status": "machine"
+    },
+    "channels.field.name": {
+      "text": "الاسم",
+      "status": "machine"
+    },
+    "channels.find.action": {
+      "text": "البحث عن {handle}",
+      "status": "machine"
+    },
+    "channels.find.none": {
+      "text": "لم يُعثر على قناة باسم {handle}.",
+      "status": "machine"
+    },
+    "channels.index_hint": {
+      "text": "اختر قناة أو أنشئ واحدة",
+      "status": "machine"
+    },
+    "channels.info.manage_sub": {
+      "text": "اسمها ووصفها، ومن يقرؤها، ومن يمكنه النشر فيها أيضًا.",
+      "status": "machine"
+    },
+    "channels.info.subscribers": {
+      "text": "{count, plural, zero {# مشترك} one {مشترك واحد} two {مشتركان} few {# مشتركين} many {# مشتركًا} other {# مشترك}}",
+      "status": "machine"
+    },
+    "channels.info.unsubscribe_sub": {
+      "text": "يزيل القناة من قائمتك ويوقف قراءتها على هذا الجهاز. يمكنك الاشتراك مجددًا لاحقًا.",
+      "status": "machine"
+    },
+    "channels.join.default_name": {
+      "text": "قناة بنشر مشترك",
+      "status": "machine"
+    },
+    "channels.join.error.sign_in": {
+      "text": "سجّل الدخول مجددًا للانضمام إلى قناة.",
+      "status": "machine"
+    },
+    "channels.join.link_label": {
+      "text": "الرابط",
+      "status": "machine"
+    },
+    "channels.join.name_label": {
+      "text": "الاسم على هذا الجهاز (اختياري)",
+      "status": "machine"
+    },
+    "channels.join.no_approval": {
+      "text": "لم تتم الموافقة بعد. حاول مجددًا بعد أن يوافق المالك.",
+      "status": "machine"
+    },
+    "channels.join.requesting": {
+      "text": "جارٍ إرسال الطلب...",
+      "status": "machine"
+    },
+    "channels.join.subtitle": {
+      "text": "الصق الرابط الذي شاركه مالك القناة. بعد موافقته، يمكن لهذا الجهاز النشر في القناة.",
+      "status": "machine"
+    },
+    "channels.join.title": {
+      "text": "الانضمام كناشر مشارك",
+      "status": "machine"
+    },
+    "channels.join.waiting": {
+      "text": "بانتظار موافقة مالك القناة...",
+      "status": "machine"
+    },
+    "channels.legacy.channel": {
+      "text": "أُنشئت هذه القناة بإصدار أقدم من Lakko ولا يمكن فتحها في هذا الإصدار. تبقى المنشورات التي نشرتها مقروءة لمشتركيك. للنشر مجددًا، أنشئ قناة جديدة، فلا يمكن إصلاح هذه القناة.",
+      "status": "machine"
+    },
+    "channels.legacy.copublisher_link": {
+      "text": "أُنشئ رابط دعوة الناشرين المشاركين هذا بإصدار أقدم من Lakko ولم يعد يعمل. اطلب من مالك القناة أن يرسل لك رابط دعوة جديدًا.",
+      "status": "machine"
+    },
+    "channels.manage.back": {
+      "text": "العودة إلى المنشورات",
+      "status": "machine"
+    },
+    "channels.manage.error.open": {
+      "text": "تعذّر فتح إعدادات القناة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "channels.manage.error.sign_in": {
+      "text": "سجّل الدخول مجددًا لإدارة هذه القناة.",
+      "status": "machine"
+    },
+    "channels.manage.title": {
+      "text": "إدارة القناة",
+      "status": "machine"
+    },
+    "channels.meta.desc": {
+      "text": "يصل الاسم والوصف إلى كل مشترك مشفّرَين. لا يقرؤهما الخادم أبدًا.",
+      "status": "machine"
+    },
+    "channels.meta.error.description_bad_character": {
+      "text": "يحتوي الوصف على حرف لا يمكن عرضه.",
+      "status": "machine"
+    },
+    "channels.meta.error.description_too_long": {
+      "text": "الوصف طويل جدًا.",
+      "status": "machine"
+    },
+    "channels.meta.error.generic": {
+      "text": "لا يمكن استخدام هذا الاسم أو الوصف.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_bad_character": {
+      "text": "يحتوي الاسم على حرف لا يمكن عرضه.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_empty": {
+      "text": "يجب أن يكون للقناة اسم",
+      "status": "machine"
+    },
+    "channels.meta.error.name_line_break": {
+      "text": "يجب أن يكون الاسم في سطر واحد.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_too_long": {
+      "text": "الاسم طويل جدًا.",
+      "status": "machine"
+    },
+    "channels.meta.error.save": {
+      "text": "تعذّر الحفظ. حاول مجددًا.",
+      "status": "machine"
+    },
+    "channels.meta.error.save_prefix": {
+      "text": "تعذّر الحفظ.",
+      "status": "machine"
+    },
+    "channels.meta.saved": {
+      "text": "تم الحفظ. يرى المشتركون الاسم الجديد مع منشوراتهم التالية.",
+      "status": "machine"
+    },
+    "channels.meta.title": {
+      "text": "القناة",
+      "status": "machine"
+    },
+    "channels.new.create": {
+      "text": "إنشاء",
+      "status": "machine"
+    },
+    "channels.new.error.create": {
+      "text": "تعذّر إنشاء القناة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "channels.new.error.handle": {
+      "text": "تعذّر حجز المعرّف. حاول مجددًا.",
+      "status": "machine"
+    },
+    "channels.new.error.handle_offline": {
+      "text": "تعذّر حجز المعرّف. تحقّق من اتصالك وحاول مجددًا.",
+      "status": "machine"
+    },
+    "channels.new.error.handle_taken": {
+      "text": "المعرّف {handle} مستخدم بالفعل. اختر معرّفًا آخر أو اتركه فارغًا.",
+      "status": "machine"
+    },
+    "channels.new.error.no_name": {
+      "text": "أعطِ القناة اسمًا.",
+      "status": "machine"
+    },
+    "channels.new.error.sign_in": {
+      "text": "سجّل الدخول مجددًا لإنشاء قناة.",
+      "status": "machine"
+    },
+    "channels.new.handle_hint": {
+      "text": "يستطيع الآخرون العثور على القناة والاشتراك فيها من خلاله.",
+      "status": "machine"
+    },
+    "channels.new.handle_label": {
+      "text": "@معرّف عام (اختياري)",
+      "status": "machine"
+    },
+    "channels.new.handle_placeholder": {
+      "text": "@my-channel",
+      "status": "machine"
+    },
+    "channels.new.subtitle": {
+      "text": "يرى المشتركون الاسم والوصف. ينتقلان مشفّرَين، ولا يصل إلى الخادم إلا نص مشفّر.",
+      "status": "machine"
+    },
+    "channels.new.title": {
+      "text": "قناة جديدة",
+      "status": "machine"
+    },
+    "channels.new_menu": {
+      "text": "قناة جديدة أو الانضمام إلى قناة",
+      "status": "machine"
+    },
+    "channels.post.not_available": {
+      "text": "غير متاح",
+      "status": "machine"
+    },
+    "channels.post.older_key": {
+      "text": "هذا المنشور أقدم مما يستطيع هذا الجهاز قراءته.",
+      "status": "machine"
+    },
+    "channels.post.unreadable": {
+      "text": "تعذّر فتح هذا المنشور على هذا الجهاز.",
+      "status": "machine"
+    },
+    "channels.posts.empty": {
+      "text": "لا توجد منشورات بعد.",
+      "status": "machine"
+    },
+    "channels.posts.empty_owner": {
+      "text": "لا توجد منشورات بعد. اكتب أول منشور بالأسفل.",
+      "status": "machine"
+    },
+    "channels.posts.error.load": {
+      "text": "تعذّر تحميل المنشورات.",
+      "status": "machine"
+    },
+    "channels.publish.error.generic": {
+      "text": "تعذّر النشر. حاول مجددًا.",
+      "status": "machine"
+    },
+    "channels.publish.error.not_publisher": {
+      "text": "لا يمكن لهذا الجهاز النشر في هذه القناة.",
+      "status": "machine"
+    },
+    "channels.publish.error.prefix": {
+      "text": "تعذّر النشر.",
+      "status": "machine"
+    },
+    "channels.rotation.desc": {
+      "text": "يجدّد Lakko حماية القناة تلقائيًا. جدّدها الآن إذا كنت تعتقد أن جهاز أحد المشتركين قد تعرّض للاختراق.",
+      "status": "machine"
+    },
+    "channels.rotation.error.check": {
+      "text": "تعذّر التحقق من حماية القناة.",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh": {
+      "text": "تعذّر التجديد. حاول مجددًا بعد قليل.",
+      "status": "machine"
+    },
+    "channels.rotation.never": {
+      "text": "لم تُجدَّد بعد.",
+      "status": "machine"
+    },
+    "channels.rotation.refresh_now": {
+      "text": "التجديد الآن",
+      "status": "machine"
+    },
+    "channels.rotation.refreshed": {
+      "text": "جُدّدت {when}.",
+      "status": "machine"
+    },
+    "channels.rotation.refreshing": {
+      "text": "جارٍ التجديد...",
+      "status": "machine"
+    },
+    "channels.rotation.title": {
+      "text": "الحماية",
+      "status": "machine"
+    },
+    "channels.row.own": {
+      "text": "قناتك",
+      "status": "machine"
+    },
+    "channels.search.label": {
+      "text": "البحث في القنوات أو العثور على قناة بمعرّفها",
+      "status": "machine"
+    },
+    "channels.search.placeholder": {
+      "text": "ابحث أو اعثر عليها بـ @المعرّف",
+      "status": "machine"
+    },
+    "channels.subscribe.action": {
+      "text": "اشتراك",
+      "status": "machine"
+    },
+    "channels.subscribe.error.generic": {
+      "text": "تعذّر الاشتراك. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "channels.subscribe.error.prefix": {
+      "text": "تعذّر الاشتراك.",
+      "status": "machine"
+    },
+    "channels.subscribe.prompt_body": {
+      "text": "تظهر المنشورات هنا بعد أن تسمح القناة لهذا الجهاز بالدخول.",
+      "status": "machine"
+    },
+    "channels.subscribe.prompt_title": {
+      "text": "اشترك لقراءة هذه القناة",
+      "status": "machine"
+    },
+    "channels.subscribe.status.not_subscribed": {
+      "text": "غير مشترك",
+      "status": "machine"
+    },
+    "channels.subscribe.status.subscribed": {
+      "text": "مشترك",
+      "status": "machine"
+    },
+    "channels.subscribe.status.subscribing": {
+      "text": "جارٍ الاشتراك...",
+      "status": "machine"
+    },
+    "channels.subscribe.status.waiting": {
+      "text": "بانتظار السماح بالدخول...",
+      "status": "machine"
+    },
+    "channels.subscribe.waiting_notice": {
+      "text": "تم الاشتراك. تظهر المنشورات بعد أن تسمح القناة لهذا الجهاز بالدخول، وعادةً ما يستغرق ذلك لحظات.",
+      "status": "machine"
+    },
+    "channels.subscribers.count": {
+      "text": "({count})",
+      "status": "machine"
+    },
+    "channels.subscribers.desc": {
+      "text": "يُسمح للمشتركين الجدد بالدخول من هذا الجهاز تلقائيًا.",
+      "status": "machine"
+    },
+    "channels.subscribers.empty": {
+      "text": "لا يوجد مشتركون بعد. شارك معرّف القناة ليتمكن الآخرون من الاشتراك.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.deliver": {
+      "text": "تعذّر إعداد هذا المشترك. حاول مجددًا.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.deliver_prefix": {
+      "text": "تعذّر إعداد هذا المشترك.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.load": {
+      "text": "تعذّر تحميل المشتركين. حاول مجددًا.",
+      "status": "machine"
+    },
+    "channels.subscribers.retrying": {
+      "text": "جارٍ إعادة المحاولة...",
+      "status": "machine"
+    },
+    "channels.subscribers.row": {
+      "text": "المشترك {number}",
+      "status": "machine"
+    },
+    "channels.subscribers.status.not_ready": {
+      "text": "غير جاهز",
+      "status": "machine"
+    },
+    "channels.subscribers.status.ready": {
+      "text": "جاهز",
+      "status": "machine"
+    },
+    "channels.subscribers.status.setting_up": {
+      "text": "جارٍ الإعداد...",
+      "status": "machine"
+    },
+    "channels.subscribers.title": {
+      "text": "المشتركون",
+      "status": "machine"
+    },
+    "channels.unsubscribe.action": {
+      "text": "إلغاء المتابعة",
+      "status": "machine"
+    },
+    "channels.unsubscribe.body": {
+      "text": "تُزال من قائمتك ويتوقف هذا الجهاز عن قراءتها. يمكنك الاشتراك مجددًا لاحقًا.",
+      "status": "machine"
+    },
+    "channels.unsubscribe.title": {
+      "text": "هل تريد إلغاء متابعة هذه القناة؟",
+      "status": "machine"
+    },
+    "channels.unsubscribe.title_named": {
+      "text": "هل تريد إلغاء متابعة {name}؟",
+      "status": "machine"
+    },
     "chat.attachment.error.attach": {
       "text": "تعذّر إرفاق العنصر المحدّد. حاول مجددًا.",
       "status": "machine"
@@ -532,6 +1000,10 @@
     },
     "chat.delete.control": {
       "text": "حذف هذه الدردشة",
+      "status": "machine"
+    },
+    "chat.delete.sub": {
+      "text": "يزيل هذه المحادثة وكل ما فيها من هذا الجهاز. لا يمكن التراجع عن ذلك.",
       "status": "machine"
     },
     "chat.delete.title": {
@@ -2054,6 +2526,14 @@
       "text": "جارٍ التحقق...",
       "status": "machine"
     },
+    "common.clipboard.link": {
+      "text": "رابط من Lakko",
+      "status": "machine"
+    },
+    "common.clipboard.message": {
+      "text": "رسالة من Lakko",
+      "status": "machine"
+    },
     "common.close": {
       "text": "إغلاق",
       "status": "machine"
@@ -2084,6 +2564,10 @@
     },
     "common.copy": {
       "text": "نسخ",
+      "status": "machine"
+    },
+    "common.creating": {
+      "text": "جارٍ الإنشاء...",
       "status": "machine"
     },
     "common.delete": {
@@ -2158,6 +2642,10 @@
       "text": "توسيع",
       "status": "machine"
     },
+    "common.fact_pair": {
+      "text": "{first} · {second}",
+      "status": "machine"
+    },
     "common.list_pair": {
       "text": "{first}، {second}",
       "status": "machine"
@@ -2194,6 +2682,10 @@
       "text": "تشغيل",
       "status": "machine"
     },
+    "common.open_chat": {
+      "text": "فتح الدردشة",
+      "status": "machine"
+    },
     "common.open_lakko": {
       "text": "فتح Lakko",
       "status": "machine"
@@ -2212,6 +2704,10 @@
     },
     "common.preparing": {
       "text": "جارٍ التحضير...",
+      "status": "machine"
+    },
+    "common.qr_code": {
+      "text": "رمز QR",
       "status": "machine"
     },
     "common.remove": {
@@ -2262,12 +2758,296 @@
       "text": "{size} ميغابايت",
       "status": "machine"
     },
+    "common.time.days_ago": {
+      "text": "منذ {count, plural, zero {# يوم} one {يوم واحد} two {يومين} few {# أيام} many {# يومًا} other {# يوم}}",
+      "status": "machine"
+    },
+    "common.time.hours_ago": {
+      "text": "منذ {count, plural, zero {# ساعة} one {ساعة واحدة} two {ساعتين} few {# ساعات} many {# ساعة} other {# ساعة}}",
+      "status": "machine"
+    },
+    "common.time.just_now": {
+      "text": "الآن",
+      "status": "machine"
+    },
+    "common.time.minutes_ago": {
+      "text": "منذ {count, plural, zero {# دقيقة} one {دقيقة واحدة} two {دقيقتين} few {# دقائق} many {# دقيقة} other {# دقيقة}}",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "حاول مجددًا",
       "status": "machine"
     },
     "common.unknown": {
       "text": "غير معروف",
+      "status": "machine"
+    },
+    "contacts.accept.error.old_version": {
+      "text": "جاء هذا الطلب من إصدار أقدم من Lakko. اطلب من المرسل التحديث وإرساله مجددًا.",
+      "status": "machine"
+    },
+    "contacts.add.by_username": {
+      "text": "إضافة باسم المستخدم",
+      "status": "machine"
+    },
+    "contacts.add.intro_label": {
+      "text": "رسالة (اختياري)",
+      "status": "machine"
+    },
+    "contacts.add.intro_placeholder": {
+      "text": "مرحبًا، أنا ليلى من المؤتمر.",
+      "status": "machine"
+    },
+    "contacts.add.send": {
+      "text": "إرسال",
+      "status": "machine"
+    },
+    "contacts.add.share_invite": {
+      "text": "مشاركة رابط الدعوة",
+      "status": "machine"
+    },
+    "contacts.add.subtitle": {
+      "text": "الطلبات مشفّرة تشفيرًا تامًا بين الطرفين. لا تستطيع خوادم Lakko قراءتها.",
+      "status": "machine"
+    },
+    "contacts.add.title": {
+      "text": "إضافة جهة اتصال",
+      "status": "machine"
+    },
+    "contacts.add.username_label": {
+      "text": "اسم المستخدم",
+      "status": "machine"
+    },
+    "contacts.add.username_placeholder": {
+      "text": "@alice",
+      "status": "machine"
+    },
+    "contacts.detail.actions": {
+      "text": "إجراءات جهة الاتصال",
+      "status": "machine"
+    },
+    "contacts.detail.call_needs_chat": {
+      "text": "أرسل رسالة أولًا لبدء مكالمة.",
+      "status": "machine"
+    },
+    "contacts.detail.gone_body": {
+      "text": "لم يعد هذا الشخص ضمن جهات اتصالك.",
+      "status": "machine"
+    },
+    "contacts.detail.gone_title": {
+      "text": "لم يُعثر على جهة الاتصال",
+      "status": "machine"
+    },
+    "contacts.detail.message": {
+      "text": "رسالة",
+      "status": "machine"
+    },
+    "contacts.detail.message_unavailable": {
+      "text": "أُضيفت جهة الاتصال هذه قبل أن يصبح بدء الدردشات من هنا ممكنًا. اطلب منها أن تراسلك.",
+      "status": "machine"
+    },
+    "contacts.detail.their_name": {
+      "text": "الاسم الذي اختاره: {name}",
+      "status": "machine"
+    },
+    "contacts.detail.username_not_verified": {
+      "text": "اسم المستخدم غير موثَّق",
+      "status": "machine"
+    },
+    "contacts.error.send": {
+      "text": "تعذّر إرسال الطلب. حاول مجددًا.",
+      "status": "machine"
+    },
+    "contacts.error.start_chat": {
+      "text": "تعذّر بدء الدردشة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.reset": {
+      "text": "أعاد {name} تعيين هويته الآمنة (مثلًا بعد فقدان جهازه). يؤكّد سجل الشفافية أن صاحب الحساب هو من أجرى إعادة التعيين. إذا كنت واثقًا من أنه هو فعلًا، فتحقّق مجددًا من رقم الأمان الخاص به عبر وسيلة أخرى قبل المتابعة.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.reset_unnamed": {
+      "text": "أعادت جهة الاتصال هذه تعيين هويتها الآمنة (مثلًا بعد فقدان جهازها). يؤكّد سجل الشفافية أن صاحب الحساب هو من أجرى إعادة التعيين. إذا كنت واثقًا من أنها هي فعلًا، فتحقّق مجددًا من رقم الأمان الخاص بها عبر وسيلة أخرى قبل المتابعة.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unconfirmed": {
+      "text": "تغيّرت الهوية الآمنة لـ {name} وتعذّر تأكيد ذلك من سجل الشفافية. تحقّق عبر وسيلة أخرى قبل أن تثق بها.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unconfirmed_unnamed": {
+      "text": "تغيّرت الهوية الآمنة لجهة الاتصال هذه وتعذّر تأكيد ذلك من سجل الشفافية. تحقّق عبر وسيلة أخرى قبل أن تثق بها.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unexplained": {
+      "text": "تغيّرت الهوية الآمنة لـ {name}، ولا يُظهر سجل الشفافية أي إعادة تعيين أجراها صاحب الحساب. تعامل مع هذا على أنه اختراق محتمل للحساب. تحقّق عبر وسيلة أخرى قبل أن تثق بها.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unexplained_unnamed": {
+      "text": "تغيّرت الهوية الآمنة لجهة الاتصال هذه، ولا يُظهر سجل الشفافية أي إعادة تعيين أجراها صاحب الحساب. تعامل مع هذا على أنه اختراق محتمل للحساب. تحقّق عبر وسيلة أخرى قبل أن تثق بها.",
+      "status": "machine"
+    },
+    "contacts.invite_links.subtitle": {
+      "text": "شارك رابطًا مع من تريد أن يتواصل معك.",
+      "status": "machine"
+    },
+    "contacts.invite_links.title": {
+      "text": "روابط الدعوة",
+      "status": "machine"
+    },
+    "contacts.list.add": {
+      "text": "إضافة",
+      "status": "machine"
+    },
+    "contacts.list.empty.action": {
+      "text": "إضافة جهة اتصال",
+      "status": "machine"
+    },
+    "contacts.list.empty.body": {
+      "text": "أضف شخصًا باسم المستخدم، أو شارك رابط الدعوة الخاص بك.",
+      "status": "machine"
+    },
+    "contacts.list.empty.title": {
+      "text": "لا توجد جهات اتصال بعد",
+      "status": "machine"
+    },
+    "contacts.list.no_match": {
+      "text": "لا توجد جهات اتصال مطابقة.",
+      "status": "machine"
+    },
+    "contacts.list.requests": {
+      "text": "الطلبات",
+      "status": "machine"
+    },
+    "contacts.list.search": {
+      "text": "البحث في جهات الاتصال",
+      "status": "machine"
+    },
+    "contacts.list.section_index": {
+      "text": "فهرس الأقسام",
+      "status": "machine"
+    },
+    "contacts.list.sent": {
+      "text": "المُرسلة ({count})",
+      "status": "machine"
+    },
+    "contacts.list.sent_dismiss": {
+      "text": "إزالة من هذه القائمة",
+      "status": "machine"
+    },
+    "contacts.list.sent_waiting": {
+      "text": "بانتظار الرد",
+      "status": "machine"
+    },
+    "contacts.mailbox.join_failed": {
+      "text": "أُضفت إلى مجموعة، لكن تعذّر فتح الدعوة على هذا الجهاز. اطلب ممن أضافك أن يضيفك مجددًا.",
+      "status": "machine"
+    },
+    "contacts.mailbox.poll_failed": {
+      "text": "تعذّر التحقق من طلبات الاتصال الجديدة. جارٍ إعادة المحاولة.",
+      "status": "machine"
+    },
+    "contacts.mailbox.sign_in": {
+      "text": "سجّل الدخول مجددًا للتحقق من الطلبات الجديدة.",
+      "status": "machine"
+    },
+    "contacts.reauth.body": {
+      "text": "المفاتيح التي تحتاجها هذه الجلسة لجهات الاتصال غير متاحة. سجّل الدخول مجددًا لاستخدام جهات الاتصال.",
+      "status": "machine"
+    },
+    "contacts.remove.body": {
+      "text": "تبقى الدردشات المشتركة بينكما كما هي، ولا يتغيّر إلا قائمة جهات اتصالك. يمكنك إضافته مجددًا لاحقًا.",
+      "status": "machine"
+    },
+    "contacts.remove.confirm_named": {
+      "text": "إزالة {name}",
+      "status": "machine"
+    },
+    "contacts.remove.control": {
+      "text": "إزالة جهة الاتصال",
+      "status": "machine"
+    },
+    "contacts.remove.sub": {
+      "text": "يزيل {name} من قائمة جهات الاتصال في هذا الحساب.",
+      "status": "machine"
+    },
+    "contacts.remove.title": {
+      "text": "هل تريد إزالة جهة الاتصال هذه؟",
+      "status": "machine"
+    },
+    "contacts.rename.action": {
+      "text": "إعادة التسمية",
+      "status": "machine"
+    },
+    "contacts.rename.field": {
+      "text": "الاسم الذي تختاره لجهة الاتصال هذه",
+      "status": "machine"
+    },
+    "contacts.rename.placeholder": {
+      "text": "اتركه فارغًا لاستخدام الاسم الذي اختاره بنفسه",
+      "status": "machine"
+    },
+    "contacts.rename.sub_local": {
+      "text": "الاسم الذي اخترته لجهة الاتصال هذه. لا يراه أحد غيرك.",
+      "status": "machine"
+    },
+    "contacts.rename.sub_theirs": {
+      "text": "كما عيّنه صاحبه. يمكنك أن تعطيه اسمًا من اختيارك.",
+      "status": "machine"
+    },
+    "contacts.rename.title": {
+      "text": "الاسم",
+      "status": "machine"
+    },
+    "contacts.request.accept": {
+      "text": "قبول",
+      "status": "machine"
+    },
+    "contacts.request.decline": {
+      "text": "رفض",
+      "status": "machine"
+    },
+    "contacts.request.no_intro": {
+      "text": "يريد التواصل معك",
+      "status": "machine"
+    },
+    "contacts.request.someone": {
+      "text": "شخص ما",
+      "status": "machine"
+    },
+    "contacts.safety.body": {
+      "text": "قارنه مع {name} وجهًا لوجه أو في مكالمة. تطابق الأرقام يعني أنه لا يوجد أحد بينكما.",
+      "status": "machine"
+    },
+    "contacts.safety.body_unnamed": {
+      "text": "قارنه مع جهة اتصالك وجهًا لوجه أو في مكالمة. تطابق الأرقام يعني أنه لا يوجد أحد بينكما.",
+      "status": "machine"
+    },
+    "contacts.safety.error": {
+      "text": "تعذّر حساب رقم الأمان. حاول مجددًا.",
+      "status": "machine"
+    },
+    "contacts.safety.number": {
+      "text": "رقم الأمان",
+      "status": "machine"
+    },
+    "contacts.safety.row_sub": {
+      "text": "قارن الرقم وجهًا لوجه للتأكد من أنه هو فعلًا.",
+      "status": "machine"
+    },
+    "contacts.safety.show": {
+      "text": "عرض",
+      "status": "machine"
+    },
+    "contacts.safety.sign_in": {
+      "text": "سجّل الدخول مجددًا لرؤية رقم الأمان.",
+      "status": "machine"
+    },
+    "contacts.safety.title": {
+      "text": "التحقق من رقم الأمان",
+      "status": "machine"
+    },
+    "contacts.send.done": {
+      "text": "أُرسل الطلب إلى {name}. يبقى ضمن «المُرسلة» إلى أن يقبله.",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -2450,6 +3230,10 @@
       "text": "إضافة جهاز",
       "status": "machine"
     },
+    "devices.pairing.qr_description": {
+      "text": "رمز QR للربط",
+      "status": "machine"
+    },
     "devices.scan.confirm.body": {
       "text": "سيمنح هذا الجهازَ الذي مسحت رمزه وصولًا كاملًا إلى حسابك: رسائلك وجهات اتصالك وهويتك. تابع فقط إذا كان الرمز معروضًا على جهازك الجديد أنت.",
       "status": "machine"
@@ -2510,12 +3294,44 @@
       "text": "تحقّق من تاريخ هذا الجهاز ووقته.",
       "status": "machine"
     },
+    "group.join.needs_account": {
+      "text": "تحتاج إلى حساب لطلب الانضمام. أنشئ حسابًا أو سجّل الدخول.",
+      "status": "machine"
+    },
     "group.join.not_taking_requests": {
       "text": "لا تستقبل هذه المجموعة الطلبات بعد. حاول لاحقًا.",
       "status": "machine"
     },
+    "group.join.open_chat": {
+      "text": "فتح الدردشة",
+      "status": "machine"
+    },
+    "group.join.request": {
+      "text": "طلب الانضمام",
+      "status": "machine"
+    },
     "group.join.request_again": {
       "text": "إعادة الطلب",
+      "status": "machine"
+    },
+    "group.join.request_failed": {
+      "text": "لم يُرسل طلبك. تحقّق من اتصالك وحاول مجددًا.",
+      "status": "machine"
+    },
+    "group.join.sending": {
+      "text": "جارٍ إرسال الطلب...",
+      "status": "machine"
+    },
+    "group.join.succeeded": {
+      "text": "انضممت إلى المجموعة.",
+      "status": "machine"
+    },
+    "group.join.succeeded_opening": {
+      "text": "انضممت إلى المجموعة. جارٍ فتح الدردشة...",
+      "status": "machine"
+    },
+    "group.join.title": {
+      "text": "الانضمام إلى مجموعة",
       "status": "machine"
     },
     "group.join.wait_primary": {
@@ -2524,6 +3340,362 @@
     },
     "group.join.wait_secondary": {
       "text": "لا توجد مهلة زمنية لأي من الخطوتين. إذا لم يحدث شيء، يمكنك إرسال الطلب مجددًا.",
+      "status": "machine"
+    },
+    "invite.contact.accept_failed": {
+      "text": "تعذّر قبول الدعوة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "invite.contact.accepting": {
+      "text": "جارٍ قبول الدعوة...",
+      "status": "machine"
+    },
+    "invite.contact.already_accepted": {
+      "text": "لقد قبلت هذه الدعوة بالفعل. طلبك في طريقه إلى {name}؛ راجع جهات الاتصال لمعرفة الرد.",
+      "status": "machine"
+    },
+    "invite.contact.already_accepted_unnamed": {
+      "text": "لقد قبلت هذه الدعوة بالفعل. ابحث عن هذا الشخص في جهات الاتصال.",
+      "status": "machine"
+    },
+    "invite.contact.check_body": {
+      "text": "اطلب من الشخص رقم الأمان الخاص به بطريقة تثق بها بالفعل (وجهًا لوجه، أو في مكالمة). إذا لم يتطابق، فهذا الرابط جاء من شخص آخر.",
+      "status": "machine"
+    },
+    "invite.contact.check_title": {
+      "text": "تحقّق منه قبل القبول.",
+      "status": "machine"
+    },
+    "invite.contact.connected": {
+      "text": "تم الاتصال.",
+      "status": "machine"
+    },
+    "invite.contact.expired": {
+      "text": "انتهت صلاحية هذه الدعوة. اطلب رابطًا جديدًا ممن دعاك.",
+      "status": "machine"
+    },
+    "invite.contact.expiry": {
+      "text": "انتهاء الصلاحية",
+      "status": "machine"
+    },
+    "invite.contact.fingerprint": {
+      "text": "بصمة الداعي",
+      "status": "machine"
+    },
+    "invite.contact.intro_label": {
+      "text": "رسالة تعريفية (اختياري)",
+      "status": "machine"
+    },
+    "invite.contact.invalid_body": {
+      "text": "الرابط معطوب أو تغيّر في الطريق. اطلب رابطًا جديدًا ممن دعاك.",
+      "status": "machine"
+    },
+    "invite.contact.invalid_title": {
+      "text": "رابط الدعوة هذا غير صالح",
+      "status": "machine"
+    },
+    "invite.contact.needs_auth_body": {
+      "text": "تحتاج إلى حساب للقبول. أنشئ حسابًا أو سجّل الدخول، وستعود إلى هنا تلقائيًا.",
+      "status": "machine"
+    },
+    "invite.contact.needs_auth_title": {
+      "text": "شخص ما يريد التواصل معك على Lakko",
+      "status": "machine"
+    },
+    "invite.contact.no_longer_valid": {
+      "text": "لم يعد هذا الرابط صالحًا. اطلب رابطًا جديدًا من الشخص.",
+      "status": "machine"
+    },
+    "invite.contact.page_title": {
+      "text": "دعوة",
+      "status": "machine"
+    },
+    "invite.contact.referral": {
+      "text": "رابط إحالة: يُرسل طلبك تلقائيًا.",
+      "status": "machine"
+    },
+    "invite.contact.result.already_body": {
+      "text": "لقد قبلت هذه الدعوة بالفعل على هذا الجهاز. ستجد الشخص ضمن جهات الاتصال.",
+      "status": "machine"
+    },
+    "invite.contact.result.already_title": {
+      "text": "مقبولة بالفعل",
+      "status": "machine"
+    },
+    "invite.contact.result.expired_title": {
+      "text": "انتهت صلاحية الدعوة",
+      "status": "machine"
+    },
+    "invite.contact.result.failed_title": {
+      "text": "لم تُقبل الدعوة",
+      "status": "machine"
+    },
+    "invite.contact.result.not_found_title": {
+      "text": "لم يُعثر على الدعوة",
+      "status": "machine"
+    },
+    "invite.contact.result.rate_limited_title": {
+      "text": "ليس الآن",
+      "status": "machine"
+    },
+    "invite.contact.result.sent_body": {
+      "text": "طلب الاتصال الخاص بك في طريقه. بعد أن يقبله، تظهر الدردشة ضمن الدردشات.",
+      "status": "machine"
+    },
+    "invite.contact.result.sent_title": {
+      "text": "تم إرسال الطلب",
+      "status": "machine"
+    },
+    "invite.contact.result.used_up_title": {
+      "text": "استُنفدت الدعوة",
+      "status": "machine"
+    },
+    "invite.contact.sending": {
+      "text": "جارٍ إرسال طلبك إلى {name}...",
+      "status": "machine"
+    },
+    "invite.contact.sent": {
+      "text": "أُرسل الطلب إلى {name}.",
+      "status": "machine"
+    },
+    "invite.contact.title": {
+      "text": "هل تريد التواصل مع {name}؟",
+      "status": "machine"
+    },
+    "invite.contact.type": {
+      "text": "النوع",
+      "status": "machine"
+    },
+    "invite.contact.used_up": {
+      "text": "استُنفد هذا الرابط. اطلب رابطًا جديدًا من الشخص.",
+      "status": "machine"
+    },
+    "invite.contact.uses": {
+      "text": "مرات الاستخدام المسموحة",
+      "status": "machine"
+    },
+    "invite.expiry.ago_days": {
+      "text": "انتهت منذ {count, plural, zero {# يوم} one {يوم واحد} two {يومين} few {# أيام} many {# يومًا} other {# يوم}}",
+      "status": "machine"
+    },
+    "invite.expiry.ago_hours": {
+      "text": "انتهت منذ {count, plural, zero {# ساعة} one {ساعة واحدة} two {ساعتين} few {# ساعات} many {# ساعة} other {# ساعة}}",
+      "status": "machine"
+    },
+    "invite.expiry.ago_minutes": {
+      "text": "انتهت منذ {count, plural, zero {# دقيقة} one {دقيقة واحدة} two {دقيقتين} few {# دقائق} many {# دقيقة} other {# دقيقة}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_days": {
+      "text": "بعد {count, plural, zero {# يوم} one {يوم واحد} two {يومين} few {# أيام} many {# يومًا} other {# يوم}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_hours": {
+      "text": "بعد {count, plural, zero {# ساعة} one {ساعة واحدة} two {ساعتين} few {# ساعات} many {# ساعة} other {# ساعة}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_minutes": {
+      "text": "بعد {count, plural, zero {# دقيقة} one {دقيقة واحدة} two {دقيقتين} few {# دقائق} many {# دقيقة} other {# دقيقة}}",
+      "status": "machine"
+    },
+    "invite.expiry.never": {
+      "text": "لا تنتهي صلاحيته",
+      "status": "machine"
+    },
+    "invite.go_home": {
+      "text": "الذهاب إلى صفحة Lakko الرئيسية",
+      "status": "machine"
+    },
+    "invite.group.invited_by": {
+      "text": "الدعوة من {fingerprint}",
+      "status": "machine"
+    },
+    "invite.group.lead_anonymous": {
+      "text": "أنت مدعو إلى",
+      "status": "machine"
+    },
+    "invite.group.lead_anonymous_unnamed": {
+      "text": "أنت مدعو إلى مجموعة",
+      "status": "machine"
+    },
+    "invite.group.lead_named": {
+      "text": "يدعوك {name} إلى",
+      "status": "machine"
+    },
+    "invite.group.lead_named_unnamed": {
+      "text": "يدعوك {name} إلى مجموعة",
+      "status": "machine"
+    },
+    "invite.link.damaged": {
+      "text": "رابط الدعوة هذا تالف. اطلب رابطًا جديدًا.",
+      "status": "machine"
+    },
+    "invite.link.invalid": {
+      "text": "رابط الدعوة هذا غير صالح أو منتهي الصلاحية.",
+      "status": "machine"
+    },
+    "invite.link.loading": {
+      "text": "جارٍ تحميل الدعوة...",
+      "status": "machine"
+    },
+    "invite.link.rate_limited": {
+      "text": "طلبات كثيرة جدًا من هذه الشبكة حاليًا. حاول مجددًا بعد دقيقة.",
+      "status": "machine"
+    },
+    "invite.links.already_removed": {
+      "text": "كان «{label}» قد أُزيل بالفعل.",
+      "status": "machine"
+    },
+    "invite.links.already_removed_unnamed": {
+      "text": "كان هذا الرابط قد أُزيل بالفعل.",
+      "status": "machine"
+    },
+    "invite.links.create": {
+      "text": "إنشاء رابط",
+      "status": "machine"
+    },
+    "invite.links.created": {
+      "text": "أُنشئ في {date}",
+      "status": "machine"
+    },
+    "invite.links.desc": {
+      "text": "يستطيع أي شخص يفتح أحد روابطك أن يرسل إليك طلب اتصال إلى أن تنتهي صلاحية الرابط أو يُستنفد.",
+      "status": "machine"
+    },
+    "invite.links.empty": {
+      "text": "لا توجد روابط نشطة.",
+      "status": "machine"
+    },
+    "invite.links.error.copy": {
+      "text": "تعذّر نسخ الرابط.",
+      "status": "machine"
+    },
+    "invite.links.error.load": {
+      "text": "تعذّر تحميل روابط الدعوة الخاصة بك. حاول مجددًا.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_create": {
+      "text": "سجّل الدخول مجددًا لإنشاء رابط دعوة.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_list": {
+      "text": "سجّل الدخول مجددًا لرؤية روابط الدعوة الخاصة بك.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_revoke": {
+      "text": "سجّل الدخول مجددًا لإبطال رابط دعوة.",
+      "status": "machine"
+    },
+    "invite.links.expired": {
+      "text": "منتهي الصلاحية",
+      "status": "machine"
+    },
+    "invite.links.expires_days": {
+      "text": "ينتهي بعد {count} ي",
+      "status": "machine"
+    },
+    "invite.links.expires_field": {
+      "text": "انتهاء الصلاحية",
+      "status": "machine"
+    },
+    "invite.links.expires_hours": {
+      "text": "ينتهي بعد {count} س",
+      "status": "machine"
+    },
+    "invite.links.expires_minutes": {
+      "text": "ينتهي بعد {count} د",
+      "status": "machine"
+    },
+    "invite.links.expires_option_days": {
+      "text": "{count, plural, zero {بعد # يوم} one {بعد يوم واحد} two {بعد يومين} few {بعد # أيام} many {بعد # يومًا} other {بعد # يوم}}",
+      "status": "machine"
+    },
+    "invite.links.expires_option_never": {
+      "text": "أبدًا",
+      "status": "machine"
+    },
+    "invite.links.for_new_user": {
+      "text": "لشخص جديد على Lakko",
+      "status": "machine"
+    },
+    "invite.links.inline_note": {
+      "text": "تعذّر على Lakko تقصير هذا الرابط، لذا فهو طويل. يعمل بالطريقة نفسها ولا يمكن إبطاله.",
+      "status": "machine"
+    },
+    "invite.links.label_field": {
+      "text": "التسمية (اختياري)",
+      "status": "machine"
+    },
+    "invite.links.label_placeholder": {
+      "text": "تظهر لمن يفتح الرابط",
+      "status": "machine"
+    },
+    "invite.links.list": {
+      "text": "روابط الدعوة النشطة",
+      "status": "machine"
+    },
+    "invite.links.never_expires": {
+      "text": "لا تنتهي صلاحيته",
+      "status": "machine"
+    },
+    "invite.links.new_badge": {
+      "text": "جديد",
+      "status": "machine"
+    },
+    "invite.links.referral_option": {
+      "text": "لشخص ليس لديه حساب Lakko بعد",
+      "status": "machine"
+    },
+    "invite.links.revoked": {
+      "text": "تم إبطال الرابط.",
+      "status": "machine"
+    },
+    "invite.links.revoking": {
+      "text": "جارٍ الإبطال...",
+      "status": "machine"
+    },
+    "invite.links.unlimited_uses": {
+      "text": "استخدامات غير محدودة",
+      "status": "machine"
+    },
+    "invite.links.used_up": {
+      "text": "مستنفد",
+      "status": "machine"
+    },
+    "invite.links.uses_field": {
+      "text": "مرات الاستخدام",
+      "status": "machine"
+    },
+    "invite.links.uses_left": {
+      "text": "{count, plural, zero {لم يتبقَّ أي استخدام} one {تبقّى استخدام واحد} two {تبقّى استخدامان} few {تبقّت # استخدامات} many {تبقّى # استخدامًا} other {تبقّى # استخدام}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_one": {
+      "text": "شخص واحد",
+      "status": "machine"
+    },
+    "invite.links.uses_option_unlimited": {
+      "text": "غير محدود",
+      "status": "machine"
+    },
+    "invite.links.uses_option_up_to": {
+      "text": "{count, plural, zero {حتى # شخص} one {حتى شخص واحد} two {حتى شخصين} few {حتى # أشخاص} many {حتى # شخصًا} other {حتى # شخص}}",
+      "status": "machine"
+    },
+    "invite.sign_up": {
+      "text": "إنشاء حساب",
+      "status": "machine"
+    },
+    "invite.uses.single": {
+      "text": "لاستخدام واحد",
+      "status": "machine"
+    },
+    "invite.uses.unlimited": {
+      "text": "غير محدود",
+      "status": "machine"
+    },
+    "invite.uses.up_to": {
+      "text": "{count, plural, zero {حتى # استخدام} one {حتى استخدام واحد} two {حتى استخدامين} few {حتى # استخدامات} many {حتى # استخدامًا} other {حتى # استخدام}}",
       "status": "machine"
     },
     "language.name.ar": {
@@ -2588,6 +3760,38 @@
     },
     "nav.settings": {
       "text": "الإعدادات",
+      "status": "machine"
+    },
+    "new_group.back": {
+      "text": "المجموعات",
+      "status": "machine"
+    },
+    "new_group.error.sign_in": {
+      "text": "سجّل الدخول مجددًا لإنشاء مجموعة.",
+      "status": "machine"
+    },
+    "new_group.index_hint": {
+      "text": "اختر مجموعة لبدء المراسلة",
+      "status": "machine"
+    },
+    "new_group.name_hint": {
+      "text": "يرى جميع الأعضاء الاسم. يُرسل مشفّرًا، ولا يقرؤه الخادم أبدًا.",
+      "status": "machine"
+    },
+    "new_group.name_not_sent": {
+      "text": "لم يُرسل اسم المجموعة. عيّنه من لوحة الأعضاء.",
+      "status": "machine"
+    },
+    "new_group.name_placeholder": {
+      "text": "خطط عطلة نهاية الأسبوع",
+      "status": "machine"
+    },
+    "new_group.no_contacts": {
+      "text": "أضف جهات اتصال أولًا؛ فالمجموعة تبدأ بأشخاص تعرفهم بالفعل.",
+      "status": "machine"
+    },
+    "new_group.subtitle": {
+      "text": "ستكون مالك المجموعة. يمكنك إضافة أشخاص آخرين لاحقًا.",
       "status": "machine"
     },
     "recovery.access_only_note": {

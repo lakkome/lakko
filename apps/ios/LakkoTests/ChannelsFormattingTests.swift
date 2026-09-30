@@ -18,6 +18,14 @@ final class ChannelsFormattingTests: XCTestCase {
     /// 2026-09-16 12:00:00 UTC.
     private let now: Int64 = 1_789_560_000_000
 
+    /// The catalog isolates a text argument (ADR-0058); these assertions
+    /// compare the words.
+    private func plain(_ text: String) -> String {
+        text.unicodeScalars
+            .filter { !(0x2066...0x2069).contains($0.value) }
+            .map(String.init).joined()
+    }
+
     // MARK: Row model
 
     func testRowJoinsHandleAndSubscriberCount() {
@@ -28,7 +36,7 @@ final class ChannelsFormattingTests: XCTestCase {
         XCTAssertEqual(row.title, "Weather")
         XCTAssertEqual(row.handleLabel, "@weather")
         XCTAssertEqual(row.subscribersLabel, "12 subscribers")
-        XCTAssertEqual(row.secondLine, "@weather \u{00B7} 12 subscribers")
+        XCTAssertEqual(plain(row.secondLine), "@weather \u{00B7} 12 subscribers")
         XCTAssertNil(row.timeLabel)
     }
 
@@ -146,11 +154,11 @@ final class ChannelsFormattingTests: XCTestCase {
             ChannelsFormatting.relativeLabel(
                 ms: now - agoS * 1000, nowMs: now, calendar: calendar, locale: locale)
         }
-        XCTAssertEqual(label(0), "Just now")
-        XCTAssertEqual(label(59), "Just now")
-        XCTAssertEqual(label(60), "1 min ago")
-        XCTAssertEqual(label(5 * 60), "5 min ago")
-        XCTAssertEqual(label(2 * 3600), "2 h ago")
+        XCTAssertEqual(label(0), "just now")
+        XCTAssertEqual(label(59), "just now")
+        XCTAssertEqual(label(60), "1 minute ago")
+        XCTAssertEqual(label(5 * 60), "5 minutes ago")
+        XCTAssertEqual(label(2 * 3600), "2 hours ago")
         // 12:00 UTC minus 13 h is yesterday 23:00.
         XCTAssertEqual(label(13 * 3600), "Yesterday")
         // The abbreviated month is the OS's ("Sep" or "Sept" for en_GB).
@@ -163,7 +171,7 @@ final class ChannelsFormattingTests: XCTestCase {
         XCTAssertEqual(
             ChannelsFormatting.relativeLabel(
                 ms: now + 60_000, nowMs: now, calendar: calendar, locale: locale),
-            "Just now")
+            "just now")
     }
 
     // MARK: Access refresh line
@@ -172,20 +180,25 @@ final class ChannelsFormattingTests: XCTestCase {
         XCTAssertEqual(
             ChannelsFormatting.accessRefreshLine(
                 lastRotationMs: nil, nowMs: now, calendar: calendar, locale: locale),
-            "Access refreshes automatically; not refreshed yet.")
+            "Not refreshed yet.")
         XCTAssertEqual(
             ChannelsFormatting.accessRefreshLine(
                 lastRotationMs: 0, nowMs: now, calendar: calendar, locale: locale),
-            "Access refreshes automatically; not refreshed yet.")
+            "Not refreshed yet.")
         XCTAssertEqual(
-            ChannelsFormatting.accessRefreshLine(
+            plain(ChannelsFormatting.accessRefreshLine(
                 lastRotationMs: UInt64(now - 2 * 3_600_000), nowMs: now,
-                calendar: calendar, locale: locale),
-            "Access last refreshed 2 h ago; refreshes automatically.")
+                calendar: calendar, locale: locale)),
+            "Refreshed 2 hours ago.")
         XCTAssertEqual(
-            ChannelsFormatting.accessRefreshLine(
+            plain(ChannelsFormatting.accessRefreshLine(
                 lastRotationMs: UInt64(now - 10_000), nowMs: now,
-                calendar: calendar, locale: locale),
-            "Access last refreshed just now; refreshes automatically.")
+                calendar: calendar, locale: locale)),
+            "Refreshed just now.")
+        XCTAssertEqual(
+            plain(ChannelsFormatting.accessRefreshLine(
+                lastRotationMs: UInt64(now - 3 * 86_400_000), nowMs: now,
+                calendar: calendar, locale: locale)),
+            "Refreshed 3 days ago.")
     }
 }

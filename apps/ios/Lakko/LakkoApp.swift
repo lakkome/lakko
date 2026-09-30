@@ -988,7 +988,7 @@ private struct SessionRoot: View, Equatable {
     @ViewBuilder
     private func channelSeedMissing(_ title: String) -> some View {
         VStack(spacing: 16) {
-            Text("Sign in again to use channels.")
+            Text(l10n.t("channels.error.sign_in"))
                 .foregroundStyle(.secondary)
         }
         .padding()
@@ -1026,7 +1026,7 @@ private struct SessionRoot: View, Equatable {
         case .newChat:
             ContactPickerScreen(
                 viewModel: contactsVM,
-                title: "New chat",
+                title: l10n.t("chats.create.chat"),
                 onPick: { groupIdHex in
                     replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
                 }
@@ -1060,7 +1060,7 @@ private struct SessionRoot: View, Equatable {
                     client: ChannelsClient(),
                     accountIdentitySeed: seed)
             } else {
-                channelSeedMissing("Channel")
+                channelSeedMissing(l10n.t("channels.fallback_name"))
             }
         case .channelFound(let channelId, let handle):
             // A channel the ONE network lookup resolved by `@handle`. This
@@ -1074,7 +1074,7 @@ private struct SessionRoot: View, Equatable {
                     accountIdentitySeed: seed,
                     foundHandle: handle)
             } else {
-                channelSeedMissing("Channel")
+                channelSeedMissing(l10n.t("channels.fallback_name"))
             }
         case .newChannel:
             if let seed = accountIdentitySeed {
@@ -1087,13 +1087,13 @@ private struct SessionRoot: View, Equatable {
                     },
                     onJoinAsCoPublisher: { push(.joinCoPublisher, on: tab) })
             } else {
-                channelSeedMissing("New channel")
+                channelSeedMissing(l10n.t("channels.new.title"))
             }
         case .joinCoPublisher:
             if let seed = accountIdentitySeed {
                 JoinCoPublisherScreen(state: channelsState, accountIdentitySeed: seed)
             } else {
-                channelSeedMissing("Join as co-publisher")
+                channelSeedMissing(l10n.t("channels.join.title"))
             }
         case .contactDetail(let messageId):
             ContactDetailScreen(

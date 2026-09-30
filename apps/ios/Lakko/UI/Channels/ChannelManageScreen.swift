@@ -16,6 +16,8 @@ struct ChannelManageScreen: View {
     /// ADR-0028 OQ3 — the canonical AccountIdentity seed, so the co-publisher
     /// and rotation panels can open the channel's PublisherGroup + sign.
     let accountIdentitySeed: Data
+    /// ADR-0058 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         ScrollView {
@@ -41,7 +43,7 @@ struct ChannelManageScreen: View {
             .padding(16)
         }
         .background(Color.lakkoBackground)
-        .navigationTitle("Manage")
+        .navigationTitle(l10n.t("channels.manage.title"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -62,7 +64,8 @@ private struct ChannelNamePanel: View {
     @State private var description: String = ""
     @State private var seededFrom: SharedChannelMeta?
     @State private var busy = false
-    @State private var error: String?
+    @State private var error: UiText?
+    @ObservedObject private var l10n = Localization.shared
 
     private var channel: ChannelHandle? { state.channels.first(where: { $0.id == channelId }) }
 
@@ -74,10 +77,10 @@ private struct ChannelNamePanel: View {
 
     var body: some View {
         ChannelManageCard(
-            title: "Channel",
-            subtitle: "Everyone who subscribes sees the name and description. The server never does."
+            title: l10n.t("channels.meta.title"),
+            subtitle: l10n.t("channels.meta.desc")
         ) {
-            TextField("Name", text: $name)
+            TextField(l10n.t("channels.field.name"), text: $name)
                 .textFieldStyle(.roundedBorder)
                 .disabled(busy)
                 .onChange(of: name) { _, value in
@@ -88,7 +91,7 @@ private struct ChannelNamePanel: View {
                         name = value.filter { !$0.isNewline }
                     }
                 }
-            TextField("Description (optional)", text: $description, axis: .vertical)
+            TextField(l10n.t("channels.field.description_optional"), text: $description, axis: .vertical)
                 .lineLimit(2...5)
                 .textFieldStyle(.roundedBorder)
                 .disabled(busy)
@@ -99,13 +102,13 @@ private struct ChannelNamePanel: View {
                 }
             HStack {
                 Spacer()
-                Button(busy ? "Saving..." : "Save") { Task { await save() } }
+                Button(l10n.t(busy ? "common.saving" : "common.save")) { Task { await save() } }
                     .buttonStyle(.borderedProminent)
                     .tint(Color.lakkoAccent)
                     .disabled(busy || !dirty)
             }
             if let error {
-                ChannelManageErrorLine(text: error)
+                ChannelManageErrorLine(text: error.text)
             }
         }
         .onAppear { seed() }
@@ -136,7 +139,7 @@ private struct ChannelNamePanel: View {
             name: name, description: description,
             nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
         else {
-            error = "A channel needs a name"
+            error = .key("channels.meta.error.name_empty")
             return
         }
         do {
@@ -147,10 +150,10 @@ private struct ChannelNamePanel: View {
                 channelId: channelId, localName: meta.name, localDescription: meta.description)
             seededFrom = meta
         } catch let err as LegacyChannelError {
-            error = err.message
+            error = UiText { err.message }
         } catch {
             NSLog("Channels: metadata record post failed: %@", String(describing: error))
-            self.error = "Could not save. Check your connection and try again."
+            self.error = .key("channels.meta.error.save")
         }
     }
 }

@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.contacts
 
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -154,14 +155,14 @@ class InviteLinkRowsTest {
     @Test
     fun `expiry and uses copy`() {
         val now = 1_000_000L
-        assertEquals("Never expires", describeInviteExpiry(0L, now))
-        assertEquals("Expired", describeInviteExpiry(now, now))
-        assertEquals("Expires in 2d", describeInviteExpiry(now + 2 * 24 * 3_600_000L + 5, now))
-        assertEquals("Expires in 3h", describeInviteExpiry(now + 3 * 3_600_000L + 5, now))
-        assertEquals("Expires in 1m", describeInviteExpiry(now + 10, now))
-        assertEquals(null, describeUsesLeft(null))
-        assertEquals("1 use left", describeUsesLeft(1L))
-        assertEquals("0 uses left", describeUsesLeft(0L))
-        assertEquals("4 uses left", describeUsesLeft(4L))
+        assertEquals("Never expires", describeInviteExpiry(0L, now).en)
+        assertEquals("Expired", describeInviteExpiry(now, now).en)
+        assertEquals("Expires in 2d", describeInviteExpiry(now + 2 * 24 * 3_600_000L + 5, now).en)
+        assertEquals("Expires in 3h", describeInviteExpiry(now + 3 * 3_600_000L + 5, now).en)
+        assertEquals("Expires in 1m", describeInviteExpiry(now + 10, now).en)
+        assertEquals(null, describeUsesLeft(null)?.en)
+        assertEquals("1 use left", describeUsesLeft(1L)?.en)
+        assertEquals("0 uses left", describeUsesLeft(0L)?.en)
+        assertEquals("4 uses left", describeUsesLeft(4L)?.en)
     }
 }

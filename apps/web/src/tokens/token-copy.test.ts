@@ -78,13 +78,17 @@ describe("the surfaces", () => {
 
   it("a contact request whose lookup ran out says so", () => {
     const err = ContactsError.wrap(new AnonTokenQuotaExhaustedError("discovery-lookup", 1));
-    expect(formatContactsError(err)).toBe(LOOKUP_ALLOWANCE_USED());
+    expect(formatContactsError(err, "contacts.error.send")).toBe(LOOKUP_ALLOWANCE_USED());
   });
 
   it("a group link that ran out of tokens says so, without a retry", () => {
     const err = ContactsError.wrap(new AnonTokenQuotaExhaustedError("invite-consume", 1));
-    expect(joinFailureNotice(err)).toEqual({ message: ACTION_ALLOWANCE_USED(), offerRetry: false });
+    const notice = joinFailureNotice(err);
+    expect(notice.render()).toBe(ACTION_ALLOWANCE_USED());
+    expect(notice.offerRetry).toBe(false);
     const knock = ContactsError.wrap(new AnonTokenQuotaExhaustedError("ds-knock", 1));
-    expect(joinFailureNotice(knock)).toEqual({ message: ACTION_ALLOWANCE_USED(), offerRetry: false });
+    const knockNotice = joinFailureNotice(knock);
+    expect(knockNotice.render()).toBe(ACTION_ALLOWANCE_USED());
+    expect(knockNotice.offerRetry).toBe(false);
   });
 });

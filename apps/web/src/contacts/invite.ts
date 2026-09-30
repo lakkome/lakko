@@ -19,6 +19,7 @@
  *     focused on rendering and gives unit-test coverage for the
  *     defaulting logic without spinning up Solid.
  */
+import { t } from "../l10n";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
 import {
   classifyInviteSlug,
@@ -161,31 +162,28 @@ export function maxUsesPresetToValue(preset: MaxUsesPreset): number {
 /** Convert a wire `max_uses` u32 back into a human-visible
  *  rendering for the landing page. */
 export function describeMaxUses(maxUses: number): string {
-  if (maxUses === 0) return "single-use";
-  if (maxUses === 0xff_ff_ff_ff) return "unlimited";
-  return `up to ${maxUses} uses`;
+  if (maxUses === 0) return t("invite.uses.single");
+  if (maxUses === 0xff_ff_ff_ff) return t("invite.uses.unlimited");
+  return t("invite.uses.up_to", { count: maxUses });
 }
 
 /** Render an `expiry_ms` (UNIX millis) for the landing page —
  *  `"never expires"` for the `NEVER_EXPIRES` sentinel, otherwise
  *  a relative "in 6 days" / "expired 3 hours ago" string. */
 export function describeExpiry(expiryMs: bigint, nowMs: number): string {
-  if (expiryMs === 0n) return "never expires";
+  if (expiryMs === 0n) return t("invite.expiry.never");
   const exp = Number(expiryMs);
   const deltaMs = exp - nowMs;
-  const futureLabel = deltaMs >= 0 ? "in" : "expired";
+  const tense = deltaMs >= 0 ? "in" : "ago";
   const absMs = Math.abs(deltaMs);
   const day = 86_400_000;
   const hour = 3_600_000;
   const minute = 60_000;
   if (absMs >= day) {
-    const days = Math.round(absMs / day);
-    return `${futureLabel} ${days} day${days === 1 ? "" : "s"}${deltaMs >= 0 ? "" : " ago"}`;
+    return t(`invite.expiry.${tense}_days`, { count: Math.round(absMs / day) });
   }
   if (absMs >= hour) {
-    const hours = Math.round(absMs / hour);
-    return `${futureLabel} ${hours} hour${hours === 1 ? "" : "s"}${deltaMs >= 0 ? "" : " ago"}`;
+    return t(`invite.expiry.${tense}_hours`, { count: Math.round(absMs / hour) });
   }
-  const mins = Math.max(1, Math.round(absMs / minute));
-  return `${futureLabel} ${mins} minute${mins === 1 ? "" : "s"}${deltaMs >= 0 ? "" : " ago"}`;
+  return t(`invite.expiry.${tense}_minutes`, { count: Math.max(1, Math.round(absMs / minute)) });
 }

@@ -330,6 +330,474 @@
       "text": "आप यह स्क्रीन छोड़ सकते हैं; अनुमति मिलते ही आप कॉल में शामिल हो जाएंगे।",
       "status": "machine"
     },
+    "channels.back": {
+      "text": "चैनलों पर वापस जाएँ",
+      "status": "machine"
+    },
+    "channels.compose.label": {
+      "text": "नई पोस्ट",
+      "status": "machine"
+    },
+    "channels.compose.placeholder": {
+      "text": "पोस्ट लिखें",
+      "status": "machine"
+    },
+    "channels.compose.publish": {
+      "text": "पब्लिश करें",
+      "status": "machine"
+    },
+    "channels.compose.publishing": {
+      "text": "पब्लिश हो रही है...",
+      "status": "machine"
+    },
+    "channels.copublishers.desc": {
+      "text": "वे लोग जो इस चैनल में पोस्ट कर सकते हैं। लिंक शेयर करें; जब वे अनुरोध करें, तब उन्हें स्वीकार करें।",
+      "status": "machine"
+    },
+    "channels.copublishers.error.approve": {
+      "text": "अनुरोध स्वीकार नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.copublishers.error.poll": {
+      "text": "अनुरोध जाँचे नहीं जा सके। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.copublishers.error.reject": {
+      "text": "अनुरोध अस्वीकार नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.copublishers.link": {
+      "text": "सह-प्रकाशक इनवाइट लिंक",
+      "status": "machine"
+    },
+    "channels.copublishers.request_row": {
+      "text": "किसी ने सह-प्रकाशक बनने का अनुरोध किया",
+      "status": "machine"
+    },
+    "channels.copublishers.requests": {
+      "text": "अनुरोध ({count})",
+      "status": "machine"
+    },
+    "channels.copublishers.title": {
+      "text": "सह-प्रकाशक",
+      "status": "machine"
+    },
+    "channels.empty.action": {
+      "text": "चैनल बनाएँ",
+      "status": "machine"
+    },
+    "channels.empty.title": {
+      "text": "अभी कोई चैनल नहीं है",
+      "status": "machine"
+    },
+    "channels.error.empty_post": {
+      "text": "पोस्ट करने के लिए कुछ लिखें।",
+      "status": "machine"
+    },
+    "channels.error.not_let_in": {
+      "text": "चैनल ने अभी तक इस डिवाइस को अंदर नहीं आने दिया है। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.error.post_too_large": {
+      "text": "यह पोस्ट पब्लिश करने के लिए बहुत लंबी है।",
+      "status": "machine"
+    },
+    "channels.error.refused": {
+      "text": "सर्वर ने अनुरोध अस्वीकार कर दिया। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.error.sign_in": {
+      "text": "चैनल इस्तेमाल करने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "channels.error.unknown_channel": {
+      "text": "यह चैनल सर्वर पर मौजूद नहीं है।",
+      "status": "machine"
+    },
+    "channels.error.unreachable": {
+      "text": "चैनल सेवा अभी उपलब्ध नहीं है। थोड़ी देर में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.fallback_name": {
+      "text": "चैनल",
+      "status": "machine"
+    },
+    "channels.field.description_optional": {
+      "text": "विवरण (वैकल्पिक)",
+      "status": "machine"
+    },
+    "channels.field.name": {
+      "text": "नाम",
+      "status": "machine"
+    },
+    "channels.find.action": {
+      "text": "{handle} खोजें",
+      "status": "machine"
+    },
+    "channels.find.none": {
+      "text": "{handle} के लिए कोई चैनल नहीं मिला।",
+      "status": "machine"
+    },
+    "channels.index_hint": {
+      "text": "कोई चैनल चुनें, या नया बनाएँ",
+      "status": "machine"
+    },
+    "channels.info.manage_sub": {
+      "text": "इसका नाम और विवरण, इसे कौन पढ़ता है, और कौन और इसमें पोस्ट कर सकता है।",
+      "status": "machine"
+    },
+    "channels.info.subscribers": {
+      "text": "{count, plural, one {# सब्सक्राइबर} other {# सब्सक्राइबर}}",
+      "status": "machine"
+    },
+    "channels.info.unsubscribe_sub": {
+      "text": "चैनल आपकी सूची से हट जाता है और यह डिवाइस उसे पढ़ना बंद कर देता है। आप बाद में फिर से सब्सक्राइब कर सकते हैं।",
+      "status": "machine"
+    },
+    "channels.join.default_name": {
+      "text": "सह-प्रकाशित चैनल",
+      "status": "machine"
+    },
+    "channels.join.error.sign_in": {
+      "text": "चैनल में शामिल होने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "channels.join.link_label": {
+      "text": "लिंक",
+      "status": "machine"
+    },
+    "channels.join.name_label": {
+      "text": "इस डिवाइस पर नाम (वैकल्पिक)",
+      "status": "machine"
+    },
+    "channels.join.no_approval": {
+      "text": "अभी स्वीकृति नहीं मिली। मालिक के स्वीकार करने के बाद फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.join.requesting": {
+      "text": "अनुरोध भेजा जा रहा है...",
+      "status": "machine"
+    },
+    "channels.join.subtitle": {
+      "text": "चैनल के मालिक का शेयर किया लिंक पेस्ट करें। उनके स्वीकार करने के बाद यह डिवाइस चैनल में पोस्ट कर सकेगा।",
+      "status": "machine"
+    },
+    "channels.join.title": {
+      "text": "सह-प्रकाशक के रूप में जुड़ें",
+      "status": "machine"
+    },
+    "channels.join.waiting": {
+      "text": "चैनल के मालिक की स्वीकृति का इंतज़ार है...",
+      "status": "machine"
+    },
+    "channels.legacy.channel": {
+      "text": "यह चैनल Lakko के पुराने वर्ज़न से बनाया गया था और इस बिल्ड में नहीं खुल सकता। आपकी पब्लिश की हुई पोस्ट आपके सब्सक्राइबर अब भी पढ़ सकते हैं। फिर से पब्लिश करने के लिए नया चैनल बनाएँ, क्योंकि इस चैनल को ठीक नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "channels.legacy.copublisher_link": {
+      "text": "यह सह-प्रकाशक इनवाइट लिंक Lakko के पुराने वर्ज़न से बनाया गया था और अब काम नहीं करता। चैनल के मालिक से नया इनवाइट लिंक भेजने को कहें।",
+      "status": "machine"
+    },
+    "channels.manage.back": {
+      "text": "पोस्ट पर वापस जाएँ",
+      "status": "machine"
+    },
+    "channels.manage.error.open": {
+      "text": "चैनल की सेटिंग नहीं खुल सकीं। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.manage.error.sign_in": {
+      "text": "इस चैनल को मैनेज करने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "channels.manage.title": {
+      "text": "चैनल मैनेज करें",
+      "status": "machine"
+    },
+    "channels.meta.desc": {
+      "text": "नाम और विवरण हर सब्सक्राइबर तक एन्क्रिप्टेड रूप में पहुँचते हैं। सर्वर उन्हें कभी नहीं पढ़ता।",
+      "status": "machine"
+    },
+    "channels.meta.error.description_bad_character": {
+      "text": "विवरण में एक ऐसा अक्षर है जिसे दिखाया नहीं जा सकता।",
+      "status": "machine"
+    },
+    "channels.meta.error.description_too_long": {
+      "text": "विवरण बहुत लंबा है।",
+      "status": "machine"
+    },
+    "channels.meta.error.generic": {
+      "text": "इस नाम या विवरण का इस्तेमाल नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "channels.meta.error.name_bad_character": {
+      "text": "नाम में एक ऐसा अक्षर है जिसे दिखाया नहीं जा सकता।",
+      "status": "machine"
+    },
+    "channels.meta.error.name_empty": {
+      "text": "चैनल का नाम होना चाहिए",
+      "status": "machine"
+    },
+    "channels.meta.error.name_line_break": {
+      "text": "नाम एक ही लाइन में होना चाहिए।",
+      "status": "machine"
+    },
+    "channels.meta.error.name_too_long": {
+      "text": "नाम बहुत लंबा है।",
+      "status": "machine"
+    },
+    "channels.meta.error.save": {
+      "text": "सेव नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.meta.error.save_prefix": {
+      "text": "सेव नहीं हो सका।",
+      "status": "machine"
+    },
+    "channels.meta.saved": {
+      "text": "सेव हो गया। सब्सक्राइबर को नया नाम उनकी अगली पोस्ट के साथ दिखेगा।",
+      "status": "machine"
+    },
+    "channels.meta.title": {
+      "text": "चैनल",
+      "status": "machine"
+    },
+    "channels.new.create": {
+      "text": "बनाएँ",
+      "status": "machine"
+    },
+    "channels.new.error.create": {
+      "text": "चैनल नहीं बन सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.new.error.handle": {
+      "text": "हैंडल नहीं लिया जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.new.error.handle_offline": {
+      "text": "हैंडल नहीं लिया जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.new.error.handle_taken": {
+      "text": "{handle} पहले से लिया जा चुका है। कोई दूसरा चुनें, या इसे खाली छोड़ दें।",
+      "status": "machine"
+    },
+    "channels.new.error.no_name": {
+      "text": "चैनल को एक नाम दें।",
+      "status": "machine"
+    },
+    "channels.new.error.sign_in": {
+      "text": "चैनल बनाने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "channels.new.handle_hint": {
+      "text": "इसकी मदद से दूसरे लोग चैनल ढूँढ़कर उसे सब्सक्राइब कर सकते हैं।",
+      "status": "machine"
+    },
+    "channels.new.handle_label": {
+      "text": "सार्वजनिक @हैंडल (वैकल्पिक)",
+      "status": "machine"
+    },
+    "channels.new.handle_placeholder": {
+      "text": "@my-channel",
+      "status": "machine"
+    },
+    "channels.new.subtitle": {
+      "text": "सब्सक्राइबर नाम और विवरण देखते हैं। ये एन्क्रिप्टेड रूप में जाते हैं; सर्वर तक सिर्फ़ एन्क्रिप्टेड टेक्स्ट पहुँचता है।",
+      "status": "machine"
+    },
+    "channels.new.title": {
+      "text": "नया चैनल",
+      "status": "machine"
+    },
+    "channels.new_menu": {
+      "text": "नया चैनल या किसी चैनल से जुड़ें",
+      "status": "machine"
+    },
+    "channels.post.not_available": {
+      "text": "उपलब्ध नहीं",
+      "status": "machine"
+    },
+    "channels.post.older_key": {
+      "text": "यह पोस्ट इतनी पुरानी है कि यह डिवाइस इसे नहीं पढ़ सकता।",
+      "status": "machine"
+    },
+    "channels.post.unreadable": {
+      "text": "यह पोस्ट इस डिवाइस पर नहीं खुल सकी।",
+      "status": "machine"
+    },
+    "channels.posts.empty": {
+      "text": "अभी कोई पोस्ट नहीं है।",
+      "status": "machine"
+    },
+    "channels.posts.empty_owner": {
+      "text": "अभी कोई पोस्ट नहीं है। पहली पोस्ट नीचे लिखें।",
+      "status": "machine"
+    },
+    "channels.posts.error.load": {
+      "text": "पोस्ट लोड नहीं हो सकीं।",
+      "status": "machine"
+    },
+    "channels.publish.error.generic": {
+      "text": "पब्लिश नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.publish.error.not_publisher": {
+      "text": "यह डिवाइस इस चैनल में पोस्ट नहीं कर सकता।",
+      "status": "machine"
+    },
+    "channels.publish.error.prefix": {
+      "text": "पब्लिश नहीं हो सका।",
+      "status": "machine"
+    },
+    "channels.rotation.desc": {
+      "text": "Lakko चैनल की सुरक्षा अपने-आप रिफ़्रेश करता है। अगर आपको लगता है कि किसी सब्सक्राइबर का डिवाइस हैक हो गया है, तो इसे अभी रिफ़्रेश करें।",
+      "status": "machine"
+    },
+    "channels.rotation.error.check": {
+      "text": "चैनल की सुरक्षा जाँची नहीं जा सकी।",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh": {
+      "text": "रिफ़्रेश नहीं हो सका। थोड़ी देर में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.rotation.never": {
+      "text": "अभी तक रिफ़्रेश नहीं हुआ।",
+      "status": "machine"
+    },
+    "channels.rotation.refresh_now": {
+      "text": "अभी रिफ़्रेश करें",
+      "status": "machine"
+    },
+    "channels.rotation.refreshed": {
+      "text": "{when} रिफ़्रेश किया गया।",
+      "status": "machine"
+    },
+    "channels.rotation.refreshing": {
+      "text": "रिफ़्रेश हो रहा है...",
+      "status": "machine"
+    },
+    "channels.rotation.title": {
+      "text": "सुरक्षा",
+      "status": "machine"
+    },
+    "channels.row.own": {
+      "text": "आपका चैनल",
+      "status": "machine"
+    },
+    "channels.search.label": {
+      "text": "चैनल खोजें या हैंडल से कोई चैनल ढूँढ़ें",
+      "status": "machine"
+    },
+    "channels.search.placeholder": {
+      "text": "खोजें या @हैंडल से ढूँढ़ें",
+      "status": "machine"
+    },
+    "channels.subscribe.action": {
+      "text": "सब्सक्राइब करें",
+      "status": "machine"
+    },
+    "channels.subscribe.error.generic": {
+      "text": "सब्सक्राइब नहीं हो सका। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.subscribe.error.prefix": {
+      "text": "सब्सक्राइब नहीं हो सका।",
+      "status": "machine"
+    },
+    "channels.subscribe.prompt_body": {
+      "text": "चैनल के इस डिवाइस को अंदर आने देने के बाद पोस्ट यहाँ दिखेंगी।",
+      "status": "machine"
+    },
+    "channels.subscribe.prompt_title": {
+      "text": "यह चैनल पढ़ने के लिए सब्सक्राइब करें",
+      "status": "machine"
+    },
+    "channels.subscribe.status.not_subscribed": {
+      "text": "सब्सक्राइब नहीं किया",
+      "status": "machine"
+    },
+    "channels.subscribe.status.subscribed": {
+      "text": "सब्सक्राइब किया",
+      "status": "machine"
+    },
+    "channels.subscribe.status.subscribing": {
+      "text": "सब्सक्राइब हो रहा है...",
+      "status": "machine"
+    },
+    "channels.subscribe.status.waiting": {
+      "text": "अंदर आने देने का इंतज़ार...",
+      "status": "machine"
+    },
+    "channels.subscribe.waiting_notice": {
+      "text": "सब्सक्राइब हो गया। चैनल के इस डिवाइस को अंदर आने देने के बाद पोस्ट दिखेंगी; इसमें आम तौर पर एक पल लगता है।",
+      "status": "machine"
+    },
+    "channels.subscribers.count": {
+      "text": "({count})",
+      "status": "machine"
+    },
+    "channels.subscribers.desc": {
+      "text": "नए सब्सक्राइबर को इस डिवाइस से अपने-आप अंदर आने दिया जाता है।",
+      "status": "machine"
+    },
+    "channels.subscribers.empty": {
+      "text": "अभी कोई सब्सक्राइबर नहीं है। चैनल का हैंडल शेयर करें ताकि लोग सब्सक्राइब कर सकें।",
+      "status": "machine"
+    },
+    "channels.subscribers.error.deliver": {
+      "text": "इस सब्सक्राइबर को सेट अप नहीं किया जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.subscribers.error.deliver_prefix": {
+      "text": "इस सब्सक्राइबर को सेट अप नहीं किया जा सका।",
+      "status": "machine"
+    },
+    "channels.subscribers.error.load": {
+      "text": "सब्सक्राइबर लोड नहीं हो सके। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.subscribers.retrying": {
+      "text": "फिर से कोशिश हो रही है...",
+      "status": "machine"
+    },
+    "channels.subscribers.row": {
+      "text": "सब्सक्राइबर {number}",
+      "status": "machine"
+    },
+    "channels.subscribers.status.not_ready": {
+      "text": "तैयार नहीं",
+      "status": "machine"
+    },
+    "channels.subscribers.status.ready": {
+      "text": "तैयार",
+      "status": "machine"
+    },
+    "channels.subscribers.status.setting_up": {
+      "text": "सेट अप हो रहा है...",
+      "status": "machine"
+    },
+    "channels.subscribers.title": {
+      "text": "सब्सक्राइबर",
+      "status": "machine"
+    },
+    "channels.unsubscribe.action": {
+      "text": "फ़ॉलो करना बंद करें",
+      "status": "machine"
+    },
+    "channels.unsubscribe.body": {
+      "text": "यह आपकी सूची से हट जाता है और यह डिवाइस इसे पढ़ना बंद कर देता है। आप बाद में फिर से सब्सक्राइब कर सकते हैं।",
+      "status": "machine"
+    },
+    "channels.unsubscribe.title": {
+      "text": "इस चैनल को फ़ॉलो करना बंद करें?",
+      "status": "machine"
+    },
+    "channels.unsubscribe.title_named": {
+      "text": "{name} को फ़ॉलो करना बंद करें?",
+      "status": "machine"
+    },
     "chat.attachment.error.attach": {
       "text": "चुना गया आइटम अटैच नहीं हो सका। फिर से कोशिश करें।",
       "status": "machine"
@@ -532,6 +1000,10 @@
     },
     "chat.delete.control": {
       "text": "यह चैट मिटाएँ",
+      "status": "machine"
+    },
+    "chat.delete.sub": {
+      "text": "यह बातचीत और इसमें मौजूद सब कुछ इस डिवाइस से हटा देता है। इसे वापस नहीं किया जा सकता।",
       "status": "machine"
     },
     "chat.delete.title": {
@@ -2054,6 +2526,14 @@
       "text": "जाँच हो रही है...",
       "status": "machine"
     },
+    "common.clipboard.link": {
+      "text": "Lakko लिंक",
+      "status": "machine"
+    },
+    "common.clipboard.message": {
+      "text": "Lakko मैसेज",
+      "status": "machine"
+    },
     "common.close": {
       "text": "बंद करें",
       "status": "machine"
@@ -2084,6 +2564,10 @@
     },
     "common.copy": {
       "text": "कॉपी करें",
+      "status": "machine"
+    },
+    "common.creating": {
+      "text": "बनाया जा रहा है...",
       "status": "machine"
     },
     "common.delete": {
@@ -2158,6 +2642,10 @@
       "text": "बड़ा करें",
       "status": "machine"
     },
+    "common.fact_pair": {
+      "text": "{first} · {second}",
+      "status": "machine"
+    },
     "common.list_pair": {
       "text": "{first}, {second}",
       "status": "machine"
@@ -2194,6 +2682,10 @@
       "text": "चालू",
       "status": "machine"
     },
+    "common.open_chat": {
+      "text": "चैट खोलें",
+      "status": "machine"
+    },
     "common.open_lakko": {
       "text": "Lakko खोलें",
       "status": "machine"
@@ -2212,6 +2704,10 @@
     },
     "common.preparing": {
       "text": "तैयार किया जा रहा है...",
+      "status": "machine"
+    },
+    "common.qr_code": {
+      "text": "QR कोड",
       "status": "machine"
     },
     "common.remove": {
@@ -2262,12 +2758,296 @@
       "text": "{size} MB",
       "status": "machine"
     },
+    "common.time.days_ago": {
+      "text": "{count, plural, one {# दिन पहले} other {# दिन पहले}}",
+      "status": "machine"
+    },
+    "common.time.hours_ago": {
+      "text": "{count, plural, one {# घंटे पहले} other {# घंटे पहले}}",
+      "status": "machine"
+    },
+    "common.time.just_now": {
+      "text": "अभी-अभी",
+      "status": "machine"
+    },
+    "common.time.minutes_ago": {
+      "text": "{count, plural, one {# मिनट पहले} other {# मिनट पहले}}",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "फिर से कोशिश करें",
       "status": "machine"
     },
     "common.unknown": {
       "text": "अज्ञात",
+      "status": "machine"
+    },
+    "contacts.accept.error.old_version": {
+      "text": "यह अनुरोध Lakko के पुराने वर्ज़न से आया है। उनसे ऐप अपडेट करके फिर से भेजने को कहें।",
+      "status": "machine"
+    },
+    "contacts.add.by_username": {
+      "text": "यूज़रनेम से जोड़ें",
+      "status": "machine"
+    },
+    "contacts.add.intro_label": {
+      "text": "मैसेज (वैकल्पिक)",
+      "status": "machine"
+    },
+    "contacts.add.intro_placeholder": {
+      "text": "नमस्ते, मैं कॉन्फ़्रेंस वाली प्रिया हूँ।",
+      "status": "machine"
+    },
+    "contacts.add.send": {
+      "text": "भेजें",
+      "status": "machine"
+    },
+    "contacts.add.share_invite": {
+      "text": "इनवाइट लिंक शेयर करें",
+      "status": "machine"
+    },
+    "contacts.add.subtitle": {
+      "text": "अनुरोध एंड-टू-एंड एन्क्रिप्टेड होते हैं। Lakko के सर्वर इन्हें नहीं पढ़ सकते।",
+      "status": "machine"
+    },
+    "contacts.add.title": {
+      "text": "संपर्क जोड़ें",
+      "status": "machine"
+    },
+    "contacts.add.username_label": {
+      "text": "यूज़रनेम",
+      "status": "machine"
+    },
+    "contacts.add.username_placeholder": {
+      "text": "@alice",
+      "status": "machine"
+    },
+    "contacts.detail.actions": {
+      "text": "संपर्क के विकल्प",
+      "status": "machine"
+    },
+    "contacts.detail.call_needs_chat": {
+      "text": "कॉल शुरू करने के लिए पहले एक मैसेज भेजें।",
+      "status": "machine"
+    },
+    "contacts.detail.gone_body": {
+      "text": "यह व्यक्ति अब आपके संपर्कों में नहीं है।",
+      "status": "machine"
+    },
+    "contacts.detail.gone_title": {
+      "text": "संपर्क नहीं मिला",
+      "status": "machine"
+    },
+    "contacts.detail.message": {
+      "text": "मैसेज",
+      "status": "machine"
+    },
+    "contacts.detail.message_unavailable": {
+      "text": "यह संपर्क तब जोड़ा गया था जब यहाँ से चैट शुरू नहीं की जा सकती थी। उनसे आपको मैसेज करने को कहें।",
+      "status": "machine"
+    },
+    "contacts.detail.their_name": {
+      "text": "खुद को {name} कहते हैं",
+      "status": "machine"
+    },
+    "contacts.detail.username_not_verified": {
+      "text": "यूज़रनेम की पुष्टि नहीं हुई",
+      "status": "machine"
+    },
+    "contacts.error.send": {
+      "text": "अनुरोध नहीं भेजा जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "contacts.error.start_chat": {
+      "text": "चैट शुरू नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "contacts.identity_changed.reset": {
+      "text": "{name} ने अपनी सुरक्षित पहचान रीसेट की है (उदाहरण के लिए, उनका डिवाइस खो गया)। पारदर्शिता लॉग पुष्टि करता है कि यह रीसेट अकाउंट के मालिक ने किया था। अगर आपको भरोसा है कि यह सच में वही हैं, तो आगे बढ़ने से पहले किसी दूसरे माध्यम से उनके सुरक्षा नंबर की फिर से पुष्टि करें।",
+      "status": "machine"
+    },
+    "contacts.identity_changed.reset_unnamed": {
+      "text": "इस संपर्क ने अपनी सुरक्षित पहचान रीसेट की है (उदाहरण के लिए, उनका डिवाइस खो गया)। पारदर्शिता लॉग पुष्टि करता है कि यह रीसेट अकाउंट के मालिक ने किया था। अगर आपको भरोसा है कि यह सच में वही हैं, तो आगे बढ़ने से पहले किसी दूसरे माध्यम से उनके सुरक्षा नंबर की फिर से पुष्टि करें।",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unconfirmed": {
+      "text": "{name} की सुरक्षित पहचान बदल गई है और पारदर्शिता लॉग से इसकी पुष्टि नहीं हो सकी। भरोसा करने से पहले किसी दूसरे माध्यम से पुष्टि करें।",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unconfirmed_unnamed": {
+      "text": "इस संपर्क की सुरक्षित पहचान बदल गई है और पारदर्शिता लॉग से इसकी पुष्टि नहीं हो सकी। भरोसा करने से पहले किसी दूसरे माध्यम से पुष्टि करें।",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unexplained": {
+      "text": "{name} की सुरक्षित पहचान बदल गई है, और पारदर्शिता लॉग में अकाउंट के मालिक का किया कोई रीसेट नहीं दिखता। इसे अकाउंट हैक होने की आशंका मानें। भरोसा करने से पहले किसी दूसरे माध्यम से पुष्टि करें।",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unexplained_unnamed": {
+      "text": "इस संपर्क की सुरक्षित पहचान बदल गई है, और पारदर्शिता लॉग में अकाउंट के मालिक का किया कोई रीसेट नहीं दिखता। इसे अकाउंट हैक होने की आशंका मानें। भरोसा करने से पहले किसी दूसरे माध्यम से पुष्टि करें।",
+      "status": "machine"
+    },
+    "contacts.invite_links.subtitle": {
+      "text": "जिनसे आप बात करना चाहते हैं, उनके साथ एक लिंक शेयर करें।",
+      "status": "machine"
+    },
+    "contacts.invite_links.title": {
+      "text": "इनवाइट लिंक",
+      "status": "machine"
+    },
+    "contacts.list.add": {
+      "text": "जोड़ें",
+      "status": "machine"
+    },
+    "contacts.list.empty.action": {
+      "text": "संपर्क जोड़ें",
+      "status": "machine"
+    },
+    "contacts.list.empty.body": {
+      "text": "किसी को यूज़रनेम से जोड़ें, या अपना इनवाइट लिंक शेयर करें।",
+      "status": "machine"
+    },
+    "contacts.list.empty.title": {
+      "text": "अभी कोई संपर्क नहीं",
+      "status": "machine"
+    },
+    "contacts.list.no_match": {
+      "text": "कोई संपर्क मेल नहीं खाता।",
+      "status": "machine"
+    },
+    "contacts.list.requests": {
+      "text": "अनुरोध",
+      "status": "machine"
+    },
+    "contacts.list.search": {
+      "text": "संपर्क खोजें",
+      "status": "machine"
+    },
+    "contacts.list.section_index": {
+      "text": "सेक्शन इंडेक्स",
+      "status": "machine"
+    },
+    "contacts.list.sent": {
+      "text": "भेजे गए ({count})",
+      "status": "machine"
+    },
+    "contacts.list.sent_dismiss": {
+      "text": "इस सूची से हटाएँ",
+      "status": "machine"
+    },
+    "contacts.list.sent_waiting": {
+      "text": "इंतज़ार में",
+      "status": "machine"
+    },
+    "contacts.mailbox.join_failed": {
+      "text": "आपको एक ग्रुप में जोड़ा गया, लेकिन इस डिवाइस पर इनवाइट नहीं खुल सका। जिसने आपको जोड़ा था, उससे फिर से जोड़ने को कहें।",
+      "status": "machine"
+    },
+    "contacts.mailbox.poll_failed": {
+      "text": "संपर्क के नए अनुरोध जाँचे नहीं जा सके। फिर से कोशिश की जा रही है।",
+      "status": "machine"
+    },
+    "contacts.mailbox.sign_in": {
+      "text": "नए अनुरोध जाँचने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "contacts.reauth.body": {
+      "text": "इस सेशन को संपर्कों के लिए जिन कुंजियों की ज़रूरत है, वे उपलब्ध नहीं हैं। संपर्क इस्तेमाल करने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "contacts.remove.body": {
+      "text": "आपकी साझा चैट जैसी हैं वैसी ही रहती हैं; सिर्फ़ आपकी संपर्क सूची बदलती है। आप उन्हें बाद में फिर से जोड़ सकते हैं।",
+      "status": "machine"
+    },
+    "contacts.remove.confirm_named": {
+      "text": "{name} को हटाएँ",
+      "status": "machine"
+    },
+    "contacts.remove.control": {
+      "text": "संपर्क हटाएँ",
+      "status": "machine"
+    },
+    "contacts.remove.sub": {
+      "text": "इस अकाउंट की संपर्क सूची से {name} को हटा देता है।",
+      "status": "machine"
+    },
+    "contacts.remove.title": {
+      "text": "यह संपर्क हटाएँ?",
+      "status": "machine"
+    },
+    "contacts.rename.action": {
+      "text": "नाम बदलें",
+      "status": "machine"
+    },
+    "contacts.rename.field": {
+      "text": "इस संपर्क के लिए आपका दिया नाम",
+      "status": "machine"
+    },
+    "contacts.rename.placeholder": {
+      "text": "उनका अपना नाम इस्तेमाल करने के लिए खाली छोड़ें",
+      "status": "machine"
+    },
+    "contacts.rename.sub_local": {
+      "text": "इस संपर्क के लिए आपका दिया नाम। इसे सिर्फ़ आप देखते हैं।",
+      "status": "machine"
+    },
+    "contacts.rename.sub_theirs": {
+      "text": "जैसा उन्होंने सेट किया है। आप उन्हें अपना दिया नाम दे सकते हैं।",
+      "status": "machine"
+    },
+    "contacts.rename.title": {
+      "text": "नाम",
+      "status": "machine"
+    },
+    "contacts.request.accept": {
+      "text": "स्वीकार करें",
+      "status": "machine"
+    },
+    "contacts.request.decline": {
+      "text": "अस्वीकार करें",
+      "status": "machine"
+    },
+    "contacts.request.no_intro": {
+      "text": "जुड़ना चाहते हैं",
+      "status": "machine"
+    },
+    "contacts.request.someone": {
+      "text": "कोई",
+      "status": "machine"
+    },
+    "contacts.safety.body": {
+      "text": "इसे {name} के साथ आमने-सामने या कॉल पर मिलाएँ। नंबर मेल खाने का मतलब है कि आप दोनों के बीच कोई नहीं है।",
+      "status": "machine"
+    },
+    "contacts.safety.body_unnamed": {
+      "text": "इसे अपने संपर्क के साथ आमने-सामने या कॉल पर मिलाएँ। नंबर मेल खाने का मतलब है कि आप दोनों के बीच कोई नहीं है।",
+      "status": "machine"
+    },
+    "contacts.safety.error": {
+      "text": "सुरक्षा नंबर नहीं निकाला जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "contacts.safety.number": {
+      "text": "सुरक्षा नंबर",
+      "status": "machine"
+    },
+    "contacts.safety.row_sub": {
+      "text": "यह पक्का करने के लिए कि यह सच में वही हैं, नंबर को आमने-सामने मिलाएँ।",
+      "status": "machine"
+    },
+    "contacts.safety.show": {
+      "text": "दिखाएँ",
+      "status": "machine"
+    },
+    "contacts.safety.sign_in": {
+      "text": "सुरक्षा नंबर देखने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "contacts.safety.title": {
+      "text": "सुरक्षा नंबर की पुष्टि करें",
+      "status": "machine"
+    },
+    "contacts.send.done": {
+      "text": "{name} को अनुरोध भेजा गया। उनके स्वीकार करने तक यह \"भेजे गए\" में रहेगा।",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -2450,6 +3230,10 @@
       "text": "डिवाइस जोड़ें",
       "status": "machine"
     },
+    "devices.pairing.qr_description": {
+      "text": "पेयरिंग QR कोड",
+      "status": "machine"
+    },
     "devices.scan.confirm.body": {
       "text": "इससे स्कैन किए गए डिवाइस को आपके अकाउंट का पूरा एक्सेस मिल जाता है: आपके मैसेज, आपके संपर्क और आपकी पहचान। तभी आगे बढ़ें जब कोड आपके अपने नए डिवाइस पर हो।",
       "status": "machine"
@@ -2510,12 +3294,44 @@
       "text": "इस डिवाइस की तारीख और समय जाँचें।",
       "status": "machine"
     },
+    "group.join.needs_account": {
+      "text": "शामिल होने का अनुरोध करने के लिए आपको अकाउंट चाहिए। अकाउंट बनाएँ, या लॉग इन करें।",
+      "status": "machine"
+    },
     "group.join.not_taking_requests": {
       "text": "यह ग्रुप अभी अनुरोध नहीं ले रहा है। बाद में फिर से कोशिश करें।",
       "status": "machine"
     },
+    "group.join.open_chat": {
+      "text": "चैट खोलें",
+      "status": "machine"
+    },
+    "group.join.request": {
+      "text": "शामिल होने का अनुरोध करें",
+      "status": "machine"
+    },
     "group.join.request_again": {
       "text": "फिर से अनुरोध भेजें",
+      "status": "machine"
+    },
+    "group.join.request_failed": {
+      "text": "आपका अनुरोध नहीं जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "group.join.sending": {
+      "text": "अनुरोध भेजा जा रहा है...",
+      "status": "machine"
+    },
+    "group.join.succeeded": {
+      "text": "आप ग्रुप में शामिल हो गए।",
+      "status": "machine"
+    },
+    "group.join.succeeded_opening": {
+      "text": "आप ग्रुप में शामिल हो गए। चैट खुल रही है...",
+      "status": "machine"
+    },
+    "group.join.title": {
+      "text": "ग्रुप में शामिल हों",
       "status": "machine"
     },
     "group.join.wait_primary": {
@@ -2524,6 +3340,362 @@
     },
     "group.join.wait_secondary": {
       "text": "किसी भी चरण की कोई समय-सीमा नहीं है। अगर कुछ न हो, तो आप अनुरोध फिर से भेज सकते हैं।",
+      "status": "machine"
+    },
+    "invite.contact.accept_failed": {
+      "text": "इनवाइट स्वीकार नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.contact.accepting": {
+      "text": "इनवाइट स्वीकार किया जा रहा है...",
+      "status": "machine"
+    },
+    "invite.contact.already_accepted": {
+      "text": "आप यह इनवाइट पहले ही स्वीकार कर चुके हैं। आपका अनुरोध {name} तक पहुँच रहा है; जवाब के लिए संपर्क देखें।",
+      "status": "machine"
+    },
+    "invite.contact.already_accepted_unnamed": {
+      "text": "आप यह इनवाइट पहले ही स्वीकार कर चुके हैं। इस व्यक्ति को संपर्क में देखें।",
+      "status": "machine"
+    },
+    "invite.contact.check_body": {
+      "text": "उस व्यक्ति से उनका सुरक्षा नंबर किसी ऐसे तरीके से पूछें जिस पर आपको पहले से भरोसा है (आमने-सामने, कॉल पर)। अगर वह मेल नहीं खाता, तो यह लिंक किसी और ने भेजा है।",
+      "status": "machine"
+    },
+    "invite.contact.check_title": {
+      "text": "स्वीकार करने से पहले इसे जाँचें।",
+      "status": "machine"
+    },
+    "invite.contact.connected": {
+      "text": "जुड़ गए।",
+      "status": "machine"
+    },
+    "invite.contact.expired": {
+      "text": "यह इनवाइट खत्म हो गया है। इनवाइट भेजने वाले से नया लिंक माँगें।",
+      "status": "machine"
+    },
+    "invite.contact.expiry": {
+      "text": "समय-सीमा",
+      "status": "machine"
+    },
+    "invite.contact.fingerprint": {
+      "text": "इनवाइट भेजने वाले का फ़िंगरप्रिंट",
+      "status": "machine"
+    },
+    "invite.contact.intro_label": {
+      "text": "परिचय मैसेज (वैकल्पिक)",
+      "status": "machine"
+    },
+    "invite.contact.invalid_body": {
+      "text": "लिंक टूटा हुआ है या रास्ते में बदल दिया गया। जिसने आपको इनवाइट किया था, उनसे नया लिंक माँगें।",
+      "status": "machine"
+    },
+    "invite.contact.invalid_title": {
+      "text": "यह इनवाइट लिंक अमान्य है",
+      "status": "machine"
+    },
+    "invite.contact.needs_auth_body": {
+      "text": "स्वीकार करने के लिए आपको अकाउंट चाहिए। अकाउंट बनाएँ, या लॉग इन करें, और आप अपने-आप यहाँ लौट आएँगे।",
+      "status": "machine"
+    },
+    "invite.contact.needs_auth_title": {
+      "text": "कोई Lakko पर आपसे जुड़ना चाहता है",
+      "status": "machine"
+    },
+    "invite.contact.no_longer_valid": {
+      "text": "यह लिंक अब मान्य नहीं है। उस व्यक्ति से नया लिंक माँगें।",
+      "status": "machine"
+    },
+    "invite.contact.page_title": {
+      "text": "इनवाइट",
+      "status": "machine"
+    },
+    "invite.contact.referral": {
+      "text": "रेफ़रल लिंक: आपका अनुरोध अपने-आप भेजा जाता है।",
+      "status": "machine"
+    },
+    "invite.contact.result.already_body": {
+      "text": "आप यह इनवाइट इस डिवाइस पर पहले ही स्वीकार कर चुके हैं। उस व्यक्ति को संपर्क में ढूँढ़ें।",
+      "status": "machine"
+    },
+    "invite.contact.result.already_title": {
+      "text": "पहले ही स्वीकार किया",
+      "status": "machine"
+    },
+    "invite.contact.result.expired_title": {
+      "text": "इनवाइट की समय-सीमा खत्म",
+      "status": "machine"
+    },
+    "invite.contact.result.failed_title": {
+      "text": "इनवाइट स्वीकार नहीं हुआ",
+      "status": "machine"
+    },
+    "invite.contact.result.not_found_title": {
+      "text": "इनवाइट नहीं मिला",
+      "status": "machine"
+    },
+    "invite.contact.result.rate_limited_title": {
+      "text": "अभी नहीं",
+      "status": "machine"
+    },
+    "invite.contact.result.sent_body": {
+      "text": "आपका संपर्क अनुरोध भेज दिया गया है। उनके स्वीकार करने के बाद चैट, चैट में दिखेगी।",
+      "status": "machine"
+    },
+    "invite.contact.result.sent_title": {
+      "text": "अनुरोध भेजा गया",
+      "status": "machine"
+    },
+    "invite.contact.result.used_up_title": {
+      "text": "इनवाइट के इस्तेमाल पूरे",
+      "status": "machine"
+    },
+    "invite.contact.sending": {
+      "text": "{name} को आपका अनुरोध भेजा जा रहा है...",
+      "status": "machine"
+    },
+    "invite.contact.sent": {
+      "text": "{name} को अनुरोध भेजा गया।",
+      "status": "machine"
+    },
+    "invite.contact.title": {
+      "text": "{name} से जुड़ें?",
+      "status": "machine"
+    },
+    "invite.contact.type": {
+      "text": "प्रकार",
+      "status": "machine"
+    },
+    "invite.contact.used_up": {
+      "text": "इस लिंक के सभी इस्तेमाल पूरे हो चुके हैं। उस व्यक्ति से नया लिंक माँगें।",
+      "status": "machine"
+    },
+    "invite.contact.uses": {
+      "text": "कितनी बार इस्तेमाल हो सकता है",
+      "status": "machine"
+    },
+    "invite.expiry.ago_days": {
+      "text": "{count, plural, one {# दिन पहले खत्म हुआ} other {# दिन पहले खत्म हुआ}}",
+      "status": "machine"
+    },
+    "invite.expiry.ago_hours": {
+      "text": "{count, plural, one {# घंटे पहले खत्म हुआ} other {# घंटे पहले खत्म हुआ}}",
+      "status": "machine"
+    },
+    "invite.expiry.ago_minutes": {
+      "text": "{count, plural, one {# मिनट पहले खत्म हुआ} other {# मिनट पहले खत्म हुआ}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_days": {
+      "text": "{count, plural, one {# दिन में} other {# दिनों में}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_hours": {
+      "text": "{count, plural, one {# घंटे में} other {# घंटों में}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_minutes": {
+      "text": "{count, plural, one {# मिनट में} other {# मिनटों में}}",
+      "status": "machine"
+    },
+    "invite.expiry.never": {
+      "text": "कभी खत्म नहीं होता",
+      "status": "machine"
+    },
+    "invite.go_home": {
+      "text": "Lakko के होम पेज पर जाएँ",
+      "status": "machine"
+    },
+    "invite.group.invited_by": {
+      "text": "{fingerprint} ने इनवाइट किया",
+      "status": "machine"
+    },
+    "invite.group.lead_anonymous": {
+      "text": "आपको इस ग्रुप में इनवाइट किया गया है:",
+      "status": "machine"
+    },
+    "invite.group.lead_anonymous_unnamed": {
+      "text": "आपको एक ग्रुप में इनवाइट किया गया है",
+      "status": "machine"
+    },
+    "invite.group.lead_named": {
+      "text": "{name} ने आपको इस ग्रुप में इनवाइट किया है:",
+      "status": "machine"
+    },
+    "invite.group.lead_named_unnamed": {
+      "text": "{name} ने आपको एक ग्रुप में इनवाइट किया है",
+      "status": "machine"
+    },
+    "invite.link.damaged": {
+      "text": "यह इनवाइट लिंक खराब है। नया लिंक माँगें।",
+      "status": "machine"
+    },
+    "invite.link.invalid": {
+      "text": "यह इनवाइट लिंक अमान्य है या इसकी समय-सीमा खत्म हो गई है।",
+      "status": "machine"
+    },
+    "invite.link.loading": {
+      "text": "इनवाइट लोड हो रहा है...",
+      "status": "machine"
+    },
+    "invite.link.rate_limited": {
+      "text": "इस नेटवर्क से अभी बहुत ज़्यादा अनुरोध आ रहे हैं। एक मिनट में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.links.already_removed": {
+      "text": "\"{label}\" पहले ही हटाया जा चुका था।",
+      "status": "machine"
+    },
+    "invite.links.already_removed_unnamed": {
+      "text": "यह लिंक पहले ही हटाया जा चुका था।",
+      "status": "machine"
+    },
+    "invite.links.create": {
+      "text": "लिंक बनाएँ",
+      "status": "machine"
+    },
+    "invite.links.created": {
+      "text": "{date} को बनाया",
+      "status": "machine"
+    },
+    "invite.links.desc": {
+      "text": "आपका कोई भी लिंक खोलने वाला व्यक्ति आपको संपर्क अनुरोध भेज सकता है, जब तक लिंक की समय-सीमा खत्म न हो जाए या उसके सभी इस्तेमाल पूरे न हो जाएँ।",
+      "status": "machine"
+    },
+    "invite.links.empty": {
+      "text": "कोई सक्रिय लिंक नहीं।",
+      "status": "machine"
+    },
+    "invite.links.error.copy": {
+      "text": "लिंक कॉपी नहीं हो सका।",
+      "status": "machine"
+    },
+    "invite.links.error.load": {
+      "text": "आपके इनवाइट लिंक लोड नहीं हो सके। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_create": {
+      "text": "इनवाइट लिंक बनाने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_list": {
+      "text": "अपने इनवाइट लिंक देखने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_revoke": {
+      "text": "इनवाइट लिंक रद्द करने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "invite.links.expired": {
+      "text": "समय-सीमा खत्म",
+      "status": "machine"
+    },
+    "invite.links.expires_days": {
+      "text": "{count} दिन में खत्म",
+      "status": "machine"
+    },
+    "invite.links.expires_field": {
+      "text": "समय-सीमा",
+      "status": "machine"
+    },
+    "invite.links.expires_hours": {
+      "text": "{count} घंटे में खत्म",
+      "status": "machine"
+    },
+    "invite.links.expires_minutes": {
+      "text": "{count} मिनट में खत्म",
+      "status": "machine"
+    },
+    "invite.links.expires_option_days": {
+      "text": "{count, plural, one {# दिन में} other {# दिनों में}}",
+      "status": "machine"
+    },
+    "invite.links.expires_option_never": {
+      "text": "कभी नहीं",
+      "status": "machine"
+    },
+    "invite.links.for_new_user": {
+      "text": "Lakko पर नए व्यक्ति के लिए",
+      "status": "machine"
+    },
+    "invite.links.inline_note": {
+      "text": "Lakko इस लिंक को छोटा नहीं कर सका, इसलिए यह लंबा है। यह उसी तरह काम करता है और इसे रद्द नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "invite.links.label_field": {
+      "text": "लेबल (वैकल्पिक)",
+      "status": "machine"
+    },
+    "invite.links.label_placeholder": {
+      "text": "लिंक खोलने वाले को दिखता है",
+      "status": "machine"
+    },
+    "invite.links.list": {
+      "text": "सक्रिय इनवाइट लिंक",
+      "status": "machine"
+    },
+    "invite.links.never_expires": {
+      "text": "कभी खत्म नहीं होता",
+      "status": "machine"
+    },
+    "invite.links.new_badge": {
+      "text": "नया",
+      "status": "machine"
+    },
+    "invite.links.referral_option": {
+      "text": "ऐसे व्यक्ति के लिए जिसका अभी Lakko अकाउंट नहीं है",
+      "status": "machine"
+    },
+    "invite.links.revoked": {
+      "text": "लिंक रद्द कर दिया गया।",
+      "status": "machine"
+    },
+    "invite.links.revoking": {
+      "text": "रद्द किया जा रहा है...",
+      "status": "machine"
+    },
+    "invite.links.unlimited_uses": {
+      "text": "असीमित इस्तेमाल",
+      "status": "machine"
+    },
+    "invite.links.used_up": {
+      "text": "इस्तेमाल पूरे",
+      "status": "machine"
+    },
+    "invite.links.uses_field": {
+      "text": "इस्तेमाल",
+      "status": "machine"
+    },
+    "invite.links.uses_left": {
+      "text": "{count, plural, one {# इस्तेमाल बाकी} other {# इस्तेमाल बाकी}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_one": {
+      "text": "एक व्यक्ति",
+      "status": "machine"
+    },
+    "invite.links.uses_option_unlimited": {
+      "text": "असीमित",
+      "status": "machine"
+    },
+    "invite.links.uses_option_up_to": {
+      "text": "{count, plural, one {ज़्यादा से ज़्यादा # व्यक्ति} other {ज़्यादा से ज़्यादा # लोग}}",
+      "status": "machine"
+    },
+    "invite.sign_up": {
+      "text": "साइन अप करें",
+      "status": "machine"
+    },
+    "invite.uses.single": {
+      "text": "एक बार इस्तेमाल",
+      "status": "machine"
+    },
+    "invite.uses.unlimited": {
+      "text": "असीमित",
+      "status": "machine"
+    },
+    "invite.uses.up_to": {
+      "text": "{count, plural, one {ज़्यादा से ज़्यादा # बार} other {ज़्यादा से ज़्यादा # बार}}",
       "status": "machine"
     },
     "language.name.ar": {
@@ -2588,6 +3760,38 @@
     },
     "nav.settings": {
       "text": "सेटिंग्स",
+      "status": "machine"
+    },
+    "new_group.back": {
+      "text": "ग्रुप",
+      "status": "machine"
+    },
+    "new_group.error.sign_in": {
+      "text": "ग्रुप बनाने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "new_group.index_hint": {
+      "text": "मैसेज भेजने के लिए कोई ग्रुप चुनें",
+      "status": "machine"
+    },
+    "new_group.name_hint": {
+      "text": "हर सदस्य नाम देखता है। इसे एन्क्रिप्ट करके भेजा जाता है; सर्वर इसे कभी नहीं पढ़ता।",
+      "status": "machine"
+    },
+    "new_group.name_not_sent": {
+      "text": "ग्रुप का नाम नहीं भेजा जा सका। इसे सदस्यों वाले पैनल से सेट करें।",
+      "status": "machine"
+    },
+    "new_group.name_placeholder": {
+      "text": "वीकेंड का प्लान",
+      "status": "machine"
+    },
+    "new_group.no_contacts": {
+      "text": "पहले संपर्क जोड़ें; ग्रुप उन लोगों से शुरू होता है जिन्हें आप पहले से जानते हैं।",
+      "status": "machine"
+    },
+    "new_group.subtitle": {
+      "text": "आप ग्रुप के मालिक होंगे। आप बाद में और लोगों को जोड़ सकते हैं।",
       "status": "machine"
     },
     "recovery.access_only_note": {

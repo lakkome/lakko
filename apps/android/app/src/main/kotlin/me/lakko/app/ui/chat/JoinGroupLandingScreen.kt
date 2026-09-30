@@ -39,11 +39,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import me.lakko.app.chat.ChatRepository
-import me.lakko.app.chat.GROUP_INVITE_INVALID_COPY
-import me.lakko.app.chat.GROUP_INVITE_REQUEST_TO_JOIN
+import me.lakko.app.chat.GROUP_INVITE_INVALID_TEXT
+import me.lakko.app.chat.GROUP_INVITE_REQUEST_TO_JOIN_TEXT
 import me.lakko.app.chat.GroupInviteCard
 import me.lakko.app.chat.groupInvitePageLines
 import me.lakko.app.chat.invitedByLine
+import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 
 /**
@@ -114,7 +115,7 @@ public class JoinGroupLandingViewModel(
         public data class Joined(val groupIdHex: String) : State
         /** [message] is one of the fixed sentences [me.lakko.app.chat.joinFailureCopy]
          *  returns — never a raw or protocol message. */
-        public data class Failed(val message: String) : State
+        public data class Failed(val message: me.lakko.app.l10n.UiText) : State
     }
 
     private val mutableState: MutableStateFlow<State> = MutableStateFlow(State.Loading)
@@ -294,10 +295,10 @@ public fun JoinGroupLandingScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Join group") },
+                title = { Text(t("group.join.title")) },
                 navigationIcon = {
                     IconButton(onClick = onDone) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -315,27 +316,27 @@ public fun JoinGroupLandingScreen(
             is JoinGroupLandingViewModel.State.Loading -> {
                 CircularProgressIndicator()
                 Spacer(Modifier.height(8.dp))
-                Text("Loading invite…")
+                Text(t("invite.link.loading"))
             }
             is JoinGroupLandingViewModel.State.Invalid -> {
-                Text(GROUP_INVITE_INVALID_COPY, textAlign = TextAlign.Center)
+                Text(GROUP_INVITE_INVALID_TEXT.text(), textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = onDone) { Text("Open Lakko") }
+                Button(onClick = onDone) { Text(t("common.open_lakko")) }
             }
             is JoinGroupLandingViewModel.State.Damaged -> {
-                Text(me.lakko.app.chat.GROUP_INVITE_DAMAGED_COPY, textAlign = TextAlign.Center)
+                Text(me.lakko.app.chat.GROUP_INVITE_DAMAGED_TEXT.text(), textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = onDone) { Text("Open Lakko") }
+                Button(onClick = onDone) { Text(t("common.open_lakko")) }
             }
             is JoinGroupLandingViewModel.State.RateLimited -> {
-                Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY, textAlign = TextAlign.Center)
+                Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT.text(), textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = { viewModel.retryOpen() }) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN) }
+                Button(onClick = { viewModel.retryOpen() }) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN_TEXT.text()) }
             }
             is JoinGroupLandingViewModel.State.Ready -> {
                 InviteHeadline(card)
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = { viewModel.request() }) { Text(GROUP_INVITE_REQUEST_TO_JOIN) }
+                Button(onClick = { viewModel.request() }) { Text(GROUP_INVITE_REQUEST_TO_JOIN_TEXT.text()) }
                 InviteFoot(card)
             }
             is JoinGroupLandingViewModel.State.Requesting -> {
@@ -343,7 +344,7 @@ public fun JoinGroupLandingScreen(
                 Spacer(Modifier.height(16.dp))
                 CircularProgressIndicator()
                 Spacer(Modifier.height(8.dp))
-                Text("Sending request…")
+                Text(t("group.join.sending"))
                 InviteFoot(card)
             }
             is JoinGroupLandingViewModel.State.Waiting -> {
@@ -367,14 +368,14 @@ public fun JoinGroupLandingScreen(
                 InviteFoot(card)
             }
             is JoinGroupLandingViewModel.State.Joined -> {
-                Text(me.lakko.app.chat.JOIN_SUCCESS_COPY, textAlign = TextAlign.Center)
+                Text(me.lakko.app.chat.JOIN_SUCCESS_TEXT.text(), textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = { onOpenChat(s.groupIdHex) }) { Text(me.lakko.app.chat.JOIN_OPEN_CHAT) }
+                Button(onClick = { onOpenChat(s.groupIdHex) }) { Text(me.lakko.app.chat.JOIN_OPEN_CHAT_TEXT.text()) }
             }
             is JoinGroupLandingViewModel.State.Failed -> {
                 InviteHeadline(card)
                 Spacer(Modifier.height(16.dp))
-                Text(s.message, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+                Text(s.message.text(), color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
                 // "Try again" only with the general failure; the other two
                 // sentences ask the person to wait or fix the clock first.
@@ -382,9 +383,9 @@ public fun JoinGroupLandingScreen(
                     Button(
                         onClick = { viewModel.request() },
                         enabled = !requesting,
-                    ) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN) }
+                    ) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN_TEXT.text()) }
                 } else {
-                    Button(onClick = onDone) { Text("Close") }
+                    Button(onClick = onDone) { Text(t("common.close")) }
                 }
                 InviteFoot(card)
             }
@@ -403,7 +404,7 @@ public fun JoinGroupLandingScreen(
 private fun InviteHeadline(card: GroupInviteCard?) {
     val lines = groupInvitePageLines(card?.preview)
     Text(
-        text = lines.headline,
+        text = lines.headline.text(),
         style = MaterialTheme.typography.titleMedium,
         textAlign = TextAlign.Center,
         modifier = Modifier.fillMaxWidth(),
@@ -420,7 +421,7 @@ private fun InviteHeadline(card: GroupInviteCard?) {
     lines.membersLine?.let { members ->
         Spacer(Modifier.height(4.dp))
         Text(
-            text = members,
+            text = members.text(),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
@@ -436,7 +437,7 @@ private fun InviteFoot(card: GroupInviteCard?) {
     val fingerprint = card?.fingerprint ?: return
     Spacer(Modifier.height(16.dp))
     Text(
-        text = invitedByLine(fingerprint),
+        text = invitedByLine(fingerprint).text(),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         textAlign = TextAlign.Center,

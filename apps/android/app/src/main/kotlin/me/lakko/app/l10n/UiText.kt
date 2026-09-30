@@ -50,6 +50,16 @@ public fun joinList(items: List<String>, strings: Strings): String =
         if (acc.isEmpty()) item else strings.format("common.list_pair", mapOf("first" to acc, "second" to item))
     }
 
+/** Short facts on one line ("Created 16 Sep · Used up") joined pair by pair through `common.fact_pair`. */
+@Composable
+public fun joinFacts(items: List<String>): String = joinFacts(items, LocalStrings.current)
+
+/** [items] joined pair by pair through `common.fact_pair` in [strings]. */
+public fun joinFacts(items: List<String>, strings: Strings): String =
+    items.fold("") { acc, item ->
+        if (acc.isEmpty()) item else strings.format("common.fact_pair", mapOf("first" to acc, "second" to item))
+    }
+
 /**
  * A list of word positions ("3, 7 and 15") for the `{positions}` argument of
  * the recovery messages: the locale's list formatter for the language the

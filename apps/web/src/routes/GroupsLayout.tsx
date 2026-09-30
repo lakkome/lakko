@@ -10,6 +10,7 @@
 import type { JSX } from "solid-js";
 import { useLocation, useParams, type RouteSectionProps } from "@solidjs/router";
 import { ChatList } from "../chat/ChatList";
+import { t } from "../l10n";
 import { paths } from "./paths";
 
 export default function GroupsLayout(props: RouteSectionProps): JSX.Element {
@@ -28,7 +29,7 @@ export default function GroupsLayout(props: RouteSectionProps): JSX.Element {
 export function GroupsIndex(): JSX.Element {
   return (
     <div class="lk-main-center">
-      <span class="lk-hint-pill">Select a group to start messaging</span>
+      <span class="lk-hint-pill">{t("new_group.index_hint")}</span>
     </div>
   );
 }

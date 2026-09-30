@@ -75,8 +75,8 @@ public fun isDiscoveryRateLimited(error: Throwable): Boolean {
     return false
 }
 
-/** The copy for an invite link whose fetch or consume was rate limited. */
-public const val INVITE_RATE_LIMITED_COPY: String =
-    "Too many requests from this network right now. Try again in a minute."
+/** What an invite link whose fetch or consume was rate limited says (ADR-0058). */
+public val INVITE_RATE_LIMITED_TEXT: me.lakko.app.l10n.UiText =
+    me.lakko.app.l10n.UiText("invite.link.rate_limited")
 
 private const val HTTP_TOO_MANY_REQUESTS: Int = 429

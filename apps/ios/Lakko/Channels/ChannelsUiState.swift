@@ -680,7 +680,7 @@ public struct ChannelHandle: Equatable, Sendable, Identifiable {
         let local = localName.trimmingCharacters(in: .whitespacesAndNewlines)
         if !local.isEmpty { return local }
         let bare = handle.trimmingCharacters(in: .whitespacesAndNewlines).drop(while: { $0 == "@" })
-        return bare.isEmpty ? "Channel" : String(bare)
+        return bare.isEmpty ? Localization.text("channels.fallback_name") : String(bare)
     }
 
     /// The description to show: the shared one when a record landed, else

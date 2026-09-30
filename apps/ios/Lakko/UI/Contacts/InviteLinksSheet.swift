@@ -12,6 +12,8 @@ import SwiftUI
 struct InviteLinksSheet: View {
     @ObservedObject var viewModel: ContactsViewModel
     let onDismiss: () -> Void
+    /// ADR-0058 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     /// Frozen per body so every row's "expires in" agrees.
     @State private var now = Date()
@@ -33,28 +35,25 @@ struct InviteLinksSheet: View {
                         HStack {
                             if viewModel.generatingInvite {
                                 ProgressView().controlSize(.small)
-                                Text("Creating link…")
+                                Text(l10n.t("chats.new_group.creating"))
                             } else {
-                                Label("Create link", systemImage: "link.badge.plus")
+                                Label(l10n.t("invite.links.create"), systemImage: "link.badge.plus")
                             }
                         }
                     }
                     .disabled(viewModel.generatingInvite)
                     if let error = viewModel.inviteError {
-                        Text(error)
+                        Text(error.text)
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoDanger)
                     }
                 } footer: {
-                    Text(
-                        "A link works once and for 7 days. Whoever opens it is added "
-                            + "as your contact without seeing your username first."
-                    )
+                    Text(l10n.t("invite.links.desc"))
                 }
 
                 Section {
                     if let error = viewModel.activeInvitesError {
-                        Text(error)
+                        Text(error.text)
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoDanger)
                     }
@@ -63,11 +62,11 @@ struct InviteLinksSheet: View {
                             if viewModel.loadingActiveInvites {
                                 ProgressView().controlSize(.small)
                             }
-                            Text("Loading...")
+                            Text(l10n.t("common.loading"))
                                 .foregroundStyle(Color.lakkoTextMuted)
                         }
                     } else if rows.isEmpty {
-                        Text("No active links.")
+                        Text(l10n.t("invite.links.empty"))
                             .foregroundStyle(Color.lakkoTextMuted)
                     } else {
                         ForEach(rows) { row in
@@ -85,15 +84,15 @@ struct InviteLinksSheet: View {
                         }
                     }
                 } header: {
-                    Text("Active links")
+                    Text(l10n.t("invite.links.list"))
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("Invite links")
+            .navigationTitle(l10n.t("contacts.invite_links.title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done", action: onDismiss)
+                    Button(l10n.t("common.done"), action: onDismiss)
                 }
             }
         }
@@ -107,11 +106,13 @@ struct InviteLinksSheet: View {
     private func details(for row: InviteLinkRow) -> [String] {
         var lines: [String] = []
         if let created = row.createdAt {
-            lines.append("Created \(created.formatted(date: .abbreviated, time: .shortened))")
+            let date = created.formatted(
+                Date.FormatStyle(date: .abbreviated, time: .shortened).locale(l10n.locale))
+            lines.append(l10n.t("invite.links.created", texts: ["date": date]))
         }
         var status = InviteLinkRows.expiryCopy(expiryMs: row.expiryMs, now: now)
         if let uses = row.usesLeft {
-            status += " · \(uses)"
+            status = l10n.t("common.fact_pair", texts: ["first": status, "second": uses])
         }
         lines.append(status)
         return lines
@@ -140,6 +141,7 @@ struct LinkActionsRow: View {
     var revoke: (() -> Void)? = nil
 
     @State private var copied = false
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -148,7 +150,7 @@ struct LinkActionsRow: View {
                     .font(.body.weight(.medium))
                     .foregroundStyle(Color.lakkoText)
                 if highlighted {
-                    Text("New")
+                    Text(l10n.t("invite.links.new_badge"))
                         .font(.caption2.weight(.semibold))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -171,13 +173,13 @@ struct LinkActionsRow: View {
                         copied = false
                     }
                 } label: {
-                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    Label(l10n.t(copied ? "common.copied" : "common.copy"), systemImage: copied ? "checkmark" : "doc.on.doc")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
                 ShareLink(item: url) {
-                    Label("Share", systemImage: "square.and.arrow.up")
+                    Label(l10n.t("chat.invite_link.share"), systemImage: "square.and.arrow.up")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -188,7 +190,7 @@ struct LinkActionsRow: View {
                         if revoking {
                             ProgressView().controlSize(.small)
                         } else {
-                            Label("Revoke", systemImage: "trash")
+                            Label(l10n.t("chat.invite_link.revoke"), systemImage: "trash")
                         }
                     }
                     .buttonStyle(.bordered)

@@ -5,8 +5,10 @@
  * Words for an invite link's expiry and remaining uses, straight off the
  * wire sentinels the server enforces: `expiry_ms == 0` never expires;
  * `max_uses == 0` is single-use and `0xFFFFFFFF` unlimited. Pure; tested in
- * `invite-describe.test.ts`.
+ * `invite-describe.test.ts`. The words are catalog messages
+ * (`invite.links.*`, ADR-0058).
  */
+import { currentLanguage, t } from "../l10n";
 
 /** The `max_uses` sentinel for an unlimited link. */
 export const INVITE_USES_UNLIMITED = 0xffff_ffff;
@@ -14,15 +16,15 @@ export const INVITE_USES_UNLIMITED = 0xffff_ffff;
 /** "Expires in 3d" / "Expires in 2h" / "Expires in 5m" / "Never expires" /
  *  "Expired". */
 export function describeInviteExpiry(expiryMs: number, nowMs: number): string {
-  if (expiryMs === 0) return "Never expires";
-  if (expiryMs <= nowMs) return "Expired";
+  if (expiryMs === 0) return t("invite.links.never_expires");
+  if (expiryMs <= nowMs) return t("invite.links.expired");
   const deltaMs = expiryMs - nowMs;
   const days = Math.floor(deltaMs / 86_400_000);
-  if (days >= 1) return `Expires in ${days}d`;
+  if (days >= 1) return t("invite.links.expires_days", { count: days });
   const hours = Math.floor(deltaMs / 3_600_000);
-  if (hours >= 1) return `Expires in ${hours}h`;
+  if (hours >= 1) return t("invite.links.expires_hours", { count: hours });
   const minutes = Math.max(1, Math.floor(deltaMs / 60_000));
-  return `Expires in ${minutes}m`;
+  return t("invite.links.expires_minutes", { count: minutes });
 }
 
 /** Uses left, or `null` for an unlimited link. Never below zero. */
@@ -35,15 +37,19 @@ export function inviteUsesLeft(usedCount: number, maxUses: number): number | nul
 /** "1 use left" / "3 uses left" / "Used up" / "Unlimited uses". */
 export function describeInviteUses(usedCount: number, maxUses: number): string {
   const left = inviteUsesLeft(usedCount, maxUses);
-  if (left === null) return "Unlimited uses";
-  if (left === 0) return "Used up";
-  return `${left} ${left === 1 ? "use" : "uses"} left`;
+  if (left === null) return t("invite.links.unlimited_uses");
+  if (left === 0) return t("invite.links.used_up");
+  return t("invite.links.uses_left", { count: left });
 }
 
-/** "Created 16 Sep" style date, or an empty string for an unparseable
- *  timestamp. */
+/** "Created 16 Sep" style date (formatted for `locale`, by default the
+ *  interface language), or an empty string for an unparseable timestamp. */
 export function describeInviteCreated(createdAt: string, locale?: string): string {
-  const t = Date.parse(createdAt);
-  if (Number.isNaN(t)) return "";
-  return `Created ${new Date(t).toLocaleDateString(locale, { day: "numeric", month: "short" })}`;
+  const ms = Date.parse(createdAt);
+  if (Number.isNaN(ms)) return "";
+  const date = new Date(ms).toLocaleDateString(locale ?? currentLanguage(), {
+    day: "numeric",
+    month: "short",
+  });
+  return t("invite.links.created", { date });
 }

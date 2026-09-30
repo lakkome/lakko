@@ -34,9 +34,9 @@ public final class ContactsViewModel: ObservableObject {
     // MARK: - Ephemeral status
 
     @Published public private(set) var sending: Bool = false
-    @Published public private(set) var sendError: String?
+    @Published public private(set) var sendError: UiText?
     @Published public private(set) var generatingInvite: Bool = false
-    @Published public private(set) var inviteError: String?
+    @Published public private(set) var inviteError: UiText?
     /// The last invite link the user generated this session.
     /// Surfaced as a copyable / shareable bottom-sheet on the
     /// Contacts screen; cleared once the user dismisses or
@@ -136,10 +136,10 @@ public final class ContactsViewModel: ObservableObject {
         let username: String
         switch checkUsername(usernameInput) {
         case .empty:
-            sendError = "Type a username first."
+            sendError = .key("username.error.empty")
             return
         case .invalid(let reason):
-            sendError = reason.message
+            sendError = UiText { reason.message }
             return
         case .valid(let canonical):
             username = canonical
@@ -175,17 +175,15 @@ public final class ContactsViewModel: ObservableObject {
                 // already refused regardless of the log — this only
                 // colours the prompt.
                 sending = false
-                sendError = Self.supersessionRefusedMessage(
-                    loggedReset: refused.loggedReset,
-                    peerLabel: peerLabel
-                )
-            } catch let err as ContactsError {
-                sending = false
-                sendError = userFacing(err)
+                let loggedReset = refused.loggedReset
+                sendError = UiText {
+                    Self.supersessionRefusedMessage(loggedReset: loggedReset, peerLabel: peerLabel)
+                }
             } catch {
                 sending = false
-                sendError = (error as? LocalizedError)?.errorDescription
-                    ?? "Send failed."
+                sendError = Self.contactsErrorText(
+                    for: error, fallbackKey: "contacts.error.send",
+                    quotaKey: "tokens.lookup_allowance_used")
             }
         }
     }
@@ -418,13 +416,9 @@ public final class ContactsViewModel: ObservableObject {
                 // link shows with its server row rather than only the
                 // session copy.
                 await loadActiveInvites()
-            } catch let err as ContactsError {
-                generatingInvite = false
-                inviteError = userFacing(err)
             } catch {
                 generatingInvite = false
-                inviteError = (error as? LocalizedError)?.errorDescription
-                    ?? "Invite generation failed."
+                inviteError = Self.contactsErrorText(for: error, fallbackKey: "chat.error.create_link")
             }
         }
     }
@@ -436,11 +430,8 @@ public final class ContactsViewModel: ObservableObject {
         Task {
             do {
                 _ = try await repository.revokeInviteLink(blobId: blobId)
-            } catch let err as ContactsError {
-                inviteError = userFacing(err)
             } catch {
-                inviteError = (error as? LocalizedError)?.errorDescription
-                    ?? "Revoke failed."
+                inviteError = Self.contactsErrorText(for: error, fallbackKey: "chat.error.revoke_link")
             }
         }
     }
@@ -462,7 +453,7 @@ public final class ContactsViewModel: ObservableObject {
     /// Contacts tab opens and on pull-to-refresh (``loadActiveInvites()``).
     @Published public private(set) var activeInvites: [ActiveInvite] = []
     @Published public private(set) var loadingActiveInvites: Bool = false
-    @Published public private(set) var activeInvitesError: String?
+    @Published public private(set) var activeInvitesError: UiText?
     /// `blobIdSlug` of the row currently being revoked, when any.
     /// The screen disables the Revoke button on that row + shows
     /// a spinner.
@@ -488,11 +479,8 @@ public final class ContactsViewModel: ObservableObject {
                 activeInvites = []
             }
             activeInvitesLoaded = true
-        } catch let err as ContactsError {
-            activeInvitesError = userFacing(err)
         } catch {
-            activeInvitesError = (error as? LocalizedError)?.errorDescription
-                ?? "Could not load invites."
+            activeInvitesError = Self.contactsErrorText(for: error, fallbackKey: "invite.links.error.load")
         }
     }
 
@@ -505,7 +493,7 @@ public final class ContactsViewModel: ObservableObject {
             return
         }
         guard let blobId = base64UrlDecodeNoPad(row.blobIdSlug) else {
-            activeInvitesError = "This invite link cannot be revoked."
+            activeInvitesError = .key("chat.error.revoke_link")
             return
         }
         revokingActiveInviteSlug = slug
@@ -515,29 +503,60 @@ public final class ContactsViewModel: ObservableObject {
             do {
                 _ = try await repository.revokeInviteLink(blobId: blobId)
                 activeInvites = activeInvites.filter { $0.blobIdSlug != slug }
-            } catch let err as ContactsError {
-                activeInvitesError = userFacing(err)
             } catch {
-                activeInvitesError = (error as? LocalizedError)?.errorDescription
-                    ?? "Revoke failed."
+                activeInvitesError = Self.contactsErrorText(for: error, fallbackKey: "chat.error.revoke_link")
             }
         }
     }
 
     // MARK: - Error mapping
 
-    private func userFacing(_ err: ContactsError) -> String {
-        switch err {
-        case .usernameUnknown(let normalised):
-            return "@\(normalised) is not registered on Lakko."
-        case .noIdentityBundle:
-            return "That account has no identity bundle yet — ask them to open the app once."
-        case .wrapped(let cause):
-            // ADR-0054 S3 — a lookup refused for the day's allowance.
-            if let search = AnonTokenCopy.searchMessage(for: cause) { return search }
-            return (cause as? LocalizedError)?.errorDescription
-                ?? String(describing: cause)
+    /// How to render a Contacts failure (ADR-0058 section 6; the web
+    /// `contactsErrorText`): from its kind, never from its description. A
+    /// used-up allowance says so (`quotaKey`: the search copy for a lookup,
+    /// the action copy for a link), an unknown username and a person who has
+    /// not finished setting up have their own messages, a rate limit and a
+    /// network failure the common ones; anything else is logged and shown as
+    /// the action's own `fallbackKey`.
+    nonisolated static func contactsErrorText(
+        for error: Error,
+        fallbackKey: String,
+        quotaKey: String = "tokens.action_allowance_used"
+    ) -> UiText {
+        if let token = AnonTokenUnavailable.find(in: error) {
+            if case .quotaExhausted = token { return .key(quotaKey) }
+            return .key("common.error.offline")
         }
+        if let refused = error as? SupersessionRefused {
+            let loggedReset = refused.loggedReset
+            return UiText { supersessionRefusedMessage(loggedReset: loggedReset, peerLabel: nil) }
+        }
+        switch error as? ContactsError {
+        case .usernameUnknown(let normalised)?:
+            return .key("chat.members.add.error.unknown_username", texts: ["name": "@\(normalised)"])
+        case .noIdentityBundle?:
+            return .key("chat.members.add.error.no_bundle")
+        case .wrapped(let cause)?:
+            if cause is SupersessionRefused || cause is ContactsError {
+                return contactsErrorText(for: cause, fallbackKey: fallbackKey, quotaKey: quotaKey)
+            }
+        case nil:
+            break
+        }
+        if DiscoveryClientError.isRateLimited(error) { return .key("common.error.too_many_attempts") }
+        if isNetworkFailure(error) { return .key("common.error.offline") }
+        NSLog("[contacts] action failed: \(error)")
+        return .key(fallbackKey)
+    }
+
+    /// A discovery or DS request that never reached the server, directly or
+    /// behind the contacts wrapper.
+    nonisolated private static func isNetworkFailure(_ error: Error) -> Bool {
+        if case .network? = error as? DiscoveryClientError { return true }
+        if case .network? = error as? DsClientError { return true }
+        if error is URLError { return true }
+        if case .wrapped(let cause)? = error as? ContactsError { return isNetworkFailure(cause) }
+        return false
     }
 
     /// KT-log S4 — render the reset-aware copy for a fail-closed
@@ -553,33 +572,23 @@ public final class ContactsViewModel: ObservableObject {
     ///     refusal carries (`true` = confirmed owner reset, `false` = no
     ///     owner reset shown, `nil` = off / unreachable / inconclusive).
     ///   - peerLabel: the handle the user typed (e.g. `@alice`), rendered
-    ///     verbatim as the subject; falls back to "This contact" when
-    ///     `nil` / empty.
+    ///     verbatim as the subject; `nil` / empty picks the unnamed message.
     nonisolated static func supersessionRefusedMessage(
         loggedReset: Bool?,
         peerLabel: String?
     ) -> String {
-        let who: String
+        // One catalog message per verdict, and an unnamed twin of each
+        // rather than "This contact" as an argument (ADR-0058 batch 4). All
+        // `security_critical`.
+        let verdict: String
+        switch loggedReset {
+        case .some(true): verdict = "reset"
+        case .some(false): verdict = "unexplained"
+        case .none: verdict = "unconfirmed"
+        }
         if let label = peerLabel, !label.isEmpty {
-            who = label
-        } else {
-            who = "This contact"
+            return Localization.text("contacts.identity_changed.\(verdict)", texts: ["name": label])
         }
-        if loggedReset == true {
-            return "\(who) reset their secure identity (for example, they "
-                + "lost their device). The transparency log confirms this "
-                + "was an owner-initiated reset. If you trust this is really "
-                + "them, re-verify their safety number out of band before "
-                + "continuing."
-        }
-        if loggedReset == false {
-            return "\(who)'s secure identity changed, and the transparency "
-                + "log does NOT show an owner reset — treat this as a "
-                + "possible account compromise. Verify out of band before "
-                + "trusting."
-        }
-        return "\(who)'s secure identity changed and could not be confirmed "
-            + "against the transparency log. Verify out of band before "
-            + "trusting."
+        return Localization.text("contacts.identity_changed.\(verdict)_unnamed")
     }
 }

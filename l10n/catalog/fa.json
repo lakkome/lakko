@@ -330,6 +330,474 @@
       "text": "می‌توانید این صفحه را ترک کنید؛ پس از پذیرش به تماس می‌پیوندید.",
       "status": "machine"
     },
+    "channels.back": {
+      "text": "بازگشت به کانال‌ها",
+      "status": "machine"
+    },
+    "channels.compose.label": {
+      "text": "پست جدید",
+      "status": "machine"
+    },
+    "channels.compose.placeholder": {
+      "text": "یک پست بنویسید",
+      "status": "machine"
+    },
+    "channels.compose.publish": {
+      "text": "انتشار",
+      "status": "machine"
+    },
+    "channels.compose.publishing": {
+      "text": "در حال انتشار...",
+      "status": "machine"
+    },
+    "channels.copublishers.desc": {
+      "text": "افرادی که می‌توانند در این کانال پست بگذارند. پیوندی را به اشتراک بگذارید و وقتی درخواست دادند، تأییدشان کنید.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.approve": {
+      "text": "تأیید درخواست ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.poll": {
+      "text": "بررسی درخواست‌ها ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.reject": {
+      "text": "رد درخواست ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.copublishers.link": {
+      "text": "پیوند دعوت ناشران همکار",
+      "status": "machine"
+    },
+    "channels.copublishers.request_row": {
+      "text": "کسی درخواست انتشار همکار داده است",
+      "status": "machine"
+    },
+    "channels.copublishers.requests": {
+      "text": "درخواست‌ها ({count})",
+      "status": "machine"
+    },
+    "channels.copublishers.title": {
+      "text": "ناشران همکار",
+      "status": "machine"
+    },
+    "channels.empty.action": {
+      "text": "ساخت کانال",
+      "status": "machine"
+    },
+    "channels.empty.title": {
+      "text": "هنوز کانالی نیست",
+      "status": "machine"
+    },
+    "channels.error.empty_post": {
+      "text": "برای انتشار چیزی بنویسید.",
+      "status": "machine"
+    },
+    "channels.error.not_let_in": {
+      "text": "کانال هنوز به این دستگاه اجازه ورود نداده است. بعداً دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.error.post_too_large": {
+      "text": "این پست برای انتشار بیش از حد طولانی است.",
+      "status": "machine"
+    },
+    "channels.error.refused": {
+      "text": "سرور درخواست را رد کرد. بعداً دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.error.sign_in": {
+      "text": "برای استفاده از کانال‌ها دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "channels.error.unknown_channel": {
+      "text": "این کانال روی سرور وجود ندارد.",
+      "status": "machine"
+    },
+    "channels.error.unreachable": {
+      "text": "سرویس کانال‌ها در حال حاضر در دسترس نیست. کمی بعد دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.fallback_name": {
+      "text": "کانال",
+      "status": "machine"
+    },
+    "channels.field.description_optional": {
+      "text": "توضیحات (اختیاری)",
+      "status": "machine"
+    },
+    "channels.field.name": {
+      "text": "نام",
+      "status": "machine"
+    },
+    "channels.find.action": {
+      "text": "یافتن {handle}",
+      "status": "machine"
+    },
+    "channels.find.none": {
+      "text": "کانالی با {handle} پیدا نشد.",
+      "status": "machine"
+    },
+    "channels.index_hint": {
+      "text": "یک کانال انتخاب کنید یا کانالی بسازید",
+      "status": "machine"
+    },
+    "channels.info.manage_sub": {
+      "text": "نام و توضیحات آن، چه کسانی آن را می‌خوانند و چه کس دیگری می‌تواند در آن پست بگذارد.",
+      "status": "machine"
+    },
+    "channels.info.subscribers": {
+      "text": "{count, plural, one {# مشترک} other {# مشترک}}",
+      "status": "machine"
+    },
+    "channels.info.unsubscribe_sub": {
+      "text": "کانال را از فهرست شما برمی‌دارد و این دستگاه دیگر آن را نمی‌خواند. بعداً می‌توانید دوباره مشترک شوید.",
+      "status": "machine"
+    },
+    "channels.join.default_name": {
+      "text": "کانال با انتشار مشترک",
+      "status": "machine"
+    },
+    "channels.join.error.sign_in": {
+      "text": "برای پیوستن به کانال دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "channels.join.link_label": {
+      "text": "پیوند",
+      "status": "machine"
+    },
+    "channels.join.name_label": {
+      "text": "نام در این دستگاه (اختیاری)",
+      "status": "machine"
+    },
+    "channels.join.no_approval": {
+      "text": "هنوز تأیید نشده است. پس از تأیید مالک دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.join.requesting": {
+      "text": "در حال ارسال درخواست...",
+      "status": "machine"
+    },
+    "channels.join.subtitle": {
+      "text": "پیوندی را که مالک کانال به اشتراک گذاشته جای‌گذاری کنید. پس از تأیید او، این دستگاه می‌تواند در کانال پست بگذارد.",
+      "status": "machine"
+    },
+    "channels.join.title": {
+      "text": "پیوستن به‌عنوان ناشر همکار",
+      "status": "machine"
+    },
+    "channels.join.waiting": {
+      "text": "در انتظار تأیید مالک کانال...",
+      "status": "machine"
+    },
+    "channels.legacy.channel": {
+      "text": "این کانال با نسخه قدیمی‌تری از Lakko ساخته شده و در این نسخه باز نمی‌شود. پست‌هایی که قبلاً منتشر کرده‌اید برای مشترکانتان خواندنی می‌مانند. برای انتشار دوباره، کانال جدیدی بسازید؛ این کانال قابل تعمیر نیست.",
+      "status": "machine"
+    },
+    "channels.legacy.copublisher_link": {
+      "text": "این پیوند دعوت ناشر همکار با نسخه قدیمی‌تری از Lakko ساخته شده و دیگر کار نمی‌کند. از مالک کانال بخواهید پیوند دعوت جدیدی برایتان بفرستد.",
+      "status": "machine"
+    },
+    "channels.manage.back": {
+      "text": "بازگشت به پست‌ها",
+      "status": "machine"
+    },
+    "channels.manage.error.open": {
+      "text": "باز کردن تنظیمات کانال ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.manage.error.sign_in": {
+      "text": "برای مدیریت این کانال دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "channels.manage.title": {
+      "text": "مدیریت کانال",
+      "status": "machine"
+    },
+    "channels.meta.desc": {
+      "text": "نام و توضیحات به‌صورت رمزگذاری‌شده به همه مشترکان می‌رسد. سرور هرگز آن‌ها را نمی‌خواند.",
+      "status": "machine"
+    },
+    "channels.meta.error.description_bad_character": {
+      "text": "توضیحات نویسه‌ای دارد که نمی‌توان آن را نمایش داد.",
+      "status": "machine"
+    },
+    "channels.meta.error.description_too_long": {
+      "text": "توضیحات خیلی طولانی است.",
+      "status": "machine"
+    },
+    "channels.meta.error.generic": {
+      "text": "این نام یا توضیحات قابل استفاده نیست.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_bad_character": {
+      "text": "نام نویسه‌ای دارد که نمی‌توان آن را نمایش داد.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_empty": {
+      "text": "کانال به نام نیاز دارد",
+      "status": "machine"
+    },
+    "channels.meta.error.name_line_break": {
+      "text": "نام باید در یک خط باشد.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_too_long": {
+      "text": "نام خیلی طولانی است.",
+      "status": "machine"
+    },
+    "channels.meta.error.save": {
+      "text": "ذخیره ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.meta.error.save_prefix": {
+      "text": "ذخیره ممکن نشد.",
+      "status": "machine"
+    },
+    "channels.meta.saved": {
+      "text": "ذخیره شد. مشترکان نام جدید را همراه پست‌های بعدی می‌بینند.",
+      "status": "machine"
+    },
+    "channels.meta.title": {
+      "text": "کانال",
+      "status": "machine"
+    },
+    "channels.new.create": {
+      "text": "ساختن",
+      "status": "machine"
+    },
+    "channels.new.error.create": {
+      "text": "ساخت کانال ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.new.error.handle": {
+      "text": "رزرو شناسه ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.new.error.handle_offline": {
+      "text": "رزرو شناسه ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.new.error.handle_taken": {
+      "text": "{handle} قبلاً گرفته شده است. شناسه دیگری انتخاب کنید یا آن را خالی بگذارید.",
+      "status": "machine"
+    },
+    "channels.new.error.no_name": {
+      "text": "برای کانال نامی بگذارید.",
+      "status": "machine"
+    },
+    "channels.new.error.sign_in": {
+      "text": "برای ساخت کانال دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "channels.new.handle_hint": {
+      "text": "دیگران با آن می‌توانند کانال را پیدا کنند و مشترکش شوند.",
+      "status": "machine"
+    },
+    "channels.new.handle_label": {
+      "text": "@شناسه عمومی (اختیاری)",
+      "status": "machine"
+    },
+    "channels.new.handle_placeholder": {
+      "text": "@my-channel",
+      "status": "machine"
+    },
+    "channels.new.subtitle": {
+      "text": "مشترکان نام و توضیحات را می‌بینند. این‌ها رمزگذاری‌شده منتقل می‌شوند و فقط متن رمزشده به سرور می‌رسد.",
+      "status": "machine"
+    },
+    "channels.new.title": {
+      "text": "کانال جدید",
+      "status": "machine"
+    },
+    "channels.new_menu": {
+      "text": "کانال جدید یا پیوستن به یک کانال",
+      "status": "machine"
+    },
+    "channels.post.not_available": {
+      "text": "در دسترس نیست",
+      "status": "machine"
+    },
+    "channels.post.older_key": {
+      "text": "این پست قدیمی‌تر از آن است که این دستگاه بتواند بخواند.",
+      "status": "machine"
+    },
+    "channels.post.unreadable": {
+      "text": "این پست در این دستگاه باز نشد.",
+      "status": "machine"
+    },
+    "channels.posts.empty": {
+      "text": "هنوز پستی نیست.",
+      "status": "machine"
+    },
+    "channels.posts.empty_owner": {
+      "text": "هنوز پستی نیست. اولین پست را پایین بنویسید.",
+      "status": "machine"
+    },
+    "channels.posts.error.load": {
+      "text": "بارگیری پست‌ها ممکن نشد.",
+      "status": "machine"
+    },
+    "channels.publish.error.generic": {
+      "text": "انتشار ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.publish.error.not_publisher": {
+      "text": "این دستگاه نمی‌تواند در این کانال پست بگذارد.",
+      "status": "machine"
+    },
+    "channels.publish.error.prefix": {
+      "text": "انتشار ممکن نشد.",
+      "status": "machine"
+    },
+    "channels.rotation.desc": {
+      "text": "Lakko خودش محافظت کانال را تازه می‌کند. اگر فکر می‌کنید دستگاه یکی از مشترکان به خطر افتاده است، همین حالا آن را تازه کنید.",
+      "status": "machine"
+    },
+    "channels.rotation.error.check": {
+      "text": "بررسی محافظت کانال ممکن نشد.",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh": {
+      "text": "تازه‌سازی ممکن نشد. کمی بعد دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.rotation.never": {
+      "text": "هنوز تازه نشده است.",
+      "status": "machine"
+    },
+    "channels.rotation.refresh_now": {
+      "text": "تازه‌سازی اکنون",
+      "status": "machine"
+    },
+    "channels.rotation.refreshed": {
+      "text": "{when} تازه شد.",
+      "status": "machine"
+    },
+    "channels.rotation.refreshing": {
+      "text": "در حال تازه‌سازی...",
+      "status": "machine"
+    },
+    "channels.rotation.title": {
+      "text": "محافظت",
+      "status": "machine"
+    },
+    "channels.row.own": {
+      "text": "کانال شما",
+      "status": "machine"
+    },
+    "channels.search.label": {
+      "text": "جستجوی کانال‌ها یا یافتن کانال با شناسه",
+      "status": "machine"
+    },
+    "channels.search.placeholder": {
+      "text": "جستجو یا یافتن با @شناسه",
+      "status": "machine"
+    },
+    "channels.subscribe.action": {
+      "text": "مشترک شدن",
+      "status": "machine"
+    },
+    "channels.subscribe.error.generic": {
+      "text": "اشتراک ممکن نشد. بعداً دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.subscribe.error.prefix": {
+      "text": "اشتراک ممکن نشد.",
+      "status": "machine"
+    },
+    "channels.subscribe.prompt_body": {
+      "text": "وقتی کانال به این دستگاه اجازه ورود بدهد، پست‌ها اینجا نمایش داده می‌شوند.",
+      "status": "machine"
+    },
+    "channels.subscribe.prompt_title": {
+      "text": "برای خواندن این کانال مشترک شوید",
+      "status": "machine"
+    },
+    "channels.subscribe.status.not_subscribed": {
+      "text": "مشترک نیستید",
+      "status": "machine"
+    },
+    "channels.subscribe.status.subscribed": {
+      "text": "مشترک هستید",
+      "status": "machine"
+    },
+    "channels.subscribe.status.subscribing": {
+      "text": "در حال اشتراک...",
+      "status": "machine"
+    },
+    "channels.subscribe.status.waiting": {
+      "text": "در انتظار اجازه ورود...",
+      "status": "machine"
+    },
+    "channels.subscribe.waiting_notice": {
+      "text": "مشترک شدید. وقتی کانال به این دستگاه اجازه ورود بدهد پست‌ها نمایش داده می‌شوند؛ این کار معمولاً لحظه‌ای طول می‌کشد.",
+      "status": "machine"
+    },
+    "channels.subscribers.count": {
+      "text": "({count})",
+      "status": "machine"
+    },
+    "channels.subscribers.desc": {
+      "text": "مشترکان جدید به‌طور خودکار از این دستگاه اجازه ورود می‌گیرند.",
+      "status": "machine"
+    },
+    "channels.subscribers.empty": {
+      "text": "هنوز مشترکی نیست. شناسه کانال را به اشتراک بگذارید تا دیگران بتوانند مشترک شوند.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.deliver": {
+      "text": "راه‌اندازی این مشترک ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.deliver_prefix": {
+      "text": "راه‌اندازی این مشترک ممکن نشد.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.load": {
+      "text": "بارگیری مشترکان ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.subscribers.retrying": {
+      "text": "در حال تلاش دوباره...",
+      "status": "machine"
+    },
+    "channels.subscribers.row": {
+      "text": "مشترک {number}",
+      "status": "machine"
+    },
+    "channels.subscribers.status.not_ready": {
+      "text": "آماده نیست",
+      "status": "machine"
+    },
+    "channels.subscribers.status.ready": {
+      "text": "آماده",
+      "status": "machine"
+    },
+    "channels.subscribers.status.setting_up": {
+      "text": "در حال راه‌اندازی...",
+      "status": "machine"
+    },
+    "channels.subscribers.title": {
+      "text": "مشترکان",
+      "status": "machine"
+    },
+    "channels.unsubscribe.action": {
+      "text": "لغو دنبال کردن",
+      "status": "machine"
+    },
+    "channels.unsubscribe.body": {
+      "text": "از فهرست شما برداشته می‌شود و این دستگاه دیگر آن را نمی‌خواند. بعداً می‌توانید دوباره مشترک شوید.",
+      "status": "machine"
+    },
+    "channels.unsubscribe.title": {
+      "text": "دنبال کردن این کانال لغو شود؟",
+      "status": "machine"
+    },
+    "channels.unsubscribe.title_named": {
+      "text": "دنبال کردن {name} لغو شود؟",
+      "status": "machine"
+    },
     "chat.attachment.error.attach": {
       "text": "پیوست کردن مورد انتخاب‌شده ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
@@ -532,6 +1000,10 @@
     },
     "chat.delete.control": {
       "text": "حذف این گفتگو",
+      "status": "machine"
+    },
+    "chat.delete.sub": {
+      "text": "این گفتگو و همه محتوای آن را از این دستگاه حذف می‌کند. این کار برگشت‌پذیر نیست.",
       "status": "machine"
     },
     "chat.delete.title": {
@@ -2054,6 +2526,14 @@
       "text": "در حال بررسی...",
       "status": "machine"
     },
+    "common.clipboard.link": {
+      "text": "پیوند Lakko",
+      "status": "machine"
+    },
+    "common.clipboard.message": {
+      "text": "پیام Lakko",
+      "status": "machine"
+    },
     "common.close": {
       "text": "بستن",
       "status": "machine"
@@ -2084,6 +2564,10 @@
     },
     "common.copy": {
       "text": "کپی",
+      "status": "machine"
+    },
+    "common.creating": {
+      "text": "در حال ساخت...",
       "status": "machine"
     },
     "common.delete": {
@@ -2158,6 +2642,10 @@
       "text": "باز کردن",
       "status": "machine"
     },
+    "common.fact_pair": {
+      "text": "{first} · {second}",
+      "status": "machine"
+    },
     "common.list_pair": {
       "text": "{first}، {second}",
       "status": "machine"
@@ -2194,6 +2682,10 @@
       "text": "روشن",
       "status": "machine"
     },
+    "common.open_chat": {
+      "text": "باز کردن گفتگو",
+      "status": "machine"
+    },
     "common.open_lakko": {
       "text": "باز کردن Lakko",
       "status": "machine"
@@ -2212,6 +2704,10 @@
     },
     "common.preparing": {
       "text": "در حال آماده‌سازی...",
+      "status": "machine"
+    },
+    "common.qr_code": {
+      "text": "کد QR",
       "status": "machine"
     },
     "common.remove": {
@@ -2262,12 +2758,296 @@
       "text": "{size} مگابایت",
       "status": "machine"
     },
+    "common.time.days_ago": {
+      "text": "{count, plural, one {# روز پیش} other {# روز پیش}}",
+      "status": "machine"
+    },
+    "common.time.hours_ago": {
+      "text": "{count, plural, one {# ساعت پیش} other {# ساعت پیش}}",
+      "status": "machine"
+    },
+    "common.time.just_now": {
+      "text": "همین حالا",
+      "status": "machine"
+    },
+    "common.time.minutes_ago": {
+      "text": "{count, plural, one {# دقیقه پیش} other {# دقیقه پیش}}",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "تلاش دوباره",
       "status": "machine"
     },
     "common.unknown": {
       "text": "نامشخص",
+      "status": "machine"
+    },
+    "contacts.accept.error.old_version": {
+      "text": "این درخواست از نسخه قدیمی‌تری از Lakko آمده است. از فرستنده بخواهید برنامه را به‌روز کند و دوباره آن را بفرستد.",
+      "status": "machine"
+    },
+    "contacts.add.by_username": {
+      "text": "افزودن با نام کاربری",
+      "status": "machine"
+    },
+    "contacts.add.intro_label": {
+      "text": "پیام (اختیاری)",
+      "status": "machine"
+    },
+    "contacts.add.intro_placeholder": {
+      "text": "سلام، سارا هستم، از همایش.",
+      "status": "machine"
+    },
+    "contacts.add.send": {
+      "text": "ارسال",
+      "status": "machine"
+    },
+    "contacts.add.share_invite": {
+      "text": "اشتراک‌گذاری پیوند دعوت",
+      "status": "machine"
+    },
+    "contacts.add.subtitle": {
+      "text": "درخواست‌ها با رمزگذاری سرتاسری فرستاده می‌شوند. سرورهای Lakko نمی‌توانند آن‌ها را بخوانند.",
+      "status": "machine"
+    },
+    "contacts.add.title": {
+      "text": "افزودن مخاطب",
+      "status": "machine"
+    },
+    "contacts.add.username_label": {
+      "text": "نام کاربری",
+      "status": "machine"
+    },
+    "contacts.add.username_placeholder": {
+      "text": "@alice",
+      "status": "machine"
+    },
+    "contacts.detail.actions": {
+      "text": "کارهای مخاطب",
+      "status": "machine"
+    },
+    "contacts.detail.call_needs_chat": {
+      "text": "برای شروع تماس ابتدا پیامی بفرستید.",
+      "status": "machine"
+    },
+    "contacts.detail.gone_body": {
+      "text": "این شخص دیگر در مخاطبان شما نیست.",
+      "status": "machine"
+    },
+    "contacts.detail.gone_title": {
+      "text": "مخاطب پیدا نشد",
+      "status": "machine"
+    },
+    "contacts.detail.message": {
+      "text": "پیام",
+      "status": "machine"
+    },
+    "contacts.detail.message_unavailable": {
+      "text": "این مخاطب پیش از آنکه بتوان از اینجا گفتگو را شروع کرد اضافه شده است. از او بخواهید به شما پیام بدهد.",
+      "status": "machine"
+    },
+    "contacts.detail.their_name": {
+      "text": "نامی که خودش گذاشته: {name}",
+      "status": "machine"
+    },
+    "contacts.detail.username_not_verified": {
+      "text": "نام کاربری تأیید نشده است",
+      "status": "machine"
+    },
+    "contacts.error.send": {
+      "text": "ارسال درخواست ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "contacts.error.start_chat": {
+      "text": "شروع گفتگو ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.reset": {
+      "text": "{name} هویت امن خود را بازنشانی کرده است (مثلاً دستگاهش را گم کرده). گزارش شفافیت تأیید می‌کند که این بازنشانی را صاحب حساب انجام داده است. اگر مطمئن هستید که واقعاً خود اوست، پیش از ادامه شماره امنیتی‌اش را از راه دیگری دوباره تأیید کنید.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.reset_unnamed": {
+      "text": "این مخاطب هویت امن خود را بازنشانی کرده است (مثلاً دستگاهش را گم کرده). گزارش شفافیت تأیید می‌کند که این بازنشانی را صاحب حساب انجام داده است. اگر مطمئن هستید که واقعاً خود اوست، پیش از ادامه شماره امنیتی‌اش را از راه دیگری دوباره تأیید کنید.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unconfirmed": {
+      "text": "هویت امن {name} تغییر کرده و تطبیق آن با گزارش شفافیت ممکن نشد. پیش از اعتماد، از راه دیگری تأیید کنید.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unconfirmed_unnamed": {
+      "text": "هویت امن این مخاطب تغییر کرده و تطبیق آن با گزارش شفافیت ممکن نشد. پیش از اعتماد، از راه دیگری تأیید کنید.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unexplained": {
+      "text": "هویت امن {name} تغییر کرده و گزارش شفافیت هیچ بازنشانی‌ای از سوی صاحب حساب نشان «نمی‌دهد»؛ این را یک نفوذ احتمالی به حساب در نظر بگیرید. پیش از اعتماد، از راه دیگری تأیید کنید.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unexplained_unnamed": {
+      "text": "هویت امن این مخاطب تغییر کرده و گزارش شفافیت هیچ بازنشانی‌ای از سوی صاحب حساب نشان «نمی‌دهد»؛ این را یک نفوذ احتمالی به حساب در نظر بگیرید. پیش از اعتماد، از راه دیگری تأیید کنید.",
+      "status": "machine"
+    },
+    "contacts.invite_links.subtitle": {
+      "text": "پیوندی را با کسی که می‌خواهید از او خبر بگیرید به اشتراک بگذارید.",
+      "status": "machine"
+    },
+    "contacts.invite_links.title": {
+      "text": "پیوندهای دعوت",
+      "status": "machine"
+    },
+    "contacts.list.add": {
+      "text": "افزودن",
+      "status": "machine"
+    },
+    "contacts.list.empty.action": {
+      "text": "افزودن مخاطب",
+      "status": "machine"
+    },
+    "contacts.list.empty.body": {
+      "text": "کسی را با نام کاربری اضافه کنید یا پیوند دعوت خود را به اشتراک بگذارید.",
+      "status": "machine"
+    },
+    "contacts.list.empty.title": {
+      "text": "هنوز مخاطبی ندارید",
+      "status": "machine"
+    },
+    "contacts.list.no_match": {
+      "text": "هیچ مخاطبی مطابقت ندارد.",
+      "status": "machine"
+    },
+    "contacts.list.requests": {
+      "text": "درخواست‌ها",
+      "status": "machine"
+    },
+    "contacts.list.search": {
+      "text": "جستجوی مخاطبان",
+      "status": "machine"
+    },
+    "contacts.list.section_index": {
+      "text": "فهرست بخش‌ها",
+      "status": "machine"
+    },
+    "contacts.list.sent": {
+      "text": "ارسال‌شده ({count})",
+      "status": "machine"
+    },
+    "contacts.list.sent_dismiss": {
+      "text": "حذف از این فهرست",
+      "status": "machine"
+    },
+    "contacts.list.sent_waiting": {
+      "text": "در انتظار",
+      "status": "machine"
+    },
+    "contacts.mailbox.join_failed": {
+      "text": "شما به یک گروه اضافه شدید، اما دعوت در این دستگاه باز نشد. از کسی که شما را اضافه کرد بخواهید دوباره اضافه‌تان کند.",
+      "status": "machine"
+    },
+    "contacts.mailbox.poll_failed": {
+      "text": "بررسی درخواست‌های مخاطب جدید ممکن نشد. در حال تلاش دوباره.",
+      "status": "machine"
+    },
+    "contacts.mailbox.sign_in": {
+      "text": "برای بررسی درخواست‌های جدید دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "contacts.reauth.body": {
+      "text": "کلیدهایی که این نشست برای مخاطبان لازم دارد در دسترس نیستند. برای استفاده از مخاطبان دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "contacts.remove.body": {
+      "text": "گفتگوهای مشترکتان همان‌طور که هستند می‌مانند؛ فقط فهرست مخاطبان شما تغییر می‌کند. بعداً می‌توانید دوباره او را اضافه کنید.",
+      "status": "machine"
+    },
+    "contacts.remove.confirm_named": {
+      "text": "حذف {name}",
+      "status": "machine"
+    },
+    "contacts.remove.control": {
+      "text": "حذف مخاطب",
+      "status": "machine"
+    },
+    "contacts.remove.sub": {
+      "text": "{name} را از فهرست مخاطبان این حساب برمی‌دارد.",
+      "status": "machine"
+    },
+    "contacts.remove.title": {
+      "text": "این مخاطب حذف شود؟",
+      "status": "machine"
+    },
+    "contacts.rename.action": {
+      "text": "تغییر نام",
+      "status": "machine"
+    },
+    "contacts.rename.field": {
+      "text": "نامی که شما برای این مخاطب می‌گذارید",
+      "status": "machine"
+    },
+    "contacts.rename.placeholder": {
+      "text": "برای استفاده از نام خود او خالی بگذارید",
+      "status": "machine"
+    },
+    "contacts.rename.sub_local": {
+      "text": "نامی که شما برای این مخاطب گذاشته‌اید. فقط خودتان آن را می‌بینید.",
+      "status": "machine"
+    },
+    "contacts.rename.sub_theirs": {
+      "text": "همان‌طور که خودش تنظیم کرده است. می‌توانید نام دلخواه خودتان را برایش بگذارید.",
+      "status": "machine"
+    },
+    "contacts.rename.title": {
+      "text": "نام",
+      "status": "machine"
+    },
+    "contacts.request.accept": {
+      "text": "پذیرفتن",
+      "status": "machine"
+    },
+    "contacts.request.decline": {
+      "text": "رد کردن",
+      "status": "machine"
+    },
+    "contacts.request.no_intro": {
+      "text": "می‌خواهد با شما در ارتباط باشد",
+      "status": "machine"
+    },
+    "contacts.request.someone": {
+      "text": "یک نفر",
+      "status": "machine"
+    },
+    "contacts.safety.body": {
+      "text": "آن را حضوری یا در یک تماس با {name} مقایسه کنید. یکسان بودن شماره‌ها یعنی کسی میان شما نیست.",
+      "status": "machine"
+    },
+    "contacts.safety.body_unnamed": {
+      "text": "آن را حضوری یا در یک تماس با مخاطبتان مقایسه کنید. یکسان بودن شماره‌ها یعنی کسی میان شما نیست.",
+      "status": "machine"
+    },
+    "contacts.safety.error": {
+      "text": "محاسبه شماره امنیتی ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "contacts.safety.number": {
+      "text": "شماره امنیتی",
+      "status": "machine"
+    },
+    "contacts.safety.row_sub": {
+      "text": "برای اطمینان از اینکه واقعاً خود اوست، شماره را حضوری مقایسه کنید.",
+      "status": "machine"
+    },
+    "contacts.safety.show": {
+      "text": "نمایش",
+      "status": "machine"
+    },
+    "contacts.safety.sign_in": {
+      "text": "برای دیدن شماره امنیتی دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "contacts.safety.title": {
+      "text": "تأیید شماره امنیتی",
+      "status": "machine"
+    },
+    "contacts.send.done": {
+      "text": "درخواست به {name} فرستاده شد. تا وقتی آن را بپذیرد، در «ارسال‌شده» می‌ماند.",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -2450,6 +3230,10 @@
       "text": "افزودن دستگاه",
       "status": "machine"
     },
+    "devices.pairing.qr_description": {
+      "text": "کد QR اتصال",
+      "status": "machine"
+    },
     "devices.scan.confirm.body": {
       "text": "این کار به دستگاه اسکن‌شده دسترسی کامل به حسابتان می‌دهد: پیام‌ها، مخاطبان و هویت شما. فقط در صورتی ادامه دهید که کد روی دستگاه جدید خودتان باشد.",
       "status": "machine"
@@ -2510,12 +3294,44 @@
       "text": "تاریخ و ساعت این دستگاه را بررسی کنید.",
       "status": "machine"
     },
+    "group.join.needs_account": {
+      "text": "برای درخواست پیوستن به حساب نیاز دارید. حسابی بسازید یا وارد شوید.",
+      "status": "machine"
+    },
     "group.join.not_taking_requests": {
       "text": "این گروه هنوز درخواست نمی‌پذیرد. بعداً دوباره تلاش کنید.",
       "status": "machine"
     },
+    "group.join.open_chat": {
+      "text": "باز کردن گفتگو",
+      "status": "machine"
+    },
+    "group.join.request": {
+      "text": "درخواست پیوستن",
+      "status": "machine"
+    },
     "group.join.request_again": {
       "text": "درخواست دوباره",
+      "status": "machine"
+    },
+    "group.join.request_failed": {
+      "text": "درخواست شما ارسال نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "group.join.sending": {
+      "text": "در حال ارسال درخواست...",
+      "status": "machine"
+    },
+    "group.join.succeeded": {
+      "text": "به گروه پیوستید.",
+      "status": "machine"
+    },
+    "group.join.succeeded_opening": {
+      "text": "به گروه پیوستید. در حال باز کردن گفتگو...",
+      "status": "machine"
+    },
+    "group.join.title": {
+      "text": "پیوستن به گروه",
       "status": "machine"
     },
     "group.join.wait_primary": {
@@ -2524,6 +3340,362 @@
     },
     "group.join.wait_secondary": {
       "text": "هیچ‌یک از این دو مرحله محدودیت زمانی ندارد. اگر اتفاقی نیفتاد، می‌توانید دوباره درخواست بفرستید.",
+      "status": "machine"
+    },
+    "invite.contact.accept_failed": {
+      "text": "پذیرفتن دعوت ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "invite.contact.accepting": {
+      "text": "در حال پذیرفتن دعوت...",
+      "status": "machine"
+    },
+    "invite.contact.already_accepted": {
+      "text": "شما قبلاً این دعوت را پذیرفته‌اید. درخواستتان در راه {name} است؛ برای پاسخ به مخاطبان سر بزنید.",
+      "status": "machine"
+    },
+    "invite.contact.already_accepted_unnamed": {
+      "text": "شما قبلاً این دعوت را پذیرفته‌اید. این شخص را در مخاطبان پیدا کنید.",
+      "status": "machine"
+    },
+    "invite.contact.check_body": {
+      "text": "شماره امنیتی آن شخص را از راهی که به آن اعتماد دارید (حضوری یا در یک تماس) از او بپرسید. اگر یکسان نبود، این پیوند را کس دیگری ساخته است.",
+      "status": "machine"
+    },
+    "invite.contact.check_title": {
+      "text": "پیش از پذیرفتن آن را بررسی کنید.",
+      "status": "machine"
+    },
+    "invite.contact.connected": {
+      "text": "متصل شدید.",
+      "status": "machine"
+    },
+    "invite.contact.expired": {
+      "text": "این دعوت منقضی شده است. از دعوت‌کننده پیوند تازه‌ای بخواهید.",
+      "status": "machine"
+    },
+    "invite.contact.expiry": {
+      "text": "انقضا",
+      "status": "machine"
+    },
+    "invite.contact.fingerprint": {
+      "text": "اثر انگشت دعوت‌کننده",
+      "status": "machine"
+    },
+    "invite.contact.intro_label": {
+      "text": "پیام معرفی (اختیاری)",
+      "status": "machine"
+    },
+    "invite.contact.invalid_body": {
+      "text": "پیوند خراب است یا در مسیر تغییر کرده است. از کسی که شما را دعوت کرده پیوند جدیدی بخواهید.",
+      "status": "machine"
+    },
+    "invite.contact.invalid_title": {
+      "text": "این پیوند دعوت نامعتبر است",
+      "status": "machine"
+    },
+    "invite.contact.needs_auth_body": {
+      "text": "برای پذیرفتن به حساب نیاز دارید. حسابی بسازید یا وارد شوید، و خودکار به اینجا بازمی‌گردید.",
+      "status": "machine"
+    },
+    "invite.contact.needs_auth_title": {
+      "text": "کسی می‌خواهد در Lakko با شما در ارتباط باشد",
+      "status": "machine"
+    },
+    "invite.contact.no_longer_valid": {
+      "text": "این پیوند دیگر معتبر نیست. از آن شخص پیوند جدیدی بخواهید.",
+      "status": "machine"
+    },
+    "invite.contact.page_title": {
+      "text": "دعوت",
+      "status": "machine"
+    },
+    "invite.contact.referral": {
+      "text": "پیوند معرفی: درخواست شما خودکار فرستاده می‌شود.",
+      "status": "machine"
+    },
+    "invite.contact.result.already_body": {
+      "text": "شما قبلاً این دعوت را در این دستگاه پذیرفته‌اید. آن شخص را در مخاطبان پیدا کنید.",
+      "status": "machine"
+    },
+    "invite.contact.result.already_title": {
+      "text": "قبلاً پذیرفته شده",
+      "status": "machine"
+    },
+    "invite.contact.result.expired_title": {
+      "text": "دعوت منقضی شده",
+      "status": "machine"
+    },
+    "invite.contact.result.failed_title": {
+      "text": "دعوت پذیرفته نشد",
+      "status": "machine"
+    },
+    "invite.contact.result.not_found_title": {
+      "text": "دعوت پیدا نشد",
+      "status": "machine"
+    },
+    "invite.contact.result.rate_limited_title": {
+      "text": "الان نه",
+      "status": "machine"
+    },
+    "invite.contact.result.sent_body": {
+      "text": "درخواست مخاطب شما در راه است. وقتی آن را بپذیرد، گفتگو در بخش گفتگوها نمایش داده می‌شود.",
+      "status": "machine"
+    },
+    "invite.contact.result.sent_title": {
+      "text": "درخواست فرستاده شد",
+      "status": "machine"
+    },
+    "invite.contact.result.used_up_title": {
+      "text": "ظرفیت دعوت تمام شده",
+      "status": "machine"
+    },
+    "invite.contact.sending": {
+      "text": "در حال ارسال درخواست شما به {name}...",
+      "status": "machine"
+    },
+    "invite.contact.sent": {
+      "text": "درخواست به {name} فرستاده شد.",
+      "status": "machine"
+    },
+    "invite.contact.title": {
+      "text": "با {name} در ارتباط باشید؟",
+      "status": "machine"
+    },
+    "invite.contact.type": {
+      "text": "نوع",
+      "status": "machine"
+    },
+    "invite.contact.used_up": {
+      "text": "ظرفیت استفاده از این پیوند تمام شده است. از آن شخص پیوند جدیدی بخواهید.",
+      "status": "machine"
+    },
+    "invite.contact.uses": {
+      "text": "تعداد استفاده مجاز",
+      "status": "machine"
+    },
+    "invite.expiry.ago_days": {
+      "text": "{count, plural, one {# روز پیش منقضی شد} other {# روز پیش منقضی شد}}",
+      "status": "machine"
+    },
+    "invite.expiry.ago_hours": {
+      "text": "{count, plural, one {# ساعت پیش منقضی شد} other {# ساعت پیش منقضی شد}}",
+      "status": "machine"
+    },
+    "invite.expiry.ago_minutes": {
+      "text": "{count, plural, one {# دقیقه پیش منقضی شد} other {# دقیقه پیش منقضی شد}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_days": {
+      "text": "{count, plural, one {تا # روز دیگر} other {تا # روز دیگر}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_hours": {
+      "text": "{count, plural, one {تا # ساعت دیگر} other {تا # ساعت دیگر}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_minutes": {
+      "text": "{count, plural, one {تا # دقیقه دیگر} other {تا # دقیقه دیگر}}",
+      "status": "machine"
+    },
+    "invite.expiry.never": {
+      "text": "منقضی نمی‌شود",
+      "status": "machine"
+    },
+    "invite.go_home": {
+      "text": "رفتن به صفحه اصلی Lakko",
+      "status": "machine"
+    },
+    "invite.group.invited_by": {
+      "text": "دعوت از طرف {fingerprint}",
+      "status": "machine"
+    },
+    "invite.group.lead_anonymous": {
+      "text": "شما دعوت شده‌اید به",
+      "status": "machine"
+    },
+    "invite.group.lead_anonymous_unnamed": {
+      "text": "شما به یک گروه دعوت شده‌اید",
+      "status": "machine"
+    },
+    "invite.group.lead_named": {
+      "text": "{name} شما را دعوت می‌کند به",
+      "status": "machine"
+    },
+    "invite.group.lead_named_unnamed": {
+      "text": "{name} شما را به یک گروه دعوت می‌کند",
+      "status": "machine"
+    },
+    "invite.link.damaged": {
+      "text": "این پیوند دعوت آسیب دیده است. پیوند جدیدی بخواهید.",
+      "status": "machine"
+    },
+    "invite.link.invalid": {
+      "text": "این پیوند دعوت نامعتبر است یا منقضی شده است.",
+      "status": "machine"
+    },
+    "invite.link.loading": {
+      "text": "در حال بارگیری دعوت...",
+      "status": "machine"
+    },
+    "invite.link.rate_limited": {
+      "text": "در حال حاضر درخواست‌های زیادی از این شبکه آمده است. یک دقیقه دیگر دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "invite.links.already_removed": {
+      "text": "«{label}» قبلاً حذف شده بود.",
+      "status": "machine"
+    },
+    "invite.links.already_removed_unnamed": {
+      "text": "این پیوند قبلاً حذف شده بود.",
+      "status": "machine"
+    },
+    "invite.links.create": {
+      "text": "ساخت پیوند",
+      "status": "machine"
+    },
+    "invite.links.created": {
+      "text": "ساخته‌شده در {date}",
+      "status": "machine"
+    },
+    "invite.links.desc": {
+      "text": "هر کسی یکی از پیوندهای شما را باز کند، تا وقتی پیوند منقضی نشده یا ظرفیتش تمام نشده، می‌تواند برایتان درخواست مخاطب بفرستد.",
+      "status": "machine"
+    },
+    "invite.links.empty": {
+      "text": "پیوند فعالی نیست.",
+      "status": "machine"
+    },
+    "invite.links.error.copy": {
+      "text": "کپی پیوند ممکن نشد.",
+      "status": "machine"
+    },
+    "invite.links.error.load": {
+      "text": "بارگیری پیوندهای دعوت شما ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_create": {
+      "text": "برای ساخت پیوند دعوت دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_list": {
+      "text": "برای دیدن پیوندهای دعوت خود دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_revoke": {
+      "text": "برای لغو پیوند دعوت دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "invite.links.expired": {
+      "text": "منقضی‌شده",
+      "status": "machine"
+    },
+    "invite.links.expires_days": {
+      "text": "انقضا تا {count} روز",
+      "status": "machine"
+    },
+    "invite.links.expires_field": {
+      "text": "انقضا",
+      "status": "machine"
+    },
+    "invite.links.expires_hours": {
+      "text": "انقضا تا {count} ساعت",
+      "status": "machine"
+    },
+    "invite.links.expires_minutes": {
+      "text": "انقضا تا {count} دقیقه",
+      "status": "machine"
+    },
+    "invite.links.expires_option_days": {
+      "text": "{count, plural, one {پس از # روز} other {پس از # روز}}",
+      "status": "machine"
+    },
+    "invite.links.expires_option_never": {
+      "text": "هرگز",
+      "status": "machine"
+    },
+    "invite.links.for_new_user": {
+      "text": "برای کسی که تازه به Lakko آمده",
+      "status": "machine"
+    },
+    "invite.links.inline_note": {
+      "text": "Lakko نتوانست این پیوند را کوتاه کند، برای همین طولانی است. به همان شکل کار می‌کند و نمی‌توان آن را لغو کرد.",
+      "status": "machine"
+    },
+    "invite.links.label_field": {
+      "text": "برچسب (اختیاری)",
+      "status": "machine"
+    },
+    "invite.links.label_placeholder": {
+      "text": "به کسی که پیوند را باز کند نشان داده می‌شود",
+      "status": "machine"
+    },
+    "invite.links.list": {
+      "text": "پیوندهای دعوت فعال",
+      "status": "machine"
+    },
+    "invite.links.never_expires": {
+      "text": "منقضی نمی‌شود",
+      "status": "machine"
+    },
+    "invite.links.new_badge": {
+      "text": "جدید",
+      "status": "machine"
+    },
+    "invite.links.referral_option": {
+      "text": "برای کسی که هنوز حساب Lakko ندارد",
+      "status": "machine"
+    },
+    "invite.links.revoked": {
+      "text": "پیوند لغو شد.",
+      "status": "machine"
+    },
+    "invite.links.revoking": {
+      "text": "در حال لغو...",
+      "status": "machine"
+    },
+    "invite.links.unlimited_uses": {
+      "text": "استفاده نامحدود",
+      "status": "machine"
+    },
+    "invite.links.used_up": {
+      "text": "تمام‌شده",
+      "status": "machine"
+    },
+    "invite.links.uses_field": {
+      "text": "تعداد استفاده",
+      "status": "machine"
+    },
+    "invite.links.uses_left": {
+      "text": "{count, plural, one {# استفاده باقی مانده} other {# استفاده باقی مانده}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_one": {
+      "text": "یک نفر",
+      "status": "machine"
+    },
+    "invite.links.uses_option_unlimited": {
+      "text": "نامحدود",
+      "status": "machine"
+    },
+    "invite.links.uses_option_up_to": {
+      "text": "{count, plural, one {حداکثر # نفر} other {حداکثر # نفر}}",
+      "status": "machine"
+    },
+    "invite.sign_up": {
+      "text": "ثبت‌نام",
+      "status": "machine"
+    },
+    "invite.uses.single": {
+      "text": "یک‌بارمصرف",
+      "status": "machine"
+    },
+    "invite.uses.unlimited": {
+      "text": "نامحدود",
+      "status": "machine"
+    },
+    "invite.uses.up_to": {
+      "text": "{count, plural, one {حداکثر # بار} other {حداکثر # بار}}",
       "status": "machine"
     },
     "language.name.ar": {
@@ -2588,6 +3760,38 @@
     },
     "nav.settings": {
       "text": "تنظیمات",
+      "status": "machine"
+    },
+    "new_group.back": {
+      "text": "گروه‌ها",
+      "status": "machine"
+    },
+    "new_group.error.sign_in": {
+      "text": "برای ساخت گروه دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "new_group.index_hint": {
+      "text": "برای شروع پیام‌رسانی یک گروه را انتخاب کنید",
+      "status": "machine"
+    },
+    "new_group.name_hint": {
+      "text": "همه اعضا نام را می‌بینند. نام رمزگذاری‌شده فرستاده می‌شود و سرور هرگز آن را نمی‌خواند.",
+      "status": "machine"
+    },
+    "new_group.name_not_sent": {
+      "text": "نام گروه فرستاده نشد. آن را از بخش اعضا تنظیم کنید.",
+      "status": "machine"
+    },
+    "new_group.name_placeholder": {
+      "text": "برنامه آخر هفته",
+      "status": "machine"
+    },
+    "new_group.no_contacts": {
+      "text": "ابتدا مخاطب اضافه کنید؛ گروه با افرادی شروع می‌شود که از قبل می‌شناسید.",
+      "status": "machine"
+    },
+    "new_group.subtitle": {
+      "text": "شما مالک گروه خواهید بود. بعداً می‌توانید افراد دیگری اضافه کنید.",
       "status": "machine"
     },
     "recovery.access_only_note": {

@@ -113,11 +113,11 @@ public struct ContactsScreen: View {
             .overlay {
                 if showsEmptyState {
                     ContentUnavailableView {
-                        Label("No contacts yet", systemImage: "person.crop.circle.badge.plus")
+                        Label(l10n.t("contacts.list.empty.title"), systemImage: "person.crop.circle.badge.plus")
                     } description: {
-                        Text("People you add appear here.")
+                        Text(l10n.t("contacts.list.empty.body"))
                     } actions: {
-                        Button("Add contact") { addContactPresented = true }
+                        Button(l10n.t("contacts.list.empty.action")) { addContactPresented = true }
                             .buttonStyle(.borderedProminent)
                     }
                 } else if isSearching && items.isEmpty {
@@ -128,7 +128,7 @@ public struct ContactsScreen: View {
         // Rebuilt on a layout-direction flip: a UIKit-backed List keeps the
         // mirroring it was built with (see SettingsScreen).
         .id(l10n.layoutDirection)
-        .searchable(text: $query, prompt: "Search contacts")
+        .searchable(text: $query, prompt: Text(l10n.t("contacts.list.search")))
         .refreshable { await viewModel.pullToRefresh() }
         .navigationTitle(l10n.t("nav.contacts"))
         .navigationBarTitleDisplayMode(.large)
@@ -176,15 +176,15 @@ public struct ContactsScreen: View {
     private var addMenu: some View {
         Menu {
             Button { addContactPresented = true } label: {
-                Label("Add by username", systemImage: "at")
+                Label(l10n.t("contacts.add.by_username"), systemImage: "at")
             }
             Button { inviteLinksPresented = true } label: {
-                Label("Share invite link", systemImage: "link")
+                Label(l10n.t("contacts.add.share_invite"), systemImage: "link")
             }
         } label: {
             Image(systemName: "person.badge.plus")
         }
-        .accessibilityLabel("Add")
+        .accessibilityLabel(l10n.t("contacts.list.add"))
     }
 
     // MARK: - Sections
@@ -194,7 +194,7 @@ public struct ContactsScreen: View {
     private var errorSection: some View {
         if let err = viewModel.repositoryState.lastError {
             Section {
-                Text(err)
+                Text(l10n.t(err))
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoDanger)
                     .lineLimit(3)
@@ -214,7 +214,7 @@ public struct ContactsScreen: View {
                     )
                 }
             } header: {
-                Text("Requests")
+                Text(l10n.t("contacts.list.requests"))
             }
         }
     }
@@ -229,13 +229,13 @@ public struct ContactsScreen: View {
                             Text("@\(row.recipientUsername)")
                                 .foregroundStyle(Color.lakkoText)
                             Spacer()
-                            Text("Waiting")
+                            Text(l10n.t("contacts.list.sent_waiting"))
                                 .font(.footnote)
                                 .foregroundStyle(Color.lakkoTextMuted)
                         }
                     }
                 } label: {
-                    Text("Sent (\(sent.count))")
+                    Text(l10n.t("contacts.list.sent", texts: ["count": sent.count.formatted(.number.locale(l10n.locale))]))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
@@ -300,6 +300,7 @@ private struct ContactRow: View {
 /// bound to its signed key; "Someone" when nothing is known), their intro, and
 /// Accept / Decline.
 private struct IncomingRequestRow: View {
+    @ObservedObject private var l10n = Localization.shared
     let request: IncomingContactRequest
     let onAccept: () -> Void
     let onDecline: () -> Void
@@ -314,7 +315,7 @@ private struct IncomingRequestRow: View {
                     placeholderSymbol: "person.fill"
                 )
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(resolved.isPlaceholder ? ResolvedDisplayName.placeholderSomeone : resolved.name)
+                    Text(resolved.isPlaceholder ? l10n.t("contacts.request.someone") : resolved.name)
                         .foregroundStyle(Color.lakkoText)
                     if let line = resolved.usernameLine {
                         Text(line)
@@ -329,12 +330,12 @@ private struct IncomingRequestRow: View {
                     }
                     HStack(spacing: 8) {
                         Button(action: onAccept) {
-                            Text("Accept").frame(minWidth: 72)
+                            Text(l10n.t("contacts.request.accept")).frame(minWidth: 72)
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                         Button(action: onDecline) {
-                            Text("Decline").frame(minWidth: 72)
+                            Text(l10n.t("contacts.request.decline")).frame(minWidth: 72)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -380,16 +381,18 @@ private struct SectionIndexBar: View {
                 .onEnded { _ in lastSelected = nil }
         )
         .padding(.trailing, 2)
-        .accessibilityLabel("Section index")
+        .accessibilityLabel(Localization.text("contacts.list.section_index"))
     }
 }
 
 private struct ReauthPanel: View {
+    @ObservedObject private var l10n = Localization.shared
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Re-enter your password")
+            Text(l10n.t("chat.reauth.title"))
                 .font(.headline)
-            Text("Log out and log back in to send and receive contact requests.")
+            Text(l10n.t("contacts.reauth.body"))
                 .font(.body)
                 .foregroundStyle(Color.lakkoTextMuted)
         }

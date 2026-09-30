@@ -58,6 +58,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.ContactsRepository
+import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.components.LakkoAvatar
@@ -185,7 +186,7 @@ public fun ContactDetailScreen(
                 title = {},
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -272,14 +273,14 @@ private fun ContactDetailBody(
             }
             name.theirName?.let { theirs ->
                 Text(
-                    "Their name: $theirs",
+                    t("contacts.detail.their_name", mapOf("name" to theirs)),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             if (name.usernameNotVerified) {
                 Text(
-                    "Username not verified",
+                    t("contacts.detail.username_not_verified"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -294,7 +295,7 @@ private fun ContactDetailBody(
                 // from the conversation itself the host makes this a return.
                 if (InfoSection.MESSAGE in sections) {
                     ActionButton(
-                        label = "Message",
+                        label = t("contacts.detail.message"),
                         icon = Icons.AutoMirrored.Filled.Chat,
                         enabled = groupIdHex != null,
                         onClick = { if (groupIdHex != null) onOpenChat(groupIdHex) },
@@ -306,14 +307,14 @@ private fun ContactDetailBody(
                 // than dimmed: the key comes from a group we are not in.
                 if (InfoSection.CALL in sections) {
                     ActionButton(
-                        label = "Call",
+                        label = t("chat.call.voice"),
                         icon = Icons.Filled.Call,
                         enabled = groupIdHex != null && onStartCall != null,
                         onClick = { if (groupIdHex != null) onStartCall?.invoke(groupIdHex, false) },
                         modifier = Modifier.weight(1f),
                     )
                     ActionButton(
-                        label = "Video",
+                        label = t("chat.media.video"),
                         icon = Icons.Filled.Videocam,
                         enabled = groupIdHex != null && onStartCall != null,
                         onClick = { if (groupIdHex != null) onStartCall?.invoke(groupIdHex, true) },
@@ -328,7 +329,7 @@ private fun ContactDetailBody(
             if (groupIdHex == null && hasConversationActions) {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Chat not available on this device yet.",
+                    t("contacts.detail.message_unavailable"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -338,16 +339,16 @@ private fun ContactDetailBody(
 
             if (InfoSection.SAFETY_NUMBER in sections) {
                 DetailRow(
-                    title = "Verify safety number",
-                    supporting = "Compare a number in person to confirm this is really them.",
+                    title = t("contacts.safety.title"),
+                    supporting = t("contacts.safety.row_sub"),
                     icon = Icons.Filled.VerifiedUser,
                     onClick = { onVerifySafetyNumber(contactKey) },
                 )
             }
             if (InfoSection.RENAME_CONTACT in sections) {
                 DetailRow(
-                    title = "Rename",
-                    supporting = "Your name for this contact. Only you see it.",
+                    title = t("contacts.rename.action"),
+                    supporting = t("contacts.rename.sub_local"),
                     icon = Icons.Filled.Edit,
                     onClick = onRename,
                 )
@@ -355,7 +356,7 @@ private fun ContactDetailBody(
             if (InfoSection.REMOVE_CONTACT in sections) {
                 HorizontalDivider()
                 DetailRow(
-                    title = "Remove contact",
+                    title = t("contacts.remove.control"),
                     supporting = null,
                     icon = Icons.Filled.PersonRemove,
                     onClick = onRemove,
@@ -393,11 +394,11 @@ private fun RenameContactDialog(
     if (!open) return
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Rename") },
+        title = { Text(t("contacts.rename.action")) },
         text = {
             Column {
                 Text(
-                    "Leave blank to use their own name.",
+                    t("contacts.rename.placeholder"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -406,12 +407,12 @@ private fun RenameContactDialog(
                     value = draft,
                     onValueChange = onDraftChange,
                     singleLine = true,
-                    label = { Text("Name") },
+                    label = { Text(t("contacts.rename.field")) },
                 )
             }
         },
-        confirmButton = { TextButton(onClick = onSave) { Text("Save") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        confirmButton = { TextButton(onClick = onSave) { Text(t("common.save")) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(t("common.cancel")) } },
     )
 }
 
@@ -426,19 +427,24 @@ private fun RemoveContactDialog(
     if (!open) return
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Remove $name?") },
+        title = { Text(t("contacts.remove.title")) },
         text = {
             Text(
-                "They are removed from your contacts on this device. " +
-                    "An existing chat stays until you leave it.",
+                t(
+                    "common.sentence_pair",
+                    mapOf(
+                        "first" to t("contacts.remove.sub", mapOf("name" to name)),
+                        "second" to t("contacts.remove.body"),
+                    ),
+                ),
             )
         },
         confirmButton = {
             TextButton(onClick = onRemove) {
-                Text("Remove", color = MaterialTheme.colorScheme.error)
+                Text(t("common.remove"), color = MaterialTheme.colorScheme.error)
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(t("common.cancel")) } },
     )
 }
 
@@ -493,7 +499,7 @@ private fun DetailRow(
 private sealed interface SafetyNumberUi {
     data object Loading : SafetyNumberUi
     data class Ready(val groups: List<String>) : SafetyNumberUi
-    data class Error(val message: String) : SafetyNumberUi
+    data object Error : SafetyNumberUi
 }
 
 /**
@@ -528,7 +534,8 @@ public fun SafetyNumberScreen(
             val raw = withContext(Dispatchers.Default) { contactsRepository.safetyNumber(c.request.fromPubkey) }
             SafetyNumberUi.Ready(safetyNumberGroups(raw))
         } catch (cause: Throwable) {
-            SafetyNumberUi.Error("Could not compute the safety number. Try again later.")
+            android.util.Log.w("LakkoContacts", "WARN safety number failed: ${cause.javaClass.simpleName}")
+            SafetyNumberUi.Error
         }
     }
 
@@ -536,10 +543,10 @@ public fun SafetyNumberScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("Safety number") },
+                title = { Text(t("contacts.safety.number")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -555,8 +562,8 @@ public fun SafetyNumberScreen(
         ) {
             when (val s = ui) {
                 SafetyNumberUi.Loading -> CircularProgressIndicator(modifier = Modifier.padding(32.dp))
-                is SafetyNumberUi.Error -> Text(
-                    s.message,
+                SafetyNumberUi.Error -> Text(
+                    t("contacts.safety.error"),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -580,9 +587,11 @@ public fun SafetyNumberScreen(
             }
             Spacer(Modifier.height(16.dp))
             Text(
-                text = "Compare this number with ${name ?: "your contact"} in person or on a call " +
-                    "you trust. Both of you see the same number. If it matches, nobody is " +
-                    "between you; if it does not, stop and check before sharing anything.",
+                text = if (name != null) {
+                    t("contacts.safety.body", mapOf("name" to name))
+                } else {
+                    t("contacts.safety.body_unnamed")
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,

@@ -8,7 +8,6 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  INVITED_BY_PREFIX,
   inviteHeadline,
   invitedByLine,
   memberCountLine,
@@ -80,6 +79,5 @@ describe("inviteHeadline", () => {
 describe("invitedByLine", () => {
   it("prefixes the fingerprint with `Invited by`", () => {
     expect(invitedByLine("12345 67890")).toBe("Invited by 12345 67890");
-    expect(INVITED_BY_PREFIX).toBe("Invited by");
   });
 });

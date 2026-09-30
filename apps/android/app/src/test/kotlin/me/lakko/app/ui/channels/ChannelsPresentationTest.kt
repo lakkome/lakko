@@ -5,6 +5,8 @@ package me.lakko.app.ui.channels
 
 import me.lakko.app.channels.ChannelHandle
 import me.lakko.app.channels.PostView
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -23,6 +25,7 @@ class ChannelsPresentationTest {
 
     private val zone: ZoneId = ZoneId.of("Europe/Berlin")
     private val en: Locale = Locale.UK
+    private val strings = EnglishForTests.strings
 
     /** 2026-09-16 14:05 in Berlin (CEST, UTC+2). */
     private val now: Long = Instant.parse("2026-09-16T12:05:00Z").toEpochMilli()
@@ -56,7 +59,7 @@ class ChannelsPresentationTest {
         posts: List<PostView>? = null,
         count: Int? = null,
         isOwner: Boolean = false,
-    ) = channelRowModel(channel, posts, count, isOwner, now, zone, use24h = true, locale = en)
+    ) = channelRowModel(channel, posts, count, isOwner, now, zone, use24h = true, locale = en, strings = strings)
 
     // --- row model -------------------------------------------------------------
 
@@ -84,10 +87,10 @@ class ChannelsPresentationTest {
 
     @Test
     fun `title precedence is shared name, then local name, then handle, then Channel`() {
-        assertEquals("Lakko News", channelTitle(channel(name = "local", handle = "h", sharedName = "Lakko News", sharedStamp = 1uL)))
-        assertEquals("local", channelTitle(channel(name = "local", handle = "h")))
-        assertEquals("lakkonews", channelTitle(channel(name = "  ", handle = "@lakkonews")))
-        assertEquals("Channel", channelTitle(channel(name = "  ")))
+        assertEquals("Lakko News", channelTitle(channel(name = "local", handle = "h", sharedName = "Lakko News", sharedStamp = 1uL), strings))
+        assertEquals("local", channelTitle(channel(name = "local", handle = "h"), strings))
+        assertEquals("lakkonews", channelTitle(channel(name = "  ", handle = "@lakkonews"), strings))
+        assertEquals("Channel", channelTitle(channel(name = "  "), strings))
     }
 
     @Test
@@ -96,11 +99,11 @@ class ChannelsPresentationTest {
         assertEquals("lakkonews", row(byHandle).title)
         assertEquals("Subscribed", row(byHandle).subtitle)
         assertEquals("3 subscribers", row(byHandle, count = 3, isOwner = true).subtitle)
-        assertNull(channelHeaderModel(byHandle, isOwner = false).handleLine)
+        assertNull(channelHeaderModel(byHandle, isOwner = false, strings).handleLine)
         // With a name the handle is informative and shown once, in the subtitle.
         val named = channel(name = "", handle = "lakkonews", sharedName = "Lakko News", sharedStamp = 1uL)
         assertEquals("@lakkonews", row(named).subtitle)
-        assertEquals("@lakkonews", channelHeaderModel(named, isOwner = false).handleLine)
+        assertEquals("@lakkonews", channelHeaderModel(named, isOwner = false, strings).handleLine)
     }
 
     @Test
@@ -108,12 +111,13 @@ class ChannelsPresentationTest {
         val h = channelHeaderModel(
             channel(name = "local", description = "old", sharedName = "Lakko News", sharedDescription = "Daily notes", sharedStamp = 5uL),
             isOwner = true,
+            strings,
         )
         assertEquals("Lakko News", h.title)
         assertEquals("Daily notes", h.description)
-        assertEquals("Your channel", h.statusLine)
-        assertNull(channelHeaderModel(channel(description = "  "), isOwner = false).description)
-        assertEquals("Subscribed", channelHeaderModel(channel(), isOwner = false).statusLine)
+        assertEquals("Your channel", h.statusLine.en)
+        assertNull(channelHeaderModel(channel(description = "  "), isOwner = false, strings).description)
+        assertEquals("Subscribed", channelHeaderModel(channel(), isOwner = false, strings).statusLine.en)
     }
 
     @Test
@@ -122,8 +126,8 @@ class ChannelsPresentationTest {
         assertEquals("@news", channelHandleLabel(" news "))
         assertNull(channelHandleLabel(""))
         assertNull(channelHandleLabel("@"))
-        assertEquals("1 subscriber", subscriberCountLine(1))
-        assertEquals("0 subscribers", subscriberCountLine(0))
+        assertEquals("1 subscriber", subscriberCountLine(1)?.en)
+        assertEquals("0 subscribers", subscriberCountLine(0)?.en)
         assertNull(subscriberCountLine(null))
     }
 
@@ -141,42 +145,42 @@ class ChannelsPresentationTest {
 
     @Test
     fun `relative time steps from just now through minutes, hours and days to a date`() {
-        assertEquals("just now", relativeTimeLabel(now - 30_000L, now, zone, en))
-        assertEquals("just now", relativeTimeLabel(now + 60_000L, now, zone, en))
-        assertEquals("5 min ago", relativeTimeLabel(now - 5 * 60_000L, now, zone, en))
-        assertEquals("2 h ago", relativeTimeLabel(now - 2 * 3_600_000L, now, zone, en))
-        assertEquals("3 d ago", relativeTimeLabel(now - 3 * 86_400_000L, now, zone, en))
-        assertEquals("1 Sept 2026", relativeTimeLabel(now - 15 * 86_400_000L, now, zone, en))
+        assertEquals("just now", relativeTimeLabel(now - 30_000L, now, zone, en, strings))
+        assertEquals("just now", relativeTimeLabel(now + 60_000L, now, zone, en, strings))
+        assertEquals("5 minutes ago", relativeTimeLabel(now - 5 * 60_000L, now, zone, en, strings))
+        assertEquals("2 hours ago", relativeTimeLabel(now - 2 * 3_600_000L, now, zone, en, strings))
+        assertEquals("3 days ago", relativeTimeLabel(now - 3 * 86_400_000L, now, zone, en, strings))
+        assertEquals("1 Sept 2026", relativeTimeLabel(now - 15 * 86_400_000L, now, zone, en, strings))
     }
 
     @Test
     fun `rotation line names a time only for a rotation in this session`() {
-        assertEquals("Keys rotate automatically.", rotationStatusLine(null, now, zone, en))
-        assertEquals("Keys rotated 2 h ago.", rotationStatusLine(now - 2 * 3_600_000L, now, zone, en))
+        assertEquals("Not refreshed yet.", rotationStatusLine(null, now, zone, en, strings))
+        assertEquals("Refreshed 2 hours ago.", rotationStatusLine(now - 2 * 3_600_000L, now, zone, en, strings))
     }
 
     // --- post time ----------------------------------------------------------------
 
     @Test
     fun `post time is relative while recent, then the date`() {
-        assertEquals("Just now", postRelativeTimeLabel(now - 20_000L, now, zone, en))
-        assertEquals("Just now", postRelativeTimeLabel(now + 5_000L, now, zone, en))
-        assertEquals("5 min ago", postRelativeTimeLabel(now - 5 * 60_000L, now, zone, en))
-        assertEquals("2 h ago", postRelativeTimeLabel(now - 2 * 3_600_000L, now, zone, en))
-        assertEquals("14 Sept", postRelativeTimeLabel(at("2026-09-14T07:03:00Z"), now, zone, en))
-        assertEquals("14 Sept 2025", postRelativeTimeLabel(at("2025-09-14T07:03:00Z"), now, zone, en))
+        assertEquals("just now", postRelativeTimeLabel(now - 20_000L, now, zone, en, strings))
+        assertEquals("just now", postRelativeTimeLabel(now + 5_000L, now, zone, en, strings))
+        assertEquals("5 minutes ago", postRelativeTimeLabel(now - 5 * 60_000L, now, zone, en, strings))
+        assertEquals("2 hours ago", postRelativeTimeLabel(now - 2 * 3_600_000L, now, zone, en, strings))
+        assertEquals("14 Sept", postRelativeTimeLabel(at("2026-09-14T07:03:00Z"), now, zone, en, strings))
+        assertEquals("14 Sept 2025", postRelativeTimeLabel(at("2025-09-14T07:03:00Z"), now, zone, en, strings))
     }
 
     @Test
     fun `post time never shows a clock with a meridiem`() {
-        val label = postRelativeTimeLabel(at("2026-09-16T07:03:00Z"), now, zone, Locale.US)
+        val label = postRelativeTimeLabel(at("2026-09-16T07:03:00Z"), now, zone, Locale.US, strings)
         assertFalse(label, label.contains("AM") || label.contains("PM"))
-        assertTrue(label, label.endsWith("ago") || label == "Just now")
+        assertTrue(label, label.endsWith("ago") || label == "just now")
     }
 
     @Test
     fun `unreadable reason is one plain sentence with no protocol words`() {
-        for (line in listOf(unreadableReasonLine(true), unreadableReasonLine(false))) {
+        for (line in listOf(unreadableReasonLine(true).en, unreadableReasonLine(false).en)) {
             for (banned in listOf("epoch", "seed", "cursor", "key window", "hex")) {
                 assertFalse("$line contains $banned", line.contains(banned, ignoreCase = true))
             }

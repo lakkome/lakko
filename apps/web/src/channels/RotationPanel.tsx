@@ -47,6 +47,8 @@ import type { WasmIdentity } from "./composer";
 import type { ChannelRotationPolicy, PublisherGroupHandle } from "./publisher-group-handle";
 import { channelsActions, channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { Icon } from "../ui/icons";
 
 export function RotationPanel(props: {
@@ -54,9 +56,10 @@ export function RotationPanel(props: {
   readonly publisherGroup: PublisherGroupHandle;
   readonly identity: WasmIdentity;
 }): JSX.Element {
-  const [status, setStatus] = createSignal("Loading...");
+  const [status, setStatus] = createLiveText();
+  setStatus(() => t("common.loading"));
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
 
   let cron: RotationCronHandle | null = null;
   let policy: ChannelRotationPolicy | null = null;
@@ -121,10 +124,11 @@ export function RotationPanel(props: {
   function refreshStatus(): void {
     const state = loadRotationState(props.channelIdHex);
     if (state === null || state.lastRotationMs <= 0n) {
-      setStatus("Not refreshed yet.");
+      setStatus(() => t("channels.rotation.never"));
       return;
     }
-    setStatus(`Refreshed ${relativeTimeLabel(state.lastRotationMs)}.`);
+    const since = state.lastRotationMs;
+    setStatus(() => t("channels.rotation.refreshed", { when: relativeTimeLabel(since) }));
   }
 
   /** Force a rotation regardless of the schedule. */
@@ -138,7 +142,8 @@ export function RotationPanel(props: {
       await runRotationOnce(context(), forcePolicy, wasm.channelRotationStateNew());
       refreshStatus();
     } catch (err) {
-      setError(`Could not refresh. Try again in a moment. (${String(err)})`);
+      console.warn("[channels] rotation failed", err);
+      setError(() => t("channels.rotation.error.refresh"));
     } finally {
       setBusy(false);
     }
@@ -156,7 +161,8 @@ export function RotationPanel(props: {
         policy: defaultPolicy,
         loadState: (): Promise<ChannelRotationState> => loadOrSeedState(),
         onError: (err: unknown): void => {
-          setError(`Could not check the channel's protection: ${String(err)}`);
+          console.warn("[channels] rotation check failed", err);
+          setError(() => t("channels.rotation.error.check"));
         },
       });
     })();
@@ -169,11 +175,8 @@ export function RotationPanel(props: {
 
   return (
     <section class="lk-card">
-      <h2>Protection</h2>
-      <p class="lk-card-desc">
-        Lakko refreshes the channel's protection on its own. Refresh it now if you think a
-        subscriber's device was compromised.
-      </p>
+      <h2>{t("channels.rotation.title")}</h2>
+      <p class="lk-card-desc">{t("channels.rotation.desc")}</p>
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
           <Icon name="shield" size={18} />
@@ -191,7 +194,7 @@ export function RotationPanel(props: {
             void onRotateNow();
           }}
         >
-          {busy() ? "Refreshing..." : "Refresh now"}
+          {busy() ? t("channels.rotation.refreshing") : t("channels.rotation.refresh_now")}
         </button>
       </div>
       <Show when={error()}>

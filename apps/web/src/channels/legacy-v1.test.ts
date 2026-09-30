@@ -93,7 +93,7 @@ describe("rethrowAsLegacyChannel", () => {
     } catch (e) {
       expect(e).toBeInstanceOf(LegacyChannelError);
       expect((e as LegacyChannelError).kind).toBe("channel");
-      expect((e as Error).message).toBe(LEGACY_CHANNEL_MESSAGE);
+      expect((e as Error).message).toBe(LEGACY_CHANNEL_MESSAGE());
     }
   });
 
@@ -113,18 +113,18 @@ describe("channelErrorMessage", () => {
   const fallback = (e: unknown): string => `Could not open the channel group: ${String(e)}`;
 
   it("returns the channel copy for the Rust refusal", () => {
-    expect(channelErrorMessage(new Error(RUST_REFUSAL), fallback)).toBe(LEGACY_CHANNEL_MESSAGE);
+    expect(channelErrorMessage(new Error(RUST_REFUSAL), fallback)).toBe(LEGACY_CHANNEL_MESSAGE());
   });
 
   it("returns the channel copy for an already-wrapped LegacyChannelError", () => {
     expect(channelErrorMessage(new LegacyChannelError("channel"), fallback)).toBe(
-      LEGACY_CHANNEL_MESSAGE,
+      LEGACY_CHANNEL_MESSAGE(),
     );
   });
 
   it("returns the invite-link copy for a link LegacyChannelError", () => {
     expect(channelErrorMessage(new LegacyChannelError("invite-link"), fallback)).toBe(
-      LEGACY_COPUBLISHER_LINK_MESSAGE,
+      LEGACY_COPUBLISHER_LINK_MESSAGE(),
     );
   });
 
@@ -132,29 +132,29 @@ describe("channelErrorMessage", () => {
   it("falls back for a network failure", () => {
     const msg = channelErrorMessage(new TypeError("Failed to fetch"), fallback);
     expect(msg).toContain("Failed to fetch");
-    expect(msg).not.toBe(LEGACY_CHANNEL_MESSAGE);
+    expect(msg).not.toBe(LEGACY_CHANNEL_MESSAGE());
   });
 });
 
 describe("copy", () => {
   it("says all three things the channel message must say, in order", () => {
-    const older = LEGACY_CHANNEL_MESSAGE.indexOf("older version");
-    const readable = LEGACY_CHANNEL_MESSAGE.indexOf("stay readable");
-    const create = LEGACY_CHANNEL_MESSAGE.indexOf("create a new channel");
+    const older = LEGACY_CHANNEL_MESSAGE().indexOf("older version");
+    const readable = LEGACY_CHANNEL_MESSAGE().indexOf("stay readable");
+    const create = LEGACY_CHANNEL_MESSAGE().indexOf("create a new channel");
     expect(older).toBeGreaterThanOrEqual(0);
     expect(readable).toBeGreaterThan(older);
     expect(create).toBeGreaterThan(readable);
-    expect(LEGACY_CHANNEL_MESSAGE).toContain("cannot be repaired");
+    expect(LEGACY_CHANNEL_MESSAGE()).toContain("cannot be repaired");
   });
 
   it("offers no repair or retry affordance", () => {
-    for (const msg of [LEGACY_CHANNEL_MESSAGE, LEGACY_COPUBLISHER_LINK_MESSAGE]) {
+    for (const msg of [LEGACY_CHANNEL_MESSAGE(), LEGACY_COPUBLISHER_LINK_MESSAGE()]) {
       expect(msg.toLowerCase()).not.toMatch(/\b(migrat|retry|try again|repair this|recover)\b/);
     }
   });
 
   it("tells the joiner to ask for a new link", () => {
-    expect(LEGACY_COPUBLISHER_LINK_MESSAGE).toContain("older version");
-    expect(LEGACY_COPUBLISHER_LINK_MESSAGE).toContain("new invite link");
+    expect(LEGACY_COPUBLISHER_LINK_MESSAGE()).toContain("older version");
+    expect(LEGACY_COPUBLISHER_LINK_MESSAGE()).toContain("new invite link");
   });
 });

@@ -15,6 +15,8 @@ struct ContactPickerScreen: View {
     var footer: String? = nil
     /// Called with the picked contact's chat.
     let onPick: (String) -> Void
+    /// ADR-0058 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         List {
@@ -27,7 +29,7 @@ struct ContactPickerScreen: View {
             }
             if viewModel.repositoryState.accepted.isEmpty {
                 Section {
-                    Text("No contacts yet. Add someone from the Contacts tab first.")
+                    Text(l10n.t("chats.new_chat.no_contacts"))
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
             } else {
@@ -47,7 +49,7 @@ struct ContactPickerScreen: View {
                                         Text(resolved.listLabel)
                                             .foregroundStyle(Color.lakkoText)
                                         if entry.groupIdHex == nil {
-                                            Text("Chat not set up yet")
+                                            Text(l10n.t("chats.new_chat.not_available"))
                                                 .font(.footnote)
                                                 .foregroundStyle(Color.lakkoTextMuted)
                                         }

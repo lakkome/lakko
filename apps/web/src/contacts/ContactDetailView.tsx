@@ -49,6 +49,9 @@ import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon, type IconName } from "../ui/icons";
+import { t } from "../l10n";
+import { namedActionKey } from "../ui/confirm-dialog";
+import { createLiveText } from "../l10n/live-text";
 import { computeSafetyNumber } from "./safety";
 import { safetyNumberRows } from "./safety-number-format";
 
@@ -106,7 +109,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   const [numberOpen, setNumberOpen] = createSignal(false);
   const [number, setNumber] = createSignal<string | null>(null);
   const [numberBusy, setNumberBusy] = createSignal(false);
-  const [numberError, setNumberError] = createSignal<string | null>(null);
+  const [numberError, setNumberError] = createLiveText();
   const [editing, setEditing] = createSignal(false);
   const [draft, setDraft] = createSignal("");
 
@@ -128,7 +131,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     if (number() !== null) return;
     const my = props.myPubkey();
     if (my === null) {
-      setNumberError("Sign in again to see the safety number.");
+      setNumberError(() => t("contacts.safety.sign_in"));
       return;
     }
     setNumberBusy(true);
@@ -136,7 +139,8 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     try {
       setNumber(await computeSafetyNumber(my, base64Decode(props.personKeyB64)));
     } catch (e) {
-      setNumberError(e instanceof Error ? e.message : String(e));
+      console.warn("[contacts] safety number failed", e);
+      setNumberError(() => t("contacts.safety.error"));
     } finally {
       setNumberBusy(false);
     }
@@ -158,13 +162,12 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   }
 
   async function confirmRemove(): Promise<void> {
+    const who = name();
     const ok = await requestConfirm({
-      title: "Remove this contact?",
-      body:
-        "Any chats you share stay as they are; only your contact list changes. " +
-        "You can add them again later.",
-      confirmLabel: `Remove ${name()}`,
-      cancelLabel: "Cancel",
+      title: t("contacts.remove.title"),
+      body: t("contacts.remove.body"),
+      confirmLabel: namedActionKey("common.remove", "contacts.remove.confirm_named", who),
+      cancelLabel: t("common.cancel"),
       tone: "danger",
     });
     if (ok) props.onRemove();
@@ -178,7 +181,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     run: () => void;
   }> => {
     const noChat = props.chatHref === null;
-    const callTitle = noChat ? "Send a message first to start a call." : undefined;
+    const callTitle = noChat ? t("contacts.detail.call_needs_chat") : undefined;
     // Message is offered wherever the card was opened from (spec section
     // 2.1); whether it appears at all is the rule's call, not this file's.
     const message =
@@ -186,12 +189,12 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
         ? []
         : [
             {
-              label: "Message",
+              label: t("contacts.detail.message"),
               icon: "chat" as IconName,
               disabled: props.busy() || (noChat && !props.canStartChat),
               title:
                 noChat && !props.canStartChat
-                  ? "This contact was added before chats could be started from here. Ask them to message you."
+                  ? t("contacts.detail.message_unavailable")
                   : undefined,
               run: () => props.onMessage(),
             },
@@ -205,14 +208,14 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
       ? []
       : [
           {
-            label: "Call",
+            label: t("chat.call.voice"),
             icon: "phone" as IconName,
             disabled: props.busy() || noChat,
             title: callTitle,
             run: () => props.onCall(false),
           },
           {
-            label: "Video",
+            label: t("chat.media.video"),
             icon: "video" as IconName,
             disabled: props.busy() || noChat,
             title: callTitle,
@@ -232,7 +235,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           onClick={() => props.onBack()}
         >
           <Icon name="back" size={16} />
-          Contacts
+          {t("nav.contacts")}
         </button>
 
         <header class="lk-contact-head">
@@ -242,10 +245,10 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
             {(u) => <div class="lk-contact-username">{u()}</div>}
           </Show>
           <Show when={resolved().theirName}>
-            {(their) => <div class="lk-meta">Calls themselves {their()}</div>}
+            {(their) => <div class="lk-meta">{t("contacts.detail.their_name", { name: their() })}</div>}
           </Show>
           <Show when={resolved().usernameNotVerified}>
-            <div class="lk-meta">Username not verified</div>
+            <div class="lk-meta">{t("contacts.detail.username_not_verified")}</div>
           </Show>
         </header>
 
@@ -253,7 +256,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
             screen is the conversation's own, there is nothing left to put in
             it. */}
         <Show when={actions().length > 0}>
-          <div class="lk-detail-actions" role="group" aria-label="Contact actions">
+          <div class="lk-detail-actions" role="group" aria-label={t("contacts.detail.actions")}>
             <For each={actions()}>
               {(a) => (
                 <button
@@ -279,11 +282,8 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               <Icon name="shield" size={18} />
             </span>
             <div class="lk-card-row-body">
-              <span class="lk-card-row-title">Verify safety number</span>
-              <span class="lk-card-row-sub">
-                Compare it with {name()} in person or on a call. Matching numbers mean nobody is
-                between you.
-              </span>
+              <span class="lk-card-row-title">{t("contacts.safety.title")}</span>
+              <span class="lk-card-row-sub">{t("contacts.safety.body", { name: name() })}</span>
             </div>
             <button
               type="button"
@@ -293,7 +293,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               disabled={numberBusy()}
               onClick={() => void toggleNumber()}
             >
-              {numberOpen() ? "Hide" : "Show"}
+              {numberOpen() ? t("chat.attachment.hide") : t("contacts.safety.show")}
             </button>
           </div>
           <Show when={numberOpen()}>
@@ -301,12 +301,12 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               when={number()}
               fallback={
                 <p class="lk-meta lk-center" style={{ margin: 0 }}>
-                  {numberBusy() ? "Loading..." : (numberError() ?? "")}
+                  {numberBusy() ? t("common.loading") : (numberError() ?? "")}
                 </p>
               }
             >
               {(n) => (
-                <div class="lk-safety-number" aria-label="Safety number">
+                <div class="lk-safety-number" aria-label={t("contacts.safety.number")}>
                   <For each={safetyNumberRows(n())}>
                     {(row) => (
                       <div class="lk-safety-row">
@@ -328,11 +328,11 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                 <Icon name="pencil" size={18} />
               </span>
               <div class="lk-card-row-body">
-                <span class="lk-card-row-title">Name</span>
+                <span class="lk-card-row-title">{t("contacts.rename.title")}</span>
                 <span class="lk-card-row-sub">
                   {props.localName.length > 0
-                    ? "Your name for this contact. Only you see it."
-                    : "Shown as they set it. You can give them your own name."}
+                    ? t("contacts.rename.sub_local")
+                    : t("contacts.rename.sub_theirs")}
                 </span>
               </div>
               <button
@@ -340,7 +340,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                 class="lk-card-row-action"
                 onClick={() => (editing() ? setEditing(false) : startEdit())}
               >
-                Rename
+                {t("contacts.rename.action")}
               </button>
             </div>
             <Show when={editing()}>
@@ -348,8 +348,8 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                 <input
                   type="text"
                   value={draft()}
-                  placeholder="Leave blank to use their own name"
-                  aria-label="Your name for this contact"
+                  placeholder={t("contacts.rename.placeholder")}
+                  aria-label={t("contacts.rename.field")}
                   onInput={(e) => setDraft(e.currentTarget.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") saveEdit();
@@ -358,10 +358,10 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                   style={{ flex: 1 }}
                 />
                 <button type="button" class="primary" onClick={saveEdit}>
-                  Save
+                  {t("common.save")}
                 </button>
                 <button type="button" class="ghost" onClick={() => setEditing(false)}>
-                  Cancel
+                  {t("common.cancel")}
                 </button>
               </div>
             </Show>
@@ -375,8 +375,8 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                 <Icon name="trash" size={18} />
               </span>
               <div class="lk-card-row-body">
-                <span class="lk-card-row-title">Remove contact</span>
-                <span class="lk-card-row-sub">Takes {name()} off your contact list on this account.</span>
+                <span class="lk-card-row-title">{t("contacts.remove.control")}</span>
+                <span class="lk-card-row-sub">{t("contacts.remove.sub", { name: name() })}</span>
               </div>
               <button
                 type="button"
@@ -384,7 +384,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                 disabled={props.busy()}
                 onClick={() => void confirmRemove()}
               >
-                Remove
+                {t("common.remove")}
               </button>
             </div>
           </section>
@@ -413,10 +413,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               </span>
               <div class="lk-card-row-body">
                 <span class="lk-card-row-title">{DELETE_CHAT_CONTROL()}</span>
-                <span class="lk-card-row-sub">
-                  Removes this conversation and everything in it from this
-                  device. It cannot be undone.
-                </span>
+                <span class="lk-card-row-sub">{t("chat.delete.sub")}</span>
               </div>
               <button
                 type="button"
@@ -424,7 +421,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                 disabled={props.busy()}
                 onClick={() => props.onDeleteChat?.()}
               >
-                Delete
+                {t("common.delete")}
               </button>
             </div>
           </section>

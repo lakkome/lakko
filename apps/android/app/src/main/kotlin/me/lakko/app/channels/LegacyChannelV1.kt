@@ -123,6 +123,25 @@ public object LegacyChannelV1 {
         isLegacyPublisherGroupError(error) -> CHANNEL_MESSAGE
         else -> fallback(error)
     }
+
+    /**
+     * [describe] as a catalog message (ADR-0058): `channels.legacy.*` when the
+     * retired-v1 copy applies, otherwise [fallback].
+     */
+    public fun describeText(
+        error: Throwable,
+        fallback: (Throwable) -> me.lakko.app.l10n.UiText,
+    ): me.lakko.app.l10n.UiText = when {
+        error is LegacyChannelException -> error.text
+        isLegacyPublisherGroupError(error) -> me.lakko.app.l10n.UiText(CHANNEL_KEY)
+        else -> fallback(error)
+    }
+
+    /** Catalog key of [CHANNEL_MESSAGE]. */
+    public const val CHANNEL_KEY: String = "channels.legacy.channel"
+
+    /** Catalog key of [CO_PUBLISHER_LINK_MESSAGE]. */
+    public const val CO_PUBLISHER_LINK_KEY: String = "channels.legacy.copublisher_link"
 }
 
 /** Which of the two retired-v1 surfaces a [LegacyChannelException] describes. */
@@ -148,7 +167,16 @@ public class LegacyChannelException(
         LegacyChannelKind.INVITE_LINK -> LegacyChannelV1.CO_PUBLISHER_LINK_MESSAGE
     },
 ) {
-    /** The user-facing copy for this refusal — never null, unlike [Throwable.message]. */
+    /** What the screen shows for this refusal, in the interface language (ADR-0058). */
+    public val text: me.lakko.app.l10n.UiText
+        get() = me.lakko.app.l10n.UiText(
+            when (kind) {
+                LegacyChannelKind.CHANNEL -> LegacyChannelV1.CHANNEL_KEY
+                LegacyChannelKind.INVITE_LINK -> LegacyChannelV1.CO_PUBLISHER_LINK_KEY
+            },
+        )
+
+    /** The English copy for this refusal (logs) — never null, unlike [Throwable.message]. */
     override val message: String
         get() = when (kind) {
             LegacyChannelKind.CHANNEL -> LegacyChannelV1.CHANNEL_MESSAGE

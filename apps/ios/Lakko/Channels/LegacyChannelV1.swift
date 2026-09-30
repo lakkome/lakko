@@ -56,17 +56,14 @@ public enum LegacyChannelV1 {
     static let rustRefusalMarker = "legacy v1 PublisherGroup state"
 
     /// User-facing copy for a channel whose MLS state predates the v2
-    /// derivation.
-    public static let channelMessage =
-        "This channel was created by an older version of Lakko and cannot be opened in this build. "
-        + "Posts you already published stay readable for your subscribers. "
-        + "To publish again, create a new channel — this one cannot be repaired."
+    /// derivation (`channels.legacy.channel`, ADR-0058).
+    public static var channelMessage: String { Localization.text("channels.legacy.channel") }
 
     /// User-facing copy for a `/g/` co-publisher link minted under the v1
-    /// derivation.
-    public static let coPublisherLinkMessage =
-        "This co-publisher invite link was created by an older version of Lakko and no longer works. "
-        + "Ask the channel owner to send you a new invite link."
+    /// derivation (`channels.legacy.copublisher_link`, ADR-0058).
+    public static var coPublisherLinkMessage: String {
+        Localization.text("channels.legacy.copublisher_link")
+    }
 
     /// True when `groupId` carries the retired 41-byte v1 PublisherGroup shape.
     ///

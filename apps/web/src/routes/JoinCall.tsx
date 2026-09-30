@@ -347,9 +347,9 @@ export default function JoinCall() {
             <p>{t("call.link.loading")}</p>
           </Show>
           <Show when={!decoded.loading && decoded() === null && rateLimited()}>
-            <p>{INVITE_LINK_RATE_LIMITED}</p>
+            <p>{INVITE_LINK_RATE_LIMITED()}</p>
             <button type="button" class="primary" onClick={() => void refetch()}>
-              {INVITE_LINK_TRY_AGAIN}
+              {INVITE_LINK_TRY_AGAIN()}
             </button>
             <A href={paths.home}>{t("common.open_lakko")}</A>
           </Show>

@@ -553,7 +553,7 @@ fun JoinCallScreen(
         when {
             ui.loading -> Text(t("call.link.loading"))
             ui.rateLimited -> {
-                Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY)
+                Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT.text())
                 TextButton(onClick = { viewModel.retryDecode() }) { Text(t("common.try_again")) }
                 TextButton(onClick = onExit) { Text(t("common.back")) }
             }

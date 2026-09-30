@@ -86,6 +86,8 @@ import {
   channelsState,
 } from "../state/channels-state";
 import { loadWasm } from "../wasm";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
@@ -119,8 +121,8 @@ function ChannelHead(props: {
       <button
         type="button"
         class="lk-icon-button lk-narrow-only"
-        title="Channels"
-        aria-label="Back to channels"
+        title={t("nav.channels")}
+        aria-label={t("channels.back")}
         onClick={(): void => navigate(paths.channels)}
       >
         <Icon name="back" size={20} />
@@ -190,9 +192,7 @@ function ChannelInfoBody(props: {
             is left out rather than shown as zero. */}
         <Show when={sections().includes("subscriber-count") && subscribers()}>
           {(n) => (
-            <div class="lk-meta">
-              {n()} {n() === 1 ? "subscriber" : "subscribers"}
-            </div>
+            <div class="lk-meta">{t("channels.info.subscribers", { count: n() })}</div>
           )}
         </Show>
       </header>
@@ -204,10 +204,8 @@ function ChannelInfoBody(props: {
               <Icon name="settings" size={18} />
             </span>
             <div class="lk-card-row-body">
-              <span class="lk-card-row-title">Manage channel</span>
-              <span class="lk-card-row-sub">
-                Its name and description, who reads it, and who else may post.
-              </span>
+              <span class="lk-card-row-title">{t("channels.manage.title")}</span>
+              <span class="lk-card-row-sub">{t("channels.info.manage_sub")}</span>
             </div>
             <button
               type="button"
@@ -215,7 +213,7 @@ function ChannelInfoBody(props: {
               style={{ color: "var(--accent)" }}
               onClick={(): void => props.onManage()}
             >
-              Open
+              {t("chat.attachment.open")}
             </button>
           </div>
         </section>
@@ -228,18 +226,15 @@ function ChannelInfoBody(props: {
               <Icon name="trash" size={18} />
             </span>
             <div class="lk-card-row-body">
-              <span class="lk-card-row-title">Stop following</span>
-              <span class="lk-card-row-sub">
-                Takes the channel off your list and stops this device reading
-                it. You can subscribe again later.
-              </span>
+              <span class="lk-card-row-title">{t("channels.unsubscribe.action")}</span>
+              <span class="lk-card-row-sub">{t("channels.info.unsubscribe_sub")}</span>
             </div>
             <button
               type="button"
               class="danger lk-card-row-action"
               onClick={(): void => props.onUnsubscribe()}
             >
-              Stop following
+              {t("channels.unsubscribe.action")}
             </button>
           </div>
         </section>
@@ -280,7 +275,7 @@ function PostList(props: {
         when={ordered().length > 0}
         fallback={
           <p class="lk-channel-empty">
-            {props.loading ? "Loading..." : (props.emptyText ?? "No posts yet.")}
+            {props.loading ? t("common.loading") : (props.emptyText ?? t("channels.posts.empty"))}
           </p>
         }
       >
@@ -307,12 +302,13 @@ function PostList(props: {
  */
 async function confirmStopFollowing(channelIdHex: string, name: string): Promise<boolean> {
   const ok = await requestConfirm({
-    title: `Stop following ${name}?`,
-    body:
-      "It leaves your list and this device stops reading it. " +
-      "You can subscribe again later.",
-    confirmLabel: "Stop following",
-    cancelLabel: "Cancel",
+    title:
+      name.trim().length > 0
+        ? t("channels.unsubscribe.title_named", { name })
+        : t("channels.unsubscribe.title"),
+    body: t("channels.unsubscribe.body"),
+    confirmLabel: t("channels.unsubscribe.action"),
+    cancelLabel: t("common.cancel"),
     tone: "danger",
   });
   if (!ok) return false;
@@ -370,7 +366,7 @@ const NewChannel: Component = () => {
   // subscribe by handle instead of the raw channel id.
   const [handle, setHandle] = createSignal("");
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
 
   /** Generate a fresh 16-byte channel id locally — the server has no role in
    *  id allocation per ADR-0010 (the id is a pseudonym chosen by the
@@ -386,12 +382,12 @@ const NewChannel: Component = () => {
   async function onCreate(): Promise<void> {
     if (busy()) return;
     if (name().trim().length === 0) {
-      setError("Give the channel a name.");
+      setError(() => t("channels.new.error.no_name"));
       return;
     }
     const secrets = auth.identitySecrets();
     if (secrets === null) {
-      setError("Sign in again to create a channel.");
+      setError(() => t("channels.new.error.sign_in"));
       return;
     }
     setBusy(true);
@@ -408,17 +404,17 @@ const NewChannel: Component = () => {
         try {
           await registerChannelHandle(wantedHandle, id, secrets.sessionToken);
         } catch (err) {
-          const token = anonTokenMessage(
-            err,
-            "Could not claim the handle. Check your connection and try again.",
-          );
+          const taken = `@${wantedHandle}`;
           if (err instanceof DiscoveryHttpError && err.status === 409) {
-            setError(`@${wantedHandle} is already taken. Pick another, or leave it blank.`);
-          } else if (token !== null) {
+            setError(() => t("channels.new.error.handle_taken", { handle: taken }));
+          } else if (anonTokenMessage(err, "") !== null) {
             // ADR-0054 S3: the lookup and the register each spend a token.
-            setError(token);
+            setError(
+              () => anonTokenMessage(err, t("channels.new.error.handle_offline")) ?? "",
+            );
           } else {
-            setError(`Could not claim the handle. Try again. (${String(err)})`);
+            console.warn("[channels] handle claim failed", err);
+            setError(() => t("channels.new.error.handle"));
           }
           setBusy(false);
           return;
@@ -434,7 +430,7 @@ const NewChannel: Component = () => {
       // the group, and the seed every subscriber holds, with it.
       const identity = chats.accountIdentity();
       if (identity === null) {
-        setError("Sign in again to create a channel.");
+        setError(() => t("channels.new.error.sign_in"));
         return;
       }
       await awaitChannelsHydration();
@@ -464,11 +460,12 @@ const NewChannel: Component = () => {
       navigate(paths.channel(id));
     } catch (err) {
       if (err instanceof LegacyChannelError) {
-        setError(err.message);
+        setError(() => err.text());
       } else if (apiError.is(err)) {
-        setError(channelErrorText(err));
+        setError(() => channelErrorText(err));
       } else {
-        setError(`Could not reach Lakko. Check your connection and try again. (${String(err)})`);
+        console.warn("[channels] create failed", err);
+        setError(() => t("common.error.offline"));
       }
       setBusy(false);
     }
@@ -482,11 +479,11 @@ const NewChannel: Component = () => {
         onClick={(): void => navigate(paths.channels)}
       >
         <Icon name="back" size={16} />
-        Channels
+        {t("nav.channels")}
       </button>
       <div class="lk-page-head">
-        <h1>New channel</h1>
-        <p>Subscribers see the name and description. They travel encrypted; only ciphertext reaches the server.</p>
+        <h1>{t("channels.new.title")}</h1>
+        <p>{t("channels.new.subtitle")}</p>
       </div>
       <form
         class="lk-card"
@@ -496,7 +493,7 @@ const NewChannel: Component = () => {
         }}
       >
         <label>
-          Name
+          {t("channels.field.name")}
           <input
             type="text"
             required
@@ -507,7 +504,7 @@ const NewChannel: Component = () => {
           />
         </label>
         <label>
-          Description (optional)
+          {t("channels.field.description_optional")}
           <textarea
             rows={3}
             value={description()}
@@ -517,11 +514,11 @@ const NewChannel: Component = () => {
           />
         </label>
         <label>
-          Public @handle (optional)
+          {t("channels.new.handle_label")}
           <input
             type="text"
             value={handle()}
-            placeholder="@my-channel"
+            placeholder={t("channels.new.handle_placeholder")}
             autocapitalize="none"
             autocomplete="off"
             spellcheck={false}
@@ -529,7 +526,7 @@ const NewChannel: Component = () => {
               setHandle(e.currentTarget.value);
             }}
           />
-          <span class="lk-meta lk-block lk-mt-4">Others can find and subscribe to the channel by it.</span>
+          <span class="lk-meta lk-block lk-mt-4">{t("channels.new.handle_hint")}</span>
         </label>
         <Show when={error()}>
           {(msg) => (
@@ -545,10 +542,10 @@ const NewChannel: Component = () => {
             onClick={(): void => navigate(paths.channels)}
             disabled={busy()}
           >
-            Cancel
+            {t("common.cancel")}
           </button>
           <button type="submit" class="primary" disabled={busy()}>
-            {busy() ? "Creating..." : "Create"}
+            {busy() ? t("chats.new_group.creating") : t("channels.new.create")}
           </button>
         </div>
       </form>
@@ -573,10 +570,10 @@ const JoinCoPublisher: Component = () => {
   const [link, setLink] = createSignal("");
   const [name, setName] = createSignal("");
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
   /** `Try again` under a failed request — only for the general failure. */
   const [offerRetry, setOfferRetry] = createSignal(false);
-  const [status, setStatus] = createSignal<string | null>(null);
+  const [status, setStatus] = createLiveText();
 
   async function onJoin(): Promise<void> {
     const l = link().trim();
@@ -587,13 +584,13 @@ const JoinCoPublisher: Component = () => {
     // lose both on the next reload.
     const identity = chats.accountIdentity();
     if (auth.identitySecrets() === null || identity === null) {
-      setError("Sign in again to join a channel.");
+      setError(() => t("channels.join.error.sign_in"));
       return;
     }
     setBusy(true);
     setError(null);
     setOfferRetry(false);
-    setStatus("Sending your request...");
+    setStatus(() => t("group.join.sending"));
     try {
       await awaitChannelsHydration();
       const ds = new DsClient();
@@ -601,7 +598,7 @@ const JoinCoPublisher: Component = () => {
       // The proposal's KeyPackage private keys are in the provider now; get
       // them on disk so a reload while waiting can still open the Welcome.
       channelsActions.notePublisherGroupChanged();
-      setStatus("Waiting for the channel owner to approve...");
+      setStatus(() => t("channels.join.waiting"));
       let keys: Awaited<ReturnType<typeof pollForCoPublishWelcome>> = null;
       for (let i = 0; i < 60 && keys === null; ++i) {
         keys = await pollForCoPublishWelcome(
@@ -615,12 +612,12 @@ const JoinCoPublisher: Component = () => {
         if (keys === null) await new Promise((r) => setTimeout(r, 3000));
       }
       if (keys === null) {
-        setError("No approval yet. Try again once the owner has approved.");
+        setError(() => t("channels.join.no_approval"));
         return;
       }
       channelsActions.addChannel({
         id: channelIdHex,
-        localName: name().trim() || "Co-published channel",
+        localName: name().trim() || t("channels.join.default_name"),
         localDescription: "",
         addedAtMs: Date.now(),
       });
@@ -631,7 +628,7 @@ const JoinCoPublisher: Component = () => {
       // eslint-disable-next-line no-console
       console.warn("co-publisher join: request failed", err);
       const notice = coPublisherJoinFailure(err);
-      setError(notice.message);
+      setError(notice.render);
       setOfferRetry(notice.offerRetry);
     } finally {
       setBusy(false);
@@ -647,14 +644,11 @@ const JoinCoPublisher: Component = () => {
         onClick={(): void => navigate(paths.channels)}
       >
         <Icon name="back" size={16} />
-        Channels
+        {t("nav.channels")}
       </button>
       <div class="lk-page-head">
-        <h1>Join as co-publisher</h1>
-        <p>
-          Paste the link a channel owner shared. Once they approve, this device can post to the
-          channel.
-        </p>
+        <h1>{t("channels.join.title")}</h1>
+        <p>{t("channels.join.subtitle")}</p>
       </div>
       <form
         class="lk-card"
@@ -664,7 +658,7 @@ const JoinCoPublisher: Component = () => {
         }}
       >
         <label>
-          Link
+          {t("channels.join.link_label")}
           <input
             type="text"
             placeholder="https://lakko.me/g/..."
@@ -679,7 +673,7 @@ const JoinCoPublisher: Component = () => {
           />
         </label>
         <label>
-          Name on this device (optional)
+          {t("channels.join.name_label")}
           <input
             type="text"
             value={name()}
@@ -711,7 +705,7 @@ const JoinCoPublisher: Component = () => {
               disabled={busy()}
               onClick={(): void => void onJoin()}
             >
-              {JOIN_TRY_AGAIN}
+              {JOIN_TRY_AGAIN()}
             </button>
           </div>
         </Show>
@@ -722,10 +716,10 @@ const JoinCoPublisher: Component = () => {
             onClick={(): void => navigate(paths.channels)}
             disabled={busy()}
           >
-            Cancel
+            {t("common.cancel")}
           </button>
           <button type="submit" class="primary" disabled={busy() || link().trim().length === 0}>
-            {busy() ? "Requesting..." : "Request to join"}
+            {busy() ? t("channels.join.requesting") : t("group.join.request")}
           </button>
         </div>
       </form>
@@ -741,7 +735,7 @@ const ChannelView: Component = () => {
   const params = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [publishBusy, setPublishBusy] = createSignal(false);
-  const [publishError, setPublishError] = createSignal<string | null>(null);
+  const [publishError, setPublishError] = createLiveText();
   const [composeText, setComposeText] = createSignal("");
   const [manageOpen, setManageOpen] = createSignal(false);
   const [infoOpen, setInfoOpen] = createSignal(false);
@@ -780,7 +774,7 @@ const ChannelView: Component = () => {
     if (text.length === 0) return;
     const keys = channelsState.keysByChannel().get(params.id);
     if (keys === undefined) {
-      setPublishError("This device cannot post to this channel.");
+      setPublishError(() => t("channels.publish.error.not_publisher"));
       return;
     }
     setPublishBusy(true);
@@ -794,9 +788,15 @@ const ChannelView: Component = () => {
       await refetch();
     } catch (err) {
       if (apiError.is(err)) {
-        setPublishError(`Could not publish. ${channelErrorText(err)}`);
+        setPublishError(() =>
+          t("common.sentence_pair", {
+            first: t("channels.publish.error.prefix"),
+            second: channelErrorText(err),
+          }),
+        );
       } else {
-        setPublishError(`Could not publish. Try again. (${String(err)})`);
+        console.warn("[channels] publish failed", err);
+        setPublishError(() => t("channels.publish.error.generic"));
       }
     } finally {
       setPublishBusy(false);
@@ -827,7 +827,7 @@ const ChannelView: Component = () => {
    *  the handle. */
   const subLine = (): string => {
     const m = meta();
-    if (manageOpen()) return "Manage";
+    if (manageOpen()) return t("common.manage");
     if (m.description.length > 0) return m.description;
     return m.handle;
   };
@@ -853,8 +853,8 @@ const ChannelView: Component = () => {
                 <button
                   type="button"
                   class="lk-icon-button"
-                  title={manageOpen() ? "Back to posts" : "Manage"}
-                  aria-label={manageOpen() ? "Back to posts" : "Manage channel"}
+                  title={manageOpen() ? t("channels.manage.back") : t("common.manage")}
+                  aria-label={manageOpen() ? t("channels.manage.back") : t("channels.manage.title")}
                   aria-pressed={manageOpen()}
                   onClick={(): void => {
                     setManageOpen(!manageOpen());
@@ -900,14 +900,14 @@ const ChannelView: Component = () => {
             fallback={
               <div class="lk-empty">
                 <Icon name="channels" size={40} strokeWidth={1.4} />
-                <strong>Subscribe to read this channel</strong>
-                <span>Posts appear here once the channel lets this device in.</span>
+                <strong>{t("channels.subscribe.prompt_title")}</strong>
+                <span>{t("channels.subscribe.prompt_body")}</span>
                 <button
                   type="button"
                   class="primary"
                   onClick={(): void => navigate(paths.channelSubscribe(params.id))}
                 >
-                  Subscribe
+                  {t("channels.subscribe.action")}
                 </button>
               </div>
             }
@@ -917,7 +917,7 @@ const ChannelView: Component = () => {
                 posts={data()?.posts ?? []}
                 decodedByCursor={decodedByCursor()}
                 loading={data.loading}
-                emptyText="No posts yet. Write the first one below."
+                emptyText={t("channels.posts.empty_owner")}
               />
               <PublishComposer
                 value={composeText()}
@@ -955,7 +955,7 @@ const ChannelSubscribe: Component = () => {
   const [bootstrap, setBootstrap] = createSignal<
     "idle" | "registering" | "polling" | "active" | "error"
   >("idle");
-  const [bootstrapError, setBootstrapError] = createSignal<string | null>(null);
+  const [bootstrapError, setBootstrapError] = createLiveText();
   const [posts, setPosts] = createSignal<ReadonlyArray<ChannelPostView>>([]);
   const [decodedByCursor, setDecodedByCursor] = createSignal<ReadonlyMap<number, PostDecode>>(
     new Map(),
@@ -1023,9 +1023,10 @@ const ChannelSubscribe: Component = () => {
       }
     } catch (err) {
       if (apiError.is(err)) {
-        setBootstrapError(channelErrorText(err));
+        setBootstrapError(() => channelErrorText(err));
       } else {
-        setBootstrapError(String(err));
+        console.warn("[channels] subscribe failed", err);
+        setBootstrapError(null);
       }
       setBootstrap("error");
     }
@@ -1146,17 +1147,17 @@ const ChannelSubscribe: Component = () => {
     switch (bootstrap()) {
       case "idle":
       case "registering":
-        return "Subscribing...";
+        return t("channels.subscribe.status.subscribing");
       case "polling":
-        return "Waiting to be let in...";
+        return t("channels.subscribe.status.waiting");
       case "active": {
         // UX spec §5 — the description under the header when present.
         const m = meta();
         if (m.description.length > 0) return m.description;
-        return m.handle.length > 0 ? m.handle : "Subscribed";
+        return m.handle.length > 0 ? m.handle : t("channels.subscribe.status.subscribed");
       }
       case "error":
-        return "Not subscribed";
+        return t("channels.subscribe.status.not_subscribed");
     }
   };
 
@@ -1196,15 +1197,17 @@ const ChannelSubscribe: Component = () => {
         <Switch>
           <Match when={bootstrap() === "polling"}>
             <div class="lk-alert info lk-channel-notice" role="status">
-              Subscribed. Posts appear once the channel lets this device in; that usually takes a
-              moment.
+              {t("channels.subscribe.waiting_notice")}
             </div>
           </Match>
           <Match when={bootstrap() === "error"}>
             <div class="lk-alert danger lk-channel-notice" role="alert">
               {bootstrapError() === null
-                ? "Could not subscribe. Try again later."
-                : `Could not subscribe. ${bootstrapError()}`}
+                ? t("channels.subscribe.error.generic")
+                : t("common.sentence_pair", {
+                    first: t("channels.subscribe.error.prefix"),
+                    second: bootstrapError() ?? "",
+                  })}
             </div>
           </Match>
         </Switch>
@@ -1212,7 +1215,7 @@ const ChannelSubscribe: Component = () => {
           posts={bootstrap() === "active" ? posts() : []}
           decodedByCursor={decodedByCursor()}
           loading={bootstrap() !== "active" && bootstrap() !== "error"}
-          emptyText={bootstrap() === "error" ? "" : "No posts yet."}
+          emptyText={bootstrap() === "error" ? "" : t("channels.posts.empty")}
         />
       </div>
     </article>

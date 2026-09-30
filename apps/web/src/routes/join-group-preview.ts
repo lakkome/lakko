@@ -17,6 +17,7 @@
  * offering a join without a preview.
  */
 import type { GroupInviteFragment } from "../contacts/invite-link";
+import { t } from "../l10n";
 
 /** What `GroupInviteCapability.openPreview` yields, as plain data. */
 export interface GroupInvitePreviewData {
@@ -38,44 +39,43 @@ export interface InviteHeadline {
   readonly members: string | null;
 }
 
-/** The prefix of the muted foot line that carries the issuer fingerprint. */
-export const INVITED_BY_PREFIX = "Invited by";
-
-const UNNAMED_GROUP = "a group";
-const NO_INVITER = "You are invited to";
-
 function trimmed(value: string | undefined): string | null {
-  const t = value?.trim() ?? "";
-  return t.length > 0 ? t : null;
+  const v = value?.trim() ?? "";
+  return v.length > 0 ? v : null;
 }
 
-/** `1 member` / `N members`. */
+/** `1 member` / `N members`. A malformed count reads as none. */
 export function memberCountLine(count: number): string {
   const n = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
-  return n === 1 ? "1 member" : `${n} members`;
+  return t("chat.members.count", { count: n });
 }
 
-/** The headline for a preview, or for no preview at all (`null`). */
+/** The headline for a preview, or for no preview at all (`null`). The lead
+ *  is one catalog sentence per shape (`invite.group.lead_*`), so no language
+ *  has to glue a subject to a fixed "a group". */
 export function inviteHeadline(preview: GroupInvitePreviewData | null): InviteHeadline {
   if (preview === null) {
-    return { lead: `${NO_INVITER} ${UNNAMED_GROUP}`, title: null, members: null };
+    return { lead: t("invite.group.lead_anonymous_unnamed"), title: null, members: null };
   }
   const inviter = trimmed(preview.inviterName);
   const group = trimmed(preview.groupName);
-  const subject = inviter === null ? NO_INVITER : `${inviter} invites you to`;
-  return {
-    lead: group === null ? `${subject} ${UNNAMED_GROUP}` : subject,
-    title: group,
-    members: memberCountLine(preview.memberCount),
-  };
+  let lead: string;
+  if (inviter === null) {
+    lead = group === null ? t("invite.group.lead_anonymous_unnamed") : t("invite.group.lead_anonymous");
+  } else {
+    lead =
+      group === null
+        ? t("invite.group.lead_named_unnamed", { name: inviter })
+        : t("invite.group.lead_named", { name: inviter });
+  }
+  return { lead, title: group, members: memberCountLine(preview.memberCount) };
 }
 
 /** The muted foot line: `Invited by <fingerprint>`. */
 export function invitedByLine(fingerprint: string): string {
-  return `${INVITED_BY_PREFIX} ${fingerprint}`;
+  return t("invite.group.invited_by", { fingerprint });
 }
 
-/** The part of a decoded `GroupInviteCapability` the preview decision reads. */
 export interface PreviewSource {
   readonly hasPreview: boolean;
   openPreview(secret: Uint8Array): GroupInvitePreviewData | undefined;

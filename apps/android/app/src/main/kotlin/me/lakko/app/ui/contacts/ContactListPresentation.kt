@@ -3,6 +3,8 @@
 
 package me.lakko.app.ui.contacts
 
+import me.lakko.app.l10n.UiText
+
 /**
  * Pure presentation rules for the Contacts tab and the contact detail —
  * docs/ux/client-redesign.md section 5.3. No Compose, no repository: every
@@ -159,22 +161,20 @@ public fun mergeInviteLinkRows(
     return merged + rest
 }
 
-/** "Expires in 6d" / "Expires in 3h" / "Expired" / "Never expires". */
-public fun describeInviteExpiry(expiryMs: Long, nowMs: Long): String {
-    if (expiryMs == 0L) return "Never expires"
-    if (expiryMs <= nowMs) return "Expired"
+/** "Expires in 6d" / "Expires in 3h" / "Expired" / "Never expires" (ADR-0058: catalog messages). */
+public fun describeInviteExpiry(expiryMs: Long, nowMs: Long): UiText {
+    if (expiryMs == 0L) return UiText("invite.links.never_expires")
+    if (expiryMs <= nowMs) return UiText("invite.links.expired")
     val deltaMs = expiryMs - nowMs
     val days = deltaMs / (24L * 60 * 60 * 1000)
-    if (days >= 1) return "Expires in ${days}d"
+    if (days >= 1) return UiText("invite.links.expires_days", texts = mapOf("count" to days.toString()))
     val hours = deltaMs / (60L * 60 * 1000)
-    if (hours >= 1) return "Expires in ${hours}h"
+    if (hours >= 1) return UiText("invite.links.expires_hours", texts = mapOf("count" to hours.toString()))
     val minutes = (deltaMs / (60L * 1000)).coerceAtLeast(1L)
-    return "Expires in ${minutes}m"
+    return UiText("invite.links.expires_minutes", texts = mapOf("count" to minutes.toString()))
 }
 
 /** "1 use left" / "3 uses left" / `null` when unknown. */
-public fun describeUsesLeft(usesLeft: Long?): String? = when (usesLeft) {
-    null -> null
-    1L -> "1 use left"
-    else -> "$usesLeft uses left"
+public fun describeUsesLeft(usesLeft: Long?): UiText? = usesLeft?.let {
+    UiText("invite.links.uses_left", counts = mapOf("count" to it.toULong()))
 }

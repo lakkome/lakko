@@ -213,7 +213,7 @@ internal fun copyMessageText(context: Context, text: String) {
     val clipboard =
         context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             ?: return
-    clipboard.setPrimaryClip(ClipData.newPlainText("Lakko message", text))
+    clipboard.setPrimaryClip(ClipData.newPlainText(Localization.strings.value["common.clipboard.message"], text))
 }
 
 /**

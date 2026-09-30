@@ -20,6 +20,9 @@ import { loadAccepted, subscribeAcceptedChanged, type AcceptedContact } from "..
 import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
+import { contactsErrorText } from "../contacts/errors";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 
 export const GROUP_NAME_MAX = 64;
@@ -50,7 +53,7 @@ export default function NewGroup(): JSX.Element {
   const [name, setName] = createSignal("");
   const [picked, setPicked] = createSignal<ReadonlySet<string>>(new Set());
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
 
   // A contact can be added without a username lookup only when its account id
   // was captured at accept (ADR-0021); older records lack it.
@@ -68,7 +71,7 @@ export default function NewGroup(): JSX.Element {
     setError(null);
     const secrets = auth.identitySecrets();
     if (secrets === null) {
-      setError("Sign in again to create a group.");
+      setError(() => t("new_group.error.sign_in"));
       return;
     }
     const picks = accepted().filter((c) => picked().has(c.signaturePubkeyB64) && addable(c));
@@ -118,7 +121,7 @@ export default function NewGroup(): JSX.Element {
       }
       navigate(paths.groupChat(base64UrlEncodeNoPad(result.group.groupId)), { replace: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(contactsErrorText(err, "chats.new_group.error"));
       setBusy(false);
     }
   }
@@ -133,34 +136,34 @@ export default function NewGroup(): JSX.Element {
           onClick={() => navigate(paths.groups)}
         >
           <Icon name="back" size={16} />
-          Groups
+          {t("new_group.back")}
         </button>
         <div class="lk-page-head">
-          <h1>New group</h1>
-          <p>You will be the group's owner. You can add more people later.</p>
+          <h1>{t("chats.new_group.title")}</h1>
+          <p>{t("new_group.subtitle")}</p>
         </div>
         <section class="lk-card">
           <label>
-            Group name
+            {t("chat.group_name.label")}
             <input
               type="text"
               value={name()}
               maxLength={GROUP_NAME_MAX}
-              placeholder="Weekend plans"
+              placeholder={t("new_group.name_placeholder")}
               disabled={busy()}
               onInput={(e) => setName(e.currentTarget.value)}
             />
           </label>
           <p class="lk-card-desc" style={{ margin: 0 }}>
-            Every member sees the name. It is sent encrypted; the server never reads it.
+            {t("new_group.name_hint")}
           </p>
         </section>
         <section class="lk-card" style={{ gap: "4px" }}>
           <h2>
-            Members
+            {t("chat.members.title")}
             <Show when={picked().size > 0}>
               <span class="form-info" style={{ "font-weight": 400, "margin-left": "8px" }}>
-                {picked().size} selected
+                {t("chat.select.count", { count: picked().size })}
               </span>
             </Show>
           </h2>
@@ -168,9 +171,9 @@ export default function NewGroup(): JSX.Element {
             when={accepted().length > 0}
             fallback={
               <div class="lk-empty" style={{ padding: "24px" }}>
-                <span>Add contacts first; a group starts from people you already know.</span>
+                <span>{t("new_group.no_contacts")}</span>
                 <button type="button" onClick={() => navigate(paths.contacts)}>
-                  Go to Contacts
+                  {t("chats.new_group.open_contacts")}
                 </button>
               </div>
             }
@@ -188,7 +191,7 @@ export default function NewGroup(): JSX.Element {
                   <div class="lk-row-body">
                     <span class="lk-row-title">{labelOf(c)}</span>
                     <Show when={!addable(c)}>
-                      <span class="lk-row-sub">Accept this contact again to add them to a group.</span>
+                      <span class="lk-row-sub">{t("chats.new_group.accept_again")}</span>
                     </Show>
                   </div>
                 </label>
@@ -199,10 +202,10 @@ export default function NewGroup(): JSX.Element {
         <Show when={error()}>{(m) => <div class="form-error">{m()}</div>}</Show>
         <div class="lk-actions">
           <button type="submit" class="primary" disabled={busy() || picked().size === 0}>
-            {busy() ? "Creating…" : "Create group"}
+            {busy() ? t("chats.new_group.creating") : t("chats.create.group")}
           </button>
           <button type="button" class="ghost" disabled={busy()} onClick={() => navigate(paths.groups)}>
-            Cancel
+            {t("common.cancel")}
           </button>
         </div>
       </form>

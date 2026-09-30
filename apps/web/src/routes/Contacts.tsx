@@ -60,7 +60,7 @@ import type { IncomingContactRequest, SendResult } from "../contacts/client";
 import { ContactDetailView } from "../contacts/ContactDetailView";
 import { ContactListPane, type AddMode } from "../contacts/ContactListPane";
 import { waitingSentRequests, type SentRequestRecord } from "../contacts/contact-list-model";
-import { atLabel, formatContactsError } from "../contacts/errors";
+import { atLabel, contactsErrorText } from "../contacts/errors";
 import { InviteLinksPanel } from "../contacts/InviteLinksPanel";
 import {
   loadAccepted,
@@ -82,6 +82,8 @@ import { mayLookUp, usernameReason, type UsernameCheck } from "../profile/rules"
 import { createUsernameCheck } from "../profile/username-field";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 
 export default function Contacts(): JSX.Element {
@@ -185,8 +187,8 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const [searchInput, setSearchInput] = createSignal("");
   const [introInput, setIntroInput] = createSignal("");
   const [sendBusy, setSendBusy] = createSignal(false);
-  const [sendError, setSendError] = createSignal<string | null>(null);
-  const [sendNotice, setSendNotice] = createSignal<string | null>(null);
+  const [sendError, setSendError] = createLiveText();
+  const [sendNotice, setSendNotice] = createLiveText();
   // ADR-0048 §4 — no lookup leaves the device for a name that fails the rule.
   const searchCheck = createUsernameCheck(searchInput);
 
@@ -212,11 +214,12 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         });
         setSentVersion((v) => v + 1);
       }
-      setSendNotice(`Request sent to @${result.recipientUsername}. It waits under Sent until they accept.`);
+      const recipient = `@${result.recipientUsername}`;
+      setSendNotice(() => t("contacts.send.done", { name: recipient }));
       setSearchInput("");
       setIntroInput("");
     } catch (err) {
-      setSendError(formatContactsError(err, atLabel(searchInput())));
+      setSendError(contactsErrorText(err, "contacts.error.send", atLabel(searchInput())));
     } finally {
       setSendBusy(false);
     }
@@ -226,7 +229,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   // Owned by the session-wide `<MailboxProvider>`: its long-poll loop
   // dispatches requests into this list, acks into the address book and
   // Welcomes into joined groups, whether or not this route is mounted.
-  const [acceptError, setAcceptError] = createSignal<string | null>(null);
+  const [acceptError, setAcceptError] = createLiveText();
 
   /** Found the 1x1 chat with a contact and link it back to the contact
    *  record (ADR-0021 follow-up). Shared by Accept and by Message on a
@@ -282,16 +285,16 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     // 1.16e3b: Accept-driven group creation. Requires the v2 wire format —
     // surface a clean error for legacy senders.
     if (req.fromAccountId === null) {
-      setAcceptError(
-        "This request came from an older version of Lakko. Ask them to update and send it again.",
-      );
+      setAcceptError(() => t("contacts.accept.error.old_version"));
       return;
     }
     try {
       await foundChatWith(contact, req.fromAccountId, req.fromPubkey);
     } catch (err) {
       // Don't unwind the acceptance; just surface the error.
-      setAcceptError(formatContactsError(err, memberNameOf(profiles.resolve(req.fromPubkey))));
+      setAcceptError(
+        contactsErrorText(err, "contacts.error.start_chat", memberNameOf(profiles.resolve(req.fromPubkey))),
+      );
     }
   }
 
@@ -451,7 +454,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       });
       clearSelection();
     } catch (err) {
-      setDetailError(formatContactsError(err, chatLabelOf(c)));
+      setDetailError(contactsErrorText(err, "chat.error.delete_chat", chatLabelOf(c)));
     } finally {
       setDetailBusy(false);
     }
@@ -459,7 +462,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
 
   // ---- detail actions --------------------------------------------
   const [detailBusy, setDetailBusy] = createSignal(false);
-  const [detailError, setDetailError] = createSignal<string | null>(null);
+  const [detailError, setDetailError] = createLiveText();
   createEffect(on(selectedKey, () => setDetailError(null), { defer: true }));
 
   /** Message: open the chat, or create it first when this device has none
@@ -481,7 +484,13 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       );
       navigate(href);
     } catch (err) {
-      setDetailError(formatContactsError(err, memberNameOf(profiles.resolve(c.signaturePubkeyB64))));
+      setDetailError(
+        contactsErrorText(
+          err,
+          "contacts.error.start_chat",
+          memberNameOf(profiles.resolve(c.signaturePubkeyB64)),
+        ),
+      );
     } finally {
       setDetailBusy(false);
     }
@@ -533,12 +542,12 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
                   onClick={() => setAdding(null)}
                 >
                   <Icon name="back" size={16} />
-                  Contacts
+                  {t("nav.contacts")}
                 </button>
                 <Show when={adding() === "username" || adding() === null}>
                   <div class="lk-page-head">
-                    <h1>Add a contact</h1>
-                    <p>Requests are end-to-end encrypted. Lakko's servers cannot read them.</p>
+                    <h1>{t("contacts.add.title")}</h1>
+                    <p>{t("contacts.add.subtitle")}</p>
                   </div>
                   <SendPanel
                     searchCheck={searchCheck}
@@ -554,8 +563,8 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
                 </Show>
                 <Show when={adding() === "invite"}>
                   <div class="lk-page-head">
-                    <h1>Invite links</h1>
-                    <p>Share a link with someone you want to hear from.</p>
+                    <h1>{t("contacts.invite_links.title")}</h1>
+                    <p>{t("contacts.invite_links.subtitle")}</p>
                   </div>
                   <InviteLinksPanel />
                 </Show>
@@ -621,13 +630,13 @@ interface SendPanelProps {
 function SendPanel(props: SendPanelProps): JSX.Element {
   return (
     <section class="lk-card">
-      <h2>Add by username</h2>
+      <h2>{t("contacts.add.by_username")}</h2>
       <form onSubmit={props.onSubmit} class="lk-stack" style={{ gap: "12px" }}>
         <label>
-          Username
+          {t("contacts.add.username_label")}
           <input
             type="text"
-            placeholder="@alice"
+            placeholder={t("contacts.add.username_placeholder")}
             autocomplete="off"
             spellcheck={false}
             required
@@ -645,10 +654,10 @@ function SendPanel(props: SendPanelProps): JSX.Element {
           )}
         </Show>
         <label>
-          Message (optional)
+          {t("contacts.add.intro_label")}
           <textarea
             rows={2}
-            placeholder="Hi, this is Alice from the conference."
+            placeholder={t("contacts.add.intro_placeholder")}
             value={props.introInput()}
             onInput={(e) => props.setIntroInput(e.currentTarget.value)}
             disabled={props.busy()}
@@ -663,7 +672,7 @@ function SendPanel(props: SendPanelProps): JSX.Element {
             disabled={props.busy() || !mayLookUp(props.searchCheck())}
           >
             <Icon name="send" size={18} />
-            {props.busy() ? "Sending..." : "Send"}
+            {props.busy() ? t("common.sending") : t("contacts.add.send")}
           </button>
         </div>
       </form>
@@ -684,14 +693,11 @@ function NeedsReauth(): JSX.Element {
   return (
     <div class="lk-page lk-stack" style={{ "max-width": "560px" }}>
       <section class="lk-card">
-        <h2>Sign in again</h2>
-        <p class="lk-card-desc">
-          The keys this session needs for contacts are not available. Sign in again to use
-          Contacts.
-        </p>
+        <h2>{t("chat.reauth.title")}</h2>
+        <p class="lk-card-desc">{t("contacts.reauth.body")}</p>
         <div class="lk-actions">
           <button class="primary" type="button" onClick={signInAgain}>
-            Sign in again
+            {t("chat.reauth.action")}
           </button>
         </div>
       </section>

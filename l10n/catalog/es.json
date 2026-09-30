@@ -330,6 +330,474 @@
       "text": "Puedes salir de esta pantalla; te unirás cuando se apruebe tu entrada.",
       "status": "machine"
     },
+    "channels.back": {
+      "text": "Volver a los canales",
+      "status": "machine"
+    },
+    "channels.compose.label": {
+      "text": "Nueva publicación",
+      "status": "machine"
+    },
+    "channels.compose.placeholder": {
+      "text": "Escribe una publicación",
+      "status": "machine"
+    },
+    "channels.compose.publish": {
+      "text": "Publicar",
+      "status": "machine"
+    },
+    "channels.compose.publishing": {
+      "text": "Publicando...",
+      "status": "machine"
+    },
+    "channels.copublishers.desc": {
+      "text": "Personas que pueden publicar en este canal. Comparte un enlace y apruébalas cuando lo pidan.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.approve": {
+      "text": "No se pudo aprobar la solicitud. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.poll": {
+      "text": "No se pudieron comprobar las solicitudes. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.reject": {
+      "text": "No se pudo rechazar la solicitud. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "channels.copublishers.link": {
+      "text": "Enlace de invitación para copublicadores",
+      "status": "machine"
+    },
+    "channels.copublishers.request_row": {
+      "text": "Alguien pidió copublicar",
+      "status": "machine"
+    },
+    "channels.copublishers.requests": {
+      "text": "Solicitudes ({count})",
+      "status": "machine"
+    },
+    "channels.copublishers.title": {
+      "text": "Copublicadores",
+      "status": "machine"
+    },
+    "channels.empty.action": {
+      "text": "Crear un canal",
+      "status": "machine"
+    },
+    "channels.empty.title": {
+      "text": "Aún no hay canales",
+      "status": "machine"
+    },
+    "channels.error.empty_post": {
+      "text": "Escribe algo para publicar.",
+      "status": "machine"
+    },
+    "channels.error.not_let_in": {
+      "text": "El canal aún no ha dado acceso a este dispositivo. Inténtalo más tarde.",
+      "status": "machine"
+    },
+    "channels.error.post_too_large": {
+      "text": "Esta publicación es demasiado larga para publicarla.",
+      "status": "machine"
+    },
+    "channels.error.refused": {
+      "text": "El servidor rechazó la solicitud. Inténtalo más tarde.",
+      "status": "machine"
+    },
+    "channels.error.sign_in": {
+      "text": "Vuelve a iniciar sesión para usar los canales.",
+      "status": "machine"
+    },
+    "channels.error.unknown_channel": {
+      "text": "Este canal no existe en el servidor.",
+      "status": "machine"
+    },
+    "channels.error.unreachable": {
+      "text": "El servicio de canales no está disponible ahora mismo. Inténtalo de nuevo en un momento.",
+      "status": "machine"
+    },
+    "channels.fallback_name": {
+      "text": "Canal",
+      "status": "machine"
+    },
+    "channels.field.description_optional": {
+      "text": "Descripción (opcional)",
+      "status": "machine"
+    },
+    "channels.field.name": {
+      "text": "Nombre",
+      "status": "machine"
+    },
+    "channels.find.action": {
+      "text": "Buscar {handle}",
+      "status": "machine"
+    },
+    "channels.find.none": {
+      "text": "No se encontró ningún canal para {handle}.",
+      "status": "machine"
+    },
+    "channels.index_hint": {
+      "text": "Selecciona un canal o crea uno",
+      "status": "machine"
+    },
+    "channels.info.manage_sub": {
+      "text": "Su nombre y descripción, quién lo lee y quién más puede publicar.",
+      "status": "machine"
+    },
+    "channels.info.subscribers": {
+      "text": "{count, plural, one {# suscriptor} other {# suscriptores}}",
+      "status": "machine"
+    },
+    "channels.info.unsubscribe_sub": {
+      "text": "Quita el canal de tu lista y este dispositivo deja de leerlo. Puedes volver a suscribirte más tarde.",
+      "status": "machine"
+    },
+    "channels.join.default_name": {
+      "text": "Canal copublicado",
+      "status": "machine"
+    },
+    "channels.join.error.sign_in": {
+      "text": "Vuelve a iniciar sesión para unirte a un canal.",
+      "status": "machine"
+    },
+    "channels.join.link_label": {
+      "text": "Enlace",
+      "status": "machine"
+    },
+    "channels.join.name_label": {
+      "text": "Nombre en este dispositivo (opcional)",
+      "status": "machine"
+    },
+    "channels.join.no_approval": {
+      "text": "Aún no hay aprobación. Inténtalo de nuevo cuando el propietario la haya aprobado.",
+      "status": "machine"
+    },
+    "channels.join.requesting": {
+      "text": "Enviando solicitud...",
+      "status": "machine"
+    },
+    "channels.join.subtitle": {
+      "text": "Pega el enlace que compartió el propietario de un canal. Cuando lo apruebe, este dispositivo podrá publicar en el canal.",
+      "status": "machine"
+    },
+    "channels.join.title": {
+      "text": "Unirse como copublicador",
+      "status": "machine"
+    },
+    "channels.join.waiting": {
+      "text": "Esperando a que el propietario del canal lo apruebe...",
+      "status": "machine"
+    },
+    "channels.legacy.channel": {
+      "text": "Este canal se creó con una versión anterior de Lakko y no se puede abrir en esta versión. Las publicaciones que ya hiciste siguen siendo legibles para tus suscriptores. Para volver a publicar, crea un canal nuevo: este no se puede reparar.",
+      "status": "machine"
+    },
+    "channels.legacy.copublisher_link": {
+      "text": "Este enlace de invitación para copublicadores se creó con una versión anterior de Lakko y ya no funciona. Pide al propietario del canal que te envíe un enlace de invitación nuevo.",
+      "status": "machine"
+    },
+    "channels.manage.back": {
+      "text": "Volver a las publicaciones",
+      "status": "machine"
+    },
+    "channels.manage.error.open": {
+      "text": "No se pudo abrir la configuración del canal. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "channels.manage.error.sign_in": {
+      "text": "Vuelve a iniciar sesión para gestionar este canal.",
+      "status": "machine"
+    },
+    "channels.manage.title": {
+      "text": "Gestionar canal",
+      "status": "machine"
+    },
+    "channels.meta.desc": {
+      "text": "El nombre y la descripción llegan cifrados a todos los suscriptores. El servidor nunca los lee.",
+      "status": "machine"
+    },
+    "channels.meta.error.description_bad_character": {
+      "text": "La descripción contiene un carácter que no se puede mostrar.",
+      "status": "machine"
+    },
+    "channels.meta.error.description_too_long": {
+      "text": "La descripción es demasiado larga.",
+      "status": "machine"
+    },
+    "channels.meta.error.generic": {
+      "text": "Ese nombre o esa descripción no se pueden usar.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_bad_character": {
+      "text": "El nombre contiene un carácter que no se puede mostrar.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_empty": {
+      "text": "Un canal necesita un nombre",
+      "status": "machine"
+    },
+    "channels.meta.error.name_line_break": {
+      "text": "El nombre debe ocupar una sola línea.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_too_long": {
+      "text": "El nombre es demasiado largo.",
+      "status": "machine"
+    },
+    "channels.meta.error.save": {
+      "text": "No se pudo guardar. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "channels.meta.error.save_prefix": {
+      "text": "No se pudo guardar.",
+      "status": "machine"
+    },
+    "channels.meta.saved": {
+      "text": "Guardado. Los suscriptores verán el nuevo nombre con sus próximas publicaciones.",
+      "status": "machine"
+    },
+    "channels.meta.title": {
+      "text": "Canal",
+      "status": "machine"
+    },
+    "channels.new.create": {
+      "text": "Crear",
+      "status": "machine"
+    },
+    "channels.new.error.create": {
+      "text": "No se pudo crear el canal. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "channels.new.error.handle": {
+      "text": "No se pudo reservar el identificador. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "channels.new.error.handle_offline": {
+      "text": "No se pudo reservar el identificador. Revisa tu conexión e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "channels.new.error.handle_taken": {
+      "text": "{handle} ya está en uso. Elige otro o déjalo en blanco.",
+      "status": "machine"
+    },
+    "channels.new.error.no_name": {
+      "text": "Ponle un nombre al canal.",
+      "status": "machine"
+    },
+    "channels.new.error.sign_in": {
+      "text": "Vuelve a iniciar sesión para crear un canal.",
+      "status": "machine"
+    },
+    "channels.new.handle_hint": {
+      "text": "Cualquiera podrá encontrar el canal y suscribirse con él.",
+      "status": "machine"
+    },
+    "channels.new.handle_label": {
+      "text": "@identificador público (opcional)",
+      "status": "machine"
+    },
+    "channels.new.handle_placeholder": {
+      "text": "@mi-canal",
+      "status": "machine"
+    },
+    "channels.new.subtitle": {
+      "text": "Los suscriptores ven el nombre y la descripción. Viajan cifrados: al servidor solo llega texto cifrado.",
+      "status": "machine"
+    },
+    "channels.new.title": {
+      "text": "Nuevo canal",
+      "status": "machine"
+    },
+    "channels.new_menu": {
+      "text": "Nuevo canal o unirse a uno",
+      "status": "machine"
+    },
+    "channels.post.not_available": {
+      "text": "No disponible",
+      "status": "machine"
+    },
+    "channels.post.older_key": {
+      "text": "Esta publicación es más antigua de lo que este dispositivo puede leer.",
+      "status": "machine"
+    },
+    "channels.post.unreadable": {
+      "text": "Esta publicación no se pudo abrir en este dispositivo.",
+      "status": "machine"
+    },
+    "channels.posts.empty": {
+      "text": "Aún no hay publicaciones.",
+      "status": "machine"
+    },
+    "channels.posts.empty_owner": {
+      "text": "Aún no hay publicaciones. Escribe la primera abajo.",
+      "status": "machine"
+    },
+    "channels.posts.error.load": {
+      "text": "No se pudieron cargar las publicaciones.",
+      "status": "machine"
+    },
+    "channels.publish.error.generic": {
+      "text": "No se pudo publicar. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "channels.publish.error.not_publisher": {
+      "text": "Este dispositivo no puede publicar en este canal.",
+      "status": "machine"
+    },
+    "channels.publish.error.prefix": {
+      "text": "No se pudo publicar.",
+      "status": "machine"
+    },
+    "channels.rotation.desc": {
+      "text": "Lakko renueva la protección del canal por sí solo. Renuévala ahora si crees que el dispositivo de un suscriptor se vio comprometido.",
+      "status": "machine"
+    },
+    "channels.rotation.error.check": {
+      "text": "No se pudo comprobar la protección del canal.",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh": {
+      "text": "No se pudo renovar. Inténtalo de nuevo en un momento.",
+      "status": "machine"
+    },
+    "channels.rotation.never": {
+      "text": "Aún no se ha renovado.",
+      "status": "machine"
+    },
+    "channels.rotation.refresh_now": {
+      "text": "Renovar ahora",
+      "status": "machine"
+    },
+    "channels.rotation.refreshed": {
+      "text": "Renovada {when}.",
+      "status": "machine"
+    },
+    "channels.rotation.refreshing": {
+      "text": "Renovando...",
+      "status": "machine"
+    },
+    "channels.rotation.title": {
+      "text": "Protección",
+      "status": "machine"
+    },
+    "channels.row.own": {
+      "text": "Tu canal",
+      "status": "machine"
+    },
+    "channels.search.label": {
+      "text": "Buscar canales o encontrar uno por su identificador",
+      "status": "machine"
+    },
+    "channels.search.placeholder": {
+      "text": "Buscar o encontrar por @identificador",
+      "status": "machine"
+    },
+    "channels.subscribe.action": {
+      "text": "Suscribirse",
+      "status": "machine"
+    },
+    "channels.subscribe.error.generic": {
+      "text": "No se pudo completar la suscripción. Inténtalo más tarde.",
+      "status": "machine"
+    },
+    "channels.subscribe.error.prefix": {
+      "text": "No se pudo completar la suscripción.",
+      "status": "machine"
+    },
+    "channels.subscribe.prompt_body": {
+      "text": "Las publicaciones aparecerán aquí cuando el canal dé acceso a este dispositivo.",
+      "status": "machine"
+    },
+    "channels.subscribe.prompt_title": {
+      "text": "Suscríbete para leer este canal",
+      "status": "machine"
+    },
+    "channels.subscribe.status.not_subscribed": {
+      "text": "Sin suscripción",
+      "status": "machine"
+    },
+    "channels.subscribe.status.subscribed": {
+      "text": "Suscrito",
+      "status": "machine"
+    },
+    "channels.subscribe.status.subscribing": {
+      "text": "Suscribiendo...",
+      "status": "machine"
+    },
+    "channels.subscribe.status.waiting": {
+      "text": "Esperando acceso...",
+      "status": "machine"
+    },
+    "channels.subscribe.waiting_notice": {
+      "text": "Suscrito. Las publicaciones aparecerán cuando el canal dé acceso a este dispositivo; suele tardar un momento.",
+      "status": "machine"
+    },
+    "channels.subscribers.count": {
+      "text": "({count})",
+      "status": "machine"
+    },
+    "channels.subscribers.desc": {
+      "text": "Este dispositivo da acceso automáticamente a los nuevos suscriptores.",
+      "status": "machine"
+    },
+    "channels.subscribers.empty": {
+      "text": "Aún no hay suscriptores. Comparte el identificador del canal para que la gente pueda suscribirse.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.deliver": {
+      "text": "No se pudo configurar este suscriptor. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.deliver_prefix": {
+      "text": "No se pudo configurar este suscriptor.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.load": {
+      "text": "No se pudieron cargar los suscriptores. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "channels.subscribers.retrying": {
+      "text": "Reintentando...",
+      "status": "machine"
+    },
+    "channels.subscribers.row": {
+      "text": "Suscriptor {number}",
+      "status": "machine"
+    },
+    "channels.subscribers.status.not_ready": {
+      "text": "No listo",
+      "status": "machine"
+    },
+    "channels.subscribers.status.ready": {
+      "text": "Listo",
+      "status": "machine"
+    },
+    "channels.subscribers.status.setting_up": {
+      "text": "Configurando...",
+      "status": "machine"
+    },
+    "channels.subscribers.title": {
+      "text": "Suscriptores",
+      "status": "machine"
+    },
+    "channels.unsubscribe.action": {
+      "text": "Dejar de seguir",
+      "status": "machine"
+    },
+    "channels.unsubscribe.body": {
+      "text": "Sale de tu lista y este dispositivo deja de leerlo. Puedes volver a suscribirte más tarde.",
+      "status": "machine"
+    },
+    "channels.unsubscribe.title": {
+      "text": "¿Dejar de seguir este canal?",
+      "status": "machine"
+    },
+    "channels.unsubscribe.title_named": {
+      "text": "¿Dejar de seguir {name}?",
+      "status": "machine"
+    },
     "chat.attachment.error.attach": {
       "text": "No se pudo adjuntar el elemento seleccionado. Inténtalo de nuevo.",
       "status": "machine"
@@ -532,6 +1000,10 @@
     },
     "chat.delete.control": {
       "text": "Eliminar este chat",
+      "status": "machine"
+    },
+    "chat.delete.sub": {
+      "text": "Elimina esta conversación y todo su contenido de este dispositivo. No se puede deshacer.",
       "status": "machine"
     },
     "chat.delete.title": {
@@ -2054,6 +2526,14 @@
       "text": "Comprobando...",
       "status": "machine"
     },
+    "common.clipboard.link": {
+      "text": "Enlace de Lakko",
+      "status": "machine"
+    },
+    "common.clipboard.message": {
+      "text": "Mensaje de Lakko",
+      "status": "machine"
+    },
     "common.close": {
       "text": "Cerrar",
       "status": "machine"
@@ -2084,6 +2564,10 @@
     },
     "common.copy": {
       "text": "Copiar",
+      "status": "machine"
+    },
+    "common.creating": {
+      "text": "Creando...",
       "status": "machine"
     },
     "common.delete": {
@@ -2158,6 +2642,10 @@
       "text": "Expandir",
       "status": "machine"
     },
+    "common.fact_pair": {
+      "text": "{first} · {second}",
+      "status": "machine"
+    },
     "common.list_pair": {
       "text": "{first}, {second}",
       "status": "machine"
@@ -2194,6 +2682,10 @@
       "text": "Activado",
       "status": "machine"
     },
+    "common.open_chat": {
+      "text": "Abrir chat",
+      "status": "machine"
+    },
     "common.open_lakko": {
       "text": "Abrir Lakko",
       "status": "machine"
@@ -2212,6 +2704,10 @@
     },
     "common.preparing": {
       "text": "Preparando...",
+      "status": "machine"
+    },
+    "common.qr_code": {
+      "text": "Código QR",
       "status": "machine"
     },
     "common.remove": {
@@ -2262,12 +2758,296 @@
       "text": "{size} MB",
       "status": "machine"
     },
+    "common.time.days_ago": {
+      "text": "{count, plural, one {hace # día} other {hace # días}}",
+      "status": "machine"
+    },
+    "common.time.hours_ago": {
+      "text": "{count, plural, one {hace # hora} other {hace # horas}}",
+      "status": "machine"
+    },
+    "common.time.just_now": {
+      "text": "hace un momento",
+      "status": "machine"
+    },
+    "common.time.minutes_ago": {
+      "text": "{count, plural, one {hace # minuto} other {hace # minutos}}",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "Reintentar",
       "status": "machine"
     },
     "common.unknown": {
       "text": "desconocido",
+      "status": "machine"
+    },
+    "contacts.accept.error.old_version": {
+      "text": "Esta solicitud llegó desde una versión anterior de Lakko. Pídele a esa persona que actualice y la vuelva a enviar.",
+      "status": "machine"
+    },
+    "contacts.add.by_username": {
+      "text": "Añadir por nombre de usuario",
+      "status": "machine"
+    },
+    "contacts.add.intro_label": {
+      "text": "Mensaje (opcional)",
+      "status": "machine"
+    },
+    "contacts.add.intro_placeholder": {
+      "text": "Hola, soy Alicia, de la conferencia.",
+      "status": "machine"
+    },
+    "contacts.add.send": {
+      "text": "Enviar",
+      "status": "machine"
+    },
+    "contacts.add.share_invite": {
+      "text": "Compartir enlace de invitación",
+      "status": "machine"
+    },
+    "contacts.add.subtitle": {
+      "text": "Las solicitudes están cifradas de extremo a extremo. Los servidores de Lakko no pueden leerlas.",
+      "status": "machine"
+    },
+    "contacts.add.title": {
+      "text": "Añadir un contacto",
+      "status": "machine"
+    },
+    "contacts.add.username_label": {
+      "text": "Nombre de usuario",
+      "status": "machine"
+    },
+    "contacts.add.username_placeholder": {
+      "text": "@alice",
+      "status": "machine"
+    },
+    "contacts.detail.actions": {
+      "text": "Acciones del contacto",
+      "status": "machine"
+    },
+    "contacts.detail.call_needs_chat": {
+      "text": "Envía primero un mensaje para poder llamar.",
+      "status": "machine"
+    },
+    "contacts.detail.gone_body": {
+      "text": "Esta persona ya no está en tus contactos.",
+      "status": "machine"
+    },
+    "contacts.detail.gone_title": {
+      "text": "Contacto no encontrado",
+      "status": "machine"
+    },
+    "contacts.detail.message": {
+      "text": "Mensaje",
+      "status": "machine"
+    },
+    "contacts.detail.message_unavailable": {
+      "text": "Este contacto se añadió antes de que se pudieran iniciar chats desde aquí. Pídele que te escriba.",
+      "status": "machine"
+    },
+    "contacts.detail.their_name": {
+      "text": "Se hace llamar {name}",
+      "status": "machine"
+    },
+    "contacts.detail.username_not_verified": {
+      "text": "Nombre de usuario sin verificar",
+      "status": "machine"
+    },
+    "contacts.error.send": {
+      "text": "No se pudo enviar la solicitud. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "contacts.error.start_chat": {
+      "text": "No se pudo iniciar el chat. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.reset": {
+      "text": "{name} restableció su identidad segura (por ejemplo, perdió su dispositivo). El registro de transparencia confirma que el restablecimiento lo hizo el titular. Si confías en que de verdad es esa persona, vuelve a verificar su número de seguridad por otro medio antes de continuar.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.reset_unnamed": {
+      "text": "Este contacto restableció su identidad segura (por ejemplo, perdió su dispositivo). El registro de transparencia confirma que el restablecimiento lo hizo el titular. Si confías en que de verdad es esa persona, vuelve a verificar su número de seguridad por otro medio antes de continuar.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unconfirmed": {
+      "text": "La identidad segura de {name} cambió y no se pudo confirmar con el registro de transparencia. Verifícala por otro medio antes de confiar.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unconfirmed_unnamed": {
+      "text": "La identidad segura de este contacto cambió y no se pudo confirmar con el registro de transparencia. Verifícala por otro medio antes de confiar.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unexplained": {
+      "text": "La identidad segura de {name} cambió y el registro de transparencia NO muestra un restablecimiento hecho por el titular: trátalo como un posible robo de la cuenta. Verifícala por otro medio antes de confiar.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unexplained_unnamed": {
+      "text": "La identidad segura de este contacto cambió y el registro de transparencia NO muestra un restablecimiento hecho por el titular: trátalo como un posible robo de la cuenta. Verifícala por otro medio antes de confiar.",
+      "status": "machine"
+    },
+    "contacts.invite_links.subtitle": {
+      "text": "Comparte un enlace con quien quieras que te escriba.",
+      "status": "machine"
+    },
+    "contacts.invite_links.title": {
+      "text": "Enlaces de invitación",
+      "status": "machine"
+    },
+    "contacts.list.add": {
+      "text": "Añadir",
+      "status": "machine"
+    },
+    "contacts.list.empty.action": {
+      "text": "Añadir contacto",
+      "status": "machine"
+    },
+    "contacts.list.empty.body": {
+      "text": "Añade a alguien por su nombre de usuario o comparte tu enlace de invitación.",
+      "status": "machine"
+    },
+    "contacts.list.empty.title": {
+      "text": "Aún no tienes contactos",
+      "status": "machine"
+    },
+    "contacts.list.no_match": {
+      "text": "Ningún contacto coincide.",
+      "status": "machine"
+    },
+    "contacts.list.requests": {
+      "text": "Solicitudes",
+      "status": "machine"
+    },
+    "contacts.list.search": {
+      "text": "Buscar contactos",
+      "status": "machine"
+    },
+    "contacts.list.section_index": {
+      "text": "Índice de secciones",
+      "status": "machine"
+    },
+    "contacts.list.sent": {
+      "text": "Enviadas ({count})",
+      "status": "machine"
+    },
+    "contacts.list.sent_dismiss": {
+      "text": "Quitar de esta lista",
+      "status": "machine"
+    },
+    "contacts.list.sent_waiting": {
+      "text": "En espera",
+      "status": "machine"
+    },
+    "contacts.mailbox.join_failed": {
+      "text": "Te añadieron a un grupo, pero la invitación no se pudo abrir en este dispositivo. Pide a quien te añadió que vuelva a añadirte.",
+      "status": "machine"
+    },
+    "contacts.mailbox.poll_failed": {
+      "text": "No se pudieron comprobar las nuevas solicitudes de contacto. Reintentando.",
+      "status": "machine"
+    },
+    "contacts.mailbox.sign_in": {
+      "text": "Vuelve a iniciar sesión para comprobar si hay solicitudes nuevas.",
+      "status": "machine"
+    },
+    "contacts.reauth.body": {
+      "text": "Las claves que esta sesión necesita para los contactos no están disponibles. Vuelve a iniciar sesión para usar Contactos.",
+      "status": "machine"
+    },
+    "contacts.remove.body": {
+      "text": "Los chats compartidos se quedan como están; solo cambia tu lista de contactos. Puedes volver a añadirlo más tarde.",
+      "status": "machine"
+    },
+    "contacts.remove.confirm_named": {
+      "text": "Quitar a {name}",
+      "status": "machine"
+    },
+    "contacts.remove.control": {
+      "text": "Quitar contacto",
+      "status": "machine"
+    },
+    "contacts.remove.sub": {
+      "text": "Quita a {name} de la lista de contactos de esta cuenta.",
+      "status": "machine"
+    },
+    "contacts.remove.title": {
+      "text": "¿Quitar este contacto?",
+      "status": "machine"
+    },
+    "contacts.rename.action": {
+      "text": "Cambiar nombre",
+      "status": "machine"
+    },
+    "contacts.rename.field": {
+      "text": "Tu nombre para este contacto",
+      "status": "machine"
+    },
+    "contacts.rename.placeholder": {
+      "text": "Déjalo en blanco para usar su propio nombre",
+      "status": "machine"
+    },
+    "contacts.rename.sub_local": {
+      "text": "Tu nombre para este contacto. Solo tú lo ves.",
+      "status": "machine"
+    },
+    "contacts.rename.sub_theirs": {
+      "text": "Tal como lo puso esta persona. Puedes darle un nombre propio.",
+      "status": "machine"
+    },
+    "contacts.rename.title": {
+      "text": "Nombre",
+      "status": "machine"
+    },
+    "contacts.request.accept": {
+      "text": "Aceptar",
+      "status": "machine"
+    },
+    "contacts.request.decline": {
+      "text": "Rechazar",
+      "status": "machine"
+    },
+    "contacts.request.no_intro": {
+      "text": "Quiere conectar contigo",
+      "status": "machine"
+    },
+    "contacts.request.someone": {
+      "text": "Alguien",
+      "status": "machine"
+    },
+    "contacts.safety.body": {
+      "text": "Compáralo con {name} en persona o en una llamada. Si los números coinciden, nadie se interpone en la conversación.",
+      "status": "machine"
+    },
+    "contacts.safety.body_unnamed": {
+      "text": "Compáralo con tu contacto en persona o en una llamada. Si los números coinciden, nadie se interpone en la conversación.",
+      "status": "machine"
+    },
+    "contacts.safety.error": {
+      "text": "No se pudo calcular el número de seguridad. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "contacts.safety.number": {
+      "text": "Número de seguridad",
+      "status": "machine"
+    },
+    "contacts.safety.row_sub": {
+      "text": "Compara el número en persona para confirmar que de verdad es esa persona.",
+      "status": "machine"
+    },
+    "contacts.safety.show": {
+      "text": "Mostrar",
+      "status": "machine"
+    },
+    "contacts.safety.sign_in": {
+      "text": "Vuelve a iniciar sesión para ver el número de seguridad.",
+      "status": "machine"
+    },
+    "contacts.safety.title": {
+      "text": "Verificar número de seguridad",
+      "status": "machine"
+    },
+    "contacts.send.done": {
+      "text": "Solicitud enviada a {name}. Queda en Enviadas hasta que la acepte.",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -2450,6 +3230,10 @@
       "text": "Añadir un dispositivo",
       "status": "machine"
     },
+    "devices.pairing.qr_description": {
+      "text": "Código QR de vinculación",
+      "status": "machine"
+    },
     "devices.scan.confirm.body": {
       "text": "El dispositivo escaneado tendrá acceso completo a tu cuenta: tus mensajes, tus contactos y tu identidad. Continúa solo si el código está en tu propio dispositivo nuevo.",
       "status": "machine"
@@ -2510,12 +3294,44 @@
       "text": "Revisa la fecha y la hora de este dispositivo.",
       "status": "machine"
     },
+    "group.join.needs_account": {
+      "text": "Necesitas una cuenta para pedir unirte. Crea una o inicia sesión.",
+      "status": "machine"
+    },
     "group.join.not_taking_requests": {
       "text": "Este grupo aún no acepta solicitudes. Inténtalo más tarde.",
       "status": "machine"
     },
+    "group.join.open_chat": {
+      "text": "Abrir chat",
+      "status": "machine"
+    },
+    "group.join.request": {
+      "text": "Solicitar unirse",
+      "status": "machine"
+    },
     "group.join.request_again": {
       "text": "Volver a solicitar",
+      "status": "machine"
+    },
+    "group.join.request_failed": {
+      "text": "Tu solicitud no se envió. Revisa tu conexión e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "group.join.sending": {
+      "text": "Enviando solicitud...",
+      "status": "machine"
+    },
+    "group.join.succeeded": {
+      "text": "Te uniste al grupo.",
+      "status": "machine"
+    },
+    "group.join.succeeded_opening": {
+      "text": "Te uniste al grupo. Abriendo el chat...",
+      "status": "machine"
+    },
+    "group.join.title": {
+      "text": "Unirse a un grupo",
       "status": "machine"
     },
     "group.join.wait_primary": {
@@ -2524,6 +3340,362 @@
     },
     "group.join.wait_secondary": {
       "text": "Ninguno de los dos pasos tiene límite de tiempo. Si no pasa nada, puedes volver a enviar la solicitud.",
+      "status": "machine"
+    },
+    "invite.contact.accept_failed": {
+      "text": "No se pudo aceptar la invitación. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "invite.contact.accepting": {
+      "text": "Aceptando la invitación...",
+      "status": "machine"
+    },
+    "invite.contact.already_accepted": {
+      "text": "Ya aceptaste esta invitación. Tu solicitud va de camino a {name}; consulta Contactos para ver la respuesta.",
+      "status": "machine"
+    },
+    "invite.contact.already_accepted_unnamed": {
+      "text": "Ya aceptaste esta invitación. Busca a esta persona en Contactos.",
+      "status": "machine"
+    },
+    "invite.contact.check_body": {
+      "text": "Pide a esa persona su número de seguridad por un medio en el que ya confíes (en persona, en una llamada). Si no coincide, este enlace lo creó otra persona.",
+      "status": "machine"
+    },
+    "invite.contact.check_title": {
+      "text": "Compruébalo antes de aceptar.",
+      "status": "machine"
+    },
+    "invite.contact.connected": {
+      "text": "Conectado.",
+      "status": "machine"
+    },
+    "invite.contact.expired": {
+      "text": "Esta invitación caducó. Pide un enlace nuevo a quien te invitó.",
+      "status": "machine"
+    },
+    "invite.contact.expiry": {
+      "text": "Caducidad",
+      "status": "machine"
+    },
+    "invite.contact.fingerprint": {
+      "text": "Huella de quien invita",
+      "status": "machine"
+    },
+    "invite.contact.intro_label": {
+      "text": "Mensaje de presentación (opcional)",
+      "status": "machine"
+    },
+    "invite.contact.invalid_body": {
+      "text": "El enlace está roto o se modificó por el camino. Pide uno nuevo a quien te invitó.",
+      "status": "machine"
+    },
+    "invite.contact.invalid_title": {
+      "text": "Este enlace de invitación no es válido",
+      "status": "machine"
+    },
+    "invite.contact.needs_auth_body": {
+      "text": "Necesitas una cuenta para aceptar. Crea una o inicia sesión y volverás aquí automáticamente.",
+      "status": "machine"
+    },
+    "invite.contact.needs_auth_title": {
+      "text": "Alguien quiere conectar contigo en Lakko",
+      "status": "machine"
+    },
+    "invite.contact.no_longer_valid": {
+      "text": "Este enlace ya no es válido. Pide uno nuevo a esa persona.",
+      "status": "machine"
+    },
+    "invite.contact.page_title": {
+      "text": "Invitación",
+      "status": "machine"
+    },
+    "invite.contact.referral": {
+      "text": "Enlace de referido: tu solicitud se envía automáticamente.",
+      "status": "machine"
+    },
+    "invite.contact.result.already_body": {
+      "text": "Ya aceptaste esta invitación en este dispositivo. Busca a esa persona en Contactos.",
+      "status": "machine"
+    },
+    "invite.contact.result.already_title": {
+      "text": "Ya aceptada",
+      "status": "machine"
+    },
+    "invite.contact.result.expired_title": {
+      "text": "Invitación caducada",
+      "status": "machine"
+    },
+    "invite.contact.result.failed_title": {
+      "text": "Invitación no aceptada",
+      "status": "machine"
+    },
+    "invite.contact.result.not_found_title": {
+      "text": "Invitación no encontrada",
+      "status": "machine"
+    },
+    "invite.contact.result.rate_limited_title": {
+      "text": "Ahora no",
+      "status": "machine"
+    },
+    "invite.contact.result.sent_body": {
+      "text": "Tu solicitud de contacto va de camino. Cuando la acepte, el chat aparecerá en Chats.",
+      "status": "machine"
+    },
+    "invite.contact.result.sent_title": {
+      "text": "Solicitud enviada",
+      "status": "machine"
+    },
+    "invite.contact.result.used_up_title": {
+      "text": "Invitación agotada",
+      "status": "machine"
+    },
+    "invite.contact.sending": {
+      "text": "Enviando tu solicitud a {name}...",
+      "status": "machine"
+    },
+    "invite.contact.sent": {
+      "text": "Solicitud enviada a {name}.",
+      "status": "machine"
+    },
+    "invite.contact.title": {
+      "text": "¿Conectar con {name}?",
+      "status": "machine"
+    },
+    "invite.contact.type": {
+      "text": "Tipo",
+      "status": "machine"
+    },
+    "invite.contact.used_up": {
+      "text": "Este enlace ya se usó todas las veces permitidas. Pide uno nuevo a esa persona.",
+      "status": "machine"
+    },
+    "invite.contact.uses": {
+      "text": "Usos permitidos",
+      "status": "machine"
+    },
+    "invite.expiry.ago_days": {
+      "text": "{count, plural, one {caducó hace # día} other {caducó hace # días}}",
+      "status": "machine"
+    },
+    "invite.expiry.ago_hours": {
+      "text": "{count, plural, one {caducó hace # hora} other {caducó hace # horas}}",
+      "status": "machine"
+    },
+    "invite.expiry.ago_minutes": {
+      "text": "{count, plural, one {caducó hace # minuto} other {caducó hace # minutos}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_days": {
+      "text": "{count, plural, one {en # día} other {en # días}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_hours": {
+      "text": "{count, plural, one {en # hora} other {en # horas}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_minutes": {
+      "text": "{count, plural, one {en # minuto} other {en # minutos}}",
+      "status": "machine"
+    },
+    "invite.expiry.never": {
+      "text": "no caduca",
+      "status": "machine"
+    },
+    "invite.go_home": {
+      "text": "Ir al inicio de Lakko",
+      "status": "machine"
+    },
+    "invite.group.invited_by": {
+      "text": "Invitación de {fingerprint}",
+      "status": "machine"
+    },
+    "invite.group.lead_anonymous": {
+      "text": "Te han invitado a",
+      "status": "machine"
+    },
+    "invite.group.lead_anonymous_unnamed": {
+      "text": "Te han invitado a un grupo",
+      "status": "machine"
+    },
+    "invite.group.lead_named": {
+      "text": "{name} te invita a",
+      "status": "machine"
+    },
+    "invite.group.lead_named_unnamed": {
+      "text": "{name} te invita a un grupo",
+      "status": "machine"
+    },
+    "invite.link.damaged": {
+      "text": "Este enlace de invitación está dañado. Pide un enlace nuevo.",
+      "status": "machine"
+    },
+    "invite.link.invalid": {
+      "text": "Este enlace de invitación no es válido o ha caducado.",
+      "status": "machine"
+    },
+    "invite.link.loading": {
+      "text": "Cargando invitación...",
+      "status": "machine"
+    },
+    "invite.link.rate_limited": {
+      "text": "Demasiadas solicitudes desde esta red ahora mismo. Inténtalo de nuevo en un minuto.",
+      "status": "machine"
+    },
+    "invite.links.already_removed": {
+      "text": "«{label}» ya se había eliminado.",
+      "status": "machine"
+    },
+    "invite.links.already_removed_unnamed": {
+      "text": "Este enlace ya se había eliminado.",
+      "status": "machine"
+    },
+    "invite.links.create": {
+      "text": "Crear enlace",
+      "status": "machine"
+    },
+    "invite.links.created": {
+      "text": "Creado el {date}",
+      "status": "machine"
+    },
+    "invite.links.desc": {
+      "text": "Cualquiera que abra uno de tus enlaces puede enviarte una solicitud de contacto hasta que caduque o se agoten sus usos.",
+      "status": "machine"
+    },
+    "invite.links.empty": {
+      "text": "No hay enlaces activos.",
+      "status": "machine"
+    },
+    "invite.links.error.copy": {
+      "text": "No se pudo copiar el enlace.",
+      "status": "machine"
+    },
+    "invite.links.error.load": {
+      "text": "No se pudieron cargar tus enlaces de invitación. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_create": {
+      "text": "Vuelve a iniciar sesión para crear un enlace de invitación.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_list": {
+      "text": "Vuelve a iniciar sesión para ver tus enlaces de invitación.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_revoke": {
+      "text": "Vuelve a iniciar sesión para revocar un enlace de invitación.",
+      "status": "machine"
+    },
+    "invite.links.expired": {
+      "text": "Caducado",
+      "status": "machine"
+    },
+    "invite.links.expires_days": {
+      "text": "Caduca en {count} d",
+      "status": "machine"
+    },
+    "invite.links.expires_field": {
+      "text": "Caduca",
+      "status": "machine"
+    },
+    "invite.links.expires_hours": {
+      "text": "Caduca en {count} h",
+      "status": "machine"
+    },
+    "invite.links.expires_minutes": {
+      "text": "Caduca en {count} min",
+      "status": "machine"
+    },
+    "invite.links.expires_option_days": {
+      "text": "{count, plural, one {En # día} other {En # días}}",
+      "status": "machine"
+    },
+    "invite.links.expires_option_never": {
+      "text": "Nunca",
+      "status": "machine"
+    },
+    "invite.links.for_new_user": {
+      "text": "Para alguien nuevo en Lakko",
+      "status": "machine"
+    },
+    "invite.links.inline_note": {
+      "text": "Lakko no pudo acortar este enlace, así que es largo. Funciona igual y no se puede revocar.",
+      "status": "machine"
+    },
+    "invite.links.label_field": {
+      "text": "Etiqueta (opcional)",
+      "status": "machine"
+    },
+    "invite.links.label_placeholder": {
+      "text": "La verá quien abra el enlace",
+      "status": "machine"
+    },
+    "invite.links.list": {
+      "text": "Enlaces de invitación activos",
+      "status": "machine"
+    },
+    "invite.links.never_expires": {
+      "text": "No caduca",
+      "status": "machine"
+    },
+    "invite.links.new_badge": {
+      "text": "Nuevo",
+      "status": "machine"
+    },
+    "invite.links.referral_option": {
+      "text": "Para alguien que aún no tiene cuenta de Lakko",
+      "status": "machine"
+    },
+    "invite.links.revoked": {
+      "text": "Enlace revocado.",
+      "status": "machine"
+    },
+    "invite.links.revoking": {
+      "text": "Revocando...",
+      "status": "machine"
+    },
+    "invite.links.unlimited_uses": {
+      "text": "Usos ilimitados",
+      "status": "machine"
+    },
+    "invite.links.used_up": {
+      "text": "Agotado",
+      "status": "machine"
+    },
+    "invite.links.uses_field": {
+      "text": "Usos",
+      "status": "machine"
+    },
+    "invite.links.uses_left": {
+      "text": "{count, plural, one {Queda # uso} other {Quedan # usos}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_one": {
+      "text": "Una persona",
+      "status": "machine"
+    },
+    "invite.links.uses_option_unlimited": {
+      "text": "Ilimitados",
+      "status": "machine"
+    },
+    "invite.links.uses_option_up_to": {
+      "text": "{count, plural, one {Hasta # persona} other {Hasta # personas}}",
+      "status": "machine"
+    },
+    "invite.sign_up": {
+      "text": "Registrarse",
+      "status": "machine"
+    },
+    "invite.uses.single": {
+      "text": "un solo uso",
+      "status": "machine"
+    },
+    "invite.uses.unlimited": {
+      "text": "ilimitados",
+      "status": "machine"
+    },
+    "invite.uses.up_to": {
+      "text": "{count, plural, one {hasta # uso} other {hasta # usos}}",
       "status": "machine"
     },
     "language.name.ar": {
@@ -2588,6 +3760,38 @@
     },
     "nav.settings": {
       "text": "Ajustes",
+      "status": "machine"
+    },
+    "new_group.back": {
+      "text": "Grupos",
+      "status": "machine"
+    },
+    "new_group.error.sign_in": {
+      "text": "Vuelve a iniciar sesión para crear un grupo.",
+      "status": "machine"
+    },
+    "new_group.index_hint": {
+      "text": "Selecciona un grupo para empezar a enviar mensajes",
+      "status": "machine"
+    },
+    "new_group.name_hint": {
+      "text": "Todos los miembros ven el nombre. Se envía cifrado; el servidor nunca lo lee.",
+      "status": "machine"
+    },
+    "new_group.name_not_sent": {
+      "text": "El nombre del grupo no se envió. Ponlo desde el panel de miembros.",
+      "status": "machine"
+    },
+    "new_group.name_placeholder": {
+      "text": "Planes para el fin de semana",
+      "status": "machine"
+    },
+    "new_group.no_contacts": {
+      "text": "Primero añade contactos: un grupo empieza con personas que ya conoces.",
+      "status": "machine"
+    },
+    "new_group.subtitle": {
+      "text": "Serás el propietario del grupo. Puedes añadir a más personas después.",
       "status": "machine"
     },
     "recovery.access_only_note": {

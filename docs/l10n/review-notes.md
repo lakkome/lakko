@@ -262,3 +262,130 @@ recovery area (`docs/l10n/batch-1-auth.md`).
   refer to "contact" (grammatically masculine), not the person.
 - **tr "Video message"** stays "görüntülü not" in the new keys, as in the
   main batch.
+
+## Batch 4 (contacts, channels, invite pages): ar, es, fa, he, hi
+
+### Terms used
+
+| en | ar | es | fa | he | hi |
+|---|---|---|---|---|---|
+| subscriber | مشترك | suscriptor | مشترک | מנוי | सब्सक्राइबर |
+| post | منشور | publicación | پست | פוסט | पोस्ट |
+| publish | نشر | publicar | انتشار | פרסום | पब्लिश |
+| co-publisher | ناشر مشارك | copublicador | ناشر همکار | מפרסם שותף | सह-प्रकाशक |
+| handle | معرّف | identificador | شناسه | מזהה | हैंडल |
+| verify | التحقق | verificar | تأیید | אימות | पुष्टि |
+| transparency log | سجل الشفافية | registro de transparencia | گزارش شفافیت | יומן השקיפות | पारदर्शिता लॉग |
+| stop following | إلغاء المتابعة | Dejar de seguir | لغو دنبال کردن | הפסקת מעקב | फ़ॉलो करना बंद करें |
+
+### Across languages
+
+- **"NOT" emphasis** in `contacts.identity_changed.unexplained*`
+  (security-critical, the comment asks to keep it): es keeps "NO" in capitals.
+  ar, he and hi have no capitals and carry it by wording only; fa puts the
+  verb in «» quotes. A reviewer should decide whether this is enough.
+- **"out of band"**: every language says "by another means" / "another way",
+  with no technical term.
+- **The example name** in `contacts.add.intro_placeholder` is localized (es
+  Alicia, ar ليلى, fa سارا, he נועה, hi प्रिया). The `@alice` and
+  `@my-channel` placeholders stay Latin, as the comments require.
+- **Channel key "refresh"**: es "renovar", ar "تجديد", fa "تازه‌سازی", he
+  "רענון", hi "रिफ़्रेश". In es, ar and he, `channels.rotation.refreshed`
+  agrees in the feminine with "protection".
+- **Compact expiry facts** (`invite.links.expires_{days,hours,minutes}`):
+  es "d/h/min", ar "ي/س/د", he "ימ׳/שע׳/דק׳"; fa and hi spell the unit out.
+
+### Per language
+
+- **es**: "Suscrito", "propietario" and "copublicador" are masculine. Avoided
+  vosotros/ustedes in `contacts.safety.body` and `contacts.remove.body`.
+- **ar**: `contacts.identity_changed.reset` is masculine for a named contact,
+  and the `_unnamed` form agrees with "جهة الاتصال" (feminine).
+  `invite.group.lead_*` uses "مدعو" (masculine).
+- **fa**: `invite.group.lead_anonymous` / `lead_named` put "به" last so the
+  group name on the next line completes the sentence; check that it reads
+  naturally.
+- **he**: `invite.group.lead_named*` rendered as "הזמנה מ-{name} אל" to avoid
+  a gendered verb. The identity-changed messages ("איפס", "שלו", "הוא") are
+  masculine. `contacts.request.accept` is "אישור" (the call accept is
+  "מענה").
+- **hi**: the verb-final word order does not fit "invites you to" + the group
+  name underneath; `lead_named` / `lead_anonymous` end with "इस ग्रुप में
+  इनवाइट किया है:" and a colon.
+
+## Batch 4 (contacts, channels, invite pages): pt-BR, ru, tr, uk, zh-Hans
+
+- **Glossary chosen.** subscriber: pt-BR "inscrito", ru "подписчик", tr
+  "abone", uk "підписник", zh-Hans 订阅者. co-publisher: pt-BR
+  "copublicador", ru "соиздатель", tr "ortak yayıncı", uk "співвидавець",
+  zh-Hans 共同发布者 (none of these is an established UI term; review).
+  post: pt-BR "publicação", ru "пост", tr "gönderi", uk "допис", zh-Hans 帖子.
+  invite link: as batch 3 (ссылка-приглашение, посилання-запрошення,
+  link de convite, davet bağlantısı, 邀请链接).
+- **@handle** has no settled term: pt-BR "@identificador", ru "@адрес",
+  uk "@адреса", tr "@adres", zh-Hans "@ 标识". The handle placeholder stays
+  "@my-channel" in ru/uk/zh-Hans (Latin required); pt-BR "@meu-canal",
+  tr "@kanalim".
+- **"secure identity"** follows the batch-1 term per language: ru
+  "ключи аккаунта" (sentences rebuilt in the passive: "Ключи аккаунта
+  {name} сброшены"), uk "ідентичність", pt-BR "identidade segura", tr
+  "güvenli kimlik", zh-Hans 安全身份. "Transparency log": registro de
+  transparência / журнал прозрачности / şeffaflık kaydı / журнал
+  прозорості / 透明度日志. "Out of band": "por outro canal", "по другому
+  каналу связи", "başka bir kanaldan", "іншим каналом зв’язку", 通过其他渠道.
+  The NOT emphasis is kept in capitals in pt-BR, ru, tr, uk
+  (НЕ / NÃO / GÖSTERMİYOR); zh-Hans has no capitals and uses 并未.
+- **tr security-critical `contacts.identity_changed.unconfirmed` /
+  `unexplained`** move `{name}` to the end of the first sentence
+  ("...: {name}.") to avoid a genitive suffix; reads stiff.
+- **"Stop following"** is rendered as "unsubscribe" in ru/uk
+  ("Отписаться / Відписатися"); pt-BR "Deixar de seguir", tr "Takibi
+  bırak", zh-Hans 取消关注, which do not match "Inscrever-se / Abone ol /
+  订阅" on the subscribe button.
+- **Gender:** pt-BR "Você foi convidado" avoided on the group invite
+  headline ("Convite para"); pt-BR "Você foi adicionado a um grupo"
+  (`contacts.mailbox.join_failed`), "Você será o proprietário", "Inscrito"
+  remain masculine. ru `invite.group.invited_by` "Приглашение от
+  {fingerprint}" avoids "пригласил(а)".
+- **ru/uk `contacts.safety.body`** wraps {name} in "с собеседником
+  ({name})" to avoid declining the name.
+- **Compact expiry facts** (`invite.links.expires_*`): ru "дн./ч/мин",
+  uk "дн./год/хв", tr "{count} gün kaldı" ("{count} days left") rather
+  than a unit abbreviation.
+- **`channels.rotation.refreshed`:** tr "Son yenileme: {when}." and
+  zh-Hans "{when}已更新" reorder; check with `common.time.just_now`.
+- **`invite.contact.fingerprint`:** "отпечаток", "impressão digital",
+  "parmak izi", "відбиток", 指纹; check it matches whatever the safety
+  number screens call the fingerprint.
+
+### Batch 4 top-up (keys added by iOS and Android)
+
+
+- **`invite.contact.result.rate_limited_title`** "Not right now" reuses each
+  language's `common.not_now` wording (es "Ahora no", ar "ليس الآن", fa "الان
+  نه", he "לא עכשיו", hi "अभी नहीं"), so on screen it reads like a button
+  label rather than a headline.
+- **`invite.contact.connected`**: he "נוצר קשר." and fa "متصل شدید." are
+  literal; check against the fingerprint text that follows.
+- **`invite.contact.result.sent_body`** (hi): "चैट, चैट में दिखेगी" repeats
+  "chat" (the conversation and the Chats section); a native speaker may
+  prefer the tab's own name.
+- **`contacts.safety.row_sub`** (security-critical): he and ar say "this
+  person" / "it is really him"; es repeats "esa persona"; check the tone.
+- **`common.clipboard.*`**: rendered as "Link from Lakko" (ar "رابط من Lakko",
+  he "קישור מ-Lakko"); es "Enlace de Lakko"; fa and hi use "Lakko" + noun.
+
+
+- **`invite.contact.connected`** ("Connected."): ru/uk render it as
+  "Контакт добавлен / Контакт додано" (the literal "Подключено" reads as a
+  network state); pt-BR "Conectado." is masculine.
+- **`invite.contact.result.rate_limited_title`** ("Not right now"):
+  zh-Hans 暂时无法处理 ("cannot handle it right now") instead of the
+  literal 暂不, which reads as a refusal by the user.
+- **`contacts.list.section_index`:** ru/uk "Алфавитный указатель /
+  Алфавітний покажчик", zh-Hans 索引; pt-BR "Índice de seções" and tr
+  "Bölüm dizini" literal.
+- **`invite.links.new_badge`:** ru "Новая" and uk "Нове" agree with
+  "ссылка / посилання"; pt-BR "Novo" with "link".
+- **`common.qr_code`:** pt-BR keeps "QR code" (common in Brazil), matching
+  batch 1.

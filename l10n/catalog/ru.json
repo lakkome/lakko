@@ -330,6 +330,474 @@
       "text": "Можно уйти с этого экрана: вы присоединитесь, как только вас впустят.",
       "status": "machine"
     },
+    "channels.back": {
+      "text": "Назад к каналам",
+      "status": "machine"
+    },
+    "channels.compose.label": {
+      "text": "Новый пост",
+      "status": "machine"
+    },
+    "channels.compose.placeholder": {
+      "text": "Напишите пост",
+      "status": "machine"
+    },
+    "channels.compose.publish": {
+      "text": "Опубликовать",
+      "status": "machine"
+    },
+    "channels.compose.publishing": {
+      "text": "Публикация...",
+      "status": "machine"
+    },
+    "channels.copublishers.desc": {
+      "text": "Люди, которые могут публиковать в этом канале. Поделитесь ссылкой и одобрите запрос, когда он придёт.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.approve": {
+      "text": "Не удалось одобрить запрос. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.poll": {
+      "text": "Не удалось проверить запросы. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.reject": {
+      "text": "Не удалось отклонить запрос. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.copublishers.link": {
+      "text": "Ссылка-приглашение для соиздателя",
+      "status": "machine"
+    },
+    "channels.copublishers.request_row": {
+      "text": "Кто-то хочет стать соиздателем",
+      "status": "machine"
+    },
+    "channels.copublishers.requests": {
+      "text": "Запросы ({count})",
+      "status": "machine"
+    },
+    "channels.copublishers.title": {
+      "text": "Соиздатели",
+      "status": "machine"
+    },
+    "channels.empty.action": {
+      "text": "Создать канал",
+      "status": "machine"
+    },
+    "channels.empty.title": {
+      "text": "Каналов пока нет",
+      "status": "machine"
+    },
+    "channels.error.empty_post": {
+      "text": "Напишите что-нибудь, чтобы опубликовать.",
+      "status": "machine"
+    },
+    "channels.error.not_let_in": {
+      "text": "Канал ещё не открыл доступ этому устройству. Попробуйте позже.",
+      "status": "machine"
+    },
+    "channels.error.post_too_large": {
+      "text": "Этот пост слишком длинный для публикации.",
+      "status": "machine"
+    },
+    "channels.error.refused": {
+      "text": "Сервер отклонил запрос. Попробуйте позже.",
+      "status": "machine"
+    },
+    "channels.error.sign_in": {
+      "text": "Войдите снова, чтобы пользоваться каналами.",
+      "status": "machine"
+    },
+    "channels.error.unknown_channel": {
+      "text": "Этого канала нет на сервере.",
+      "status": "machine"
+    },
+    "channels.error.unreachable": {
+      "text": "Сервис каналов сейчас недоступен. Попробуйте чуть позже.",
+      "status": "machine"
+    },
+    "channels.fallback_name": {
+      "text": "Канал",
+      "status": "machine"
+    },
+    "channels.field.description_optional": {
+      "text": "Описание (необязательно)",
+      "status": "machine"
+    },
+    "channels.field.name": {
+      "text": "Название",
+      "status": "machine"
+    },
+    "channels.find.action": {
+      "text": "Найти {handle}",
+      "status": "machine"
+    },
+    "channels.find.none": {
+      "text": "Канал {handle} не найден.",
+      "status": "machine"
+    },
+    "channels.index_hint": {
+      "text": "Выберите канал или создайте новый",
+      "status": "machine"
+    },
+    "channels.info.manage_sub": {
+      "text": "Название и описание, кто его читает и кто ещё может публиковать.",
+      "status": "machine"
+    },
+    "channels.info.subscribers": {
+      "text": "{count, plural, one {# подписчик} few {# подписчика} many {# подписчиков} other {# подписчика}}",
+      "status": "machine"
+    },
+    "channels.info.unsubscribe_sub": {
+      "text": "Убирает канал из вашего списка, и это устройство перестаёт его читать. Позже можно подписаться снова.",
+      "status": "machine"
+    },
+    "channels.join.default_name": {
+      "text": "Канал, где вы соиздатель",
+      "status": "machine"
+    },
+    "channels.join.error.sign_in": {
+      "text": "Войдите снова, чтобы присоединиться к каналу.",
+      "status": "machine"
+    },
+    "channels.join.link_label": {
+      "text": "Ссылка",
+      "status": "machine"
+    },
+    "channels.join.name_label": {
+      "text": "Название на этом устройстве (необязательно)",
+      "status": "machine"
+    },
+    "channels.join.no_approval": {
+      "text": "Одобрения пока нет. Попробуйте снова, когда владелец одобрит запрос.",
+      "status": "machine"
+    },
+    "channels.join.requesting": {
+      "text": "Отправка запроса...",
+      "status": "machine"
+    },
+    "channels.join.subtitle": {
+      "text": "Вставьте ссылку, которой поделился владелец канала. После одобрения это устройство сможет публиковать в канале.",
+      "status": "machine"
+    },
+    "channels.join.title": {
+      "text": "Стать соиздателем",
+      "status": "machine"
+    },
+    "channels.join.waiting": {
+      "text": "Ждём одобрения владельца канала...",
+      "status": "machine"
+    },
+    "channels.legacy.channel": {
+      "text": "Этот канал создан старой версией Lakko и не открывается в этой сборке. Уже опубликованные посты останутся доступны вашим подписчикам. Чтобы снова публиковать, создайте новый канал — этот восстановить нельзя.",
+      "status": "machine"
+    },
+    "channels.legacy.copublisher_link": {
+      "text": "Эта ссылка-приглашение для соиздателя создана старой версией Lakko и больше не работает. Попросите владельца канала прислать новую ссылку-приглашение.",
+      "status": "machine"
+    },
+    "channels.manage.back": {
+      "text": "Назад к постам",
+      "status": "machine"
+    },
+    "channels.manage.error.open": {
+      "text": "Не удалось открыть настройки канала. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.manage.error.sign_in": {
+      "text": "Войдите снова, чтобы управлять этим каналом.",
+      "status": "machine"
+    },
+    "channels.manage.title": {
+      "text": "Управление каналом",
+      "status": "machine"
+    },
+    "channels.meta.desc": {
+      "text": "Название и описание доходят до всех подписчиков в зашифрованном виде. Сервер никогда их не читает.",
+      "status": "machine"
+    },
+    "channels.meta.error.description_bad_character": {
+      "text": "В описании есть символ, который нельзя отобразить.",
+      "status": "machine"
+    },
+    "channels.meta.error.description_too_long": {
+      "text": "Описание слишком длинное.",
+      "status": "machine"
+    },
+    "channels.meta.error.generic": {
+      "text": "Это название или описание нельзя использовать.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_bad_character": {
+      "text": "В названии есть символ, который нельзя отобразить.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_empty": {
+      "text": "У канала должно быть название",
+      "status": "machine"
+    },
+    "channels.meta.error.name_line_break": {
+      "text": "Название должно быть в одну строку.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_too_long": {
+      "text": "Название слишком длинное.",
+      "status": "machine"
+    },
+    "channels.meta.error.save": {
+      "text": "Не удалось сохранить. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.meta.error.save_prefix": {
+      "text": "Не удалось сохранить.",
+      "status": "machine"
+    },
+    "channels.meta.saved": {
+      "text": "Сохранено. Подписчики увидят новое название вместе со следующими постами.",
+      "status": "machine"
+    },
+    "channels.meta.title": {
+      "text": "Канал",
+      "status": "machine"
+    },
+    "channels.new.create": {
+      "text": "Создать",
+      "status": "machine"
+    },
+    "channels.new.error.create": {
+      "text": "Не удалось создать канал. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.new.error.handle": {
+      "text": "Не удалось занять @адрес. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.new.error.handle_offline": {
+      "text": "Не удалось занять @адрес. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.new.error.handle_taken": {
+      "text": "{handle} уже занят. Выберите другой или оставьте поле пустым.",
+      "status": "machine"
+    },
+    "channels.new.error.no_name": {
+      "text": "Дайте каналу название.",
+      "status": "machine"
+    },
+    "channels.new.error.sign_in": {
+      "text": "Войдите снова, чтобы создать канал.",
+      "status": "machine"
+    },
+    "channels.new.handle_hint": {
+      "text": "По нему любой может найти канал и подписаться.",
+      "status": "machine"
+    },
+    "channels.new.handle_label": {
+      "text": "Публичный @адрес (необязательно)",
+      "status": "machine"
+    },
+    "channels.new.handle_placeholder": {
+      "text": "@my-channel",
+      "status": "machine"
+    },
+    "channels.new.subtitle": {
+      "text": "Подписчики видят название и описание. Они передаются в зашифрованном виде; на сервер попадает только шифротекст.",
+      "status": "machine"
+    },
+    "channels.new.title": {
+      "text": "Новый канал",
+      "status": "machine"
+    },
+    "channels.new_menu": {
+      "text": "Новый канал или присоединиться",
+      "status": "machine"
+    },
+    "channels.post.not_available": {
+      "text": "Недоступно",
+      "status": "machine"
+    },
+    "channels.post.older_key": {
+      "text": "Этот пост старше того, что может прочитать это устройство.",
+      "status": "machine"
+    },
+    "channels.post.unreadable": {
+      "text": "Этот пост не удалось открыть на этом устройстве.",
+      "status": "machine"
+    },
+    "channels.posts.empty": {
+      "text": "Постов пока нет.",
+      "status": "machine"
+    },
+    "channels.posts.empty_owner": {
+      "text": "Постов пока нет. Напишите первый ниже.",
+      "status": "machine"
+    },
+    "channels.posts.error.load": {
+      "text": "Не удалось загрузить посты.",
+      "status": "machine"
+    },
+    "channels.publish.error.generic": {
+      "text": "Не удалось опубликовать. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.publish.error.not_publisher": {
+      "text": "Это устройство не может публиковать в этом канале.",
+      "status": "machine"
+    },
+    "channels.publish.error.prefix": {
+      "text": "Не удалось опубликовать.",
+      "status": "machine"
+    },
+    "channels.rotation.desc": {
+      "text": "Lakko сам обновляет защиту канала. Обновите её сейчас, если считаете, что устройство кого-то из подписчиков скомпрометировано.",
+      "status": "machine"
+    },
+    "channels.rotation.error.check": {
+      "text": "Не удалось проверить защиту канала.",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh": {
+      "text": "Не удалось обновить. Попробуйте чуть позже.",
+      "status": "machine"
+    },
+    "channels.rotation.never": {
+      "text": "Ещё не обновлялась.",
+      "status": "machine"
+    },
+    "channels.rotation.refresh_now": {
+      "text": "Обновить сейчас",
+      "status": "machine"
+    },
+    "channels.rotation.refreshed": {
+      "text": "Обновлено {when}.",
+      "status": "machine"
+    },
+    "channels.rotation.refreshing": {
+      "text": "Обновление...",
+      "status": "machine"
+    },
+    "channels.rotation.title": {
+      "text": "Защита",
+      "status": "machine"
+    },
+    "channels.row.own": {
+      "text": "Ваш канал",
+      "status": "machine"
+    },
+    "channels.search.label": {
+      "text": "Поиск каналов или поиск по @адресу",
+      "status": "machine"
+    },
+    "channels.search.placeholder": {
+      "text": "Поиск или @адрес",
+      "status": "machine"
+    },
+    "channels.subscribe.action": {
+      "text": "Подписаться",
+      "status": "machine"
+    },
+    "channels.subscribe.error.generic": {
+      "text": "Не удалось подписаться. Попробуйте позже.",
+      "status": "machine"
+    },
+    "channels.subscribe.error.prefix": {
+      "text": "Не удалось подписаться.",
+      "status": "machine"
+    },
+    "channels.subscribe.prompt_body": {
+      "text": "Посты появятся здесь, когда канал откроет доступ этому устройству.",
+      "status": "machine"
+    },
+    "channels.subscribe.prompt_title": {
+      "text": "Подпишитесь, чтобы читать этот канал",
+      "status": "machine"
+    },
+    "channels.subscribe.status.not_subscribed": {
+      "text": "Нет подписки",
+      "status": "machine"
+    },
+    "channels.subscribe.status.subscribed": {
+      "text": "Подписка оформлена",
+      "status": "machine"
+    },
+    "channels.subscribe.status.subscribing": {
+      "text": "Подписка...",
+      "status": "machine"
+    },
+    "channels.subscribe.status.waiting": {
+      "text": "Ожидание доступа...",
+      "status": "machine"
+    },
+    "channels.subscribe.waiting_notice": {
+      "text": "Подписка оформлена. Посты появятся, когда канал откроет доступ этому устройству; обычно это занимает немного времени.",
+      "status": "machine"
+    },
+    "channels.subscribers.count": {
+      "text": "({count})",
+      "status": "machine"
+    },
+    "channels.subscribers.desc": {
+      "text": "Новым подписчикам доступ открывается с этого устройства автоматически.",
+      "status": "machine"
+    },
+    "channels.subscribers.empty": {
+      "text": "Подписчиков пока нет. Поделитесь @адресом канала, чтобы на него могли подписаться.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.deliver": {
+      "text": "Не удалось настроить доступ для этого подписчика. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.deliver_prefix": {
+      "text": "Не удалось настроить доступ для этого подписчика.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.load": {
+      "text": "Не удалось загрузить подписчиков. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.subscribers.retrying": {
+      "text": "Повторная попытка...",
+      "status": "machine"
+    },
+    "channels.subscribers.row": {
+      "text": "Подписчик {number}",
+      "status": "machine"
+    },
+    "channels.subscribers.status.not_ready": {
+      "text": "Не готов",
+      "status": "machine"
+    },
+    "channels.subscribers.status.ready": {
+      "text": "Готов",
+      "status": "machine"
+    },
+    "channels.subscribers.status.setting_up": {
+      "text": "Настройка...",
+      "status": "machine"
+    },
+    "channels.subscribers.title": {
+      "text": "Подписчики",
+      "status": "machine"
+    },
+    "channels.unsubscribe.action": {
+      "text": "Отписаться",
+      "status": "machine"
+    },
+    "channels.unsubscribe.body": {
+      "text": "Канал исчезнет из вашего списка, и это устройство перестанет его читать. Позже можно подписаться снова.",
+      "status": "machine"
+    },
+    "channels.unsubscribe.title": {
+      "text": "Отписаться от этого канала?",
+      "status": "machine"
+    },
+    "channels.unsubscribe.title_named": {
+      "text": "Отписаться от канала «{name}»?",
+      "status": "machine"
+    },
     "chat.attachment.error.attach": {
       "text": "Не удалось прикрепить выбранный элемент. Попробуйте ещё раз.",
       "status": "machine"
@@ -532,6 +1000,10 @@
     },
     "chat.delete.control": {
       "text": "Удалить этот чат",
+      "status": "machine"
+    },
+    "chat.delete.sub": {
+      "text": "Удаляет этот разговор и всё, что в нём есть, с этого устройства. Это нельзя отменить.",
       "status": "machine"
     },
     "chat.delete.title": {
@@ -2054,6 +2526,14 @@
       "text": "Проверка...",
       "status": "machine"
     },
+    "common.clipboard.link": {
+      "text": "Ссылка Lakko",
+      "status": "machine"
+    },
+    "common.clipboard.message": {
+      "text": "Сообщение Lakko",
+      "status": "machine"
+    },
     "common.close": {
       "text": "Закрыть",
       "status": "machine"
@@ -2084,6 +2564,10 @@
     },
     "common.copy": {
       "text": "Копировать",
+      "status": "machine"
+    },
+    "common.creating": {
+      "text": "Создание...",
       "status": "machine"
     },
     "common.delete": {
@@ -2158,6 +2642,10 @@
       "text": "Развернуть",
       "status": "machine"
     },
+    "common.fact_pair": {
+      "text": "{first} · {second}",
+      "status": "machine"
+    },
     "common.list_pair": {
       "text": "{first}, {second}",
       "status": "machine"
@@ -2194,6 +2682,10 @@
       "text": "Вкл.",
       "status": "machine"
     },
+    "common.open_chat": {
+      "text": "Открыть чат",
+      "status": "machine"
+    },
     "common.open_lakko": {
       "text": "Открыть Lakko",
       "status": "machine"
@@ -2212,6 +2704,10 @@
     },
     "common.preparing": {
       "text": "Подготовка...",
+      "status": "machine"
+    },
+    "common.qr_code": {
+      "text": "QR-код",
       "status": "machine"
     },
     "common.remove": {
@@ -2262,12 +2758,296 @@
       "text": "{size} МБ",
       "status": "machine"
     },
+    "common.time.days_ago": {
+      "text": "{count, plural, one {# день назад} few {# дня назад} many {# дней назад} other {# дня назад}}",
+      "status": "machine"
+    },
+    "common.time.hours_ago": {
+      "text": "{count, plural, one {# час назад} few {# часа назад} many {# часов назад} other {# часа назад}}",
+      "status": "machine"
+    },
+    "common.time.just_now": {
+      "text": "только что",
+      "status": "machine"
+    },
+    "common.time.minutes_ago": {
+      "text": "{count, plural, one {# минуту назад} few {# минуты назад} many {# минут назад} other {# минуты назад}}",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "Повторить",
       "status": "machine"
     },
     "common.unknown": {
       "text": "неизвестно",
+      "status": "machine"
+    },
+    "contacts.accept.error.old_version": {
+      "text": "Этот запрос пришёл из старой версии Lakko. Попросите человека обновить приложение и отправить запрос снова.",
+      "status": "machine"
+    },
+    "contacts.add.by_username": {
+      "text": "Добавить по имени пользователя",
+      "status": "machine"
+    },
+    "contacts.add.intro_label": {
+      "text": "Сообщение (необязательно)",
+      "status": "machine"
+    },
+    "contacts.add.intro_placeholder": {
+      "text": "Привет, это Алиса с конференции.",
+      "status": "machine"
+    },
+    "contacts.add.send": {
+      "text": "Отправить",
+      "status": "machine"
+    },
+    "contacts.add.share_invite": {
+      "text": "Поделиться ссылкой-приглашением",
+      "status": "machine"
+    },
+    "contacts.add.subtitle": {
+      "text": "Запросы защищены сквозным шифрованием. Серверы Lakko не могут их прочитать.",
+      "status": "machine"
+    },
+    "contacts.add.title": {
+      "text": "Добавить контакт",
+      "status": "machine"
+    },
+    "contacts.add.username_label": {
+      "text": "Имя пользователя",
+      "status": "machine"
+    },
+    "contacts.add.username_placeholder": {
+      "text": "@alice",
+      "status": "machine"
+    },
+    "contacts.detail.actions": {
+      "text": "Действия с контактом",
+      "status": "machine"
+    },
+    "contacts.detail.call_needs_chat": {
+      "text": "Чтобы позвонить, сначала отправьте сообщение.",
+      "status": "machine"
+    },
+    "contacts.detail.gone_body": {
+      "text": "Этого человека больше нет в ваших контактах.",
+      "status": "machine"
+    },
+    "contacts.detail.gone_title": {
+      "text": "Контакт не найден",
+      "status": "machine"
+    },
+    "contacts.detail.message": {
+      "text": "Написать",
+      "status": "machine"
+    },
+    "contacts.detail.message_unavailable": {
+      "text": "Этот контакт добавлен ещё до того, как отсюда можно было начинать чаты. Попросите его написать вам.",
+      "status": "machine"
+    },
+    "contacts.detail.their_name": {
+      "text": "Называет себя: {name}",
+      "status": "machine"
+    },
+    "contacts.detail.username_not_verified": {
+      "text": "Имя пользователя не подтверждено",
+      "status": "machine"
+    },
+    "contacts.error.send": {
+      "text": "Не удалось отправить запрос. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "contacts.error.start_chat": {
+      "text": "Не удалось начать чат. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.reset": {
+      "text": "Ключи аккаунта {name} сброшены (например, после потери устройства). Журнал прозрачности подтверждает, что сброс выполнил владелец аккаунта. Если вы уверены, что это действительно этот человек, перед продолжением снова сверьте код безопасности по другому каналу связи.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.reset_unnamed": {
+      "text": "Ключи аккаунта этого контакта сброшены (например, после потери устройства). Журнал прозрачности подтверждает, что сброс выполнил владелец аккаунта. Если вы уверены, что это действительно этот человек, перед продолжением снова сверьте код безопасности по другому каналу связи.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unconfirmed": {
+      "text": "Ключи аккаунта {name} изменились, и это не удалось подтвердить по журналу прозрачности. Прежде чем доверять, проверьте по другому каналу связи.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unconfirmed_unnamed": {
+      "text": "Ключи аккаунта этого контакта изменились, и это не удалось подтвердить по журналу прозрачности. Прежде чем доверять, проверьте по другому каналу связи.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unexplained": {
+      "text": "Ключи аккаунта {name} изменились, и журнал прозрачности НЕ показывает сброса владельцем — считайте, что аккаунт мог быть взломан. Прежде чем доверять, проверьте по другому каналу связи.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unexplained_unnamed": {
+      "text": "Ключи аккаунта этого контакта изменились, и журнал прозрачности НЕ показывает сброса владельцем — считайте, что аккаунт мог быть взломан. Прежде чем доверять, проверьте по другому каналу связи.",
+      "status": "machine"
+    },
+    "contacts.invite_links.subtitle": {
+      "text": "Поделитесь ссылкой с тем, от кого хотите получить сообщение.",
+      "status": "machine"
+    },
+    "contacts.invite_links.title": {
+      "text": "Ссылки-приглашения",
+      "status": "machine"
+    },
+    "contacts.list.add": {
+      "text": "Добавить",
+      "status": "machine"
+    },
+    "contacts.list.empty.action": {
+      "text": "Добавить контакт",
+      "status": "machine"
+    },
+    "contacts.list.empty.body": {
+      "text": "Добавьте кого-нибудь по имени пользователя или поделитесь ссылкой-приглашением.",
+      "status": "machine"
+    },
+    "contacts.list.empty.title": {
+      "text": "Контактов пока нет",
+      "status": "machine"
+    },
+    "contacts.list.no_match": {
+      "text": "Подходящих контактов нет.",
+      "status": "machine"
+    },
+    "contacts.list.requests": {
+      "text": "Запросы",
+      "status": "machine"
+    },
+    "contacts.list.search": {
+      "text": "Поиск контактов",
+      "status": "machine"
+    },
+    "contacts.list.section_index": {
+      "text": "Алфавитный указатель",
+      "status": "machine"
+    },
+    "contacts.list.sent": {
+      "text": "Отправленные ({count})",
+      "status": "machine"
+    },
+    "contacts.list.sent_dismiss": {
+      "text": "Убрать из этого списка",
+      "status": "machine"
+    },
+    "contacts.list.sent_waiting": {
+      "text": "Ожидание",
+      "status": "machine"
+    },
+    "contacts.mailbox.join_failed": {
+      "text": "Вас добавили в группу, но приглашение не удалось открыть на этом устройстве. Попросите того, кто вас добавил, сделать это ещё раз.",
+      "status": "machine"
+    },
+    "contacts.mailbox.poll_failed": {
+      "text": "Не удалось проверить новые запросы в контакты. Пробуем снова.",
+      "status": "machine"
+    },
+    "contacts.mailbox.sign_in": {
+      "text": "Войдите снова, чтобы проверить новые запросы.",
+      "status": "machine"
+    },
+    "contacts.reauth.body": {
+      "text": "Ключи, нужные этому сеансу для контактов, недоступны. Войдите снова, чтобы пользоваться контактами.",
+      "status": "machine"
+    },
+    "contacts.remove.body": {
+      "text": "Общие чаты останутся как есть; изменится только ваш список контактов. Позже контакт можно добавить снова.",
+      "status": "machine"
+    },
+    "contacts.remove.confirm_named": {
+      "text": "Удалить: {name}",
+      "status": "machine"
+    },
+    "contacts.remove.control": {
+      "text": "Удалить контакт",
+      "status": "machine"
+    },
+    "contacts.remove.sub": {
+      "text": "Убирает контакт {name} из списка контактов этого аккаунта.",
+      "status": "machine"
+    },
+    "contacts.remove.title": {
+      "text": "Удалить этот контакт?",
+      "status": "machine"
+    },
+    "contacts.rename.action": {
+      "text": "Переименовать",
+      "status": "machine"
+    },
+    "contacts.rename.field": {
+      "text": "Ваше имя для этого контакта",
+      "status": "machine"
+    },
+    "contacts.rename.placeholder": {
+      "text": "Оставьте пустым, чтобы использовать его собственное имя",
+      "status": "machine"
+    },
+    "contacts.rename.sub_local": {
+      "text": "Ваше имя для этого контакта. Его видите только вы.",
+      "status": "machine"
+    },
+    "contacts.rename.sub_theirs": {
+      "text": "Так, как задал сам контакт. Вы можете дать ему своё имя.",
+      "status": "machine"
+    },
+    "contacts.rename.title": {
+      "text": "Имя",
+      "status": "machine"
+    },
+    "contacts.request.accept": {
+      "text": "Принять",
+      "status": "machine"
+    },
+    "contacts.request.decline": {
+      "text": "Отклонить",
+      "status": "machine"
+    },
+    "contacts.request.no_intro": {
+      "text": "Хочет связаться с вами",
+      "status": "machine"
+    },
+    "contacts.request.someone": {
+      "text": "Кто-то",
+      "status": "machine"
+    },
+    "contacts.safety.body": {
+      "text": "Сверьте его с собеседником ({name}) при встрече или во время звонка. Совпадающие коды означают, что между вами никого нет.",
+      "status": "machine"
+    },
+    "contacts.safety.body_unnamed": {
+      "text": "Сверьте его с собеседником при встрече или во время звонка. Совпадающие коды означают, что между вами никого нет.",
+      "status": "machine"
+    },
+    "contacts.safety.error": {
+      "text": "Не удалось вычислить код безопасности. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "contacts.safety.number": {
+      "text": "Код безопасности",
+      "status": "machine"
+    },
+    "contacts.safety.row_sub": {
+      "text": "Сверьте код при встрече, чтобы убедиться, что это действительно этот человек.",
+      "status": "machine"
+    },
+    "contacts.safety.show": {
+      "text": "Показать",
+      "status": "machine"
+    },
+    "contacts.safety.sign_in": {
+      "text": "Войдите снова, чтобы увидеть код безопасности.",
+      "status": "machine"
+    },
+    "contacts.safety.title": {
+      "text": "Сверить код безопасности",
+      "status": "machine"
+    },
+    "contacts.send.done": {
+      "text": "Запрос отправлен: {name}. Он будет в разделе «Отправленные», пока его не примут.",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -2450,6 +3230,10 @@
       "text": "Добавить устройство",
       "status": "machine"
     },
+    "devices.pairing.qr_description": {
+      "text": "QR-код для привязки",
+      "status": "machine"
+    },
     "devices.scan.confirm.body": {
       "text": "Отсканированное устройство получит полный доступ к вашему аккаунту: сообщениям, контактам и ключам аккаунта. Продолжайте, только если этот код показан на вашем собственном новом устройстве.",
       "status": "machine"
@@ -2510,12 +3294,44 @@
       "text": "Проверьте дату и время на этом устройстве.",
       "status": "machine"
     },
+    "group.join.needs_account": {
+      "text": "Чтобы запросить вступление, нужен аккаунт. Создайте его или войдите.",
+      "status": "machine"
+    },
     "group.join.not_taking_requests": {
       "text": "Эта группа пока не принимает запросы. Попробуйте позже.",
       "status": "machine"
     },
+    "group.join.open_chat": {
+      "text": "Открыть чат",
+      "status": "machine"
+    },
+    "group.join.request": {
+      "text": "Запросить вступление",
+      "status": "machine"
+    },
     "group.join.request_again": {
       "text": "Запросить снова",
+      "status": "machine"
+    },
+    "group.join.request_failed": {
+      "text": "Запрос не отправлен. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "group.join.sending": {
+      "text": "Отправка запроса...",
+      "status": "machine"
+    },
+    "group.join.succeeded": {
+      "text": "Вы вступили в группу.",
+      "status": "machine"
+    },
+    "group.join.succeeded_opening": {
+      "text": "Вы вступили в группу. Открываем чат...",
+      "status": "machine"
+    },
+    "group.join.title": {
+      "text": "Вступить в группу",
       "status": "machine"
     },
     "group.join.wait_primary": {
@@ -2524,6 +3340,362 @@
     },
     "group.join.wait_secondary": {
       "text": "Ни у одного из шагов нет ограничения по времени. Если ничего не происходит, запрос можно отправить снова.",
+      "status": "machine"
+    },
+    "invite.contact.accept_failed": {
+      "text": "Не удалось принять приглашение. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "invite.contact.accepting": {
+      "text": "Принимаем приглашение...",
+      "status": "machine"
+    },
+    "invite.contact.already_accepted": {
+      "text": "Вы уже приняли это приглашение. Ваш запрос отправлен: {name}; ответ появится в контактах.",
+      "status": "machine"
+    },
+    "invite.contact.already_accepted_unnamed": {
+      "text": "Вы уже приняли это приглашение. Найдите этого человека в контактах.",
+      "status": "machine"
+    },
+    "invite.contact.check_body": {
+      "text": "Узнайте код безопасности у этого человека способом, которому вы уже доверяете (при встрече, по телефону). Если код не совпадает, эту ссылку создал кто-то другой.",
+      "status": "machine"
+    },
+    "invite.contact.check_title": {
+      "text": "Проверьте, прежде чем принять.",
+      "status": "machine"
+    },
+    "invite.contact.connected": {
+      "text": "Контакт добавлен.",
+      "status": "machine"
+    },
+    "invite.contact.expired": {
+      "text": "Срок действия приглашения истёк. Попросите пригласившего прислать новую ссылку.",
+      "status": "machine"
+    },
+    "invite.contact.expiry": {
+      "text": "Срок действия",
+      "status": "machine"
+    },
+    "invite.contact.fingerprint": {
+      "text": "Отпечаток пригласившего",
+      "status": "machine"
+    },
+    "invite.contact.intro_label": {
+      "text": "Сообщение для знакомства (необязательно)",
+      "status": "machine"
+    },
+    "invite.contact.invalid_body": {
+      "text": "Ссылка повреждена или была изменена по пути. Попросите пригласившего прислать новую.",
+      "status": "machine"
+    },
+    "invite.contact.invalid_title": {
+      "text": "Эта ссылка-приглашение недействительна",
+      "status": "machine"
+    },
+    "invite.contact.needs_auth_body": {
+      "text": "Чтобы принять приглашение, нужен аккаунт. Создайте его или войдите — и вы автоматически вернётесь сюда.",
+      "status": "machine"
+    },
+    "invite.contact.needs_auth_title": {
+      "text": "Кто-то хочет связаться с вами в Lakko",
+      "status": "machine"
+    },
+    "invite.contact.no_longer_valid": {
+      "text": "Эта ссылка больше не действует. Попросите человека прислать новую.",
+      "status": "machine"
+    },
+    "invite.contact.page_title": {
+      "text": "Приглашение",
+      "status": "machine"
+    },
+    "invite.contact.referral": {
+      "text": "Реферальная ссылка: ваш запрос отправляется автоматически.",
+      "status": "machine"
+    },
+    "invite.contact.result.already_body": {
+      "text": "Вы уже приняли это приглашение на этом устройстве. Найдите человека в контактах.",
+      "status": "machine"
+    },
+    "invite.contact.result.already_title": {
+      "text": "Уже принято",
+      "status": "machine"
+    },
+    "invite.contact.result.expired_title": {
+      "text": "Срок приглашения истёк",
+      "status": "machine"
+    },
+    "invite.contact.result.failed_title": {
+      "text": "Приглашение не принято",
+      "status": "machine"
+    },
+    "invite.contact.result.not_found_title": {
+      "text": "Приглашение не найдено",
+      "status": "machine"
+    },
+    "invite.contact.result.rate_limited_title": {
+      "text": "Не сейчас",
+      "status": "machine"
+    },
+    "invite.contact.result.sent_body": {
+      "text": "Ваш запрос в контакты отправлен. Когда его примут, чат появится в разделе «Чаты».",
+      "status": "machine"
+    },
+    "invite.contact.result.sent_title": {
+      "text": "Запрос отправлен",
+      "status": "machine"
+    },
+    "invite.contact.result.used_up_title": {
+      "text": "Приглашение исчерпано",
+      "status": "machine"
+    },
+    "invite.contact.sending": {
+      "text": "Отправляем ваш запрос: {name}...",
+      "status": "machine"
+    },
+    "invite.contact.sent": {
+      "text": "Запрос отправлен: {name}.",
+      "status": "machine"
+    },
+    "invite.contact.title": {
+      "text": "Связаться с {name}?",
+      "status": "machine"
+    },
+    "invite.contact.type": {
+      "text": "Тип",
+      "status": "machine"
+    },
+    "invite.contact.used_up": {
+      "text": "Эта ссылка уже исчерпана. Попросите человека прислать новую.",
+      "status": "machine"
+    },
+    "invite.contact.uses": {
+      "text": "Допустимое число использований",
+      "status": "machine"
+    },
+    "invite.expiry.ago_days": {
+      "text": "{count, plural, one {истекла # день назад} few {истекла # дня назад} many {истекла # дней назад} other {истекла # дня назад}}",
+      "status": "machine"
+    },
+    "invite.expiry.ago_hours": {
+      "text": "{count, plural, one {истекла # час назад} few {истекла # часа назад} many {истекла # часов назад} other {истекла # часа назад}}",
+      "status": "machine"
+    },
+    "invite.expiry.ago_minutes": {
+      "text": "{count, plural, one {истекла # минуту назад} few {истекла # минуты назад} many {истекла # минут назад} other {истекла # минуты назад}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_days": {
+      "text": "{count, plural, one {через # день} few {через # дня} many {через # дней} other {через # дня}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_hours": {
+      "text": "{count, plural, one {через # час} few {через # часа} many {через # часов} other {через # часа}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_minutes": {
+      "text": "{count, plural, one {через # минуту} few {через # минуты} many {через # минут} other {через # минуты}}",
+      "status": "machine"
+    },
+    "invite.expiry.never": {
+      "text": "бессрочно",
+      "status": "machine"
+    },
+    "invite.go_home": {
+      "text": "На главную Lakko",
+      "status": "machine"
+    },
+    "invite.group.invited_by": {
+      "text": "Приглашение от {fingerprint}",
+      "status": "machine"
+    },
+    "invite.group.lead_anonymous": {
+      "text": "Вас приглашают в",
+      "status": "machine"
+    },
+    "invite.group.lead_anonymous_unnamed": {
+      "text": "Вас приглашают в группу",
+      "status": "machine"
+    },
+    "invite.group.lead_named": {
+      "text": "{name} приглашает вас в",
+      "status": "machine"
+    },
+    "invite.group.lead_named_unnamed": {
+      "text": "{name} приглашает вас в группу",
+      "status": "machine"
+    },
+    "invite.link.damaged": {
+      "text": "Эта ссылка-приглашение повреждена. Попросите новую ссылку.",
+      "status": "machine"
+    },
+    "invite.link.invalid": {
+      "text": "Эта ссылка-приглашение недействительна или истекла.",
+      "status": "machine"
+    },
+    "invite.link.loading": {
+      "text": "Загрузка приглашения...",
+      "status": "machine"
+    },
+    "invite.link.rate_limited": {
+      "text": "Сейчас из этой сети слишком много запросов. Попробуйте через минуту.",
+      "status": "machine"
+    },
+    "invite.links.already_removed": {
+      "text": "Ссылка «{label}» уже была удалена.",
+      "status": "machine"
+    },
+    "invite.links.already_removed_unnamed": {
+      "text": "Эта ссылка уже была удалена.",
+      "status": "machine"
+    },
+    "invite.links.create": {
+      "text": "Создать ссылку",
+      "status": "machine"
+    },
+    "invite.links.created": {
+      "text": "Создана {date}",
+      "status": "machine"
+    },
+    "invite.links.desc": {
+      "text": "Любой, кто откроет одну из ваших ссылок, может отправить вам запрос в контакты, пока ссылка не истечёт или не будет исчерпана.",
+      "status": "machine"
+    },
+    "invite.links.empty": {
+      "text": "Активных ссылок нет.",
+      "status": "machine"
+    },
+    "invite.links.error.copy": {
+      "text": "Не удалось скопировать ссылку.",
+      "status": "machine"
+    },
+    "invite.links.error.load": {
+      "text": "Не удалось загрузить ваши ссылки-приглашения. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_create": {
+      "text": "Войдите снова, чтобы создать ссылку-приглашение.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_list": {
+      "text": "Войдите снова, чтобы увидеть ваши ссылки-приглашения.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_revoke": {
+      "text": "Войдите снова, чтобы отозвать ссылку-приглашение.",
+      "status": "machine"
+    },
+    "invite.links.expired": {
+      "text": "Истекла",
+      "status": "machine"
+    },
+    "invite.links.expires_days": {
+      "text": "Истекает через {count} дн.",
+      "status": "machine"
+    },
+    "invite.links.expires_field": {
+      "text": "Срок действия",
+      "status": "machine"
+    },
+    "invite.links.expires_hours": {
+      "text": "Истекает через {count} ч",
+      "status": "machine"
+    },
+    "invite.links.expires_minutes": {
+      "text": "Истекает через {count} мин",
+      "status": "machine"
+    },
+    "invite.links.expires_option_days": {
+      "text": "{count, plural, one {Через # день} few {Через # дня} many {Через # дней} other {Через # дня}}",
+      "status": "machine"
+    },
+    "invite.links.expires_option_never": {
+      "text": "Никогда",
+      "status": "machine"
+    },
+    "invite.links.for_new_user": {
+      "text": "Для новичка в Lakko",
+      "status": "machine"
+    },
+    "invite.links.inline_note": {
+      "text": "Lakko не удалось сократить эту ссылку, поэтому она длинная. Она работает так же, но её нельзя отозвать.",
+      "status": "machine"
+    },
+    "invite.links.label_field": {
+      "text": "Метка (необязательно)",
+      "status": "machine"
+    },
+    "invite.links.label_placeholder": {
+      "text": "Видна тому, кто откроет ссылку",
+      "status": "machine"
+    },
+    "invite.links.list": {
+      "text": "Активные ссылки-приглашения",
+      "status": "machine"
+    },
+    "invite.links.never_expires": {
+      "text": "Бессрочная",
+      "status": "machine"
+    },
+    "invite.links.new_badge": {
+      "text": "Новая",
+      "status": "machine"
+    },
+    "invite.links.referral_option": {
+      "text": "Для того, у кого ещё нет аккаунта Lakko",
+      "status": "machine"
+    },
+    "invite.links.revoked": {
+      "text": "Ссылка отозвана.",
+      "status": "machine"
+    },
+    "invite.links.revoking": {
+      "text": "Отзыв ссылки...",
+      "status": "machine"
+    },
+    "invite.links.unlimited_uses": {
+      "text": "Без ограничения использований",
+      "status": "machine"
+    },
+    "invite.links.used_up": {
+      "text": "Исчерпана",
+      "status": "machine"
+    },
+    "invite.links.uses_field": {
+      "text": "Использования",
+      "status": "machine"
+    },
+    "invite.links.uses_left": {
+      "text": "{count, plural, one {Осталось # использование} few {Осталось # использования} many {Осталось # использований} other {Осталось # использования}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_one": {
+      "text": "Один человек",
+      "status": "machine"
+    },
+    "invite.links.uses_option_unlimited": {
+      "text": "Без ограничений",
+      "status": "machine"
+    },
+    "invite.links.uses_option_up_to": {
+      "text": "{count, plural, one {До # человека} few {До # человек} many {До # человек} other {До # человека}}",
+      "status": "machine"
+    },
+    "invite.sign_up": {
+      "text": "Зарегистрироваться",
+      "status": "machine"
+    },
+    "invite.uses.single": {
+      "text": "одноразовая",
+      "status": "machine"
+    },
+    "invite.uses.unlimited": {
+      "text": "без ограничений",
+      "status": "machine"
+    },
+    "invite.uses.up_to": {
+      "text": "{count, plural, one {до # использования} few {до # использований} many {до # использований} other {до # использования}}",
       "status": "machine"
     },
     "language.name.ar": {
@@ -2588,6 +3760,38 @@
     },
     "nav.settings": {
       "text": "Настройки",
+      "status": "machine"
+    },
+    "new_group.back": {
+      "text": "Группы",
+      "status": "machine"
+    },
+    "new_group.error.sign_in": {
+      "text": "Войдите снова, чтобы создать группу.",
+      "status": "machine"
+    },
+    "new_group.index_hint": {
+      "text": "Выберите группу, чтобы начать общение",
+      "status": "machine"
+    },
+    "new_group.name_hint": {
+      "text": "Название видят все участники. Оно передаётся в зашифрованном виде; сервер никогда его не читает.",
+      "status": "machine"
+    },
+    "new_group.name_not_sent": {
+      "text": "Название группы не отправлено. Задайте его в списке участников.",
+      "status": "machine"
+    },
+    "new_group.name_placeholder": {
+      "text": "Планы на выходные",
+      "status": "machine"
+    },
+    "new_group.no_contacts": {
+      "text": "Сначала добавьте контакты: группа начинается с людей, которых вы уже знаете.",
+      "status": "machine"
+    },
+    "new_group.subtitle": {
+      "text": "Вы будете владельцем группы. Позже можно добавить ещё людей.",
       "status": "machine"
     },
     "recovery.access_only_note": {

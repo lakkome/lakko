@@ -34,7 +34,13 @@
  *   error text with no compile-time or test-time signal from this side. The
  *   durable fix is a typed error variant in the core; that is a `crates/`
  *   change and deliberately not made here. See {@link isLegacyPublisherGroupError}.
+ *
+ * The copy is catalog text (`channels.legacy.*`, ADR-0058); a
+ * {@link LegacyChannelError} is a {@link KeyedError}, so a screen renders it
+ * in the language current when it is shown.
  */
+import { t } from "../l10n";
+import { KeyedError } from "../l10n/keyed-error";
 
 /**
  * The retired v1 group-id prefix, as ASCII bytes. Frozen: nothing mints under
@@ -54,15 +60,10 @@ const V1_GROUP_ID_LEN = V1_PREFIX.length + 16;
 const RUST_REFUSAL_MARKER = "legacy v1 PublisherGroup state";
 
 /** User-facing copy for a channel whose MLS state predates the v2 derivation. */
-export const LEGACY_CHANNEL_MESSAGE =
-  "This channel was created by an older version of Lakko and cannot be opened in this build. " +
-  "Posts you already published stay readable for your subscribers. " +
-  "To publish again, create a new channel — this one cannot be repaired.";
+export const LEGACY_CHANNEL_MESSAGE = (): string => t("channels.legacy.channel");
 
 /** User-facing copy for a `/g/` co-publisher link minted under the v1 derivation. */
-export const LEGACY_COPUBLISHER_LINK_MESSAGE =
-  "This co-publisher invite link was created by an older version of Lakko and no longer works. " +
-  "Ask the channel owner to send you a new invite link.";
+export const LEGACY_COPUBLISHER_LINK_MESSAGE = (): string => t("channels.legacy.copublisher_link");
 
 /** Which of the two retired-v1 surfaces a {@link LegacyChannelError} describes. */
 export type LegacyChannelKind = "channel" | "invite-link";
@@ -75,12 +76,12 @@ export type LegacyChannelKind = "channel" | "invite-link";
  * re-doing a string match. There is exactly one place in the web client that
  * inspects an error string for this, and it is {@link isLegacyPublisherGroupError}.
  */
-export class LegacyChannelError extends Error {
+export class LegacyChannelError extends KeyedError {
   /** Which surface refused. */
   readonly kind: LegacyChannelKind;
 
   constructor(kind: LegacyChannelKind) {
-    super(kind === "channel" ? LEGACY_CHANNEL_MESSAGE : LEGACY_COPUBLISHER_LINK_MESSAGE);
+    super(kind === "channel" ? "channels.legacy.channel" : "channels.legacy.copublisher_link");
     this.name = "LegacyChannelError";
     this.kind = kind;
   }
@@ -131,7 +132,7 @@ export function rethrowAsLegacyChannel(err: unknown): never {
  * `fallback(err)` so a network / server / codec failure still reads as itself.
  */
 export function channelErrorMessage(err: unknown, fallback: (e: unknown) => string): string {
-  if (err instanceof LegacyChannelError) return err.message;
-  if (isLegacyPublisherGroupError(err)) return LEGACY_CHANNEL_MESSAGE;
+  if (err instanceof LegacyChannelError) return err.text();
+  if (isLegacyPublisherGroupError(err)) return LEGACY_CHANNEL_MESSAGE();
   return fallback(err);
 }

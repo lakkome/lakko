@@ -20,7 +20,12 @@
  *
  * The refusal itself is NEVER changed by the log — gate 1 throws
  * regardless of `loggedReset`; this only colours the message.
+ *
+ * The copy is catalog text (ADR-0058, `contacts.identity_changed.*`, all
+ * `security_critical`); an unnamed peer has its own messages rather than a
+ * "This contact" argument, so each language words the subject itself.
  */
+import { t } from "../l10n";
 
 /** The best-effort transparency-log reset marker for the refused key
  *  (the shape `SupersessionRefused.loggedReset` carries):
@@ -41,27 +46,10 @@ export function supersessionRefusedMessage(
   loggedReset: LoggedReset,
   peerLabel?: string,
 ): string {
-  const who =
-    peerLabel !== undefined && peerLabel.length > 0
-      ? peerLabel
-      : "This contact";
-  if (loggedReset === true) {
-    return (
-      `${who} reset their secure identity (for example, they lost ` +
-      `their device). The transparency log confirms this was an ` +
-      `owner-initiated reset. If you trust this is really them, ` +
-      `re-verify their safety number out of band before continuing.`
-    );
-  }
-  if (loggedReset === false) {
-    return (
-      `${who}'s secure identity changed, and the transparency log does ` +
-      `NOT show an owner reset — treat this as a possible account ` +
-      `compromise. Verify out of band before trusting.`
-    );
-  }
-  return (
-    `${who}'s secure identity changed and could not be confirmed ` +
-    `against the transparency log. Verify out of band before trusting.`
-  );
+  const named = peerLabel !== undefined && peerLabel.length > 0;
+  const verdict =
+    loggedReset === true ? "reset" : loggedReset === false ? "unexplained" : "unconfirmed";
+  return named
+    ? t(`contacts.identity_changed.${verdict}`, { name: peerLabel })
+    : t(`contacts.identity_changed.${verdict}_unnamed`);
 }

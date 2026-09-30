@@ -12,6 +12,14 @@ final class GroupInvitePageTests: XCTestCase {
     private let key = Data((0..<12).map { UInt8($0) })
     private let pointerLink = "https://lakko.me/g/" + String(repeating: "A", count: 8)
 
+    /// The catalog wraps a name argument in bidi isolates (ADR-0058); the
+    /// headline assertions compare the words.
+    private func plain(_ text: String?) -> String? {
+        text?.unicodeScalars
+            .filter { !(0x2066...0x2069).contains($0.value) }
+            .map(String.init).joined()
+    }
+
     // MARK: - Link composition (spec section 4)
 
     func testWithLinkKeyAppendsA16CharBase64UrlFragment() {
@@ -83,7 +91,7 @@ final class GroupInvitePageTests: XCTestCase {
     func testBothNamesAndSeveralMembers() {
         let headline = GroupInviteHeadline.derive(
             from: GroupInviteFacts(groupName: "Hiking club", inviterName: "Anna", memberCount: 12))
-        XCTAssertEqual(headline.lead, "Anna invites you to")
+        XCTAssertEqual(plain(headline.lead), "Anna invites you to")
         XCTAssertEqual(headline.groupName, "Hiking club")
         XCTAssertEqual(headline.members, "12 members")
     }
@@ -105,7 +113,7 @@ final class GroupInvitePageTests: XCTestCase {
     func testAMissingGroupNameFoldsAGroupIntoTheLeadAndOmitsTheGroupLine() {
         let headline = GroupInviteHeadline.derive(
             from: GroupInviteFacts(groupName: nil, inviterName: "Anna", memberCount: 3))
-        XCTAssertEqual(headline.lead, "Anna invites you to a group")
+        XCTAssertEqual(plain(headline.lead), "Anna invites you to a group")
         XCTAssertNil(headline.groupName)
         XCTAssertEqual(headline.members, "3 members")
     }
@@ -135,7 +143,7 @@ final class GroupInvitePageTests: XCTestCase {
 
     func testTheFooterNamesTheFingerprint() {
         XCTAssertEqual(
-            GroupInviteHeadline.footer(fingerprint: "12345 67890"),
+            plain(GroupInviteHeadline.footer(fingerprint: "12345 67890")),
             "Invited by 12345 67890")
         XCTAssertEqual(groupInviteInvalidMessage, "This invite link is invalid or has expired.")
     }

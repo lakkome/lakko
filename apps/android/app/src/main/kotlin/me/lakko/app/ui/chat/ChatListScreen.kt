@@ -239,6 +239,7 @@ public fun ChatListScreen(
                 zone = zone,
                 use24h = use24h,
                 locale = locale,
+                strings = strings,
             )
             ConversationListRow(
                 id = channel.id,

@@ -13,6 +13,8 @@ import SwiftUI
 struct AddContactSheet: View {
     @ObservedObject var viewModel: ContactsViewModel
     let onDismiss: () -> Void
+    /// ADR-0058 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     @FocusState private var usernameFocused: Bool
 
@@ -25,7 +27,7 @@ struct AddContactSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Username", text: $viewModel.usernameInput)
+                    TextField(l10n.t("contacts.add.username_placeholder"), text: $viewModel.usernameInput)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled(true)
                         .keyboardType(.asciiCapable)
@@ -35,39 +37,39 @@ struct AddContactSheet: View {
                         .disabled(viewModel.sending)
                     UsernameRuleHint(input: viewModel.usernameInput)
                 } header: {
-                    Text("Username")
+                    Text(l10n.t("contacts.add.username_label"))
                 } footer: {
-                    Text("They get a request they can accept or decline.")
+                    Text(l10n.t("contacts.add.subtitle"))
                 }
 
                 Section {
-                    TextField("Say who you are (optional)", text: $viewModel.introInput, axis: .vertical)
+                    TextField(l10n.t("contacts.add.intro_placeholder"), text: $viewModel.introInput, axis: .vertical)
                         .lineLimit(2...4)
                         .disabled(viewModel.sending)
                 } header: {
-                    Text("Message")
+                    Text(l10n.t("contacts.add.intro_label"))
                 }
 
                 if let error = viewModel.sendError {
                     Section {
-                        Text(error)
+                        Text(error.text)
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoDanger)
                     }
                 }
             }
-            .navigationTitle("Add contact")
+            .navigationTitle(l10n.t("contacts.add.title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel", action: onDismiss)
+                    Button(l10n.t("common.cancel"), action: onDismiss)
                         .disabled(viewModel.sending)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     if viewModel.sending {
                         ProgressView()
                     } else {
-                        Button("Send") { viewModel.onSendClicked() }
+                        Button(l10n.t("contacts.add.send")) { viewModel.onSendClicked() }
                             .disabled(!canSend)
                     }
                 }

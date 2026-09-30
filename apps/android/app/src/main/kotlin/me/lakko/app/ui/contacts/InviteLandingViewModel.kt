@@ -78,6 +78,7 @@ public class InviteLandingViewModel(
                 // that bubbles up here is a genuinely
                 // unexpected error (programmer bug, OOM). Land
                 // it on Failed with the message.
+                android.util.Log.w("LakkoInvite", "WARN accept invite threw: ${err.javaClass.simpleName}")
                 mutableState.value = InviteLandingState.Failed(
                     message = err.message ?: "unexpected error",
                 )
@@ -102,7 +103,10 @@ public class InviteLandingViewModel(
             AcceptInviteResult.RateLimited -> InviteLandingState.RateLimited
             AcceptInviteResult.AllowanceUsed -> InviteLandingState.AllowanceUsed
             AcceptInviteResult.RequiresReauth -> InviteLandingState.RequiresReauth
-            is AcceptInviteResult.Failed -> InviteLandingState.Failed(result.message)
+            is AcceptInviteResult.Failed -> {
+                android.util.Log.w("LakkoInvite", "WARN accept invite failed: ${result.message}")
+                InviteLandingState.Failed(result.message)
+            }
         }
 }
 
@@ -148,5 +152,6 @@ public sealed interface InviteLandingState {
     public data object AllowanceUsed : InviteLandingState
     public data object RequiresReauth : InviteLandingState
 
+    /** [message] is diagnostic only; the screen never shows it (ADR-0058 section 6). */
     public data class Failed(val message: String) : InviteLandingState
 }

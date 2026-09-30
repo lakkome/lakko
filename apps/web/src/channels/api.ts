@@ -26,6 +26,7 @@
  * `lakko-channels` Rust crate via WASM bindings (follow-
  * up sub-sprint G4-2-crypto).
  */
+import { t } from "../l10n";
 
 /** Default base URL — `LAKKO_CHANNELS_URL` env var
  *  resolved at build time (Vite `import.meta.env`), falls
@@ -110,21 +111,28 @@ export const apiError = { is: isChannelApiError };
  *  connection that never produced a JSON envelope. */
 export const CHANNELS_UNREACHABLE = "channels-unreachable";
 
+/** The catalog key of the sentence for a channels error code (ADR-0058
+ *  section 6: the server's `detail` prose is never shown). */
+const CHANNEL_ERROR_KEYS: Readonly<Record<string, string>> = {
+  [CHANNELS_UNREACHABLE]: "channels.error.unreachable",
+  "unknown-channel": "channels.error.unknown_channel",
+  "post-too-large": "channels.error.post_too_large",
+  "empty-post": "channels.error.empty_post",
+  "envelope-not-ready": "channels.error.not_let_in",
+};
+
 /** One sentence for the user about a channels error: what happened, not the
- *  wire code. The code stays available on the error for callers that branch. */
+ *  wire code and not the server's detail. The code stays available on the
+ *  error for callers that branch. Rendered in the current language. */
 export function channelErrorText(err: ChannelApiError): string {
-  if (err.code === CHANNELS_UNREACHABLE) {
-    return "The channels service is not reachable right now. Try again in a moment.";
-  }
-  if (err.detail.length > 0) return err.detail;
-  return `The server refused the request (${err.code}).`;
+  return t(CHANNEL_ERROR_KEYS[err.code] ?? "channels.error.refused");
 }
 
 function unreachable(status: number): ChannelApiError {
   return {
     status,
     code: CHANNELS_UNREACHABLE,
-    detail: "The channels service is not reachable right now. Try again in a moment.",
+    detail: "channels service not reachable",
   };
 }
 

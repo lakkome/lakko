@@ -70,6 +70,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.contacts.GeneratedInvite
+import me.lakko.app.l10n.joinFacts
+import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.contacts.INVITE_URL_PREFIX
 import me.lakko.app.contacts.IncomingContactRequest
@@ -216,20 +218,20 @@ public fun ContactsScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text(me.lakko.app.l10n.t("nav.contacts")) },
+                title = { Text(t("nav.contacts")) },
                 actions = {
                     Box {
                         IconButton(onClick = { menuOpen = true }) {
-                            Icon(Icons.Filled.PersonAdd, contentDescription = "Add contact")
+                            Icon(Icons.Filled.PersonAdd, contentDescription = t("contacts.list.empty.action"))
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                             DropdownMenuItem(
-                                text = { Text("Add by username") },
+                                text = { Text(t("contacts.add.by_username")) },
                                 leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
                                 onClick = { menuOpen = false; addSheetOpen = true },
                             )
                             DropdownMenuItem(
-                                text = { Text("Share invite link") },
+                                text = { Text(t("contacts.add.share_invite")) },
                                 leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null) },
                                 onClick = { menuOpen = false; inviteSheetOpen = true },
                             )
@@ -263,7 +265,7 @@ public fun ContactsScreen(
                     // The transport detail stays out of the copy (UX section 6).
                     item(key = "refresh-error") {
                         Text(
-                            text = "Could not check for new requests. Pull down to retry.",
+                            text = t("contacts.mailbox.poll_failed"),
                             color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -272,7 +274,7 @@ public fun ContactsScreen(
                 }
 
                 if (pending.isNotEmpty()) {
-                    item(key = "requests-header") { SectionTitle("Requests") }
+                    item(key = "requests-header") { SectionTitle(t("contacts.list.requests")) }
                     items(pending.distinctBy { it.messageId }, key = { "req-${it.messageId}" }) { req ->
                         RequestRow(
                             req = req,
@@ -303,7 +305,7 @@ public fun ContactsScreen(
                 } else if (sections.isEmpty() && query.isNotBlank()) {
                     item(key = "no-match") {
                         Text(
-                            "No contacts match.",
+                            t("contacts.list.no_match"),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(16.dp),
@@ -311,7 +313,7 @@ public fun ContactsScreen(
                     }
                 } else {
                     if (pending.isNotEmpty() || state.sent.isNotEmpty()) {
-                        item(key = "contacts-header") { SectionTitle("Contacts") }
+                        item(key = "contacts-header") { SectionTitle(t("nav.contacts")) }
                     }
                     for (section in sections) {
                         stickyHeader(key = "letter-${section.letter}") { LetterHeader(section.letter) }
@@ -366,7 +368,7 @@ private fun SearchField(query: String, onQueryChange: (String) -> Unit, modifier
                 Box(modifier = Modifier.padding(vertical = 8.dp)) {
                     if (query.isEmpty()) {
                         Text(
-                            "Search contacts",
+                            t("contacts.list.search"),
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -380,7 +382,7 @@ private fun SearchField(query: String, onQueryChange: (String) -> Unit, modifier
             IconButton(onClick = { onQueryChange("") }, modifier = Modifier.size(32.dp)) {
                 Icon(
                     Icons.Filled.Close,
-                    contentDescription = "Clear search",
+                    contentDescription = t("chats.search.clear"),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -445,7 +447,8 @@ private fun RequestRow(
     onAccept: () -> Unit,
     onDecline: () -> Unit,
 ) {
-    val title = requestSenderLabel(name)
+    // The resolver's "Someone" placeholder is a data value; the screen says it in the interface language.
+    val title = if (name.isPlaceholder) t("contacts.request.someone") else requestSenderLabel(name)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -461,7 +464,7 @@ private fun RequestRow(
             Column(modifier = Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                 Text(
-                    "Wants to connect",
+                    t("contacts.request.no_intro"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -480,8 +483,8 @@ private fun RequestRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(start = 52.dp),
         ) {
-            Button(onClick = onAccept) { Text("Accept") }
-            OutlinedButton(onClick = onDecline) { Text("Decline") }
+            Button(onClick = onAccept) { Text(t("contacts.request.accept")) }
+            OutlinedButton(onClick = onDecline) { Text(t("contacts.request.decline")) }
         }
     }
 }
@@ -496,14 +499,14 @@ private fun SentHeader(count: Int, expanded: Boolean, onToggle: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
         Text(
-            text = "Sent ($count)",
+            text = t("contacts.list.sent", mapOf("count" to count.toString())),
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.weight(1f),
         )
         Icon(
             imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-            contentDescription = if (expanded) "Collapse" else "Expand",
+            contentDescription = if (expanded) t("common.collapse") else t("common.expand"),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
@@ -525,7 +528,7 @@ private fun SentRow(s: SentContactRequest) {
             modifier = Modifier.weight(1f),
         )
         Text(
-            "Waiting",
+            t("contacts.list.sent_waiting"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -540,9 +543,16 @@ private fun EmptyState(onAdd: () -> Unit) {
             .fillMaxWidth()
             .padding(horizontal = 24.dp, vertical = 48.dp),
     ) {
-        Text("No contacts yet", style = MaterialTheme.typography.titleMedium)
+        Text(t("contacts.list.empty.title"), style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            t("contacts.list.empty.body"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
         Spacer(Modifier.height(12.dp))
-        Button(onClick = onAdd) { Text("Add contact") }
+        Button(onClick = onAdd) { Text(t("contacts.list.empty.action")) }
     }
 }
 
@@ -556,12 +566,12 @@ private fun ReauthPanel() {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            text = "Please re-enter your password",
+            text = t("chat.reauth.title"),
             style = MaterialTheme.typography.titleMedium,
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "Log out and log back in to load your contacts.",
+            text = t("contacts.reauth.body"),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -596,11 +606,11 @@ private fun AddByUsernameSheet(
                 .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Add by username", style = MaterialTheme.typography.titleLarge)
+            Text(t("contacts.add.title"), style = MaterialTheme.typography.titleLarge)
             OutlinedTextField(
                 value = state.usernameInput,
                 onValueChange = onUsernameChange,
-                label = { Text("Username") },
+                label = { Text(t("contacts.add.username_label")) },
                 prefix = { Text("@") },
                 singleLine = true,
                 enabled = !state.sending,
@@ -616,14 +626,14 @@ private fun AddByUsernameSheet(
             OutlinedTextField(
                 value = state.introInput,
                 onValueChange = onIntroChange,
-                label = { Text("Say hi (optional)") },
+                label = { Text(t("contacts.add.intro_label")) },
                 enabled = !state.sending,
                 minLines = 2,
                 modifier = Modifier.fillMaxWidth(),
             )
             state.sendError?.let { error ->
                 Text(
-                    text = error,
+                    text = error.text(),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -640,9 +650,9 @@ private fun AddByUsernameSheet(
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text("Sending...")
+                    Text(t("common.sending"))
                 } else {
-                    Text("Send request")
+                    Text(t("contacts.add.send"))
                 }
             }
         }
@@ -694,7 +704,10 @@ private fun InviteLinksSheet(
         )
     }
     val now = remember(rows) { System.currentTimeMillis() }
-    val dateFormat = remember { DateFormat.getDateInstance(DateFormat.MEDIUM) }
+    val language = me.lakko.app.l10n.LocalStrings.current.language
+    val dateFormat = remember(language) {
+        DateFormat.getDateInstance(DateFormat.MEDIUM, java.util.Locale.forLanguageTag(language))
+    }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
             modifier = Modifier
@@ -704,24 +717,24 @@ private fun InviteLinksSheet(
                 .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Invite links", style = MaterialTheme.typography.titleLarge)
+            Text(t("contacts.invite_links.title"), style = MaterialTheme.typography.titleLarge)
             Text(
-                "Anyone who opens a link can add you without typing your username.",
+                t("invite.links.desc"),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             (state.inviteError ?: state.activeInvitesError)?.let { error ->
-                Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                Text(error.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             if (state.loadingActiveInvites && rows.isEmpty()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(8.dp))
-                    Text("Loading...", style = MaterialTheme.typography.bodySmall)
+                    Text(t("common.loading"), style = MaterialTheme.typography.bodySmall)
                 }
             } else if (rows.isEmpty() && state.activeInvitesLoaded) {
                 Text(
-                    "No active links.",
+                    t("invite.links.empty"),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -732,13 +745,17 @@ private fun InviteLinksSheet(
                     .weight(1f, fill = false),
             ) {
                 items(rows, key = { it.slug }) { row ->
-                    val meta = buildList {
-                        row.createdAtMs?.let { add("Created ${dateFormat.format(Date(it))}") }
-                        add(describeInviteExpiry(row.expiryMs, now))
-                        describeUsesLeft(row.usesLeft)?.let { add(it) }
-                    }.joinToString(" · ")
+                    val meta = joinFacts(
+                        buildList {
+                            row.createdAtMs?.let {
+                                add(t("invite.links.created", mapOf("date" to dateFormat.format(Date(it)))))
+                            }
+                            add(describeInviteExpiry(row.expiryMs, now).text())
+                            describeUsesLeft(row.usesLeft)?.let { add(it.text()) }
+                        },
+                    )
                     LinkRow(
-                        title = row.label.ifBlank { "Invite link" },
+                        title = row.label.ifBlank { t("chat.invite_link.label") },
                         meta = meta,
                         onCopy = { onCopy(row.url) },
                         onShare = { onShare(row.url) },
@@ -749,7 +766,7 @@ private fun InviteLinksSheet(
                                 enabled = state.revokingActiveInviteSlug == null,
                             ) {
                                 Text(
-                                    if (revoking) "Revoking..." else "Revoke",
+                                    if (revoking) t("invite.links.revoking") else t("chat.invite_link.revoke"),
                                     color = MaterialTheme.colorScheme.error,
                                 )
                             }
@@ -770,9 +787,9 @@ private fun InviteLinksSheet(
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text("Creating...")
+                    Text(t("common.creating"))
                 } else {
-                    Text("Create link")
+                    Text(t("invite.links.create"))
                 }
             }
         }
@@ -806,10 +823,10 @@ private fun LinkRow(
             }
         }
         IconButton(onClick = onCopy) {
-            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy link")
+            Icon(Icons.Filled.ContentCopy, contentDescription = t("chat.invite_link.copy"))
         }
         IconButton(onClick = onShare) {
-            Icon(Icons.Filled.Share, contentDescription = "Share link")
+            Icon(Icons.Filled.Share, contentDescription = t("chat.invite_link.share"))
         }
         trailing()
     }
@@ -825,7 +842,7 @@ internal fun copyToClipboard(context: Context, text: String) {
     val clipboard =
         context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             ?: return
-    clipboard.setPrimaryClip(ClipData.newPlainText("Lakko link", text))
+    clipboard.setPrimaryClip(ClipData.newPlainText(me.lakko.app.l10n.Localization.strings.value["common.clipboard.link"], text))
 }
 
 /** Launch the Android share sheet with [url] as the body. */

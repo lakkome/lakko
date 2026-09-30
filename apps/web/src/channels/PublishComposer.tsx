@@ -8,6 +8,7 @@
  */
 import { Show, type JSX } from "solid-js";
 
+import { t } from "../l10n";
 import { Icon } from "../ui/icons";
 
 export function PublishComposer(props: {
@@ -46,8 +47,8 @@ export function PublishComposer(props: {
           ref={field}
           class="lk-composer-input"
           rows={1}
-          placeholder="Write a post"
-          aria-label="New post"
+          placeholder={t("channels.compose.placeholder")}
+          aria-label={t("channels.compose.label")}
           autocomplete="off"
           value={props.value}
           disabled={props.busy}
@@ -65,8 +66,8 @@ export function PublishComposer(props: {
         <button
           type="submit"
           class="lk-icon-button lk-send"
-          title={props.busy ? "Publishing..." : "Publish"}
-          aria-label={props.busy ? "Publishing..." : "Publish"}
+          title={props.busy ? t("channels.compose.publishing") : t("channels.compose.publish")}
+          aria-label={props.busy ? t("channels.compose.publishing") : t("channels.compose.publish")}
           aria-busy={props.busy ? "true" : undefined}
           disabled={props.busy || empty()}
         >

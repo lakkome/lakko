@@ -106,25 +106,41 @@ public struct GroupInviteHeadline: Equatable {
     /// What the page says without a preview: the link had no fragment.
     /// Nothing is invented and the page does not say why. (A fragment under
     /// which the preview does not open is not this state: that link is refused
-    /// as damaged, see ``groupInviteDamagedMessage``.)
-    public static let noPreview = GroupInviteHeadline(
-        lead: "You are invited to a group", groupName: nil, members: nil)
+    /// as damaged, see ``groupInviteDamagedMessage``.) In the interface
+    /// language of the moment it is read (ADR-0058).
+    public static var noPreview: GroupInviteHeadline {
+        GroupInviteHeadline(
+            lead: Localization.text("invite.group.lead_anonymous_unnamed"),
+            groupName: nil, members: nil)
+    }
 
     /// Derive the headline. A blank name (after trimming) counts as missing,
-    /// so a preview can never put an empty line on the card.
+    /// so a preview can never put an empty line on the card. One catalog
+    /// sentence per shape (`invite.group.lead_*`), never a sentence built
+    /// from pieces, so each language words it itself.
     public static func derive(from facts: GroupInviteFacts?) -> GroupInviteHeadline {
         guard let facts else { return noPreview }
         let inviter = nonBlank(facts.inviterName)
         let group = nonBlank(facts.groupName)
-        let subject = inviter.map { "\($0) invites you to" } ?? "You are invited to"
-        let lead = group == nil ? subject + " a group" : subject
-        let members = facts.memberCount == 1 ? "1 member" : "\(facts.memberCount) members"
+        let lead: String
+        switch (inviter, group) {
+        case let (name?, _?):
+            lead = Localization.text("invite.group.lead_named", texts: ["name": name])
+        case let (name?, nil):
+            lead = Localization.text("invite.group.lead_named_unnamed", texts: ["name": name])
+        case (nil, _?):
+            lead = Localization.text("invite.group.lead_anonymous")
+        case (nil, nil):
+            lead = Localization.text("invite.group.lead_anonymous_unnamed")
+        }
+        let members = Localization.text(
+            "chat.members.count", counts: ["count": UInt64(facts.memberCount)])
         return GroupInviteHeadline(lead: lead, groupName: group, members: members)
     }
 
     /// The foot of the card: the one thing on it the inviter cannot fake.
     public static func footer(fingerprint: String) -> String {
-        "Invited by " + fingerprint
+        Localization.text("invite.group.invited_by", texts: ["fingerprint": fingerprint])
     }
 
     private static func nonBlank(_ value: String?) -> String? {
@@ -134,8 +150,9 @@ public struct GroupInviteHeadline: Equatable {
     }
 }
 
-/// The copy of the invalid / expired state, verbatim from the spec.
-public let groupInviteInvalidMessage = "This invite link is invalid or has expired."
+/// The copy of the invalid / expired state (`invite.link.invalid`), in the
+/// interface language of the moment it is read.
+public var groupInviteInvalidMessage: String { Localization.text("invite.link.invalid") }
 
 /// The copy of a `/g/` link whose fragment is present but whose preview does
 /// not open under it (or whose fragment is not a link secret at all). Since the
@@ -143,10 +160,9 @@ public let groupInviteInvalidMessage = "This invite link is invalid or has expir
 /// the capability's group id and issuer - is what tells the joiner that the
 /// capability it was served is the one the link was made for, so a preview
 /// that does not open refuses the link rather than showing a card without one.
-public let groupInviteDamagedMessage = "This invite link is damaged. Ask for a new link."
+public var groupInviteDamagedMessage: String { Localization.text("invite.link.damaged") }
 
 /// The copy of a `429` from the discovery ledger on an invite fetch or consume:
 /// the link may be fine, the server is asking this network to slow down. Never
 /// shown as "link invalid". Shared by the `/i/`, `/c/` and `/g/` landings.
-public let inviteRateLimitedMessage =
-    "Too many requests from this network right now. Try again in a minute."
+public var inviteRateLimitedMessage: String { Localization.text("invite.link.rate_limited") }

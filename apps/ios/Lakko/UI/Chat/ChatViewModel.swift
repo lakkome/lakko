@@ -1493,8 +1493,8 @@ public final class ChatViewModel: ObservableObject {
     /// The new-group flow's hand-off (docs/ux/new-group.md §3): the chat opened
     /// with the members that did land, and says which adds did not. Rendered in
     /// the members panel's ungated notice slot.
-    func noteSetupNotice(_ text: String) {
-        membershipNotice = UiText { text }
+    func noteSetupNotice(_ text: UiText) {
+        membershipNotice = text
     }
 
     /// The header's second line: "@username" in a 1x1 chat when the other

@@ -106,9 +106,9 @@ final class ContactsPresentationTests: XCTestCase {
 
     func testUsesLeftCopyFollowsTheSentinels() {
         XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 0, usedCount: 0), "1 use left")
-        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 0, usedCount: 1), "Used")
-        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 10, usedCount: 7), "3 of 10 left")
-        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 10, usedCount: 12), "0 of 10 left", "never negative")
+        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 0, usedCount: 1), "Used up")
+        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 10, usedCount: 7), "3 uses left")
+        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 10, usedCount: 12), "Used up", "never negative")
         XCTAssertNil(InviteLinkRows.usesLeftCopy(maxUses: UInt32.max, usedCount: 3), "unlimited shows no count")
     }
 
@@ -130,7 +130,7 @@ final class ContactsPresentationTests: XCTestCase {
             now: now)
         XCTAssertEqual(rows.map(\.slug), ["new", "srv"], "newest first; the server copy wins over the session copy")
         XCTAssertEqual(rows[1].title, "Team")
-        XCTAssertEqual(rows[1].usesLeft, "8 of 10 left")
+        XCTAssertEqual(rows[1].usesLeft, "8 uses left")
         XCTAssertEqual(rows[1].origin, .server)
         // The link must point at the stack the account lives on, so the
         // prefix comes from configuration (`ApiEndpoints.webOrigin`) and a
@@ -162,9 +162,15 @@ final class ContactsPresentationTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         XCTAssertEqual(InviteLinkRows.expiryCopy(expiryMs: 0, now: now), "Never expires")
         XCTAssertEqual(InviteLinkRows.expiryCopy(expiryMs: 1_800_000_000_000, now: now), "Expired")
-        XCTAssertTrue(
-            InviteLinkRows.expiryCopy(expiryMs: 1_800_000_000_000 + 6 * 86_400_000, now: now)
-                .hasPrefix("Expires "))
+        XCTAssertEqual(
+            InviteLinkRows.expiryCopy(expiryMs: 1_800_000_000_000 + 6 * 86_400_000, now: now),
+            "Expires in 6d")
+        XCTAssertEqual(
+            InviteLinkRows.expiryCopy(expiryMs: 1_800_000_000_000 + 2 * 3_600_000 + 5, now: now),
+            "Expires in 2h")
+        XCTAssertEqual(
+            InviteLinkRows.expiryCopy(expiryMs: 1_800_000_000_000 + 10_000, now: now),
+            "Expires in 1m", "under a minute rounds up to one")
     }
 
     // MARK: - Devices

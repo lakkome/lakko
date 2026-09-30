@@ -13,6 +13,8 @@
  * subscribe page, which is how a channel someone else runs is found.
  */
 import { anonTokenMessage } from "../tokens/token-copy";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useLocation, useNavigate, useParams, type RouteSectionProps } from "@solidjs/router";
 
@@ -80,7 +82,9 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
   // Search: filters locally; Enter with no match resolves an @handle.
   const [query, setQuery] = createSignal("");
   const [findBusy, setFindBusy] = createSignal(false);
-  const [findError, setFindError] = createSignal<string | null>(null);
+  const [findError, setFindError] = createLiveText();
+  /** The typed handle with its `@`. */
+  const atHandle = (raw: string): string => (raw.startsWith("@") ? raw : `@${raw}`);
   const visible = (): ReadonlyArray<{ channel: ChannelHandle; model: ChannelRowModel }> =>
     rows().filter((r) => channelRowMatches(r.model, query()));
 
@@ -93,7 +97,8 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
     try {
       const idHex = await resolveChannelIdOrHandle(raw);
       if (idHex === null) {
-        setFindError(`No channel found for ${raw.startsWith("@") ? raw : `@${raw}`}.`);
+        const handle = atHandle(raw);
+        setFindError(() => t("channels.find.none", { handle }));
         return;
       }
       const handle = raw.replace(/^@/, "");
@@ -103,10 +108,11 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
         state: /^[0-9a-f]{32}$/i.test(handle) ? {} : { handle },
       });
     } catch (err) {
+      // ADR-0054 S3: a handle lookup spends an anonymous token.
+      if (anonTokenMessage(err, "") === null) console.warn("[channels] handle lookup failed", err);
       setFindError(
-        // ADR-0054 S3: a handle lookup spends an anonymous token.
-        anonTokenMessage(err, "Could not look that up. Check your connection and try again.") ??
-          `Could not look that up. Check your connection and try again. (${String(err)})`,
+        () =>
+          anonTokenMessage(err, t("chats.lookup.unreachable")) ?? t("chats.lookup.unreachable"),
       );
     } finally {
       setFindBusy(false);
@@ -115,15 +121,15 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
 
   return (
     <div class="lk-split" data-open={open() ? "true" : "false"}>
-      <aside class="lk-pane" aria-label="Channels">
+      <aside class="lk-pane" aria-label={t("nav.channels")}>
         <div class="lk-pane-head">
-          <h1>Channels</h1>
+          <h1>{t("nav.channels")}</h1>
           <div class="lk-menu-anchor">
             <button
               type="button"
               class="lk-icon-button accent"
-              title="New"
-              aria-label="New channel or join one"
+              title={t("chats.compose")}
+              aria-label={t("channels.new_menu")}
               aria-haspopup="menu"
               aria-expanded={menuOpen()}
               onClick={(): void => {
@@ -139,14 +145,14 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
                   setMenuOpen(false);
                 }}
               />
-              <div class="lk-menu" role="menu" aria-label="New">
+              <div class="lk-menu" role="menu" aria-label={t("chats.compose")}>
                 <button type="button" role="menuitem" onClick={(): void => go(paths.channelNew)}>
                   <Icon name="channels" size={18} />
-                  New channel
+                  {t("channels.new.title")}
                 </button>
                 <button type="button" role="menuitem" onClick={(): void => go(paths.channelJoin)}>
                   <Icon name="link" size={18} />
-                  Join as co-publisher
+                  {t("channels.join.title")}
                 </button>
               </div>
             </Show>
@@ -162,8 +168,8 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
           <Icon name="search" size={16} />
           <input
             type="search"
-            placeholder="Search or find by @handle"
-            aria-label="Search channels or find one by handle"
+            placeholder={t("channels.search.placeholder")}
+            aria-label={t("channels.search.label")}
             autocapitalize="none"
             autocomplete="off"
             spellcheck={false}
@@ -187,9 +193,9 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
           fallback={
             <div class="lk-empty">
               <Icon name="channels" size={40} strokeWidth={1.4} />
-              <strong>No channels yet</strong>
+              <strong>{t("channels.empty.title")}</strong>
               <button type="button" class="primary" onClick={(): void => navigate(paths.channelNew)}>
-                Create a channel
+                {t("channels.empty.action")}
               </button>
             </div>
           }
@@ -197,7 +203,7 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
           <div class="lk-pane-body">
             <Show when={visible().length === 0}>
               <div class="lk-pane-nomatch lk-stack">
-                <span>No results</span>
+                <span>{t("chats.search.no_results")}</span>
                 <Show when={query().trim().length > 0}>
                   <button
                     type="button"
@@ -205,7 +211,9 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
                     disabled={findBusy()}
                     onClick={(): void => void onFind()}
                   >
-                    {findBusy() ? "Looking..." : `Find ${query().trim().startsWith("@") ? query().trim() : `@${query().trim()}`}`}
+                    {findBusy()
+                      ? t("common.looking_up")
+                      : t("channels.find.action", { handle: atHandle(query().trim()) })}
                   </button>
                 </Show>
               </div>
@@ -232,7 +240,7 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
 export function ChannelsIndex(): JSX.Element {
   return (
     <div class="lk-main-center">
-      <span class="lk-hint-pill">Select a channel, or create one</span>
+      <span class="lk-hint-pill">{t("channels.index_hint")}</span>
     </div>
   );
 }

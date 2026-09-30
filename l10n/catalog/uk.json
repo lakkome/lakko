@@ -330,6 +330,474 @@
       "text": "Можна піти з цього екрана: ви приєднаєтеся, щойно вас впустять.",
       "status": "machine"
     },
+    "channels.back": {
+      "text": "Назад до каналів",
+      "status": "machine"
+    },
+    "channels.compose.label": {
+      "text": "Новий допис",
+      "status": "machine"
+    },
+    "channels.compose.placeholder": {
+      "text": "Напишіть допис",
+      "status": "machine"
+    },
+    "channels.compose.publish": {
+      "text": "Опублікувати",
+      "status": "machine"
+    },
+    "channels.compose.publishing": {
+      "text": "Публікація...",
+      "status": "machine"
+    },
+    "channels.copublishers.desc": {
+      "text": "Люди, які можуть публікувати в цьому каналі. Поділіться посиланням і схваліть запит, коли він надійде.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.approve": {
+      "text": "Не вдалося схвалити запит. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.poll": {
+      "text": "Не вдалося перевірити запити. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.copublishers.error.reject": {
+      "text": "Не вдалося відхилити запит. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.copublishers.link": {
+      "text": "Посилання-запрошення для співвидавця",
+      "status": "machine"
+    },
+    "channels.copublishers.request_row": {
+      "text": "Хтось хоче стати співвидавцем",
+      "status": "machine"
+    },
+    "channels.copublishers.requests": {
+      "text": "Запити ({count})",
+      "status": "machine"
+    },
+    "channels.copublishers.title": {
+      "text": "Співвидавці",
+      "status": "machine"
+    },
+    "channels.empty.action": {
+      "text": "Створити канал",
+      "status": "machine"
+    },
+    "channels.empty.title": {
+      "text": "Каналів поки немає",
+      "status": "machine"
+    },
+    "channels.error.empty_post": {
+      "text": "Напишіть щось, щоб опублікувати.",
+      "status": "machine"
+    },
+    "channels.error.not_let_in": {
+      "text": "Канал ще не відкрив доступ цьому пристрою. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "channels.error.post_too_large": {
+      "text": "Цей допис задовгий для публікації.",
+      "status": "machine"
+    },
+    "channels.error.refused": {
+      "text": "Сервер відхилив запит. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "channels.error.sign_in": {
+      "text": "Увійдіть знову, щоб користуватися каналами.",
+      "status": "machine"
+    },
+    "channels.error.unknown_channel": {
+      "text": "Цього каналу немає на сервері.",
+      "status": "machine"
+    },
+    "channels.error.unreachable": {
+      "text": "Сервіс каналів зараз недоступний. Спробуйте трохи згодом.",
+      "status": "machine"
+    },
+    "channels.fallback_name": {
+      "text": "Канал",
+      "status": "machine"
+    },
+    "channels.field.description_optional": {
+      "text": "Опис (необов’язково)",
+      "status": "machine"
+    },
+    "channels.field.name": {
+      "text": "Назва",
+      "status": "machine"
+    },
+    "channels.find.action": {
+      "text": "Знайти {handle}",
+      "status": "machine"
+    },
+    "channels.find.none": {
+      "text": "Канал {handle} не знайдено.",
+      "status": "machine"
+    },
+    "channels.index_hint": {
+      "text": "Виберіть канал або створіть новий",
+      "status": "machine"
+    },
+    "channels.info.manage_sub": {
+      "text": "Назва й опис, хто його читає і хто ще може публікувати.",
+      "status": "machine"
+    },
+    "channels.info.subscribers": {
+      "text": "{count, plural, one {# підписник} few {# підписники} many {# підписників} other {# підписника}}",
+      "status": "machine"
+    },
+    "channels.info.unsubscribe_sub": {
+      "text": "Прибирає канал із вашого списку, і цей пристрій перестає його читати. Пізніше можна підписатися знову.",
+      "status": "machine"
+    },
+    "channels.join.default_name": {
+      "text": "Канал, де ви співвидавець",
+      "status": "machine"
+    },
+    "channels.join.error.sign_in": {
+      "text": "Увійдіть знову, щоб приєднатися до каналу.",
+      "status": "machine"
+    },
+    "channels.join.link_label": {
+      "text": "Посилання",
+      "status": "machine"
+    },
+    "channels.join.name_label": {
+      "text": "Назва на цьому пристрої (необов’язково)",
+      "status": "machine"
+    },
+    "channels.join.no_approval": {
+      "text": "Схвалення поки немає. Спробуйте знову, коли власник схвалить запит.",
+      "status": "machine"
+    },
+    "channels.join.requesting": {
+      "text": "Надсилання запиту...",
+      "status": "machine"
+    },
+    "channels.join.subtitle": {
+      "text": "Вставте посилання, яким поділився власник каналу. Після схвалення цей пристрій зможе публікувати в каналі.",
+      "status": "machine"
+    },
+    "channels.join.title": {
+      "text": "Стати співвидавцем",
+      "status": "machine"
+    },
+    "channels.join.waiting": {
+      "text": "Чекаємо схвалення власника каналу...",
+      "status": "machine"
+    },
+    "channels.legacy.channel": {
+      "text": "Цей канал створено старою версією Lakko, і його не можна відкрити в цій збірці. Уже опубліковані дописи залишаться доступними вашим підписникам. Щоб знову публікувати, створіть новий канал — цей відновити не можна.",
+      "status": "machine"
+    },
+    "channels.legacy.copublisher_link": {
+      "text": "Це посилання-запрошення для співвидавця створено старою версією Lakko, і воно більше не працює. Попросіть власника каналу надіслати нове посилання-запрошення.",
+      "status": "machine"
+    },
+    "channels.manage.back": {
+      "text": "Назад до дописів",
+      "status": "machine"
+    },
+    "channels.manage.error.open": {
+      "text": "Не вдалося відкрити налаштування каналу. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.manage.error.sign_in": {
+      "text": "Увійдіть знову, щоб керувати цим каналом.",
+      "status": "machine"
+    },
+    "channels.manage.title": {
+      "text": "Керування каналом",
+      "status": "machine"
+    },
+    "channels.meta.desc": {
+      "text": "Назва й опис надходять усім підписникам у зашифрованому вигляді. Сервер ніколи їх не читає.",
+      "status": "machine"
+    },
+    "channels.meta.error.description_bad_character": {
+      "text": "В описі є символ, який не можна показати.",
+      "status": "machine"
+    },
+    "channels.meta.error.description_too_long": {
+      "text": "Опис задовгий.",
+      "status": "machine"
+    },
+    "channels.meta.error.generic": {
+      "text": "Цю назву або опис не можна використати.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_bad_character": {
+      "text": "У назві є символ, який не можна показати.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_empty": {
+      "text": "Канал має мати назву",
+      "status": "machine"
+    },
+    "channels.meta.error.name_line_break": {
+      "text": "Назва має бути в один рядок.",
+      "status": "machine"
+    },
+    "channels.meta.error.name_too_long": {
+      "text": "Назва задовга.",
+      "status": "machine"
+    },
+    "channels.meta.error.save": {
+      "text": "Не вдалося зберегти. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.meta.error.save_prefix": {
+      "text": "Не вдалося зберегти.",
+      "status": "machine"
+    },
+    "channels.meta.saved": {
+      "text": "Збережено. Підписники побачать нову назву разом із наступними дописами.",
+      "status": "machine"
+    },
+    "channels.meta.title": {
+      "text": "Канал",
+      "status": "machine"
+    },
+    "channels.new.create": {
+      "text": "Створити",
+      "status": "machine"
+    },
+    "channels.new.error.create": {
+      "text": "Не вдалося створити канал. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.new.error.handle": {
+      "text": "Не вдалося зайняти @адресу. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.new.error.handle_offline": {
+      "text": "Не вдалося зайняти @адресу. Перевірте з’єднання та спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.new.error.handle_taken": {
+      "text": "{handle} уже зайнято. Виберіть іншу або залиште поле порожнім.",
+      "status": "machine"
+    },
+    "channels.new.error.no_name": {
+      "text": "Дайте каналу назву.",
+      "status": "machine"
+    },
+    "channels.new.error.sign_in": {
+      "text": "Увійдіть знову, щоб створити канал.",
+      "status": "machine"
+    },
+    "channels.new.handle_hint": {
+      "text": "За нею будь-хто може знайти канал і підписатися.",
+      "status": "machine"
+    },
+    "channels.new.handle_label": {
+      "text": "Публічна @адреса (необов’язково)",
+      "status": "machine"
+    },
+    "channels.new.handle_placeholder": {
+      "text": "@my-channel",
+      "status": "machine"
+    },
+    "channels.new.subtitle": {
+      "text": "Підписники бачать назву й опис. Вони передаються в зашифрованому вигляді; на сервер потрапляє лише шифротекст.",
+      "status": "machine"
+    },
+    "channels.new.title": {
+      "text": "Новий канал",
+      "status": "machine"
+    },
+    "channels.new_menu": {
+      "text": "Новий канал або приєднатися",
+      "status": "machine"
+    },
+    "channels.post.not_available": {
+      "text": "Недоступно",
+      "status": "machine"
+    },
+    "channels.post.older_key": {
+      "text": "Цей допис старший за те, що може прочитати цей пристрій.",
+      "status": "machine"
+    },
+    "channels.post.unreadable": {
+      "text": "Цей допис не вдалося відкрити на цьому пристрої.",
+      "status": "machine"
+    },
+    "channels.posts.empty": {
+      "text": "Дописів поки немає.",
+      "status": "machine"
+    },
+    "channels.posts.empty_owner": {
+      "text": "Дописів поки немає. Напишіть перший нижче.",
+      "status": "machine"
+    },
+    "channels.posts.error.load": {
+      "text": "Не вдалося завантажити дописи.",
+      "status": "machine"
+    },
+    "channels.publish.error.generic": {
+      "text": "Не вдалося опублікувати. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.publish.error.not_publisher": {
+      "text": "Цей пристрій не може публікувати в цьому каналі.",
+      "status": "machine"
+    },
+    "channels.publish.error.prefix": {
+      "text": "Не вдалося опублікувати.",
+      "status": "machine"
+    },
+    "channels.rotation.desc": {
+      "text": "Lakko сам оновлює захист каналу. Оновіть його зараз, якщо вважаєте, що пристрій когось із підписників скомпрометовано.",
+      "status": "machine"
+    },
+    "channels.rotation.error.check": {
+      "text": "Не вдалося перевірити захист каналу.",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh": {
+      "text": "Не вдалося оновити. Спробуйте трохи згодом.",
+      "status": "machine"
+    },
+    "channels.rotation.never": {
+      "text": "Ще не оновлювався.",
+      "status": "machine"
+    },
+    "channels.rotation.refresh_now": {
+      "text": "Оновити зараз",
+      "status": "machine"
+    },
+    "channels.rotation.refreshed": {
+      "text": "Оновлено {when}.",
+      "status": "machine"
+    },
+    "channels.rotation.refreshing": {
+      "text": "Оновлення...",
+      "status": "machine"
+    },
+    "channels.rotation.title": {
+      "text": "Захист",
+      "status": "machine"
+    },
+    "channels.row.own": {
+      "text": "Ваш канал",
+      "status": "machine"
+    },
+    "channels.search.label": {
+      "text": "Пошук каналів або пошук за @адресою",
+      "status": "machine"
+    },
+    "channels.search.placeholder": {
+      "text": "Пошук або @адреса",
+      "status": "machine"
+    },
+    "channels.subscribe.action": {
+      "text": "Підписатися",
+      "status": "machine"
+    },
+    "channels.subscribe.error.generic": {
+      "text": "Не вдалося підписатися. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "channels.subscribe.error.prefix": {
+      "text": "Не вдалося підписатися.",
+      "status": "machine"
+    },
+    "channels.subscribe.prompt_body": {
+      "text": "Дописи з’являться тут, коли канал відкриє доступ цьому пристрою.",
+      "status": "machine"
+    },
+    "channels.subscribe.prompt_title": {
+      "text": "Підпишіться, щоб читати цей канал",
+      "status": "machine"
+    },
+    "channels.subscribe.status.not_subscribed": {
+      "text": "Немає підписки",
+      "status": "machine"
+    },
+    "channels.subscribe.status.subscribed": {
+      "text": "Підписку оформлено",
+      "status": "machine"
+    },
+    "channels.subscribe.status.subscribing": {
+      "text": "Підписка...",
+      "status": "machine"
+    },
+    "channels.subscribe.status.waiting": {
+      "text": "Очікування доступу...",
+      "status": "machine"
+    },
+    "channels.subscribe.waiting_notice": {
+      "text": "Підписку оформлено. Дописи з’являться, коли канал відкриє доступ цьому пристрою; зазвичай це займає трохи часу.",
+      "status": "machine"
+    },
+    "channels.subscribers.count": {
+      "text": "({count})",
+      "status": "machine"
+    },
+    "channels.subscribers.desc": {
+      "text": "Новим підписникам доступ відкривається з цього пристрою автоматично.",
+      "status": "machine"
+    },
+    "channels.subscribers.empty": {
+      "text": "Підписників поки немає. Поділіться @адресою каналу, щоб на нього могли підписатися.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.deliver": {
+      "text": "Не вдалося налаштувати доступ для цього підписника. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.deliver_prefix": {
+      "text": "Не вдалося налаштувати доступ для цього підписника.",
+      "status": "machine"
+    },
+    "channels.subscribers.error.load": {
+      "text": "Не вдалося завантажити підписників. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "channels.subscribers.retrying": {
+      "text": "Повторна спроба...",
+      "status": "machine"
+    },
+    "channels.subscribers.row": {
+      "text": "Підписник {number}",
+      "status": "machine"
+    },
+    "channels.subscribers.status.not_ready": {
+      "text": "Не готовий",
+      "status": "machine"
+    },
+    "channels.subscribers.status.ready": {
+      "text": "Готовий",
+      "status": "machine"
+    },
+    "channels.subscribers.status.setting_up": {
+      "text": "Налаштування...",
+      "status": "machine"
+    },
+    "channels.subscribers.title": {
+      "text": "Підписники",
+      "status": "machine"
+    },
+    "channels.unsubscribe.action": {
+      "text": "Відписатися",
+      "status": "machine"
+    },
+    "channels.unsubscribe.body": {
+      "text": "Канал зникне з вашого списку, і цей пристрій перестане його читати. Пізніше можна підписатися знову.",
+      "status": "machine"
+    },
+    "channels.unsubscribe.title": {
+      "text": "Відписатися від цього каналу?",
+      "status": "machine"
+    },
+    "channels.unsubscribe.title_named": {
+      "text": "Відписатися від каналу «{name}»?",
+      "status": "machine"
+    },
     "chat.attachment.error.attach": {
       "text": "Не вдалося прикріпити вибраний елемент. Спробуйте ще раз.",
       "status": "machine"
@@ -532,6 +1000,10 @@
     },
     "chat.delete.control": {
       "text": "Видалити цей чат",
+      "status": "machine"
+    },
+    "chat.delete.sub": {
+      "text": "Видаляє цю розмову й усе, що в ній є, з цього пристрою. Це не можна скасувати.",
       "status": "machine"
     },
     "chat.delete.title": {
@@ -2054,6 +2526,14 @@
       "text": "Перевірка...",
       "status": "machine"
     },
+    "common.clipboard.link": {
+      "text": "Посилання Lakko",
+      "status": "machine"
+    },
+    "common.clipboard.message": {
+      "text": "Повідомлення Lakko",
+      "status": "machine"
+    },
     "common.close": {
       "text": "Закрити",
       "status": "machine"
@@ -2084,6 +2564,10 @@
     },
     "common.copy": {
       "text": "Копіювати",
+      "status": "machine"
+    },
+    "common.creating": {
+      "text": "Створення...",
       "status": "machine"
     },
     "common.delete": {
@@ -2158,6 +2642,10 @@
       "text": "Розгорнути",
       "status": "machine"
     },
+    "common.fact_pair": {
+      "text": "{first} · {second}",
+      "status": "machine"
+    },
     "common.list_pair": {
       "text": "{first}, {second}",
       "status": "machine"
@@ -2194,6 +2682,10 @@
       "text": "Увімк.",
       "status": "machine"
     },
+    "common.open_chat": {
+      "text": "Відкрити чат",
+      "status": "machine"
+    },
     "common.open_lakko": {
       "text": "Відкрити Lakko",
       "status": "machine"
@@ -2212,6 +2704,10 @@
     },
     "common.preparing": {
       "text": "Підготовка...",
+      "status": "machine"
+    },
+    "common.qr_code": {
+      "text": "QR-код",
       "status": "machine"
     },
     "common.remove": {
@@ -2262,12 +2758,296 @@
       "text": "{size} МБ",
       "status": "machine"
     },
+    "common.time.days_ago": {
+      "text": "{count, plural, one {# день тому} few {# дні тому} many {# днів тому} other {# дня тому}}",
+      "status": "machine"
+    },
+    "common.time.hours_ago": {
+      "text": "{count, plural, one {# годину тому} few {# години тому} many {# годин тому} other {# години тому}}",
+      "status": "machine"
+    },
+    "common.time.just_now": {
+      "text": "щойно",
+      "status": "machine"
+    },
+    "common.time.minutes_ago": {
+      "text": "{count, plural, one {# хвилину тому} few {# хвилини тому} many {# хвилин тому} other {# хвилини тому}}",
+      "status": "machine"
+    },
     "common.try_again": {
       "text": "Спробувати ще раз",
       "status": "machine"
     },
     "common.unknown": {
       "text": "невідомо",
+      "status": "machine"
+    },
+    "contacts.accept.error.old_version": {
+      "text": "Цей запит надійшов зі старої версії Lakko. Попросіть людину оновити застосунок і надіслати запит знову.",
+      "status": "machine"
+    },
+    "contacts.add.by_username": {
+      "text": "Додати за ім’ям користувача",
+      "status": "machine"
+    },
+    "contacts.add.intro_label": {
+      "text": "Повідомлення (необов’язково)",
+      "status": "machine"
+    },
+    "contacts.add.intro_placeholder": {
+      "text": "Привіт, це Аліса з конференції.",
+      "status": "machine"
+    },
+    "contacts.add.send": {
+      "text": "Надіслати",
+      "status": "machine"
+    },
+    "contacts.add.share_invite": {
+      "text": "Поділитися посиланням-запрошенням",
+      "status": "machine"
+    },
+    "contacts.add.subtitle": {
+      "text": "Запити захищені наскрізним шифруванням. Сервери Lakko не можуть їх прочитати.",
+      "status": "machine"
+    },
+    "contacts.add.title": {
+      "text": "Додати контакт",
+      "status": "machine"
+    },
+    "contacts.add.username_label": {
+      "text": "Ім’я користувача",
+      "status": "machine"
+    },
+    "contacts.add.username_placeholder": {
+      "text": "@alice",
+      "status": "machine"
+    },
+    "contacts.detail.actions": {
+      "text": "Дії з контактом",
+      "status": "machine"
+    },
+    "contacts.detail.call_needs_chat": {
+      "text": "Щоб подзвонити, спершу надішліть повідомлення.",
+      "status": "machine"
+    },
+    "contacts.detail.gone_body": {
+      "text": "Цієї людини більше немає у ваших контактах.",
+      "status": "machine"
+    },
+    "contacts.detail.gone_title": {
+      "text": "Контакт не знайдено",
+      "status": "machine"
+    },
+    "contacts.detail.message": {
+      "text": "Написати",
+      "status": "machine"
+    },
+    "contacts.detail.message_unavailable": {
+      "text": "Цей контакт додано ще до того, як звідси можна було починати чати. Попросіть його написати вам.",
+      "status": "machine"
+    },
+    "contacts.detail.their_name": {
+      "text": "Називає себе: {name}",
+      "status": "machine"
+    },
+    "contacts.detail.username_not_verified": {
+      "text": "Ім’я користувача не підтверджено",
+      "status": "machine"
+    },
+    "contacts.error.send": {
+      "text": "Не вдалося надіслати запит. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "contacts.error.start_chat": {
+      "text": "Не вдалося почати чат. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.reset": {
+      "text": "Ідентичність {name} скинуто (наприклад, після втрати пристрою). Журнал прозорості підтверджує, що скидання виконав власник облікового запису. Якщо ви впевнені, що це справді ця людина, перед продовженням знову звірте код безпеки іншим каналом зв’язку.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.reset_unnamed": {
+      "text": "Ідентичність цього контакту скинуто (наприклад, після втрати пристрою). Журнал прозорості підтверджує, що скидання виконав власник облікового запису. Якщо ви впевнені, що це справді ця людина, перед продовженням знову звірте код безпеки іншим каналом зв’язку.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unconfirmed": {
+      "text": "Ідентичність {name} змінилася, і це не вдалося підтвердити за журналом прозорості. Перш ніж довіряти, перевірте іншим каналом зв’язку.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unconfirmed_unnamed": {
+      "text": "Ідентичність цього контакту змінилася, і це не вдалося підтвердити за журналом прозорості. Перш ніж довіряти, перевірте іншим каналом зв’язку.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unexplained": {
+      "text": "Ідентичність {name} змінилася, і журнал прозорості НЕ показує скидання власником — вважайте, що обліковий запис могли зламати. Перш ніж довіряти, перевірте іншим каналом зв’язку.",
+      "status": "machine"
+    },
+    "contacts.identity_changed.unexplained_unnamed": {
+      "text": "Ідентичність цього контакту змінилася, і журнал прозорості НЕ показує скидання власником — вважайте, що обліковий запис могли зламати. Перш ніж довіряти, перевірте іншим каналом зв’язку.",
+      "status": "machine"
+    },
+    "contacts.invite_links.subtitle": {
+      "text": "Поділіться посиланням із тим, від кого хочете отримати повідомлення.",
+      "status": "machine"
+    },
+    "contacts.invite_links.title": {
+      "text": "Посилання-запрошення",
+      "status": "machine"
+    },
+    "contacts.list.add": {
+      "text": "Додати",
+      "status": "machine"
+    },
+    "contacts.list.empty.action": {
+      "text": "Додати контакт",
+      "status": "machine"
+    },
+    "contacts.list.empty.body": {
+      "text": "Додайте когось за ім’ям користувача або поділіться посиланням-запрошенням.",
+      "status": "machine"
+    },
+    "contacts.list.empty.title": {
+      "text": "Контактів поки немає",
+      "status": "machine"
+    },
+    "contacts.list.no_match": {
+      "text": "Відповідних контактів немає.",
+      "status": "machine"
+    },
+    "contacts.list.requests": {
+      "text": "Запити",
+      "status": "machine"
+    },
+    "contacts.list.search": {
+      "text": "Пошук контактів",
+      "status": "machine"
+    },
+    "contacts.list.section_index": {
+      "text": "Алфавітний покажчик",
+      "status": "machine"
+    },
+    "contacts.list.sent": {
+      "text": "Надіслані ({count})",
+      "status": "machine"
+    },
+    "contacts.list.sent_dismiss": {
+      "text": "Прибрати з цього списку",
+      "status": "machine"
+    },
+    "contacts.list.sent_waiting": {
+      "text": "Очікування",
+      "status": "machine"
+    },
+    "contacts.mailbox.join_failed": {
+      "text": "Вас додали до групи, але запрошення не вдалося відкрити на цьому пристрої. Попросіть того, хто вас додав, зробити це ще раз.",
+      "status": "machine"
+    },
+    "contacts.mailbox.poll_failed": {
+      "text": "Не вдалося перевірити нові запити в контакти. Пробуємо знову.",
+      "status": "machine"
+    },
+    "contacts.mailbox.sign_in": {
+      "text": "Увійдіть знову, щоб перевірити нові запити.",
+      "status": "machine"
+    },
+    "contacts.reauth.body": {
+      "text": "Ключі, потрібні цьому сеансу для контактів, недоступні. Увійдіть знову, щоб користуватися контактами.",
+      "status": "machine"
+    },
+    "contacts.remove.body": {
+      "text": "Спільні чати залишаться як є; зміниться лише ваш список контактів. Пізніше контакт можна додати знову.",
+      "status": "machine"
+    },
+    "contacts.remove.confirm_named": {
+      "text": "Видалити: {name}",
+      "status": "machine"
+    },
+    "contacts.remove.control": {
+      "text": "Видалити контакт",
+      "status": "machine"
+    },
+    "contacts.remove.sub": {
+      "text": "Прибирає контакт {name} зі списку контактів цього облікового запису.",
+      "status": "machine"
+    },
+    "contacts.remove.title": {
+      "text": "Видалити цей контакт?",
+      "status": "machine"
+    },
+    "contacts.rename.action": {
+      "text": "Перейменувати",
+      "status": "machine"
+    },
+    "contacts.rename.field": {
+      "text": "Ваше ім’я для цього контакту",
+      "status": "machine"
+    },
+    "contacts.rename.placeholder": {
+      "text": "Залиште порожнім, щоб використовувати його власне ім’я",
+      "status": "machine"
+    },
+    "contacts.rename.sub_local": {
+      "text": "Ваше ім’я для цього контакту. Його бачите лише ви.",
+      "status": "machine"
+    },
+    "contacts.rename.sub_theirs": {
+      "text": "Так, як задав сам контакт. Ви можете дати йому своє ім’я.",
+      "status": "machine"
+    },
+    "contacts.rename.title": {
+      "text": "Ім’я",
+      "status": "machine"
+    },
+    "contacts.request.accept": {
+      "text": "Прийняти",
+      "status": "machine"
+    },
+    "contacts.request.decline": {
+      "text": "Відхилити",
+      "status": "machine"
+    },
+    "contacts.request.no_intro": {
+      "text": "Хоче зв’язатися з вами",
+      "status": "machine"
+    },
+    "contacts.request.someone": {
+      "text": "Хтось",
+      "status": "machine"
+    },
+    "contacts.safety.body": {
+      "text": "Звірте його зі співрозмовником ({name}) під час зустрічі або дзвінка. Однакові коди означають, що між вами нікого немає.",
+      "status": "machine"
+    },
+    "contacts.safety.body_unnamed": {
+      "text": "Звірте його зі співрозмовником під час зустрічі або дзвінка. Однакові коди означають, що між вами нікого немає.",
+      "status": "machine"
+    },
+    "contacts.safety.error": {
+      "text": "Не вдалося обчислити код безпеки. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "contacts.safety.number": {
+      "text": "Код безпеки",
+      "status": "machine"
+    },
+    "contacts.safety.row_sub": {
+      "text": "Звірте код під час зустрічі, щоб переконатися, що це справді ця людина.",
+      "status": "machine"
+    },
+    "contacts.safety.show": {
+      "text": "Показати",
+      "status": "machine"
+    },
+    "contacts.safety.sign_in": {
+      "text": "Увійдіть знову, щоб побачити код безпеки.",
+      "status": "machine"
+    },
+    "contacts.safety.title": {
+      "text": "Звірити код безпеки",
+      "status": "machine"
+    },
+    "contacts.send.done": {
+      "text": "Запит надіслано: {name}. Він буде в розділі «Надіслані», доки його не приймуть.",
       "status": "machine"
     },
     "device_link.compare_hint": {
@@ -2450,6 +3230,10 @@
       "text": "Додати пристрій",
       "status": "machine"
     },
+    "devices.pairing.qr_description": {
+      "text": "QR-код для прив’язування",
+      "status": "machine"
+    },
     "devices.scan.confirm.body": {
       "text": "Відсканований пристрій отримає повний доступ до вашого облікового запису: повідомлень, контактів і вашої ідентичності. Продовжуйте, лише якщо цей код показано на вашому власному новому пристрої.",
       "status": "machine"
@@ -2510,12 +3294,44 @@
       "text": "Перевірте дату й час на цьому пристрої.",
       "status": "machine"
     },
+    "group.join.needs_account": {
+      "text": "Щоб надіслати запит на приєднання, потрібен обліковий запис. Створіть його або увійдіть.",
+      "status": "machine"
+    },
     "group.join.not_taking_requests": {
       "text": "Ця група поки не приймає запити. Спробуйте пізніше.",
       "status": "machine"
     },
+    "group.join.open_chat": {
+      "text": "Відкрити чат",
+      "status": "machine"
+    },
+    "group.join.request": {
+      "text": "Надіслати запит на приєднання",
+      "status": "machine"
+    },
     "group.join.request_again": {
       "text": "Надіслати запит знову",
+      "status": "machine"
+    },
+    "group.join.request_failed": {
+      "text": "Запит не надіслано. Перевірте з’єднання та спробуйте ще раз.",
+      "status": "machine"
+    },
+    "group.join.sending": {
+      "text": "Надсилання запиту...",
+      "status": "machine"
+    },
+    "group.join.succeeded": {
+      "text": "Ви приєдналися до групи.",
+      "status": "machine"
+    },
+    "group.join.succeeded_opening": {
+      "text": "Ви приєдналися до групи. Відкриваємо чат...",
+      "status": "machine"
+    },
+    "group.join.title": {
+      "text": "Приєднатися до групи",
       "status": "machine"
     },
     "group.join.wait_primary": {
@@ -2524,6 +3340,362 @@
     },
     "group.join.wait_secondary": {
       "text": "Жоден із кроків не має обмеження в часі. Якщо нічого не відбувається, запит можна надіслати знову.",
+      "status": "machine"
+    },
+    "invite.contact.accept_failed": {
+      "text": "Не вдалося прийняти запрошення. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "invite.contact.accepting": {
+      "text": "Приймаємо запрошення...",
+      "status": "machine"
+    },
+    "invite.contact.already_accepted": {
+      "text": "Ви вже прийняли це запрошення. Ваш запит надіслано: {name}; відповідь з’явиться в контактах.",
+      "status": "machine"
+    },
+    "invite.contact.already_accepted_unnamed": {
+      "text": "Ви вже прийняли це запрошення. Знайдіть цю людину в контактах.",
+      "status": "machine"
+    },
+    "invite.contact.check_body": {
+      "text": "Дізнайтеся код безпеки в цієї людини способом, якому ви вже довіряєте (під час зустрічі, дзвінка). Якщо код не збігається, це посилання створив хтось інший.",
+      "status": "machine"
+    },
+    "invite.contact.check_title": {
+      "text": "Перевірте, перш ніж прийняти.",
+      "status": "machine"
+    },
+    "invite.contact.connected": {
+      "text": "Контакт додано.",
+      "status": "machine"
+    },
+    "invite.contact.expired": {
+      "text": "Термін дії запрошення минув. Попросіть того, хто вас запросив, надіслати нове посилання.",
+      "status": "machine"
+    },
+    "invite.contact.expiry": {
+      "text": "Термін дії",
+      "status": "machine"
+    },
+    "invite.contact.fingerprint": {
+      "text": "Відбиток того, хто запросив",
+      "status": "machine"
+    },
+    "invite.contact.intro_label": {
+      "text": "Повідомлення для знайомства (необов’язково)",
+      "status": "machine"
+    },
+    "invite.contact.invalid_body": {
+      "text": "Посилання пошкоджене або його змінили дорогою. Попросіть того, хто вас запросив, надіслати нове.",
+      "status": "machine"
+    },
+    "invite.contact.invalid_title": {
+      "text": "Це посилання-запрошення недійсне",
+      "status": "machine"
+    },
+    "invite.contact.needs_auth_body": {
+      "text": "Щоб прийняти запрошення, потрібен обліковий запис. Створіть його або увійдіть — і ви автоматично повернетеся сюди.",
+      "status": "machine"
+    },
+    "invite.contact.needs_auth_title": {
+      "text": "Хтось хоче зв’язатися з вами в Lakko",
+      "status": "machine"
+    },
+    "invite.contact.no_longer_valid": {
+      "text": "Це посилання більше не дійсне. Попросіть людину надіслати нове.",
+      "status": "machine"
+    },
+    "invite.contact.page_title": {
+      "text": "Запрошення",
+      "status": "machine"
+    },
+    "invite.contact.referral": {
+      "text": "Реферальне посилання: ваш запит надсилається автоматично.",
+      "status": "machine"
+    },
+    "invite.contact.result.already_body": {
+      "text": "Ви вже прийняли це запрошення на цьому пристрої. Знайдіть людину в контактах.",
+      "status": "machine"
+    },
+    "invite.contact.result.already_title": {
+      "text": "Уже прийнято",
+      "status": "machine"
+    },
+    "invite.contact.result.expired_title": {
+      "text": "Термін запрошення минув",
+      "status": "machine"
+    },
+    "invite.contact.result.failed_title": {
+      "text": "Запрошення не прийнято",
+      "status": "machine"
+    },
+    "invite.contact.result.not_found_title": {
+      "text": "Запрошення не знайдено",
+      "status": "machine"
+    },
+    "invite.contact.result.rate_limited_title": {
+      "text": "Не зараз",
+      "status": "machine"
+    },
+    "invite.contact.result.sent_body": {
+      "text": "Ваш запит у контакти надіслано. Коли його приймуть, чат з’явиться в розділі «Чати».",
+      "status": "machine"
+    },
+    "invite.contact.result.sent_title": {
+      "text": "Запит надіслано",
+      "status": "machine"
+    },
+    "invite.contact.result.used_up_title": {
+      "text": "Запрошення вичерпано",
+      "status": "machine"
+    },
+    "invite.contact.sending": {
+      "text": "Надсилаємо ваш запит: {name}...",
+      "status": "machine"
+    },
+    "invite.contact.sent": {
+      "text": "Запит надіслано: {name}.",
+      "status": "machine"
+    },
+    "invite.contact.title": {
+      "text": "Зв’язатися з {name}?",
+      "status": "machine"
+    },
+    "invite.contact.type": {
+      "text": "Тип",
+      "status": "machine"
+    },
+    "invite.contact.used_up": {
+      "text": "Це посилання вже вичерпано. Попросіть людину надіслати нове.",
+      "status": "machine"
+    },
+    "invite.contact.uses": {
+      "text": "Дозволена кількість використань",
+      "status": "machine"
+    },
+    "invite.expiry.ago_days": {
+      "text": "{count, plural, one {минув # день тому} few {минув # дні тому} many {минув # днів тому} other {минув # дня тому}}",
+      "status": "machine"
+    },
+    "invite.expiry.ago_hours": {
+      "text": "{count, plural, one {минув # годину тому} few {минув # години тому} many {минув # годин тому} other {минув # години тому}}",
+      "status": "machine"
+    },
+    "invite.expiry.ago_minutes": {
+      "text": "{count, plural, one {минув # хвилину тому} few {минув # хвилини тому} many {минув # хвилин тому} other {минув # хвилини тому}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_days": {
+      "text": "{count, plural, one {через # день} few {через # дні} many {через # днів} other {через # дня}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_hours": {
+      "text": "{count, plural, one {через # годину} few {через # години} many {через # годин} other {через # години}}",
+      "status": "machine"
+    },
+    "invite.expiry.in_minutes": {
+      "text": "{count, plural, one {через # хвилину} few {через # хвилини} many {через # хвилин} other {через # хвилини}}",
+      "status": "machine"
+    },
+    "invite.expiry.never": {
+      "text": "безстроково",
+      "status": "machine"
+    },
+    "invite.go_home": {
+      "text": "На головну Lakko",
+      "status": "machine"
+    },
+    "invite.group.invited_by": {
+      "text": "Запрошення від {fingerprint}",
+      "status": "machine"
+    },
+    "invite.group.lead_anonymous": {
+      "text": "Вас запрошують до",
+      "status": "machine"
+    },
+    "invite.group.lead_anonymous_unnamed": {
+      "text": "Вас запрошують до групи",
+      "status": "machine"
+    },
+    "invite.group.lead_named": {
+      "text": "{name} запрошує вас до",
+      "status": "machine"
+    },
+    "invite.group.lead_named_unnamed": {
+      "text": "{name} запрошує вас до групи",
+      "status": "machine"
+    },
+    "invite.link.damaged": {
+      "text": "Це посилання-запрошення пошкоджене. Попросіть нове посилання.",
+      "status": "machine"
+    },
+    "invite.link.invalid": {
+      "text": "Це посилання-запрошення недійсне або застаріле.",
+      "status": "machine"
+    },
+    "invite.link.loading": {
+      "text": "Завантаження запрошення...",
+      "status": "machine"
+    },
+    "invite.link.rate_limited": {
+      "text": "Зараз із цієї мережі забагато запитів. Спробуйте за хвилину.",
+      "status": "machine"
+    },
+    "invite.links.already_removed": {
+      "text": "Посилання «{label}» вже було видалено.",
+      "status": "machine"
+    },
+    "invite.links.already_removed_unnamed": {
+      "text": "Це посилання вже було видалено.",
+      "status": "machine"
+    },
+    "invite.links.create": {
+      "text": "Створити посилання",
+      "status": "machine"
+    },
+    "invite.links.created": {
+      "text": "Створено {date}",
+      "status": "machine"
+    },
+    "invite.links.desc": {
+      "text": "Будь-хто, хто відкриє одне з ваших посилань, може надіслати вам запит у контакти, доки посилання не мине або не буде вичерпане.",
+      "status": "machine"
+    },
+    "invite.links.empty": {
+      "text": "Активних посилань немає.",
+      "status": "machine"
+    },
+    "invite.links.error.copy": {
+      "text": "Не вдалося скопіювати посилання.",
+      "status": "machine"
+    },
+    "invite.links.error.load": {
+      "text": "Не вдалося завантажити ваші посилання-запрошення. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_create": {
+      "text": "Увійдіть знову, щоб створити посилання-запрошення.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_list": {
+      "text": "Увійдіть знову, щоб побачити ваші посилання-запрошення.",
+      "status": "machine"
+    },
+    "invite.links.error.sign_in_revoke": {
+      "text": "Увійдіть знову, щоб відкликати посилання-запрошення.",
+      "status": "machine"
+    },
+    "invite.links.expired": {
+      "text": "Минув термін",
+      "status": "machine"
+    },
+    "invite.links.expires_days": {
+      "text": "Мине через {count} дн.",
+      "status": "machine"
+    },
+    "invite.links.expires_field": {
+      "text": "Термін дії",
+      "status": "machine"
+    },
+    "invite.links.expires_hours": {
+      "text": "Мине через {count} год",
+      "status": "machine"
+    },
+    "invite.links.expires_minutes": {
+      "text": "Мине через {count} хв",
+      "status": "machine"
+    },
+    "invite.links.expires_option_days": {
+      "text": "{count, plural, one {Через # день} few {Через # дні} many {Через # днів} other {Через # дня}}",
+      "status": "machine"
+    },
+    "invite.links.expires_option_never": {
+      "text": "Ніколи",
+      "status": "machine"
+    },
+    "invite.links.for_new_user": {
+      "text": "Для новачка в Lakko",
+      "status": "machine"
+    },
+    "invite.links.inline_note": {
+      "text": "Lakko не вдалося скоротити це посилання, тому воно довге. Воно працює так само, але його не можна відкликати.",
+      "status": "machine"
+    },
+    "invite.links.label_field": {
+      "text": "Мітка (необов’язково)",
+      "status": "machine"
+    },
+    "invite.links.label_placeholder": {
+      "text": "Видно тому, хто відкриє посилання",
+      "status": "machine"
+    },
+    "invite.links.list": {
+      "text": "Активні посилання-запрошення",
+      "status": "machine"
+    },
+    "invite.links.never_expires": {
+      "text": "Безстрокове",
+      "status": "machine"
+    },
+    "invite.links.new_badge": {
+      "text": "Нове",
+      "status": "machine"
+    },
+    "invite.links.referral_option": {
+      "text": "Для того, хто ще не має облікового запису Lakko",
+      "status": "machine"
+    },
+    "invite.links.revoked": {
+      "text": "Посилання відкликано.",
+      "status": "machine"
+    },
+    "invite.links.revoking": {
+      "text": "Відкликання...",
+      "status": "machine"
+    },
+    "invite.links.unlimited_uses": {
+      "text": "Без обмеження використань",
+      "status": "machine"
+    },
+    "invite.links.used_up": {
+      "text": "Вичерпано",
+      "status": "machine"
+    },
+    "invite.links.uses_field": {
+      "text": "Використання",
+      "status": "machine"
+    },
+    "invite.links.uses_left": {
+      "text": "{count, plural, one {Залишилося # використання} few {Залишилося # використання} many {Залишилося # використань} other {Залишилося # використання}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_one": {
+      "text": "Одна людина",
+      "status": "machine"
+    },
+    "invite.links.uses_option_unlimited": {
+      "text": "Без обмежень",
+      "status": "machine"
+    },
+    "invite.links.uses_option_up_to": {
+      "text": "{count, plural, one {До # людини} few {До # людей} many {До # людей} other {До # людини}}",
+      "status": "machine"
+    },
+    "invite.sign_up": {
+      "text": "Зареєструватися",
+      "status": "machine"
+    },
+    "invite.uses.single": {
+      "text": "одноразове",
+      "status": "machine"
+    },
+    "invite.uses.unlimited": {
+      "text": "без обмежень",
+      "status": "machine"
+    },
+    "invite.uses.up_to": {
+      "text": "{count, plural, one {до # використання} few {до # використань} many {до # використань} other {до # використання}}",
       "status": "machine"
     },
     "language.name.ar": {
@@ -2588,6 +3760,38 @@
     },
     "nav.settings": {
       "text": "Налаштування",
+      "status": "machine"
+    },
+    "new_group.back": {
+      "text": "Групи",
+      "status": "machine"
+    },
+    "new_group.error.sign_in": {
+      "text": "Увійдіть знову, щоб створити групу.",
+      "status": "machine"
+    },
+    "new_group.index_hint": {
+      "text": "Виберіть групу, щоб почати спілкування",
+      "status": "machine"
+    },
+    "new_group.name_hint": {
+      "text": "Назву бачать усі учасники. Вона передається в зашифрованому вигляді; сервер ніколи її не читає.",
+      "status": "machine"
+    },
+    "new_group.name_not_sent": {
+      "text": "Назву групи не надіслано. Задайте її в списку учасників.",
+      "status": "machine"
+    },
+    "new_group.name_placeholder": {
+      "text": "Плани на вихідні",
+      "status": "machine"
+    },
+    "new_group.no_contacts": {
+      "text": "Спершу додайте контакти: група починається з людей, яких ви вже знаєте.",
+      "status": "machine"
+    },
+    "new_group.subtitle": {
+      "text": "Ви будете власником групи. Пізніше можна додати ще людей.",
       "status": "machine"
     },
     "recovery.access_only_note": {

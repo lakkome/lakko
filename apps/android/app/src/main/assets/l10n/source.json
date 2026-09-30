@@ -344,6 +344,482 @@
       "text": "You can leave this screen; you will join when you are admitted.",
       "comment": "Hint under the waiting line."
     },
+    "channels.back": {
+      "text": "Back to channels",
+      "comment": "Accessible name of the back button in a channel's header on a narrow screen."
+    },
+    "channels.compose.label": {
+      "text": "New post",
+      "comment": "Accessible name of the channel post composer."
+    },
+    "channels.compose.placeholder": {
+      "text": "Write a post",
+      "comment": "Placeholder of the channel post composer."
+    },
+    "channels.compose.publish": {
+      "text": "Publish",
+      "comment": "Tooltip and accessible name of the button that publishes a channel post."
+    },
+    "channels.compose.publishing": {
+      "text": "Publishing...",
+      "comment": "A channel post is being published."
+    },
+    "channels.copublishers.desc": {
+      "text": "People who can post to this channel. Share a link; approve them when they ask.",
+      "comment": "Description of the co-publishers card: the link lets someone ask, only approval lets them post.",
+      "security_critical": true
+    },
+    "channels.copublishers.error.approve": {
+      "text": "Could not approve the request. Try again.",
+      "comment": "Approving a co-publisher request failed."
+    },
+    "channels.copublishers.error.poll": {
+      "text": "Could not check for requests. Try again.",
+      "comment": "Checking for co-publisher requests failed."
+    },
+    "channels.copublishers.error.reject": {
+      "text": "Could not reject the request. Try again.",
+      "comment": "Rejecting a co-publisher request failed."
+    },
+    "channels.copublishers.link": {
+      "text": "Co-publisher invite link",
+      "comment": "Accessible name of the co-publisher link row. Anyone holding the link can ask to post to the channel.",
+      "security_critical": true
+    },
+    "channels.copublishers.request_row": {
+      "text": "Someone asked to co-publish",
+      "comment": "A pending co-publisher request (the person is not identified)."
+    },
+    "channels.copublishers.requests": {
+      "text": "Requests ({count})",
+      "comment": "Heading of pending co-publisher requests. {count} is how many."
+    },
+    "channels.copublishers.title": {
+      "text": "Co-publishers",
+      "comment": "Heading of the co-publishers card on the channel's manage screen."
+    },
+    "channels.empty.action": {
+      "text": "Create a channel",
+      "comment": "Button on the empty channels list."
+    },
+    "channels.empty.title": {
+      "text": "No channels yet",
+      "comment": "Empty channels list."
+    },
+    "channels.error.empty_post": {
+      "text": "Write something to post.",
+      "comment": "The channels server refused an empty post."
+    },
+    "channels.error.not_let_in": {
+      "text": "The channel has not let this device in yet. Try again later.",
+      "comment": "A subscriber's key for the channel is not ready on the server yet."
+    },
+    "channels.error.post_too_large": {
+      "text": "This post is too long to publish.",
+      "comment": "The channels server refused a post as too large."
+    },
+    "channels.error.refused": {
+      "text": "The server refused the request. Try again later.",
+      "comment": "The channels server refused a request for a reason with no message of its own."
+    },
+    "channels.error.sign_in": {
+      "text": "Sign in again to use channels.",
+      "comment": "Shown in place of a channel screen when this session holds no keys."
+    },
+    "channels.error.unknown_channel": {
+      "text": "This channel does not exist on the server.",
+      "comment": "The channels server does not know this channel."
+    },
+    "channels.error.unreachable": {
+      "text": "The channels service is not reachable right now. Try again in a moment.",
+      "comment": "The channels server did not answer."
+    },
+    "channels.fallback_name": {
+      "text": "Channel",
+      "comment": "Title of a channel that has no name and no handle."
+    },
+    "channels.field.description_optional": {
+      "text": "Description (optional)",
+      "comment": "Label of a channel's description field."
+    },
+    "channels.field.name": {
+      "text": "Name",
+      "comment": "Label of a channel's name field."
+    },
+    "channels.find.action": {
+      "text": "Find {handle}",
+      "comment": "Button that looks up a channel by the typed handle. {handle} includes the @."
+    },
+    "channels.find.none": {
+      "text": "No channel found for {handle}.",
+      "comment": "Looking up a channel by @handle found nothing. {handle} includes the @."
+    },
+    "channels.index_hint": {
+      "text": "Select a channel, or create one",
+      "comment": "Web: hint in the empty main pane of the channels screen."
+    },
+    "channels.info.manage_sub": {
+      "text": "Its name and description, who reads it, and who else may post.",
+      "comment": "Line under \"Manage channel\" in channel info."
+    },
+    "channels.info.subscribers": {
+      "text": "{count, plural, one {# subscriber} other {# subscribers}}",
+      "comment": "Channel info: how many subscribers this device has counted."
+    },
+    "channels.info.unsubscribe_sub": {
+      "text": "Takes the channel off your list and stops this device reading it. You can subscribe again later.",
+      "comment": "Line under \"Stop following\": says exactly what happens (the publisher is not told).",
+      "security_critical": true
+    },
+    "channels.join.default_name": {
+      "text": "Co-published channel",
+      "comment": "Name given on this device to a channel joined as co-publisher when none was typed."
+    },
+    "channels.join.error.sign_in": {
+      "text": "Sign in again to join a channel.",
+      "comment": "Joining a channel as co-publisher needs keys this session does not hold."
+    },
+    "channels.join.link_label": {
+      "text": "Link",
+      "comment": "Label of the field for the co-publisher link."
+    },
+    "channels.join.name_label": {
+      "text": "Name on this device (optional)",
+      "comment": "Label of the local name for a channel joined as co-publisher."
+    },
+    "channels.join.no_approval": {
+      "text": "No approval yet. Try again once the owner has approved.",
+      "comment": "The co-publisher request was not approved while this screen waited."
+    },
+    "channels.join.requesting": {
+      "text": "Requesting...",
+      "comment": "The co-publisher request is being sent."
+    },
+    "channels.join.subtitle": {
+      "text": "Paste the link a channel owner shared. Once they approve, this device can post to the channel.",
+      "comment": "Line under \"Join as co-publisher\"."
+    },
+    "channels.join.title": {
+      "text": "Join as co-publisher",
+      "comment": "Heading of the screen for becoming a co-publisher of a channel."
+    },
+    "channels.join.waiting": {
+      "text": "Waiting for the channel owner to approve...",
+      "comment": "The co-publisher request is sent and waits for the owner's approval."
+    },
+    "channels.legacy.channel": {
+      "text": "This channel was created by an older version of Lakko and cannot be opened in this build. Posts you already published stay readable for your subscribers. To publish again, create a new channel — this one cannot be repaired.",
+      "comment": "A channel made by an old app version can no longer be opened for publishing. Keep all three points, in this order, and do not offer a retry."
+    },
+    "channels.legacy.copublisher_link": {
+      "text": "This co-publisher invite link was created by an older version of Lakko and no longer works. Ask the channel owner to send you a new invite link.",
+      "comment": "A co-publisher link from an old app version cannot be used."
+    },
+    "channels.manage.back": {
+      "text": "Back to posts",
+      "comment": "Tooltip of the button that closes the channel's manage screen."
+    },
+    "channels.manage.error.open": {
+      "text": "Could not open the channel's settings. Try again.",
+      "comment": "Opening the channel's publisher group for the manage screen failed."
+    },
+    "channels.manage.error.sign_in": {
+      "text": "Sign in again to manage this channel.",
+      "comment": "The manage screen needs keys this session does not hold."
+    },
+    "channels.manage.title": {
+      "text": "Manage channel",
+      "comment": "Card title in channel info and the channel's manage screen; also the accessible name of the manage button."
+    },
+    "channels.meta.desc": {
+      "text": "The name and description reach every subscriber, encrypted. The server never reads them.",
+      "comment": "Description of the channel details card on the manage screen.",
+      "security_critical": true
+    },
+    "channels.meta.error.description_bad_character": {
+      "text": "The description contains a character that cannot be shown.",
+      "comment": "A channel description with an invisible or control character."
+    },
+    "channels.meta.error.description_too_long": {
+      "text": "The description is too long.",
+      "comment": "A channel description over the limit."
+    },
+    "channels.meta.error.generic": {
+      "text": "That name or description cannot be used.",
+      "comment": "A channel name or description refused for another reason."
+    },
+    "channels.meta.error.name_bad_character": {
+      "text": "The name contains a character that cannot be shown.",
+      "comment": "A channel name with an invisible or control character."
+    },
+    "channels.meta.error.name_empty": {
+      "text": "A channel needs a name",
+      "comment": "Saving a channel's details with an empty name."
+    },
+    "channels.meta.error.name_line_break": {
+      "text": "The name must be one line.",
+      "comment": "A channel name with a line break."
+    },
+    "channels.meta.error.name_too_long": {
+      "text": "The name is too long.",
+      "comment": "A channel name over the limit."
+    },
+    "channels.meta.error.save": {
+      "text": "Could not save. Try again.",
+      "comment": "Saving a channel's details failed for a reason with no message of its own."
+    },
+    "channels.meta.error.save_prefix": {
+      "text": "Could not save.",
+      "comment": "First sentence of a failed save of a channel's details; the reason follows as a second sentence."
+    },
+    "channels.meta.saved": {
+      "text": "Saved. Subscribers see the new name with their next posts.",
+      "comment": "A channel's name and description were saved."
+    },
+    "channels.meta.title": {
+      "text": "Channel",
+      "comment": "Heading of the card on the manage screen where the channel's name and description are edited."
+    },
+    "channels.new.create": {
+      "text": "Create",
+      "comment": "Submit button of the create-channel form."
+    },
+    "channels.new.error.create": {
+      "text": "Could not create the channel. Try again.",
+      "comment": "Creating a channel failed after its handle, if any, was claimed. Native clients."
+    },
+    "channels.new.error.handle": {
+      "text": "Could not claim the handle. Try again.",
+      "comment": "Registering a new channel's @handle failed for another reason."
+    },
+    "channels.new.error.handle_offline": {
+      "text": "Could not claim the handle. Check your connection and try again.",
+      "comment": "Registering a new channel's @handle failed for lack of network."
+    },
+    "channels.new.error.handle_taken": {
+      "text": "{handle} is already taken. Pick another, or leave it blank.",
+      "comment": "The public @handle chosen for a new channel belongs to another channel. {handle} includes the @."
+    },
+    "channels.new.error.no_name": {
+      "text": "Give the channel a name.",
+      "comment": "Creating a channel with an empty name."
+    },
+    "channels.new.error.sign_in": {
+      "text": "Sign in again to create a channel.",
+      "comment": "A channel cannot be created because this session holds no keys."
+    },
+    "channels.new.handle_hint": {
+      "text": "Others can find and subscribe to the channel by it.",
+      "comment": "Hint under the handle field: the handle makes the channel findable by anyone.",
+      "security_critical": true
+    },
+    "channels.new.handle_label": {
+      "text": "Public @handle (optional)",
+      "comment": "Label of the optional public handle of a new channel."
+    },
+    "channels.new.handle_placeholder": {
+      "text": "@my-channel",
+      "comment": "Example in the empty handle field. Keep the @ and Latin letters."
+    },
+    "channels.new.subtitle": {
+      "text": "Subscribers see the name and description. They travel encrypted; only ciphertext reaches the server.",
+      "comment": "Line under \"New channel\": who sees the name and description, and that the server sees only ciphertext.",
+      "security_critical": true
+    },
+    "channels.new.title": {
+      "text": "New channel",
+      "comment": "Heading of the create-channel screen."
+    },
+    "channels.new_menu": {
+      "text": "New channel or join one",
+      "comment": "Accessible name of the + button on the channels list."
+    },
+    "channels.post.not_available": {
+      "text": "Not available",
+      "comment": "Heading of a channel post this device cannot read."
+    },
+    "channels.post.older_key": {
+      "text": "This post is older than what this device can read.",
+      "comment": "A channel post sealed under a key older than the ones this device received; it is not decrypted."
+    },
+    "channels.post.unreadable": {
+      "text": "This post could not be opened on this device.",
+      "comment": "A channel post that failed to decrypt or verify."
+    },
+    "channels.posts.empty": {
+      "text": "No posts yet.",
+      "comment": "A channel with no posts."
+    },
+    "channels.posts.empty_owner": {
+      "text": "No posts yet. Write the first one below.",
+      "comment": "A publisher's channel with no posts; the composer is below."
+    },
+    "channels.posts.error.load": {
+      "text": "Could not load posts.",
+      "comment": "The posts of a channel the viewer publishes could not be loaded; a Retry button follows. Native clients."
+    },
+    "channels.publish.error.generic": {
+      "text": "Could not publish. Try again.",
+      "comment": "Publishing a post failed for a reason with no message of its own."
+    },
+    "channels.publish.error.not_publisher": {
+      "text": "This device cannot post to this channel.",
+      "comment": "Publishing from a device that holds no publisher keys for the channel."
+    },
+    "channels.publish.error.prefix": {
+      "text": "Could not publish.",
+      "comment": "First sentence of a failed post; the reason follows as a second sentence."
+    },
+    "channels.rotation.desc": {
+      "text": "Lakko refreshes the channel's protection on its own. Refresh it now if you think a subscriber's device was compromised.",
+      "comment": "Description of the protection card: refreshing replaces the channel key.",
+      "security_critical": true
+    },
+    "channels.rotation.error.check": {
+      "text": "Could not check the channel's protection.",
+      "comment": "The scheduled channel key rotation check failed."
+    },
+    "channels.rotation.error.refresh": {
+      "text": "Could not refresh. Try again in a moment.",
+      "comment": "A manual channel key rotation failed."
+    },
+    "channels.rotation.never": {
+      "text": "Not refreshed yet.",
+      "comment": "Status of the channel key rotation before the first one."
+    },
+    "channels.rotation.refresh_now": {
+      "text": "Refresh now",
+      "comment": "Button that rotates the channel key right away."
+    },
+    "channels.rotation.refreshed": {
+      "text": "Refreshed {when}.",
+      "comment": "Status of the channel key rotation. {when} is a relative time such as \"3 hours ago\" or \"just now\" (common.time.*)."
+    },
+    "channels.rotation.refreshing": {
+      "text": "Refreshing...",
+      "comment": "The channel key rotation is running."
+    },
+    "channels.rotation.title": {
+      "text": "Protection",
+      "comment": "Heading of the card that refreshes the channel's keys."
+    },
+    "channels.row.own": {
+      "text": "Your channel",
+      "comment": "Second line of a channel in the conversation list when this device publishes it and there is no handle or count to show."
+    },
+    "channels.search.label": {
+      "text": "Search channels or find one by handle",
+      "comment": "Accessible name of the channels search field."
+    },
+    "channels.search.placeholder": {
+      "text": "Search or find by @handle",
+      "comment": "Placeholder of the search field on the channels list: filters the list, and Enter looks up a public handle."
+    },
+    "channels.subscribe.action": {
+      "text": "Subscribe",
+      "comment": "Button that subscribes to a channel."
+    },
+    "channels.subscribe.error.generic": {
+      "text": "Could not subscribe. Try again later.",
+      "comment": "Subscribing to a channel failed."
+    },
+    "channels.subscribe.error.prefix": {
+      "text": "Could not subscribe.",
+      "comment": "First sentence of a failed subscription; the reason follows as a second sentence."
+    },
+    "channels.subscribe.prompt_body": {
+      "text": "Posts appear here once the channel lets this device in.",
+      "comment": "Line under \"Subscribe to read this channel\"."
+    },
+    "channels.subscribe.prompt_title": {
+      "text": "Subscribe to read this channel",
+      "comment": "Empty channel view for someone who is not subscribed."
+    },
+    "channels.subscribe.status.not_subscribed": {
+      "text": "Not subscribed",
+      "comment": "Line under a channel's name after subscribing failed."
+    },
+    "channels.subscribe.status.subscribed": {
+      "text": "Subscribed",
+      "comment": "Line under a channel's name once subscribed, when the channel has no description or handle."
+    },
+    "channels.subscribe.status.subscribing": {
+      "text": "Subscribing...",
+      "comment": "Line under a channel's name while subscribing."
+    },
+    "channels.subscribe.status.waiting": {
+      "text": "Waiting to be let in...",
+      "comment": "Line under a channel's name while waiting for the channel to share its key with this device."
+    },
+    "channels.subscribe.waiting_notice": {
+      "text": "Subscribed. Posts appear once the channel lets this device in; that usually takes a moment.",
+      "comment": "Notice while the channel's key has not reached this device yet."
+    },
+    "channels.subscribers.count": {
+      "text": "({count})",
+      "comment": "Count after the \"Subscribers\" heading, in parentheses."
+    },
+    "channels.subscribers.desc": {
+      "text": "New subscribers are let in from this device automatically.",
+      "comment": "Description of the subscribers card: this device sends each new subscriber the channel key."
+    },
+    "channels.subscribers.empty": {
+      "text": "No subscribers yet. Share the channel's handle so people can subscribe.",
+      "comment": "The channel has no subscribers."
+    },
+    "channels.subscribers.error.deliver": {
+      "text": "Could not set up this subscriber. Try again.",
+      "comment": "Sending the channel key to a subscriber failed for a reason with no message of its own."
+    },
+    "channels.subscribers.error.deliver_prefix": {
+      "text": "Could not set up this subscriber.",
+      "comment": "First sentence when sending the channel key to a subscriber failed; the reason follows as a second sentence."
+    },
+    "channels.subscribers.error.load": {
+      "text": "Could not load subscribers. Try again.",
+      "comment": "The subscriber list on the manage screen failed to load."
+    },
+    "channels.subscribers.retrying": {
+      "text": "Retrying...",
+      "comment": "Sending the key to a subscriber again."
+    },
+    "channels.subscribers.row": {
+      "text": "Subscriber {number}",
+      "comment": "A subscriber row; subscribers are anonymous, so they are numbered. {number} is 1, 2, 3..."
+    },
+    "channels.subscribers.status.not_ready": {
+      "text": "Not ready",
+      "comment": "Status of a subscriber the key could not be sent to."
+    },
+    "channels.subscribers.status.ready": {
+      "text": "Ready",
+      "comment": "Status of a subscriber who holds the channel key."
+    },
+    "channels.subscribers.status.setting_up": {
+      "text": "Setting up...",
+      "comment": "Status of a subscriber whose key has not been sent yet."
+    },
+    "channels.subscribers.title": {
+      "text": "Subscribers",
+      "comment": "Heading of the subscribers card on the manage screen."
+    },
+    "channels.unsubscribe.action": {
+      "text": "Stop following",
+      "comment": "Card title and button in channel info for a subscriber, and the confirm button of the dialog."
+    },
+    "channels.unsubscribe.body": {
+      "text": "It leaves your list and this device stops reading it. You can subscribe again later.",
+      "comment": "Body of the stop-following confirmation: what unsubscribing does on this device.",
+      "security_critical": true
+    },
+    "channels.unsubscribe.title": {
+      "text": "Stop following this channel?",
+      "comment": "Title of the confirmation before unsubscribing when the channel has no name."
+    },
+    "channels.unsubscribe.title_named": {
+      "text": "Stop following {name}?",
+      "comment": "Title of the confirmation before unsubscribing from a channel. {name} is the channel's name."
+    },
     "chat.attachment.error.attach": {
       "text": "Could not attach the selected item. Try again.",
       "comment": "Composer error when a picked file could not be read or encrypted and has no name."
@@ -549,6 +1025,11 @@
     "chat.delete.control": {
       "text": "Delete this chat",
       "comment": "Button that deletes a conversation from this device."
+    },
+    "chat.delete.sub": {
+      "text": "Removes this conversation and everything in it from this device. It cannot be undone.",
+      "comment": "Line under \"Delete this chat\" on a one-to-one whose membership ended: states that deletion is permanent.",
+      "security_critical": true
     },
     "chat.delete.title": {
       "text": "Delete this chat?",
@@ -2078,6 +2559,14 @@
       "text": "Checking...",
       "comment": "Busy label of a submit button while what was typed is checked."
     },
+    "common.clipboard.link": {
+      "text": "Lakko link",
+      "comment": "Label the system shows with a link Lakko put on the clipboard (Android paste preview). Not shown inside the app."
+    },
+    "common.clipboard.message": {
+      "text": "Lakko message",
+      "comment": "Label the system shows with a message text Lakko put on the clipboard (Android paste preview). Not shown inside the app."
+    },
     "common.close": {
       "text": "Close",
       "comment": "Accessibility label of a button that closes a sheet or dialog, e.g. the language list opened from the sign-in screen."
@@ -2109,6 +2598,10 @@
     "common.copy": {
       "text": "Copy",
       "comment": "Button that copies the text next to it to the clipboard."
+    },
+    "common.creating": {
+      "text": "Creating...",
+      "comment": "A Create button while the thing it creates (an invite link, a channel) is being made."
     },
     "common.delete": {
       "text": "Delete",
@@ -2182,6 +2675,10 @@
       "text": "Expand",
       "comment": "Accessibility label of the arrow that opens a collapsed row."
     },
+    "common.fact_pair": {
+      "text": "{first} · {second}",
+      "comment": "Joins two short facts on one line, such as a date and \"Used up\" under an invite link, or a handle and a subscriber count under a channel. Applied pair by pair for longer lists."
+    },
     "common.list_pair": {
       "text": "{first}, {second}",
       "comment": "Joins items of a short list of names, applied pair by pair: {first} is everything so far, {second} the next name. Use the language's list separator, without a word for 'and'."
@@ -2218,6 +2715,10 @@
       "text": "On",
       "comment": "State of a switch that is on."
     },
+    "common.open_chat": {
+      "text": "Open chat",
+      "comment": "Button that opens the conversation just joined or started (after joining a group by link, after accepting a contact invite)."
+    },
     "common.open_lakko": {
       "text": "Open Lakko",
       "comment": "Link from a public page (call or invite link) into the app."
@@ -2237,6 +2738,10 @@
     "common.preparing": {
       "text": "Preparing...",
       "comment": "Shown while something is being set up."
+    },
+    "common.qr_code": {
+      "text": "QR code",
+      "comment": "Accessible name of a QR code image, for example the authenticator setup code."
     },
     "common.remove": {
       "text": "Remove",
@@ -2286,6 +2791,22 @@
       "text": "{size} MB",
       "comment": "A file size in megabytes; {size} is the number already formatted with one decimal."
     },
+    "common.time.days_ago": {
+      "text": "{count, plural, one {# day ago} other {# days ago}}",
+      "comment": "Relative time, inserted into a sentence such as \"Refreshed {when}.\""
+    },
+    "common.time.hours_ago": {
+      "text": "{count, plural, one {# hour ago} other {# hours ago}}",
+      "comment": "Relative time, inserted into a sentence such as \"Refreshed {when}.\""
+    },
+    "common.time.just_now": {
+      "text": "just now",
+      "comment": "Relative time under a minute, inserted into a sentence such as \"Refreshed {when}.\" Lower case in English."
+    },
+    "common.time.minutes_ago": {
+      "text": "{count, plural, one {# minute ago} other {# minutes ago}}",
+      "comment": "Relative time, inserted into a sentence such as \"Refreshed {when}.\""
+    },
     "common.try_again": {
       "text": "Try again",
       "comment": "Button that repeats an operation that failed."
@@ -2293,6 +2814,290 @@
     "common.unknown": {
       "text": "unknown",
       "comment": "Shown in place of a date or value that could not be read."
+    },
+    "contacts.accept.error.old_version": {
+      "text": "This request came from an older version of Lakko. Ask them to update and send it again.",
+      "comment": "An accepted contact request cannot open a chat because the sender's app is too old."
+    },
+    "contacts.add.by_username": {
+      "text": "Add by username",
+      "comment": "Card heading and add-menu item: send a contact request to a username."
+    },
+    "contacts.add.intro_label": {
+      "text": "Message (optional)",
+      "comment": "Label of the optional introduction sent with a contact request."
+    },
+    "contacts.add.intro_placeholder": {
+      "text": "Hi, this is Alice from the conference.",
+      "comment": "Example text in the empty introduction field."
+    },
+    "contacts.add.send": {
+      "text": "Send",
+      "comment": "Button that sends the contact request."
+    },
+    "contacts.add.share_invite": {
+      "text": "Share invite link",
+      "comment": "Add-menu item on the contacts list: open the invite links."
+    },
+    "contacts.add.subtitle": {
+      "text": "Requests are end-to-end encrypted. Lakko's servers cannot read them.",
+      "comment": "Line under \"Add a contact\". A claim about encryption; must stay accurate.",
+      "security_critical": true
+    },
+    "contacts.add.title": {
+      "text": "Add a contact",
+      "comment": "Heading of the pane for sending a contact request."
+    },
+    "contacts.add.username_label": {
+      "text": "Username",
+      "comment": "Label of the username field when adding a contact."
+    },
+    "contacts.add.username_placeholder": {
+      "text": "@alice",
+      "comment": "Example in the empty username field. Keep the @ and a short Latin-letter name (usernames are Latin letters, digits and _)."
+    },
+    "contacts.detail.actions": {
+      "text": "Contact actions",
+      "comment": "Accessible name of the row of Message / Call / Video buttons on a contact's page."
+    },
+    "contacts.detail.call_needs_chat": {
+      "text": "Send a message first to start a call.",
+      "comment": "Tooltip of the disabled Call and Video buttons when there is no chat with this contact on this device yet."
+    },
+    "contacts.detail.gone_body": {
+      "text": "This person is no longer in your contacts.",
+      "comment": "Shown on the contact page and the safety number page when the contact was removed while it was open."
+    },
+    "contacts.detail.gone_title": {
+      "text": "Contact not found",
+      "comment": "Title of the contact page when the contact was removed while it was open."
+    },
+    "contacts.detail.message": {
+      "text": "Message",
+      "comment": "Button on a contact's page that opens (or starts) the chat with them."
+    },
+    "contacts.detail.message_unavailable": {
+      "text": "This contact was added before chats could be started from here. Ask them to message you.",
+      "comment": "Tooltip of the disabled Message button for a contact whose account is not known."
+    },
+    "contacts.detail.their_name": {
+      "text": "Calls themselves {name}",
+      "comment": "Line under a contact you renamed: the name they chose for themselves. {name} is that name."
+    },
+    "contacts.detail.username_not_verified": {
+      "text": "Username not verified",
+      "comment": "Line under a contact's name when the username they claim has not been confirmed by the directory to belong to their key.",
+      "security_critical": true
+    },
+    "contacts.error.send": {
+      "text": "Could not send the request. Try again.",
+      "comment": "A contact request failed for a reason with no message of its own."
+    },
+    "contacts.error.start_chat": {
+      "text": "Could not start the chat. Try again.",
+      "comment": "Starting the one-to-one chat with a contact failed (after accepting a request, or from Message on the contact card)."
+    },
+    "contacts.identity_changed.reset": {
+      "text": "{name} reset their secure identity (for example, they lost their device). The transparency log confirms this was an owner-initiated reset. If you trust this is really them, re-verify their safety number out of band before continuing.",
+      "comment": "A contact's identity key changed and the key transparency log confirms the owner reset it (for example after losing every device). {name} is the contact's @username. \"Out of band\" means through another channel, such as in person or a call.",
+      "security_critical": true
+    },
+    "contacts.identity_changed.reset_unnamed": {
+      "text": "This contact reset their secure identity (for example, they lost their device). The transparency log confirms this was an owner-initiated reset. If you trust this is really them, re-verify their safety number out of band before continuing.",
+      "comment": "Same as contacts.identity_changed.reset when the contact's name is not known.",
+      "security_critical": true
+    },
+    "contacts.identity_changed.unconfirmed": {
+      "text": "{name}'s secure identity changed and could not be confirmed against the transparency log. Verify out of band before trusting.",
+      "comment": "A contact's identity key changed and the transparency log could not be checked. Neither a reset nor a compromise is claimed. {name} is the contact's @username.",
+      "security_critical": true
+    },
+    "contacts.identity_changed.unconfirmed_unnamed": {
+      "text": "This contact's secure identity changed and could not be confirmed against the transparency log. Verify out of band before trusting.",
+      "comment": "Same as contacts.identity_changed.unconfirmed when the contact's name is not known.",
+      "security_critical": true
+    },
+    "contacts.identity_changed.unexplained": {
+      "text": "{name}'s secure identity changed, and the transparency log does NOT show an owner reset — treat this as a possible account compromise. Verify out of band before trusting.",
+      "comment": "A contact's identity key changed and the key transparency log shows no owner reset: a possible compromise. {name} is the contact's @username. Keep the emphasis on NOT.",
+      "security_critical": true
+    },
+    "contacts.identity_changed.unexplained_unnamed": {
+      "text": "This contact's secure identity changed, and the transparency log does NOT show an owner reset — treat this as a possible account compromise. Verify out of band before trusting.",
+      "comment": "Same as contacts.identity_changed.unexplained when the contact's name is not known.",
+      "security_critical": true
+    },
+    "contacts.invite_links.subtitle": {
+      "text": "Share a link with someone you want to hear from.",
+      "comment": "Line under \"Invite links\"."
+    },
+    "contacts.invite_links.title": {
+      "text": "Invite links",
+      "comment": "Heading of the pane listing the person's contact invite links."
+    },
+    "contacts.list.add": {
+      "text": "Add",
+      "comment": "Tooltip and accessible name of the + button on the contacts list that opens the add menu."
+    },
+    "contacts.list.empty.action": {
+      "text": "Add contact",
+      "comment": "Button on the empty contacts list."
+    },
+    "contacts.list.empty.body": {
+      "text": "Add someone by username, or share your invite link.",
+      "comment": "Empty contacts list, line under the heading."
+    },
+    "contacts.list.empty.title": {
+      "text": "No contacts yet",
+      "comment": "Empty contacts list, heading."
+    },
+    "contacts.list.no_match": {
+      "text": "No contacts match.",
+      "comment": "The contacts search matches nobody."
+    },
+    "contacts.list.requests": {
+      "text": "Requests",
+      "comment": "Section heading on the contacts list: incoming and sent contact requests."
+    },
+    "contacts.list.search": {
+      "text": "Search contacts",
+      "comment": "Accessible name of the search field on the contacts list."
+    },
+    "contacts.list.section_index": {
+      "text": "Section index",
+      "comment": "Accessible name of the letter index down the right edge of the contact list (tap or drag to jump to a letter)."
+    },
+    "contacts.list.sent": {
+      "text": "Sent ({count})",
+      "comment": "Collapsible group of contact requests this account sent that are not answered yet. {count} is how many."
+    },
+    "contacts.list.sent_dismiss": {
+      "text": "Remove from this list",
+      "comment": "Tooltip of Dismiss on a sent contact request; it only hides the row, the request is not withdrawn."
+    },
+    "contacts.list.sent_waiting": {
+      "text": "Waiting",
+      "comment": "Status line of a sent contact request not yet accepted."
+    },
+    "contacts.mailbox.join_failed": {
+      "text": "You were added to a group, but the invitation could not be opened on this device. Ask the person who added you to add you again.",
+      "comment": "Banner shown when a group invitation (MLS Welcome) arrived but could not be opened."
+    },
+    "contacts.mailbox.poll_failed": {
+      "text": "Couldn't check for new contact requests. Trying again.",
+      "comment": "Checking for new contact requests failed; the app retries by itself."
+    },
+    "contacts.mailbox.sign_in": {
+      "text": "Sign in again to check for new requests.",
+      "comment": "Checking for contact requests needs keys this session does not hold."
+    },
+    "contacts.reauth.body": {
+      "text": "The keys this session needs for contacts are not available. Sign in again to use Contacts.",
+      "comment": "Web: shown on the Contacts screen when the tab holds no identity secrets."
+    },
+    "contacts.remove.body": {
+      "text": "Any chats you share stay as they are; only your contact list changes. You can add them again later.",
+      "comment": "Body of the confirmation before removing a contact: states exactly what removal does and does not do.",
+      "security_critical": true
+    },
+    "contacts.remove.confirm_named": {
+      "text": "Remove {name}",
+      "comment": "Confirm button of the contact removal, naming the contact. Without a name the button reads \"Remove\" (common.remove)."
+    },
+    "contacts.remove.control": {
+      "text": "Remove contact",
+      "comment": "Title of the card on a contact's page that removes the contact."
+    },
+    "contacts.remove.sub": {
+      "text": "Takes {name} off your contact list on this account.",
+      "comment": "Line under \"Remove contact\": what removal does. {name} is the contact's name.",
+      "security_critical": true
+    },
+    "contacts.remove.title": {
+      "text": "Remove this contact?",
+      "comment": "Title of the confirmation before removing a contact."
+    },
+    "contacts.rename.action": {
+      "text": "Rename",
+      "comment": "Button that opens the field to rename a contact."
+    },
+    "contacts.rename.field": {
+      "text": "Your name for this contact",
+      "comment": "Accessible name of the rename field."
+    },
+    "contacts.rename.placeholder": {
+      "text": "Leave blank to use their own name",
+      "comment": "Placeholder of the rename field."
+    },
+    "contacts.rename.sub_local": {
+      "text": "Your name for this contact. Only you see it.",
+      "comment": "Line under \"Name\" when you have renamed the contact."
+    },
+    "contacts.rename.sub_theirs": {
+      "text": "Shown as they set it. You can give them your own name.",
+      "comment": "Line under \"Name\" when you have not renamed the contact."
+    },
+    "contacts.rename.title": {
+      "text": "Name",
+      "comment": "Title of the card on a contact's page where you set your own name for them."
+    },
+    "contacts.request.accept": {
+      "text": "Accept",
+      "comment": "Button that accepts an incoming contact request (the person becomes a trusted contact).",
+      "security_critical": true
+    },
+    "contacts.request.decline": {
+      "text": "Decline",
+      "comment": "Button that declines an incoming contact request."
+    },
+    "contacts.request.no_intro": {
+      "text": "Wants to connect",
+      "comment": "Line on an incoming contact request that carries no introduction."
+    },
+    "contacts.request.someone": {
+      "text": "Someone",
+      "comment": "Name of the sender of a contact request when nothing is known about them yet: no profile name, no verified username."
+    },
+    "contacts.safety.body": {
+      "text": "Compare it with {name} in person or on a call. Matching numbers mean nobody is between you.",
+      "comment": "Explanation under \"Verify safety number\". {name} is the contact's name. Must keep the meaning: equal numbers mean no one intercepts the conversation.",
+      "security_critical": true
+    },
+    "contacts.safety.body_unnamed": {
+      "text": "Compare it with your contact in person or on a call. Matching numbers mean nobody is between you.",
+      "comment": "Twin of contacts.safety.body used when the contact's name is not known.",
+      "security_critical": true
+    },
+    "contacts.safety.error": {
+      "text": "Could not compute the safety number. Try again.",
+      "comment": "Computing the safety number failed."
+    },
+    "contacts.safety.number": {
+      "text": "Safety number",
+      "comment": "Accessible name of the displayed safety number digits.",
+      "security_critical": true
+    },
+    "contacts.safety.row_sub": {
+      "text": "Compare a number in person to confirm this is really them.",
+      "comment": "Line under Verify safety number on a contact's page.",
+      "security_critical": true
+    },
+    "contacts.safety.show": {
+      "text": "Show",
+      "comment": "Button that reveals the safety number. Its opposite is \"Hide\" (chat.attachment.hide)."
+    },
+    "contacts.safety.sign_in": {
+      "text": "Sign in again to see the safety number.",
+      "comment": "The safety number cannot be computed because this session holds no keys."
+    },
+    "contacts.safety.title": {
+      "text": "Verify safety number",
+      "comment": "Title of the card on a contact's page that shows the safety number to compare.",
+      "security_critical": true
+    },
+    "contacts.send.done": {
+      "text": "Request sent to {name}. It waits under Sent until they accept.",
+      "comment": "Shown after a contact request was sent. {name} is the recipient's @username, with the @. \"Sent\" is the name of the section in the contacts list (contacts.list.sent)."
     },
     "device_link.compare_hint": {
       "text": "Make sure the other device shows the same code.",
@@ -2492,6 +3297,10 @@
       "text": "Add a device",
       "comment": "Title of the screen that links a new device to the account."
     },
+    "devices.pairing.qr_description": {
+      "text": "Pairing QR code",
+      "comment": "Accessible name of the QR code a device shows so another device can link to it."
+    },
     "devices.scan.confirm.body": {
       "text": "This gives the scanned device full access to your account: your messages, your contacts and your identity. Continue only if the code is on your own new device.",
       "comment": "Warning before the scanned device is let into the account.",
@@ -2556,13 +3365,45 @@
       "text": "Check this device's date and time.",
       "comment": "Shown when the server refused a request because this device's clock is wrong."
     },
+    "group.join.needs_account": {
+      "text": "You need an account to ask to join. Create one, or log in.",
+      "comment": "Group invite page for a visitor who is not signed in."
+    },
     "group.join.not_taking_requests": {
       "text": "This group isn't taking requests yet. Try again later.",
       "comment": "A request to join a group through a link was refused because the group is not ready to receive requests yet."
     },
+    "group.join.open_chat": {
+      "text": "Open chat",
+      "comment": "Button after joining a group from an invite link: opens the group's chat."
+    },
+    "group.join.request": {
+      "text": "Request to join",
+      "comment": "Button on the group invite page that sends the join request to the group's admins."
+    },
     "group.join.request_again": {
       "text": "Request again",
       "comment": "Button on the group invite page that sends the join request again."
+    },
+    "group.join.request_failed": {
+      "text": "Your request didn't go through. Check your connection and try again.",
+      "comment": "Sending the request to join a group failed for a reason with no message of its own."
+    },
+    "group.join.sending": {
+      "text": "Sending request...",
+      "comment": "The join request is being sent."
+    },
+    "group.join.succeeded": {
+      "text": "You joined the group.",
+      "comment": "The request to join a group through an invite link was approved and applied."
+    },
+    "group.join.succeeded_opening": {
+      "text": "You joined the group. Opening the chat...",
+      "comment": "Web: shown for a moment while the joined group's chat opens."
+    },
+    "group.join.title": {
+      "text": "Join a group",
+      "comment": "Heading of the group invite page while it loads, or when the link cannot be used."
     },
     "group.join.wait_primary": {
       "text": "Request sent. An admin approves it, then the change is applied to the group.",
@@ -2571,6 +3412,375 @@
     "group.join.wait_secondary": {
       "text": "Neither step has a time limit. If nothing happens, you can send the request again.",
       "comment": "Second line on the group invite page while a join request is waiting: neither step has a deadline, and the request can be sent again."
+    },
+    "invite.contact.accept_failed": {
+      "text": "Could not accept the invite. Try again.",
+      "comment": "Accepting a contact invite link failed for a reason that is not the link itself (a connection or server failure); Retry and Done follow."
+    },
+    "invite.contact.accepting": {
+      "text": "Accepting invite...",
+      "comment": "Shown while a contact invite link opened on a phone is being accepted."
+    },
+    "invite.contact.already_accepted": {
+      "text": "You have already accepted this invite. Your request is on its way to {name}; check Contacts for the reply.",
+      "comment": "Contact invite page when this account used the link before. {name} (shown in bold) is the link's label or the inviter's short fingerprint."
+    },
+    "invite.contact.already_accepted_unnamed": {
+      "text": "You have already accepted this invite. Check Contacts for this person.",
+      "comment": "A contact invite link opened again after it was accepted, when the inviter's name is not known."
+    },
+    "invite.contact.check_body": {
+      "text": "Ask the person for their safety number in a way you already trust (in person, on a call). If it does not match, this link came from someone else.",
+      "comment": "Contact invite page, follows \"Check it before you accept.\" Must keep the warning that a mismatch means someone else made the link.",
+      "security_critical": true
+    },
+    "invite.contact.check_title": {
+      "text": "Check it before you accept.",
+      "comment": "Contact invite page, bold first sentence under the safety number.",
+      "security_critical": true
+    },
+    "invite.contact.connected": {
+      "text": "Connected.",
+      "comment": "A contact invite link was accepted and the two accounts are now contacts. The inviter's fingerprint and the advice to compare it follow."
+    },
+    "invite.contact.expired": {
+      "text": "This invite has expired. Ask the inviter for a fresh link.",
+      "comment": "Contact invite page: the link's time is up."
+    },
+    "invite.contact.expiry": {
+      "text": "Expiry",
+      "comment": "Contact invite page: label of when the link stops working."
+    },
+    "invite.contact.fingerprint": {
+      "text": "Inviter fingerprint",
+      "comment": "Contact invite page: label of the short fingerprint of the inviter's key.",
+      "security_critical": true
+    },
+    "invite.contact.intro_label": {
+      "text": "Intro message (optional)",
+      "comment": "Contact invite page: optional introduction sent with the request."
+    },
+    "invite.contact.invalid_body": {
+      "text": "The link is broken or was changed on the way. Ask the person who invited you for a new one.",
+      "comment": "Contact invite page when the link does not verify: it may have been tampered with.",
+      "security_critical": true
+    },
+    "invite.contact.invalid_title": {
+      "text": "This invite link is invalid",
+      "comment": "Contact invite page when the link does not verify."
+    },
+    "invite.contact.needs_auth_body": {
+      "text": "You need an account to accept. Create one, or log in, and you will come back here automatically.",
+      "comment": "Contact invite page for a visitor who is not signed in."
+    },
+    "invite.contact.needs_auth_title": {
+      "text": "Someone wants to connect on Lakko",
+      "comment": "Contact invite page for a visitor who is not signed in."
+    },
+    "invite.contact.no_longer_valid": {
+      "text": "This link is no longer valid. Ask the person for a new one.",
+      "comment": "Contact invite page: the link was revoked or expired since the page loaded."
+    },
+    "invite.contact.page_title": {
+      "text": "Invite",
+      "comment": "Title bar of the page a contact invite link opens on a phone."
+    },
+    "invite.contact.referral": {
+      "text": "Referral link: your request is sent automatically.",
+      "comment": "Contact invite page, value of \"Type\" for a link made for someone new to Lakko."
+    },
+    "invite.contact.result.already_body": {
+      "text": "You already accepted this invite on this device. Find the person under Contacts.",
+      "comment": "Explanation under \"Already accepted\" on the contact invite screen."
+    },
+    "invite.contact.result.already_title": {
+      "text": "Already accepted",
+      "comment": "Headline after opening a contact invite link you had already accepted on this device."
+    },
+    "invite.contact.result.expired_title": {
+      "text": "Invite expired",
+      "comment": "Headline on the contact invite screen when the link has expired. The explanation under it is a separate message."
+    },
+    "invite.contact.result.failed_title": {
+      "text": "Invite not accepted",
+      "comment": "Headline on the contact invite screen when accepting failed for another reason."
+    },
+    "invite.contact.result.not_found_title": {
+      "text": "Invite not found",
+      "comment": "Headline on the contact invite screen when the link no longer exists (revoked or never issued)."
+    },
+    "invite.contact.result.rate_limited_title": {
+      "text": "Not right now",
+      "comment": "Headline on the contact invite screen when the server asked this network to slow down; the explanation under it says to try again in a minute."
+    },
+    "invite.contact.result.sent_body": {
+      "text": "Your contact request is on its way. Once they accept, the chat appears under Chats.",
+      "comment": "Explanation under \"Request sent\" after opening a contact invite link."
+    },
+    "invite.contact.result.sent_title": {
+      "text": "Request sent",
+      "comment": "Headline after opening a contact invite link: your contact request was sent to the person who shared it."
+    },
+    "invite.contact.result.used_up_title": {
+      "text": "Invite used up",
+      "comment": "Headline on the contact invite screen when the link has been used as many times as allowed."
+    },
+    "invite.contact.sending": {
+      "text": "Sending your request to {name}...",
+      "comment": "The contact request from an invite link is being sent. {name} is the link's label or the inviter's short fingerprint."
+    },
+    "invite.contact.sent": {
+      "text": "Request sent to {name}.",
+      "comment": "The contact request from an invite link was sent. {name} is the link's label or the inviter's short fingerprint."
+    },
+    "invite.contact.title": {
+      "text": "Connect with {name}?",
+      "comment": "Heading of the contact invite page. {name} is the label the inviter gave the link, or the first characters of their key fingerprint.",
+      "security_critical": true
+    },
+    "invite.contact.type": {
+      "text": "Type",
+      "comment": "Contact invite page: label of the kind of link."
+    },
+    "invite.contact.used_up": {
+      "text": "This link has been used up. Ask the person for a new one.",
+      "comment": "Contact invite page: nobody else can use the link."
+    },
+    "invite.contact.uses": {
+      "text": "Uses allowed",
+      "comment": "Contact invite page: label of how many people may use the link."
+    },
+    "invite.expiry.ago_days": {
+      "text": "{count, plural, one {expired # day ago} other {expired # days ago}}",
+      "comment": "Contact invite page, value of \"Expiry\" for a link that already expired."
+    },
+    "invite.expiry.ago_hours": {
+      "text": "{count, plural, one {expired # hour ago} other {expired # hours ago}}",
+      "comment": "Contact invite page, value of \"Expiry\" for a link that already expired."
+    },
+    "invite.expiry.ago_minutes": {
+      "text": "{count, plural, one {expired # minute ago} other {expired # minutes ago}}",
+      "comment": "Contact invite page, value of \"Expiry\" for a link that already expired."
+    },
+    "invite.expiry.in_days": {
+      "text": "{count, plural, one {in # day} other {in # days}}",
+      "comment": "Contact invite page, value of \"Expiry\": the link expires after this many days."
+    },
+    "invite.expiry.in_hours": {
+      "text": "{count, plural, one {in # hour} other {in # hours}}",
+      "comment": "Contact invite page, value of \"Expiry\": the link expires after this many hours."
+    },
+    "invite.expiry.in_minutes": {
+      "text": "{count, plural, one {in # minute} other {in # minutes}}",
+      "comment": "Contact invite page, value of \"Expiry\": the link expires after this many minutes."
+    },
+    "invite.expiry.never": {
+      "text": "never expires",
+      "comment": "Contact invite page, value of \"Expiry\" for a link without an end date."
+    },
+    "invite.go_home": {
+      "text": "Go to Lakko home",
+      "comment": "Link on an invite page back to the app's start page."
+    },
+    "invite.group.invited_by": {
+      "text": "Invited by {fingerprint}",
+      "comment": "Muted foot line of the group invite page. {fingerprint} is the digits of the inviter's key fingerprint, which the inviter cannot fake; keep it verbatim.",
+      "security_critical": true
+    },
+    "invite.group.lead_anonymous": {
+      "text": "You are invited to",
+      "comment": "Group invite page, first line of the headline when the inviter's name is not in the link; the group's name follows on its own line.",
+      "security_critical": true
+    },
+    "invite.group.lead_anonymous_unnamed": {
+      "text": "You are invited to a group",
+      "comment": "Group invite page headline when the link carries neither the inviter's name nor a group name.",
+      "security_critical": true
+    },
+    "invite.group.lead_named": {
+      "text": "{name} invites you to",
+      "comment": "Group invite page, first line of the headline; the group's name follows on its own line in large type. {name} is the inviter's display name as they sealed it into the link. Word it so it reads naturally with the group name shown underneath.",
+      "security_critical": true
+    },
+    "invite.group.lead_named_unnamed": {
+      "text": "{name} invites you to a group",
+      "comment": "Group invite page headline when the group has no name. {name} is the inviter's display name.",
+      "security_critical": true
+    },
+    "invite.link.damaged": {
+      "text": "This invite link is damaged. Ask for a new link.",
+      "comment": "An invite link whose secret part is missing, truncated or does not match: it is refused rather than trusted.",
+      "security_critical": true
+    },
+    "invite.link.invalid": {
+      "text": "This invite link is invalid or has expired.",
+      "comment": "An invite link could not be verified, or its time is up."
+    },
+    "invite.link.loading": {
+      "text": "Loading invite...",
+      "comment": "An invite page is fetching and checking its link."
+    },
+    "invite.link.rate_limited": {
+      "text": "Too many requests from this network right now. Try again in a minute.",
+      "comment": "The server refused to look up an invite link because this network asked too often. The link itself may be fine."
+    },
+    "invite.links.already_removed": {
+      "text": "\"{label}\" had already been removed.",
+      "comment": "Revoking an invite link found it already gone. {label} is the link's label."
+    },
+    "invite.links.already_removed_unnamed": {
+      "text": "This link had already been removed.",
+      "comment": "Revoking an unlabelled invite link found it already gone."
+    },
+    "invite.links.create": {
+      "text": "Create link",
+      "comment": "Button that opens the form for a new contact invite link, and the form's submit button."
+    },
+    "invite.links.created": {
+      "text": "Created {date}",
+      "comment": "One of the facts under a link in your list of invite links. {date} is a short date formatted for the interface language, such as \"16 Sep\"."
+    },
+    "invite.links.desc": {
+      "text": "Anyone who opens one of your links can send you a contact request until it expires or is used up.",
+      "comment": "Description of the invite links card: a link lets whoever holds it reach you, so it should be shared with care.",
+      "security_critical": true
+    },
+    "invite.links.empty": {
+      "text": "No active links.",
+      "comment": "The person has no active invite links."
+    },
+    "invite.links.error.copy": {
+      "text": "Could not copy the link.",
+      "comment": "Copying an invite link to the clipboard failed."
+    },
+    "invite.links.error.load": {
+      "text": "Could not load your invite links. Try again.",
+      "comment": "Listing the person's invite links failed."
+    },
+    "invite.links.error.sign_in_create": {
+      "text": "Sign in again to create an invite link.",
+      "comment": "An invite link cannot be created because this session holds no keys."
+    },
+    "invite.links.error.sign_in_list": {
+      "text": "Sign in again to see your invite links.",
+      "comment": "The invite links cannot be listed because this session holds no keys."
+    },
+    "invite.links.error.sign_in_revoke": {
+      "text": "Sign in again to revoke an invite link.",
+      "comment": "An invite link cannot be revoked because this session holds no keys."
+    },
+    "invite.links.expired": {
+      "text": "Expired",
+      "comment": "One of the facts under a link in your list of invite links."
+    },
+    "invite.links.expires_days": {
+      "text": "Expires in {count}d",
+      "comment": "Compact fact under an invite link in your list; {count} is whole days. Keep it short (a unit abbreviation is fine)."
+    },
+    "invite.links.expires_field": {
+      "text": "Expires",
+      "comment": "Field of the new-invite-link form: when the link stops working."
+    },
+    "invite.links.expires_hours": {
+      "text": "Expires in {count}h",
+      "comment": "Compact fact under an invite link in your list; {count} is whole hours. Keep it short."
+    },
+    "invite.links.expires_minutes": {
+      "text": "Expires in {count}m",
+      "comment": "Compact fact under an invite link in your list; {count} is whole minutes. Keep it short."
+    },
+    "invite.links.expires_option_days": {
+      "text": "{count, plural, one {In # day} other {In # days}}",
+      "comment": "Option of the Expires field."
+    },
+    "invite.links.expires_option_never": {
+      "text": "Never",
+      "comment": "Option of the Expires field: the link never expires."
+    },
+    "invite.links.for_new_user": {
+      "text": "For someone new to Lakko",
+      "comment": "Fact under an invite link made for someone without an account yet (a referral link)."
+    },
+    "invite.links.inline_note": {
+      "text": "Lakko could not shorten this link, so it is long. It works the same way and cannot be revoked.",
+      "comment": "Fact under an invite link that could not be registered with the server: it cannot be withdrawn later. Keep \"cannot be revoked\".",
+      "security_critical": true
+    },
+    "invite.links.label_field": {
+      "text": "Label (optional)",
+      "comment": "Field of the new-invite-link form: a name for the link."
+    },
+    "invite.links.label_placeholder": {
+      "text": "Shown to whoever opens the link",
+      "comment": "Placeholder of the invite link label field: the label is visible to the person who opens the link."
+    },
+    "invite.links.list": {
+      "text": "Active invite links",
+      "comment": "Accessible name of the list of the person's invite links."
+    },
+    "invite.links.never_expires": {
+      "text": "Never expires",
+      "comment": "One of the facts under a link in your list of invite links."
+    },
+    "invite.links.new_badge": {
+      "text": "New",
+      "comment": "Small badge on the invite link you just created, in your list of invite links."
+    },
+    "invite.links.referral_option": {
+      "text": "For someone without a Lakko account yet",
+      "comment": "Checkbox of the new-invite-link form: the link is for someone who will sign up first."
+    },
+    "invite.links.revoked": {
+      "text": "Link revoked.",
+      "comment": "An invite link was withdrawn."
+    },
+    "invite.links.revoking": {
+      "text": "Revoking...",
+      "comment": "An invite link is being revoked."
+    },
+    "invite.links.unlimited_uses": {
+      "text": "Unlimited uses",
+      "comment": "One of the facts under a link in your list of invite links."
+    },
+    "invite.links.used_up": {
+      "text": "Used up",
+      "comment": "One of the facts under a link in your list of invite links: nobody else can use it."
+    },
+    "invite.links.uses_field": {
+      "text": "Uses",
+      "comment": "Field of the new-invite-link form: how many people may use the link."
+    },
+    "invite.links.uses_left": {
+      "text": "{count, plural, one {# use left} other {# uses left}}",
+      "comment": "One of the facts under a link in your list of invite links."
+    },
+    "invite.links.uses_option_one": {
+      "text": "One person",
+      "comment": "Option of the Uses field."
+    },
+    "invite.links.uses_option_unlimited": {
+      "text": "Unlimited",
+      "comment": "Option of the Uses field."
+    },
+    "invite.links.uses_option_up_to": {
+      "text": "{count, plural, one {Up to # person} other {Up to # people}}",
+      "comment": "Option of the Uses field."
+    },
+    "invite.sign_up": {
+      "text": "Sign up",
+      "comment": "Button on an invite page that goes to account creation, for a visitor who is not signed in."
+    },
+    "invite.uses.single": {
+      "text": "single-use",
+      "comment": "Contact invite page, value of \"Uses allowed\": the link works for one person."
+    },
+    "invite.uses.unlimited": {
+      "text": "unlimited",
+      "comment": "Contact invite page, value of \"Uses allowed\": no limit."
+    },
+    "invite.uses.up_to": {
+      "text": "{count, plural, one {up to # use} other {up to # uses}}",
+      "comment": "Contact invite page, value of \"Uses allowed\"."
     },
     "language.name.ar": {
       "text": "Arabic",
@@ -2635,6 +3845,39 @@
     "nav.settings": {
       "text": "Settings",
       "comment": "Primary navigation: settings."
+    },
+    "new_group.back": {
+      "text": "Groups",
+      "comment": "Web: back button to the groups list on a narrow screen."
+    },
+    "new_group.error.sign_in": {
+      "text": "Sign in again to create a group.",
+      "comment": "A group cannot be created because this session holds no keys."
+    },
+    "new_group.index_hint": {
+      "text": "Select a group to start messaging",
+      "comment": "Web: hint in the empty main pane of the groups screen."
+    },
+    "new_group.name_hint": {
+      "text": "Every member sees the name. It is sent encrypted; the server never reads it.",
+      "comment": "Hint under the group name field: who sees the name, and that the server cannot read it.",
+      "security_critical": true
+    },
+    "new_group.name_not_sent": {
+      "text": "The group name was not sent. Set it from the members panel.",
+      "comment": "Notice in a group just created when its name could not be sent to the members; the group itself exists."
+    },
+    "new_group.name_placeholder": {
+      "text": "Weekend plans",
+      "comment": "Example group name in the empty field."
+    },
+    "new_group.no_contacts": {
+      "text": "Add contacts first; a group starts from people you already know.",
+      "comment": "Create-group form with no contacts to pick."
+    },
+    "new_group.subtitle": {
+      "text": "You will be the group's owner. You can add more people later.",
+      "comment": "Line under \"New group\" on the create-group form."
     },
     "recovery.access_only_note": {
       "text": "An authenticator or a code gets you back in; your chats then need your recovery phrase or another device.",

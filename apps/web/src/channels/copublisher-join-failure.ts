@@ -19,6 +19,6 @@ import { LegacyChannelError } from "./legacy-v1";
 import { joinFailureNotice, type JoinFailureNotice } from "../routes/join-group-failure";
 
 export function coPublisherJoinFailure(err: unknown): JoinFailureNotice {
-  if (err instanceof LegacyChannelError) return { message: err.message, offerRetry: false };
+  if (err instanceof LegacyChannelError) return { render: () => err.text(), offerRetry: false };
   return joinFailureNotice(err);
 }

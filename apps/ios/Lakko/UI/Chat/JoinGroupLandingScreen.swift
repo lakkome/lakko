@@ -280,6 +280,8 @@ public struct JoinGroupLandingScreen: View {
     private let onDone: () -> Void
     /// Open the joined group (replaces this screen with the chat).
     private let onOpenChat: (String) -> Void
+    /// ADR-0058 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     public init(
         viewModel: JoinGroupLandingViewModel,
@@ -297,7 +299,7 @@ public struct JoinGroupLandingScreen: View {
                 .padding(16)
         }
         .background(Color.lakkoBackground.ignoresSafeArea())
-        .navigationTitle("Join group")
+        .navigationTitle(l10n.t("group.join.title"))
         .task { await viewModel.run() }
     }
 
@@ -312,7 +314,7 @@ public struct JoinGroupLandingScreen: View {
                 Text(groupInviteDamagedMessage)
                     .foregroundStyle(Color.lakkoText)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Close") {
+                Button(l10n.t("common.close")) {
                     viewModel.dismiss()
                     onDone()
                 }
@@ -321,7 +323,7 @@ public struct JoinGroupLandingScreen: View {
                 Text(groupInviteInvalidMessage)
                     .foregroundStyle(Color.lakkoText)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Close") {
+                Button(l10n.t("common.close")) {
                     viewModel.dismiss()
                     onDone()
                 }
@@ -340,7 +342,7 @@ public struct JoinGroupLandingScreen: View {
                     .tint(.lakkoAccent)
                     .disabled(viewModel.requesting)
                 }
-                Button("Close") {
+                Button(l10n.t("common.close")) {
                     viewModel.dismiss()
                     onDone()
                 }
@@ -348,7 +350,7 @@ public struct JoinGroupLandingScreen: View {
                 footer
             case .ready:
                 headlineBlock
-                Button("Request to join") {
+                Button(l10n.t("group.join.request")) {
                     Task { await viewModel.request() }
                 }
                 .buttonStyle(.borderedProminent)
@@ -357,7 +359,7 @@ public struct JoinGroupLandingScreen: View {
                 footer
             case .requesting:
                 headlineBlock
-                ProgressView("Sending request…")
+                ProgressView(l10n.t("group.join.sending"))
                     .tint(.lakkoAccent)
                 footer
             case .waiting:
