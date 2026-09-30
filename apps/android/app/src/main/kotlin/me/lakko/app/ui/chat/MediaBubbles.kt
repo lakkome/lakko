@@ -58,6 +58,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.t
 import me.lakko.app.media.ChatMediaHub
 import me.lakko.app.media.InlineKind
 import me.lakko.app.media.KIND_GIF
@@ -75,12 +77,12 @@ import me.lakko.app.media.widestRateLabel
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import java.io.File
 
-internal const val COULD_NOT_PLAY = "Couldn't play this message"
-internal const val NOT_SENT_RETRY = "Not sent · Retry"
+internal const val COULD_NOT_PLAY = "chat.media.play_failed"
+internal const val NOT_SENT_RETRY = "chat.media.not_sent_retry"
 
 /** What a long press on a bubble — or on any control inside one — is FOR, as
  *  TalkBack announces it ("double tap and hold to ..."). */
-internal const val BUBBLE_ACTIONS_LABEL = "Message actions"
+internal const val BUBBLE_ACTIONS_LABEL = "chat.message.actions"
 
 /**
  * A control that lives INSIDE a bubble.
@@ -122,7 +124,7 @@ internal fun Modifier.bubbleControl(
     onClickLabel = onClickLabel,
     role = role,
     onClick = onClick,
-    onLongClickLabel = if (onLongPress == null) null else BUBBLE_ACTIONS_LABEL,
+    onLongClickLabel = if (onLongPress == null) null else Localization.strings.value[BUBBLE_ACTIONS_LABEL],
     onLongClick = onLongPress,
 )
 
@@ -283,9 +285,9 @@ internal fun VoiceBubble(
                 discColor = contentColor,
                 glyphColor = bubbleColor,
                 label = if (isCurrent && voice.playing) {
-                    "Pause voice message"
+                    t("chat.voice.pause")
                 } else {
-                    "Play voice message, ${spokenDuration(duration)}"
+                    t("chat.voice.play", mapOf("duration" to spokenDuration(duration)))
                 },
                 onClick = { hub.toggleVoice(ref, knownDuration, sentByMe = isOwn) },
                 onLongPress = onLongPress,
@@ -299,7 +301,7 @@ internal fun VoiceBubble(
                     progress = progress,
                     playedColor = contentColor,
                     idleColor = contentColor.copy(alpha = 0.35f),
-                    label = "Voice message position",
+                    label = t("chat.voice.seek"),
                     modifier = Modifier.width(VOICE_WAVEFORM_WIDTH).height(VOICE_WAVEFORM_HEIGHT),
                     onLongPress = onLongPress,
                     onSeek = { f -> hub.seekVoice(ref, f, knownDuration, sentByMe = isOwn) },
@@ -331,11 +333,11 @@ internal fun VoiceBubble(
         }
         if (failed) {
             Text(
-                text = COULD_NOT_PLAY,
+                text = t(COULD_NOT_PLAY),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.error,
                 modifier = Modifier.bubbleControl(
-                    onClickLabel = "Retry",
+                    onClickLabel = t("common.retry"),
                     onLongPress = onLongPress,
                 ) { hub.toggleVoice(ref, knownDuration, sentByMe = isOwn) },
             )
@@ -486,7 +488,7 @@ private fun VoiceQuietLine(
                             Modifier
                                 .clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.primary)
-                                .semantics { contentDescription = "Not played" }
+                                .semantics { contentDescription = Localization.strings.value["chat.voice.not_played"] }
                         } else {
                             Modifier
                         },
@@ -504,11 +506,16 @@ private fun VoiceQuietLine(
                         .clip(RoundedCornerShape(4.dp))
                         .bubbleControl(
                             onLongPress = onLongPress,
-                            onClickLabel = "Change playback speed",
+                            onClickLabel = t("chat.voice.change_speed"),
                             role = Role.Button,
                             onClick = onCycleRate,
                         )
-                        .semantics { contentDescription = "Playback speed ${rateLabel(rate)}" },
+                        .semantics {
+                            contentDescription = Localization.strings.value.format(
+                                "chat.voice.speed",
+                                mapOf("rate" to rateLabel(rate)),
+                            )
+                        },
                 )
             }
         }
@@ -603,7 +610,11 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
                 .background(MaterialTheme.colorScheme.surfaceVariant)
                 .bubbleControl(
                     onLongPress = onLongPress,
-                    onClickLabel = if (playingWithSound) "Pause video message" else "Play video message",
+                    onClickLabel = if (playingWithSound) {
+                        t("chat.record.pause_video")
+                    } else {
+                        t("chat.video_note.play", mapOf("duration" to spokenDuration(duration)))
+                    },
                 ) {
                     if (playingWithSound) {
                         playingWithSound = false
@@ -612,7 +623,15 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
                         start()
                     }
                 }
-                .semantics { contentDescription = "Video message, ${spokenDuration(duration)}" },
+                .semantics {
+                    contentDescription = Localization.strings.value.format(
+                        "chat.media.with_duration",
+                        mapOf(
+                            "label" to Localization.strings.value["chat.media.video_message"],
+                            "duration" to spokenDuration(duration),
+                        ),
+                    )
+                },
         ) {
             val v = video
             val p = poster
@@ -641,7 +660,7 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
                 // circle; never a broken-image icon.
                 AnimatedImage(
                     source = AnimatedSource.OfFile(p),
-                    contentDescription = "Video message poster",
+                    contentDescription = t("chat.video_note.poster"),
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -669,7 +688,7 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
         Text(formatTotalClock(duration), style = MaterialTheme.typography.labelSmall)
         if (failed) {
             Text(
-                COULD_NOT_PLAY,
+                t(COULD_NOT_PLAY),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.error,
             )
@@ -709,7 +728,7 @@ internal fun GifBubble(
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .bubbleControl(
                 onLongPress = onLongPress,
-                onClickLabel = if (failed) "Retry" else "Open GIF",
+                onClickLabel = if (failed) t("common.retry") else t("chat.gif.open_full"),
             ) {
                 if (failed) {
                     failed = false
@@ -721,12 +740,12 @@ internal fun GifBubble(
     ) {
         val f = file
         when {
-            failed -> Text(COULD_NOT_PLAY, style = MaterialTheme.typography.labelSmall)
+            failed -> Text(t(COULD_NOT_PLAY), style = MaterialTheme.typography.labelSmall)
             f == null -> CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
             else -> GifContent(f, inline, Modifier.fillMaxSize()) { failed = true }
         }
         Text(
-            "GIF",
+            t("chat.media.gif"),
             style = MaterialTheme.typography.labelSmall,
             color = Color.White,
             modifier = Modifier
@@ -748,7 +767,7 @@ internal fun GifBubble(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
-                    .clickable(onClickLabel = "Close") { fullScreen = false },
+                    .clickable(onClickLabel = t("common.close")) { fullScreen = false },
             ) {
                 GifContent(f, inline, Modifier.fillMaxSize().aspectRatio(ratio, matchHeightConstraintsFirst = false)) {}
             }
@@ -763,7 +782,7 @@ private fun GifContent(file: File, inline: InlineKind?, modifier: Modifier, onFa
     } else {
         AnimatedImage(
             source = AnimatedSource.OfFile(file),
-            contentDescription = "GIF",
+            contentDescription = t("chat.media.gif"),
             modifier = modifier,
             onFailed = onFailed,
         )
@@ -788,11 +807,28 @@ internal fun PendingMediaBubble(
             color = if (row.kind == KIND_VIDEO_NOTE) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primaryContainer,
             contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
             modifier = Modifier.semantics {
-                contentDescription = when (row.kind) {
-                    KIND_VOICE -> "Voice message, ${spokenDuration(row.durationMs ?: 0L)}"
-                    KIND_VIDEO_NOTE -> "Video message, ${spokenDuration(row.durationMs ?: 0L)}"
-                    else -> "GIF"
-                } + if (row.failed) ", not sent" else ", sending"
+                val strings = Localization.strings.value
+                val kind = when (row.kind) {
+                    KIND_VOICE -> strings.format(
+                        "chat.media.with_duration",
+                        mapOf(
+                            "label" to strings["chat.media.voice_message"],
+                            "duration" to spokenDuration(row.durationMs ?: 0L, strings),
+                        ),
+                    )
+                    KIND_VIDEO_NOTE -> strings.format(
+                        "chat.media.with_duration",
+                        mapOf(
+                            "label" to strings["chat.media.video_message"],
+                            "duration" to spokenDuration(row.durationMs ?: 0L, strings),
+                        ),
+                    )
+                    else -> strings["chat.media.gif"]
+                }
+                contentDescription = strings.format(
+                    if (row.failed) "chat.media.row_not_sent" else "chat.media.row_sending",
+                    mapOf("label" to kind),
+                )
             },
         ) {
             val inner = when (row.kind) {
@@ -830,7 +866,7 @@ internal fun PendingMediaBubble(
                                 progress = 0f,
                                 playedColor = MaterialTheme.colorScheme.onPrimaryContainer,
                                 idleColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.35f),
-                                label = "Voice message",
+                                label = t("chat.media.voice_message"),
                                 modifier = Modifier.width(VOICE_WAVEFORM_WIDTH).height(VOICE_WAVEFORM_HEIGHT),
                                 onSeek = {},
                             )
@@ -859,7 +895,7 @@ internal fun PendingMediaBubble(
                         row.posterBytes?.let { bytes ->
                             AnimatedImage(
                                 source = AnimatedSource.OfBytes("poster-${row.tempId}", bytes),
-                                contentDescription = "Video message poster",
+                                contentDescription = t("chat.video_note.poster"),
                                 modifier = Modifier.fillMaxSize().clip(CircleShape),
                             )
                         }
@@ -870,7 +906,7 @@ internal fun PendingMediaBubble(
                             if (row.mime != "video/mp4") {
                                 AnimatedImage(
                                     source = AnimatedSource.OfBytes("gif-${row.tempId}", bytes),
-                                    contentDescription = "GIF",
+                                    contentDescription = t("chat.media.gif"),
                                     modifier = Modifier.fillMaxSize(),
                                 )
                             }
@@ -883,11 +919,11 @@ internal fun PendingMediaBubble(
         if (row.failed) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onDiscard) {
-                    Text("Delete", style = MaterialTheme.typography.labelSmall)
+                    Text(t("common.delete"), style = MaterialTheme.typography.labelSmall)
                 }
                 TextButton(onClick = onRetry) {
                     Text(
-                        NOT_SENT_RETRY,
+                        t(NOT_SENT_RETRY),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.error,
                     )

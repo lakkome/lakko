@@ -151,7 +151,7 @@ public enum DsClockSkew {
     public static let toleranceSeconds: TimeInterval = 60
 
     /// The copy a final refusal shows when the clock is off.
-    public static let copy = "Check this device's date and time."
+    public static var copy: String { Localization.text("ds.clock_skew") }
 
     /// `true` when `serverDateHeader` parses and differs from `now` by more
     /// than ``toleranceSeconds``. An absent or unparseable header is not

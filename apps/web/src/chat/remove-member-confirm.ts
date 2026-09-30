@@ -56,12 +56,14 @@
  *    internal identifier in user-facing copy for as long as it did.
  */
 
+import { t } from "../l10n";
+
 /**
  * §6 — the title. Identical on both paths: it is true of a removal however it
  * is applied, and a user should not be asked a differently-worded question
  * because of a group's internal role-table state.
  */
-export const REMOVE_MEMBER_TITLE = "Remove this member?";
+export const REMOVE_MEMBER_TITLE = (): string => t("chat.members.remove.title");
 
 /**
  * §6 — the body, on the proposal path only.
@@ -73,14 +75,13 @@ export const REMOVE_MEMBER_TITLE = "Remove this member?";
  * in the group — still receiving, still able to decrypt — until the commit
  * lands, and the UI must not imply otherwise.
  */
-export const REMOVE_MEMBER_BODY =
-  "They will keep receiving messages until an owner or an admin applies the change.";
+export const REMOVE_MEMBER_BODY = (): string => t("chat.members.remove.body");
 
 /** §6 — the destructive action. */
-export const REMOVE_MEMBER_CONFIRM_LABEL = "Remove";
+export const REMOVE_MEMBER_CONFIRM_LABEL = (): string => t("common.remove");
 
 /** §6 — the exit. */
-export const REMOVE_MEMBER_CANCEL_LABEL = "Cancel";
+export const REMOVE_MEMBER_CANCEL_LABEL = (): string => t("common.cancel");
 
 /** The copy one confirmation needs, whichever widget presents it. */
 export interface RemoveMemberConfirmation {
@@ -113,9 +114,9 @@ export function removeMemberConfirmation(input: {
   readonly usesProposalPath: boolean;
 }): RemoveMemberConfirmation {
   return {
-    title: REMOVE_MEMBER_TITLE,
-    body: input.usesProposalPath ? REMOVE_MEMBER_BODY : null,
-    confirmLabel: REMOVE_MEMBER_CONFIRM_LABEL,
-    cancelLabel: REMOVE_MEMBER_CANCEL_LABEL,
+    title: REMOVE_MEMBER_TITLE(),
+    body: input.usesProposalPath ? REMOVE_MEMBER_BODY() : null,
+    confirmLabel: REMOVE_MEMBER_CONFIRM_LABEL(),
+    cancelLabel: REMOVE_MEMBER_CANCEL_LABEL(),
   };
 }

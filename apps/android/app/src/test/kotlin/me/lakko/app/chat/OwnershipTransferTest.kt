@@ -3,6 +3,8 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -30,6 +32,10 @@ import uniffi.lakko_ffi_uniffi.ProposalRecord
  * for those is a wording edit.
  */
 class OwnershipTransferTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     private companion object {
         const val ACCOUNT = "acct-a"
@@ -79,7 +85,7 @@ class OwnershipTransferTest {
         assertEquals(LEAVE_BLOCKED_BY_OWNERSHIP, block.leave.disabledReason)
         assertEquals(
             "Transfer ownership first — a group cannot be left without an owner.",
-            block.leave.disabledReason,
+            block.leave.disabledReason?.en,
         )
     }
 
@@ -157,7 +163,7 @@ class OwnershipTransferTest {
         block as ExitBlock.Member
         assertFalse("our own pending leave disables the control", block.leave.enabled)
         // §5.2's existing annotation, reused — not new copy.
-        assertEquals("Waiting to leave.", block.leave.disabledReason)
+        assertEquals("Waiting to leave.", block.leave.disabledReason?.en)
     }
 
     // -----------------------------------------------------------------------
@@ -172,7 +178,7 @@ class OwnershipTransferTest {
         assertEquals(NO_TRANSFER_CANDIDATES, block.transfer.disabledReason)
         assertEquals(
             "There is no one else in this group to transfer it to.",
-            block.transfer.disabledReason,
+            block.transfer.disabledReason?.en,
         )
     }
 
@@ -192,7 +198,7 @@ class OwnershipTransferTest {
         assertEquals(ROLE_CHANGE_ALREADY_PENDING, block.transfer.disabledReason)
         assertEquals(
             "A role change is already waiting to apply. Wait for it to land, then try again.",
-            block.transfer.disabledReason,
+            block.transfer.disabledReason?.en,
         )
     }
 
@@ -206,7 +212,7 @@ class OwnershipTransferTest {
         )
         block as ExitBlock.Owner
         assertFalse("our own waiting transfer disables transfer", block.transfer.enabled)
-        assertEquals("Waiting to make Alice the owner.", block.transfer.disabledReason)
+        assertEquals("Waiting to make Alice the owner.", block.transfer.disabledReason?.en)
     }
 
     @Test
@@ -218,7 +224,7 @@ class OwnershipTransferTest {
             ),
         )
         block as ExitBlock.Owner
-        assertEquals("Ownership transfer waiting to apply.", block.transfer.disabledReason)
+        assertEquals("Ownership transfer waiting to apply.", block.transfer.disabledReason?.en)
     }
 
     @Test
@@ -268,7 +274,7 @@ class OwnershipTransferTest {
             ),
         )
         block as ExitBlock.Owner
-        assertEquals("Waiting to make Alice the owner.", block.transfer.disabledReason)
+        assertEquals("Waiting to make Alice the owner.", block.transfer.disabledReason?.en)
     }
 
     @Test
@@ -354,7 +360,7 @@ class OwnershipTransferTest {
         val preselected = OUTGOING_OWNER_OPTIONS.filter { it.preSelected }
         assertEquals(1, preselected.size)
         assertEquals(OutgoingOwner.ADMIN, preselected[0].value)
-        assertEquals("Stay an admin", preselected[0].label)
+        assertEquals("Stay an admin", preselected[0].label.en)
     }
 
     @Test
@@ -366,12 +372,12 @@ class OwnershipTransferTest {
         )
         assertEquals(
             "You can still add and remove members. You can give this up later by asking the new owner.",
-            OUTGOING_OWNER_OPTIONS[0].consequence,
+            OUTGOING_OWNER_OPTIONS[0].consequence.en,
         )
-        assertEquals("Become a regular member", OUTGOING_OWNER_OPTIONS[1].label)
+        assertEquals("Become a regular member", OUTGOING_OWNER_OPTIONS[1].label.en)
         assertEquals(
             "You give up every group power immediately. Only the new owner can give any of it back.",
-            OUTGOING_OWNER_OPTIONS[1].consequence,
+            OUTGOING_OWNER_OPTIONS[1].consequence.en,
         )
     }
 
@@ -385,7 +391,7 @@ class OwnershipTransferTest {
         assertFalse("no default successor, and no path that skips the picker", idle.enabled)
         // There is no default successor and no path to the action that skips the
         // picker.
-        assertEquals("Transfer ownership", idle.label)
+        assertEquals("Transfer ownership", idle.label.en)
     }
 
     @Test
@@ -401,19 +407,19 @@ class OwnershipTransferTest {
         assertTrue("a picked successor makes the action live", picked.enabled)
         // Not a re-formatted or re-shortened variant: that is the string the
         // user cross-checks against the row they tapped.
-        assertEquals("Make b0b1c2d3 the owner", picked.label)
+        assertEquals("Make b0b1c2d3 the owner", picked.label.en)
     }
 
     @Test
     fun `the irreversibility copy states three specific losses, not an adjective`() {
         // BOUNDARY GUARD — this fails when the wording drifts, which is the
         // point: all three clauses are literally true and none is rhetorical.
-        assertEquals("This cannot be undone.", TRANSFER_IRREVERSIBLE_HEADLINE)
+        assertEquals("This cannot be undone.", TRANSFER_IRREVERSIBLE_HEADLINE.en)
         assertEquals(
             "Only an owner can change roles. Once you transfer this group you cannot " +
                 "take it back, you cannot restore your own owner role, and you cannot " +
                 "change your own role again unless the new owner does it for you.",
-            TRANSFER_IRREVERSIBLE_BODY,
+            TRANSFER_IRREVERSIBLE_BODY.en,
         )
     }
 
@@ -421,13 +427,13 @@ class OwnershipTransferTest {
     fun `the trailing line says APPLIED, never NOW`() {
         assertEquals(
             "Once the change is applied, you can leave the group like any other member.",
-            TRANSFER_UNLOCKS_LEAVE,
+            TRANSFER_UNLOCKS_LEAVE.en,
         )
         // Asserting the exit is open before the commit lands would be the
         // optimistic update §3 forbids.
         assertFalse(
             "\"now\" would assert the exit is open before the commit lands",
-            TRANSFER_UNLOCKS_LEAVE.contains("now"),
+            TRANSFER_UNLOCKS_LEAVE.en.contains("now"),
         )
     }
 
@@ -442,11 +448,11 @@ class OwnershipTransferTest {
         // `Remove` and every admin toggle at once.
         assertEquals(
             "Alice is now the group owner. You are still an admin.",
-            transferOutcomeNotice(TransferOutcome.COMMITTED, "Alice", OutgoingOwner.ADMIN),
+            transferOutcomeNotice(TransferOutcome.COMMITTED, "Alice", OutgoingOwner.ADMIN).en,
         )
         assertEquals(
             "Alice is now the group owner. You are now a regular member.",
-            transferOutcomeNotice(TransferOutcome.COMMITTED, "Alice", OutgoingOwner.MEMBER),
+            transferOutcomeNotice(TransferOutcome.COMMITTED, "Alice", OutgoingOwner.MEMBER).en,
         )
     }
 
@@ -458,9 +464,9 @@ class OwnershipTransferTest {
         val notice = transferOutcomeNotice(TransferOutcome.PROPOSED, "Alice", OutgoingOwner.ADMIN)
         assertEquals(
             "Ownership transfer requested. It applies when an owner or an admin applies the change.",
-            notice,
+            notice.en,
         )
-        assertFalse("an unswept request must claim no role at all", notice.contains("admin."))
+        assertFalse("an unswept request must claim no role at all", notice.en.contains("admin."))
         assertEquals(
             notice,
             transferOutcomeNotice(TransferOutcome.PROPOSED, "Alice", OutgoingOwner.MEMBER),
@@ -473,12 +479,12 @@ class OwnershipTransferTest {
 
     @Test
     fun `the pending label names the successor when they still resolve`() {
-        assertEquals("Waiting to make Alice the owner.", transferPendingLabel("Alice"))
+        assertEquals("Waiting to make Alice the owner.", transferPendingLabel("Alice").en)
     }
 
     @Test
     fun `the pending label falls back when the successor no longer resolves`() {
-        assertEquals("Ownership transfer waiting to apply.", transferPendingLabel(null))
+        assertEquals("Ownership transfer waiting to apply.", transferPendingLabel(null).en)
     }
 
     // -----------------------------------------------------------------------
@@ -556,11 +562,11 @@ class OwnershipTransferTest {
         // Naming them is sound rather than a guess: a role change is owner-only
         // and `owner_survives` (C-63) forbids naming a non-member, so the
         // previous owner did author it.
-        assertEquals("Owner made you the owner of this group.", notice?.headline)
+        assertEquals("Owner made you the owner of this group.", (notice?.headline)?.en)
         assertEquals(NEW_OWNER_BODY, notice?.body)
         assertEquals(
             "You can add and remove members, change admins, and transfer ownership to someone else.",
-            notice?.body,
+            (notice?.body)?.en,
         )
         assertEquals(NEW_OWNER_DISMISS, notice?.dismiss)
     }
@@ -568,7 +574,7 @@ class OwnershipTransferTest {
     @Test
     fun `the new-owner notice omits the name when the previous owner no longer resolves`() {
         val notice = newOwnerNotice(OWNER_KEY, ALICE_KEY, ALICE_KEY, null)
-        assertEquals("You are now the owner of this group.", notice?.headline)
+        assertEquals("You are now the owner of this group.", (notice?.headline)?.en)
     }
 
     @Test

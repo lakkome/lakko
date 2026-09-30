@@ -194,7 +194,7 @@ final class UnappliedRequestsTests: XCTestCase {
     }
 
     func testTheHeadingCounts() {
-        XCTAssertEqual(unappliedHeading(2), "Not applied (2)")
+        XCTAssertEqual(unappliedHeading(2).withoutIsolates, "Not applied (2)")
     }
 
     /// The joiner cannot be TOLD anything, so what it gets is the truth about

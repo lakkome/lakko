@@ -250,6 +250,22 @@
       "text": "מכניסים אתכם לשיחה...",
       "status": "machine"
     },
+    "call.incoming.accept": {
+      "text": "מענה",
+      "status": "machine"
+    },
+    "call.incoming.accept_from": {
+      "text": "מענה לשיחה מ-{name}",
+      "status": "machine"
+    },
+    "call.incoming.decline": {
+      "text": "דחייה",
+      "status": "machine"
+    },
+    "call.incoming.decline_from": {
+      "text": "דחיית השיחה מ-{name}",
+      "status": "machine"
+    },
     "call.link.connecting": {
       "text": "מתחבר...",
       "status": "machine"
@@ -314,8 +330,1712 @@
       "text": "אפשר לצאת מהמסך הזה; תצטרפו ברגע שתאושרו.",
       "status": "machine"
     },
+    "chat.attachment.error.attach": {
+      "text": "לא ניתן היה לצרף את הפריט שנבחר. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.attachment.error.attach_named": {
+      "text": "לא ניתן היה לצרף את „{name}”. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.attachment.error.download": {
+      "text": "לא ניתן היה להוריד את הקובץ המצורף. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.attachment.error.gone": {
+      "text": "הקובץ המצורף כבר לא זמין בשרת.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_photo": {
+      "text": "לא ניתן היה לפתוח את התמונה הזו. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_video": {
+      "text": "לא ניתן היה לפתוח את הסרטון הזה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.attachment.error.prepare_video": {
+      "text": "לא ניתן היה להכין את הסרטון הזה. אפשר לשלוח סרטונים בגודל של עד {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.preview": {
+      "text": "לא ניתן היה להציג את התמונה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large": {
+      "text": "גודל ההודעה הזו {size}, יותר מהמגבלה של {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large_named": {
+      "text": "הגודל של „{name}” הוא {size}, יותר מהמגבלה של {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.upload": {
+      "text": "לא ניתן היה להעלות את „{name}”. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.attachment.hide": {
+      "text": "הסתרה",
+      "status": "machine"
+    },
+    "chat.attachment.image_alt": {
+      "text": "תמונה מצורפת",
+      "status": "machine"
+    },
+    "chat.attachment.open": {
+      "text": "פתיחה",
+      "status": "machine"
+    },
+    "chat.attachment.save_title": {
+      "text": "שמירת הקובץ המצורף",
+      "status": "machine"
+    },
+    "chat.attachment.unnamed": {
+      "text": "(ללא שם)",
+      "status": "machine"
+    },
+    "chat.author.a_member": {
+      "text": "אחד החברים",
+      "status": "machine"
+    },
+    "chat.author.unknown": {
+      "text": "שולח לא ידוע",
+      "status": "machine"
+    },
+    "chat.author.you": {
+      "text": "את/ה",
+      "status": "machine"
+    },
+    "chat.call.busy": {
+      "text": "שיחה אחרת מתקיימת כרגע.",
+      "status": "machine"
+    },
+    "chat.call.error.start": {
+      "text": "לא ניתן היה להתחיל את השיחה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.call.group_ended": {
+      "text": "השיחה הקבוצתית הזו כבר הסתיימה.",
+      "status": "machine"
+    },
+    "chat.call.group_in_progress": {
+      "text": "שיחה קבוצתית מתקיימת",
+      "status": "machine"
+    },
+    "chat.call.group_people": {
+      "text": "{count, plural, one {אדם אחד בשיחה} two {שני אנשים בשיחה} other {# אנשים בשיחה}}",
+      "status": "machine"
+    },
+    "chat.call.group_starting": {
+      "text": "מתחילים…",
+      "status": "machine"
+    },
+    "chat.call.group_status_e2ee": {
+      "text": "{status} · מוצפנת מקצה לקצה",
+      "status": "machine"
+    },
+    "chat.call.join": {
+      "text": "הצטרפות לשיחה",
+      "status": "machine"
+    },
+    "chat.call.join_short": {
+      "text": "הצטרפות",
+      "status": "machine"
+    },
+    "chat.call.join_video": {
+      "text": "הצטרפות עם וידאו",
+      "status": "machine"
+    },
+    "chat.call.last_ended.busy": {
+      "text": "השיחה האחרונה הסתיימה: הצד השני היה תפוס.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.declined": {
+      "text": "השיחה האחרונה הסתיימה: נדחתה.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.error": {
+      "text": "השיחה האחרונה הסתיימה בגלל שגיאה.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.hung_up": {
+      "text": "השיחה האחרונה הסתיימה.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.timed_out": {
+      "text": "השיחה האחרונה הסתיימה: לא היה מענה.",
+      "status": "machine"
+    },
+    "chat.call.unavailable": {
+      "text": "שיחות קבוצתיות לא זמינות כרגע.",
+      "status": "machine"
+    },
+    "chat.call.video": {
+      "text": "שיחת וידאו",
+      "status": "machine"
+    },
+    "chat.call.voice": {
+      "text": "שיחה",
+      "status": "machine"
+    },
+    "chat.composer.attach": {
+      "text": "צירוף קבצים",
+      "status": "machine"
+    },
+    "chat.composer.attach_limit": {
+      "text": "צירוף קבצים (עד {limit} לכל קובץ)",
+      "status": "machine"
+    },
+    "chat.composer.attach_media": {
+      "text": "תמונה או סרטון",
+      "status": "machine"
+    },
+    "chat.composer.drop_files": {
+      "text": "שחררו את הקבצים כדי לצרף אותם",
+      "status": "machine"
+    },
+    "chat.composer.emoji_gifs": {
+      "text": "אמוג׳י ו-GIF",
+      "status": "machine"
+    },
+    "chat.composer.photo_library": {
+      "text": "ספריית התמונות",
+      "status": "machine"
+    },
+    "chat.composer.placeholder": {
+      "text": "הודעה",
+      "status": "machine"
+    },
+    "chat.composer.remove_attachment": {
+      "text": "הסרת הקובץ המצורף",
+      "status": "machine"
+    },
+    "chat.composer.send": {
+      "text": "שליחה",
+      "status": "machine"
+    },
+    "chat.day.today": {
+      "text": "היום",
+      "status": "machine"
+    },
+    "chat.day.yesterday": {
+      "text": "אתמול",
+      "status": "machine"
+    },
+    "chat.delete.body": {
+      "text": "הפעולה מסירה את הצ׳אט ואת ההודעות שלו מהמכשיר הזה. אין עותק בשום מקום אחר, ואי אפשר לבטל את הפעולה.",
+      "status": "machine"
+    },
+    "chat.delete.confirm_named": {
+      "text": "מחיקת {name}",
+      "status": "machine"
+    },
+    "chat.delete.control": {
+      "text": "מחיקת הצ׳אט הזה",
+      "status": "machine"
+    },
+    "chat.delete.title": {
+      "text": "למחוק את הצ׳אט הזה?",
+      "status": "machine"
+    },
+    "chat.edit.title": {
+      "text": "עריכת ההודעה",
+      "status": "machine"
+    },
+    "chat.emoji.categories": {
+      "text": "קטגוריות אמוג׳י",
+      "status": "machine"
+    },
+    "chat.emoji.choose": {
+      "text": "בחירה",
+      "status": "machine"
+    },
+    "chat.emoji.choose_reaction": {
+      "text": "בחירת תגובה",
+      "status": "machine"
+    },
+    "chat.emoji.group.activities": {
+      "text": "פעילויות",
+      "status": "machine"
+    },
+    "chat.emoji.group.animals": {
+      "text": "חיות וטבע",
+      "status": "machine"
+    },
+    "chat.emoji.group.flags": {
+      "text": "דגלים",
+      "status": "machine"
+    },
+    "chat.emoji.group.food": {
+      "text": "אוכל ושתייה",
+      "status": "machine"
+    },
+    "chat.emoji.group.objects": {
+      "text": "חפצים",
+      "status": "machine"
+    },
+    "chat.emoji.group.people": {
+      "text": "אנשים וגוף",
+      "status": "machine"
+    },
+    "chat.emoji.group.smileys": {
+      "text": "פרצופים ורגשות",
+      "status": "machine"
+    },
+    "chat.emoji.group.symbols": {
+      "text": "סמלים",
+      "status": "machine"
+    },
+    "chat.emoji.group.travel": {
+      "text": "טיולים ומקומות",
+      "status": "machine"
+    },
+    "chat.emoji.insert": {
+      "text": "הוספה",
+      "status": "machine"
+    },
+    "chat.emoji.no_results": {
+      "text": "לא נמצאו אמוג׳י",
+      "status": "machine"
+    },
+    "chat.emoji.recent": {
+      "text": "אחרונים",
+      "status": "machine"
+    },
+    "chat.emoji.search": {
+      "text": "חיפוש אמוג׳י",
+      "status": "machine"
+    },
+    "chat.emoji.skin_tones": {
+      "text": "גווני עור עבור {name}",
+      "status": "machine"
+    },
+    "chat.emoji.tab": {
+      "text": "אמוג׳י",
+      "status": "machine"
+    },
+    "chat.ended.composer": {
+      "text": "אי אפשר עוד לשלוח הודעות לקבוצה הזו.",
+      "status": "machine"
+    },
+    "chat.ended.consequence": {
+      "text": "ההודעות שכבר קיבלתם עדיין כאן. לא יגיעו הודעות חדשות.",
+      "status": "machine"
+    },
+    "chat.ended.left": {
+      "text": "יצאתם מהקבוצה הזו.",
+      "status": "machine"
+    },
+    "chat.ended.no_longer_member": {
+      "text": "אתם כבר לא חברים בקבוצה הזו.",
+      "status": "machine"
+    },
+    "chat.ended.unsent_draft": {
+      "text": "טיוטה שלא נשלחה",
+      "status": "machine"
+    },
+    "chat.error.add_member": {
+      "text": "לא ניתן היה להוסיף את האדם הזה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.approve_join": {
+      "text": "לא ניתן היה לאשר את בקשת ההצטרפות. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.change_admin": {
+      "text": "לא ניתן היה לשנות את תפקיד הניהול. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.conversation_gone": {
+      "text": "הצ׳אט הזה כבר לא כאן.",
+      "status": "machine"
+    },
+    "chat.error.create_link": {
+      "text": "לא ניתן היה ליצור קישור הזמנה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.delete_chat": {
+      "text": "לא ניתן היה למחוק את הצ׳אט הזה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.delete_message": {
+      "text": "לא ניתן היה למחוק את ההודעה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.edit": {
+      "text": "לא ניתן היה לערוך את ההודעה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.leave": {
+      "text": "לא ניתן היה לצאת מהקבוצה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.membership_request": {
+      "text": "לא ניתן היה לשלוח שוב שינוי חברות שביקשתם.",
+      "status": "machine"
+    },
+    "chat.error.message_gone": {
+      "text": "ההודעה הזו כבר לא כאן.",
+      "status": "machine"
+    },
+    "chat.error.pin": {
+      "text": "לא ניתן היה לשנות את ההצמדה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.react": {
+      "text": "לא ניתן היה לשלוח את התגובה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.refresh": {
+      "text": "לא ניתן היה לטעון הודעות חדשות. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.reject_join": {
+      "text": "לא ניתן היה לדחות את בקשת ההצטרפות. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.remove_member": {
+      "text": "לא ניתן היה להסיר את החבר הזה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.revoke_link": {
+      "text": "לא ניתן היה לבטל את קישור ההזמנה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.error.transfer": {
+      "text": "לא ניתן היה להעביר את הבעלות. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.forward.empty": {
+      "text": "אין צ׳אטים להעברה אליהם",
+      "status": "machine"
+    },
+    "chat.forward.error.generic": {
+      "text": "לא ניתן היה להעביר את ההודעה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.forward.from": {
+      "text": "הועבר מ-{name}",
+      "status": "machine"
+    },
+    "chat.forward.label": {
+      "text": "הועבר",
+      "status": "machine"
+    },
+    "chat.forward.list_label": {
+      "text": "צ׳אטים",
+      "status": "machine"
+    },
+    "chat.forward.picker_title": {
+      "text": "העברה אל",
+      "status": "machine"
+    },
+    "chat.forward.search_label": {
+      "text": "חיפוש צ׳אטים",
+      "status": "machine"
+    },
+    "chat.gif.attribution": {
+      "text": "מופעל על ידי GIPHY",
+      "status": "machine"
+    },
+    "chat.gif.load_failed": {
+      "text": "לא ניתן היה לטעון את ה-GIF · ניסיון חוזר",
+      "status": "machine"
+    },
+    "chat.gif.loading": {
+      "text": "טוען GIF",
+      "status": "machine"
+    },
+    "chat.gif.no_results": {
+      "text": "לא נמצאו GIF",
+      "status": "machine"
+    },
+    "chat.gif.note_dismiss": {
+      "text": "הבנתי",
+      "status": "machine"
+    },
+    "chat.gif.open_full": {
+      "text": "פתיחת GIF במסך מלא",
+      "status": "machine"
+    },
+    "chat.gif.privacy_note": {
+      "text": "חיפוש GIF עובר דרך השרת של Lakko, שרואה מה אתם מחפשים. קובצי GIF שנשלחים מוצפנים כמו כל קובץ.",
+      "status": "machine"
+    },
+    "chat.gif.rate_limited": {
+      "text": "יותר מדי חיפושים. נסו שוב בעוד רגע",
+      "status": "machine"
+    },
+    "chat.gif.search": {
+      "text": "חיפוש GIF",
+      "status": "machine"
+    },
+    "chat.gif.send": {
+      "text": "שליחת GIF",
+      "status": "machine"
+    },
+    "chat.gif.trending": {
+      "text": "פופולריים",
+      "status": "machine"
+    },
+    "chat.gif.unavailable": {
+      "text": "קובצי GIF לא זמינים כרגע",
+      "status": "machine"
+    },
+    "chat.group.default_name": {
+      "text": "קבוצה חדשה",
+      "status": "machine"
+    },
+    "chat.group.fallback_name": {
+      "text": "קבוצה",
+      "status": "machine"
+    },
+    "chat.group.title_more": {
+      "text": "{names} +{count}",
+      "status": "machine"
+    },
+    "chat.group_name.empty": {
+      "text": "עדיין אין שם",
+      "status": "machine"
+    },
+    "chat.group_name.error.character": {
+      "text": "השם מכיל תו שאי אפשר להציג.",
+      "status": "machine"
+    },
+    "chat.group_name.error.generic": {
+      "text": "אי אפשר להשתמש בשם הזה.",
+      "status": "machine"
+    },
+    "chat.group_name.error.line_break": {
+      "text": "השם חייב להיות בשורה אחת.",
+      "status": "machine"
+    },
+    "chat.group_name.error.save": {
+      "text": "לא ניתן היה לשנות את שם הקבוצה. נסו שוב.",
+      "status": "machine"
+    },
+    "chat.group_name.error.too_long": {
+      "text": "השם ארוך מדי.",
+      "status": "machine"
+    },
+    "chat.group_name.label": {
+      "text": "שם הקבוצה",
+      "status": "machine"
+    },
+    "chat.group_name.only_admins": {
+      "text": "רק מנהלים יכולים לשנות את שם הקבוצה הזו",
+      "status": "machine"
+    },
+    "chat.header.back": {
+      "text": "חזרה לצ׳אטים",
+      "status": "machine"
+    },
+    "chat.info.channel": {
+      "text": "פרטי הערוץ",
+      "status": "machine"
+    },
+    "chat.info.contact": {
+      "text": "פרטי איש הקשר",
+      "status": "machine"
+    },
+    "chat.info.group": {
+      "text": "פרטי הקבוצה",
+      "status": "machine"
+    },
+    "chat.invite_link.cleared": {
+      "text": "הקישור נמחק (לקישור מוטבע אין מה לבטל).",
+      "status": "machine"
+    },
+    "chat.invite_link.copy": {
+      "text": "העתקת הקישור",
+      "status": "machine"
+    },
+    "chat.invite_link.create": {
+      "text": "יצירת קישור הזמנה",
+      "status": "machine"
+    },
+    "chat.invite_link.label": {
+      "text": "קישור הזמנה",
+      "status": "machine"
+    },
+    "chat.invite_link.revoke": {
+      "text": "ביטול",
+      "status": "machine"
+    },
+    "chat.invite_link.revoked": {
+      "text": "קישור ההזמנה בוטל.",
+      "status": "machine"
+    },
+    "chat.invite_link.share": {
+      "text": "שיתוף",
+      "status": "machine"
+    },
+    "chat.leave.action": {
+      "text": "יציאה מהקבוצה",
+      "status": "machine"
+    },
+    "chat.leave.body": {
+      "text": "תמשיכו לקבל הודעות עד שהבעלים או אחד המנהלים יחילו את הבקשה שלכם. כדי להצטרף שוב תצטרכו הזמנה חדשה.",
+      "status": "machine"
+    },
+    "chat.leave.confirm": {
+      "text": "יציאה",
+      "status": "machine"
+    },
+    "chat.leave.confirm_named": {
+      "text": "יציאה מ-{name}",
+      "status": "machine"
+    },
+    "chat.leave.requested": {
+      "text": "נשלחה בקשת יציאה. היא תיכנס לתוקף כשהבעלים או אחד המנהלים יחילו את השינוי.",
+      "status": "machine"
+    },
+    "chat.leave.title": {
+      "text": "לצאת מהקבוצה הזו?",
+      "status": "machine"
+    },
+    "chat.media.and_more": {
+      "text": "{label} ועוד {count, plural, one {אחד} two {שניים} other {#}}",
+      "status": "machine"
+    },
+    "chat.media.audio": {
+      "text": "אודיו",
+      "status": "machine"
+    },
+    "chat.media.file": {
+      "text": "קובץ",
+      "status": "machine"
+    },
+    "chat.media.gif": {
+      "text": "GIF",
+      "status": "machine"
+    },
+    "chat.media.not_sent_retry": {
+      "text": "לא נשלח · ניסיון חוזר",
+      "status": "machine"
+    },
+    "chat.media.open_full_hint": {
+      "text": "פותח אותה במסך מלא",
+      "status": "machine"
+    },
+    "chat.media.photo": {
+      "text": "תמונה",
+      "status": "machine"
+    },
+    "chat.media.play_failed": {
+      "text": "לא ניתן היה להפעיל את ההודעה הזו",
+      "status": "machine"
+    },
+    "chat.media.row_not_sent": {
+      "text": "{label}, לא נשלחה",
+      "status": "machine"
+    },
+    "chat.media.row_sending": {
+      "text": "{label}, בשליחה",
+      "status": "machine"
+    },
+    "chat.media.video": {
+      "text": "סרטון",
+      "status": "machine"
+    },
+    "chat.media.video_message": {
+      "text": "הודעת וידאו",
+      "status": "machine"
+    },
+    "chat.media.voice_message": {
+      "text": "הודעה קולית",
+      "status": "machine"
+    },
+    "chat.media.with_duration": {
+      "text": "{label}, {duration}",
+      "status": "machine"
+    },
+    "chat.members.add.action": {
+      "text": "הוספת חבר",
+      "status": "machine"
+    },
+    "chat.members.add.done": {
+      "text": "ההוספה של {name} הושלמה.",
+      "status": "machine"
+    },
+    "chat.members.add.error.no_bundle": {
+      "text": "האדם הזה עדיין לא סיים להגדיר את Lakko. נסו שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "chat.members.add.error.some_failed": {
+      "text": "לא ניתן היה להוסיף את {names}. הוסיפו אותם מחלונית החברים.",
+      "status": "machine"
+    },
+    "chat.members.add.error.unknown_username": {
+      "text": "אין חשבון רשום בשם {name}.",
+      "status": "machine"
+    },
+    "chat.members.add.placeholder": {
+      "text": "@username",
+      "status": "machine"
+    },
+    "chat.members.add.requested": {
+      "text": "נשלחה בקשה להוסיף את {name}. ההצטרפות תיכנס לתוקף כשהבעלים או אחד המנהלים יחילו את השינוי.",
+      "status": "machine"
+    },
+    "chat.members.add.submit": {
+      "text": "הוספה",
+      "status": "machine"
+    },
+    "chat.members.admin.demoted": {
+      "text": "הוסר מתפקיד הניהול.",
+      "status": "machine"
+    },
+    "chat.members.admin.make": {
+      "text": "מינוי למנהל",
+      "status": "machine"
+    },
+    "chat.members.admin.marker": {
+      "text": "מנהל",
+      "status": "machine"
+    },
+    "chat.members.admin.promoted": {
+      "text": "מונה למנהל.",
+      "status": "machine"
+    },
+    "chat.members.admin.remove": {
+      "text": "הסרה מניהול",
+      "status": "machine"
+    },
+    "chat.members.admin.requested": {
+      "text": "נשלחה בקשה לשינוי. הוא ייכנס לתוקף כשהבעלים או אחד המנהלים יחילו את השינוי.",
+      "status": "machine"
+    },
+    "chat.members.count": {
+      "text": "{count, plural, one {חבר אחד} two {שני חברים} other {# חברים}}",
+      "status": "machine"
+    },
+    "chat.members.devices": {
+      "text": "{count, plural, one {מכשיר אחד} two {שני מכשירים} other {# מכשירים}}",
+      "status": "machine"
+    },
+    "chat.members.frozen": {
+      "text": "הרשימה הזו הפסיקה להתעדכן כשהחברות שלכם הסתיימה.",
+      "status": "machine"
+    },
+    "chat.members.heading": {
+      "text": "חברים ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.approve": {
+      "text": "אישור",
+      "status": "machine"
+    },
+    "chat.members.join.approved_added": {
+      "text": "ההצטרפות אושרה. הצירוף לקבוצה בוצע.",
+      "status": "machine"
+    },
+    "chat.members.join.approved_requested": {
+      "text": "ההצטרפות אושרה. היא תיכנס לתוקף כשהבעלים או אחד המנהלים יחילו את השינוי.",
+      "status": "machine"
+    },
+    "chat.members.join.heading": {
+      "text": "בקשות הצטרפות ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.link_unknown": {
+      "text": "קישור ההזמנה לא ידוע",
+      "status": "machine"
+    },
+    "chat.members.join.reject": {
+      "text": "דחייה",
+      "status": "machine"
+    },
+    "chat.members.join.rejected": {
+      "text": "בקשת ההצטרפות נדחתה.",
+      "status": "machine"
+    },
+    "chat.members.join.via_former": {
+      "text": "דרך {name} · לא חבר נוכחי",
+      "status": "machine"
+    },
+    "chat.members.join.via_member": {
+      "text": "דרך {name} · חבר",
+      "status": "machine"
+    },
+    "chat.members.pending.adds_heading": {
+      "text": "ממתינים להוספה ({count})",
+      "status": "machine"
+    },
+    "chat.members.pending.count": {
+      "text": "{count, plural, one {שינוי חברות אחד ממתין להחלה.} two {שני שינויי חברות ממתינים להחלה.} other {# שינויי חברות ממתינים להחלה.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.liveness": {
+      "text": "את שינויי החברות מחילים הבעלים של הקבוצה או אחד המנהלים. הם יוחלו אוטומטית כשאחד מהם יעשה זאת.",
+      "status": "machine"
+    },
+    "chat.members.pending.queue": {
+      "text": "{count, plural, one {עכשיו שינוי אחד ממתין להחלה.} two {עכשיו שני שינויים ממתינים להחלה.} other {עכשיו # שינויים ממתינים להחלה.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_added": {
+      "text": "ממתין להוספה.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_leave": {
+      "text": "ממתין ליציאה.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_removed": {
+      "text": "ממתין להסרה.",
+      "status": "machine"
+    },
+    "chat.members.remove.body": {
+      "text": "ההודעות ימשיכו להגיע לחבר הזה עד שהבעלים או אחד המנהלים יחילו את השינוי.",
+      "status": "machine"
+    },
+    "chat.members.remove.confirm_named": {
+      "text": "הסרת {name}",
+      "status": "machine"
+    },
+    "chat.members.remove.done": {
+      "text": "החבר הוסר.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested": {
+      "text": "נשלחה בקשת הסרה. היא תיכנס לתוקף כשהבעלים או אחד המנהלים יחילו את השינוי.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested_short": {
+      "text": "נשלחה בקשת הסרה.",
+      "status": "machine"
+    },
+    "chat.members.remove.title": {
+      "text": "להסיר את החבר הזה?",
+      "status": "machine"
+    },
+    "chat.members.row_label": {
+      "text": "{name}, {state}",
+      "status": "machine"
+    },
+    "chat.members.title": {
+      "text": "חברים",
+      "status": "machine"
+    },
+    "chat.members.unapplied.add_line": {
+      "text": "לא נוסף. אפשר להוסיף שוב.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.explanation": {
+      "text": "השינויים האלה לא הוחלו ולא ינוסו שוב מעצמם.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.heading": {
+      "text": "לא הוחלו ({count})",
+      "status": "machine"
+    },
+    "chat.members.unapplied.join_line": {
+      "text": "לא הוחל. בקשו מהאדם לשלוח שוב בקשת הצטרפות.",
+      "status": "machine"
+    },
+    "chat.members.unnamed": {
+      "text": "חבר",
+      "status": "machine"
+    },
+    "chat.message.actions": {
+      "text": "פעולות על ההודעה",
+      "status": "machine"
+    },
+    "chat.message.close_actions": {
+      "text": "סגירת הפעולות על ההודעה",
+      "status": "machine"
+    },
+    "chat.message.deleted": {
+      "text": "ההודעה נמחקה",
+      "status": "machine"
+    },
+    "chat.message.edit": {
+      "text": "עריכה",
+      "status": "machine"
+    },
+    "chat.message.edited": {
+      "text": "(נערכה)",
+      "status": "machine"
+    },
+    "chat.message.forward": {
+      "text": "העברה",
+      "status": "machine"
+    },
+    "chat.message.media_fallback": {
+      "text": "הודעת מדיה",
+      "status": "machine"
+    },
+    "chat.message.more_reactions": {
+      "text": "תגובות נוספות",
+      "status": "machine"
+    },
+    "chat.message.not_sent": {
+      "text": "לא נשלחה",
+      "status": "machine"
+    },
+    "chat.message.pin": {
+      "text": "הצמדה",
+      "status": "machine"
+    },
+    "chat.message.react": {
+      "text": "תגובה",
+      "status": "machine"
+    },
+    "chat.message.react_with": {
+      "text": "תגובה עם {emoji}",
+      "status": "machine"
+    },
+    "chat.message.read": {
+      "text": "נקראה",
+      "status": "machine"
+    },
+    "chat.message.read_by": {
+      "text": "נקראה על ידי {names}",
+      "status": "machine"
+    },
+    "chat.message.reply": {
+      "text": "השבה",
+      "status": "machine"
+    },
+    "chat.message.select": {
+      "text": "בחירה",
+      "status": "machine"
+    },
+    "chat.message.sending": {
+      "text": "שולחים...",
+      "status": "machine"
+    },
+    "chat.message.sent": {
+      "text": "נשלחה",
+      "status": "machine"
+    },
+    "chat.message.unpin": {
+      "text": "ביטול הצמדה",
+      "status": "machine"
+    },
+    "chat.not_found.back": {
+      "text": "חזרה לצ׳אטים",
+      "status": "machine"
+    },
+    "chat.not_found.body": {
+      "text": "הקישור הזה לא תואם אף צ׳אט במכשיר הזה.",
+      "status": "machine"
+    },
+    "chat.not_found.title": {
+      "text": "הצ׳אט לא נמצא",
+      "status": "machine"
+    },
+    "chat.peer.fallback_name": {
+      "text": "הצד השני",
+      "status": "machine"
+    },
+    "chat.photo.load_failed": {
+      "text": "לא ניתן היה לטעון את התמונה",
+      "status": "machine"
+    },
+    "chat.photo.load_failed_retry": {
+      "text": "לא ניתן היה לטעון את התמונה, הקישו כדי לנסות שוב",
+      "status": "machine"
+    },
+    "chat.photo.loading": {
+      "text": "תמונה, בטעינה",
+      "status": "machine"
+    },
+    "chat.photo.open": {
+      "text": "פתיחת התמונה",
+      "status": "machine"
+    },
+    "chat.photo.viewer": {
+      "text": "מציג התמונות",
+      "status": "machine"
+    },
+    "chat.photo.viewer_hint": {
+      "text": "צביטה להגדלה. החלקה למטה לסגירה.",
+      "status": "machine"
+    },
+    "chat.pin.detail_personal": {
+      "text": "רק במכשיר הזה",
+      "status": "machine"
+    },
+    "chat.pin.detail_shared": {
+      "text": "כל החברים רואים אותה",
+      "status": "machine"
+    },
+    "chat.pin.for_both": {
+      "text": "הצמדה לשניכם",
+      "status": "machine"
+    },
+    "chat.pin.for_everyone": {
+      "text": "הצמדה לכולם",
+      "status": "machine"
+    },
+    "chat.pin.for_me": {
+      "text": "הצמדה רק אצלי",
+      "status": "machine"
+    },
+    "chat.pin.sheet_title": {
+      "text": "הצמדת הודעה",
+      "status": "machine"
+    },
+    "chat.pinned_bar.all": {
+      "text": "כל ההודעות המוצמדות",
+      "status": "machine"
+    },
+    "chat.pinned_bar.for_you": {
+      "text": "בשבילכם",
+      "status": "machine"
+    },
+    "chat.pinned_bar.hint": {
+      "text": "מציג את ההודעה",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label": {
+      "text": "הודעה מוצמדת",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label_of": {
+      "text": "הודעה מוצמדת {index} מתוך {count}",
+      "status": "machine"
+    },
+    "chat.pinned_bar.list_title": {
+      "text": "הודעות מוצמדות",
+      "status": "machine"
+    },
+    "chat.reaction.add_title": {
+      "text": "תגובה - הגיבו: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by": {
+      "text": "הגיבו: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by_title": {
+      "text": "הגיבו",
+      "status": "machine"
+    },
+    "chat.reaction.remove_title": {
+      "text": "הסרת התגובה שלכם - הגיבו: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.single_emoji": {
+      "text": "תגובה חייבת להיות אמוג׳י אחד בלבד.",
+      "status": "machine"
+    },
+    "chat.reauth.action": {
+      "text": "התחברות מחדש",
+      "status": "machine"
+    },
+    "chat.reauth.body": {
+      "text": "המפתחות הדרושים לפענוח ולחתימה של הודעות לא זמינים בהפעלה הזו. התחברו מחדש כדי לפתוח את הצ׳אט הזה.",
+      "status": "machine"
+    },
+    "chat.reauth.title": {
+      "text": "התחברו מחדש",
+      "status": "machine"
+    },
+    "chat.record.bar_video": {
+      "text": "מקליטים הודעת וידאו",
+      "status": "machine"
+    },
+    "chat.record.bar_voice": {
+      "text": "מקליטים הודעה קולית",
+      "status": "machine"
+    },
+    "chat.record.cancelled": {
+      "text": "בוטל",
+      "status": "machine"
+    },
+    "chat.record.delete": {
+      "text": "מחיקת ההקלטה",
+      "status": "machine"
+    },
+    "chat.record.denied_camera": {
+      "text": "Lakko צריכה גישה למצלמה כדי להקליט הודעות וידאו. אפשרו גישה למצלמה בהגדרות האתר בדפדפן.",
+      "status": "machine"
+    },
+    "chat.record.denied_camera_app": {
+      "text": "Lakko צריכה גישה למצלמה כדי להקליט הודעות וידאו",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone": {
+      "text": "Lakko צריכה גישה למיקרופון כדי להקליט הודעות קוליות. אפשרו גישה למיקרופון בהגדרות האתר בדפדפן.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_app": {
+      "text": "Lakko צריכה גישה למיקרופון כדי להקליט הודעות קוליות",
+      "status": "machine"
+    },
+    "chat.record.finishing": {
+      "text": "מסיימים את ההקלטה",
+      "status": "machine"
+    },
+    "chat.record.flip_camera": {
+      "text": "החלפת מצלמה",
+      "status": "machine"
+    },
+    "chat.record.flip_failed": {
+      "text": "לא ניתן היה להחליף מצלמה",
+      "status": "machine"
+    },
+    "chat.record.hint_hold": {
+      "text": "לחצו לחיצה ארוכה כדי להקליט",
+      "status": "machine"
+    },
+    "chat.record.in_call": {
+      "text": "לא זמין במהלך שיחה",
+      "status": "machine"
+    },
+    "chat.record.locked_hint": {
+      "text": "מתחיל הקלטה נעולה",
+      "status": "machine"
+    },
+    "chat.record.no_camera": {
+      "text": "לא נמצאה מצלמה",
+      "status": "machine"
+    },
+    "chat.record.open_settings": {
+      "text": "פתיחת ההגדרות",
+      "status": "machine"
+    },
+    "chat.record.pause": {
+      "text": "השהיית ההקלטה",
+      "status": "machine"
+    },
+    "chat.record.pause_video": {
+      "text": "השהיית הודעת הווידאו",
+      "status": "machine"
+    },
+    "chat.record.play": {
+      "text": "הפעלת ההקלטה, {duration}",
+      "status": "machine"
+    },
+    "chat.record.play_video_sound": {
+      "text": "הפעלת הודעת הווידאו עם קול",
+      "status": "machine"
+    },
+    "chat.record.position": {
+      "text": "מיקום בהקלטה",
+      "status": "machine"
+    },
+    "chat.record.recording_duration": {
+      "text": "מקליטים, {duration}",
+      "status": "machine"
+    },
+    "chat.record.send": {
+      "text": "שליחת ההקלטה",
+      "status": "machine"
+    },
+    "chat.record.silent_mic": {
+      "text": "אין קול מהמיקרופון",
+      "status": "machine"
+    },
+    "chat.record.slide_cancel": {
+      "text": "› החליקו לביטול",
+      "status": "machine"
+    },
+    "chat.record.start_failed": {
+      "text": "לא ניתן היה להתחיל להקליט",
+      "status": "machine"
+    },
+    "chat.record.starting": {
+      "text": "מתחילים…",
+      "status": "machine"
+    },
+    "chat.record.stop": {
+      "text": "עצירת ההקלטה",
+      "status": "machine"
+    },
+    "chat.record.stop_short": {
+      "text": "עצירה",
+      "status": "machine"
+    },
+    "chat.record.switch_to_video": {
+      "text": "מעבר להודעת וידאו",
+      "status": "machine"
+    },
+    "chat.record.switch_to_voice": {
+      "text": "מעבר להודעה קולית",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video": {
+      "text": "אי אפשר להקליט הודעות וידאו בדפדפן הזה",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video_device": {
+      "text": "אי אפשר להקליט הודעות וידאו במכשיר הזה",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice": {
+      "text": "אי אפשר להקליט הודעות קוליות בדפדפן הזה",
+      "status": "machine"
+    },
+    "chat.record.video": {
+      "text": "הקלטת הודעת וידאו",
+      "status": "machine"
+    },
+    "chat.record.video_ready": {
+      "text": "הודעת הווידאו מוכנה",
+      "status": "machine"
+    },
+    "chat.record.video_tooltip": {
+      "text": "הקלטת הודעת וידאו: לחיצה ארוכה להקלטה, הקשה למעבר לקול",
+      "status": "machine"
+    },
+    "chat.record.voice": {
+      "text": "הקלטת הודעה קולית",
+      "status": "machine"
+    },
+    "chat.record.voice_tooltip": {
+      "text": "הקלטת הודעה קולית: לחיצה ארוכה להקלטה, הקשה למעבר לווידאו",
+      "status": "machine"
+    },
+    "chat.refusal.add_not_admin": {
+      "text": "רק הבעלים של הקבוצה או מנהל יכולים להוסיף חברים.",
+      "status": "machine"
+    },
+    "chat.refusal.device_binding": {
+      "text": "יש בעיה במפתח של המכשיר הזה. הסירו אותו ב„מכשירים” והוסיפו אותו שוב.",
+      "status": "machine"
+    },
+    "chat.refusal.device_limit": {
+      "text": "{count, plural, one {עד מכשיר אחד לכל חשבון. הסירו מכשיר קודם.} two {עד שני מכשירים לכל חשבון. הסירו מכשיר קודם.} other {עד # מכשירים לכל חשבון. הסירו מכשיר קודם.}}",
+      "status": "machine"
+    },
+    "chat.refusal.fallback": {
+      "text": "לא ניתן היה לבקש את השינוי הזה.",
+      "status": "machine"
+    },
+    "chat.refusal.join_not_kept": {
+      "text": "בקשת הצטרפות הגיעה כשכבר המתינו יותר מדי בקשות, ולכן היא לא נשמרה. בקשו מהאדם לשלוח אותה שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "chat.refusal.joiner_member": {
+      "text": "האדם הזה כבר הצטרף לקבוצה.",
+      "status": "machine"
+    },
+    "chat.refusal.no_join_request": {
+      "text": "בקשת ההצטרפות הזו כבר לא ממתינה.",
+      "status": "machine"
+    },
+    "chat.refusal.not_owner": {
+      "text": "רק הבעלים של הקבוצה יכולים לשנות מנהלים או להעביר את הבעלות.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_cannot_leave": {
+      "text": "הבעלים של הקבוצה לא יכולים לצאת ממנה.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_not_member": {
+      "text": "רק חבר נוכחי בקבוצה יכול להיות הבעלים שלה.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_unremovable": {
+      "text": "אי אפשר להסיר את הבעלים של הקבוצה.",
+      "status": "machine"
+    },
+    "chat.refusal.pending_full": {
+      "text": "כבר ממתינים להחלה יותר מדי שינויים.",
+      "status": "machine"
+    },
+    "chat.refusal.remove_not_admin": {
+      "text": "רק הבעלים של הקבוצה או מנהל יכולים להסיר חברים.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_many": {
+      "text": "חכו שהם יוחלו ואז נסו שוב.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_one": {
+      "text": "חכו שהוא יוחל ואז נסו שוב.",
+      "status": "machine"
+    },
+    "chat.refusal.role_change_pending": {
+      "text": "שינוי תפקיד כבר ממתין להחלה.",
+      "status": "machine"
+    },
+    "chat.refusal.with_retry": {
+      "text": "{fact} {retry}",
+      "status": "machine"
+    },
+    "chat.reply.cancel": {
+      "text": "ביטול התשובה",
+      "status": "machine"
+    },
+    "chat.reply.fallback_excerpt": {
+      "text": "הודעה",
+      "status": "machine"
+    },
+    "chat.reply.quote": {
+      "text": "תשובה",
+      "status": "machine"
+    },
+    "chat.reply.quote_to": {
+      "text": "תשובה ל-{name}",
+      "status": "machine"
+    },
+    "chat.reply.strip_label": {
+      "text": "תשובה ל-{name}",
+      "status": "machine"
+    },
+    "chat.select.count": {
+      "text": "{count, plural, one {הודעה אחת נבחרה} two {שתי הודעות נבחרו} other {# הודעות נבחרו}}",
+      "status": "machine"
+    },
+    "chat.select.count_limit": {
+      "text": "{count, plural, one {הודעה אחת נבחרה, המקסימום} two {שתי הודעות נבחרו, המקסימום} other {# הודעות נבחרו, המקסימום}}",
+      "status": "machine"
+    },
+    "chat.select.delete_helper": {
+      "text": "אפשר למחוק רק את ההודעות שלכם.",
+      "status": "machine"
+    },
+    "chat.select.delete_title": {
+      "text": "{count, plural, one {למחוק הודעה אחת?} two {למחוק שתי הודעות?} other {למחוק # הודעות?}}",
+      "status": "machine"
+    },
+    "chat.select.deleted_of": {
+      "text": "נמחקו {done} מתוך {total}.",
+      "status": "machine"
+    },
+    "chat.select.forwarded_of": {
+      "text": "הועברו {done} מתוך {total}.",
+      "status": "machine"
+    },
+    "chat.select.state_not_selected": {
+      "text": "לא נבחרה",
+      "status": "machine"
+    },
+    "chat.select.state_selected": {
+      "text": "נבחרה",
+      "status": "machine"
+    },
+    "chat.select.toolbar": {
+      "text": "הודעות שנבחרו",
+      "status": "machine"
+    },
+    "chat.send.failed": {
+      "text": "לא ניתן היה לשלוח.",
+      "status": "machine"
+    },
+    "chat.system.join_request": {
+      "text": "בקשת הצטרפות",
+      "status": "machine"
+    },
+    "chat.system.members_changed": {
+      "text": "החברים השתנו",
+      "status": "machine"
+    },
+    "chat.timeline.empty": {
+      "text": "אין עדיין הודעות. תגידו שלום.",
+      "status": "machine"
+    },
+    "chat.timeline.setting_up": {
+      "text": "הצ׳אט הזה עדיין בהגדרה במכשיר הזה.",
+      "status": "machine"
+    },
+    "chat.transfer.action": {
+      "text": "העברת הבעלות",
+      "status": "machine"
+    },
+    "chat.transfer.action_named": {
+      "text": "הפיכת {name} לבעלים",
+      "status": "machine"
+    },
+    "chat.transfer.become_member": {
+      "text": "לחזור להיות חבר רגיל",
+      "status": "machine"
+    },
+    "chat.transfer.become_member_detail": {
+      "text": "תוותרו מיד על כל ההרשאות בקבוצה. רק הבעלים החדשים יכולים להחזיר לכם חלק מהן.",
+      "status": "machine"
+    },
+    "chat.transfer.candidate_admin": {
+      "text": "{name}, מנהל",
+      "status": "machine"
+    },
+    "chat.transfer.done_admin": {
+      "text": "הבעלות על הקבוצה עברה אל {name}. אתם עדיין מנהלים.",
+      "status": "machine"
+    },
+    "chat.transfer.done_member": {
+      "text": "הבעלות על הקבוצה עברה אל {name}. אתם עכשיו חברים רגילים.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_body": {
+      "text": "רק הבעלים יכולים לשנות תפקידים. אחרי שתעבירו את הקבוצה לא תוכלו לקבל אותה בחזרה, לא תוכלו לשחזר את תפקיד הבעלים שלכם ולא תוכלו לשנות שוב את התפקיד שלכם, אלא אם הבעלים החדשים יעשו זאת בשבילכם.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_title": {
+      "text": "אי אפשר לבטל את הפעולה הזו.",
+      "status": "machine"
+    },
+    "chat.transfer.leave_blocked": {
+      "text": "קודם העבירו את הבעלות: אי אפשר לעזוב קבוצה בלי בעלים.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner": {
+      "text": "אתם עכשיו הבעלים של הקבוצה הזו.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_body": {
+      "text": "אתם יכולים להוסיף ולהסיר חברים, לשנות מנהלים ולהעביר את הבעלות למישהו אחר.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_legend": {
+      "text": "בעלים חדשים",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_named": {
+      "text": "קיבלתם מ-{name} את הבעלות על הקבוצה הזו.",
+      "status": "machine"
+    },
+    "chat.transfer.no_candidates": {
+      "text": "אין אף אחד אחר בקבוצה הזו להעביר אליו את הבעלות.",
+      "status": "machine"
+    },
+    "chat.transfer.pending": {
+      "text": "העברת הבעלות ממתינה להחלה.",
+      "status": "machine"
+    },
+    "chat.transfer.pending_named": {
+      "text": "ממתינים להפיכת {name} לבעלים.",
+      "status": "machine"
+    },
+    "chat.transfer.requested": {
+      "text": "נשלחה בקשה להעברת הבעלות. היא תיכנס לתוקף כשהבעלים או אחד המנהלים יחילו את השינוי.",
+      "status": "machine"
+    },
+    "chat.transfer.role_change_pending": {
+      "text": "שינוי תפקיד כבר ממתין להחלה. חכו שהוא יוחל ואז נסו שוב.",
+      "status": "machine"
+    },
+    "chat.transfer.role_legend": {
+      "text": "התפקיד שלכם אחר כך",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin": {
+      "text": "להישאר מנהל",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin_detail": {
+      "text": "עדיין תוכלו להוסיף ולהסיר חברים. אפשר לוותר על כך מאוחר יותר בבקשה מהבעלים החדשים.",
+      "status": "machine"
+    },
+    "chat.transfer.unlocks_leave": {
+      "text": "אחרי שהשינוי יוחל, תוכלו לצאת מהקבוצה כמו כל חבר אחר.",
+      "status": "machine"
+    },
+    "chat.typing.named": {
+      "text": "{name} בהקלדה...",
+      "status": "machine"
+    },
+    "chat.typing.one_to_one": {
+      "text": "בהקלדה...",
+      "status": "machine"
+    },
+    "chat.typing.several": {
+      "text": "כמה אנשים מקלידים...",
+      "status": "machine"
+    },
+    "chat.unpin.for_both": {
+      "text": "ביטול ההצמדה לשניכם",
+      "status": "machine"
+    },
+    "chat.unpin.for_everyone": {
+      "text": "ביטול ההצמדה לכולם",
+      "status": "machine"
+    },
+    "chat.unpin.for_me": {
+      "text": "ביטול ההצמדה אצלי",
+      "status": "machine"
+    },
+    "chat.unpin.sheet_title": {
+      "text": "ביטול הצמדת ההודעה",
+      "status": "machine"
+    },
+    "chat.upload.encrypting": {
+      "text": "מצפינים את „{name}”…",
+      "status": "machine"
+    },
+    "chat.upload.encrypting_of": {
+      "text": "מצפינים את „{name}” ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.preparing": {
+      "text": "מכינים את „{name}”…",
+      "status": "machine"
+    },
+    "chat.upload.selected_item": {
+      "text": "הפריט שנבחר",
+      "status": "machine"
+    },
+    "chat.upload.uploading": {
+      "text": "מעלים את „{name}”…",
+      "status": "machine"
+    },
+    "chat.upload.uploading_of": {
+      "text": "מעלים את „{name}” ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.working": {
+      "text": "מצפינים ומעלים…",
+      "status": "machine"
+    },
+    "chat.video.load_failed": {
+      "text": "לא ניתן היה לטעון את הסרטון",
+      "status": "machine"
+    },
+    "chat.video.load_failed_retry": {
+      "text": "לא ניתן היה לטעון את הסרטון, הקישו כדי לנסות שוב",
+      "status": "machine"
+    },
+    "chat.video.loading": {
+      "text": "טוען סרטון, {size}",
+      "status": "machine"
+    },
+    "chat.video.open": {
+      "text": "הפעלת הסרטון",
+      "status": "machine"
+    },
+    "chat.video.play": {
+      "text": "הפעלת הסרטון, {size}",
+      "status": "machine"
+    },
+    "chat.video.play_failed": {
+      "text": "לא ניתן היה להפעיל את הסרטון הזה",
+      "status": "machine"
+    },
+    "chat.video.player": {
+      "text": "נגן וידאו",
+      "status": "machine"
+    },
+    "chat.video_note.loading": {
+      "text": "הודעת וידאו, בטעינה",
+      "status": "machine"
+    },
+    "chat.video_note.play": {
+      "text": "הפעלת הודעת הווידאו, {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.play_sound": {
+      "text": "הפעלת הודעת הווידאו עם קול, {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.poster": {
+      "text": "תמונת תצוגה של הודעת הווידאו",
+      "status": "machine"
+    },
+    "chat.video_note.tap_mute": {
+      "text": "הקישו להשתקה",
+      "status": "machine"
+    },
+    "chat.video_note.tap_sound": {
+      "text": "הקישו לשמיעת קול",
+      "status": "machine"
+    },
+    "chat.voice.change_speed": {
+      "text": "שינוי מהירות ההפעלה",
+      "status": "machine"
+    },
+    "chat.voice.not_played": {
+      "text": "לא הושמעה",
+      "status": "machine"
+    },
+    "chat.voice.pause": {
+      "text": "השהיית ההודעה הקולית",
+      "status": "machine"
+    },
+    "chat.voice.play": {
+      "text": "הפעלת ההודעה הקולית, {duration}",
+      "status": "machine"
+    },
+    "chat.voice.position": {
+      "text": "{position} מתוך {duration}",
+      "status": "machine"
+    },
+    "chat.voice.seek": {
+      "text": "דילוג בהודעה הקולית",
+      "status": "machine"
+    },
+    "chat.voice.speed": {
+      "text": "מהירות הפעלה {rate}",
+      "status": "machine"
+    },
+    "chats.action.archive": {
+      "text": "העברה לארכיון",
+      "status": "machine"
+    },
+    "chats.action.mute": {
+      "text": "השתקה",
+      "status": "machine"
+    },
+    "chats.action.pin": {
+      "text": "הצמדה",
+      "status": "machine"
+    },
+    "chats.action.unarchive": {
+      "text": "הוצאה מהארכיון",
+      "status": "machine"
+    },
+    "chats.action.unmute": {
+      "text": "ביטול השתקה",
+      "status": "machine"
+    },
+    "chats.action.unpin": {
+      "text": "ביטול הצמדה",
+      "status": "machine"
+    },
+    "chats.compose": {
+      "text": "חדש",
+      "status": "machine"
+    },
+    "chats.create.channel": {
+      "text": "יצירת ערוץ",
+      "status": "machine"
+    },
+    "chats.create.chat": {
+      "text": "צ׳אט חדש",
+      "status": "machine"
+    },
+    "chats.create.group": {
+      "text": "יצירת קבוצה",
+      "status": "machine"
+    },
+    "chats.create.menu": {
+      "text": "יצירה",
+      "status": "machine"
+    },
+    "chats.empty.action": {
+      "text": "התחילו צ׳אט",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "בחרו צ׳אט כדי להתחיל לשלוח הודעות",
+      "status": "machine"
+    },
+    "chats.empty.title": {
+      "text": "אין עדיין צ׳אטים",
+      "status": "machine"
+    },
+    "chats.lookup.action": {
+      "text": "חיפוש {name}",
+      "status": "machine"
+    },
+    "chats.lookup.nothing": {
+      "text": "לא נמצאו תוצאות עבור {name}.",
+      "status": "machine"
+    },
+    "chats.lookup.unreachable": {
+      "text": "לא ניתן היה לחפש. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "chats.new_chat.add_contact": {
+      "text": "הוספת איש קשר",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts": {
+      "text": "אין עדיין אנשי קשר",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts_body": {
+      "text": "צ׳אט מתחיל עם מישהו שאתם מכירים.",
+      "status": "machine"
+    },
+    "chats.new_chat.not_available": {
+      "text": "הצ׳אט עדיין לא זמין במכשיר הזה",
+      "status": "machine"
+    },
+    "chats.new_group.accept_again": {
+      "text": "אשרו שוב את איש הקשר הזה כדי להוסיף אותו לקבוצה.",
+      "status": "machine"
+    },
+    "chats.new_group.creating": {
+      "text": "יוצרים...",
+      "status": "machine"
+    },
+    "chats.new_group.error": {
+      "text": "לא ניתן היה ליצור את הקבוצה. נסו שוב.",
+      "status": "machine"
+    },
+    "chats.new_group.name_label": {
+      "text": "שם הקבוצה (לא חובה)",
+      "status": "machine"
+    },
+    "chats.new_group.no_contacts": {
+      "text": "קבוצה מתחילה מאנשים שאתם כבר מכירים.",
+      "status": "machine"
+    },
+    "chats.new_group.open_contacts": {
+      "text": "מעבר לאנשי הקשר",
+      "status": "machine"
+    },
+    "chats.new_group.title": {
+      "text": "קבוצה חדשה",
+      "status": "machine"
+    },
+    "chats.preview.own": {
+      "text": "את/ה: {text}",
+      "status": "machine"
+    },
+    "chats.preview.sender": {
+      "text": "{name}: {text}",
+      "status": "machine"
+    },
+    "chats.row.actions": {
+      "text": "פעולות על הצ׳אט",
+      "status": "machine"
+    },
+    "chats.row.call.label": {
+      "text": "{kind} מ-{name}",
+      "status": "machine"
+    },
+    "chats.row.ended": {
+      "text": "אתם כבר לא חברים.",
+      "status": "machine"
+    },
+    "chats.row.muted": {
+      "text": "מושתק",
+      "status": "machine"
+    },
+    "chats.row.no_messages": {
+      "text": "אין עדיין הודעות",
+      "status": "machine"
+    },
+    "chats.row.people": {
+      "text": "{count, plural, one {אדם אחד} two {שני אנשים} other {# אנשים}}",
+      "status": "machine"
+    },
+    "chats.row.pinned": {
+      "text": "מוצמד",
+      "status": "machine"
+    },
+    "chats.row.unread": {
+      "text": "{count, plural, one {הודעה אחת שלא נקראה} two {שתי הודעות שלא נקראו} other {# הודעות שלא נקראו}}",
+      "status": "machine"
+    },
+    "chats.row.unread_overflow": {
+      "text": "99+",
+      "status": "machine"
+    },
+    "chats.search.clear": {
+      "text": "ניקוי החיפוש",
+      "status": "machine"
+    },
+    "chats.search.label": {
+      "text": "חיפוש צ׳אטים",
+      "status": "machine"
+    },
+    "chats.search.no_results": {
+      "text": "אין תוצאות",
+      "status": "machine"
+    },
+    "chats.search.placeholder": {
+      "text": "חיפוש",
+      "status": "machine"
+    },
+    "chats.synchronizing": {
+      "text": "מסנכרנים...",
       "status": "machine"
     },
     "common.adding": {
@@ -366,12 +2086,28 @@
       "text": "העתקה",
       "status": "machine"
     },
+    "common.delete": {
+      "text": "מחיקה",
+      "status": "machine"
+    },
     "common.dismiss": {
       "text": "סגירה",
       "status": "machine"
     },
     "common.done": {
       "text": "סיום",
+      "status": "machine"
+    },
+    "common.duration.minutes": {
+      "text": "{count, plural, one {דקה} two {שתי דקות} other {# דקות}}",
+      "status": "machine"
+    },
+    "common.duration.minutes_seconds": {
+      "text": "{minutes} ו-{seconds}",
+      "status": "machine"
+    },
+    "common.duration.seconds": {
+      "text": "{count, plural, one {שנייה} two {שתי שניות} other {# שניות}}",
       "status": "machine"
     },
     "common.email": {
@@ -422,6 +2158,10 @@
       "text": "הרחבה",
       "status": "machine"
     },
+    "common.list_pair": {
+      "text": "{first}, {second}",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "טוען...",
       "status": "machine"
@@ -438,8 +2178,16 @@
       "text": "אפשרויות נוספות",
       "status": "machine"
     },
+    "common.not_now": {
+      "text": "לא עכשיו",
+      "status": "machine"
+    },
     "common.off": {
       "text": "כבוי",
+      "status": "machine"
+    },
+    "common.ok": {
+      "text": "אישור",
       "status": "machine"
     },
     "common.on": {
@@ -474,6 +2222,10 @@
       "text": "מסיר...",
       "status": "machine"
     },
+    "common.retry": {
+      "text": "ניסיון חוזר",
+      "status": "machine"
+    },
     "common.save": {
       "text": "שמירה",
       "status": "machine"
@@ -486,8 +2238,28 @@
       "text": "שולחים...",
       "status": "machine"
     },
+    "common.sentence_pair": {
+      "text": "{first} {second}",
+      "status": "machine"
+    },
     "common.set_up": {
       "text": "הגדרה",
+      "status": "machine"
+    },
+    "common.size.bytes": {
+      "text": "{size} בתים",
+      "status": "machine"
+    },
+    "common.size.gb": {
+      "text": "{size} GB",
+      "status": "machine"
+    },
+    "common.size.kb": {
+      "text": "{size} KB",
+      "status": "machine"
+    },
+    "common.size.mb": {
+      "text": "{size} MB",
       "status": "machine"
     },
     "common.try_again": {
@@ -732,6 +2504,26 @@
     },
     "display_name.error.unknown": {
       "text": "לא ניתן להשתמש בשם הזה",
+      "status": "machine"
+    },
+    "ds.clock_skew": {
+      "text": "בדקו את התאריך והשעה במכשיר הזה.",
+      "status": "machine"
+    },
+    "group.join.not_taking_requests": {
+      "text": "הקבוצה הזו עדיין לא מקבלת בקשות. נסו שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "group.join.request_again": {
+      "text": "שליחת בקשה שוב",
+      "status": "machine"
+    },
+    "group.join.wait_primary": {
+      "text": "הבקשה נשלחה. אחד המנהלים מאשר אותה, ואז השינוי מוחל על הקבוצה.",
+      "status": "machine"
+    },
+    "group.join.wait_secondary": {
+      "text": "לאף אחד משני השלבים אין מגבלת זמן. אם שום דבר לא קורה, אפשר לשלוח את הבקשה שוב.",
       "status": "machine"
     },
     "language.name.ar": {
@@ -1952,6 +3744,14 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "מספרי בטיחות",
+      "status": "machine"
+    },
+    "tokens.action_allowance_used": {
+      "text": "ניצלתם את המכסה היומית לפעולה הזו. נסו שוב מחר.",
+      "status": "machine"
+    },
+    "tokens.lookup_allowance_used": {
+      "text": "חיפשתם היום הרבה אנשים. נסו שוב מחר.",
       "status": "machine"
     },
     "username.a11y_hint": {

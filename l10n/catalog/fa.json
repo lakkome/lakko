@@ -250,6 +250,22 @@
       "text": "در حال ورود شما به تماس...",
       "status": "machine"
     },
+    "call.incoming.accept": {
+      "text": "پاسخ",
+      "status": "machine"
+    },
+    "call.incoming.accept_from": {
+      "text": "پاسخ به تماس {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline": {
+      "text": "رد کردن",
+      "status": "machine"
+    },
+    "call.incoming.decline_from": {
+      "text": "رد تماس {name}",
+      "status": "machine"
+    },
     "call.link.connecting": {
       "text": "در حال اتصال...",
       "status": "machine"
@@ -314,8 +330,1712 @@
       "text": "می‌توانید این صفحه را ترک کنید؛ پس از پذیرش به تماس می‌پیوندید.",
       "status": "machine"
     },
+    "chat.attachment.error.attach": {
+      "text": "پیوست کردن مورد انتخاب‌شده ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.attachment.error.attach_named": {
+      "text": "پیوست کردن «{name}» ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.attachment.error.download": {
+      "text": "بارگیری پیوست ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.attachment.error.gone": {
+      "text": "این پیوست دیگر روی سرور موجود نیست.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_photo": {
+      "text": "باز کردن این عکس ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_video": {
+      "text": "باز کردن این ویدیو ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.attachment.error.prepare_video": {
+      "text": "آماده‌سازی این ویدیو ممکن نشد. ویدیوهای تا {limit} را می‌توان ارسال کرد.",
+      "status": "machine"
+    },
+    "chat.attachment.error.preview": {
+      "text": "نمایش تصویر ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large": {
+      "text": "حجم این پیام {size} است و از سقف {limit} بیشتر است.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large_named": {
+      "text": "حجم «{name}» {size} است و از سقف {limit} بیشتر است.",
+      "status": "machine"
+    },
+    "chat.attachment.error.upload": {
+      "text": "بارگذاری «{name}» ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.attachment.hide": {
+      "text": "پنهان کردن",
+      "status": "machine"
+    },
+    "chat.attachment.image_alt": {
+      "text": "تصویر پیوست",
+      "status": "machine"
+    },
+    "chat.attachment.open": {
+      "text": "باز کردن",
+      "status": "machine"
+    },
+    "chat.attachment.save_title": {
+      "text": "ذخیره پیوست",
+      "status": "machine"
+    },
+    "chat.attachment.unnamed": {
+      "text": "(بی‌نام)",
+      "status": "machine"
+    },
+    "chat.author.a_member": {
+      "text": "یکی از اعضا",
+      "status": "machine"
+    },
+    "chat.author.unknown": {
+      "text": "فرستنده ناشناس",
+      "status": "machine"
+    },
+    "chat.author.you": {
+      "text": "شما",
+      "status": "machine"
+    },
+    "chat.call.busy": {
+      "text": "تماس دیگری در جریان است.",
+      "status": "machine"
+    },
+    "chat.call.error.start": {
+      "text": "شروع تماس ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.call.group_ended": {
+      "text": "این تماس گروهی پایان یافته است.",
+      "status": "machine"
+    },
+    "chat.call.group_in_progress": {
+      "text": "تماس گروهی در جریان است",
+      "status": "machine"
+    },
+    "chat.call.group_people": {
+      "text": "{count, plural, one {# نفر در تماس} other {# نفر در تماس}}",
+      "status": "machine"
+    },
+    "chat.call.group_starting": {
+      "text": "در حال شروع…",
+      "status": "machine"
+    },
+    "chat.call.group_status_e2ee": {
+      "text": "{status} · رمزگذاری‌شده سرتاسری",
+      "status": "machine"
+    },
+    "chat.call.join": {
+      "text": "پیوستن به تماس",
+      "status": "machine"
+    },
+    "chat.call.join_short": {
+      "text": "پیوستن",
+      "status": "machine"
+    },
+    "chat.call.join_video": {
+      "text": "پیوستن با ویدیو",
+      "status": "machine"
+    },
+    "chat.call.last_ended.busy": {
+      "text": "آخرین تماس پایان یافت: طرف مقابل مشغول بود.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.declined": {
+      "text": "آخرین تماس پایان یافت: رد شد.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.error": {
+      "text": "آخرین تماس به دلیل خطا پایان یافت.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.hung_up": {
+      "text": "آخرین تماس پایان یافت.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.timed_out": {
+      "text": "آخرین تماس پایان یافت: پاسخی داده نشد.",
+      "status": "machine"
+    },
+    "chat.call.unavailable": {
+      "text": "تماس گروهی در حال حاضر در دسترس نیست.",
+      "status": "machine"
+    },
+    "chat.call.video": {
+      "text": "تماس تصویری",
+      "status": "machine"
+    },
+    "chat.call.voice": {
+      "text": "تماس",
+      "status": "machine"
+    },
+    "chat.composer.attach": {
+      "text": "پیوست کردن فایل",
+      "status": "machine"
+    },
+    "chat.composer.attach_limit": {
+      "text": "پیوست کردن فایل (هر کدام حداکثر {limit})",
+      "status": "machine"
+    },
+    "chat.composer.attach_media": {
+      "text": "عکس یا ویدیو",
+      "status": "machine"
+    },
+    "chat.composer.drop_files": {
+      "text": "فایل‌ها را برای پیوست کردن اینجا رها کنید",
+      "status": "machine"
+    },
+    "chat.composer.emoji_gifs": {
+      "text": "ایموجی و GIF",
+      "status": "machine"
+    },
+    "chat.composer.photo_library": {
+      "text": "کتابخانه عکس",
+      "status": "machine"
+    },
+    "chat.composer.placeholder": {
+      "text": "پیام",
+      "status": "machine"
+    },
+    "chat.composer.remove_attachment": {
+      "text": "حذف پیوست",
+      "status": "machine"
+    },
+    "chat.composer.send": {
+      "text": "ارسال",
+      "status": "machine"
+    },
+    "chat.day.today": {
+      "text": "امروز",
+      "status": "machine"
+    },
+    "chat.day.yesterday": {
+      "text": "دیروز",
+      "status": "machine"
+    },
+    "chat.delete.body": {
+      "text": "با این کار گفتگو و پیام‌هایش از این دستگاه حذف می‌شود. هیچ نسخه‌ای در جای دیگری وجود ندارد و این کار برگشت‌پذیر نیست.",
+      "status": "machine"
+    },
+    "chat.delete.confirm_named": {
+      "text": "حذف {name}",
+      "status": "machine"
+    },
+    "chat.delete.control": {
+      "text": "حذف این گفتگو",
+      "status": "machine"
+    },
+    "chat.delete.title": {
+      "text": "این گفتگو حذف شود؟",
+      "status": "machine"
+    },
+    "chat.edit.title": {
+      "text": "ویرایش پیام",
+      "status": "machine"
+    },
+    "chat.emoji.categories": {
+      "text": "دسته‌های ایموجی",
+      "status": "machine"
+    },
+    "chat.emoji.choose": {
+      "text": "انتخاب",
+      "status": "machine"
+    },
+    "chat.emoji.choose_reaction": {
+      "text": "یک واکنش انتخاب کنید",
+      "status": "machine"
+    },
+    "chat.emoji.group.activities": {
+      "text": "فعالیت‌ها",
+      "status": "machine"
+    },
+    "chat.emoji.group.animals": {
+      "text": "حیوانات و طبیعت",
+      "status": "machine"
+    },
+    "chat.emoji.group.flags": {
+      "text": "پرچم‌ها",
+      "status": "machine"
+    },
+    "chat.emoji.group.food": {
+      "text": "خوردنی و نوشیدنی",
+      "status": "machine"
+    },
+    "chat.emoji.group.objects": {
+      "text": "اشیا",
+      "status": "machine"
+    },
+    "chat.emoji.group.people": {
+      "text": "آدم‌ها و بدن",
+      "status": "machine"
+    },
+    "chat.emoji.group.smileys": {
+      "text": "شکلک‌ها و احساسات",
+      "status": "machine"
+    },
+    "chat.emoji.group.symbols": {
+      "text": "نمادها",
+      "status": "machine"
+    },
+    "chat.emoji.group.travel": {
+      "text": "سفر و مکان‌ها",
+      "status": "machine"
+    },
+    "chat.emoji.insert": {
+      "text": "درج",
+      "status": "machine"
+    },
+    "chat.emoji.no_results": {
+      "text": "ایموجی‌ای پیدا نشد",
+      "status": "machine"
+    },
+    "chat.emoji.recent": {
+      "text": "اخیر",
+      "status": "machine"
+    },
+    "chat.emoji.search": {
+      "text": "جستجوی ایموجی",
+      "status": "machine"
+    },
+    "chat.emoji.skin_tones": {
+      "text": "رنگ‌های پوست برای {name}",
+      "status": "machine"
+    },
+    "chat.emoji.tab": {
+      "text": "ایموجی",
+      "status": "machine"
+    },
+    "chat.ended.composer": {
+      "text": "دیگر نمی‌توانید به این گروه پیام بفرستید.",
+      "status": "machine"
+    },
+    "chat.ended.consequence": {
+      "text": "پیام‌هایی که دریافت کرده‌اید همچنان اینجا هستند. پیام تازه‌ای نخواهد رسید.",
+      "status": "machine"
+    },
+    "chat.ended.left": {
+      "text": "شما از این گروه خارج شدید.",
+      "status": "machine"
+    },
+    "chat.ended.no_longer_member": {
+      "text": "دیگر عضو این گروه نیستید.",
+      "status": "machine"
+    },
+    "chat.ended.unsent_draft": {
+      "text": "پیش‌نویس ارسال‌نشده",
+      "status": "machine"
+    },
+    "chat.error.add_member": {
+      "text": "افزودن این شخص ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.approve_join": {
+      "text": "تأیید درخواست عضویت ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.change_admin": {
+      "text": "تغییر نقش مدیر ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.conversation_gone": {
+      "text": "این گفتگو دیگر اینجا نیست.",
+      "status": "machine"
+    },
+    "chat.error.create_link": {
+      "text": "ساخت پیوند دعوت ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.delete_chat": {
+      "text": "حذف این گفتگو ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.delete_message": {
+      "text": "حذف پیام ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.edit": {
+      "text": "ویرایش پیام ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.leave": {
+      "text": "خروج از گروه ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.membership_request": {
+      "text": "ارسال دوباره تغییری که در عضویت درخواست کرده بودید ممکن نشد.",
+      "status": "machine"
+    },
+    "chat.error.message_gone": {
+      "text": "این پیام دیگر اینجا نیست.",
+      "status": "machine"
+    },
+    "chat.error.pin": {
+      "text": "تغییر سنجاق ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.react": {
+      "text": "ارسال واکنش ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.refresh": {
+      "text": "بارگیری پیام‌های تازه ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.reject_join": {
+      "text": "رد درخواست عضویت ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.remove_member": {
+      "text": "حذف این عضو ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.revoke_link": {
+      "text": "لغو پیوند دعوت ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.error.transfer": {
+      "text": "انتقال مالکیت ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.forward.empty": {
+      "text": "گفتگویی برای هدایت پیام وجود ندارد",
+      "status": "machine"
+    },
+    "chat.forward.error.generic": {
+      "text": "هدایت پیام ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.forward.from": {
+      "text": "هدایت‌شده از {name}",
+      "status": "machine"
+    },
+    "chat.forward.label": {
+      "text": "هدایت‌شده",
+      "status": "machine"
+    },
+    "chat.forward.list_label": {
+      "text": "گفتگوها",
+      "status": "machine"
+    },
+    "chat.forward.picker_title": {
+      "text": "هدایت به",
+      "status": "machine"
+    },
+    "chat.forward.search_label": {
+      "text": "جستجوی گفتگوها",
+      "status": "machine"
+    },
+    "chat.gif.attribution": {
+      "text": "با پشتیبانی GIPHY",
+      "status": "machine"
+    },
+    "chat.gif.load_failed": {
+      "text": "بارگیری این GIF ممکن نشد · تلاش دوباره",
+      "status": "machine"
+    },
+    "chat.gif.loading": {
+      "text": "در حال بارگیری GIFها",
+      "status": "machine"
+    },
+    "chat.gif.no_results": {
+      "text": "هیچ GIFی پیدا نشد",
+      "status": "machine"
+    },
+    "chat.gif.note_dismiss": {
+      "text": "متوجه شدم",
+      "status": "machine"
+    },
+    "chat.gif.open_full": {
+      "text": "باز کردن GIF در تمام صفحه",
+      "status": "machine"
+    },
+    "chat.gif.privacy_note": {
+      "text": "جستجوی GIF از طریق سرور Lakko انجام می‌شود و سرور می‌بیند چه چیزی جستجو می‌کنید. GIFهای ارسال‌شده مانند هر فایل دیگری رمزگذاری می‌شوند.",
+      "status": "machine"
+    },
+    "chat.gif.rate_limited": {
+      "text": "جستجوها بیش از حد است. کمی بعد دوباره تلاش کنید",
+      "status": "machine"
+    },
+    "chat.gif.search": {
+      "text": "جستجوی GIF",
+      "status": "machine"
+    },
+    "chat.gif.send": {
+      "text": "ارسال GIF",
+      "status": "machine"
+    },
+    "chat.gif.trending": {
+      "text": "پرطرفدار",
+      "status": "machine"
+    },
+    "chat.gif.unavailable": {
+      "text": "GIFها در حال حاضر در دسترس نیستند",
+      "status": "machine"
+    },
+    "chat.group.default_name": {
+      "text": "گروه جدید",
+      "status": "machine"
+    },
+    "chat.group.fallback_name": {
+      "text": "گروه",
+      "status": "machine"
+    },
+    "chat.group.title_more": {
+      "text": "{names} +{count}",
+      "status": "machine"
+    },
+    "chat.group_name.empty": {
+      "text": "هنوز نامی ندارد",
+      "status": "machine"
+    },
+    "chat.group_name.error.character": {
+      "text": "نام نویسه‌ای دارد که نمی‌توان آن را نمایش داد.",
+      "status": "machine"
+    },
+    "chat.group_name.error.generic": {
+      "text": "این نام قابل استفاده نیست.",
+      "status": "machine"
+    },
+    "chat.group_name.error.line_break": {
+      "text": "نام باید در یک خط باشد.",
+      "status": "machine"
+    },
+    "chat.group_name.error.save": {
+      "text": "تغییر نام گروه ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.group_name.error.too_long": {
+      "text": "نام خیلی طولانی است.",
+      "status": "machine"
+    },
+    "chat.group_name.label": {
+      "text": "نام گروه",
+      "status": "machine"
+    },
+    "chat.group_name.only_admins": {
+      "text": "فقط مدیران می‌توانند نام این گروه را تغییر دهند",
+      "status": "machine"
+    },
+    "chat.header.back": {
+      "text": "بازگشت به گفتگوها",
+      "status": "machine"
+    },
+    "chat.info.channel": {
+      "text": "اطلاعات کانال",
+      "status": "machine"
+    },
+    "chat.info.contact": {
+      "text": "اطلاعات مخاطب",
+      "status": "machine"
+    },
+    "chat.info.group": {
+      "text": "اطلاعات گروه",
+      "status": "machine"
+    },
+    "chat.invite_link.cleared": {
+      "text": "پیوند پاک شد (پیوند درون‌خطی چیزی برای لغو ندارد).",
+      "status": "machine"
+    },
+    "chat.invite_link.copy": {
+      "text": "کپی پیوند",
+      "status": "machine"
+    },
+    "chat.invite_link.create": {
+      "text": "ساخت پیوند دعوت",
+      "status": "machine"
+    },
+    "chat.invite_link.label": {
+      "text": "پیوند دعوت",
+      "status": "machine"
+    },
+    "chat.invite_link.revoke": {
+      "text": "لغو",
+      "status": "machine"
+    },
+    "chat.invite_link.revoked": {
+      "text": "پیوند دعوت لغو شد.",
+      "status": "machine"
+    },
+    "chat.invite_link.share": {
+      "text": "اشتراک‌گذاری",
+      "status": "machine"
+    },
+    "chat.leave.action": {
+      "text": "خروج از گروه",
+      "status": "machine"
+    },
+    "chat.leave.body": {
+      "text": "تا وقتی مالک یا یکی از مدیران درخواست شما را اعمال کند، همچنان پیام دریافت می‌کنید. برای پیوستن دوباره به دعوت جدیدی نیاز خواهید داشت.",
+      "status": "machine"
+    },
+    "chat.leave.confirm": {
+      "text": "خروج",
+      "status": "machine"
+    },
+    "chat.leave.confirm_named": {
+      "text": "خروج از {name}",
+      "status": "machine"
+    },
+    "chat.leave.requested": {
+      "text": "درخواست خروج ثبت شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، انجام می‌شود.",
+      "status": "machine"
+    },
+    "chat.leave.title": {
+      "text": "از این گروه خارج می‌شوید؟",
+      "status": "machine"
+    },
+    "chat.media.and_more": {
+      "text": "{label} و {count, plural, one {# مورد دیگر} other {# مورد دیگر}}",
+      "status": "machine"
+    },
+    "chat.media.audio": {
+      "text": "صدا",
+      "status": "machine"
+    },
+    "chat.media.file": {
+      "text": "فایل",
+      "status": "machine"
+    },
+    "chat.media.gif": {
+      "text": "GIF",
+      "status": "machine"
+    },
+    "chat.media.not_sent_retry": {
+      "text": "ارسال نشد · تلاش دوباره",
+      "status": "machine"
+    },
+    "chat.media.open_full_hint": {
+      "text": "آن را در تمام صفحه باز می‌کند",
+      "status": "machine"
+    },
+    "chat.media.photo": {
+      "text": "عکس",
+      "status": "machine"
+    },
+    "chat.media.play_failed": {
+      "text": "پخش این پیام ممکن نشد",
+      "status": "machine"
+    },
+    "chat.media.row_not_sent": {
+      "text": "{label}، ارسال نشد",
+      "status": "machine"
+    },
+    "chat.media.row_sending": {
+      "text": "{label}، در حال ارسال",
+      "status": "machine"
+    },
+    "chat.media.video": {
+      "text": "ویدیو",
+      "status": "machine"
+    },
+    "chat.media.video_message": {
+      "text": "یادداشت ویدیویی",
+      "status": "machine"
+    },
+    "chat.media.voice_message": {
+      "text": "پیام صوتی",
+      "status": "machine"
+    },
+    "chat.media.with_duration": {
+      "text": "{label}، {duration}",
+      "status": "machine"
+    },
+    "chat.members.add.action": {
+      "text": "افزودن عضو",
+      "status": "machine"
+    },
+    "chat.members.add.done": {
+      "text": "{name} اضافه شد.",
+      "status": "machine"
+    },
+    "chat.members.add.error.no_bundle": {
+      "text": "این شخص هنوز راه‌اندازی Lakko را تمام نکرده است. بعداً دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.members.add.error.some_failed": {
+      "text": "افزودن {names} ممکن نشد. آن‌ها را از بخش اعضا اضافه کنید.",
+      "status": "machine"
+    },
+    "chat.members.add.error.unknown_username": {
+      "text": "هیچ حسابی با نام {name} ثبت نشده است.",
+      "status": "machine"
+    },
+    "chat.members.add.placeholder": {
+      "text": "@username",
+      "status": "machine"
+    },
+    "chat.members.add.requested": {
+      "text": "افزودن {name} درخواست شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، به گروه می‌پیوندد.",
+      "status": "machine"
+    },
+    "chat.members.add.submit": {
+      "text": "افزودن",
+      "status": "machine"
+    },
+    "chat.members.admin.demoted": {
+      "text": "از مدیریت برداشته شد.",
+      "status": "machine"
+    },
+    "chat.members.admin.make": {
+      "text": "مدیر کردن",
+      "status": "machine"
+    },
+    "chat.members.admin.marker": {
+      "text": "مدیر",
+      "status": "machine"
+    },
+    "chat.members.admin.promoted": {
+      "text": "به مدیر ارتقا یافت.",
+      "status": "machine"
+    },
+    "chat.members.admin.remove": {
+      "text": "برداشتن از مدیریت",
+      "status": "machine"
+    },
+    "chat.members.admin.requested": {
+      "text": "تغییر درخواست شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، انجام می‌شود.",
+      "status": "machine"
+    },
+    "chat.members.count": {
+      "text": "{count, plural, one {# عضو} other {# عضو}}",
+      "status": "machine"
+    },
+    "chat.members.devices": {
+      "text": "{count, plural, one {# دستگاه} other {# دستگاه}}",
+      "status": "machine"
+    },
+    "chat.members.frozen": {
+      "text": "این فهرست با پایان عضویت شما دیگر به‌روز نمی‌شود.",
+      "status": "machine"
+    },
+    "chat.members.heading": {
+      "text": "اعضا ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.approve": {
+      "text": "تأیید",
+      "status": "machine"
+    },
+    "chat.members.join.approved_added": {
+      "text": "عضویت تأیید شد. به گروه اضافه شد.",
+      "status": "machine"
+    },
+    "chat.members.join.approved_requested": {
+      "text": "عضویت تأیید شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، به گروه می‌پیوندد.",
+      "status": "machine"
+    },
+    "chat.members.join.heading": {
+      "text": "درخواست‌های عضویت ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.link_unknown": {
+      "text": "پیوند دعوت نامشخص است",
+      "status": "machine"
+    },
+    "chat.members.join.reject": {
+      "text": "رد کردن",
+      "status": "machine"
+    },
+    "chat.members.join.rejected": {
+      "text": "درخواست عضویت رد شد.",
+      "status": "machine"
+    },
+    "chat.members.join.via_former": {
+      "text": "از طریق {name} · دیگر عضو نیست",
+      "status": "machine"
+    },
+    "chat.members.join.via_member": {
+      "text": "از طریق {name} · عضو",
+      "status": "machine"
+    },
+    "chat.members.pending.adds_heading": {
+      "text": "در انتظار افزوده شدن ({count})",
+      "status": "machine"
+    },
+    "chat.members.pending.count": {
+      "text": "{count, plural, one {# تغییر در عضویت در انتظار اعمال است.} other {# تغییر در عضویت در انتظار اعمال است.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.liveness": {
+      "text": "تغییرات عضویت را مالک گروه یا یکی از مدیران اعمال می‌کند. هر وقت یکی از آن‌ها این کار را بکند، به‌طور خودکار اعمال می‌شوند.",
+      "status": "machine"
+    },
+    "chat.members.pending.queue": {
+      "text": "{count, plural, one {اکنون # تغییر در انتظار اعمال است.} other {اکنون # تغییر در انتظار اعمال است.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_added": {
+      "text": "در انتظار افزوده شدن.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_leave": {
+      "text": "در انتظار خروج.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_removed": {
+      "text": "در انتظار حذف.",
+      "status": "machine"
+    },
+    "chat.members.remove.body": {
+      "text": "تا وقتی مالک یا یکی از مدیران تغییر را اعمال کند، همچنان پیام دریافت می‌کند.",
+      "status": "machine"
+    },
+    "chat.members.remove.confirm_named": {
+      "text": "حذف {name}",
+      "status": "machine"
+    },
+    "chat.members.remove.done": {
+      "text": "عضو حذف شد.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested": {
+      "text": "حذف درخواست شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، انجام می‌شود.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested_short": {
+      "text": "حذف درخواست شد.",
+      "status": "machine"
+    },
+    "chat.members.remove.title": {
+      "text": "این عضو حذف شود؟",
+      "status": "machine"
+    },
+    "chat.members.row_label": {
+      "text": "{name}، {state}",
+      "status": "machine"
+    },
+    "chat.members.title": {
+      "text": "اعضا",
+      "status": "machine"
+    },
+    "chat.members.unapplied.add_line": {
+      "text": "اضافه نشد. می‌توانید دوباره اضافه‌اش کنید.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.explanation": {
+      "text": "این تغییرات اعمال نشدند و خودبه‌خود دوباره امتحان نمی‌شوند.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.heading": {
+      "text": "اعمال‌نشده ({count})",
+      "status": "machine"
+    },
+    "chat.members.unapplied.join_line": {
+      "text": "اعمال نشد. از او بخواهید دوباره درخواست عضویت بدهد.",
+      "status": "machine"
+    },
+    "chat.members.unnamed": {
+      "text": "عضو",
+      "status": "machine"
+    },
+    "chat.message.actions": {
+      "text": "کارهای پیام",
+      "status": "machine"
+    },
+    "chat.message.close_actions": {
+      "text": "بستن کارهای پیام",
+      "status": "machine"
+    },
+    "chat.message.deleted": {
+      "text": "پیام حذف شد",
+      "status": "machine"
+    },
+    "chat.message.edit": {
+      "text": "ویرایش",
+      "status": "machine"
+    },
+    "chat.message.edited": {
+      "text": "(ویرایش‌شده)",
+      "status": "machine"
+    },
+    "chat.message.forward": {
+      "text": "هدایت",
+      "status": "machine"
+    },
+    "chat.message.media_fallback": {
+      "text": "پیام رسانه‌ای",
+      "status": "machine"
+    },
+    "chat.message.more_reactions": {
+      "text": "واکنش‌های بیشتر",
+      "status": "machine"
+    },
+    "chat.message.not_sent": {
+      "text": "ارسال نشد",
+      "status": "machine"
+    },
+    "chat.message.pin": {
+      "text": "سنجاق کردن",
+      "status": "machine"
+    },
+    "chat.message.react": {
+      "text": "واکنش",
+      "status": "machine"
+    },
+    "chat.message.react_with": {
+      "text": "واکنش {emoji}",
+      "status": "machine"
+    },
+    "chat.message.read": {
+      "text": "خوانده شد",
+      "status": "machine"
+    },
+    "chat.message.read_by": {
+      "text": "خوانده‌شده توسط {names}",
+      "status": "machine"
+    },
+    "chat.message.reply": {
+      "text": "پاسخ",
+      "status": "machine"
+    },
+    "chat.message.select": {
+      "text": "انتخاب",
+      "status": "machine"
+    },
+    "chat.message.sending": {
+      "text": "در حال ارسال...",
+      "status": "machine"
+    },
+    "chat.message.sent": {
+      "text": "ارسال شد",
+      "status": "machine"
+    },
+    "chat.message.unpin": {
+      "text": "برداشتن سنجاق",
+      "status": "machine"
+    },
+    "chat.not_found.back": {
+      "text": "بازگشت به گفتگوها",
+      "status": "machine"
+    },
+    "chat.not_found.body": {
+      "text": "این پیوند با هیچ گفتگویی در این دستگاه مطابقت ندارد.",
+      "status": "machine"
+    },
+    "chat.not_found.title": {
+      "text": "گفتگو پیدا نشد",
+      "status": "machine"
+    },
+    "chat.peer.fallback_name": {
+      "text": "طرف گفتگو",
+      "status": "machine"
+    },
+    "chat.photo.load_failed": {
+      "text": "بارگیری عکس ممکن نشد",
+      "status": "machine"
+    },
+    "chat.photo.load_failed_retry": {
+      "text": "بارگیری عکس ممکن نشد، برای تلاش دوباره ضربه بزنید",
+      "status": "machine"
+    },
+    "chat.photo.loading": {
+      "text": "عکس، در حال بارگیری",
+      "status": "machine"
+    },
+    "chat.photo.open": {
+      "text": "باز کردن عکس",
+      "status": "machine"
+    },
+    "chat.photo.viewer": {
+      "text": "نمایشگر عکس",
+      "status": "machine"
+    },
+    "chat.photo.viewer_hint": {
+      "text": "برای بزرگ‌نمایی دو انگشت را باز کنید. برای بستن به پایین بکشید.",
+      "status": "machine"
+    },
+    "chat.pin.detail_personal": {
+      "text": "فقط در این دستگاه",
+      "status": "machine"
+    },
+    "chat.pin.detail_shared": {
+      "text": "همه اعضا آن را می‌بینند",
+      "status": "machine"
+    },
+    "chat.pin.for_both": {
+      "text": "سنجاق برای هر دو نفر",
+      "status": "machine"
+    },
+    "chat.pin.for_everyone": {
+      "text": "سنجاق برای همه",
+      "status": "machine"
+    },
+    "chat.pin.for_me": {
+      "text": "سنجاق برای خودم",
+      "status": "machine"
+    },
+    "chat.pin.sheet_title": {
+      "text": "سنجاق کردن پیام",
+      "status": "machine"
+    },
+    "chat.pinned_bar.all": {
+      "text": "همه پیام‌های سنجاق‌شده",
+      "status": "machine"
+    },
+    "chat.pinned_bar.for_you": {
+      "text": "برای شما",
+      "status": "machine"
+    },
+    "chat.pinned_bar.hint": {
+      "text": "پیام را نشان می‌دهد",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label": {
+      "text": "پیام سنجاق‌شده",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label_of": {
+      "text": "پیام سنجاق‌شده {index} از {count}",
+      "status": "machine"
+    },
+    "chat.pinned_bar.list_title": {
+      "text": "پیام‌های سنجاق‌شده",
+      "status": "machine"
+    },
+    "chat.reaction.add_title": {
+      "text": "واکنش - واکنش‌دهندگان: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by": {
+      "text": "واکنش‌دهندگان: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by_title": {
+      "text": "واکنش‌دهندگان",
+      "status": "machine"
+    },
+    "chat.reaction.remove_title": {
+      "text": "حذف واکنش شما - واکنش‌دهندگان: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.single_emoji": {
+      "text": "واکنش باید فقط یک ایموجی باشد.",
+      "status": "machine"
+    },
+    "chat.reauth.action": {
+      "text": "ورود دوباره",
+      "status": "machine"
+    },
+    "chat.reauth.body": {
+      "text": "کلیدهای لازم برای رمزگشایی و امضای پیام‌ها در این نشست در دسترس نیستند. برای باز کردن این گفتگو دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "chat.reauth.title": {
+      "text": "دوباره وارد شوید",
+      "status": "machine"
+    },
+    "chat.record.bar_video": {
+      "text": "در حال ضبط یادداشت ویدیویی",
+      "status": "machine"
+    },
+    "chat.record.bar_voice": {
+      "text": "در حال ضبط پیام صوتی",
+      "status": "machine"
+    },
+    "chat.record.cancelled": {
+      "text": "لغو شد",
+      "status": "machine"
+    },
+    "chat.record.delete": {
+      "text": "حذف ضبط",
+      "status": "machine"
+    },
+    "chat.record.denied_camera": {
+      "text": "Lakko برای ضبط یادداشت ویدیویی به دوربین دسترسی نیاز دارد. در تنظیمات سایت مرورگر خود اجازه دسترسی به دوربین را بدهید.",
+      "status": "machine"
+    },
+    "chat.record.denied_camera_app": {
+      "text": "Lakko برای ضبط یادداشت ویدیویی به دوربین دسترسی نیاز دارد",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone": {
+      "text": "Lakko برای ضبط پیام صوتی به میکروفون دسترسی نیاز دارد. در تنظیمات سایت مرورگر خود اجازه دسترسی به میکروفون را بدهید.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_app": {
+      "text": "Lakko برای ضبط پیام صوتی به میکروفون دسترسی نیاز دارد",
+      "status": "machine"
+    },
+    "chat.record.finishing": {
+      "text": "در حال پایان دادن به ضبط",
+      "status": "machine"
+    },
+    "chat.record.flip_camera": {
+      "text": "چرخاندن دوربین",
+      "status": "machine"
+    },
+    "chat.record.flip_failed": {
+      "text": "چرخاندن دوربین ممکن نشد",
+      "status": "machine"
+    },
+    "chat.record.hint_hold": {
+      "text": "برای ضبط نگه دارید",
+      "status": "machine"
+    },
+    "chat.record.in_call": {
+      "text": "در حین تماس در دسترس نیست",
+      "status": "machine"
+    },
+    "chat.record.locked_hint": {
+      "text": "ضبط قفل‌شده را شروع می‌کند",
+      "status": "machine"
+    },
+    "chat.record.no_camera": {
+      "text": "دوربینی پیدا نشد",
+      "status": "machine"
+    },
+    "chat.record.open_settings": {
+      "text": "باز کردن تنظیمات",
+      "status": "machine"
+    },
+    "chat.record.pause": {
+      "text": "توقف موقت ضبط",
+      "status": "machine"
+    },
+    "chat.record.pause_video": {
+      "text": "توقف موقت یادداشت ویدیویی",
+      "status": "machine"
+    },
+    "chat.record.play": {
+      "text": "پخش ضبط، {duration}",
+      "status": "machine"
+    },
+    "chat.record.play_video_sound": {
+      "text": "پخش یادداشت ویدیویی با صدا",
+      "status": "machine"
+    },
+    "chat.record.position": {
+      "text": "موقعیت در ضبط",
+      "status": "machine"
+    },
+    "chat.record.recording_duration": {
+      "text": "در حال ضبط، {duration}",
+      "status": "machine"
+    },
+    "chat.record.send": {
+      "text": "ارسال ضبط",
+      "status": "machine"
+    },
+    "chat.record.silent_mic": {
+      "text": "صدایی از میکروفون دریافت نمی‌شود",
+      "status": "machine"
+    },
+    "chat.record.slide_cancel": {
+      "text": "› برای لغو بکشید",
+      "status": "machine"
+    },
+    "chat.record.start_failed": {
+      "text": "شروع ضبط ممکن نشد",
+      "status": "machine"
+    },
+    "chat.record.starting": {
+      "text": "در حال شروع…",
+      "status": "machine"
+    },
+    "chat.record.stop": {
+      "text": "پایان ضبط",
+      "status": "machine"
+    },
+    "chat.record.stop_short": {
+      "text": "پایان",
+      "status": "machine"
+    },
+    "chat.record.switch_to_video": {
+      "text": "رفتن به یادداشت ویدیویی",
+      "status": "machine"
+    },
+    "chat.record.switch_to_voice": {
+      "text": "رفتن به پیام صوتی",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video": {
+      "text": "در این مرورگر نمی‌توان یادداشت ویدیویی ضبط کرد",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video_device": {
+      "text": "در این دستگاه نمی‌توان یادداشت ویدیویی ضبط کرد",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice": {
+      "text": "در این مرورگر نمی‌توان پیام صوتی ضبط کرد",
+      "status": "machine"
+    },
+    "chat.record.video": {
+      "text": "ضبط یادداشت ویدیویی",
+      "status": "machine"
+    },
+    "chat.record.video_ready": {
+      "text": "یادداشت ویدیویی آماده است",
+      "status": "machine"
+    },
+    "chat.record.video_tooltip": {
+      "text": "ضبط یادداشت ویدیویی: برای ضبط نگه دارید، برای رفتن به صدا ضربه بزنید",
+      "status": "machine"
+    },
+    "chat.record.voice": {
+      "text": "ضبط پیام صوتی",
+      "status": "machine"
+    },
+    "chat.record.voice_tooltip": {
+      "text": "ضبط پیام صوتی: برای ضبط نگه دارید، برای رفتن به ویدیو ضربه بزنید",
+      "status": "machine"
+    },
+    "chat.refusal.add_not_admin": {
+      "text": "فقط مالک گروه یا یکی از مدیران می‌تواند عضو اضافه کند.",
+      "status": "machine"
+    },
+    "chat.refusal.device_binding": {
+      "text": "کلید این دستگاه مشکل دارد. آن را از «دستگاه‌ها» حذف کنید و دوباره اضافه کنید.",
+      "status": "machine"
+    },
+    "chat.refusal.device_limit": {
+      "text": "{count, plural, one {حداکثر # دستگاه برای هر حساب. ابتدا یکی را حذف کنید.} other {حداکثر # دستگاه برای هر حساب. ابتدا یکی را حذف کنید.}}",
+      "status": "machine"
+    },
+    "chat.refusal.fallback": {
+      "text": "درخواست این تغییر ممکن نشد.",
+      "status": "machine"
+    },
+    "chat.refusal.join_not_kept": {
+      "text": "یک درخواست عضویت وقتی رسید که درخواست‌های زیادی در انتظار بودند، به همین دلیل نگه داشته نشد. از آن شخص بخواهید بعداً دوباره آن را بفرستد.",
+      "status": "machine"
+    },
+    "chat.refusal.joiner_member": {
+      "text": "این شخص قبلاً به این گروه پیوسته است.",
+      "status": "machine"
+    },
+    "chat.refusal.no_join_request": {
+      "text": "این درخواست عضویت دیگر در انتظار نیست.",
+      "status": "machine"
+    },
+    "chat.refusal.not_owner": {
+      "text": "فقط مالک گروه می‌تواند مدیران را تغییر دهد یا مالکیت را منتقل کند.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_cannot_leave": {
+      "text": "مالک گروه نمی‌تواند از گروه خارج شود.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_not_member": {
+      "text": "فقط عضو فعلی این گروه می‌تواند مالک آن باشد.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_unremovable": {
+      "text": "مالک گروه را نمی‌توان حذف کرد.",
+      "status": "machine"
+    },
+    "chat.refusal.pending_full": {
+      "text": "هم‌اکنون تغییرات زیادی در انتظار اعمال است.",
+      "status": "machine"
+    },
+    "chat.refusal.remove_not_admin": {
+      "text": "فقط مالک گروه یا یکی از مدیران می‌تواند عضو حذف کند.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_many": {
+      "text": "صبر کنید تا اعمال شوند، سپس دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_one": {
+      "text": "صبر کنید تا اعمال شود، سپس دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.refusal.role_change_pending": {
+      "text": "یک تغییر نقش هم‌اکنون در انتظار اعمال است.",
+      "status": "machine"
+    },
+    "chat.refusal.with_retry": {
+      "text": "{fact} {retry}",
+      "status": "machine"
+    },
+    "chat.reply.cancel": {
+      "text": "لغو پاسخ",
+      "status": "machine"
+    },
+    "chat.reply.fallback_excerpt": {
+      "text": "پیام",
+      "status": "machine"
+    },
+    "chat.reply.quote": {
+      "text": "پاسخ",
+      "status": "machine"
+    },
+    "chat.reply.quote_to": {
+      "text": "پاسخ به {name}",
+      "status": "machine"
+    },
+    "chat.reply.strip_label": {
+      "text": "در حال پاسخ به {name}",
+      "status": "machine"
+    },
+    "chat.select.count": {
+      "text": "{count, plural, one {# انتخاب‌شده} other {# انتخاب‌شده}}",
+      "status": "machine"
+    },
+    "chat.select.count_limit": {
+      "text": "{count, plural, one {# انتخاب‌شده، حداکثر مجاز} other {# انتخاب‌شده، حداکثر مجاز}}",
+      "status": "machine"
+    },
+    "chat.select.delete_helper": {
+      "text": "فقط پیام‌های خودتان را می‌توانید حذف کنید.",
+      "status": "machine"
+    },
+    "chat.select.delete_title": {
+      "text": "{count, plural, one {# پیام حذف شود؟} other {# پیام حذف شود؟}}",
+      "status": "machine"
+    },
+    "chat.select.deleted_of": {
+      "text": "{done} از {total} حذف شد.",
+      "status": "machine"
+    },
+    "chat.select.forwarded_of": {
+      "text": "{done} از {total} هدایت شد.",
+      "status": "machine"
+    },
+    "chat.select.state_not_selected": {
+      "text": "انتخاب‌نشده",
+      "status": "machine"
+    },
+    "chat.select.state_selected": {
+      "text": "انتخاب‌شده",
+      "status": "machine"
+    },
+    "chat.select.toolbar": {
+      "text": "پیام‌های انتخاب‌شده",
+      "status": "machine"
+    },
+    "chat.send.failed": {
+      "text": "ارسال ممکن نشد.",
+      "status": "machine"
+    },
+    "chat.system.join_request": {
+      "text": "درخواست عضویت",
+      "status": "machine"
+    },
+    "chat.system.members_changed": {
+      "text": "اعضا تغییر کردند",
+      "status": "machine"
+    },
+    "chat.timeline.empty": {
+      "text": "هنوز پیامی نیست. سلام کنید.",
+      "status": "machine"
+    },
+    "chat.timeline.setting_up": {
+      "text": "این گفتگو هنوز در این دستگاه در حال راه‌اندازی است.",
+      "status": "machine"
+    },
+    "chat.transfer.action": {
+      "text": "انتقال مالکیت",
+      "status": "machine"
+    },
+    "chat.transfer.action_named": {
+      "text": "مالک کردن {name}",
+      "status": "machine"
+    },
+    "chat.transfer.become_member": {
+      "text": "عضو عادی شدن",
+      "status": "machine"
+    },
+    "chat.transfer.become_member_detail": {
+      "text": "بلافاصله همه اختیارات خود در گروه را از دست می‌دهید. فقط مالک جدید می‌تواند هر یک از آن‌ها را به شما برگرداند.",
+      "status": "machine"
+    },
+    "chat.transfer.candidate_admin": {
+      "text": "{name}، مدیر",
+      "status": "machine"
+    },
+    "chat.transfer.done_admin": {
+      "text": "اکنون {name} مالک گروه است. شما همچنان مدیر هستید.",
+      "status": "machine"
+    },
+    "chat.transfer.done_member": {
+      "text": "اکنون {name} مالک گروه است. شما اکنون عضو عادی هستید.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_body": {
+      "text": "فقط مالک می‌تواند نقش‌ها را تغییر دهد. پس از انتقال این گروه نمی‌توانید آن را پس بگیرید، نمی‌توانید نقش مالک خود را بازگردانید و نمی‌توانید دوباره نقش خود را تغییر دهید، مگر اینکه مالک جدید این کار را برایتان انجام دهد.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_title": {
+      "text": "این کار برگشت‌پذیر نیست.",
+      "status": "machine"
+    },
+    "chat.transfer.leave_blocked": {
+      "text": "ابتدا مالکیت را منتقل کنید؛ گروه را نمی‌توان بدون مالک ترک کرد.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner": {
+      "text": "اکنون شما مالک این گروه هستید.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_body": {
+      "text": "می‌توانید اعضا را اضافه و حذف کنید، مدیران را تغییر دهید و مالکیت را به شخص دیگری منتقل کنید.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_legend": {
+      "text": "مالک جدید",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_named": {
+      "text": "{name} شما را مالک این گروه کرد.",
+      "status": "machine"
+    },
+    "chat.transfer.no_candidates": {
+      "text": "کس دیگری در این گروه نیست که مالکیت به او منتقل شود.",
+      "status": "machine"
+    },
+    "chat.transfer.pending": {
+      "text": "انتقال مالکیت در انتظار اعمال است.",
+      "status": "machine"
+    },
+    "chat.transfer.pending_named": {
+      "text": "در انتظار مالک شدن {name}.",
+      "status": "machine"
+    },
+    "chat.transfer.requested": {
+      "text": "انتقال مالکیت درخواست شد. وقتی مالک یا یکی از مدیران تغییر را اعمال کند، انجام می‌شود.",
+      "status": "machine"
+    },
+    "chat.transfer.role_change_pending": {
+      "text": "یک تغییر نقش هم‌اکنون در انتظار اعمال است. صبر کنید تا اعمال شود، سپس دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chat.transfer.role_legend": {
+      "text": "نقش شما پس از آن",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin": {
+      "text": "مدیر ماندن",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin_detail": {
+      "text": "همچنان می‌توانید اعضا را اضافه و حذف کنید. بعداً می‌توانید با درخواست از مالک جدید از این نقش کنار بروید.",
+      "status": "machine"
+    },
+    "chat.transfer.unlocks_leave": {
+      "text": "پس از اعمال تغییر، می‌توانید مانند هر عضو دیگری از گروه خارج شوید.",
+      "status": "machine"
+    },
+    "chat.typing.named": {
+      "text": "{name} در حال نوشتن...",
+      "status": "machine"
+    },
+    "chat.typing.one_to_one": {
+      "text": "در حال نوشتن...",
+      "status": "machine"
+    },
+    "chat.typing.several": {
+      "text": "چند نفر در حال نوشتن‌اند...",
+      "status": "machine"
+    },
+    "chat.unpin.for_both": {
+      "text": "برداشتن سنجاق برای هر دو نفر",
+      "status": "machine"
+    },
+    "chat.unpin.for_everyone": {
+      "text": "برداشتن سنجاق برای همه",
+      "status": "machine"
+    },
+    "chat.unpin.for_me": {
+      "text": "برداشتن سنجاق برای خودم",
+      "status": "machine"
+    },
+    "chat.unpin.sheet_title": {
+      "text": "برداشتن سنجاق پیام",
+      "status": "machine"
+    },
+    "chat.upload.encrypting": {
+      "text": "در حال رمزگذاری «{name}»…",
+      "status": "machine"
+    },
+    "chat.upload.encrypting_of": {
+      "text": "در حال رمزگذاری «{name}» ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.preparing": {
+      "text": "در حال آماده‌سازی «{name}»…",
+      "status": "machine"
+    },
+    "chat.upload.selected_item": {
+      "text": "مورد انتخاب‌شده",
+      "status": "machine"
+    },
+    "chat.upload.uploading": {
+      "text": "در حال بارگذاری «{name}»…",
+      "status": "machine"
+    },
+    "chat.upload.uploading_of": {
+      "text": "در حال بارگذاری «{name}» ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.working": {
+      "text": "در حال رمزگذاری و بارگذاری…",
+      "status": "machine"
+    },
+    "chat.video.load_failed": {
+      "text": "بارگیری ویدیو ممکن نشد",
+      "status": "machine"
+    },
+    "chat.video.load_failed_retry": {
+      "text": "بارگیری ویدیو ممکن نشد، برای تلاش دوباره ضربه بزنید",
+      "status": "machine"
+    },
+    "chat.video.loading": {
+      "text": "در حال بارگیری ویدیو، {size}",
+      "status": "machine"
+    },
+    "chat.video.open": {
+      "text": "پخش ویدیو",
+      "status": "machine"
+    },
+    "chat.video.play": {
+      "text": "پخش ویدیو، {size}",
+      "status": "machine"
+    },
+    "chat.video.play_failed": {
+      "text": "پخش این ویدیو ممکن نشد",
+      "status": "machine"
+    },
+    "chat.video.player": {
+      "text": "پخش‌کننده ویدیو",
+      "status": "machine"
+    },
+    "chat.video_note.loading": {
+      "text": "یادداشت ویدیویی، در حال بارگیری",
+      "status": "machine"
+    },
+    "chat.video_note.play": {
+      "text": "پخش یادداشت ویدیویی، {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.play_sound": {
+      "text": "پخش یادداشت ویدیویی با صدا، {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.poster": {
+      "text": "تصویر پیش‌نمایش یادداشت ویدیویی",
+      "status": "machine"
+    },
+    "chat.video_note.tap_mute": {
+      "text": "برای بی‌صدا کردن ضربه بزنید",
+      "status": "machine"
+    },
+    "chat.video_note.tap_sound": {
+      "text": "برای صدا ضربه بزنید",
+      "status": "machine"
+    },
+    "chat.voice.change_speed": {
+      "text": "تغییر سرعت پخش",
+      "status": "machine"
+    },
+    "chat.voice.not_played": {
+      "text": "پخش‌نشده",
+      "status": "machine"
+    },
+    "chat.voice.pause": {
+      "text": "توقف موقت پیام صوتی",
+      "status": "machine"
+    },
+    "chat.voice.play": {
+      "text": "پخش پیام صوتی، {duration}",
+      "status": "machine"
+    },
+    "chat.voice.position": {
+      "text": "{position} از {duration}",
+      "status": "machine"
+    },
+    "chat.voice.seek": {
+      "text": "جابه‌جایی در پیام صوتی",
+      "status": "machine"
+    },
+    "chat.voice.speed": {
+      "text": "سرعت پخش {rate}",
+      "status": "machine"
+    },
+    "chats.action.archive": {
+      "text": "بایگانی",
+      "status": "machine"
+    },
+    "chats.action.mute": {
+      "text": "بی‌صدا کردن",
+      "status": "machine"
+    },
+    "chats.action.pin": {
+      "text": "سنجاق کردن",
+      "status": "machine"
+    },
+    "chats.action.unarchive": {
+      "text": "خارج کردن از بایگانی",
+      "status": "machine"
+    },
+    "chats.action.unmute": {
+      "text": "باصدا کردن",
+      "status": "machine"
+    },
+    "chats.action.unpin": {
+      "text": "برداشتن سنجاق",
+      "status": "machine"
+    },
+    "chats.compose": {
+      "text": "جدید",
+      "status": "machine"
+    },
+    "chats.create.channel": {
+      "text": "ساخت کانال",
+      "status": "machine"
+    },
+    "chats.create.chat": {
+      "text": "گفتگوی جدید",
+      "status": "machine"
+    },
+    "chats.create.group": {
+      "text": "ساخت گروه",
+      "status": "machine"
+    },
+    "chats.create.menu": {
+      "text": "ساختن",
+      "status": "machine"
+    },
+    "chats.empty.action": {
+      "text": "یکی را شروع کنید",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "برای شروع پیام‌رسانی یک گفتگو را انتخاب کنید",
+      "status": "machine"
+    },
+    "chats.empty.title": {
+      "text": "هنوز گفتگویی نیست",
+      "status": "machine"
+    },
+    "chats.lookup.action": {
+      "text": "جستجوی {name}",
+      "status": "machine"
+    },
+    "chats.lookup.nothing": {
+      "text": "چیزی برای {name} پیدا نشد.",
+      "status": "machine"
+    },
+    "chats.lookup.unreachable": {
+      "text": "جستجو ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chats.new_chat.add_contact": {
+      "text": "افزودن مخاطب",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts": {
+      "text": "هنوز مخاطبی ندارید",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts_body": {
+      "text": "گفتگو با کسی شروع می‌شود که می‌شناسید.",
+      "status": "machine"
+    },
+    "chats.new_chat.not_available": {
+      "text": "این گفتگو هنوز در این دستگاه در دسترس نیست",
+      "status": "machine"
+    },
+    "chats.new_group.accept_again": {
+      "text": "برای افزودن این مخاطب به گروه، دوباره او را بپذیرید.",
+      "status": "machine"
+    },
+    "chats.new_group.creating": {
+      "text": "در حال ساخت...",
+      "status": "machine"
+    },
+    "chats.new_group.error": {
+      "text": "ساخت گروه ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "chats.new_group.name_label": {
+      "text": "نام گروه (اختیاری)",
+      "status": "machine"
+    },
+    "chats.new_group.no_contacts": {
+      "text": "گروه با افرادی شروع می‌شود که از قبل می‌شناسید.",
+      "status": "machine"
+    },
+    "chats.new_group.open_contacts": {
+      "text": "رفتن به مخاطبان",
+      "status": "machine"
+    },
+    "chats.new_group.title": {
+      "text": "گروه جدید",
+      "status": "machine"
+    },
+    "chats.preview.own": {
+      "text": "شما: {text}",
+      "status": "machine"
+    },
+    "chats.preview.sender": {
+      "text": "{name}: {text}",
+      "status": "machine"
+    },
+    "chats.row.actions": {
+      "text": "کارهای گفتگو",
+      "status": "machine"
+    },
+    "chats.row.call.label": {
+      "text": "{kind} از {name}",
+      "status": "machine"
+    },
+    "chats.row.ended": {
+      "text": "دیگر عضو نیستید.",
+      "status": "machine"
+    },
+    "chats.row.muted": {
+      "text": "بی‌صدا",
+      "status": "machine"
+    },
+    "chats.row.no_messages": {
+      "text": "هنوز پیامی نیست",
+      "status": "machine"
+    },
+    "chats.row.people": {
+      "text": "{count, plural, one {# نفر} other {# نفر}}",
+      "status": "machine"
+    },
+    "chats.row.pinned": {
+      "text": "سنجاق‌شده",
+      "status": "machine"
+    },
+    "chats.row.unread": {
+      "text": "{count, plural, one {# پیام خوانده‌نشده} other {# پیام خوانده‌نشده}}",
+      "status": "machine"
+    },
+    "chats.row.unread_overflow": {
+      "text": "99+",
+      "status": "machine"
+    },
+    "chats.search.clear": {
+      "text": "پاک کردن جستجو",
+      "status": "machine"
+    },
+    "chats.search.label": {
+      "text": "جستجوی گفتگوها",
+      "status": "machine"
+    },
+    "chats.search.no_results": {
+      "text": "نتیجه‌ای نیست",
+      "status": "machine"
+    },
+    "chats.search.placeholder": {
+      "text": "جستجو",
+      "status": "machine"
+    },
+    "chats.synchronizing": {
+      "text": "در حال همگام‌سازی...",
       "status": "machine"
     },
     "common.adding": {
@@ -366,12 +2086,28 @@
       "text": "کپی",
       "status": "machine"
     },
+    "common.delete": {
+      "text": "حذف",
+      "status": "machine"
+    },
     "common.dismiss": {
       "text": "بستن",
       "status": "machine"
     },
     "common.done": {
       "text": "تمام",
+      "status": "machine"
+    },
+    "common.duration.minutes": {
+      "text": "{count, plural, one {# دقیقه} other {# دقیقه}}",
+      "status": "machine"
+    },
+    "common.duration.minutes_seconds": {
+      "text": "{minutes} و {seconds}",
+      "status": "machine"
+    },
+    "common.duration.seconds": {
+      "text": "{count, plural, one {# ثانیه} other {# ثانیه}}",
       "status": "machine"
     },
     "common.email": {
@@ -422,6 +2158,10 @@
       "text": "باز کردن",
       "status": "machine"
     },
+    "common.list_pair": {
+      "text": "{first}، {second}",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "در حال بارگیری...",
       "status": "machine"
@@ -438,8 +2178,16 @@
       "text": "گزینه‌های بیشتر",
       "status": "machine"
     },
+    "common.not_now": {
+      "text": "الان نه",
+      "status": "machine"
+    },
     "common.off": {
       "text": "خاموش",
+      "status": "machine"
+    },
+    "common.ok": {
+      "text": "باشه",
       "status": "machine"
     },
     "common.on": {
@@ -474,6 +2222,10 @@
       "text": "در حال حذف...",
       "status": "machine"
     },
+    "common.retry": {
+      "text": "تلاش دوباره",
+      "status": "machine"
+    },
     "common.save": {
       "text": "ذخیره",
       "status": "machine"
@@ -486,8 +2238,28 @@
       "text": "در حال ارسال...",
       "status": "machine"
     },
+    "common.sentence_pair": {
+      "text": "{first} {second}",
+      "status": "machine"
+    },
     "common.set_up": {
       "text": "راه‌اندازی",
+      "status": "machine"
+    },
+    "common.size.bytes": {
+      "text": "{size} بایت",
+      "status": "machine"
+    },
+    "common.size.gb": {
+      "text": "{size} گیگابایت",
+      "status": "machine"
+    },
+    "common.size.kb": {
+      "text": "{size} کیلوبایت",
+      "status": "machine"
+    },
+    "common.size.mb": {
+      "text": "{size} مگابایت",
       "status": "machine"
     },
     "common.try_again": {
@@ -732,6 +2504,26 @@
     },
     "display_name.error.unknown": {
       "text": "این نام قابل استفاده نیست",
+      "status": "machine"
+    },
+    "ds.clock_skew": {
+      "text": "تاریخ و ساعت این دستگاه را بررسی کنید.",
+      "status": "machine"
+    },
+    "group.join.not_taking_requests": {
+      "text": "این گروه هنوز درخواست نمی‌پذیرد. بعداً دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "group.join.request_again": {
+      "text": "درخواست دوباره",
+      "status": "machine"
+    },
+    "group.join.wait_primary": {
+      "text": "درخواست ارسال شد. یکی از مدیران آن را تأیید می‌کند و سپس تغییر در گروه اعمال می‌شود.",
+      "status": "machine"
+    },
+    "group.join.wait_secondary": {
+      "text": "هیچ‌یک از این دو مرحله محدودیت زمانی ندارد. اگر اتفاقی نیفتاد، می‌توانید دوباره درخواست بفرستید.",
       "status": "machine"
     },
     "language.name.ar": {
@@ -1952,6 +3744,14 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "شماره‌های امنیتی",
+      "status": "machine"
+    },
+    "tokens.action_allowance_used": {
+      "text": "سهمیه امروز شما برای این کار تمام شده است. فردا دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "tokens.lookup_allowance_used": {
+      "text": "امروز افراد زیادی را جستجو کرده‌اید. فردا دوباره تلاش کنید.",
       "status": "machine"
     },
     "username.a11y_hint": {

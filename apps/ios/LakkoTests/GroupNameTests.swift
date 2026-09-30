@@ -113,7 +113,8 @@ final class GroupNameTests: XCTestCase {
         XCTAssertEqual(
             ConversationTitle.resolvedGroupTitle(sharedName: "Trio", otherMemberNames: ["Anna", "Ivan"]), "Trio")
         XCTAssertEqual(
-            ConversationTitle.resolvedGroupTitle(sharedName: "  ", otherMemberNames: ["Anna", "Ivan"]),
+            ConversationTitle.resolvedGroupTitle(sharedName: "  ", otherMemberNames: ["Anna", "Ivan"])
+                .withoutIsolates,
             "Anna, Ivan")
         XCTAssertEqual(ConversationTitle.resolvedGroupTitle(sharedName: nil, otherMemberNames: [nil]), "Group")
     }

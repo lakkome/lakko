@@ -5,6 +5,7 @@ package me.lakko.app.chat
 
 import android.content.Context
 import android.content.SharedPreferences
+import me.lakko.app.l10n.UiText
 
 /**
  * ADR-0045 S7 residual 1 — the request that was not carried. Android mirror of
@@ -126,21 +127,21 @@ internal fun unappliedAddRequests(
  * retained request and only the joiner holds the key material — so it directs
  * the action to them. An ordinary add is re-doable here.
  */
-internal fun unappliedLine(item: UnappliedAdd): String =
+internal fun unappliedLine(item: UnappliedAdd): UiText =
     if (item.viaJoinRequest) {
-        "Not applied. Ask them to request to join again."
+        UiText("chat.members.unapplied.join_line")
     } else {
-        "Not added. You can add them again."
+        UiText("chat.members.unapplied.add_line")
     }
 
 /** The one explanatory line under the section heading. True on both counts: the
  *  request left the pending set, so no sweep will carry it, and no client
  *  re-requests (UX §7's automatic re-request is designed and not built). */
-internal const val UNAPPLIED_EXPLANATION: String =
-    "These changes did not apply and will not be retried on their own."
+internal val UNAPPLIED_EXPLANATION: UiText = UiText("chat.members.unapplied.explanation")
 
 /** The section heading. */
-internal fun unappliedHeading(count: Int): String = "Not applied ($count)"
+internal fun unappliedHeading(count: Int): UiText =
+    UiText("chat.members.unapplied.heading", counts = mapOf("count" to count.toULong()))
 
 // ---------------------------------------------------------------------------
 // The joiner's half of the same residual
@@ -153,13 +154,11 @@ internal fun unappliedHeading(count: Int): String = "Not applied ($count)"
  * file's header. What it is told instead is the truth about the wait itself,
  * which the previous copy left out: **both** steps are unbounded.
  */
-internal const val JOIN_WAIT_PRIMARY: String =
-    "Request sent. An admin approves it, then the change is applied to the group."
+internal val JOIN_WAIT_PRIMARY: UiText = UiText("group.join.wait_primary")
 
 /** The second line — the part that was missing, and the only thing that makes
  *  the [JOIN_REQUEST_AGAIN] control legible. */
-internal const val JOIN_WAIT_SECONDARY: String =
-    "Neither step has a time limit. If nothing happens, you can send the request again."
+internal val JOIN_WAIT_SECONDARY: UiText = UiText("group.join.wait_secondary")
 
 /**
  * The joiner's one repair, and the ONLY thing available to this side.
@@ -177,7 +176,7 @@ internal const val JOIN_WAIT_SECONDARY: String =
  * which is exactly the case that matters here, because a successful approve
  * consumed it.
  */
-internal const val JOIN_REQUEST_AGAIN: String = "Request again"
+internal val JOIN_REQUEST_AGAIN: UiText = UiText("group.join.request_again")
 
 // ---------------------------------------------------------------------------
 // The store

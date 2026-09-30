@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.withTimeoutOrNull
 import me.lakko.app.chat.AttachmentBridgeException
+import me.lakko.app.l10n.UiText
 
 /**
  * UX spec §10 — the rules that keep a picked item from disappearing: every
@@ -19,7 +20,7 @@ import me.lakko.app.chat.AttachmentBridgeException
 public const val VISUAL_PREP_TIMEOUT_MS: Long = 15_000L
 
 /** The chip label before the picked item's name is known. */
-public const val PICKED_ITEM_PLACEHOLDER: String = "Selected item"
+public const val PICKED_ITEM_PLACEHOLDER_KEY: String = "chat.upload.selected_item"
 
 /**
  * Run [block] in [scope] and wait at most [timeoutMs] for it. `null` on
@@ -36,17 +37,37 @@ public suspend fun <T : Any> awaitBounded(
     return withTimeoutOrNull(timeoutMs) { deferred.await() }
 }
 
-/** The readable composer error for an attachment that could not be added. */
-public fun attachFailureMessage(name: String?, error: Throwable?): String {
-    val label = name?.takeUnless { it.isBlank() }?.let { "\"$it\"" } ?: "the selected item"
-    val reason = when (error) {
-        is AttachmentBridgeException.TooLarge -> "it is larger than 50 MB"
-        is AttachmentBridgeException.Upload -> "the upload failed"
-        is AttachmentBridgeException.Encryption -> "encryption failed"
-        null -> "it could not be read"
-        else -> "something went wrong"
+/**
+ * The readable composer error for an attachment that could not be added
+ * (ADR-0058: the kind decides the sentence, the exception's own text is never
+ * shown).
+ */
+public fun attachFailureMessage(name: String?, error: Throwable?): UiText {
+    val named = name?.takeUnless { it.isBlank() } ?: return UiText("chat.attachment.error.attach")
+    return when (error) {
+        is AttachmentBridgeException.TooLarge -> UiText(
+            "chat.attachment.error.too_large_named",
+            texts = mapOf("name" to named),
+            parts = mapOf(
+                "size" to sizeText(error.got.toULong()),
+                "limit" to sizeText(error.max.toULong()),
+            ),
+        )
+        is AttachmentBridgeException.Upload -> UiText("chat.attachment.error.upload", texts = mapOf("name" to named))
+        else -> UiText("chat.attachment.error.attach_named", texts = mapOf("name" to named))
     }
-    return "Couldn't attach $label: $reason. Try again."
+}
+
+/** [AttachmentBridge.formatSize] as a [UiText], so it re-renders on a language switch. */
+private fun sizeText(bytes: ULong): UiText {
+    val (key, scale) = when {
+        bytes < 1_000UL -> "common.size.bytes" to 1.0
+        bytes < 1_000_000UL -> "common.size.kb" to 1_000.0
+        bytes < 1_000_000_000UL -> "common.size.mb" to 1_000_000.0
+        else -> "common.size.gb" to 1_000_000_000.0
+    }
+    val value = if (scale == 1.0) bytes.toString() else String.format(java.util.Locale.ROOT, "%.1f", bytes.toDouble() / scale)
+    return UiText(key, texts = mapOf("size" to value))
 }
 
 /** Bytes + metadata read from a picker URI. */

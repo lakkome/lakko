@@ -63,14 +63,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.lakko.app.chat.AttachmentBridge
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.t
 import me.lakko.app.media.ChatMediaHub
 import me.lakko.app.media.decodeOrientedBitmap
 import me.lakko.app.media.mediaBubbleBox
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import java.io.File
 
-internal const val COULD_NOT_LOAD_PHOTO = "Couldn't load photo"
-internal const val COULD_NOT_LOAD_VIDEO = "Couldn't load video"
+internal const val COULD_NOT_LOAD_PHOTO = "chat.photo.load_failed"
+internal const val COULD_NOT_LOAD_VIDEO = "chat.video.load_failed"
 
 /** Longest side, in px, a photo is decoded at inside its bubble. */
 private const val BUBBLE_DECODE_SIDE = 1080
@@ -161,13 +163,14 @@ internal fun PhotoBubble(
     }
 
     val ready = file != null && (animated || full != null)
+    val photoLabel = t(if (failed) "chat.photo.load_failed_retry" else "chat.media.photo")
     Box(
         modifier = Modifier
             .size(box.widthDp.dp, box.heightDp.dp)
             .clip(MEDIA_SHAPE)
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .mediaGestures(
-                label = if (failed) "Retry" else "Open photo",
+                label = t(if (failed) "common.retry" else "chat.photo.open"),
                 onClick = {
                     if (failed) {
                         failed = false
@@ -179,7 +182,7 @@ internal fun PhotoBubble(
                 },
                 onLongPress = onLongPress,
             )
-            .semantics { contentDescription = if (failed) "Photo, $COULD_NOT_LOAD_PHOTO" else "Photo" },
+            .semantics { contentDescription = photoLabel },
     ) {
         val f = file
         val fullBitmap = full
@@ -187,7 +190,7 @@ internal fun PhotoBubble(
         when {
             !failed && animated && f != null -> AnimatedImage(
                 source = AnimatedSource.OfFile(f),
-                contentDescription = "Photo",
+                contentDescription = t("chat.media.photo"),
                 modifier = Modifier.fillMaxSize(),
                 onFailed = { failed = true },
             )
@@ -205,7 +208,7 @@ internal fun PhotoBubble(
             )
         }
         if (failed) {
-            FailedLabel(COULD_NOT_LOAD_PHOTO, Modifier.align(Alignment.Center))
+            FailedLabel(t(COULD_NOT_LOAD_PHOTO), Modifier.align(Alignment.Center))
         } else if (!ready) {
             CircularProgressIndicator(
                 strokeWidth = 2.dp,
@@ -256,7 +259,8 @@ internal fun VideoBubble(
             ref.thumb?.height?.toInt(),
         )
     }
-    val sizeLabel = remember(ref.size) { AttachmentBridge.formatSize(ref.size) }
+    val strings = LocalStrings.current
+    val sizeLabel = remember(ref.size, strings) { AttachmentBridge.formatSize(ref.size, strings) }
     var poster by remember(key) { mutableStateOf<ImageBitmap?>(null) }
     var file by remember(key) { mutableStateOf<File?>(hub.fileFor(key)) }
     var loading by remember(key) { mutableStateOf(false) }
@@ -289,18 +293,23 @@ internal fun VideoBubble(
         }
     }
 
+    val videoLabel = if (failed) {
+        t("chat.video.load_failed_retry")
+    } else {
+        t("chat.video.play", mapOf("size" to sizeLabel))
+    }
     Box(
         modifier = Modifier
             .size(box.widthDp.dp, box.heightDp.dp)
             .clip(MEDIA_SHAPE)
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .mediaGestures(
-                label = if (failed) "Retry" else "Play video",
+                label = t(if (failed) "common.retry" else "chat.video.open"),
                 onClick = ::open,
                 onLongPress = onLongPress,
             )
             .semantics {
-                contentDescription = if (failed) "Video, $COULD_NOT_LOAD_VIDEO" else "Video, $sizeLabel"
+                contentDescription = videoLabel
             },
     ) {
         poster?.let {
@@ -332,7 +341,7 @@ internal fun VideoBubble(
         }
         if (failed) {
             FailedLabel(
-                COULD_NOT_LOAD_VIDEO,
+                t(COULD_NOT_LOAD_VIDEO),
                 Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp),
             )
         }
@@ -381,10 +390,10 @@ private fun ViewerTopBar(onClose: () -> Unit, onSave: () -> Unit, modifier: Modi
             .padding(horizontal = 4.dp),
     ) {
         IconButton(onClick = onClose) {
-            Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White)
+            Icon(Icons.Filled.Close, contentDescription = t("common.close"), tint = Color.White)
         }
         Box(Modifier.weight(1f))
-        TextButton(onClick = onSave) { Text("Save", color = Color.White) }
+        TextButton(onClick = onSave) { Text(t("common.save"), color = Color.White) }
     }
 }
 
@@ -401,6 +410,7 @@ private fun PhotoViewer(file: File, animated: Boolean, onSave: () -> Unit, onClo
     var offset by remember { mutableStateOf(Offset.Zero) }
     var dragY by remember { mutableFloatStateOf(0f) }
     val dismissPx = with(LocalDensity.current) { 120.dp.toPx() }
+    val viewerLabel = t("chat.photo.viewer")
 
     LaunchedEffect(file) {
         if (animated) return@LaunchedEffect
@@ -418,7 +428,7 @@ private fun PhotoViewer(file: File, animated: Boolean, onSave: () -> Unit, onClo
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
-                .semantics { contentDescription = "Photo viewer" },
+                .semantics { contentDescription = viewerLabel },
         ) {
             val content = Modifier
                 .fillMaxSize()
@@ -465,18 +475,18 @@ private fun PhotoViewer(file: File, animated: Boolean, onSave: () -> Unit, onClo
             when {
                 animated -> AnimatedImage(
                     source = AnimatedSource.OfFile(file),
-                    contentDescription = "Photo",
+                    contentDescription = t("chat.media.photo"),
                     modifier = content,
                     fit = true,
                     onFailed = { failed = true },
                 )
                 b != null -> Image(
                     bitmap = b,
-                    contentDescription = "Photo",
+                    contentDescription = t("chat.media.photo"),
                     contentScale = ContentScale.Fit,
                     modifier = content,
                 )
-                failed -> FailedLabel(COULD_NOT_LOAD_PHOTO, Modifier.align(Alignment.Center))
+                failed -> FailedLabel(t(COULD_NOT_LOAD_PHOTO), Modifier.align(Alignment.Center))
                 else -> CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
             }
             ViewerTopBar(onClose = onClose, onSave = onSave, modifier = Modifier.align(Alignment.TopCenter))
@@ -491,6 +501,7 @@ private fun PhotoViewer(file: File, animated: Boolean, onSave: () -> Unit, onClo
 @Composable
 private fun VideoPlayerDialog(file: File, onSave: () -> Unit, onClose: () -> Unit) {
     var failed by remember(file) { mutableStateOf(false) }
+    val playerLabel = t("chat.video.player")
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -499,10 +510,10 @@ private fun VideoPlayerDialog(file: File, onSave: () -> Unit, onClose: () -> Uni
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
-                .semantics { contentDescription = "Video player" },
+                .semantics { contentDescription = playerLabel },
         ) {
             if (failed) {
-                FailedLabel("Couldn't play this video", Modifier.align(Alignment.Center))
+                FailedLabel(t("chat.video.play_failed"), Modifier.align(Alignment.Center))
             } else {
                 AndroidView(
                     factory = { ctx ->

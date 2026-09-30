@@ -23,6 +23,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import me.lakko.app.l10n.EnglishForTests
 import me.lakko.app.media.ChatMediaHub
 import me.lakko.app.media.InlineKind
 import me.lakko.app.media.KIND_VOICE
@@ -72,6 +73,10 @@ import uniffi.lakko_ffi_uniffi.AttachmentRef
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class MediaBaselineScreenshotTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()

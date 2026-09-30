@@ -32,8 +32,8 @@ describe("the delete-chat confirmation", () => {
     // second place for them to drift, which is the failure mode the
     // `membership-ended.ts` split exists to prevent.
     const c = deleteChatConfirmation({ chatLabel: "Ops team" });
-    expect(c.title).toBe(DELETE_CHAT_TITLE);
-    expect(c.body).toBe(DELETE_CHAT_BODY);
+    expect(c.title).toBe(DELETE_CHAT_TITLE());
+    expect(c.body).toBe(DELETE_CHAT_BODY());
   });
 
   it("keeps the body exact rather than sweeping", () => {
@@ -51,8 +51,8 @@ describe("the delete-chat confirmation", () => {
     expect(deleteChatConfirmation({ chatLabel: "Ops team" }).confirmLabel).toBe(
       "Delete Ops team",
     );
-    expect(DELETE_CHAT_CONFIRM_LABEL).toBe("Delete");
-    expect(DELETE_CHAT_CANCEL_LABEL).toBe("Cancel");
+    expect(DELETE_CHAT_CONFIRM_LABEL()).toBe("Delete");
+    expect(DELETE_CHAT_CANCEL_LABEL()).toBe("Cancel");
   });
 
   it("falls back to the bare verb for an unnamed chat", () => {

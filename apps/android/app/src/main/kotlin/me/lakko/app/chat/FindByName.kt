@@ -4,6 +4,7 @@
 package me.lakko.app.chat
 
 import kotlinx.coroutines.CancellationException
+import me.lakko.app.l10n.UiText
 
 /**
  * Looking a name up on the network, from the conversation list.
@@ -132,10 +133,10 @@ public fun findByNameMessage(
     result: FoundByName,
     typed: String,
     bareName: (String) -> String = { uniffi.lakko_ffi_uniffi.bareName(it) },
-): String? = when (result) {
-    is FoundByName.NothingFound -> "Nothing found for @${bareName(typed)}."
-    is FoundByName.Unreachable -> "Could not look that up. Check your connection and try again."
-    is FoundByName.AllowanceUsed -> me.lakko.app.anon.LOOKUP_ALLOWANCE_USED_COPY
+): UiText? = when (result) {
+    is FoundByName.NothingFound -> UiText("chats.lookup.nothing", texts = mapOf("name" to "@${bareName(typed)}"))
+    is FoundByName.Unreachable -> UiText("chats.lookup.unreachable")
+    is FoundByName.AllowanceUsed -> UiText("tokens.lookup_allowance_used")
     else -> null
 }
 
@@ -143,4 +144,4 @@ public fun findByNameMessage(
 public fun findByNameRowLabel(
     typed: String,
     bareName: (String) -> String = { uniffi.lakko_ffi_uniffi.bareName(it) },
-): String = "Look up @${bareName(typed)}"
+): UiText = UiText("chats.lookup.action", texts = mapOf("name" to "@${bareName(typed)}"))

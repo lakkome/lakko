@@ -57,6 +57,7 @@
  */
 
 import { loadWasm } from "../wasm";
+import { currentLanguage, t } from "../l10n";
 import { StorageClient } from "../storage/client";
 import type { AttachmentRef as WasmAttachmentRef } from "../../wasm/lakko_ffi_wasm";
 
@@ -817,10 +818,19 @@ export async function composeReadReceiptEnvelope(
  * UI.
  */
 export function formatAttachmentSize(bytes: number): string {
-  if (bytes < 1000) return `${bytes} B`;
-  if (bytes < 1_000_000) return `${(bytes / 1000).toFixed(1)} kB`;
-  if (bytes < 1_000_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
-  return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+  // ADR-0058: the number in the interface language's format, the unit
+  // abbreviation from the catalog.
+  const oneDecimal = (n: number): string =>
+    new Intl.NumberFormat(currentLanguage(), {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    }).format(n);
+  if (bytes < 1000) {
+    return t("common.size.bytes", { size: new Intl.NumberFormat(currentLanguage()).format(bytes) });
+  }
+  if (bytes < 1_000_000) return t("common.size.kb", { size: oneDecimal(bytes / 1000) });
+  if (bytes < 1_000_000_000) return t("common.size.mb", { size: oneDecimal(bytes / 1_000_000) });
+  return t("common.size.gb", { size: oneDecimal(bytes / 1_000_000_000) });
 }
 
 /**

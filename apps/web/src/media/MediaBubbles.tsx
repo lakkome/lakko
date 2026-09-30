@@ -12,6 +12,7 @@
  * a bubble either plays authenticated bytes or shows "Couldn't play".
  */
 
+import { t } from "../l10n";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 
 import type { AttachmentRefBytes } from "../chat/attachments";
@@ -80,7 +81,7 @@ export function NotSent(props: { onRetry: () => void }): JSX.Element {
         "text-decoration": "underline",
       }}
     >
-      Not sent · Retry
+      {t("chat.media.not_sent_retry")}
     </button>
   );
 }
@@ -346,8 +347,8 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
           class="lakko-voice-play"
           aria-label={
             playing()
-              ? "Pause voice message"
-              : `Play voice message, ${spokenDuration(duration())}`
+              ? t("chat.voice.pause")
+              : t("chat.voice.play", { duration: spokenDuration(duration()) })
           }
           disabled={uploading()}
           onClick={toggle}
@@ -367,11 +368,11 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
             class="lakko-wave"
             role="slider"
             tabindex={uploading() ? -1 : 0}
-            aria-label="Seek voice message"
+            aria-label={t("chat.voice.seek")}
             aria-valuemin={0}
             aria-valuemax={Math.round(duration() / 1000)}
             aria-valuenow={Math.round(position() / 1000)}
-            aria-valuetext={`${spokenDuration(position())} of ${spokenDuration(duration())}`}
+            aria-valuetext={t("chat.voice.position", { position: spokenDuration(position()), duration: spokenDuration(duration()) })}
             onPointerDown={(e) => {
               // Primary button only. A right-click on the waveform is a request
               // for the message's action menu (`MessageMenu.tsx`), and seeking
@@ -419,7 +420,7 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
               {active() ? formatClock(position()) : formatTotalClock(duration())}
             </span>
             <Show when={unplayed()}>
-              <span class="lakko-unplayed" aria-label="Not played" />
+              <span class="lakko-unplayed" aria-label={t("chat.voice.not_played")} />
             </Show>
             {/* Only while this message is the one playing: a speed control on
                 a message nobody is listening to is a control for nothing.
@@ -437,7 +438,7 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
               class="lakko-voice-rate"
               data-reserved={active() ? undefined : "true"}
               tabindex={active() ? undefined : -1}
-              aria-label={`Playback speed ${rateLabel(rate())}`}
+              aria-label={t("chat.voice.speed", { rate: rateLabel(rate()) })}
               onClick={() => {
                 const next = nextPlaybackRate(rate());
                 setRate(next);
@@ -463,7 +464,7 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
           }}
           style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "min-height": 0, "font-size": "0.75rem", "text-align": "left", "text-decoration": "underline" }}
         >
-          Couldn't play this message
+          {t("chat.media.play_failed")}
         </button>
       </Show>
       <Show when={props.upload === "failed"}>
@@ -668,9 +669,9 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
 
   const label = (): string => {
     const d = spokenDuration(props.attachment.durationMs ?? 0);
-    if (mode() === "sound" && !paused()) return "Pause video message";
-    if (mode() === "muted") return `Play video message with sound, ${d}`;
-    return `Play video message, ${d}`;
+    if (mode() === "sound" && !paused()) return t("chat.record.pause_video");
+    if (mode() === "muted") return t("chat.video_note.play_sound", { duration: d });
+    return t("chat.video_note.play", { duration: d });
   };
 
   return (
@@ -739,7 +740,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
             </Show>
           }
         >
-          <span class="lakko-vn-corner">Tap for sound</span>
+          <span class="lakko-vn-corner">{t("chat.video_note.tap_sound")}</span>
         </Show>
       </button>
       <Show when={status() === "error"}>
@@ -751,7 +752,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
           }}
           style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "min-height": 0, "font-size": "0.75rem", "text-decoration": "underline" }}
         >
-          Couldn't play this message
+          {t("chat.media.play_failed")}
         </button>
       </Show>
       <Show when={props.upload === "failed"}>
@@ -827,9 +828,9 @@ export function GifBubble(props: MediaBubbleProps): JSX.Element {
     <Show when={url()}>
       {(u) =>
         inline() === "video" ? (
-          <video src={u()} autoplay muted loop playsinline aria-label="GIF" style={big ? {} : undefined} />
+          <video src={u()} autoplay muted loop playsinline aria-label={t("chat.media.gif")} style={big ? {} : undefined} />
         ) : (
-          <img src={u()} alt="GIF" draggable={false} />
+          <img src={u()} alt={t("chat.media.gif")} draggable={false} />
         )
       }
     </Show>
@@ -841,12 +842,12 @@ export function GifBubble(props: MediaBubbleProps): JSX.Element {
         type="button"
         class="lakko-gif"
         style={{ width: `${width()}px`, "aspect-ratio": aspect() }}
-        aria-label="Open GIF full screen"
+        aria-label={t("chat.gif.open_full")}
         disabled={status() !== "ready"}
         onClick={() => setFullScreen(true)}
       >
         {media(false)}
-        <span class="lakko-gif-label">GIF</span>
+        <span class="lakko-gif-label">{t("chat.media.gif")}</span>
         <Show when={status() === "loading" || uploading()}>
           <span class="lakko-vn-glyph" style={{ "font-size": "1rem" }}>
             <span class="lakko-spinner" />
@@ -859,14 +860,14 @@ export function GifBubble(props: MediaBubbleProps): JSX.Element {
           onClick={load}
           style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "min-height": 0, "font-size": "0.75rem", "text-decoration": "underline", "text-align": "left" }}
         >
-          Couldn't load this GIF · Retry
+          {t("chat.gif.load_failed")}
         </button>
       </Show>
       <Show when={props.upload === "failed"}>
         <NotSent onRetry={props.onRetry} />
       </Show>
       <Show when={fullScreen()}>
-        <div class="lakko-lightbox" role="dialog" aria-label="GIF" onClick={() => setFullScreen(false)}>
+        <div class="lakko-lightbox" role="dialog" aria-label={t("chat.media.gif")} onClick={() => setFullScreen(false)}>
           {media(true)}
         </div>
       </Show>

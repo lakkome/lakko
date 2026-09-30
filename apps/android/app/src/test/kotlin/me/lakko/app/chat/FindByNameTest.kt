@@ -5,6 +5,8 @@ package me.lakko.app.chat
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -22,6 +24,10 @@ import org.junit.Test
  * "no answer".
  */
 class FindByNameTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     /** The two namespaces, scripted. A `null` script entry means "not here"; a
      *  `Throwable` means the network was the problem. */
@@ -102,7 +108,7 @@ class FindByNameTest {
         assertEquals(FoundByName.AllowanceUsed, found)
         assertEquals(
             "You have looked up a lot of people today. Try again tomorrow.",
-            findByNameMessage(found, "@anna", bare),
+            findByNameMessage(found, "@anna", bare)?.en,
         )
     }
 
@@ -140,9 +146,9 @@ class FindByNameTest {
 
     @Test
     fun `the copy names what happened and what to do, and never a protocol word`() {
-        val nothing = findByNameMessage(FoundByName.NothingFound, "@anna", bare)
+        val nothing = findByNameMessage(FoundByName.NothingFound, "@anna", bare)?.en
         assertEquals("Nothing found for @anna.", nothing)
-        val unreachable = findByNameMessage(FoundByName.Unreachable, "@anna", bare)
+        val unreachable = findByNameMessage(FoundByName.Unreachable, "@anna", bare)?.en
         assertEquals("Could not look that up. Check your connection and try again.", unreachable)
         for (copy in listOfNotNull(nothing, unreachable)) {
             assertFalse(copy.contains("OPRF"))
@@ -160,7 +166,7 @@ class FindByNameTest {
 
     @Test
     fun `the row offers the whole name, never a prefix`() {
-        assertEquals("Look up @anna", findByNameRowLabel("  @Anna  ") { it.trim().removePrefix("@").lowercase() })
-        assertTrue(findByNameRowLabel("anna", bare).startsWith("Look up @"))
+        assertEquals("Look up @anna", findByNameRowLabel("  @Anna  ") { it.trim().removePrefix("@").lowercase() }.en)
+        assertTrue(findByNameRowLabel("anna", bare).en.startsWith("Look up @"))
     }
 }

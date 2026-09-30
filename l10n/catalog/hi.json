@@ -250,6 +250,22 @@
       "text": "आपको कॉल में जोड़ा जा रहा है...",
       "status": "machine"
     },
+    "call.incoming.accept": {
+      "text": "स्वीकार करें",
+      "status": "machine"
+    },
+    "call.incoming.accept_from": {
+      "text": "{name} की कॉल स्वीकार करें",
+      "status": "machine"
+    },
+    "call.incoming.decline": {
+      "text": "अस्वीकार करें",
+      "status": "machine"
+    },
+    "call.incoming.decline_from": {
+      "text": "{name} की कॉल अस्वीकार करें",
+      "status": "machine"
+    },
     "call.link.connecting": {
       "text": "कनेक्ट हो रहा है...",
       "status": "machine"
@@ -314,8 +330,1712 @@
       "text": "आप यह स्क्रीन छोड़ सकते हैं; अनुमति मिलते ही आप कॉल में शामिल हो जाएंगे।",
       "status": "machine"
     },
+    "chat.attachment.error.attach": {
+      "text": "चुना गया आइटम अटैच नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.attachment.error.attach_named": {
+      "text": "\"{name}\" अटैच नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.attachment.error.download": {
+      "text": "अटैचमेंट डाउनलोड नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.attachment.error.gone": {
+      "text": "यह अटैचमेंट अब सर्वर पर उपलब्ध नहीं है।",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_photo": {
+      "text": "यह फ़ोटो खुल नहीं सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_video": {
+      "text": "यह वीडियो खुल नहीं सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.attachment.error.prepare_video": {
+      "text": "यह वीडियो तैयार नहीं हो सका। {limit} तक के वीडियो भेजे जा सकते हैं।",
+      "status": "machine"
+    },
+    "chat.attachment.error.preview": {
+      "text": "तस्वीर नहीं दिखाई जा सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large": {
+      "text": "यह मैसेज {size} का है, जो {limit} की सीमा से ज़्यादा है।",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large_named": {
+      "text": "\"{name}\" {size} की है, जो {limit} की सीमा से ज़्यादा है।",
+      "status": "machine"
+    },
+    "chat.attachment.error.upload": {
+      "text": "\"{name}\" अपलोड नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.attachment.hide": {
+      "text": "छिपाएँ",
+      "status": "machine"
+    },
+    "chat.attachment.image_alt": {
+      "text": "तस्वीर अटैचमेंट",
+      "status": "machine"
+    },
+    "chat.attachment.open": {
+      "text": "खोलें",
+      "status": "machine"
+    },
+    "chat.attachment.save_title": {
+      "text": "अटैचमेंट सेव करें",
+      "status": "machine"
+    },
+    "chat.attachment.unnamed": {
+      "text": "(बिना नाम)",
+      "status": "machine"
+    },
+    "chat.author.a_member": {
+      "text": "एक सदस्य",
+      "status": "machine"
+    },
+    "chat.author.unknown": {
+      "text": "अज्ञात भेजने वाला",
+      "status": "machine"
+    },
+    "chat.author.you": {
+      "text": "आप",
+      "status": "machine"
+    },
+    "chat.call.busy": {
+      "text": "एक और कॉल चल रही है।",
+      "status": "machine"
+    },
+    "chat.call.error.start": {
+      "text": "कॉल शुरू नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.call.group_ended": {
+      "text": "वह ग्रुप कॉल खत्म हो चुकी है।",
+      "status": "machine"
+    },
+    "chat.call.group_in_progress": {
+      "text": "ग्रुप कॉल चल रही है",
+      "status": "machine"
+    },
+    "chat.call.group_people": {
+      "text": "{count, plural, one {कॉल में # व्यक्ति} other {कॉल में # लोग}}",
+      "status": "machine"
+    },
+    "chat.call.group_starting": {
+      "text": "शुरू हो रही है…",
+      "status": "machine"
+    },
+    "chat.call.group_status_e2ee": {
+      "text": "{status} · एंड-टू-एंड एन्क्रिप्टेड",
+      "status": "machine"
+    },
+    "chat.call.join": {
+      "text": "कॉल में शामिल हों",
+      "status": "machine"
+    },
+    "chat.call.join_short": {
+      "text": "शामिल हों",
+      "status": "machine"
+    },
+    "chat.call.join_video": {
+      "text": "वीडियो के साथ शामिल हों",
+      "status": "machine"
+    },
+    "chat.call.last_ended.busy": {
+      "text": "पिछली कॉल खत्म हुई: दूसरा व्यक्ति व्यस्त था।",
+      "status": "machine"
+    },
+    "chat.call.last_ended.declined": {
+      "text": "पिछली कॉल खत्म हुई: अस्वीकार कर दी गई।",
+      "status": "machine"
+    },
+    "chat.call.last_ended.error": {
+      "text": "पिछली कॉल एक गड़बड़ी की वजह से खत्म हुई।",
+      "status": "machine"
+    },
+    "chat.call.last_ended.hung_up": {
+      "text": "पिछली कॉल खत्म हुई।",
+      "status": "machine"
+    },
+    "chat.call.last_ended.timed_out": {
+      "text": "पिछली कॉल खत्म हुई: कोई जवाब नहीं मिला।",
+      "status": "machine"
+    },
+    "chat.call.unavailable": {
+      "text": "ग्रुप कॉल अभी उपलब्ध नहीं हैं।",
+      "status": "machine"
+    },
+    "chat.call.video": {
+      "text": "वीडियो कॉल",
+      "status": "machine"
+    },
+    "chat.call.voice": {
+      "text": "कॉल करें",
+      "status": "machine"
+    },
+    "chat.composer.attach": {
+      "text": "फ़ाइलें अटैच करें",
+      "status": "machine"
+    },
+    "chat.composer.attach_limit": {
+      "text": "फ़ाइलें अटैच करें (हर फ़ाइल {limit} तक)",
+      "status": "machine"
+    },
+    "chat.composer.attach_media": {
+      "text": "फ़ोटो या वीडियो",
+      "status": "machine"
+    },
+    "chat.composer.drop_files": {
+      "text": "अटैच करने के लिए फ़ाइलें यहाँ छोड़ें",
+      "status": "machine"
+    },
+    "chat.composer.emoji_gifs": {
+      "text": "इमोजी और GIF",
+      "status": "machine"
+    },
+    "chat.composer.photo_library": {
+      "text": "फ़ोटो लाइब्रेरी",
+      "status": "machine"
+    },
+    "chat.composer.placeholder": {
+      "text": "मैसेज",
+      "status": "machine"
+    },
+    "chat.composer.remove_attachment": {
+      "text": "अटैचमेंट हटाएँ",
+      "status": "machine"
+    },
+    "chat.composer.send": {
+      "text": "भेजें",
+      "status": "machine"
+    },
+    "chat.day.today": {
+      "text": "आज",
+      "status": "machine"
+    },
+    "chat.day.yesterday": {
+      "text": "कल",
+      "status": "machine"
+    },
+    "chat.delete.body": {
+      "text": "इससे यह बातचीत और इसके मैसेज इस डिवाइस से हट जाएँगे। इसकी कोई कॉपी कहीं और नहीं है और इसे वापस नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "chat.delete.confirm_named": {
+      "text": "{name} मिटाएँ",
+      "status": "machine"
+    },
+    "chat.delete.control": {
+      "text": "यह चैट मिटाएँ",
+      "status": "machine"
+    },
+    "chat.delete.title": {
+      "text": "यह चैट मिटाएँ?",
+      "status": "machine"
+    },
+    "chat.edit.title": {
+      "text": "मैसेज एडिट करें",
+      "status": "machine"
+    },
+    "chat.emoji.categories": {
+      "text": "इमोजी श्रेणियाँ",
+      "status": "machine"
+    },
+    "chat.emoji.choose": {
+      "text": "चुनें",
+      "status": "machine"
+    },
+    "chat.emoji.choose_reaction": {
+      "text": "रिएक्शन चुनें",
+      "status": "machine"
+    },
+    "chat.emoji.group.activities": {
+      "text": "गतिविधियाँ",
+      "status": "machine"
+    },
+    "chat.emoji.group.animals": {
+      "text": "जानवर और प्रकृति",
+      "status": "machine"
+    },
+    "chat.emoji.group.flags": {
+      "text": "झंडे",
+      "status": "machine"
+    },
+    "chat.emoji.group.food": {
+      "text": "खाना-पीना",
+      "status": "machine"
+    },
+    "chat.emoji.group.objects": {
+      "text": "वस्तुएँ",
+      "status": "machine"
+    },
+    "chat.emoji.group.people": {
+      "text": "लोग और शरीर",
+      "status": "machine"
+    },
+    "chat.emoji.group.smileys": {
+      "text": "स्माइली और भावनाएँ",
+      "status": "machine"
+    },
+    "chat.emoji.group.symbols": {
+      "text": "चिह्न",
+      "status": "machine"
+    },
+    "chat.emoji.group.travel": {
+      "text": "यात्रा और जगहें",
+      "status": "machine"
+    },
+    "chat.emoji.insert": {
+      "text": "डालें",
+      "status": "machine"
+    },
+    "chat.emoji.no_results": {
+      "text": "कोई इमोजी नहीं मिला",
+      "status": "machine"
+    },
+    "chat.emoji.recent": {
+      "text": "हाल ही में",
+      "status": "machine"
+    },
+    "chat.emoji.search": {
+      "text": "इमोजी खोजें",
+      "status": "machine"
+    },
+    "chat.emoji.skin_tones": {
+      "text": "{name} के लिए त्वचा के रंग",
+      "status": "machine"
+    },
+    "chat.emoji.tab": {
+      "text": "इमोजी",
+      "status": "machine"
+    },
+    "chat.ended.composer": {
+      "text": "आप अब इस ग्रुप में मैसेज नहीं भेज सकते।",
+      "status": "machine"
+    },
+    "chat.ended.consequence": {
+      "text": "जो मैसेज आपको पहले मिल चुके हैं, वे यहीं हैं। कोई नया मैसेज नहीं आएगा।",
+      "status": "machine"
+    },
+    "chat.ended.left": {
+      "text": "आपने यह ग्रुप छोड़ दिया।",
+      "status": "machine"
+    },
+    "chat.ended.no_longer_member": {
+      "text": "आप अब इस ग्रुप के सदस्य नहीं हैं।",
+      "status": "machine"
+    },
+    "chat.ended.unsent_draft": {
+      "text": "बिना भेजा ड्राफ़्ट",
+      "status": "machine"
+    },
+    "chat.error.add_member": {
+      "text": "इस व्यक्ति को जोड़ा नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.approve_join": {
+      "text": "शामिल होने का अनुरोध स्वीकार नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.change_admin": {
+      "text": "एडमिन की भूमिका नहीं बदली जा सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.conversation_gone": {
+      "text": "वह बातचीत अब यहाँ नहीं है।",
+      "status": "machine"
+    },
+    "chat.error.create_link": {
+      "text": "इनवाइट लिंक नहीं बन सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.delete_chat": {
+      "text": "यह चैट मिटाई नहीं जा सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.delete_message": {
+      "text": "मैसेज मिटाया नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.edit": {
+      "text": "मैसेज एडिट नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.leave": {
+      "text": "ग्रुप छोड़ा नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.membership_request": {
+      "text": "आपका अनुरोध किया गया सदस्यता बदलाव फिर से नहीं भेजा जा सका।",
+      "status": "machine"
+    },
+    "chat.error.message_gone": {
+      "text": "वह मैसेज अब यहाँ नहीं है।",
+      "status": "machine"
+    },
+    "chat.error.pin": {
+      "text": "पिन नहीं बदला जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.react": {
+      "text": "रिएक्शन नहीं भेजा जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.refresh": {
+      "text": "नए मैसेज लोड नहीं हो सके। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.reject_join": {
+      "text": "शामिल होने का अनुरोध अस्वीकार नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.remove_member": {
+      "text": "इस सदस्य को हटाया नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.revoke_link": {
+      "text": "इनवाइट लिंक रद्द नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.error.transfer": {
+      "text": "मालिकाना हक नहीं सौंपा जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.forward.empty": {
+      "text": "फ़ॉरवर्ड करने के लिए कोई बातचीत नहीं है",
+      "status": "machine"
+    },
+    "chat.forward.error.generic": {
+      "text": "मैसेज फ़ॉरवर्ड नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.forward.from": {
+      "text": "{name} से फ़ॉरवर्ड किया गया",
+      "status": "machine"
+    },
+    "chat.forward.label": {
+      "text": "फ़ॉरवर्ड किया गया",
+      "status": "machine"
+    },
+    "chat.forward.list_label": {
+      "text": "बातचीत",
+      "status": "machine"
+    },
+    "chat.forward.picker_title": {
+      "text": "इसे फ़ॉरवर्ड करें",
+      "status": "machine"
+    },
+    "chat.forward.search_label": {
+      "text": "बातचीत खोजें",
+      "status": "machine"
+    },
+    "chat.gif.attribution": {
+      "text": "GIPHY द्वारा संचालित",
+      "status": "machine"
+    },
+    "chat.gif.load_failed": {
+      "text": "यह GIF लोड नहीं हो सका · फिर से कोशिश करें",
+      "status": "machine"
+    },
+    "chat.gif.loading": {
+      "text": "GIF लोड हो रहे हैं",
+      "status": "machine"
+    },
+    "chat.gif.no_results": {
+      "text": "कोई GIF नहीं मिला",
+      "status": "machine"
+    },
+    "chat.gif.note_dismiss": {
+      "text": "ठीक है",
+      "status": "machine"
+    },
+    "chat.gif.open_full": {
+      "text": "GIF फ़ुल स्क्रीन में खोलें",
+      "status": "machine"
+    },
+    "chat.gif.privacy_note": {
+      "text": "GIF खोज Lakko के सर्वर से होकर जाती है, जो देखता है कि आप क्या खोज रहे हैं। भेजे गए GIF किसी भी फ़ाइल की तरह एन्क्रिप्ट होते हैं।",
+      "status": "machine"
+    },
+    "chat.gif.rate_limited": {
+      "text": "बहुत ज़्यादा खोजें हो गईं। थोड़ी देर में फिर से कोशिश करें",
+      "status": "machine"
+    },
+    "chat.gif.search": {
+      "text": "GIF खोजें",
+      "status": "machine"
+    },
+    "chat.gif.send": {
+      "text": "GIF भेजें",
+      "status": "machine"
+    },
+    "chat.gif.trending": {
+      "text": "ट्रेंडिंग",
+      "status": "machine"
+    },
+    "chat.gif.unavailable": {
+      "text": "GIF अभी उपलब्ध नहीं हैं",
+      "status": "machine"
+    },
+    "chat.group.default_name": {
+      "text": "नया ग्रुप",
+      "status": "machine"
+    },
+    "chat.group.fallback_name": {
+      "text": "ग्रुप",
+      "status": "machine"
+    },
+    "chat.group.title_more": {
+      "text": "{names} +{count}",
+      "status": "machine"
+    },
+    "chat.group_name.empty": {
+      "text": "अभी कोई नाम नहीं",
+      "status": "machine"
+    },
+    "chat.group_name.error.character": {
+      "text": "नाम में एक ऐसा अक्षर है जिसे दिखाया नहीं जा सकता।",
+      "status": "machine"
+    },
+    "chat.group_name.error.generic": {
+      "text": "इस नाम का इस्तेमाल नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "chat.group_name.error.line_break": {
+      "text": "नाम एक ही लाइन में होना चाहिए।",
+      "status": "machine"
+    },
+    "chat.group_name.error.save": {
+      "text": "ग्रुप का नाम नहीं बदला जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.group_name.error.too_long": {
+      "text": "नाम बहुत लंबा है।",
+      "status": "machine"
+    },
+    "chat.group_name.label": {
+      "text": "ग्रुप का नाम",
+      "status": "machine"
+    },
+    "chat.group_name.only_admins": {
+      "text": "सिर्फ़ एडमिन इस ग्रुप का नाम बदल सकते हैं",
+      "status": "machine"
+    },
+    "chat.header.back": {
+      "text": "चैट पर वापस जाएँ",
+      "status": "machine"
+    },
+    "chat.info.channel": {
+      "text": "चैनल की जानकारी",
+      "status": "machine"
+    },
+    "chat.info.contact": {
+      "text": "संपर्क की जानकारी",
+      "status": "machine"
+    },
+    "chat.info.group": {
+      "text": "ग्रुप की जानकारी",
+      "status": "machine"
+    },
+    "chat.invite_link.cleared": {
+      "text": "लिंक हटा दिया गया (इनलाइन लिंक में रद्द करने के लिए कुछ नहीं होता)।",
+      "status": "machine"
+    },
+    "chat.invite_link.copy": {
+      "text": "लिंक कॉपी करें",
+      "status": "machine"
+    },
+    "chat.invite_link.create": {
+      "text": "इनवाइट लिंक बनाएँ",
+      "status": "machine"
+    },
+    "chat.invite_link.label": {
+      "text": "इनवाइट लिंक",
+      "status": "machine"
+    },
+    "chat.invite_link.revoke": {
+      "text": "रद्द करें",
+      "status": "machine"
+    },
+    "chat.invite_link.revoked": {
+      "text": "इनवाइट लिंक रद्द कर दिया गया।",
+      "status": "machine"
+    },
+    "chat.invite_link.share": {
+      "text": "शेयर करें",
+      "status": "machine"
+    },
+    "chat.leave.action": {
+      "text": "ग्रुप छोड़ें",
+      "status": "machine"
+    },
+    "chat.leave.body": {
+      "text": "जब तक मालिक या कोई एडमिन आपका अनुरोध लागू नहीं करता, आपको मैसेज मिलते रहेंगे। फिर से शामिल होने के लिए आपको नए इनवाइट की ज़रूरत होगी।",
+      "status": "machine"
+    },
+    "chat.leave.confirm": {
+      "text": "छोड़ें",
+      "status": "machine"
+    },
+    "chat.leave.confirm_named": {
+      "text": "{name} छोड़ें",
+      "status": "machine"
+    },
+    "chat.leave.requested": {
+      "text": "ग्रुप छोड़ने का अनुरोध भेजा गया। यह तब लागू होगा जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
+      "status": "machine"
+    },
+    "chat.leave.title": {
+      "text": "यह ग्रुप छोड़ें?",
+      "status": "machine"
+    },
+    "chat.media.and_more": {
+      "text": "{label} और {count, plural, one {# अन्य} other {# अन्य}}",
+      "status": "machine"
+    },
+    "chat.media.audio": {
+      "text": "ऑडियो",
+      "status": "machine"
+    },
+    "chat.media.file": {
+      "text": "फ़ाइल",
+      "status": "machine"
+    },
+    "chat.media.gif": {
+      "text": "GIF",
+      "status": "machine"
+    },
+    "chat.media.not_sent_retry": {
+      "text": "नहीं भेजा गया · फिर से कोशिश करें",
+      "status": "machine"
+    },
+    "chat.media.open_full_hint": {
+      "text": "इसे फ़ुल स्क्रीन में खोलता है",
+      "status": "machine"
+    },
+    "chat.media.photo": {
+      "text": "फ़ोटो",
+      "status": "machine"
+    },
+    "chat.media.play_failed": {
+      "text": "यह मैसेज चल नहीं सका",
+      "status": "machine"
+    },
+    "chat.media.row_not_sent": {
+      "text": "{label}, नहीं भेजा गया",
+      "status": "machine"
+    },
+    "chat.media.row_sending": {
+      "text": "{label}, भेजा जा रहा है",
+      "status": "machine"
+    },
+    "chat.media.video": {
+      "text": "वीडियो",
+      "status": "machine"
+    },
+    "chat.media.video_message": {
+      "text": "वीडियो नोट",
+      "status": "machine"
+    },
+    "chat.media.voice_message": {
+      "text": "वॉइस मैसेज",
+      "status": "machine"
+    },
+    "chat.media.with_duration": {
+      "text": "{label}, {duration}",
+      "status": "machine"
+    },
+    "chat.members.add.action": {
+      "text": "सदस्य जोड़ें",
+      "status": "machine"
+    },
+    "chat.members.add.done": {
+      "text": "{name} को जोड़ दिया गया।",
+      "status": "machine"
+    },
+    "chat.members.add.error.no_bundle": {
+      "text": "इस व्यक्ति ने अभी तक Lakko सेट अप करना पूरा नहीं किया है। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.members.add.error.some_failed": {
+      "text": "{names} को नहीं जोड़ा जा सका। उन्हें सदस्यों वाले पैनल से जोड़ें।",
+      "status": "machine"
+    },
+    "chat.members.add.error.unknown_username": {
+      "text": "{name} नाम से कोई अकाउंट रजिस्टर नहीं है।",
+      "status": "machine"
+    },
+    "chat.members.add.placeholder": {
+      "text": "@username",
+      "status": "machine"
+    },
+    "chat.members.add.requested": {
+      "text": "{name} को जोड़ने का अनुरोध भेजा गया। वे तब शामिल होंगे जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
+      "status": "machine"
+    },
+    "chat.members.add.submit": {
+      "text": "जोड़ें",
+      "status": "machine"
+    },
+    "chat.members.admin.demoted": {
+      "text": "एडमिन की भूमिका हटा दी गई।",
+      "status": "machine"
+    },
+    "chat.members.admin.make": {
+      "text": "एडमिन बनाएँ",
+      "status": "machine"
+    },
+    "chat.members.admin.marker": {
+      "text": "एडमिन",
+      "status": "machine"
+    },
+    "chat.members.admin.promoted": {
+      "text": "एडमिन बना दिया गया।",
+      "status": "machine"
+    },
+    "chat.members.admin.remove": {
+      "text": "एडमिन की भूमिका हटाएँ",
+      "status": "machine"
+    },
+    "chat.members.admin.requested": {
+      "text": "बदलाव का अनुरोध भेजा गया। यह तब लागू होगा जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
+      "status": "machine"
+    },
+    "chat.members.count": {
+      "text": "{count, plural, one {# सदस्य} other {# सदस्य}}",
+      "status": "machine"
+    },
+    "chat.members.devices": {
+      "text": "{count, plural, one {# डिवाइस} other {# डिवाइस}}",
+      "status": "machine"
+    },
+    "chat.members.frozen": {
+      "text": "आपकी सदस्यता खत्म होने पर इस सूची का अपडेट होना बंद हो गया।",
+      "status": "machine"
+    },
+    "chat.members.heading": {
+      "text": "सदस्य ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.approve": {
+      "text": "स्वीकार करें",
+      "status": "machine"
+    },
+    "chat.members.join.approved_added": {
+      "text": "शामिल होना स्वीकार किया गया। उन्हें ग्रुप में जोड़ दिया गया है।",
+      "status": "machine"
+    },
+    "chat.members.join.approved_requested": {
+      "text": "शामिल होना स्वीकार किया गया। वे तब शामिल होंगे जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
+      "status": "machine"
+    },
+    "chat.members.join.heading": {
+      "text": "शामिल होने के अनुरोध ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.link_unknown": {
+      "text": "इनवाइट लिंक का पता नहीं",
+      "status": "machine"
+    },
+    "chat.members.join.reject": {
+      "text": "अस्वीकार करें",
+      "status": "machine"
+    },
+    "chat.members.join.rejected": {
+      "text": "शामिल होने का अनुरोध अस्वीकार कर दिया गया।",
+      "status": "machine"
+    },
+    "chat.members.join.via_former": {
+      "text": "{name} के ज़रिए · अब सदस्य नहीं",
+      "status": "machine"
+    },
+    "chat.members.join.via_member": {
+      "text": "{name} के ज़रिए · सदस्य",
+      "status": "machine"
+    },
+    "chat.members.pending.adds_heading": {
+      "text": "जोड़े जाने का इंतज़ार ({count})",
+      "status": "machine"
+    },
+    "chat.members.pending.count": {
+      "text": "{count, plural, one {# सदस्यता बदलाव लागू होने का इंतज़ार कर रहा है।} other {# सदस्यता बदलाव लागू होने का इंतज़ार कर रहे हैं।}}",
+      "status": "machine"
+    },
+    "chat.members.pending.liveness": {
+      "text": "सदस्यता के बदलाव ग्रुप के मालिक या कोई एडमिन लागू करते हैं। जब उनमें से कोई ऐसा करेगा, तो ये अपने-आप लागू हो जाएँगे।",
+      "status": "machine"
+    },
+    "chat.members.pending.queue": {
+      "text": "{count, plural, one {अब # बदलाव लागू होने का इंतज़ार कर रहा है।} other {अब # बदलाव लागू होने का इंतज़ार कर रहे हैं।}}",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_added": {
+      "text": "जोड़े जाने का इंतज़ार।",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_leave": {
+      "text": "छोड़ने का इंतज़ार।",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_removed": {
+      "text": "हटाए जाने का इंतज़ार।",
+      "status": "machine"
+    },
+    "chat.members.remove.body": {
+      "text": "जब तक मालिक या कोई एडमिन बदलाव लागू नहीं करता, उन्हें मैसेज मिलते रहेंगे।",
+      "status": "machine"
+    },
+    "chat.members.remove.confirm_named": {
+      "text": "{name} को हटाएँ",
+      "status": "machine"
+    },
+    "chat.members.remove.done": {
+      "text": "सदस्य को हटा दिया गया।",
+      "status": "machine"
+    },
+    "chat.members.remove.requested": {
+      "text": "हटाने का अनुरोध भेजा गया। यह तब लागू होगा जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
+      "status": "machine"
+    },
+    "chat.members.remove.requested_short": {
+      "text": "हटाने का अनुरोध भेजा गया।",
+      "status": "machine"
+    },
+    "chat.members.remove.title": {
+      "text": "इस सदस्य को हटाएँ?",
+      "status": "machine"
+    },
+    "chat.members.row_label": {
+      "text": "{name}, {state}",
+      "status": "machine"
+    },
+    "chat.members.title": {
+      "text": "सदस्य",
+      "status": "machine"
+    },
+    "chat.members.unapplied.add_line": {
+      "text": "नहीं जोड़ा गया। आप उन्हें फिर से जोड़ सकते हैं।",
+      "status": "machine"
+    },
+    "chat.members.unapplied.explanation": {
+      "text": "ये बदलाव लागू नहीं हुए और अपने-आप दोबारा नहीं आज़माए जाएँगे।",
+      "status": "machine"
+    },
+    "chat.members.unapplied.heading": {
+      "text": "लागू नहीं हुए ({count})",
+      "status": "machine"
+    },
+    "chat.members.unapplied.join_line": {
+      "text": "लागू नहीं हुआ। उनसे फिर से शामिल होने का अनुरोध भेजने को कहें।",
+      "status": "machine"
+    },
+    "chat.members.unnamed": {
+      "text": "सदस्य",
+      "status": "machine"
+    },
+    "chat.message.actions": {
+      "text": "मैसेज के विकल्प",
+      "status": "machine"
+    },
+    "chat.message.close_actions": {
+      "text": "मैसेज के विकल्प बंद करें",
+      "status": "machine"
+    },
+    "chat.message.deleted": {
+      "text": "मैसेज मिटा दिया गया",
+      "status": "machine"
+    },
+    "chat.message.edit": {
+      "text": "एडिट करें",
+      "status": "machine"
+    },
+    "chat.message.edited": {
+      "text": "(एडिट किया गया)",
+      "status": "machine"
+    },
+    "chat.message.forward": {
+      "text": "फ़ॉरवर्ड करें",
+      "status": "machine"
+    },
+    "chat.message.media_fallback": {
+      "text": "मीडिया मैसेज",
+      "status": "machine"
+    },
+    "chat.message.more_reactions": {
+      "text": "और रिएक्शन",
+      "status": "machine"
+    },
+    "chat.message.not_sent": {
+      "text": "नहीं भेजा गया",
+      "status": "machine"
+    },
+    "chat.message.pin": {
+      "text": "पिन करें",
+      "status": "machine"
+    },
+    "chat.message.react": {
+      "text": "रिएक्ट करें",
+      "status": "machine"
+    },
+    "chat.message.react_with": {
+      "text": "{emoji} से रिएक्ट करें",
+      "status": "machine"
+    },
+    "chat.message.read": {
+      "text": "पढ़ लिया गया",
+      "status": "machine"
+    },
+    "chat.message.read_by": {
+      "text": "{names} ने पढ़ा",
+      "status": "machine"
+    },
+    "chat.message.reply": {
+      "text": "जवाब दें",
+      "status": "machine"
+    },
+    "chat.message.select": {
+      "text": "चुनें",
+      "status": "machine"
+    },
+    "chat.message.sending": {
+      "text": "भेजा जा रहा है...",
+      "status": "machine"
+    },
+    "chat.message.sent": {
+      "text": "भेजा गया",
+      "status": "machine"
+    },
+    "chat.message.unpin": {
+      "text": "अनपिन करें",
+      "status": "machine"
+    },
+    "chat.not_found.back": {
+      "text": "चैट पर वापस जाएँ",
+      "status": "machine"
+    },
+    "chat.not_found.body": {
+      "text": "यह लिंक इस डिवाइस की किसी बातचीत से मेल नहीं खाता।",
+      "status": "machine"
+    },
+    "chat.not_found.title": {
+      "text": "बातचीत नहीं मिली",
+      "status": "machine"
+    },
+    "chat.peer.fallback_name": {
+      "text": "दूसरा व्यक्ति",
+      "status": "machine"
+    },
+    "chat.photo.load_failed": {
+      "text": "फ़ोटो लोड नहीं हो सकी",
+      "status": "machine"
+    },
+    "chat.photo.load_failed_retry": {
+      "text": "फ़ोटो लोड नहीं हो सकी, फिर से कोशिश करने के लिए टैप करें",
+      "status": "machine"
+    },
+    "chat.photo.loading": {
+      "text": "फ़ोटो, लोड हो रही है",
+      "status": "machine"
+    },
+    "chat.photo.open": {
+      "text": "फ़ोटो खोलें",
+      "status": "machine"
+    },
+    "chat.photo.viewer": {
+      "text": "फ़ोटो व्यूअर",
+      "status": "machine"
+    },
+    "chat.photo.viewer_hint": {
+      "text": "ज़ूम करने के लिए पिंच करें। बंद करने के लिए नीचे स्वाइप करें।",
+      "status": "machine"
+    },
+    "chat.pin.detail_personal": {
+      "text": "सिर्फ़ इस डिवाइस पर",
+      "status": "machine"
+    },
+    "chat.pin.detail_shared": {
+      "text": "हर सदस्य को दिखता है",
+      "status": "machine"
+    },
+    "chat.pin.for_both": {
+      "text": "दोनों के लिए पिन करें",
+      "status": "machine"
+    },
+    "chat.pin.for_everyone": {
+      "text": "सभी के लिए पिन करें",
+      "status": "machine"
+    },
+    "chat.pin.for_me": {
+      "text": "मेरे लिए पिन करें",
+      "status": "machine"
+    },
+    "chat.pin.sheet_title": {
+      "text": "मैसेज पिन करें",
+      "status": "machine"
+    },
+    "chat.pinned_bar.all": {
+      "text": "सभी पिन किए गए मैसेज",
+      "status": "machine"
+    },
+    "chat.pinned_bar.for_you": {
+      "text": "आपके लिए",
+      "status": "machine"
+    },
+    "chat.pinned_bar.hint": {
+      "text": "मैसेज दिखाता है",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label": {
+      "text": "पिन किया गया मैसेज",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label_of": {
+      "text": "पिन किया गया मैसेज {index}, कुल {count}",
+      "status": "machine"
+    },
+    "chat.pinned_bar.list_title": {
+      "text": "पिन किए गए मैसेज",
+      "status": "machine"
+    },
+    "chat.reaction.add_title": {
+      "text": "रिएक्ट करें - रिएक्ट करने वाले: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by": {
+      "text": "रिएक्ट करने वाले: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by_title": {
+      "text": "रिएक्ट करने वाले",
+      "status": "machine"
+    },
+    "chat.reaction.remove_title": {
+      "text": "अपना रिएक्शन हटाएँ - रिएक्ट करने वाले: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.single_emoji": {
+      "text": "रिएक्शन सिर्फ़ एक इमोजी होना चाहिए।",
+      "status": "machine"
+    },
+    "chat.reauth.action": {
+      "text": "फिर से साइन इन करें",
+      "status": "machine"
+    },
+    "chat.reauth.body": {
+      "text": "मैसेज को डिक्रिप्ट और साइन करने के लिए ज़रूरी कुंजियाँ इस सेशन में उपलब्ध नहीं हैं। यह चैट खोलने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "chat.reauth.title": {
+      "text": "फिर से साइन इन करें",
+      "status": "machine"
+    },
+    "chat.record.bar_video": {
+      "text": "वीडियो नोट रिकॉर्ड हो रहा है",
+      "status": "machine"
+    },
+    "chat.record.bar_voice": {
+      "text": "वॉइस मैसेज रिकॉर्ड हो रहा है",
+      "status": "machine"
+    },
+    "chat.record.cancelled": {
+      "text": "रद्द किया गया",
+      "status": "machine"
+    },
+    "chat.record.delete": {
+      "text": "रिकॉर्डिंग मिटाएँ",
+      "status": "machine"
+    },
+    "chat.record.denied_camera": {
+      "text": "वीडियो नोट रिकॉर्ड करने के लिए Lakko को कैमरे की अनुमति चाहिए। अपने ब्राउज़र की साइट सेटिंग में कैमरे की अनुमति दें।",
+      "status": "machine"
+    },
+    "chat.record.denied_camera_app": {
+      "text": "वीडियो नोट रिकॉर्ड करने के लिए Lakko को कैमरे की अनुमति चाहिए",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone": {
+      "text": "वॉइस मैसेज रिकॉर्ड करने के लिए Lakko को माइक्रोफ़ोन की अनुमति चाहिए। अपने ब्राउज़र की साइट सेटिंग में माइक्रोफ़ोन की अनुमति दें।",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_app": {
+      "text": "वॉइस मैसेज रिकॉर्ड करने के लिए Lakko को माइक्रोफ़ोन की अनुमति चाहिए",
+      "status": "machine"
+    },
+    "chat.record.finishing": {
+      "text": "रिकॉर्डिंग पूरी हो रही है",
+      "status": "machine"
+    },
+    "chat.record.flip_camera": {
+      "text": "कैमरा बदलें",
+      "status": "machine"
+    },
+    "chat.record.flip_failed": {
+      "text": "कैमरा नहीं बदला जा सका",
+      "status": "machine"
+    },
+    "chat.record.hint_hold": {
+      "text": "रिकॉर्ड करने के लिए दबाकर रखें",
+      "status": "machine"
+    },
+    "chat.record.in_call": {
+      "text": "कॉल के दौरान उपलब्ध नहीं",
+      "status": "machine"
+    },
+    "chat.record.locked_hint": {
+      "text": "लॉक की गई रिकॉर्डिंग शुरू करता है",
+      "status": "machine"
+    },
+    "chat.record.no_camera": {
+      "text": "कोई कैमरा नहीं मिला",
+      "status": "machine"
+    },
+    "chat.record.open_settings": {
+      "text": "सेटिंग खोलें",
+      "status": "machine"
+    },
+    "chat.record.pause": {
+      "text": "रिकॉर्डिंग रोकें",
+      "status": "machine"
+    },
+    "chat.record.pause_video": {
+      "text": "वीडियो नोट रोकें",
+      "status": "machine"
+    },
+    "chat.record.play": {
+      "text": "रिकॉर्डिंग चलाएँ, {duration}",
+      "status": "machine"
+    },
+    "chat.record.play_video_sound": {
+      "text": "वीडियो नोट आवाज़ के साथ चलाएँ",
+      "status": "machine"
+    },
+    "chat.record.position": {
+      "text": "रिकॉर्डिंग में स्थिति",
+      "status": "machine"
+    },
+    "chat.record.recording_duration": {
+      "text": "रिकॉर्ड हो रहा है, {duration}",
+      "status": "machine"
+    },
+    "chat.record.send": {
+      "text": "रिकॉर्डिंग भेजें",
+      "status": "machine"
+    },
+    "chat.record.silent_mic": {
+      "text": "माइक्रोफ़ोन से कोई आवाज़ नहीं आ रही",
+      "status": "machine"
+    },
+    "chat.record.slide_cancel": {
+      "text": "‹ रद्द करने के लिए स्लाइड करें",
+      "status": "machine"
+    },
+    "chat.record.start_failed": {
+      "text": "रिकॉर्डिंग शुरू नहीं हो सकी",
+      "status": "machine"
+    },
+    "chat.record.starting": {
+      "text": "शुरू हो रहा है…",
+      "status": "machine"
+    },
+    "chat.record.stop": {
+      "text": "रिकॉर्डिंग बंद करें",
+      "status": "machine"
+    },
+    "chat.record.stop_short": {
+      "text": "बंद करें",
+      "status": "machine"
+    },
+    "chat.record.switch_to_video": {
+      "text": "वीडियो नोट पर जाएँ",
+      "status": "machine"
+    },
+    "chat.record.switch_to_voice": {
+      "text": "वॉइस मैसेज पर जाएँ",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video": {
+      "text": "इस ब्राउज़र में वीडियो नोट रिकॉर्ड नहीं किए जा सकते",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video_device": {
+      "text": "इस डिवाइस पर वीडियो नोट रिकॉर्ड नहीं किए जा सकते",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice": {
+      "text": "इस ब्राउज़र में वॉइस मैसेज रिकॉर्ड नहीं किए जा सकते",
+      "status": "machine"
+    },
+    "chat.record.video": {
+      "text": "वीडियो नोट रिकॉर्ड करें",
+      "status": "machine"
+    },
+    "chat.record.video_ready": {
+      "text": "वीडियो नोट तैयार है",
+      "status": "machine"
+    },
+    "chat.record.video_tooltip": {
+      "text": "वीडियो नोट रिकॉर्ड करें: रिकॉर्ड करने के लिए दबाकर रखें, वॉइस पर जाने के लिए टैप करें",
+      "status": "machine"
+    },
+    "chat.record.voice": {
+      "text": "वॉइस मैसेज रिकॉर्ड करें",
+      "status": "machine"
+    },
+    "chat.record.voice_tooltip": {
+      "text": "वॉइस मैसेज रिकॉर्ड करें: रिकॉर्ड करने के लिए दबाकर रखें, वीडियो पर जाने के लिए टैप करें",
+      "status": "machine"
+    },
+    "chat.refusal.add_not_admin": {
+      "text": "सिर्फ़ ग्रुप का मालिक या कोई एडमिन सदस्य जोड़ सकता है।",
+      "status": "machine"
+    },
+    "chat.refusal.device_binding": {
+      "text": "इस डिवाइस की कुंजी में कोई गड़बड़ी है। इसे \"डिवाइस\" से हटाएँ और फिर से जोड़ें।",
+      "status": "machine"
+    },
+    "chat.refusal.device_limit": {
+      "text": "{count, plural, one {हर अकाउंट में ज़्यादा से ज़्यादा # डिवाइस। पहले एक हटाएँ।} other {हर अकाउंट में ज़्यादा से ज़्यादा # डिवाइस। पहले एक हटाएँ।}}",
+      "status": "machine"
+    },
+    "chat.refusal.fallback": {
+      "text": "इस बदलाव का अनुरोध नहीं किया जा सका।",
+      "status": "machine"
+    },
+    "chat.refusal.join_not_kept": {
+      "text": "शामिल होने का एक अनुरोध तब आया जब पहले से बहुत सारे अनुरोध इंतज़ार में थे, इसलिए उसे नहीं रखा गया। उस व्यक्ति से बाद में फिर से भेजने को कहें।",
+      "status": "machine"
+    },
+    "chat.refusal.joiner_member": {
+      "text": "वह व्यक्ति पहले से इस ग्रुप में है।",
+      "status": "machine"
+    },
+    "chat.refusal.no_join_request": {
+      "text": "शामिल होने का वह अनुरोध अब इंतज़ार में नहीं है।",
+      "status": "machine"
+    },
+    "chat.refusal.not_owner": {
+      "text": "सिर्फ़ ग्रुप का मालिक एडमिन बदल सकता है या मालिकाना हक सौंप सकता है।",
+      "status": "machine"
+    },
+    "chat.refusal.owner_cannot_leave": {
+      "text": "ग्रुप का मालिक ग्रुप नहीं छोड़ सकता।",
+      "status": "machine"
+    },
+    "chat.refusal.owner_not_member": {
+      "text": "मालिकाना हक सिर्फ़ इस ग्रुप के मौजूदा सदस्य के पास हो सकता है।",
+      "status": "machine"
+    },
+    "chat.refusal.owner_unremovable": {
+      "text": "ग्रुप के मालिक को हटाया नहीं जा सकता।",
+      "status": "machine"
+    },
+    "chat.refusal.pending_full": {
+      "text": "पहले से बहुत सारे बदलाव लागू होने का इंतज़ार कर रहे हैं।",
+      "status": "machine"
+    },
+    "chat.refusal.remove_not_admin": {
+      "text": "सिर्फ़ ग्रुप का मालिक या कोई एडमिन सदस्यों को हटा सकता है।",
+      "status": "machine"
+    },
+    "chat.refusal.retry_many": {
+      "text": "उनके लागू होने का इंतज़ार करें, फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.refusal.retry_one": {
+      "text": "उसके लागू होने का इंतज़ार करें, फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.refusal.role_change_pending": {
+      "text": "भूमिका का एक बदलाव पहले से लागू होने का इंतज़ार कर रहा है।",
+      "status": "machine"
+    },
+    "chat.refusal.with_retry": {
+      "text": "{fact} {retry}",
+      "status": "machine"
+    },
+    "chat.reply.cancel": {
+      "text": "जवाब रद्द करें",
+      "status": "machine"
+    },
+    "chat.reply.fallback_excerpt": {
+      "text": "मैसेज",
+      "status": "machine"
+    },
+    "chat.reply.quote": {
+      "text": "जवाब",
+      "status": "machine"
+    },
+    "chat.reply.quote_to": {
+      "text": "{name} को जवाब",
+      "status": "machine"
+    },
+    "chat.reply.strip_label": {
+      "text": "{name} को जवाब दे रहे हैं",
+      "status": "machine"
+    },
+    "chat.select.count": {
+      "text": "{count, plural, one {# चुना गया} other {# चुने गए}}",
+      "status": "machine"
+    },
+    "chat.select.count_limit": {
+      "text": "{count, plural, one {# चुना गया, यही सीमा है} other {# चुने गए, यही सीमा है}}",
+      "status": "machine"
+    },
+    "chat.select.delete_helper": {
+      "text": "सिर्फ़ आपके अपने मैसेज मिटाए जा सकते हैं।",
+      "status": "machine"
+    },
+    "chat.select.delete_title": {
+      "text": "{count, plural, one {# मैसेज मिटाएँ?} other {# मैसेज मिटाएँ?}}",
+      "status": "machine"
+    },
+    "chat.select.deleted_of": {
+      "text": "{total} में से {done} मिटाए गए।",
+      "status": "machine"
+    },
+    "chat.select.forwarded_of": {
+      "text": "{total} में से {done} फ़ॉरवर्ड किए गए।",
+      "status": "machine"
+    },
+    "chat.select.state_not_selected": {
+      "text": "नहीं चुना गया",
+      "status": "machine"
+    },
+    "chat.select.state_selected": {
+      "text": "चुना गया",
+      "status": "machine"
+    },
+    "chat.select.toolbar": {
+      "text": "चुने गए मैसेज",
+      "status": "machine"
+    },
+    "chat.send.failed": {
+      "text": "भेजा नहीं जा सका।",
+      "status": "machine"
+    },
+    "chat.system.join_request": {
+      "text": "शामिल होने का अनुरोध",
+      "status": "machine"
+    },
+    "chat.system.members_changed": {
+      "text": "सदस्य बदले",
+      "status": "machine"
+    },
+    "chat.timeline.empty": {
+      "text": "अभी कोई मैसेज नहीं है। हाय कहें।",
+      "status": "machine"
+    },
+    "chat.timeline.setting_up": {
+      "text": "यह बातचीत अभी इस डिवाइस पर सेट अप हो रही है।",
+      "status": "machine"
+    },
+    "chat.transfer.action": {
+      "text": "मालिकाना हक सौंपें",
+      "status": "machine"
+    },
+    "chat.transfer.action_named": {
+      "text": "{name} को मालिक बनाएँ",
+      "status": "machine"
+    },
+    "chat.transfer.become_member": {
+      "text": "सामान्य सदस्य बनें",
+      "status": "machine"
+    },
+    "chat.transfer.become_member_detail": {
+      "text": "आप ग्रुप के सारे अधिकार तुरंत छोड़ देते हैं। सिर्फ़ नया मालिक इनमें से कोई भी अधिकार आपको वापस दे सकता है।",
+      "status": "machine"
+    },
+    "chat.transfer.candidate_admin": {
+      "text": "{name}, एडमिन",
+      "status": "machine"
+    },
+    "chat.transfer.done_admin": {
+      "text": "{name} अब ग्रुप के मालिक हैं। आप अब भी एडमिन हैं।",
+      "status": "machine"
+    },
+    "chat.transfer.done_member": {
+      "text": "{name} अब ग्रुप के मालिक हैं। अब आप एक सामान्य सदस्य हैं।",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_body": {
+      "text": "सिर्फ़ मालिक भूमिकाएँ बदल सकता है। यह ग्रुप सौंपने के बाद आप इसे वापस नहीं ले सकते, अपनी मालिक की भूमिका बहाल नहीं कर सकते, और अपनी भूमिका फिर से नहीं बदल सकते, जब तक कि नया मालिक आपके लिए ऐसा न करे।",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_title": {
+      "text": "इसे वापस नहीं किया जा सकता।",
+      "status": "machine"
+    },
+    "chat.transfer.leave_blocked": {
+      "text": "पहले मालिकाना हक सौंपें, क्योंकि ग्रुप को बिना मालिक के नहीं छोड़ा जा सकता।",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner": {
+      "text": "अब आप इस ग्रुप के मालिक हैं।",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_body": {
+      "text": "आप सदस्यों को जोड़ और हटा सकते हैं, एडमिन बदल सकते हैं, और मालिकाना हक किसी और को सौंप सकते हैं।",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_legend": {
+      "text": "नया मालिक",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_named": {
+      "text": "{name} ने आपको इस ग्रुप का मालिक बनाया है।",
+      "status": "machine"
+    },
+    "chat.transfer.no_candidates": {
+      "text": "इस ग्रुप में कोई और नहीं है जिसे यह सौंपा जा सके।",
+      "status": "machine"
+    },
+    "chat.transfer.pending": {
+      "text": "मालिकाना हक सौंपना लागू होने का इंतज़ार कर रहा है।",
+      "status": "machine"
+    },
+    "chat.transfer.pending_named": {
+      "text": "{name} को मालिक बनाए जाने का इंतज़ार है।",
+      "status": "machine"
+    },
+    "chat.transfer.requested": {
+      "text": "मालिकाना हक सौंपने का अनुरोध भेजा गया। यह तब लागू होगा जब मालिक या कोई एडमिन बदलाव लागू करेगा।",
+      "status": "machine"
+    },
+    "chat.transfer.role_change_pending": {
+      "text": "भूमिका का एक बदलाव पहले से लागू होने का इंतज़ार कर रहा है। उसके लागू होने का इंतज़ार करें, फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chat.transfer.role_legend": {
+      "text": "इसके बाद आपकी भूमिका",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin": {
+      "text": "एडमिन बने रहें",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin_detail": {
+      "text": "आप अब भी सदस्यों को जोड़ और हटा सकेंगे। बाद में नए मालिक से कहकर आप यह भूमिका छोड़ सकते हैं।",
+      "status": "machine"
+    },
+    "chat.transfer.unlocks_leave": {
+      "text": "बदलाव लागू होने के बाद आप किसी भी दूसरे सदस्य की तरह ग्रुप छोड़ सकते हैं।",
+      "status": "machine"
+    },
+    "chat.typing.named": {
+      "text": "{name} टाइप कर रहे हैं...",
+      "status": "machine"
+    },
+    "chat.typing.one_to_one": {
+      "text": "टाइप कर रहे हैं...",
+      "status": "machine"
+    },
+    "chat.typing.several": {
+      "text": "कई लोग टाइप कर रहे हैं...",
+      "status": "machine"
+    },
+    "chat.unpin.for_both": {
+      "text": "दोनों के लिए अनपिन करें",
+      "status": "machine"
+    },
+    "chat.unpin.for_everyone": {
+      "text": "सभी के लिए अनपिन करें",
+      "status": "machine"
+    },
+    "chat.unpin.for_me": {
+      "text": "मेरे लिए अनपिन करें",
+      "status": "machine"
+    },
+    "chat.unpin.sheet_title": {
+      "text": "मैसेज अनपिन करें",
+      "status": "machine"
+    },
+    "chat.upload.encrypting": {
+      "text": "\"{name}\" एन्क्रिप्ट हो रही है…",
+      "status": "machine"
+    },
+    "chat.upload.encrypting_of": {
+      "text": "\"{name}\" एन्क्रिप्ट हो रही है ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.preparing": {
+      "text": "\"{name}\" तैयार हो रही है…",
+      "status": "machine"
+    },
+    "chat.upload.selected_item": {
+      "text": "चुना गया आइटम",
+      "status": "machine"
+    },
+    "chat.upload.uploading": {
+      "text": "\"{name}\" अपलोड हो रही है…",
+      "status": "machine"
+    },
+    "chat.upload.uploading_of": {
+      "text": "\"{name}\" अपलोड हो रही है ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.working": {
+      "text": "एन्क्रिप्ट और अपलोड हो रहा है…",
+      "status": "machine"
+    },
+    "chat.video.load_failed": {
+      "text": "वीडियो लोड नहीं हो सका",
+      "status": "machine"
+    },
+    "chat.video.load_failed_retry": {
+      "text": "वीडियो लोड नहीं हो सका, फिर से कोशिश करने के लिए टैप करें",
+      "status": "machine"
+    },
+    "chat.video.loading": {
+      "text": "वीडियो लोड हो रहा है, {size}",
+      "status": "machine"
+    },
+    "chat.video.open": {
+      "text": "वीडियो चलाएँ",
+      "status": "machine"
+    },
+    "chat.video.play": {
+      "text": "वीडियो चलाएँ, {size}",
+      "status": "machine"
+    },
+    "chat.video.play_failed": {
+      "text": "यह वीडियो चल नहीं सका",
+      "status": "machine"
+    },
+    "chat.video.player": {
+      "text": "वीडियो प्लेयर",
+      "status": "machine"
+    },
+    "chat.video_note.loading": {
+      "text": "वीडियो नोट, लोड हो रहा है",
+      "status": "machine"
+    },
+    "chat.video_note.play": {
+      "text": "वीडियो नोट चलाएँ, {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.play_sound": {
+      "text": "वीडियो नोट आवाज़ के साथ चलाएँ, {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.poster": {
+      "text": "वीडियो नोट का पोस्टर",
+      "status": "machine"
+    },
+    "chat.video_note.tap_mute": {
+      "text": "म्यूट करने के लिए टैप करें",
+      "status": "machine"
+    },
+    "chat.video_note.tap_sound": {
+      "text": "आवाज़ के लिए टैप करें",
+      "status": "machine"
+    },
+    "chat.voice.change_speed": {
+      "text": "प्लेबैक स्पीड बदलें",
+      "status": "machine"
+    },
+    "chat.voice.not_played": {
+      "text": "सुना नहीं गया",
+      "status": "machine"
+    },
+    "chat.voice.pause": {
+      "text": "वॉइस मैसेज रोकें",
+      "status": "machine"
+    },
+    "chat.voice.play": {
+      "text": "वॉइस मैसेज चलाएँ, {duration}",
+      "status": "machine"
+    },
+    "chat.voice.position": {
+      "text": "{duration} में से {position}",
+      "status": "machine"
+    },
+    "chat.voice.seek": {
+      "text": "वॉइस मैसेज में आगे-पीछे जाएँ",
+      "status": "machine"
+    },
+    "chat.voice.speed": {
+      "text": "प्लेबैक स्पीड {rate}",
+      "status": "machine"
+    },
+    "chats.action.archive": {
+      "text": "आर्काइव करें",
+      "status": "machine"
+    },
+    "chats.action.mute": {
+      "text": "म्यूट करें",
+      "status": "machine"
+    },
+    "chats.action.pin": {
+      "text": "पिन करें",
+      "status": "machine"
+    },
+    "chats.action.unarchive": {
+      "text": "आर्काइव से निकालें",
+      "status": "machine"
+    },
+    "chats.action.unmute": {
+      "text": "अनम्यूट करें",
+      "status": "machine"
+    },
+    "chats.action.unpin": {
+      "text": "अनपिन करें",
+      "status": "machine"
+    },
+    "chats.compose": {
+      "text": "नया",
+      "status": "machine"
+    },
+    "chats.create.channel": {
+      "text": "चैनल बनाएँ",
+      "status": "machine"
+    },
+    "chats.create.chat": {
+      "text": "नई चैट",
+      "status": "machine"
+    },
+    "chats.create.group": {
+      "text": "ग्रुप बनाएँ",
+      "status": "machine"
+    },
+    "chats.create.menu": {
+      "text": "बनाएँ",
+      "status": "machine"
+    },
+    "chats.empty.action": {
+      "text": "शुरू करें",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "मैसेज भेजने के लिए कोई चैट चुनें",
+      "status": "machine"
+    },
+    "chats.empty.title": {
+      "text": "अभी कोई बातचीत नहीं है",
+      "status": "machine"
+    },
+    "chats.lookup.action": {
+      "text": "{name} खोजें",
+      "status": "machine"
+    },
+    "chats.lookup.nothing": {
+      "text": "{name} के लिए कुछ नहीं मिला।",
+      "status": "machine"
+    },
+    "chats.lookup.unreachable": {
+      "text": "खोज नहीं हो सकी। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chats.new_chat.add_contact": {
+      "text": "संपर्क जोड़ें",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts": {
+      "text": "अभी कोई संपर्क नहीं",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts_body": {
+      "text": "चैट किसी जान-पहचान वाले से शुरू होती है।",
+      "status": "machine"
+    },
+    "chats.new_chat.not_available": {
+      "text": "यह चैट अभी इस डिवाइस पर उपलब्ध नहीं है",
+      "status": "machine"
+    },
+    "chats.new_group.accept_again": {
+      "text": "इस संपर्क को ग्रुप में जोड़ने के लिए इसे फिर से स्वीकार करें।",
+      "status": "machine"
+    },
+    "chats.new_group.creating": {
+      "text": "बनाया जा रहा है...",
+      "status": "machine"
+    },
+    "chats.new_group.error": {
+      "text": "ग्रुप नहीं बन सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "chats.new_group.name_label": {
+      "text": "ग्रुप का नाम (वैकल्पिक)",
+      "status": "machine"
+    },
+    "chats.new_group.no_contacts": {
+      "text": "ग्रुप उन लोगों से शुरू होता है जिन्हें आप पहले से जानते हैं।",
+      "status": "machine"
+    },
+    "chats.new_group.open_contacts": {
+      "text": "संपर्क पर जाएँ",
+      "status": "machine"
+    },
+    "chats.new_group.title": {
+      "text": "नया ग्रुप",
+      "status": "machine"
+    },
+    "chats.preview.own": {
+      "text": "आप: {text}",
+      "status": "machine"
+    },
+    "chats.preview.sender": {
+      "text": "{name}: {text}",
+      "status": "machine"
+    },
+    "chats.row.actions": {
+      "text": "बातचीत के विकल्प",
+      "status": "machine"
+    },
+    "chats.row.call.label": {
+      "text": "{name} से {kind}",
+      "status": "machine"
+    },
+    "chats.row.ended": {
+      "text": "आप अब सदस्य नहीं हैं।",
+      "status": "machine"
+    },
+    "chats.row.muted": {
+      "text": "म्यूट है",
+      "status": "machine"
+    },
+    "chats.row.no_messages": {
+      "text": "अभी कोई मैसेज नहीं",
+      "status": "machine"
+    },
+    "chats.row.people": {
+      "text": "{count, plural, one {# व्यक्ति} other {# लोग}}",
+      "status": "machine"
+    },
+    "chats.row.pinned": {
+      "text": "पिन है",
+      "status": "machine"
+    },
+    "chats.row.unread": {
+      "text": "{count, plural, one {# बिना पढ़ा मैसेज} other {# बिना पढ़े मैसेज}}",
+      "status": "machine"
+    },
+    "chats.row.unread_overflow": {
+      "text": "99+",
+      "status": "machine"
+    },
+    "chats.search.clear": {
+      "text": "खोज साफ़ करें",
+      "status": "machine"
+    },
+    "chats.search.label": {
+      "text": "चैट खोजें",
+      "status": "machine"
+    },
+    "chats.search.no_results": {
+      "text": "कोई नतीजा नहीं",
+      "status": "machine"
+    },
+    "chats.search.placeholder": {
+      "text": "खोजें",
+      "status": "machine"
+    },
+    "chats.synchronizing": {
+      "text": "सिंक हो रहा है...",
       "status": "machine"
     },
     "common.adding": {
@@ -366,12 +2086,28 @@
       "text": "कॉपी करें",
       "status": "machine"
     },
+    "common.delete": {
+      "text": "मिटाएँ",
+      "status": "machine"
+    },
     "common.dismiss": {
       "text": "हटाएँ",
       "status": "machine"
     },
     "common.done": {
       "text": "हो गया",
+      "status": "machine"
+    },
+    "common.duration.minutes": {
+      "text": "{count, plural, one {# मिनट} other {# मिनट}}",
+      "status": "machine"
+    },
+    "common.duration.minutes_seconds": {
+      "text": "{minutes} {seconds}",
+      "status": "machine"
+    },
+    "common.duration.seconds": {
+      "text": "{count, plural, one {# सेकंड} other {# सेकंड}}",
       "status": "machine"
     },
     "common.email": {
@@ -422,6 +2158,10 @@
       "text": "बड़ा करें",
       "status": "machine"
     },
+    "common.list_pair": {
+      "text": "{first}, {second}",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "लोड हो रहा है...",
       "status": "machine"
@@ -438,8 +2178,16 @@
       "text": "और विकल्प",
       "status": "machine"
     },
+    "common.not_now": {
+      "text": "अभी नहीं",
+      "status": "machine"
+    },
     "common.off": {
       "text": "बंद",
+      "status": "machine"
+    },
+    "common.ok": {
+      "text": "ठीक है",
       "status": "machine"
     },
     "common.on": {
@@ -474,6 +2222,10 @@
       "text": "हटाया जा रहा है...",
       "status": "machine"
     },
+    "common.retry": {
+      "text": "फिर से कोशिश करें",
+      "status": "machine"
+    },
     "common.save": {
       "text": "सेव करें",
       "status": "machine"
@@ -486,8 +2238,28 @@
       "text": "भेजा जा रहा है...",
       "status": "machine"
     },
+    "common.sentence_pair": {
+      "text": "{first} {second}",
+      "status": "machine"
+    },
     "common.set_up": {
       "text": "सेट अप करें",
+      "status": "machine"
+    },
+    "common.size.bytes": {
+      "text": "{size} बाइट",
+      "status": "machine"
+    },
+    "common.size.gb": {
+      "text": "{size} GB",
+      "status": "machine"
+    },
+    "common.size.kb": {
+      "text": "{size} KB",
+      "status": "machine"
+    },
+    "common.size.mb": {
+      "text": "{size} MB",
       "status": "machine"
     },
     "common.try_again": {
@@ -732,6 +2504,26 @@
     },
     "display_name.error.unknown": {
       "text": "यह नाम इस्तेमाल नहीं किया जा सकता",
+      "status": "machine"
+    },
+    "ds.clock_skew": {
+      "text": "इस डिवाइस की तारीख और समय जाँचें।",
+      "status": "machine"
+    },
+    "group.join.not_taking_requests": {
+      "text": "यह ग्रुप अभी अनुरोध नहीं ले रहा है। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "group.join.request_again": {
+      "text": "फिर से अनुरोध भेजें",
+      "status": "machine"
+    },
+    "group.join.wait_primary": {
+      "text": "अनुरोध भेजा गया। कोई एडमिन इसे स्वीकार करेगा, फिर बदलाव ग्रुप पर लागू होगा।",
+      "status": "machine"
+    },
+    "group.join.wait_secondary": {
+      "text": "किसी भी चरण की कोई समय-सीमा नहीं है। अगर कुछ न हो, तो आप अनुरोध फिर से भेज सकते हैं।",
       "status": "machine"
     },
     "language.name.ar": {
@@ -1952,6 +3744,14 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "सुरक्षा नंबर",
+      "status": "machine"
+    },
+    "tokens.action_allowance_used": {
+      "text": "आप इसके लिए आज की सीमा इस्तेमाल कर चुके हैं। कल फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "tokens.lookup_allowance_used": {
+      "text": "आज आप बहुत सारे लोगों को खोज चुके हैं। कल फिर से कोशिश करें।",
       "status": "machine"
     },
     "username.a11y_hint": {

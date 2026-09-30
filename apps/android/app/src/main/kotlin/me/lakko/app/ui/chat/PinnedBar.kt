@@ -42,6 +42,8 @@ import me.lakko.app.chat.PinBarEntry
 import me.lakko.app.chat.PinMenu
 import me.lakko.app.chat.pinActionLabel
 import me.lakko.app.chat.pinActionSubline
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 
 /*
  * ADR-0052 decision 3 + `docs/ux/message-actions.md` section 4.1 — the pinned
@@ -104,7 +106,7 @@ internal fun PinnedBar(
                 IconButton(onClick = onOpenList) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.List,
-                        contentDescription = PIN_LIST_LABEL,
+                        contentDescription = PIN_LIST_LABEL.text(),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -127,11 +129,16 @@ private fun StackedIndicator(position: Int, count: Int) {
     val lit = (position - windowStart).coerceIn(0, segments - 1)
     val active = MaterialTheme.colorScheme.primary
     val idle = MaterialTheme.colorScheme.outlineVariant
+    val label = t(
+        "chat.pinned_bar.label_of",
+        emptyMap(),
+        mapOf("index" to (position + 1).toULong(), "count" to shown.toULong()),
+    )
     Canvas(
         modifier = Modifier
             .width(3.dp)
             .height(32.dp)
-            .semantics { contentDescription = "Pinned message ${position + 1} of $shown" },
+            .semantics { contentDescription = label },
     ) {
         val gap = 2.dp.toPx()
         val segmentHeight = (size.height - gap * (segments - 1)) / segments
@@ -162,7 +169,7 @@ internal fun PinListSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Text(
-            text = PIN_LIST_LABEL,
+            text = PIN_LIST_LABEL.text(),
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
         )
@@ -216,11 +223,11 @@ internal fun PinScopeSheet(
                     .padding(horizontal = 20.dp, vertical = 12.dp),
             ) {
                 Text(
-                    text = pinActionLabel(action, oneToOne),
+                    text = pinActionLabel(action, oneToOne).text(),
                     style = MaterialTheme.typography.bodyLarge,
                 )
                 Text(
-                    text = pinActionSubline(action),
+                    text = pinActionSubline(action).text(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

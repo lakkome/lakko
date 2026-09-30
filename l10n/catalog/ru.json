@@ -250,6 +250,22 @@
       "text": "Подключаем вас к звонку...",
       "status": "machine"
     },
+    "call.incoming.accept": {
+      "text": "Принять",
+      "status": "machine"
+    },
+    "call.incoming.accept_from": {
+      "text": "Принять звонок: {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline": {
+      "text": "Отклонить",
+      "status": "machine"
+    },
+    "call.incoming.decline_from": {
+      "text": "Отклонить звонок: {name}",
+      "status": "machine"
+    },
     "call.link.connecting": {
       "text": "Подключение...",
       "status": "machine"
@@ -314,8 +330,1712 @@
       "text": "Можно уйти с этого экрана: вы присоединитесь, как только вас впустят.",
       "status": "machine"
     },
+    "chat.attachment.error.attach": {
+      "text": "Не удалось прикрепить выбранный элемент. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.attachment.error.attach_named": {
+      "text": "Не удалось прикрепить «{name}». Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.attachment.error.download": {
+      "text": "Не удалось скачать вложение. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.attachment.error.gone": {
+      "text": "Вложения больше нет на сервере.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_photo": {
+      "text": "Не удалось открыть это фото. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_video": {
+      "text": "Не удалось открыть это видео. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.attachment.error.prepare_video": {
+      "text": "Не удалось подготовить это видео. Можно отправлять видео размером до {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.preview": {
+      "text": "Не удалось показать изображение. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large": {
+      "text": "Размер сообщения — {size}, это больше лимита {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large_named": {
+      "text": "Размер «{name}» — {size}, это больше лимита {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.upload": {
+      "text": "Не удалось загрузить «{name}». Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.attachment.hide": {
+      "text": "Скрыть",
+      "status": "machine"
+    },
+    "chat.attachment.image_alt": {
+      "text": "вложенное изображение",
+      "status": "machine"
+    },
+    "chat.attachment.open": {
+      "text": "Открыть",
+      "status": "machine"
+    },
+    "chat.attachment.save_title": {
+      "text": "Сохранить вложение",
+      "status": "machine"
+    },
+    "chat.attachment.unnamed": {
+      "text": "(без названия)",
+      "status": "machine"
+    },
+    "chat.author.a_member": {
+      "text": "Участник",
+      "status": "machine"
+    },
+    "chat.author.unknown": {
+      "text": "Неизвестный отправитель",
+      "status": "machine"
+    },
+    "chat.author.you": {
+      "text": "Вы",
+      "status": "machine"
+    },
+    "chat.call.busy": {
+      "text": "Уже идёт другой звонок.",
+      "status": "machine"
+    },
+    "chat.call.error.start": {
+      "text": "Не удалось начать звонок. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.call.group_ended": {
+      "text": "Этот групповой звонок уже завершён.",
+      "status": "machine"
+    },
+    "chat.call.group_in_progress": {
+      "text": "Идёт групповой звонок",
+      "status": "machine"
+    },
+    "chat.call.group_people": {
+      "text": "{count, plural, one {# человек в звонке} few {# человека в звонке} many {# человек в звонке} other {# человека в звонке}}",
+      "status": "machine"
+    },
+    "chat.call.group_starting": {
+      "text": "Начинается…",
+      "status": "machine"
+    },
+    "chat.call.group_status_e2ee": {
+      "text": "{status} · сквозное шифрование",
+      "status": "machine"
+    },
+    "chat.call.join": {
+      "text": "Присоединиться к звонку",
+      "status": "machine"
+    },
+    "chat.call.join_short": {
+      "text": "Присоединиться",
+      "status": "machine"
+    },
+    "chat.call.join_video": {
+      "text": "Присоединиться с видео",
+      "status": "machine"
+    },
+    "chat.call.last_ended.busy": {
+      "text": "Последний звонок завершён: собеседник был занят.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.declined": {
+      "text": "Последний звонок завершён: отклонён.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.error": {
+      "text": "Последний звонок завершён из-за ошибки.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.hung_up": {
+      "text": "Последний звонок завершён.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.timed_out": {
+      "text": "Последний звонок завершён: нет ответа.",
+      "status": "machine"
+    },
+    "chat.call.unavailable": {
+      "text": "Групповые звонки сейчас недоступны.",
+      "status": "machine"
+    },
+    "chat.call.video": {
+      "text": "Видеозвонок",
+      "status": "machine"
+    },
+    "chat.call.voice": {
+      "text": "Позвонить",
+      "status": "machine"
+    },
+    "chat.composer.attach": {
+      "text": "Прикрепить файлы",
+      "status": "machine"
+    },
+    "chat.composer.attach_limit": {
+      "text": "Прикрепить файлы (до {limit} каждый)",
+      "status": "machine"
+    },
+    "chat.composer.attach_media": {
+      "text": "Фото или видео",
+      "status": "machine"
+    },
+    "chat.composer.drop_files": {
+      "text": "Перетащите файлы сюда, чтобы прикрепить",
+      "status": "machine"
+    },
+    "chat.composer.emoji_gifs": {
+      "text": "Эмодзи и GIF",
+      "status": "machine"
+    },
+    "chat.composer.photo_library": {
+      "text": "Медиатека",
+      "status": "machine"
+    },
+    "chat.composer.placeholder": {
+      "text": "Сообщение",
+      "status": "machine"
+    },
+    "chat.composer.remove_attachment": {
+      "text": "Убрать вложение",
+      "status": "machine"
+    },
+    "chat.composer.send": {
+      "text": "Отправить",
+      "status": "machine"
+    },
+    "chat.day.today": {
+      "text": "Сегодня",
+      "status": "machine"
+    },
+    "chat.day.yesterday": {
+      "text": "Вчера",
+      "status": "machine"
+    },
+    "chat.delete.body": {
+      "text": "Разговор и его сообщения будут удалены с этого устройства. Других копий нигде нет, и это действие нельзя отменить.",
+      "status": "machine"
+    },
+    "chat.delete.confirm_named": {
+      "text": "Удалить: {name}",
+      "status": "machine"
+    },
+    "chat.delete.control": {
+      "text": "Удалить этот чат",
+      "status": "machine"
+    },
+    "chat.delete.title": {
+      "text": "Удалить этот чат?",
+      "status": "machine"
+    },
+    "chat.edit.title": {
+      "text": "Изменить сообщение",
+      "status": "machine"
+    },
+    "chat.emoji.categories": {
+      "text": "Категории эмодзи",
+      "status": "machine"
+    },
+    "chat.emoji.choose": {
+      "text": "Выбрать",
+      "status": "machine"
+    },
+    "chat.emoji.choose_reaction": {
+      "text": "Выберите реакцию",
+      "status": "machine"
+    },
+    "chat.emoji.group.activities": {
+      "text": "Занятия",
+      "status": "machine"
+    },
+    "chat.emoji.group.animals": {
+      "text": "Животные и природа",
+      "status": "machine"
+    },
+    "chat.emoji.group.flags": {
+      "text": "Флаги",
+      "status": "machine"
+    },
+    "chat.emoji.group.food": {
+      "text": "Еда и напитки",
+      "status": "machine"
+    },
+    "chat.emoji.group.objects": {
+      "text": "Предметы",
+      "status": "machine"
+    },
+    "chat.emoji.group.people": {
+      "text": "Люди и тело",
+      "status": "machine"
+    },
+    "chat.emoji.group.smileys": {
+      "text": "Смайлики и эмоции",
+      "status": "machine"
+    },
+    "chat.emoji.group.symbols": {
+      "text": "Символы",
+      "status": "machine"
+    },
+    "chat.emoji.group.travel": {
+      "text": "Путешествия и места",
+      "status": "machine"
+    },
+    "chat.emoji.insert": {
+      "text": "Вставить",
+      "status": "machine"
+    },
+    "chat.emoji.no_results": {
+      "text": "Эмодзи не найдены",
+      "status": "machine"
+    },
+    "chat.emoji.recent": {
+      "text": "Недавние",
+      "status": "machine"
+    },
+    "chat.emoji.search": {
+      "text": "Поиск эмодзи",
+      "status": "machine"
+    },
+    "chat.emoji.skin_tones": {
+      "text": "Оттенки кожи: {name}",
+      "status": "machine"
+    },
+    "chat.emoji.tab": {
+      "text": "Эмодзи",
+      "status": "machine"
+    },
+    "chat.ended.composer": {
+      "text": "Вы больше не можете отправлять сообщения в эту группу.",
+      "status": "machine"
+    },
+    "chat.ended.consequence": {
+      "text": "Уже полученные сообщения остаются здесь. Новые приходить не будут.",
+      "status": "machine"
+    },
+    "chat.ended.left": {
+      "text": "Вы вышли из этой группы.",
+      "status": "machine"
+    },
+    "chat.ended.no_longer_member": {
+      "text": "Вы больше не участник этой группы.",
+      "status": "machine"
+    },
+    "chat.ended.unsent_draft": {
+      "text": "Неотправленный черновик",
+      "status": "machine"
+    },
+    "chat.error.add_member": {
+      "text": "Не удалось добавить этого человека. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.approve_join": {
+      "text": "Не удалось одобрить запрос на вступление. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.change_admin": {
+      "text": "Не удалось изменить роль администратора. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.conversation_gone": {
+      "text": "Этого разговора здесь больше нет.",
+      "status": "machine"
+    },
+    "chat.error.create_link": {
+      "text": "Не удалось создать ссылку-приглашение. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.delete_chat": {
+      "text": "Не удалось удалить этот чат. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.delete_message": {
+      "text": "Не удалось удалить сообщение. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.edit": {
+      "text": "Не удалось изменить сообщение. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.leave": {
+      "text": "Не удалось выйти из группы. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.membership_request": {
+      "text": "Не удалось повторно отправить запрошенное вами изменение состава группы.",
+      "status": "machine"
+    },
+    "chat.error.message_gone": {
+      "text": "Этого сообщения здесь больше нет.",
+      "status": "machine"
+    },
+    "chat.error.pin": {
+      "text": "Не удалось изменить закрепление. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.react": {
+      "text": "Не удалось отправить реакцию. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.refresh": {
+      "text": "Не удалось загрузить новые сообщения. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.reject_join": {
+      "text": "Не удалось отклонить запрос на вступление. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.remove_member": {
+      "text": "Не удалось удалить этого участника. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.revoke_link": {
+      "text": "Не удалось отозвать ссылку-приглашение. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.error.transfer": {
+      "text": "Не удалось передать права владельца. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.forward.empty": {
+      "text": "Нет разговоров, куда можно переслать",
+      "status": "machine"
+    },
+    "chat.forward.error.generic": {
+      "text": "Не удалось переслать сообщение. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.forward.from": {
+      "text": "Переслано от: {name}",
+      "status": "machine"
+    },
+    "chat.forward.label": {
+      "text": "Пересланное сообщение",
+      "status": "machine"
+    },
+    "chat.forward.list_label": {
+      "text": "Разговоры",
+      "status": "machine"
+    },
+    "chat.forward.picker_title": {
+      "text": "Переслать в",
+      "status": "machine"
+    },
+    "chat.forward.search_label": {
+      "text": "Поиск по разговорам",
+      "status": "machine"
+    },
+    "chat.gif.attribution": {
+      "text": "При поддержке GIPHY",
+      "status": "machine"
+    },
+    "chat.gif.load_failed": {
+      "text": "Не удалось загрузить GIF · Повторить",
+      "status": "machine"
+    },
+    "chat.gif.loading": {
+      "text": "Загрузка GIF",
+      "status": "machine"
+    },
+    "chat.gif.no_results": {
+      "text": "GIF не найдены",
+      "status": "machine"
+    },
+    "chat.gif.note_dismiss": {
+      "text": "Понятно",
+      "status": "machine"
+    },
+    "chat.gif.open_full": {
+      "text": "Открыть GIF на весь экран",
+      "status": "machine"
+    },
+    "chat.gif.privacy_note": {
+      "text": "Поиск GIF идёт через сервер Lakko, который видит, что вы ищете. Отправленные GIF шифруются, как любые файлы.",
+      "status": "machine"
+    },
+    "chat.gif.rate_limited": {
+      "text": "Слишком много запросов — попробуйте чуть позже",
+      "status": "machine"
+    },
+    "chat.gif.search": {
+      "text": "Поиск GIF",
+      "status": "machine"
+    },
+    "chat.gif.send": {
+      "text": "Отправить GIF",
+      "status": "machine"
+    },
+    "chat.gif.trending": {
+      "text": "Популярное",
+      "status": "machine"
+    },
+    "chat.gif.unavailable": {
+      "text": "GIF сейчас недоступны",
+      "status": "machine"
+    },
+    "chat.group.default_name": {
+      "text": "Новая группа",
+      "status": "machine"
+    },
+    "chat.group.fallback_name": {
+      "text": "Группа",
+      "status": "machine"
+    },
+    "chat.group.title_more": {
+      "text": "{names} +{count}",
+      "status": "machine"
+    },
+    "chat.group_name.empty": {
+      "text": "Названия пока нет",
+      "status": "machine"
+    },
+    "chat.group_name.error.character": {
+      "text": "В названии есть символ, который нельзя отобразить.",
+      "status": "machine"
+    },
+    "chat.group_name.error.generic": {
+      "text": "Это название нельзя использовать.",
+      "status": "machine"
+    },
+    "chat.group_name.error.line_break": {
+      "text": "Название должно быть в одну строку.",
+      "status": "machine"
+    },
+    "chat.group_name.error.save": {
+      "text": "Не удалось переименовать группу. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.group_name.error.too_long": {
+      "text": "Название слишком длинное.",
+      "status": "machine"
+    },
+    "chat.group_name.label": {
+      "text": "Название группы",
+      "status": "machine"
+    },
+    "chat.group_name.only_admins": {
+      "text": "Переименовать эту группу могут только администраторы",
+      "status": "machine"
+    },
+    "chat.header.back": {
+      "text": "Назад к чатам",
+      "status": "machine"
+    },
+    "chat.info.channel": {
+      "text": "О канале",
+      "status": "machine"
+    },
+    "chat.info.contact": {
+      "text": "О контакте",
+      "status": "machine"
+    },
+    "chat.info.group": {
+      "text": "О группе",
+      "status": "machine"
+    },
+    "chat.invite_link.cleared": {
+      "text": "Ссылка убрана (у встроенной ссылки нечего отзывать).",
+      "status": "machine"
+    },
+    "chat.invite_link.copy": {
+      "text": "Копировать ссылку",
+      "status": "machine"
+    },
+    "chat.invite_link.create": {
+      "text": "Создать ссылку-приглашение",
+      "status": "machine"
+    },
+    "chat.invite_link.label": {
+      "text": "Ссылка-приглашение",
+      "status": "machine"
+    },
+    "chat.invite_link.revoke": {
+      "text": "Отозвать",
+      "status": "machine"
+    },
+    "chat.invite_link.revoked": {
+      "text": "Ссылка-приглашение отозвана.",
+      "status": "machine"
+    },
+    "chat.invite_link.share": {
+      "text": "Поделиться",
+      "status": "machine"
+    },
+    "chat.leave.action": {
+      "text": "Выйти из группы",
+      "status": "machine"
+    },
+    "chat.leave.body": {
+      "text": "Вы будете получать сообщения, пока владелец или администратор не применит ваш запрос. Чтобы вернуться, понадобится новое приглашение.",
+      "status": "machine"
+    },
+    "chat.leave.confirm": {
+      "text": "Выйти",
+      "status": "machine"
+    },
+    "chat.leave.confirm_named": {
+      "text": "Выйти: {name}",
+      "status": "machine"
+    },
+    "chat.leave.requested": {
+      "text": "Запрос на выход отправлен. Он вступит в силу, когда владелец или администратор применит изменение.",
+      "status": "machine"
+    },
+    "chat.leave.title": {
+      "text": "Выйти из этой группы?",
+      "status": "machine"
+    },
+    "chat.media.and_more": {
+      "text": "{label} и ещё {count, plural, one {#} few {#} many {#} other {#}}",
+      "status": "machine"
+    },
+    "chat.media.audio": {
+      "text": "Аудио",
+      "status": "machine"
+    },
+    "chat.media.file": {
+      "text": "Файл",
+      "status": "machine"
+    },
+    "chat.media.gif": {
+      "text": "GIF",
+      "status": "machine"
+    },
+    "chat.media.not_sent_retry": {
+      "text": "Не отправлено · Повторить",
+      "status": "machine"
+    },
+    "chat.media.open_full_hint": {
+      "text": "Открывает на весь экран",
+      "status": "machine"
+    },
+    "chat.media.photo": {
+      "text": "Фото",
+      "status": "machine"
+    },
+    "chat.media.play_failed": {
+      "text": "Не удалось воспроизвести это сообщение",
+      "status": "machine"
+    },
+    "chat.media.row_not_sent": {
+      "text": "{label}, не отправлено",
+      "status": "machine"
+    },
+    "chat.media.row_sending": {
+      "text": "{label}, отправляется",
+      "status": "machine"
+    },
+    "chat.media.video": {
+      "text": "Видео",
+      "status": "machine"
+    },
+    "chat.media.video_message": {
+      "text": "Видеосообщение",
+      "status": "machine"
+    },
+    "chat.media.voice_message": {
+      "text": "Голосовое сообщение",
+      "status": "machine"
+    },
+    "chat.media.with_duration": {
+      "text": "{label}, {duration}",
+      "status": "machine"
+    },
+    "chat.members.add.action": {
+      "text": "Добавить участника",
+      "status": "machine"
+    },
+    "chat.members.add.done": {
+      "text": "Добавлено: {name}.",
+      "status": "machine"
+    },
+    "chat.members.add.error.no_bundle": {
+      "text": "Этот человек ещё не закончил настройку Lakko. Попробуйте позже.",
+      "status": "machine"
+    },
+    "chat.members.add.error.some_failed": {
+      "text": "Не удалось добавить: {names}. Добавьте их через список участников.",
+      "status": "machine"
+    },
+    "chat.members.add.error.unknown_username": {
+      "text": "Аккаунт {name} не зарегистрирован.",
+      "status": "machine"
+    },
+    "chat.members.add.placeholder": {
+      "text": "@username",
+      "status": "machine"
+    },
+    "chat.members.add.requested": {
+      "text": "Запрошено добавление: {name}. Человек вступит, когда владелец или администратор применит изменение.",
+      "status": "machine"
+    },
+    "chat.members.add.submit": {
+      "text": "Добавить",
+      "status": "machine"
+    },
+    "chat.members.admin.demoted": {
+      "text": "Роль администратора снята.",
+      "status": "machine"
+    },
+    "chat.members.admin.make": {
+      "text": "Сделать администратором",
+      "status": "machine"
+    },
+    "chat.members.admin.marker": {
+      "text": "Админ",
+      "status": "machine"
+    },
+    "chat.members.admin.promoted": {
+      "text": "Назначен администратор.",
+      "status": "machine"
+    },
+    "chat.members.admin.remove": {
+      "text": "Снять роль администратора",
+      "status": "machine"
+    },
+    "chat.members.admin.requested": {
+      "text": "Изменение запрошено. Оно вступит в силу, когда владелец или администратор применит его.",
+      "status": "machine"
+    },
+    "chat.members.count": {
+      "text": "{count, plural, one {# участник} few {# участника} many {# участников} other {# участника}}",
+      "status": "machine"
+    },
+    "chat.members.devices": {
+      "text": "{count, plural, one {# устройство} few {# устройства} many {# устройств} other {# устройства}}",
+      "status": "machine"
+    },
+    "chat.members.frozen": {
+      "text": "Этот список перестал обновляться, когда закончилось ваше участие в группе.",
+      "status": "machine"
+    },
+    "chat.members.heading": {
+      "text": "Участники ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.approve": {
+      "text": "Одобрить",
+      "status": "machine"
+    },
+    "chat.members.join.approved_added": {
+      "text": "Вступление одобрено. Человек добавлен в группу.",
+      "status": "machine"
+    },
+    "chat.members.join.approved_requested": {
+      "text": "Вступление одобрено. Человек вступит, когда владелец или администратор применит изменение.",
+      "status": "machine"
+    },
+    "chat.members.join.heading": {
+      "text": "Запросы на вступление ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.link_unknown": {
+      "text": "Ссылка-приглашение неизвестна",
+      "status": "machine"
+    },
+    "chat.members.join.reject": {
+      "text": "Отклонить",
+      "status": "machine"
+    },
+    "chat.members.join.rejected": {
+      "text": "Запрос на вступление отклонён.",
+      "status": "machine"
+    },
+    "chat.members.join.via_former": {
+      "text": "через {name} · больше не участник",
+      "status": "machine"
+    },
+    "chat.members.join.via_member": {
+      "text": "через {name} · участник",
+      "status": "machine"
+    },
+    "chat.members.pending.adds_heading": {
+      "text": "Ожидают добавления ({count})",
+      "status": "machine"
+    },
+    "chat.members.pending.count": {
+      "text": "{count, plural, one {# изменение состава ожидает применения.} few {# изменения состава ожидают применения.} many {# изменений состава ожидают применения.} other {# изменения состава ожидают применения.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.liveness": {
+      "text": "Изменения состава применяет владелец группы или администратор. Они применятся автоматически, когда кто-то из них это сделает.",
+      "status": "machine"
+    },
+    "chat.members.pending.queue": {
+      "text": "{count, plural, one {Теперь # изменение ожидает применения.} few {Теперь # изменения ожидают применения.} many {Теперь # изменений ожидают применения.} other {Теперь # изменения ожидают применения.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_added": {
+      "text": "Ожидает добавления.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_leave": {
+      "text": "Ожидает выхода.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_removed": {
+      "text": "Ожидает удаления.",
+      "status": "machine"
+    },
+    "chat.members.remove.body": {
+      "text": "Человек будет получать сообщения, пока владелец или администратор не применит изменение.",
+      "status": "machine"
+    },
+    "chat.members.remove.confirm_named": {
+      "text": "Удалить: {name}",
+      "status": "machine"
+    },
+    "chat.members.remove.done": {
+      "text": "Участник удалён.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested": {
+      "text": "Удаление запрошено. Оно вступит в силу, когда владелец или администратор применит изменение.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested_short": {
+      "text": "Удаление запрошено.",
+      "status": "machine"
+    },
+    "chat.members.remove.title": {
+      "text": "Удалить этого участника?",
+      "status": "machine"
+    },
+    "chat.members.row_label": {
+      "text": "{name}, {state}",
+      "status": "machine"
+    },
+    "chat.members.title": {
+      "text": "Участники",
+      "status": "machine"
+    },
+    "chat.members.unapplied.add_line": {
+      "text": "Добавление не применено. Можно добавить снова.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.explanation": {
+      "text": "Эти изменения не применились и сами повторяться не будут.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.heading": {
+      "text": "Не применено ({count})",
+      "status": "machine"
+    },
+    "chat.members.unapplied.join_line": {
+      "text": "Не применено. Попросите человека снова запросить вступление.",
+      "status": "machine"
+    },
+    "chat.members.unnamed": {
+      "text": "Участник",
+      "status": "machine"
+    },
+    "chat.message.actions": {
+      "text": "Действия с сообщением",
+      "status": "machine"
+    },
+    "chat.message.close_actions": {
+      "text": "Закрыть действия с сообщением",
+      "status": "machine"
+    },
+    "chat.message.deleted": {
+      "text": "Сообщение удалено",
+      "status": "machine"
+    },
+    "chat.message.edit": {
+      "text": "Изменить",
+      "status": "machine"
+    },
+    "chat.message.edited": {
+      "text": "(изменено)",
+      "status": "machine"
+    },
+    "chat.message.forward": {
+      "text": "Переслать",
+      "status": "machine"
+    },
+    "chat.message.media_fallback": {
+      "text": "Медиасообщение",
+      "status": "machine"
+    },
+    "chat.message.more_reactions": {
+      "text": "Другие реакции",
+      "status": "machine"
+    },
+    "chat.message.not_sent": {
+      "text": "Не отправлено",
+      "status": "machine"
+    },
+    "chat.message.pin": {
+      "text": "Закрепить",
+      "status": "machine"
+    },
+    "chat.message.react": {
+      "text": "Реакция",
+      "status": "machine"
+    },
+    "chat.message.react_with": {
+      "text": "Реакция {emoji}",
+      "status": "machine"
+    },
+    "chat.message.read": {
+      "text": "Прочитано",
+      "status": "machine"
+    },
+    "chat.message.read_by": {
+      "text": "Прочитали: {names}",
+      "status": "machine"
+    },
+    "chat.message.reply": {
+      "text": "Ответить",
+      "status": "machine"
+    },
+    "chat.message.select": {
+      "text": "Выбрать",
+      "status": "machine"
+    },
+    "chat.message.sending": {
+      "text": "Отправка...",
+      "status": "machine"
+    },
+    "chat.message.sent": {
+      "text": "Отправлено",
+      "status": "machine"
+    },
+    "chat.message.unpin": {
+      "text": "Открепить",
+      "status": "machine"
+    },
+    "chat.not_found.back": {
+      "text": "Назад к чатам",
+      "status": "machine"
+    },
+    "chat.not_found.body": {
+      "text": "Эта ссылка не соответствует ни одному разговору на этом устройстве.",
+      "status": "machine"
+    },
+    "chat.not_found.title": {
+      "text": "Разговор не найден",
+      "status": "machine"
+    },
+    "chat.peer.fallback_name": {
+      "text": "Собеседник",
+      "status": "machine"
+    },
+    "chat.photo.load_failed": {
+      "text": "Не удалось загрузить фото",
+      "status": "machine"
+    },
+    "chat.photo.load_failed_retry": {
+      "text": "Не удалось загрузить фото, нажмите, чтобы повторить",
+      "status": "machine"
+    },
+    "chat.photo.loading": {
+      "text": "Фото загружается",
+      "status": "machine"
+    },
+    "chat.photo.open": {
+      "text": "Открыть фото",
+      "status": "machine"
+    },
+    "chat.photo.viewer": {
+      "text": "Просмотр фото",
+      "status": "machine"
+    },
+    "chat.photo.viewer_hint": {
+      "text": "Сведите или разведите пальцы, чтобы изменить масштаб. Проведите вниз, чтобы закрыть.",
+      "status": "machine"
+    },
+    "chat.pin.detail_personal": {
+      "text": "Только на этом устройстве",
+      "status": "machine"
+    },
+    "chat.pin.detail_shared": {
+      "text": "Видят все участники",
+      "status": "machine"
+    },
+    "chat.pin.for_both": {
+      "text": "Закрепить для обоих",
+      "status": "machine"
+    },
+    "chat.pin.for_everyone": {
+      "text": "Закрепить для всех",
+      "status": "machine"
+    },
+    "chat.pin.for_me": {
+      "text": "Закрепить для себя",
+      "status": "machine"
+    },
+    "chat.pin.sheet_title": {
+      "text": "Закрепить сообщение",
+      "status": "machine"
+    },
+    "chat.pinned_bar.all": {
+      "text": "Все закреплённые сообщения",
+      "status": "machine"
+    },
+    "chat.pinned_bar.for_you": {
+      "text": "Для вас",
+      "status": "machine"
+    },
+    "chat.pinned_bar.hint": {
+      "text": "Показывает сообщение",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label": {
+      "text": "Закреплённое сообщение",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label_of": {
+      "text": "Закреплённое сообщение {index} из {count}",
+      "status": "machine"
+    },
+    "chat.pinned_bar.list_title": {
+      "text": "Закреплённые сообщения",
+      "status": "machine"
+    },
+    "chat.reaction.add_title": {
+      "text": "Отреагировать — Отреагировали: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by": {
+      "text": "Отреагировали: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by_title": {
+      "text": "Отреагировали",
+      "status": "machine"
+    },
+    "chat.reaction.remove_title": {
+      "text": "Убрать свою реакцию — Отреагировали: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.single_emoji": {
+      "text": "Реакция должна быть одним эмодзи.",
+      "status": "machine"
+    },
+    "chat.reauth.action": {
+      "text": "Войти снова",
+      "status": "machine"
+    },
+    "chat.reauth.body": {
+      "text": "Ключи для расшифровки и подписи сообщений недоступны в этом сеансе. Войдите снова, чтобы открыть этот чат.",
+      "status": "machine"
+    },
+    "chat.reauth.title": {
+      "text": "Войдите снова",
+      "status": "machine"
+    },
+    "chat.record.bar_video": {
+      "text": "Запись видеосообщения",
+      "status": "machine"
+    },
+    "chat.record.bar_voice": {
+      "text": "Запись голосового сообщения",
+      "status": "machine"
+    },
+    "chat.record.cancelled": {
+      "text": "Отменено",
+      "status": "machine"
+    },
+    "chat.record.delete": {
+      "text": "Удалить запись",
+      "status": "machine"
+    },
+    "chat.record.denied_camera": {
+      "text": "Lakko нужен доступ к камере, чтобы записывать видеосообщения. Разрешите доступ к камере в настройках сайта в браузере.",
+      "status": "machine"
+    },
+    "chat.record.denied_camera_app": {
+      "text": "Lakko нужен доступ к камере, чтобы записывать видеосообщения",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone": {
+      "text": "Lakko нужен доступ к микрофону, чтобы записывать голосовые сообщения. Разрешите доступ к микрофону в настройках сайта в браузере.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_app": {
+      "text": "Lakko нужен доступ к микрофону, чтобы записывать голосовые сообщения",
+      "status": "machine"
+    },
+    "chat.record.finishing": {
+      "text": "Завершение записи",
+      "status": "machine"
+    },
+    "chat.record.flip_camera": {
+      "text": "Сменить камеру",
+      "status": "machine"
+    },
+    "chat.record.flip_failed": {
+      "text": "Не удалось сменить камеру",
+      "status": "machine"
+    },
+    "chat.record.hint_hold": {
+      "text": "Удерживайте для записи",
+      "status": "machine"
+    },
+    "chat.record.in_call": {
+      "text": "Недоступно во время звонка",
+      "status": "machine"
+    },
+    "chat.record.locked_hint": {
+      "text": "Начинает запись без удержания",
+      "status": "machine"
+    },
+    "chat.record.no_camera": {
+      "text": "Камера не найдена",
+      "status": "machine"
+    },
+    "chat.record.open_settings": {
+      "text": "Открыть настройки",
+      "status": "machine"
+    },
+    "chat.record.pause": {
+      "text": "Приостановить запись",
+      "status": "machine"
+    },
+    "chat.record.pause_video": {
+      "text": "Приостановить видеосообщение",
+      "status": "machine"
+    },
+    "chat.record.play": {
+      "text": "Воспроизвести запись, {duration}",
+      "status": "machine"
+    },
+    "chat.record.play_video_sound": {
+      "text": "Воспроизвести видеосообщение со звуком",
+      "status": "machine"
+    },
+    "chat.record.position": {
+      "text": "Позиция в записи",
+      "status": "machine"
+    },
+    "chat.record.recording_duration": {
+      "text": "Идёт запись, {duration}",
+      "status": "machine"
+    },
+    "chat.record.send": {
+      "text": "Отправить запись",
+      "status": "machine"
+    },
+    "chat.record.silent_mic": {
+      "text": "Нет звука с микрофона",
+      "status": "machine"
+    },
+    "chat.record.slide_cancel": {
+      "text": "‹ Проведите для отмены",
+      "status": "machine"
+    },
+    "chat.record.start_failed": {
+      "text": "Не удалось начать запись",
+      "status": "machine"
+    },
+    "chat.record.starting": {
+      "text": "Запуск…",
+      "status": "machine"
+    },
+    "chat.record.stop": {
+      "text": "Остановить запись",
+      "status": "machine"
+    },
+    "chat.record.stop_short": {
+      "text": "Стоп",
+      "status": "machine"
+    },
+    "chat.record.switch_to_video": {
+      "text": "Переключиться на видеосообщение",
+      "status": "machine"
+    },
+    "chat.record.switch_to_voice": {
+      "text": "Переключиться на голосовое сообщение",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video": {
+      "text": "В этом браузере нельзя записывать видеосообщения",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video_device": {
+      "text": "На этом устройстве нельзя записывать видеосообщения",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice": {
+      "text": "В этом браузере нельзя записывать голосовые сообщения",
+      "status": "machine"
+    },
+    "chat.record.video": {
+      "text": "Записать видеосообщение",
+      "status": "machine"
+    },
+    "chat.record.video_ready": {
+      "text": "Видеосообщение готово",
+      "status": "machine"
+    },
+    "chat.record.video_tooltip": {
+      "text": "Записать видеосообщение: удерживайте для записи, нажмите, чтобы переключиться на голос",
+      "status": "machine"
+    },
+    "chat.record.voice": {
+      "text": "Записать голосовое сообщение",
+      "status": "machine"
+    },
+    "chat.record.voice_tooltip": {
+      "text": "Записать голосовое сообщение: удерживайте для записи, нажмите, чтобы переключиться на видео",
+      "status": "machine"
+    },
+    "chat.refusal.add_not_admin": {
+      "text": "Добавлять участников может только владелец группы или администратор.",
+      "status": "machine"
+    },
+    "chat.refusal.device_binding": {
+      "text": "С ключом этого устройства что-то не так. Удалите его в разделе «Устройства» и добавьте снова.",
+      "status": "machine"
+    },
+    "chat.refusal.device_limit": {
+      "text": "{count, plural, one {Не более # устройства на аккаунт. Сначала удалите одно.} few {Не более # устройств на аккаунт. Сначала удалите одно.} many {Не более # устройств на аккаунт. Сначала удалите одно.} other {Не более # устройства на аккаунт. Сначала удалите одно.}}",
+      "status": "machine"
+    },
+    "chat.refusal.fallback": {
+      "text": "Это изменение запросить не удалось.",
+      "status": "machine"
+    },
+    "chat.refusal.join_not_kept": {
+      "text": "Запрос на вступление пришёл, когда ожидающих было уже слишком много, поэтому он не сохранён. Попросите человека отправить его позже.",
+      "status": "machine"
+    },
+    "chat.refusal.joiner_member": {
+      "text": "Этот человек уже вступил в группу.",
+      "status": "machine"
+    },
+    "chat.refusal.no_join_request": {
+      "text": "Этот запрос на вступление больше не ожидает.",
+      "status": "machine"
+    },
+    "chat.refusal.not_owner": {
+      "text": "Менять администраторов и передавать права владельца может только владелец группы.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_cannot_leave": {
+      "text": "Владелец группы не может выйти из неё.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_not_member": {
+      "text": "Владельцем может быть только текущий участник этой группы.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_unremovable": {
+      "text": "Владельца группы нельзя удалить.",
+      "status": "machine"
+    },
+    "chat.refusal.pending_full": {
+      "text": "Слишком много изменений уже ожидают применения.",
+      "status": "machine"
+    },
+    "chat.refusal.remove_not_admin": {
+      "text": "Удалять участников может только владелец группы или администратор.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_many": {
+      "text": "Дождитесь их применения и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_one": {
+      "text": "Дождитесь его применения и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.refusal.role_change_pending": {
+      "text": "Изменение ролей уже ожидает применения.",
+      "status": "machine"
+    },
+    "chat.refusal.with_retry": {
+      "text": "{fact} {retry}",
+      "status": "machine"
+    },
+    "chat.reply.cancel": {
+      "text": "Отменить ответ",
+      "status": "machine"
+    },
+    "chat.reply.fallback_excerpt": {
+      "text": "Сообщение",
+      "status": "machine"
+    },
+    "chat.reply.quote": {
+      "text": "Ответ",
+      "status": "machine"
+    },
+    "chat.reply.quote_to": {
+      "text": "Ответ: {name}",
+      "status": "machine"
+    },
+    "chat.reply.strip_label": {
+      "text": "Ответ: {name}",
+      "status": "machine"
+    },
+    "chat.select.count": {
+      "text": "{count, plural, one {Выбрано: #} few {Выбрано: #} many {Выбрано: #} other {Выбрано: #}}",
+      "status": "machine"
+    },
+    "chat.select.count_limit": {
+      "text": "{count, plural, one {Выбрано: # (максимум)} few {Выбрано: # (максимум)} many {Выбрано: # (максимум)} other {Выбрано: # (максимум)}}",
+      "status": "machine"
+    },
+    "chat.select.delete_helper": {
+      "text": "Удалять можно только свои сообщения.",
+      "status": "machine"
+    },
+    "chat.select.delete_title": {
+      "text": "{count, plural, one {Удалить # сообщение?} few {Удалить # сообщения?} many {Удалить # сообщений?} other {Удалить # сообщения?}}",
+      "status": "machine"
+    },
+    "chat.select.deleted_of": {
+      "text": "Удалено {done} из {total}.",
+      "status": "machine"
+    },
+    "chat.select.forwarded_of": {
+      "text": "Переслано {done} из {total}.",
+      "status": "machine"
+    },
+    "chat.select.state_not_selected": {
+      "text": "Не выбрано",
+      "status": "machine"
+    },
+    "chat.select.state_selected": {
+      "text": "Выбрано",
+      "status": "machine"
+    },
+    "chat.select.toolbar": {
+      "text": "Выбранные сообщения",
+      "status": "machine"
+    },
+    "chat.send.failed": {
+      "text": "Не удалось отправить.",
+      "status": "machine"
+    },
+    "chat.system.join_request": {
+      "text": "Запрос на вступление",
+      "status": "machine"
+    },
+    "chat.system.members_changed": {
+      "text": "Состав изменён",
+      "status": "machine"
+    },
+    "chat.timeline.empty": {
+      "text": "Сообщений пока нет. Поздоровайтесь.",
+      "status": "machine"
+    },
+    "chat.timeline.setting_up": {
+      "text": "Этот разговор ещё настраивается на этом устройстве.",
+      "status": "machine"
+    },
+    "chat.transfer.action": {
+      "text": "Передать права владельца",
+      "status": "machine"
+    },
+    "chat.transfer.action_named": {
+      "text": "Сделать владельцем: {name}",
+      "status": "machine"
+    },
+    "chat.transfer.become_member": {
+      "text": "Стать обычным участником",
+      "status": "machine"
+    },
+    "chat.transfer.become_member_detail": {
+      "text": "Вы сразу теряете все права в группе. Вернуть что-либо может только новый владелец.",
+      "status": "machine"
+    },
+    "chat.transfer.candidate_admin": {
+      "text": "{name}, администратор",
+      "status": "machine"
+    },
+    "chat.transfer.done_admin": {
+      "text": "Теперь владелец группы — {name}. Вы остаётесь администратором.",
+      "status": "machine"
+    },
+    "chat.transfer.done_member": {
+      "text": "Теперь владелец группы — {name}. Вы теперь обычный участник.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_body": {
+      "text": "Менять роли может только владелец. После передачи группы вы не сможете вернуть её, восстановить свою роль владельца или снова изменить свою роль, если это не сделает за вас новый владелец.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_title": {
+      "text": "Это нельзя отменить.",
+      "status": "machine"
+    },
+    "chat.transfer.leave_blocked": {
+      "text": "Сначала передайте права владельца — группу нельзя оставить без владельца.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner": {
+      "text": "Теперь вы владелец этой группы.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_body": {
+      "text": "Вы можете добавлять и удалять участников, менять администраторов и передавать права владельца другому человеку.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_legend": {
+      "text": "Новый владелец",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_named": {
+      "text": "{name} передаёт вам права владельца этой группы.",
+      "status": "machine"
+    },
+    "chat.transfer.no_candidates": {
+      "text": "В этой группе больше никого нет, кому её можно передать.",
+      "status": "machine"
+    },
+    "chat.transfer.pending": {
+      "text": "Передача прав владельца ожидает применения.",
+      "status": "machine"
+    },
+    "chat.transfer.pending_named": {
+      "text": "Ожидает передачи прав владельца: {name}.",
+      "status": "machine"
+    },
+    "chat.transfer.requested": {
+      "text": "Передача прав владельца запрошена. Она вступит в силу, когда владелец или администратор применит изменение.",
+      "status": "machine"
+    },
+    "chat.transfer.role_change_pending": {
+      "text": "Изменение ролей уже ожидает применения. Дождитесь его применения и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chat.transfer.role_legend": {
+      "text": "Ваша роль после передачи",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin": {
+      "text": "Остаться администратором",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin_detail": {
+      "text": "Вы по-прежнему сможете добавлять и удалять участников. Отказаться от этого можно позже, попросив нового владельца.",
+      "status": "machine"
+    },
+    "chat.transfer.unlocks_leave": {
+      "text": "Когда изменение применится, вы сможете выйти из группы, как любой другой участник.",
+      "status": "machine"
+    },
+    "chat.typing.named": {
+      "text": "{name} печатает...",
+      "status": "machine"
+    },
+    "chat.typing.one_to_one": {
+      "text": "печатает...",
+      "status": "machine"
+    },
+    "chat.typing.several": {
+      "text": "Несколько человек печатают...",
+      "status": "machine"
+    },
+    "chat.unpin.for_both": {
+      "text": "Открепить для обоих",
+      "status": "machine"
+    },
+    "chat.unpin.for_everyone": {
+      "text": "Открепить для всех",
+      "status": "machine"
+    },
+    "chat.unpin.for_me": {
+      "text": "Открепить для себя",
+      "status": "machine"
+    },
+    "chat.unpin.sheet_title": {
+      "text": "Открепить сообщение",
+      "status": "machine"
+    },
+    "chat.upload.encrypting": {
+      "text": "Шифрование «{name}»…",
+      "status": "machine"
+    },
+    "chat.upload.encrypting_of": {
+      "text": "Шифрование «{name}» ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.preparing": {
+      "text": "Подготовка «{name}»…",
+      "status": "machine"
+    },
+    "chat.upload.selected_item": {
+      "text": "Выбранный элемент",
+      "status": "machine"
+    },
+    "chat.upload.uploading": {
+      "text": "Загрузка «{name}»…",
+      "status": "machine"
+    },
+    "chat.upload.uploading_of": {
+      "text": "Загрузка «{name}» ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.working": {
+      "text": "Шифрование и загрузка…",
+      "status": "machine"
+    },
+    "chat.video.load_failed": {
+      "text": "Не удалось загрузить видео",
+      "status": "machine"
+    },
+    "chat.video.load_failed_retry": {
+      "text": "Не удалось загрузить видео, нажмите, чтобы повторить",
+      "status": "machine"
+    },
+    "chat.video.loading": {
+      "text": "Загрузка видео, {size}",
+      "status": "machine"
+    },
+    "chat.video.open": {
+      "text": "Воспроизвести видео",
+      "status": "machine"
+    },
+    "chat.video.play": {
+      "text": "Воспроизвести видео, {size}",
+      "status": "machine"
+    },
+    "chat.video.play_failed": {
+      "text": "Не удалось воспроизвести это видео",
+      "status": "machine"
+    },
+    "chat.video.player": {
+      "text": "Видеоплеер",
+      "status": "machine"
+    },
+    "chat.video_note.loading": {
+      "text": "Видеосообщение загружается",
+      "status": "machine"
+    },
+    "chat.video_note.play": {
+      "text": "Воспроизвести видеосообщение, {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.play_sound": {
+      "text": "Воспроизвести видеосообщение со звуком, {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.poster": {
+      "text": "Обложка видеосообщения",
+      "status": "machine"
+    },
+    "chat.video_note.tap_mute": {
+      "text": "Нажмите, чтобы выключить звук",
+      "status": "machine"
+    },
+    "chat.video_note.tap_sound": {
+      "text": "Нажмите для звука",
+      "status": "machine"
+    },
+    "chat.voice.change_speed": {
+      "text": "Изменить скорость воспроизведения",
+      "status": "machine"
+    },
+    "chat.voice.not_played": {
+      "text": "Не прослушано",
+      "status": "machine"
+    },
+    "chat.voice.pause": {
+      "text": "Приостановить голосовое сообщение",
+      "status": "machine"
+    },
+    "chat.voice.play": {
+      "text": "Воспроизвести голосовое сообщение, {duration}",
+      "status": "machine"
+    },
+    "chat.voice.position": {
+      "text": "{position} из {duration}",
+      "status": "machine"
+    },
+    "chat.voice.seek": {
+      "text": "Перемотка голосового сообщения",
+      "status": "machine"
+    },
+    "chat.voice.speed": {
+      "text": "Скорость воспроизведения {rate}",
+      "status": "machine"
+    },
+    "chats.action.archive": {
+      "text": "В архив",
+      "status": "machine"
+    },
+    "chats.action.mute": {
+      "text": "Без звука",
+      "status": "machine"
+    },
+    "chats.action.pin": {
+      "text": "Закрепить",
+      "status": "machine"
+    },
+    "chats.action.unarchive": {
+      "text": "Из архива",
+      "status": "machine"
+    },
+    "chats.action.unmute": {
+      "text": "Включить звук",
+      "status": "machine"
+    },
+    "chats.action.unpin": {
+      "text": "Открепить",
+      "status": "machine"
+    },
+    "chats.compose": {
+      "text": "Создать",
+      "status": "machine"
+    },
+    "chats.create.channel": {
+      "text": "Создать канал",
+      "status": "machine"
+    },
+    "chats.create.chat": {
+      "text": "Новый чат",
+      "status": "machine"
+    },
+    "chats.create.group": {
+      "text": "Создать группу",
+      "status": "machine"
+    },
+    "chats.create.menu": {
+      "text": "Создать",
+      "status": "machine"
+    },
+    "chats.empty.action": {
+      "text": "Начать",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "Выберите чат, чтобы начать общение",
+      "status": "machine"
+    },
+    "chats.empty.title": {
+      "text": "Разговоров пока нет",
+      "status": "machine"
+    },
+    "chats.lookup.action": {
+      "text": "Найти {name}",
+      "status": "machine"
+    },
+    "chats.lookup.nothing": {
+      "text": "По запросу {name} ничего не найдено.",
+      "status": "machine"
+    },
+    "chats.lookup.unreachable": {
+      "text": "Не удалось выполнить поиск. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chats.new_chat.add_contact": {
+      "text": "Добавить контакт",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts": {
+      "text": "Контактов пока нет",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts_body": {
+      "text": "Чат начинается с того, кого вы знаете.",
+      "status": "machine"
+    },
+    "chats.new_chat.not_available": {
+      "text": "Чат пока недоступен на этом устройстве",
+      "status": "machine"
+    },
+    "chats.new_group.accept_again": {
+      "text": "Примите этот контакт снова, чтобы добавить его в группу.",
+      "status": "machine"
+    },
+    "chats.new_group.creating": {
+      "text": "Создание...",
+      "status": "machine"
+    },
+    "chats.new_group.error": {
+      "text": "Не удалось создать группу. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "chats.new_group.name_label": {
+      "text": "Название группы (необязательно)",
+      "status": "machine"
+    },
+    "chats.new_group.no_contacts": {
+      "text": "Группа начинается с людей, которых вы уже знаете.",
+      "status": "machine"
+    },
+    "chats.new_group.open_contacts": {
+      "text": "Перейти в контакты",
+      "status": "machine"
+    },
+    "chats.new_group.title": {
+      "text": "Новая группа",
+      "status": "machine"
+    },
+    "chats.preview.own": {
+      "text": "Вы: {text}",
+      "status": "machine"
+    },
+    "chats.preview.sender": {
+      "text": "{name}: {text}",
+      "status": "machine"
+    },
+    "chats.row.actions": {
+      "text": "Действия с разговором",
+      "status": "machine"
+    },
+    "chats.row.call.label": {
+      "text": "{kind}: {name}",
+      "status": "machine"
+    },
+    "chats.row.ended": {
+      "text": "Вы больше не участник.",
+      "status": "machine"
+    },
+    "chats.row.muted": {
+      "text": "Звук отключён",
+      "status": "machine"
+    },
+    "chats.row.no_messages": {
+      "text": "Сообщений пока нет",
+      "status": "machine"
+    },
+    "chats.row.people": {
+      "text": "{count, plural, one {# человек} few {# человека} many {# человек} other {# человека}}",
+      "status": "machine"
+    },
+    "chats.row.pinned": {
+      "text": "Закреплён",
+      "status": "machine"
+    },
+    "chats.row.unread": {
+      "text": "{count, plural, one {# непрочитанное сообщение} few {# непрочитанных сообщения} many {# непрочитанных сообщений} other {# непрочитанного сообщения}}",
+      "status": "machine"
+    },
+    "chats.row.unread_overflow": {
+      "text": "99+",
+      "status": "machine"
+    },
+    "chats.search.clear": {
+      "text": "Очистить поиск",
+      "status": "machine"
+    },
+    "chats.search.label": {
+      "text": "Поиск по чатам",
+      "status": "machine"
+    },
+    "chats.search.no_results": {
+      "text": "Ничего не найдено",
+      "status": "machine"
+    },
+    "chats.search.placeholder": {
+      "text": "Поиск",
+      "status": "machine"
+    },
+    "chats.synchronizing": {
+      "text": "Синхронизация...",
       "status": "machine"
     },
     "common.adding": {
@@ -366,12 +2086,28 @@
       "text": "Копировать",
       "status": "machine"
     },
+    "common.delete": {
+      "text": "Удалить",
+      "status": "machine"
+    },
     "common.dismiss": {
       "text": "Скрыть",
       "status": "machine"
     },
     "common.done": {
       "text": "Готово",
+      "status": "machine"
+    },
+    "common.duration.minutes": {
+      "text": "{count, plural, one {# минута} few {# минуты} many {# минут} other {# минуты}}",
+      "status": "machine"
+    },
+    "common.duration.minutes_seconds": {
+      "text": "{minutes} {seconds}",
+      "status": "machine"
+    },
+    "common.duration.seconds": {
+      "text": "{count, plural, one {# секунда} few {# секунды} many {# секунд} other {# секунды}}",
       "status": "machine"
     },
     "common.email": {
@@ -422,6 +2158,10 @@
       "text": "Развернуть",
       "status": "machine"
     },
+    "common.list_pair": {
+      "text": "{first}, {second}",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "Загрузка...",
       "status": "machine"
@@ -438,8 +2178,16 @@
       "text": "Другие варианты",
       "status": "machine"
     },
+    "common.not_now": {
+      "text": "Не сейчас",
+      "status": "machine"
+    },
     "common.off": {
       "text": "Выкл.",
+      "status": "machine"
+    },
+    "common.ok": {
+      "text": "ОК",
       "status": "machine"
     },
     "common.on": {
@@ -474,6 +2222,10 @@
       "text": "Удаление...",
       "status": "machine"
     },
+    "common.retry": {
+      "text": "Повторить",
+      "status": "machine"
+    },
     "common.save": {
       "text": "Сохранить",
       "status": "machine"
@@ -486,8 +2238,28 @@
       "text": "Отправка...",
       "status": "machine"
     },
+    "common.sentence_pair": {
+      "text": "{first} {second}",
+      "status": "machine"
+    },
     "common.set_up": {
       "text": "Настроить",
+      "status": "machine"
+    },
+    "common.size.bytes": {
+      "text": "{size} Б",
+      "status": "machine"
+    },
+    "common.size.gb": {
+      "text": "{size} ГБ",
+      "status": "machine"
+    },
+    "common.size.kb": {
+      "text": "{size} КБ",
+      "status": "machine"
+    },
+    "common.size.mb": {
+      "text": "{size} МБ",
       "status": "machine"
     },
     "common.try_again": {
@@ -732,6 +2504,26 @@
     },
     "display_name.error.unknown": {
       "text": "Это имя нельзя использовать",
+      "status": "machine"
+    },
+    "ds.clock_skew": {
+      "text": "Проверьте дату и время на этом устройстве.",
+      "status": "machine"
+    },
+    "group.join.not_taking_requests": {
+      "text": "Эта группа пока не принимает запросы. Попробуйте позже.",
+      "status": "machine"
+    },
+    "group.join.request_again": {
+      "text": "Запросить снова",
+      "status": "machine"
+    },
+    "group.join.wait_primary": {
+      "text": "Запрос отправлен. Администратор одобрит его, затем изменение будет применено к группе.",
+      "status": "machine"
+    },
+    "group.join.wait_secondary": {
+      "text": "Ни у одного из шагов нет ограничения по времени. Если ничего не происходит, запрос можно отправить снова.",
       "status": "machine"
     },
     "language.name.ar": {
@@ -1952,6 +3744,14 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "Коды безопасности",
+      "status": "machine"
+    },
+    "tokens.action_allowance_used": {
+      "text": "Вы исчерпали дневной лимит на это действие. Попробуйте завтра.",
+      "status": "machine"
+    },
+    "tokens.lookup_allowance_used": {
+      "text": "Сегодня вы искали очень много людей. Попробуйте завтра.",
       "status": "machine"
     },
     "username.a11y_hint": {

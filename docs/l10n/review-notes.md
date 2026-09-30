@@ -133,3 +133,132 @@ recovery area (`docs/l10n/batch-1-auth.md`).
   `other` only.
 - **Lakko gender in he** stays feminine (מתחברת, יכולה) in the
   anti-censorship and notifications strings.
+
+## Batch 3 (chat, chat list, common): ar, es, fa, he, hi
+
+### Across languages
+
+- **"video message" = the round video note.** The source says "Video message"
+  in chat keys; each language reuses its existing video-note term from
+  `settings.media.autoplay_video_notes.*` for consistency: es "videonota",
+  ar "ملاحظة فيديو", fa "یادداشت ویدیویی", he "הודעת וידאו", hi "वीडियो नोट".
+- **`chat.record.slide_cancel`**: ar, fa, he flipped the arrow to "›" on the
+  assumption the cancel gesture is mirrored in RTL; es and hi keep "‹". Check
+  on screen which way the slide actually goes.
+- **`chat.members.add.placeholder`**: ar, fa, he, hi keep "@username" in Latin
+  (usernames are `[a-z0-9_]`); es uses "@usuario".
+- **`chat.gif.attribution`**: "Powered by" translated, GIPHY kept. If GIPHY's
+  terms require the English line or their logo, revert.
+- **"applies when an owner or an admin applies the change"**: rendered as
+  "takes effect when the owner or an admin applies the change" (es "el
+  propietario"); the group has one owner.
+- **File-size units**: es kept B/kB/MB/GB; ar and fa spell the units out;
+  he "בתים" + KB/MB/GB; hi "बाइट" + KB/MB/GB (kB became KB in he and hi).
+- **`common.duration.minutes_seconds`** gained "and" in ar ("و"), fa ("و"),
+  he ("ו-"); es and hi keep a plain space.
+
+### Per language
+
+- **ar**: `chat.forward.label` "رسالة معاد توجيهها" (a noun phrase); "tap"
+  unified to "اضغط" as in settings. `chat.message.react` is the imperative
+  "تفاعل" and `chat.reaction.*` "تفاعل {names}" reads as a past verb: same
+  spelling, check context.
+- **es**: `chat.members.admin.*` and "administrador"/"propietario" are
+  masculine; `chat.author.you` "Tú". `chat.peer.fallback_name` "Contacto"
+  rather than a literal "Par".
+- **fa**: forward = "هدایت" (Telegram usage); pin = "سنجاق"; conversation and
+  chat both "گفتگو", so `chat.delete.control` says "this conversation".
+- **he**: "conversation" is "צ׳אט" throughout, because "שיחה" is also "call".
+  Gendered leftovers: "חבר" (member), "מנהל" (admin), "שולח", "ממתין";
+  `chat.author.you` and `chats.preview.own` use "את/ה" (the slash form flagged
+  in batch 1). Typing uses the neutral "בהקלדה". Owner = "בעלים" (plural
+  agreement). Arguments after prepositions use a hyphen: "מ-{name}",
+  "ל-{name}".
+- **hi**: "owner" = "मालिक", ownership = "मालिकाना हक"; group = "ग्रुप"
+  (not समूह); `chat.pinned_bar.label_of` reworded to "{index}, कुल {count}".
+
+## Batch 3 (chat, chat list, common): pt-BR, ru, tr, uk, zh-Hans
+
+- **Owner / admin terms.** pt-BR "proprietário" / "administrador" and
+  tr "sahip" / "yönetici" are grammatically masculine or generic; ru/uk
+  "владелец / власник", "администратор / адміністратор" are masculine
+  generics. zh-Hans uses 群主 for the group owner (distinct from 发起人,
+  the call-link owner from batch 1).
+- **Placeholder `chat.members.add.placeholder`:** ru, uk keep `@username`
+  in Latin (usernames are `[a-z0-9_]`, a Cyrillic word would suggest
+  otherwise); pt-BR `@nomedeusuario`, tr `@kullaniciadi` (ASCII);
+  zh-Hans `@用户名` (inconsistent with ru/uk; pick one rule).
+- **Video note term** follows batch 2: tr keeps "görüntülü not" for
+  "Video message" (`chat.media.video_message`, `chat.record.*`), which
+  reads oddly next to "Sesli mesaj"; pt-BR "mensagem de vídeo", ru/uk
+  видео-/відеоповідомлення, zh-Hans 视频消息.
+- **Label form to avoid case endings on `{name}`:** ru/uk
+  "Удалить: {name}", "Выйти: {name}", "Добавлено: {name}", "Переслано
+  от: {name}", "Ответ: {name}" (both `quote_to` and `strip_label`
+  render the same in ru/uk); tr uses label form throughout
+  ("Sil: {name}", "Ara: {name}", "Bulunamadı: {name}",
+  "Şu kişiden iletildi: {name}", "davet eden: {name}").
+  zh-Hans joins `{name}` with no space ("删除{name}", "退出{name}").
+- **Plurals with an identical form in every category** (ru/uk
+  `chat.select.count`, `chat.media.and_more` put the number outside the
+  noun, "Выбрано: #"); tr repeats the singular noun in both
+  categories, as Turkish does after a number.
+- **`chat.members.add.done` (pt-BR)** rephrased to "{name} agora está no
+  grupo." and admin notices to "Função de administrador
+  removida/concedida" to avoid gender; ru "Назначен администратор." is
+  still masculine.
+- **`chat.transfer.new_owner_named`:** ru/uk use the present
+  "передаёт / передає" to avoid a gendered past tense.
+- **`chat.gif.attribution`:** translated ("Com tecnologia GIPHY", "При
+  поддержке GIPHY", "GIPHY tarafından desteklenmektedir", "На основі
+  GIPHY", "由 GIPHY 提供支持"); GIPHY's own attribution rules may require
+  the English "Powered by GIPHY" logo text.
+- **`chat.record.pause`** ("Pause recording", comment: pauses playback of
+  the recording): zh-Hans says "暂停播放录音"; the others translate the
+  English literally and are equally ambiguous.
+- **`common.duration.minutes_seconds`:** pt-BR inserts "e" ("{minutes} e
+  {seconds}"); zh-Hans joins with no space; ru/uk/tr keep a space.
+- **Sizes:** ru/uk use Cyrillic units (Б, КБ, МБ, ГБ); zh-Hans "KB";
+  pt-BR/tr keep "kB" as the source.
+- **`chat.peer.fallback_name`** ("Peer"): pt-BR "Contato", ru
+  "Собеседник", uk "Співрозмовник", tr "Karşı taraf", zh-Hans "对方".
+- **`chats.row.call.label`** ("{kind} from {name}"): ru/uk/tr "{kind}:
+  {name}"; zh-Hans reorders to "来自 {name} 的{kind}".
+
+### Batch 3 top-up (keys added by iOS and Android)
+
+
+- **`chat.composer.photo_library`**: es "Fototeca" follows Apple's Spanish
+  name; on Android "Galería" may read better. Others are literal.
+- **`chat.record.open_settings`**: es "Abrir Ajustes" (iOS term); Android
+  calls it "Configuración".
+- **`common.ok`**: es "Aceptar", ar "حسنًا", fa "باشه" (informal; "تأیید" is
+  more formal), he "אישור", hi "ठीक है". hi `chat.gif.note_dismiss` is also
+  "ठीक है".
+- **he**: `chat.record.locked_hint` "מתחיל" and `chat.media.open_full_hint`
+  "פותח" are masculine, agreeing with the button. `chat.members.count` uses
+  "חברים" (the masculine plural used generically).
+- **`chat.video_note.poster`**: rendered as "cover/preview image" in each
+  language; the literal "poster" means nothing to a user.
+
+
+- **`chat.composer.photo_library`:** follows the platform names: pt-BR
+  "Galeria de fotos", ru "Медиатека", uk "Медіатека" (the Apple Photos
+  picker name), tr "Fotoğraf Arşivi", zh-Hans 照片图库. On Android the
+  system name differs; check both platforms.
+- **`chat.record.open_settings`:** pt-BR "Abrir Ajustes" uses the iOS name
+  "Ajustes"; Android says "Configurações", and earlier batches used
+  "Configurações". Pick per platform or neutral.
+- **`chat.record.locked_hint`:** "locked recording" rendered as "hands-free"
+  (ru/uk "без удержания", tr "basılı tutmadan", zh-Hans 免按住,
+  pt-BR "contínua").
+- **`chat.photo.viewer_hint`:** ru/uk spell out the pinch gesture
+  ("Сведите или разведите пальцы"); long for a hint.
+- **`common.ok`:** ru "ОК" is Cyrillic, uk keeps Latin "OK"; pick one.
+- **`chat.reaction.reacted_by_title`** is a heading with no object:
+  pt-BR "Reações de" dangles; ru/uk "Отреагировали", tr "Tepki verenler",
+  zh-Hans 回应者 read as "Those who reacted".
+- **`chats.new_group.accept_again`:** pt-BR "adicioná-lo", ru/uk "его/його"
+  refer to "contact" (grammatically masculine), not the person.
+- **tr "Video message"** stays "görüntülü not" in the new keys, as in the
+  main batch.

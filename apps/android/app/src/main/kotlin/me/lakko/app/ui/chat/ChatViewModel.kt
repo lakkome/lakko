@@ -33,6 +33,8 @@ import me.lakko.app.chat.ChatThread
 import me.lakko.app.calls.CallKind
 import me.lakko.app.calls.GroupCallStartOutcome
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.GroupMember
 import uniffi.lakko_ffi_uniffi.OutgoingOwner
@@ -116,14 +118,14 @@ public class ChatViewModel(
     /** `true` while a bulk delete is running; the action bar waits. */
     public val bulkBusy: StateFlow<Boolean> = mutableBulkBusy.asStateFlow()
 
-    private val mutableBulkStatus = MutableStateFlow<String?>(null)
+    private val mutableBulkStatus = MutableStateFlow<UiText?>(null)
 
     /**
      * "Deleted K of N." / "Forwarded K of N." after a run stopped short,
      * shown under the action bar; `null` otherwise. Cleared by the next
      * action and by leaving the mode.
      */
-    public val bulkStatus: StateFlow<String?> = mutableBulkStatus.asStateFlow()
+    public val bulkStatus: StateFlow<UiText?> = mutableBulkStatus.asStateFlow()
 
     init {
         // Section 8 — the picker leaves a selection's forward outcome in the
@@ -383,7 +385,7 @@ public class ChatViewModel(
      * reuses it rather than reading the live roster (a Rust call that waits on
      * the group's mutex) on the main thread.
      */
-    private var lastTypingText: String? = null
+    private var lastTypingText: UiText? = null
 
     public val state: StateFlow<ChatScreenUiState> = derived.asStateFlow()
 
@@ -723,18 +725,18 @@ public class ChatViewModel(
     /** `true` while an add / remove commit is in flight. */
     public val membershipBusy: StateFlow<Boolean> = mutableMembershipBusy.asStateFlow()
 
-    private val mutableMembershipError: MutableStateFlow<String?> = MutableStateFlow(null)
+    private val mutableMembershipError: MutableStateFlow<UiText?> = MutableStateFlow(null)
 
     /** Last add / remove error surfaced to the sheet, else `null`. */
-    public val membershipError: StateFlow<String?> = mutableMembershipError.asStateFlow()
+    public val membershipError: StateFlow<UiText?> = mutableMembershipError.asStateFlow()
 
-    private val mutableMembershipNotice: MutableStateFlow<String?> = MutableStateFlow(null)
+    private val mutableMembershipNotice: MutableStateFlow<UiText?> = MutableStateFlow(null)
 
     /** ADR-0045 — feedback for a membership request that was accepted locally
      *  and published. Distinct from [membershipError] because a request is not
      *  an outcome: the change has NOT happened yet, and the copy must not
      *  suggest it has. */
-    public val membershipNotice: StateFlow<String?> = mutableMembershipNotice.asStateFlow()
+    public val membershipNotice: StateFlow<UiText?> = mutableMembershipNotice.asStateFlow()
 
     private val mutableCanManageMembers: MutableStateFlow<Boolean> = MutableStateFlow(true)
 
@@ -892,7 +894,7 @@ public class ChatViewModel(
                     try {
                         repo.setSharedPin(groupIdHex, messageId, pinned)
                     } catch (err: Throwable) {
-                        composer.update { it.copy(sendError = err.message ?: me.lakko.app.chat.PIN_SEND_FAILED) }
+                        composer.update { it.copy(sendError = chatError(err, "chat.error.pin")) }
                         android.util.Log.w("ChatViewModel", "onPinAction failed", err)
                     }
                 }
@@ -917,10 +919,10 @@ public class ChatViewModel(
     /** `true` while a rename is being sent. */
     public val groupNameBusy: StateFlow<Boolean> = mutableGroupNameBusy.asStateFlow()
 
-    private val mutableGroupNameError: MutableStateFlow<String?> = MutableStateFlow(null)
+    private val mutableGroupNameError: MutableStateFlow<UiText?> = MutableStateFlow(null)
 
     /** The last rename failure, else `null`. */
-    public val groupNameError: StateFlow<String?> = mutableGroupNameError.asStateFlow()
+    public val groupNameError: StateFlow<UiText?> = mutableGroupNameError.asStateFlow()
 
     /** Re-read the stored shared name (and reset the draft to it). */
     private fun refreshGroupName() {
@@ -960,7 +962,7 @@ public class ChatViewModel(
             } catch (e: uniffi.lakko_ffi_uniffi.FfiException) {
                 // The composer refused the text (line break, control character,
                 // too long): the message names the rule.
-                mutableGroupNameError.value = e.message ?: me.lakko.app.chat.GROUP_NAME_SEND_FAILED
+                mutableGroupNameError.value = groupNameErrorText(e)
                 android.util.Log.w("ChatViewModel", "saveGroupName refused", e)
             } catch (e: Throwable) {
                 mutableGroupNameError.value = me.lakko.app.chat.GROUP_NAME_SEND_FAILED
@@ -1018,16 +1020,40 @@ public class ChatViewModel(
      * raw text, and §6 row 7 is about not leaking a *refusal's* internal
      * reason, not about hiding every error.
      */
-    private fun reportMembershipFailure(e: Throwable, op: String) {
-        mutableMembershipError.value =
-            me.lakko.app.chat.membershipRefusalMessage(
-                e,
-                ::membershipRefusalRetryMaySucceed,
-            )
-                // ADR-0054 - adding by username spends a lookup token.
-                ?: me.lakko.app.anon.anonTokenFailureCopy(e, me.lakko.app.anon.LOOKUP_ALLOWANCE_USED_COPY)
-                ?: (e.message ?: e.toString())
+    private fun reportMembershipFailure(e: Throwable, op: String, fallbackKey: String) {
+        // ADR-0058 section 6: the reason, the token pool or the device clock
+        // pick the sentence; anything else is the action's own key. The raw
+        // message stays in the log, for the people it was written for.
+        mutableMembershipError.value = me.lakko.app.chat.chatErrorText(
+            e,
+            fallbackKey,
+            ::membershipRefusalRetryMaySucceed,
+            // ADR-0054 - adding by username spends a lookup token.
+            allowance = me.lakko.app.chat.AllowanceKind.LOOKUP,
+        )
         android.util.Log.w("ChatViewModel", "$op failed", e)
+    }
+
+    /** ADR-0058 section 6 — a failed chat action's sentence, [fallbackKey] unless the error names itself. */
+    private fun chatError(err: Throwable, fallbackKey: String): UiText {
+        // The raw message is for the log. A host JVM test has no
+        // android.util.Log, and the sentence must not depend on one.
+        try {
+            android.util.Log.w("ChatViewModel", "chat action failed ($fallbackKey)", err)
+        } catch (_: RuntimeException) {
+        }
+        return me.lakko.app.chat.chatErrorText(err, fallbackKey, ::membershipRefusalRetryMaySucceed)
+    }
+
+    /** A rename's refusal from its kind (`chat.group_name.error.*`), never the core's text. */
+    private fun groupNameErrorText(e: uniffi.lakko_ffi_uniffi.FfiException): UiText = when (e) {
+        is uniffi.lakko_ffi_uniffi.FfiException.DisplayNameLineBreak -> UiText("chat.group_name.error.line_break")
+        is uniffi.lakko_ffi_uniffi.FfiException.DisplayNameControlOrFormatCharacter ->
+            UiText("chat.group_name.error.character")
+        is uniffi.lakko_ffi_uniffi.FfiException.DisplayNameTooLong,
+        is uniffi.lakko_ffi_uniffi.FfiException.DisplayNameTooManyBytes,
+        -> UiText("chat.group_name.error.too_long")
+        else -> UiText("chat.group_name.error.generic")
     }
 
     // -----------------------------------------------------------------------
@@ -1341,7 +1367,7 @@ public class ChatViewModel(
                         // Anything else is a real failure of a request the user
                         // made and was not present for, so it replaces the
                         // stale message rather than being logged away.
-                        reportMembershipFailure(e, "membership retry")
+                        reportMembershipFailure(e, "membership retry", "chat.error.membership_request")
                     }
                 }
             }
@@ -1629,7 +1655,7 @@ public class ChatViewModel(
                 )
                 refreshMembers()
             } catch (e: Throwable) {
-                reportMembershipFailure(e, "onTransferOwnership")
+                reportMembershipFailure(e, "onTransferOwnership", "chat.error.transfer")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -1733,7 +1759,7 @@ public class ChatViewModel(
     public fun memberLabel(member: GroupMember): String {
         // The local leaf is not in the contact directory, so the resolver
         // would fall back to "Member"; the row is simply "You".
-        if (ownLeafIndex() == member.leafIndex) return "You"
+        if (ownLeafIndex() == member.leafIndex) return Localization.strings.value["chat.author.you"]
         // ADR-0048 UX §3 — the one resolver: rename, profile name, verified
         // @username, fingerprint (never `@` + hex).
         return profileNames.resolve(member.signaturePublicKey).listLabel
@@ -1823,7 +1849,7 @@ public class ChatViewModel(
             keyB64?.let { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }
         } catch (_: Throwable) {
             null
-        } ?: return "Unknown member"
+        } ?: return Localization.strings.value["chat.members.unnamed"]
         // ADR-0048 — a prospective member resolves like anyone else: a profile
         // is only known if one reached this device, so this is usually the
         // fingerprint (without `@`).
@@ -1842,7 +1868,7 @@ public class ChatViewModel(
         // ADR-0048 §4 — a name failing the rule is never looked up.
         val username = when (val decision = me.lakko.app.profile.searchDecision(typed, validateUsername)) {
             is me.lakko.app.profile.SearchDecision.Refuse -> {
-                mutableMembershipError.value = decision.text.render()
+                mutableMembershipError.value = decision.text
                 return
             }
             is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized
@@ -1872,7 +1898,7 @@ public class ChatViewModel(
                 mutableAddMemberInput.value = ""
                 refreshMembers()
             } catch (e: Throwable) {
-                reportMembershipFailure(e, "onAddMember")
+                reportMembershipFailure(e, "onAddMember", "chat.error.add_member")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -1885,7 +1911,7 @@ public class ChatViewModel(
      */
     public fun onRemoveMember(leafIndex: UInt) {
         if (ownLeafIndex() == leafIndex) {
-            mutableMembershipError.value = "You cannot remove yourself from the group."
+            mutableMembershipError.value = UiText("chat.refusal.fallback")
             return
         }
         if (mutableMembershipBusy.value) return
@@ -1909,7 +1935,7 @@ public class ChatViewModel(
                 }
                 refreshMembers()
             } catch (e: Throwable) {
-                reportMembershipFailure(e, "onRemoveMember")
+                reportMembershipFailure(e, "onRemoveMember", "chat.error.remove_member")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -2008,11 +2034,10 @@ public class ChatViewModel(
                 // true either way.
                 repo.noteOwnLeaveRequested(groupIdHex)
                 leaveRequestedAtMs = repo.leaveRequestedAt(groupIdHex)
-                mutableMembershipNotice.value =
-                    "Leave requested. It applies when an owner or an admin applies the change."
+                mutableMembershipNotice.value = UiText("chat.leave.requested")
                 refreshMembers()
             } catch (e: Throwable) {
-                reportMembershipFailure(e, "onLeaveGroup")
+                reportMembershipFailure(e, "onLeaveGroup", "chat.error.leave")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -2059,7 +2084,7 @@ public class ChatViewModel(
                 ) { repo.setMemberAdmin(groupIdHex, member.signaturePublicKey, makeAdmin) }
                 refreshMembers()
             } catch (e: Throwable) {
-                reportMembershipFailure(e, "onToggleAdmin")
+                reportMembershipFailure(e, "onToggleAdmin", "chat.error.change_admin")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -2097,7 +2122,7 @@ public class ChatViewModel(
                 }
                 val swept = repo.sweepIfCommitter(groupIdHex)
                 mutableMembershipNotice.value = if (swept is me.lakko.app.chat.SweepOutcome.Committed) {
-                    "Join approved. They have been added to the group."
+                    UiText("chat.members.join.approved_added")
                 } else {
                     // ADR-0045 S7 residual 2 — an approve that did not apply has
                     // grown a queue only a sweep drains, and the core's own
@@ -2108,8 +2133,12 @@ public class ChatViewModel(
                     val queue = me.lakko.app.chat.waitingQueueLine(
                         repo.pendingProposalCount(groupIdHex),
                     )
-                    "Join approved. They join when an owner or an admin applies the change." +
-                        (queue?.let { " $it" } ?: "")
+                    val approved = UiText("chat.members.join.approved_requested")
+                    if (queue == null) {
+                        approved
+                    } else {
+                        UiText("common.sentence_pair", parts = mapOf("first" to approved, "second" to queue))
+                    }
                 }
                 // Acting on the queue is what may have made room for the
                 // request the quarantine turned away, so the notice about it
@@ -2117,7 +2146,7 @@ public class ChatViewModel(
                 repo.clearUnkeptExternalJoin(groupIdHex)
                 refreshMembers()
             } catch (e: Throwable) {
-                reportMembershipFailure(e, "onApproveJoin")
+                reportMembershipFailure(e, "onApproveJoin", "chat.error.approve_join")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -2161,7 +2190,7 @@ public class ChatViewModel(
                 repo.clearUnkeptExternalJoin(groupIdHex)
                 refreshMembers()
             } catch (e: Throwable) {
-                reportMembershipFailure(e, "onRejectJoin")
+                reportMembershipFailure(e, "onRejectJoin", "chat.error.reject_join")
             } finally {
                 mutableMembershipBusy.value = false
             }
@@ -2178,7 +2207,7 @@ public class ChatViewModel(
             try {
                 mutableInviteLink.value = repo.createGroupInviteLink(groupIdHex)
             } catch (e: Throwable) {
-                reportMembershipFailure(e, "onCreateInviteLink")
+                reportMembershipFailure(e, "onCreateInviteLink", "chat.error.create_link")
             }
         }
     }
@@ -2196,7 +2225,7 @@ public class ChatViewModel(
                 repo.revokeGroupInviteLink(link)
                 mutableInviteLink.value = null
             } catch (e: Throwable) {
-                reportMembershipFailure(e, "onRevokeInviteLink")
+                reportMembershipFailure(e, "onRevokeInviteLink", "chat.error.revoke_link")
             }
         }
     }
@@ -2234,7 +2263,7 @@ public class ChatViewModel(
     private fun showBusyNotice(verb: me.lakko.app.calls.CallVerb) {
         val occupant = callOccupant.value
         if (occupant == null) {
-            showCallNotice("Another call is in progress.")
+            showCallNotice(Localization.strings.value["chat.call.busy"])
             return
         }
         mutableCallNotice.value = me.lakko.app.calls.callBusyMessage(occupant, verb)
@@ -2288,7 +2317,7 @@ public class ChatViewModel(
      */
     public fun joinGroupCall(video: Boolean = false) {
         val record = liveGroupCallRecord() ?: run {
-            showCallNotice("That group call has ended.")
+            showCallNotice(Localization.strings.value["chat.call.group_ended"])
             return
         }
         requestGroupCall(video = video, joinCallIdHex = record.callIdHex)
@@ -2296,7 +2325,7 @@ public class ChatViewModel(
 
     private fun requestGroupCall(video: Boolean, joinCallIdHex: String?) {
         val host = groupCallHost ?: run {
-            showCallNotice("Group calls are not available right now.")
+            showCallNotice(Localization.strings.value["chat.call.unavailable"])
             return
         }
         viewModelScope.launch {
@@ -2308,7 +2337,7 @@ public class ChatViewModel(
                     mutableCallNotice.value = outcome.message
                     mutableCallNoticeOffersEnd.value = true
                 }
-                GroupCallStartOutcome.Ended -> showCallNotice("That group call has ended.")
+                GroupCallStartOutcome.Ended -> showCallNotice(Localization.strings.value["chat.call.group_ended"])
                 is GroupCallStartOutcome.Failed -> showCallNotice(outcome.message)
             }
         }
@@ -2554,7 +2583,7 @@ public class ChatViewModel(
      */
     private fun typingIndicatorText(
         typingMembers: Set<me.lakko.app.chat.MemberIdentity>,
-    ): String? {
+    ): UiText? {
         if (typingMembers.isEmpty()) return null
         // The LIVE roster read, not the last-refreshed members snapshot: this
         // runs on every state emission, including before the members sheet has
@@ -2566,11 +2595,15 @@ public class ChatViewModel(
         // typist needs no name.
         val isOneToOne = (repo.memberCount(groupIdHex) ?: 0) <= 2
         if (others.size == 1) {
-            if (isOneToOne) return "typing…"
+            if (isOneToOne) return UiText("chat.typing.one_to_one")
             val name = labelForIdentity(others.first())
-            return if (name != null) "$name is typing…" else "typing…"
+            return if (name != null) {
+                UiText("chat.typing.named", texts = mapOf("name" to name))
+            } else {
+                UiText("chat.typing.one_to_one")
+            }
         }
-        return "Several people are typing…"
+        return UiText("chat.typing.several")
     }
 
     /** ADR-0024 — resolve a single member IDENTITY to its label (contact name
@@ -2590,14 +2623,14 @@ public class ChatViewModel(
     /** The roster reads one repository emission needs, taken together off the
      *  main thread. */
     private class LiveGroupRead(
-        val typingText: String?,
+        val typingText: UiText?,
         val otherIdentities: Set<me.lakko.app.chat.MemberIdentity>,
         val isActive: Boolean?,
     )
 
     /** The typing line for [repoState]. Reads the live roster: call it off
      *  the main thread. */
-    private fun typingTextFor(repoState: me.lakko.app.chat.ChatRepositoryState): String? =
+    private fun typingTextFor(repoState: me.lakko.app.chat.ChatRepositoryState): UiText? =
         typingIndicatorText(
             repoState.threads.firstOrNull { it.groupIdHex == groupIdHex }?.typingMembers ?: emptySet(),
         )
@@ -2605,7 +2638,7 @@ public class ChatViewModel(
     private fun buildState(
         repoState: me.lakko.app.chat.ChatRepositoryState,
         composer: ComposerState,
-        typingText: String?,
+        typingText: UiText?,
     ): ChatScreenUiState {
         val thread: ChatThread? =
             repoState.threads.firstOrNull { it.groupIdHex == groupIdHex }
@@ -2738,7 +2771,7 @@ public class ChatViewModel(
                 composer.update {
                     it.copy(
                         sending = false,
-                        sendError = err.message ?: "Could not send.",
+                        sendError = chatError(err, "chat.send.failed"),
                     )
                 }
             }
@@ -2752,7 +2785,7 @@ public class ChatViewModel(
             try {
                 repo.retrySend(groupIdHex = groupIdHex, localId = localId)
             } catch (err: Throwable) {
-                composer.update { it.copy(sendError = err.message ?: "Could not send.") }
+                composer.update { it.copy(sendError = chatError(err, "chat.send.failed")) }
             }
         }
     }
@@ -2775,7 +2808,7 @@ public class ChatViewModel(
                     newText = trimmed,
                 )
             } catch (err: Throwable) {
-                composer.update { it.copy(sendError = err.message ?: "Edit failed.") }
+                composer.update { it.copy(sendError = chatError(err, "chat.error.edit")) }
                 android.util.Log.w("ChatViewModel", "onEditMessage failed", err)
             }
         }
@@ -2793,7 +2826,7 @@ public class ChatViewModel(
                     targetMessageId = targetMessageId,
                 )
             } catch (err: Throwable) {
-                composer.update { it.copy(sendError = err.message ?: "Delete failed.") }
+                composer.update { it.copy(sendError = chatError(err, "chat.error.delete_message")) }
                 android.util.Log.w("ChatViewModel", "onDeleteMessage failed", err)
             }
         }
@@ -2817,7 +2850,7 @@ public class ChatViewModel(
                     emoji = emoji,
                 )
             } catch (err: Throwable) {
-                composer.update { it.copy(sendError = err.message ?: "Reaction failed.") }
+                composer.update { it.copy(sendError = chatError(err, "chat.error.react")) }
                 android.util.Log.w("ChatViewModel", "onReactToMessage failed", err)
             }
         }
@@ -2868,7 +2901,8 @@ public class ChatViewModel(
 
     private fun onPickedUri(uri: android.net.Uri) {
         val id = nextPickId.getAndIncrement()
-        addInFlight(UploadProgress(id = id, fileName = me.lakko.app.media.PICKED_ITEM_PLACEHOLDER, stage = null))
+        val placeholder = Localization.strings.value[me.lakko.app.media.PICKED_ITEM_PLACEHOLDER_KEY]
+        addInFlight(UploadProgress(id = id, fileName = placeholder, stage = null))
         viewModelScope.launch {
             val read = try {
                 withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -2882,7 +2916,7 @@ public class ChatViewModel(
                 is me.lakko.app.media.PickedRead.Failed -> failPick(id, read.name, read.error)
                 is me.lakko.app.media.PickedRead.Ok -> {
                     val payload = read.payload
-                    updateInFlight(id) { it.copy(fileName = payload.name ?: "attachment") }
+                    updateInFlight(id) { it.copy(fileName = payload.name ?: placeholder) }
                     val visual = prepareVisualBounded(payload.bytes, payload.mime)
                     updateInFlight(id) { it.copy(previewBytes = visual?.thumb) }
                     uploadPicked(id, payload.bytes, payload.mime, payload.name, visual)
@@ -2907,7 +2941,7 @@ public class ChatViewModel(
         addInFlight(
             UploadProgress(
                 id = id,
-                fileName = name?.takeUnless { it.isEmpty() } ?: "attachment",
+                fileName = name?.takeUnless { it.isEmpty() } ?: Localization.strings.value[me.lakko.app.media.PICKED_ITEM_PLACEHOLDER_KEY],
                 stage = null,
                 previewBytes = visual?.thumb,
             ),
@@ -3298,7 +3332,7 @@ public class ChatViewModel(
     private data class ComposerState(
         val draft: String = "",
         val sending: Boolean = false,
-        val sendError: String? = null,
+        val sendError: UiText? = null,
         /** Phase 1.19c4 — attachments staged in the composer.
          *  The user picks a file / photo; each call to
          *  [ChatViewModel.onAttachmentPicked] encrypts +
@@ -3337,7 +3371,7 @@ public data class ChatScreenUiState(
     val messages: List<ChatMessage>,
     val draft: String,
     val sending: Boolean,
-    val sendError: String?,
+    val sendError: UiText?,
     /** 1.19c4 — staged attachments below the text composer. */
     val pendingAttachments: List<AttachmentRef> = emptyList(),
     /** 1.19c4 — `true` while a picked item is being encrypted
@@ -3356,7 +3390,7 @@ public data class ChatScreenUiState(
     /** ADR-0024 — the typing-indicator line ("<name> is typing…" /
      *  "typing…" / "Several people are typing…"), or `null` when
      *  nobody is typing. Rendered just above the input bar. */
-    val typingText: String? = null,
+    val typingText: UiText? = null,
     /** ADR-0024 — the monotone per-MEMBER read watermark, keyed on the
      *  member's signature key. The Bubble renders "Read" on an OWN message once
      *  EVERY other member's watermark `>=` that message's id (else "Sent"). */

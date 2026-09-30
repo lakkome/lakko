@@ -604,12 +604,15 @@ public fun formatTotalClock(ms: Long): String {
 public fun voiceClockReservation(durationMs: Long): String = formatTotalClock(durationMs)
 
 /** Spoken duration for labels: "12 seconds", "1 minute 5 seconds". */
-public fun spokenDuration(ms: Long): String {
+public fun spokenDuration(
+    ms: Long,
+    strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
+): String {
     val total = maxOf(0L, Math.round(ms / 1000.0))
     val minutes = total / 60L
     val seconds = total % 60L
-    val s = "$seconds ${if (seconds == 1L) "second" else "seconds"}"
+    val s = strings.format("common.duration.seconds", counts = mapOf("count" to seconds.toULong()))
     if (minutes == 0L) return s
-    val m = "$minutes ${if (minutes == 1L) "minute" else "minutes"}"
-    return if (seconds == 0L) m else "$m $s"
+    val m = strings.format("common.duration.minutes", counts = mapOf("count" to minutes.toULong()))
+    return if (seconds == 0L) m else strings.format("common.duration.minutes_seconds", mapOf("minutes" to m, "seconds" to s))
 }

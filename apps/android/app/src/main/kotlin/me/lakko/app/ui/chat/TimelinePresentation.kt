@@ -6,6 +6,8 @@ package me.lakko.app.ui.chat
 import me.lakko.app.chat.Ack
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.Strings
 import me.lakko.app.media.KIND_GIF
 import me.lakko.app.media.KIND_VIDEO_NOTE
 import me.lakko.app.media.KIND_VOICE
@@ -89,14 +91,20 @@ public fun formatListTime(
  * "Yesterday", the weekday within the last six days, "16 September" in the
  * current year, "16 September 2025" otherwise.
  */
-public fun dateSeparatorLabel(atMs: Long, nowMs: Long, zone: ZoneId, locale: Locale): String {
+public fun dateSeparatorLabel(
+    atMs: Long,
+    nowMs: Long,
+    zone: ZoneId,
+    locale: Locale,
+    strings: Strings = Localization.strings.value,
+): String {
     val at = Instant.ofEpochMilli(atMs).atZone(zone)
     val today = dateOf(nowMs, zone)
     val day = at.toLocalDate()
     val daysAgo = today.toEpochDay() - day.toEpochDay()
     return when {
-        daysAgo == 0L -> "Today"
-        daysAgo == 1L -> "Yesterday"
+        daysAgo == 0L -> strings["chat.day.today"]
+        daysAgo == 1L -> strings["chat.day.yesterday"]
         daysAgo in 2..6 -> day.dayOfWeek.getDisplayName(TextStyle.FULL, locale)
         day.year == today.year -> DateTimeFormatter.ofPattern("d MMMM", locale).format(at)
         else -> DateTimeFormatter.ofPattern("d MMMM yyyy", locale).format(at)
@@ -111,13 +119,19 @@ public data class PreviewAttachment(val kind: String?, val mime: String?)
  * the word the same way it picks the bubble shape (ADR-0047); the MIME type
  * decides "Photo" for a plain image. Nothing here plays or decodes the bytes.
  */
-public fun mediaPreviewLabel(attachment: PreviewAttachment): String = when {
-    attachment.kind == KIND_VOICE -> "Voice message"
-    attachment.kind == KIND_VIDEO_NOTE -> "Video message"
-    attachment.kind == KIND_GIF -> "GIF"
-    attachment.mime?.lowercase(Locale.ROOT)?.startsWith("image/") == true -> "Photo"
-    attachment.mime?.lowercase(Locale.ROOT)?.startsWith("video/") == true -> "Video"
-    else -> "File"
+public fun mediaPreviewLabel(
+    attachment: PreviewAttachment,
+    strings: Strings = Localization.strings.value,
+): String = strings[mediaPreviewKey(attachment)]
+
+/** The catalog key of [mediaPreviewLabel]. */
+public fun mediaPreviewKey(attachment: PreviewAttachment): String = when {
+    attachment.kind == KIND_VOICE -> "chat.media.voice_message"
+    attachment.kind == KIND_VIDEO_NOTE -> "chat.media.video_message"
+    attachment.kind == KIND_GIF -> "chat.media.gif"
+    attachment.mime?.lowercase(Locale.ROOT)?.startsWith("image/") == true -> "chat.media.photo"
+    attachment.mime?.lowercase(Locale.ROOT)?.startsWith("video/") == true -> "chat.media.video"
+    else -> "chat.media.file"
 }
 
 /**
@@ -130,25 +144,48 @@ public fun previewLine(
     text: String,
     attachments: List<PreviewAttachment>,
     deleted: Boolean,
-    prefix: String,
+    author: PreviewAuthor?,
+    strings: Strings = Localization.strings.value,
 ): String {
     val body = when {
-        deleted -> "Message deleted"
+        deleted -> strings["chat.message.deleted"]
         text.isNotBlank() -> text.trim().replace(Regex("\\s+"), " ")
         attachments.isNotEmpty() -> {
-            val first = mediaPreviewLabel(attachments.first())
-            if (attachments.size > 1) "$first +${attachments.size - 1}" else first
+            val first = mediaPreviewLabel(attachments.first(), strings)
+            if (attachments.size > 1) {
+                strings.format(
+                    "chat.media.and_more",
+                    mapOf("label" to first),
+                    mapOf("count" to (attachments.size - 1).toULong()),
+                )
+            } else {
+                first
+            }
         }
         else -> ""
     }
-    return if (body.isEmpty()) body else prefix + body
+    if (body.isEmpty()) return body
+    return when (author) {
+        null -> body
+        PreviewAuthor.Own -> strings.format("chats.preview.own", mapOf("text" to body))
+        is PreviewAuthor.Named -> strings.format("chats.preview.sender", mapOf("name" to author.name, "text" to body))
+    }
+}
+
+/** Whose message a preview line quotes: rendered as `You: ...` / `Anna: ...`. */
+public sealed interface PreviewAuthor {
+    /** An own message. */
+    public data object Own : PreviewAuthor
+
+    /** Someone else's message in a group. */
+    public data class Named(val name: String) : PreviewAuthor
 }
 
 /** The preview prefix for a message: "You: " for own, the sender's name in groups, nothing otherwise. */
-public fun previewPrefix(direction: Direction, isGroup: Boolean, senderName: String?): String = when {
-    direction == Direction.Outgoing -> "You: "
-    direction == Direction.Incoming && isGroup && !senderName.isNullOrBlank() -> "$senderName: "
-    else -> ""
+public fun previewPrefix(direction: Direction, isGroup: Boolean, senderName: String?): PreviewAuthor? = when {
+    direction == Direction.Outgoing -> PreviewAuthor.Own
+    direction == Direction.Incoming && isGroup && !senderName.isNullOrBlank() -> PreviewAuthor.Named(senderName)
+    else -> null
 }
 
 /** Consecutive messages closer than this, from one sender, render as one run. */
@@ -216,11 +253,12 @@ public sealed class TimelineItem {
  * (`docs/ux/media-messages.md` section 3) - two spellings of the same thing
  * would be one of them being wrong.
  */
-public fun statusLabel(ack: Ack, time: String?): String? = when (ack) {
-    Ack.PENDING -> "Sending..."
-    Ack.FAILED -> "Not sent"
-    Ack.SENT -> time
-}
+public fun statusLabel(ack: Ack, time: String?, strings: Strings = Localization.strings.value): String? =
+    when (ack) {
+        Ack.PENDING -> strings["chat.message.sending"]
+        Ack.FAILED -> strings["chat.message.not_sent"]
+        Ack.SENT -> time
+    }
 
 /**
  * The two bookkeeping rows the receive loop files as system rows carry protocol
@@ -246,6 +284,7 @@ public fun buildTimeline(
     zone: ZoneId,
     use24h: Boolean,
     locale: Locale,
+    strings: Strings = Localization.strings.value,
 ): List<TimelineItem> {
     // Dropped before the fold, so a hidden row neither opens a date separator
     // nor breaks a run between two messages that read as one.
@@ -259,7 +298,7 @@ public fun buildTimeline(
         if (ms != null && (lastSeparatorDayMs == null || !sameCalendarDay(lastSeparatorDayMs, ms, zone))) {
             out += TimelineItem.DateSeparator(
                 key = "d-${dateOf(ms, zone)}",
-                label = dateSeparatorLabel(ms, nowMs, zone, locale),
+                label = dateSeparatorLabel(ms, nowMs, zone, locale, strings),
             )
             lastSeparatorDayMs = ms
         }
@@ -271,7 +310,7 @@ public fun buildTimeline(
             message = msg,
             firstInRun = first,
             lastInRun = last,
-            time = statusLabel(msg.ack, ms?.let { formatClockTime(it, zone, use24h, locale) }),
+            time = statusLabel(msg.ack, ms?.let { formatClockTime(it, zone, use24h, locale) }, strings),
         )
     }
     return out

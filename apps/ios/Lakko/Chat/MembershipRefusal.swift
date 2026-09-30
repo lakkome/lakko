@@ -95,13 +95,13 @@ import LakkoCore
 /// "It must exist, must never leak an internal reason, and must never be
 /// reached in normal use." The third clause is the one worth holding onto: if
 /// this string starts appearing, something is wrong that is not a copy problem.
-public let membershipRefusalFallbackMessage = "This change could not be requested."
+public var membershipRefusalFallbackMessage: String { Localization.text("chat.refusal.fallback") }
 
 /// §6 row 1, verbatim.
-public let addNotOwnerOrAdminMessage = "Only the group owner or an admin can add members."
+public var addNotOwnerOrAdminMessage: String { Localization.text("chat.refusal.add_not_admin") }
 
 /// §6 row 2, verbatim.
-public let removeNotOwnerOrAdminMessage = "Only the group owner or an admin can remove members."
+public var removeNotOwnerOrAdminMessage: String { Localization.text("chat.refusal.remove_not_admin") }
 
 /// §6 row 3, verbatim.
 ///
@@ -109,7 +109,7 @@ public let removeNotOwnerOrAdminMessage = "Only the group owner or an admin can 
 /// *is this leaf the owner's* before it checks anything about roles, so an
 /// owner's self-removal reports this and not `ownerCannotLeave`. §6.1.1
 /// disables that control, but the string is right if it is reached anyway.
-public let ownerUnremovableMessage = "The group owner cannot be removed."
+public var ownerUnremovableMessage: String { Localization.text("chat.refusal.owner_unremovable") }
 
 /// §6 row 4, verbatim.
 ///
@@ -134,7 +134,7 @@ public let ownerUnremovableMessage = "The group owner cannot be removed."
 /// zero-trust DS). The day it fires, this reason becomes reachable and the copy
 /// is already right. A collapse would instead degrade a precise refusal into
 /// the fail-closed row nobody is supposed to see, silently.
-public let ownerCannotLeaveMessage = "The group owner cannot leave the group."
+public var ownerCannotLeaveMessage: String { Localization.text("chat.refusal.owner_cannot_leave") }
 
 /// §6 row 5, **widened** — the one existing row this table does not take
 /// verbatim, and the reason is in the core rather than in taste.
@@ -145,7 +145,7 @@ public let ownerCannotLeaveMessage = "The group owner cannot leave the group."
 /// commit type, just the owner slot moved. One reason takes one string, and a
 /// string naming only admins would be plainly wrong for half of what the
 /// reason covers.
-public let notOwnerMessage = "Only the group owner can change admins or transfer ownership."
+public var notOwnerMessage: String { Localization.text("chat.refusal.not_owner") }
 
 /// §6 row 6, its **fact** half. The invitation is ``retryWhenItLandsMessage``
 /// and is appended only when the core says waiting helps; joined, the two are
@@ -155,7 +155,7 @@ public let notOwnerMessage = "Only the group owner can change admins or transfer
 /// authorisation ones, and that getting the distinction backwards is a real
 /// defect in both directions. Splitting the sentence is how that argument
 /// becomes mechanical instead of remembered.
-public let roleChangePendingMessage = "A role change is already waiting to apply."
+public var roleChangePendingMessage: String { Localization.text("chat.refusal.role_change_pending") }
 
 /// NEW — §7.1 names this refusal and says plainly that turning it into fixed
 /// copy "needs the typed refusal table §12 already lists as unbuilt".
@@ -165,7 +165,7 @@ public let roleChangePendingMessage = "A role change is already waiting to apply
 /// client-side literal is the stale-drift class this repo has already been
 /// bitten by, and that it fails in the dangerous direction — reading as *room
 /// left* when there is none.
-public let pendingSetFullMessage = "Too many changes are already waiting to apply."
+public var pendingSetFullMessage: String { Localization.text("chat.refusal.pending_full") }
 
 /// NEW — reachable from the §6.1 transfer picker when the chosen member has
 /// left the group between the picker rendering and the tap.
@@ -173,31 +173,32 @@ public let pendingSetFullMessage = "Too many changes are already waiting to appl
 /// Phrased as the standing rule rather than as *that person is gone*, because
 /// the reason also covers a role-table rewrite whose owner slot names a
 /// non-member, where there is no "that person" the user chose.
-public let ownerNotAMemberMessage = "Ownership can only be held by a current member of this group."
+public var ownerNotAMemberMessage: String { Localization.text("chat.refusal.owner_not_member") }
 
 /// NEW — a stale-view refusal, and the one an admin hits after tapping an
 /// affordance that should no longer have been on screen. Not phrased as an
 /// error, because nothing went wrong.
-public let noSuchJoinRequestMessage = "That join request is no longer waiting."
+public var noSuchJoinRequestMessage: String { Localization.text("chat.refusal.no_join_request") }
 
 /// NEW — two admins approving the same joiner is ordinary. Nothing is wrong
 /// and nothing needs doing.
-public let joinerAlreadyAMemberMessage = "That person has already joined this group."
+public var joinerAlreadyAMemberMessage: String { Localization.text("chat.refusal.joiner_member") }
 
 /// §6 row 6's second half — singular, for the one pending role change.
 /// ADR-0050 — the per-account device cap (`MAX_LEAVES_PER_ACCOUNT`).
-public let deviceLimitReachedMessage = "Up to 8 devices per account. Remove one first."
+public var deviceLimitReachedMessage: String {
+    Localization.text("chat.refusal.device_limit", counts: ["count": 8])
+}
 /// ADR-0050 — a device whose binding the group refuses (docs/ux/second-device.md
 /// section 5: a client bug, one plain sentence rather than a screen).
-public let deviceBindingInvalidMessage =
-    "Something is wrong with this device's key. Remove it from Devices and add it again."
+public var deviceBindingInvalidMessage: String { Localization.text("chat.refusal.device_binding") }
 
-public let retryWhenItLandsMessage = "Wait for it to land, then try again."
+public var retryWhenItLandsMessage: String { Localization.text("chat.refusal.retry_one") }
 
 /// ``pendingSetFullMessage``'s second half — plural, for a queue of them. Two
 /// invitations rather than one because "wait for it to land" after "too many
 /// changes" has no referent.
-public let retryWhenTheyLandMessage = "Wait for them to land, then try again."
+public var retryWhenTheyLandMessage: String { Localization.text("chat.refusal.retry_many") }
 
 /// NEW — the state §7.1 recorded as unsurfaceable.
 ///
@@ -206,9 +207,7 @@ public let retryWhenTheyLandMessage = "Wait for them to land, then try again."
 /// arrived." The core's `retained` flag **is** that distinction, so the state
 /// is statable now and silence stopped being the honest option. Naming no
 /// number, for the ``pendingSetFullMessage`` reason.
-public let joinRequestNotKeptMessage =
-    "A join request arrived while too many were already waiting, so it was not kept. "
-    + "Ask the person to send it again later."
+public var joinRequestNotKeptMessage: String { Localization.text("chat.refusal.join_not_kept") }
 
 // MARK: - The table
 
@@ -356,7 +355,8 @@ public func membershipRefusal(
     let retry = retryMaySucceed(reason)
     let message: String
     if retry, let invitation = copy.invitation {
-        message = "\(copy.fact) \(invitation)"
+        message = Localization.text(
+            "chat.refusal.with_retry", texts: ["fact": copy.fact, "retry": invitation])
     } else {
         message = copy.fact
     }

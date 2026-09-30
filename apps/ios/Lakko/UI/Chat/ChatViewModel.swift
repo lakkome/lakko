@@ -43,7 +43,7 @@ public final class ChatViewModel: ObservableObject {
     // MARK: - Ephemeral status
 
     @Published public private(set) var sending: Bool = false
-    @Published public private(set) var sendError: String?
+    @Published public private(set) var sendError: UiText?
     /// `true` while one or more picked items are being
     /// encrypted + uploaded. The composer disables Send and the
     /// picker buttons until it flips back.
@@ -97,7 +97,7 @@ public final class ChatViewModel: ObservableObject {
     /// `true` while an add or remove commit is in flight (disables the form).
     @Published public private(set) var membershipBusy: Bool = false
     /// Last add/remove error surfaced to the sheet, else `nil`.
-    @Published public private(set) var membershipError: String?
+    @Published public private(set) var membershipError: UiText?
     /// ADR-0027 / UX §7.1 — an external-join request arrived while the
     /// quarantine was full, so the core did not keep it. It is in no list and
     /// can be approved by nobody; the only honest thing left is to say it
@@ -177,7 +177,7 @@ public final class ChatViewModel: ObservableObject {
     /// and published. Distinct from ``membershipError`` because a request is not
     /// an outcome: the change has NOT happened yet, and the copy must not
     /// suggest it has.
-    @Published public private(set) var membershipNotice: String?
+    @Published public private(set) var membershipNotice: UiText?
     /// The group's current role table (owner + admins), or `nil` for an open
     /// group — drives the per-member admin labelling.
     @Published public private(set) var roleTable: RoleTable?
@@ -891,13 +891,46 @@ public final class ChatViewModel: ObservableObject {
     /// socket into "This change could not be requested." would be a worse lie
     /// than the raw text, and §6 row 7 is about not leaking a *refusal's*
     /// internal reason, not about hiding every error.
-    private func reportMembershipFailure(_ error: Error, op: String) {
-        membershipError =
-            membershipRefusalMessage(
-                for: error,
-                retryMaySucceed: { membershipRefusalRetryMaySucceed(reason: $0) })
-            ?? error.localizedDescription
+    ///
+    /// ADR-0058 section 6 — the non-refusal case now renders from its kind
+    /// too: the action's own `chat.error.*` key (``errorText(for:fallbackKey:)``).
+    private func reportMembershipFailure(_ error: Error, op: String, key: String) {
+        membershipError = Self.errorText(for: error, fallbackKey: key)
         NSLog("%@ failed: %@", op, error.localizedDescription)
+    }
+
+    /// What the person is told when an action fails (ADR-0058 section 6): a
+    /// membership refusal keeps its curated copy, a device clock that is off
+    /// and a used-up allowance say so, and anything else is the action's own
+    /// catalog message. The error's own prose is for the log only.
+    nonisolated static func errorText(for error: Error, fallbackKey: String) -> UiText {
+        if let reason = membershipRefusalReason(of: error) {
+            return UiText {
+                membershipRefusal(
+                    reason: reason,
+                    retryMaySucceed: { membershipRefusalRetryMaySucceed(reason: $0) }
+                ).message
+            }
+        }
+        if DsClientError.clockSkewCopy(in: error) != nil { return .key("ds.clock_skew") }
+        if AnonTokenUnavailable.isQuotaExhausted(error) { return .key("tokens.action_allowance_used") }
+        return .key(fallbackKey)
+    }
+
+    /// The add-member form's failure: a name nobody registered and a person
+    /// who has not finished setting up say so; the rest as any action.
+    nonisolated static func addMemberErrorText(for error: Error, username: String) -> UiText {
+        switch error as? ContactsError {
+        case .usernameUnknown?:
+            return .key("chat.members.add.error.unknown_username", texts: ["name": "@\(username)"])
+        case .noIdentityBundle?:
+            return .key("chat.members.add.error.no_bundle")
+        default:
+            if AnonTokenUnavailable.isQuotaExhausted(error), membershipRefusalReason(of: error) == nil {
+                return .key("tokens.lookup_allowance_used")
+            }
+            return errorText(for: error, fallbackKey: "chat.error.add_member")
+        }
     }
 
     func refreshMembers() {
@@ -1231,7 +1264,7 @@ public final class ChatViewModel: ObservableObject {
                         // Anything else is a real failure of a request the user
                         // made and was not present for, so it replaces the
                         // stale message rather than being logged away.
-                        reportMembershipFailure(error, op: "membership retry")
+                        reportMembershipFailure(error, op: "membership retry", key: "chat.error.membership_request")
                     }
                 }
             }
@@ -1365,7 +1398,7 @@ public final class ChatViewModel: ObservableObject {
     func memberLabel(_ member: GroupMember) -> String {
         // The local leaf is not in the contact directory, so the resolver
         // would fall back to "Member"; the row is simply "You".
-        if ownLeafIndex == member.leafIndex { return "You" }
+        if ownLeafIndex == member.leafIndex { return Localization.text("chat.author.you") }
         // ADR-0048 — the member list has room for the verified username under
         // the name, so it shows the list form (`Alice Petrova · @alice`); the
         // resolver already falls back to the fingerprint WITHOUT `@`.
@@ -1446,14 +1479,14 @@ public final class ChatViewModel: ObservableObject {
     /// ADR-0051 §3 — send the new name (an empty string clears it). The store
     /// and the title change only after the send succeeded; a failure returns
     /// the error copy the members panel shows and leaves the title as it was.
-    func saveGroupName(_ name: String) async -> String? {
+    func saveGroupName(_ name: String) async -> UiText? {
         do {
             try await repository.setGroupName(groupIdHex: groupIdHex, name: name)
             objectWillChange.send()
             return nil
         } catch {
             NSLog("ADR-0051 rename failed: \(error)")
-            return "Could not save the name. Check your connection and try again."
+            return .key("chat.group_name.error.save")
         }
     }
 
@@ -1461,7 +1494,7 @@ public final class ChatViewModel: ObservableObject {
     /// with the members that did land, and says which adds did not. Rendered in
     /// the members panel's ungated notice slot.
     func noteSetupNotice(_ text: String) {
-        membershipNotice = text
+        membershipNotice = UiText { text }
     }
 
     /// The header's second line: "@username" in a 1x1 chat when the other
@@ -1488,8 +1521,9 @@ public final class ChatViewModel: ObservableObject {
         // ADR-0048 §4 — no lookup for a name that fails the username rule; the
         // reason is already on screen under the field.
         guard case .valid(let username) = checkUsername(addMemberInput) else {
-            if let message = checkUsername(addMemberInput).inlineMessage {
-                membershipError = message
+            let typed = addMemberInput
+            if checkUsername(typed).inlineMessage != nil {
+                membershipError = UiText { checkUsername(typed).inlineMessage ?? "" }
             }
             return
         }
@@ -1527,7 +1561,8 @@ public final class ChatViewModel: ObservableObject {
                 _ = outcome
                 refreshMembers()
             } catch {
-                reportMembershipFailure(error, op: "onAddMember")
+                membershipError = Self.addMemberErrorText(for: error, username: username)
+                NSLog("onAddMember failed: %@", error.localizedDescription)
             }
         }
     }
@@ -1536,7 +1571,7 @@ public final class ChatViewModel: ObservableObject {
     /// (own-marked). Refuses to remove the local leaf. Fail-closed on error.
     func onRemoveMember(leafIndex: UInt32) {
         guard ownLeafIndex != leafIndex else {
-            membershipError = "You cannot remove yourself from the group."
+            membershipError = .key("chat.refusal.fallback")
             return
         }
         guard !membershipBusy else { return }
@@ -1567,7 +1602,7 @@ public final class ChatViewModel: ObservableObject {
                 }
                 refreshMembers()
             } catch {
-                reportMembershipFailure(error, op: "onRemoveMember")
+                reportMembershipFailure(error, op: "onRemoveMember", key: "chat.error.remove_member")
             }
         }
     }
@@ -1615,7 +1650,7 @@ public final class ChatViewModel: ObservableObject {
             // Reached only if the gate went stale between draw and tap. Answer
             // in this feature's own vocabulary rather than letting the core's
             // prose surface to a user who never asked about proposals.
-            membershipError = refusal.message
+            membershipError = UiText { refusal.message }
             return
         case .disabled:
             // Busy, or we have already asked. Asking twice would put two
@@ -1664,11 +1699,10 @@ public final class ChatViewModel: ObservableObject {
                 // in the same call. Fail-safe when absent — the fallback string
                 // is true either way.
                 repository.noteLeaveRequested(groupIdHex: groupIdHex)
-                membershipNotice =
-                    "Leave requested. It applies when an owner or an admin applies the change."
+                membershipNotice = .key("chat.leave.requested")
                 refreshMembers()
             } catch {
-                reportMembershipFailure(error, op: "onLeaveGroup")
+                reportMembershipFailure(error, op: "onLeaveGroup", key: "chat.error.leave")
             }
         }
     }
@@ -1816,7 +1850,7 @@ public final class ChatViewModel: ObservableObject {
         Task { @MainActor in
             defer { membershipBusy = false }
             guard let successorKey = base64Decode(successor.signatureKeyB64) else {
-                membershipError = "This change could not be requested."
+                membershipError = .key("chat.refusal.fallback")
                 return
             }
             do {
@@ -1834,13 +1868,16 @@ public final class ChatViewModel: ObservableObject {
                 let swept = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
                 let landed: Bool
                 if case .committed = swept { landed = true } else { landed = false }
-                membershipNotice = transferOutcomeNotice(
-                    outcome: landed ? .committed : .proposed,
-                    successorLabel: successor.label,
-                    outgoing: outgoing)
+                let successorLabel = successor.label
+                membershipNotice = UiText {
+                    transferOutcomeNotice(
+                        outcome: landed ? .committed : .proposed,
+                        successorLabel: successorLabel,
+                        outgoing: outgoing)
+                }
                 refreshMembers()
             } catch {
-                reportMembershipFailure(error, op: "onTransferOwnership")
+                reportMembershipFailure(error, op: "onTransferOwnership", key: "chat.error.transfer")
             }
         }
     }
@@ -1903,7 +1940,7 @@ public final class ChatViewModel: ObservableObject {
                 }
                 refreshMembers()
             } catch {
-                reportMembershipFailure(error, op: "onToggleAdmin")
+                reportMembershipFailure(error, op: "onToggleAdmin", key: "chat.error.change_admin")
             }
         }
     }
@@ -1941,7 +1978,7 @@ public final class ChatViewModel: ObservableObject {
                 }
                 let swept = await repository.sweepIfCommitter(groupIdHex: groupIdHex)
                 if case .committed = swept {
-                    membershipNotice = "Join approved. They have been added to the group."
+                    membershipNotice = .key("chat.members.join.approved_added")
                 } else {
                     // ADR-0045 S7 residual 2 — an approve that did not apply has
                     // grown a queue only a sweep drains, and the core's own
@@ -1950,10 +1987,12 @@ public final class ChatViewModel: ObservableObject {
                     // caused it. Read from the core, not from `pendingRequests`,
                     // which has not been refreshed yet.
                     let depth = repository.pendingProposals(groupIdHex: groupIdHex).count
-                    let queue = waitingQueueLine(depth)
-                    membershipNotice =
-                        "Join approved. They join when an owner or an admin applies the change."
-                        + (queue.map { " \($0)" } ?? "")
+                    membershipNotice = UiText {
+                        let approved = Localization.text("chat.members.join.approved_requested")
+                        guard let queue = waitingQueueLine(depth) else { return approved }
+                        return Localization.text(
+                            "common.sentence_pair", texts: ["first": approved, "second": queue])
+                    }
                 }
                 // Acting on the queue is what may have made room for the
                 // request the quarantine turned away, so the notice about it
@@ -1961,7 +2000,7 @@ public final class ChatViewModel: ObservableObject {
                 repository.clearUnkeptExternalJoin(groupIdHex: groupIdHex)
                 refreshMembers()
             } catch {
-                reportMembershipFailure(error, op: "onApproveJoin")
+                reportMembershipFailure(error, op: "onApproveJoin", key: "chat.error.approve_join")
             }
         }
     }
@@ -1989,7 +2028,7 @@ public final class ChatViewModel: ObservableObject {
             repository.clearUnkeptExternalJoin(groupIdHex: groupIdHex)
             refreshMembers()
         } catch {
-            reportMembershipFailure(error, op: "onRejectJoin")
+            reportMembershipFailure(error, op: "onRejectJoin", key: "chat.error.reject_join")
         }
     }
 
@@ -2001,7 +2040,7 @@ public final class ChatViewModel: ObservableObject {
             do {
                 inviteLink = try await repository.createGroupInviteLink(groupIdHex: groupIdHex)
             } catch {
-                reportMembershipFailure(error, op: "onCreateInviteLink")
+                reportMembershipFailure(error, op: "onCreateInviteLink", key: "chat.error.create_link")
             }
         }
     }
@@ -2017,7 +2056,7 @@ public final class ChatViewModel: ObservableObject {
                 _ = try await repository.revokeGroupInviteLink(link: link)
                 inviteLink = nil
             } catch {
-                reportMembershipFailure(error, op: "onRevokeInviteLink")
+                reportMembershipFailure(error, op: "onRevokeInviteLink", key: "chat.error.revoke_link")
             }
         }
     }
@@ -2256,7 +2295,7 @@ public final class ChatViewModel: ObservableObject {
         let deleted = repository.deleteChat(groupIdHex: groupIdHex)
         if !deleted {
             // Only reachable if the gate went stale between draw and tap.
-            membershipError = "This chat could not be deleted."
+            membershipError = .key("chat.error.delete_chat")
         }
         return deleted
     }
@@ -2308,8 +2347,8 @@ public final class ChatViewModel: ObservableObject {
                 // its own words - "you are no longer a member of this group"
                 // is the difference between retrying usefully and retrying
                 // forever.
-                sendError = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not send."
+                sendError = Self.errorText(for: error, fallbackKey: "chat.send.failed")
+                NSLog("send failed: %@", error.localizedDescription)
             }
         }
     }
@@ -2321,8 +2360,8 @@ public final class ChatViewModel: ObservableObject {
             do {
                 try await repository.retrySend(groupIdHex: groupIdHex, localId: localId)
             } catch {
-                sendError = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not send."
+                sendError = Self.errorText(for: error, fallbackKey: "chat.send.failed")
+                NSLog("retry send failed: %@", error.localizedDescription)
             }
         }
     }
@@ -2477,7 +2516,7 @@ public final class ChatViewModel: ObservableObject {
                 try await self?.forwardAwaiting(message, to: targetGroupIdHex)
             } catch {
                 NSLog("ADR-0052 forward failed: \(error)")
-                self?.sendError = "Forward failed. Try again."
+                self?.sendError = Self.errorText(for: error, fallbackKey: "chat.forward.error.generic")
             }
         }
     }
@@ -2588,7 +2627,7 @@ public final class ChatViewModel: ObservableObject {
             for: message, authorLabel: replyAuthorLabel(for: message))
         let lines = ReplySnapshot.replyQuoteLines(snapshot)
         switch entry.scope {
-        case .personal: return (author: "For you", excerpt: lines.excerpt)
+        case .personal: return (author: Localization.text("chat.pinned_bar.for_you"), excerpt: lines.excerpt)
         case .shared: return (author: lines.name, excerpt: lines.excerpt)
         }
     }
@@ -2668,7 +2707,7 @@ public final class ChatViewModel: ObservableObject {
                         groupIdHex: self.groupIdHex, messageId: target, pinned: pinned)
                 } catch {
                     NSLog("ADR-0052 shared pin failed: \(error)")
-                    self.sendError = pinned ? "Could not pin. Try again." : "Could not unpin. Try again."
+                    self.sendError = Self.errorText(for: error, fallbackKey: "chat.error.pin")
                 }
             }
         }
@@ -2694,12 +2733,12 @@ public final class ChatViewModel: ObservableObject {
     func replyAuthorLabel(for message: ChatMessage) -> String {
         switch message.direction {
         case .outgoing:
-            return "You"
+            return Localization.text("chat.author.you")
         case .incoming, .system:
             if let key = message.authorKeyB64, let name = personName(signatureKeyB64: key) {
                 return name
             }
-            return oneToOnePeerName ?? "Member"
+            return oneToOnePeerName ?? Localization.text("chat.members.unnamed")
         }
     }
 
@@ -2738,8 +2777,8 @@ public final class ChatViewModel: ObservableObject {
                     newText: trimmed
                 )
             } catch {
-                sendError = (error as? LocalizedError)?.errorDescription
-                    ?? "Edit failed."
+                sendError = Self.errorText(for: error, fallbackKey: "chat.error.edit")
+                NSLog("edit failed: %@", error.localizedDescription)
             }
         }
     }
@@ -2751,8 +2790,8 @@ public final class ChatViewModel: ObservableObject {
             do {
                 try await deleteMessageAwaiting(message)
             } catch {
-                sendError = (error as? LocalizedError)?.errorDescription
-                    ?? "Delete failed."
+                sendError = Self.errorText(for: error, fallbackKey: "chat.error.delete_message")
+                NSLog("delete failed: %@", error.localizedDescription)
             }
         }
     }
@@ -2786,8 +2825,8 @@ public final class ChatViewModel: ObservableObject {
                     emoji: emoji
                 )
             } catch {
-                sendError = (error as? LocalizedError)?.errorDescription
-                    ?? "Reaction failed."
+                sendError = Self.errorText(for: error, fallbackKey: "chat.error.react")
+                NSLog("reaction failed: %@", error.localizedDescription)
             }
         }
     }
@@ -2914,18 +2953,18 @@ public final class ChatViewModel: ObservableObject {
         let typers = typingMembersNow
         guard !typers.isEmpty else { return nil }
         if typers.count > 1 {
-            return "Several people are typing…"
+            return Localization.text("chat.typing.several")
         }
         let who = typers[0]
         // 1×1 chats (2 members) read as a bare "typing…" — naming the
         // sole peer adds nothing.
         if !isGroupChat {
-            return "typing…"
+            return Localization.text("chat.typing.one_to_one")
         }
         if let name = displayName(for: who) {
-            return "\(name) is typing…"
+            return Localization.text("chat.typing.named", texts: ["name": name])
         }
-        return "typing…"
+        return Localization.text("chat.typing.one_to_one")
     }
 
     /// Resolve a member identity to the human label the roster uses (a
@@ -3094,7 +3133,7 @@ public final class ChatViewModel: ObservableObject {
         // doesn't show the generic spinner for the brief encrypt
         // window. `AttachmentBridge.encryptAndUpload` flips the
         // stage to `.uploading` once it reaches the PUT path.
-        let displayName = (name?.isEmpty ?? true) ? "attachment" : name!
+        let displayName = (name?.isEmpty ?? true) ? Localization.text("chat.attachment.unnamed") : name!
         uploadStage = .encrypting(fileName: displayName)
         defer {
             uploading = false
@@ -3121,15 +3160,17 @@ public final class ChatViewModel: ObservableObject {
             )
             pendingAttachments.append(ref)
         } catch let err as AttachmentBridgeError {
-            sendError = err.errorDescription
+            sendError = err.userText(fileName: displayName)
+            NSLog("attachment failed: %@", err.errorDescription ?? "")
         } catch {
-            sendError = "Attachment failed: \(error)"
+            sendError = .key("chat.attachment.error.upload", texts: ["name": displayName])
+            NSLog("attachment failed: %@", String(describing: error))
         }
     }
 
     /// A picked item that could not be prepared for sending: one sentence
     /// in the composer's error line, nothing sent.
-    public func reportAttachmentProblem(_ copy: String) {
+    public func reportAttachmentProblem(_ copy: UiText) {
         sendError = copy
     }
 
@@ -3207,9 +3248,11 @@ public final class ChatViewModel: ObservableObject {
             }
             pendingAttachments.append(ref)
         } catch let err as AttachmentBridgeError {
-            sendError = err.errorDescription
+            sendError = err.userText(fileName: displayName)
+            NSLog("attachment failed: %@", err.errorDescription ?? "")
         } catch {
-            sendError = "Attachment failed: \(error)"
+            sendError = .key("chat.attachment.error.upload", texts: ["name": displayName])
+            NSLog("attachment failed: %@", String(describing: error))
         }
     }
 

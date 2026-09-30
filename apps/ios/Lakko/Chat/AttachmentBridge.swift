@@ -380,14 +380,21 @@ public enum AttachmentBridge {
     /// `1.2 kB`, `4.7 MB`. SI-decimal (matches the iOS Files
     /// app); base-2 conversion is too pedantic for chat UI.
     public static func formatSize(_ bytes: UInt64) -> String {
-        if bytes < 1_000 { return "\(bytes) B" }
-        if bytes < 1_000_000 {
-            return String(format: "%.1f kB", Double(bytes) / 1_000)
+        // ADR-0058 — the unit from the catalog, the number formatted for the
+        // interface language (one decimal above bytes).
+        let locale = Localization.currentLocale
+        if bytes < 1_000 {
+            return Localization.text(
+                "common.size.bytes", texts: ["size": bytes.formatted(.number.locale(locale))])
         }
-        if bytes < 1_000_000_000 {
-            return String(format: "%.1f MB", Double(bytes) / 1_000_000)
+        func scaled(_ divisor: Double, _ key: String) -> String {
+            let value = (Double(bytes) / divisor)
+                .formatted(.number.precision(.fractionLength(1)).locale(locale))
+            return Localization.text(key, texts: ["size": value])
         }
-        return String(format: "%.1f GB", Double(bytes) / 1_000_000_000)
+        if bytes < 1_000_000 { return scaled(1_000, "common.size.kb") }
+        if bytes < 1_000_000_000 { return scaled(1_000_000, "common.size.mb") }
+        return scaled(1_000_000_000, "common.size.gb")
     }
 
     /// `true` when the ref's MIME type is one the chat UI knows
@@ -518,6 +525,34 @@ public enum AttachmentBridgeError: Error {
     case download(Error)
     /// Storage returned 404 — the blob is no longer there.
     case missing(blobId: Data)
+}
+
+extension AttachmentBridgeError {
+    /// What the person is told (ADR-0058 section 6): rendered from the kind,
+    /// never from ``errorDescription``, which carries the underlying error
+    /// for the log. `fileName` names the file being sent, when there is one.
+    public func userText(fileName: String?) -> UiText {
+        let name = fileName.flatMap { $0.isEmpty ? nil : $0 }
+        switch self {
+        case .tooLarge(let got, let max):
+            let size = AttachmentBridge.formatSize(UInt64(Swift.max(0, got)))
+            let limit = AttachmentBridge.formatSize(UInt64(Swift.max(0, max)))
+            if let name {
+                return .key(
+                    "chat.attachment.error.too_large_named",
+                    texts: ["name": name, "size": size, "limit": limit])
+            }
+            return .key("chat.attachment.error.too_large", texts: ["size": size, "limit": limit])
+        case .encryption, .upload:
+            return .key(
+                "chat.attachment.error.upload",
+                texts: ["name": name ?? Localization.text("chat.attachment.unnamed")])
+        case .decryption, .download:
+            return .key("chat.attachment.error.download")
+        case .missing:
+            return .key("chat.attachment.error.gone")
+        }
+    }
 }
 
 extension AttachmentBridgeError: LocalizedError {

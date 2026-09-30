@@ -250,6 +250,22 @@
       "text": "Colocando você na chamada...",
       "status": "machine"
     },
+    "call.incoming.accept": {
+      "text": "Atender",
+      "status": "machine"
+    },
+    "call.incoming.accept_from": {
+      "text": "Atender chamada de {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline": {
+      "text": "Recusar",
+      "status": "machine"
+    },
+    "call.incoming.decline_from": {
+      "text": "Recusar chamada de {name}",
+      "status": "machine"
+    },
     "call.link.connecting": {
       "text": "Conectando...",
       "status": "machine"
@@ -314,8 +330,1712 @@
       "text": "Você pode sair desta tela; você vai entrar assim que sua entrada for liberada.",
       "status": "machine"
     },
+    "chat.attachment.error.attach": {
+      "text": "Não foi possível anexar o item selecionado. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.attachment.error.attach_named": {
+      "text": "Não foi possível anexar \"{name}\". Tente novamente.",
+      "status": "machine"
+    },
+    "chat.attachment.error.download": {
+      "text": "Não foi possível baixar o anexo. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.attachment.error.gone": {
+      "text": "O anexo não está mais disponível no servidor.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_photo": {
+      "text": "Não foi possível abrir esta foto. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_video": {
+      "text": "Não foi possível abrir este vídeo. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.attachment.error.prepare_video": {
+      "text": "Não foi possível preparar este vídeo. É possível enviar vídeos de até {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.preview": {
+      "text": "Não foi possível mostrar a imagem. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large": {
+      "text": "Essa mensagem tem {size}, acima do limite de {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large_named": {
+      "text": "\"{name}\" tem {size}, acima do limite de {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.upload": {
+      "text": "Não foi possível enviar \"{name}\". Tente novamente.",
+      "status": "machine"
+    },
+    "chat.attachment.hide": {
+      "text": "Ocultar",
+      "status": "machine"
+    },
+    "chat.attachment.image_alt": {
+      "text": "imagem anexada",
+      "status": "machine"
+    },
+    "chat.attachment.open": {
+      "text": "Abrir",
+      "status": "machine"
+    },
+    "chat.attachment.save_title": {
+      "text": "Salvar anexo",
+      "status": "machine"
+    },
+    "chat.attachment.unnamed": {
+      "text": "(sem nome)",
+      "status": "machine"
+    },
+    "chat.author.a_member": {
+      "text": "Um membro",
+      "status": "machine"
+    },
+    "chat.author.unknown": {
+      "text": "Remetente desconhecido",
+      "status": "machine"
+    },
+    "chat.author.you": {
+      "text": "Você",
+      "status": "machine"
+    },
+    "chat.call.busy": {
+      "text": "Outra chamada está em andamento.",
+      "status": "machine"
+    },
+    "chat.call.error.start": {
+      "text": "Não foi possível iniciar a chamada. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.call.group_ended": {
+      "text": "Essa chamada em grupo terminou.",
+      "status": "machine"
+    },
+    "chat.call.group_in_progress": {
+      "text": "Chamada em grupo em andamento",
+      "status": "machine"
+    },
+    "chat.call.group_people": {
+      "text": "{count, plural, one {# pessoa na chamada} other {# pessoas na chamada}}",
+      "status": "machine"
+    },
+    "chat.call.group_starting": {
+      "text": "Iniciando…",
+      "status": "machine"
+    },
+    "chat.call.group_status_e2ee": {
+      "text": "{status} · criptografia de ponta a ponta",
+      "status": "machine"
+    },
+    "chat.call.join": {
+      "text": "Entrar na chamada",
+      "status": "machine"
+    },
+    "chat.call.join_short": {
+      "text": "Entrar",
+      "status": "machine"
+    },
+    "chat.call.join_video": {
+      "text": "Entrar com vídeo",
+      "status": "machine"
+    },
+    "chat.call.last_ended.busy": {
+      "text": "Última chamada encerrada: a outra pessoa estava ocupada.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.declined": {
+      "text": "Última chamada encerrada: recusada.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.error": {
+      "text": "A última chamada foi encerrada por um erro.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.hung_up": {
+      "text": "Última chamada encerrada.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.timed_out": {
+      "text": "Última chamada encerrada: sem resposta.",
+      "status": "machine"
+    },
+    "chat.call.unavailable": {
+      "text": "Chamadas em grupo não estão disponíveis no momento.",
+      "status": "machine"
+    },
+    "chat.call.video": {
+      "text": "Chamada de vídeo",
+      "status": "machine"
+    },
+    "chat.call.voice": {
+      "text": "Ligar",
+      "status": "machine"
+    },
+    "chat.composer.attach": {
+      "text": "Anexar arquivos",
+      "status": "machine"
+    },
+    "chat.composer.attach_limit": {
+      "text": "Anexar arquivos (até {limit} cada)",
+      "status": "machine"
+    },
+    "chat.composer.attach_media": {
+      "text": "Foto ou vídeo",
+      "status": "machine"
+    },
+    "chat.composer.drop_files": {
+      "text": "Solte os arquivos para anexar",
+      "status": "machine"
+    },
+    "chat.composer.emoji_gifs": {
+      "text": "Emojis e GIFs",
+      "status": "machine"
+    },
+    "chat.composer.photo_library": {
+      "text": "Galeria de fotos",
+      "status": "machine"
+    },
+    "chat.composer.placeholder": {
+      "text": "Mensagem",
+      "status": "machine"
+    },
+    "chat.composer.remove_attachment": {
+      "text": "Remover anexo",
+      "status": "machine"
+    },
+    "chat.composer.send": {
+      "text": "Enviar",
+      "status": "machine"
+    },
+    "chat.day.today": {
+      "text": "Hoje",
+      "status": "machine"
+    },
+    "chat.day.yesterday": {
+      "text": "Ontem",
+      "status": "machine"
+    },
+    "chat.delete.body": {
+      "text": "Isso remove a conversa e as mensagens dela deste dispositivo. Não há cópia em nenhum outro lugar e não é possível desfazer.",
+      "status": "machine"
+    },
+    "chat.delete.confirm_named": {
+      "text": "Excluir {name}",
+      "status": "machine"
+    },
+    "chat.delete.control": {
+      "text": "Excluir esta conversa",
+      "status": "machine"
+    },
+    "chat.delete.title": {
+      "text": "Excluir esta conversa?",
+      "status": "machine"
+    },
+    "chat.edit.title": {
+      "text": "Editar mensagem",
+      "status": "machine"
+    },
+    "chat.emoji.categories": {
+      "text": "Categorias de emoji",
+      "status": "machine"
+    },
+    "chat.emoji.choose": {
+      "text": "Escolher",
+      "status": "machine"
+    },
+    "chat.emoji.choose_reaction": {
+      "text": "Escolha uma reação",
+      "status": "machine"
+    },
+    "chat.emoji.group.activities": {
+      "text": "Atividades",
+      "status": "machine"
+    },
+    "chat.emoji.group.animals": {
+      "text": "Animais e natureza",
+      "status": "machine"
+    },
+    "chat.emoji.group.flags": {
+      "text": "Bandeiras",
+      "status": "machine"
+    },
+    "chat.emoji.group.food": {
+      "text": "Comidas e bebidas",
+      "status": "machine"
+    },
+    "chat.emoji.group.objects": {
+      "text": "Objetos",
+      "status": "machine"
+    },
+    "chat.emoji.group.people": {
+      "text": "Pessoas e corpo",
+      "status": "machine"
+    },
+    "chat.emoji.group.smileys": {
+      "text": "Carinhas e emoções",
+      "status": "machine"
+    },
+    "chat.emoji.group.symbols": {
+      "text": "Símbolos",
+      "status": "machine"
+    },
+    "chat.emoji.group.travel": {
+      "text": "Viagens e lugares",
+      "status": "machine"
+    },
+    "chat.emoji.insert": {
+      "text": "Inserir",
+      "status": "machine"
+    },
+    "chat.emoji.no_results": {
+      "text": "Nenhum emoji encontrado",
+      "status": "machine"
+    },
+    "chat.emoji.recent": {
+      "text": "Recentes",
+      "status": "machine"
+    },
+    "chat.emoji.search": {
+      "text": "Pesquisar emoji",
+      "status": "machine"
+    },
+    "chat.emoji.skin_tones": {
+      "text": "Tons de pele para {name}",
+      "status": "machine"
+    },
+    "chat.emoji.tab": {
+      "text": "Emoji",
+      "status": "machine"
+    },
+    "chat.ended.composer": {
+      "text": "Você não pode mais enviar mensagens para este grupo.",
+      "status": "machine"
+    },
+    "chat.ended.consequence": {
+      "text": "As mensagens que você já recebeu continuam aqui. Nenhuma nova vai chegar.",
+      "status": "machine"
+    },
+    "chat.ended.left": {
+      "text": "Você saiu deste grupo.",
+      "status": "machine"
+    },
+    "chat.ended.no_longer_member": {
+      "text": "Você não é mais membro deste grupo.",
+      "status": "machine"
+    },
+    "chat.ended.unsent_draft": {
+      "text": "Rascunho não enviado",
+      "status": "machine"
+    },
+    "chat.error.add_member": {
+      "text": "Não foi possível adicionar esta pessoa. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.approve_join": {
+      "text": "Não foi possível aprovar o pedido para entrar. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.change_admin": {
+      "text": "Não foi possível alterar a função de administrador. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.conversation_gone": {
+      "text": "Essa conversa não está mais aqui.",
+      "status": "machine"
+    },
+    "chat.error.create_link": {
+      "text": "Não foi possível criar um link de convite. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.delete_chat": {
+      "text": "Não foi possível excluir esta conversa. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.delete_message": {
+      "text": "Não foi possível excluir a mensagem. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.edit": {
+      "text": "Não foi possível editar a mensagem. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.leave": {
+      "text": "Não foi possível sair do grupo. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.membership_request": {
+      "text": "Não foi possível reenviar uma alteração de membros que você pediu.",
+      "status": "machine"
+    },
+    "chat.error.message_gone": {
+      "text": "Essa mensagem não está mais aqui.",
+      "status": "machine"
+    },
+    "chat.error.pin": {
+      "text": "Não foi possível alterar a fixação. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.react": {
+      "text": "Não foi possível enviar a reação. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.refresh": {
+      "text": "Não foi possível carregar novas mensagens. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.reject_join": {
+      "text": "Não foi possível recusar o pedido para entrar. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.remove_member": {
+      "text": "Não foi possível remover este membro. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.revoke_link": {
+      "text": "Não foi possível revogar o link de convite. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.error.transfer": {
+      "text": "Não foi possível transferir a propriedade. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.forward.empty": {
+      "text": "Nenhuma conversa para onde encaminhar",
+      "status": "machine"
+    },
+    "chat.forward.error.generic": {
+      "text": "Não foi possível encaminhar a mensagem. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.forward.from": {
+      "text": "Encaminhada de {name}",
+      "status": "machine"
+    },
+    "chat.forward.label": {
+      "text": "Encaminhada",
+      "status": "machine"
+    },
+    "chat.forward.list_label": {
+      "text": "Conversas",
+      "status": "machine"
+    },
+    "chat.forward.picker_title": {
+      "text": "Encaminhar para",
+      "status": "machine"
+    },
+    "chat.forward.search_label": {
+      "text": "Pesquisar conversas",
+      "status": "machine"
+    },
+    "chat.gif.attribution": {
+      "text": "Com tecnologia GIPHY",
+      "status": "machine"
+    },
+    "chat.gif.load_failed": {
+      "text": "Não foi possível carregar este GIF · Tentar novamente",
+      "status": "machine"
+    },
+    "chat.gif.loading": {
+      "text": "Carregando GIFs",
+      "status": "machine"
+    },
+    "chat.gif.no_results": {
+      "text": "Nenhum GIF encontrado",
+      "status": "machine"
+    },
+    "chat.gif.note_dismiss": {
+      "text": "Entendi",
+      "status": "machine"
+    },
+    "chat.gif.open_full": {
+      "text": "Abrir GIF em tela cheia",
+      "status": "machine"
+    },
+    "chat.gif.privacy_note": {
+      "text": "A pesquisa de GIFs passa pelo servidor do Lakko, que vê o que você pesquisa. GIFs enviados são criptografados como qualquer arquivo.",
+      "status": "machine"
+    },
+    "chat.gif.rate_limited": {
+      "text": "Pesquisas demais. Tente novamente em instantes",
+      "status": "machine"
+    },
+    "chat.gif.search": {
+      "text": "Pesquisar GIF",
+      "status": "machine"
+    },
+    "chat.gif.send": {
+      "text": "Enviar GIF",
+      "status": "machine"
+    },
+    "chat.gif.trending": {
+      "text": "Em alta",
+      "status": "machine"
+    },
+    "chat.gif.unavailable": {
+      "text": "Os GIFs não estão disponíveis no momento",
+      "status": "machine"
+    },
+    "chat.group.default_name": {
+      "text": "Novo grupo",
+      "status": "machine"
+    },
+    "chat.group.fallback_name": {
+      "text": "Grupo",
+      "status": "machine"
+    },
+    "chat.group.title_more": {
+      "text": "{names} +{count}",
+      "status": "machine"
+    },
+    "chat.group_name.empty": {
+      "text": "Ainda sem nome",
+      "status": "machine"
+    },
+    "chat.group_name.error.character": {
+      "text": "O nome contém um caractere que não pode ser exibido.",
+      "status": "machine"
+    },
+    "chat.group_name.error.generic": {
+      "text": "Esse nome não pode ser usado.",
+      "status": "machine"
+    },
+    "chat.group_name.error.line_break": {
+      "text": "O nome deve ter uma única linha.",
+      "status": "machine"
+    },
+    "chat.group_name.error.save": {
+      "text": "Não foi possível renomear o grupo. Tente novamente.",
+      "status": "machine"
+    },
+    "chat.group_name.error.too_long": {
+      "text": "O nome é longo demais.",
+      "status": "machine"
+    },
+    "chat.group_name.label": {
+      "text": "Nome do grupo",
+      "status": "machine"
+    },
+    "chat.group_name.only_admins": {
+      "text": "Só administradores podem renomear este grupo",
+      "status": "machine"
+    },
+    "chat.header.back": {
+      "text": "Voltar às conversas",
+      "status": "machine"
+    },
+    "chat.info.channel": {
+      "text": "Informações do canal",
+      "status": "machine"
+    },
+    "chat.info.contact": {
+      "text": "Informações do contato",
+      "status": "machine"
+    },
+    "chat.info.group": {
+      "text": "Informações do grupo",
+      "status": "machine"
+    },
+    "chat.invite_link.cleared": {
+      "text": "Link removido (um link direto não tem nada a revogar).",
+      "status": "machine"
+    },
+    "chat.invite_link.copy": {
+      "text": "Copiar link",
+      "status": "machine"
+    },
+    "chat.invite_link.create": {
+      "text": "Criar link de convite",
+      "status": "machine"
+    },
+    "chat.invite_link.label": {
+      "text": "Link de convite",
+      "status": "machine"
+    },
+    "chat.invite_link.revoke": {
+      "text": "Revogar",
+      "status": "machine"
+    },
+    "chat.invite_link.revoked": {
+      "text": "Link de convite revogado.",
+      "status": "machine"
+    },
+    "chat.invite_link.share": {
+      "text": "Compartilhar",
+      "status": "machine"
+    },
+    "chat.leave.action": {
+      "text": "Sair do grupo",
+      "status": "machine"
+    },
+    "chat.leave.body": {
+      "text": "Você continuará recebendo mensagens até que um proprietário ou administrador aplique seu pedido. Você precisará de um novo convite para voltar.",
+      "status": "machine"
+    },
+    "chat.leave.confirm": {
+      "text": "Sair",
+      "status": "machine"
+    },
+    "chat.leave.confirm_named": {
+      "text": "Sair de {name}",
+      "status": "machine"
+    },
+    "chat.leave.requested": {
+      "text": "Saída solicitada. Ela vale quando um proprietário ou administrador aplicar a alteração.",
+      "status": "machine"
+    },
+    "chat.leave.title": {
+      "text": "Sair deste grupo?",
+      "status": "machine"
+    },
+    "chat.media.and_more": {
+      "text": "{label} e {count, plural, one {mais #} other {mais #}}",
+      "status": "machine"
+    },
+    "chat.media.audio": {
+      "text": "Áudio",
+      "status": "machine"
+    },
+    "chat.media.file": {
+      "text": "Arquivo",
+      "status": "machine"
+    },
+    "chat.media.gif": {
+      "text": "GIF",
+      "status": "machine"
+    },
+    "chat.media.not_sent_retry": {
+      "text": "Não enviada · Tentar novamente",
+      "status": "machine"
+    },
+    "chat.media.open_full_hint": {
+      "text": "Abre em tela cheia",
+      "status": "machine"
+    },
+    "chat.media.photo": {
+      "text": "Foto",
+      "status": "machine"
+    },
+    "chat.media.play_failed": {
+      "text": "Não foi possível reproduzir esta mensagem",
+      "status": "machine"
+    },
+    "chat.media.row_not_sent": {
+      "text": "{label}, não enviada",
+      "status": "machine"
+    },
+    "chat.media.row_sending": {
+      "text": "{label}, enviando",
+      "status": "machine"
+    },
+    "chat.media.video": {
+      "text": "Vídeo",
+      "status": "machine"
+    },
+    "chat.media.video_message": {
+      "text": "Mensagem de vídeo",
+      "status": "machine"
+    },
+    "chat.media.voice_message": {
+      "text": "Mensagem de voz",
+      "status": "machine"
+    },
+    "chat.media.with_duration": {
+      "text": "{label}, {duration}",
+      "status": "machine"
+    },
+    "chat.members.add.action": {
+      "text": "Adicionar membro",
+      "status": "machine"
+    },
+    "chat.members.add.done": {
+      "text": "{name} agora está no grupo.",
+      "status": "machine"
+    },
+    "chat.members.add.error.no_bundle": {
+      "text": "Esta pessoa ainda não terminou de configurar o Lakko. Tente novamente mais tarde.",
+      "status": "machine"
+    },
+    "chat.members.add.error.some_failed": {
+      "text": "Não foi possível adicionar {names}. Adicione pelo painel de membros.",
+      "status": "machine"
+    },
+    "chat.members.add.error.unknown_username": {
+      "text": "Nenhuma conta está registrada como {name}.",
+      "status": "machine"
+    },
+    "chat.members.add.placeholder": {
+      "text": "@nomedeusuario",
+      "status": "machine"
+    },
+    "chat.members.add.requested": {
+      "text": "Pedido para adicionar {name} enviado. A pessoa entra quando um proprietário ou administrador aplicar a alteração.",
+      "status": "machine"
+    },
+    "chat.members.add.submit": {
+      "text": "Adicionar",
+      "status": "machine"
+    },
+    "chat.members.admin.demoted": {
+      "text": "Função de administrador removida.",
+      "status": "machine"
+    },
+    "chat.members.admin.make": {
+      "text": "Tornar administrador",
+      "status": "machine"
+    },
+    "chat.members.admin.marker": {
+      "text": "Admin",
+      "status": "machine"
+    },
+    "chat.members.admin.promoted": {
+      "text": "Função de administrador concedida.",
+      "status": "machine"
+    },
+    "chat.members.admin.remove": {
+      "text": "Remover administrador",
+      "status": "machine"
+    },
+    "chat.members.admin.requested": {
+      "text": "Alteração solicitada. Ela vale quando um proprietário ou administrador aplicar a alteração.",
+      "status": "machine"
+    },
+    "chat.members.count": {
+      "text": "{count, plural, one {# membro} other {# membros}}",
+      "status": "machine"
+    },
+    "chat.members.devices": {
+      "text": "{count, plural, one {# dispositivo} other {# dispositivos}}",
+      "status": "machine"
+    },
+    "chat.members.frozen": {
+      "text": "Esta lista parou de ser atualizada quando sua participação terminou.",
+      "status": "machine"
+    },
+    "chat.members.heading": {
+      "text": "Membros ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.approve": {
+      "text": "Aprovar",
+      "status": "machine"
+    },
+    "chat.members.join.approved_added": {
+      "text": "Entrada aprovada. A pessoa foi adicionada ao grupo.",
+      "status": "machine"
+    },
+    "chat.members.join.approved_requested": {
+      "text": "Entrada aprovada. A pessoa entra quando um proprietário ou administrador aplicar a alteração.",
+      "status": "machine"
+    },
+    "chat.members.join.heading": {
+      "text": "Pedidos para entrar ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.link_unknown": {
+      "text": "Link de convite desconhecido",
+      "status": "machine"
+    },
+    "chat.members.join.reject": {
+      "text": "Recusar",
+      "status": "machine"
+    },
+    "chat.members.join.rejected": {
+      "text": "Pedido para entrar recusado.",
+      "status": "machine"
+    },
+    "chat.members.join.via_former": {
+      "text": "via {name} · não é mais membro",
+      "status": "machine"
+    },
+    "chat.members.join.via_member": {
+      "text": "via {name} · membro",
+      "status": "machine"
+    },
+    "chat.members.pending.adds_heading": {
+      "text": "Aguardando ser adicionados ({count})",
+      "status": "machine"
+    },
+    "chat.members.pending.count": {
+      "text": "{count, plural, one {# alteração de membros aguarda ser aplicada.} other {# alterações de membros aguardam ser aplicadas.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.liveness": {
+      "text": "As alterações de membros são aplicadas pelo proprietário do grupo ou por um administrador. Elas serão aplicadas automaticamente quando um deles fizer isso.",
+      "status": "machine"
+    },
+    "chat.members.pending.queue": {
+      "text": "{count, plural, one {# alteração agora aguarda ser aplicada.} other {# alterações agora aguardam ser aplicadas.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_added": {
+      "text": "Aguardando adição.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_leave": {
+      "text": "Aguardando saída.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_removed": {
+      "text": "Aguardando remoção.",
+      "status": "machine"
+    },
+    "chat.members.remove.body": {
+      "text": "A pessoa continuará recebendo mensagens até que um proprietário ou administrador aplique a alteração.",
+      "status": "machine"
+    },
+    "chat.members.remove.confirm_named": {
+      "text": "Remover {name}",
+      "status": "machine"
+    },
+    "chat.members.remove.done": {
+      "text": "Membro removido.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested": {
+      "text": "Remoção solicitada. Ela vale quando um proprietário ou administrador aplicar a alteração.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested_short": {
+      "text": "Remoção solicitada.",
+      "status": "machine"
+    },
+    "chat.members.remove.title": {
+      "text": "Remover este membro?",
+      "status": "machine"
+    },
+    "chat.members.row_label": {
+      "text": "{name}, {state}",
+      "status": "machine"
+    },
+    "chat.members.title": {
+      "text": "Membros",
+      "status": "machine"
+    },
+    "chat.members.unapplied.add_line": {
+      "text": "Adição não aplicada. Você pode adicionar de novo.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.explanation": {
+      "text": "Estas alterações não foram aplicadas e não serão tentadas de novo por conta própria.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.heading": {
+      "text": "Não aplicadas ({count})",
+      "status": "machine"
+    },
+    "chat.members.unapplied.join_line": {
+      "text": "Não aplicado. Peça para a pessoa pedir para entrar de novo.",
+      "status": "machine"
+    },
+    "chat.members.unnamed": {
+      "text": "Membro",
+      "status": "machine"
+    },
+    "chat.message.actions": {
+      "text": "Ações da mensagem",
+      "status": "machine"
+    },
+    "chat.message.close_actions": {
+      "text": "Fechar ações da mensagem",
+      "status": "machine"
+    },
+    "chat.message.deleted": {
+      "text": "Mensagem excluída",
+      "status": "machine"
+    },
+    "chat.message.edit": {
+      "text": "Editar",
+      "status": "machine"
+    },
+    "chat.message.edited": {
+      "text": "(editada)",
+      "status": "machine"
+    },
+    "chat.message.forward": {
+      "text": "Encaminhar",
+      "status": "machine"
+    },
+    "chat.message.media_fallback": {
+      "text": "Mensagem de mídia",
+      "status": "machine"
+    },
+    "chat.message.more_reactions": {
+      "text": "Mais reações",
+      "status": "machine"
+    },
+    "chat.message.not_sent": {
+      "text": "Não enviada",
+      "status": "machine"
+    },
+    "chat.message.pin": {
+      "text": "Fixar",
+      "status": "machine"
+    },
+    "chat.message.react": {
+      "text": "Reagir",
+      "status": "machine"
+    },
+    "chat.message.react_with": {
+      "text": "Reagir com {emoji}",
+      "status": "machine"
+    },
+    "chat.message.read": {
+      "text": "Lida",
+      "status": "machine"
+    },
+    "chat.message.read_by": {
+      "text": "Lida por {names}",
+      "status": "machine"
+    },
+    "chat.message.reply": {
+      "text": "Responder",
+      "status": "machine"
+    },
+    "chat.message.select": {
+      "text": "Selecionar",
+      "status": "machine"
+    },
+    "chat.message.sending": {
+      "text": "Enviando...",
+      "status": "machine"
+    },
+    "chat.message.sent": {
+      "text": "Enviada",
+      "status": "machine"
+    },
+    "chat.message.unpin": {
+      "text": "Desafixar",
+      "status": "machine"
+    },
+    "chat.not_found.back": {
+      "text": "Voltar às conversas",
+      "status": "machine"
+    },
+    "chat.not_found.body": {
+      "text": "Este link não corresponde a nenhuma conversa neste dispositivo.",
+      "status": "machine"
+    },
+    "chat.not_found.title": {
+      "text": "Conversa não encontrada",
+      "status": "machine"
+    },
+    "chat.peer.fallback_name": {
+      "text": "Contato",
+      "status": "machine"
+    },
+    "chat.photo.load_failed": {
+      "text": "Não foi possível carregar a foto",
+      "status": "machine"
+    },
+    "chat.photo.load_failed_retry": {
+      "text": "Não foi possível carregar a foto, toque para tentar novamente",
+      "status": "machine"
+    },
+    "chat.photo.loading": {
+      "text": "Foto, carregando",
+      "status": "machine"
+    },
+    "chat.photo.open": {
+      "text": "Abrir foto",
+      "status": "machine"
+    },
+    "chat.photo.viewer": {
+      "text": "Visualizador de fotos",
+      "status": "machine"
+    },
+    "chat.photo.viewer_hint": {
+      "text": "Faça pinça para ampliar. Deslize para baixo para fechar.",
+      "status": "machine"
+    },
+    "chat.pin.detail_personal": {
+      "text": "Só neste dispositivo",
+      "status": "machine"
+    },
+    "chat.pin.detail_shared": {
+      "text": "Todos os membros veem",
+      "status": "machine"
+    },
+    "chat.pin.for_both": {
+      "text": "Fixar para os dois",
+      "status": "machine"
+    },
+    "chat.pin.for_everyone": {
+      "text": "Fixar para todos",
+      "status": "machine"
+    },
+    "chat.pin.for_me": {
+      "text": "Fixar só para mim",
+      "status": "machine"
+    },
+    "chat.pin.sheet_title": {
+      "text": "Fixar mensagem",
+      "status": "machine"
+    },
+    "chat.pinned_bar.all": {
+      "text": "Todas as mensagens fixadas",
+      "status": "machine"
+    },
+    "chat.pinned_bar.for_you": {
+      "text": "Para você",
+      "status": "machine"
+    },
+    "chat.pinned_bar.hint": {
+      "text": "Mostra a mensagem",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label": {
+      "text": "Mensagem fixada",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label_of": {
+      "text": "Mensagem fixada {index} de {count}",
+      "status": "machine"
+    },
+    "chat.pinned_bar.list_title": {
+      "text": "Mensagens fixadas",
+      "status": "machine"
+    },
+    "chat.reaction.add_title": {
+      "text": "Reagir - Reações de {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by": {
+      "text": "Reações de {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by_title": {
+      "text": "Reações de",
+      "status": "machine"
+    },
+    "chat.reaction.remove_title": {
+      "text": "Remover sua reação - Reações de {names}",
+      "status": "machine"
+    },
+    "chat.reaction.single_emoji": {
+      "text": "Uma reação deve ser um único emoji.",
+      "status": "machine"
+    },
+    "chat.reauth.action": {
+      "text": "Entrar novamente",
+      "status": "machine"
+    },
+    "chat.reauth.body": {
+      "text": "As chaves necessárias para descriptografar e assinar mensagens não estão disponíveis nesta sessão. Entre novamente para abrir esta conversa.",
+      "status": "machine"
+    },
+    "chat.reauth.title": {
+      "text": "Entrar novamente",
+      "status": "machine"
+    },
+    "chat.record.bar_video": {
+      "text": "Gravando uma mensagem de vídeo",
+      "status": "machine"
+    },
+    "chat.record.bar_voice": {
+      "text": "Gravando uma mensagem de voz",
+      "status": "machine"
+    },
+    "chat.record.cancelled": {
+      "text": "Cancelada",
+      "status": "machine"
+    },
+    "chat.record.delete": {
+      "text": "Excluir gravação",
+      "status": "machine"
+    },
+    "chat.record.denied_camera": {
+      "text": "O Lakko precisa de acesso à câmera para gravar mensagens de vídeo. Permita o acesso à câmera nas configurações do site no navegador.",
+      "status": "machine"
+    },
+    "chat.record.denied_camera_app": {
+      "text": "O Lakko precisa de acesso à câmera para gravar mensagens de vídeo",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone": {
+      "text": "O Lakko precisa de acesso ao microfone para gravar mensagens de voz. Permita o acesso ao microfone nas configurações do site no navegador.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_app": {
+      "text": "O Lakko precisa de acesso ao microfone para gravar mensagens de voz",
+      "status": "machine"
+    },
+    "chat.record.finishing": {
+      "text": "Finalizando a gravação",
+      "status": "machine"
+    },
+    "chat.record.flip_camera": {
+      "text": "Virar câmera",
+      "status": "machine"
+    },
+    "chat.record.flip_failed": {
+      "text": "Não foi possível trocar de câmera",
+      "status": "machine"
+    },
+    "chat.record.hint_hold": {
+      "text": "Segure para gravar",
+      "status": "machine"
+    },
+    "chat.record.in_call": {
+      "text": "Indisponível durante uma chamada",
+      "status": "machine"
+    },
+    "chat.record.locked_hint": {
+      "text": "Inicia uma gravação contínua",
+      "status": "machine"
+    },
+    "chat.record.no_camera": {
+      "text": "Nenhuma câmera encontrada",
+      "status": "machine"
+    },
+    "chat.record.open_settings": {
+      "text": "Abrir Ajustes",
+      "status": "machine"
+    },
+    "chat.record.pause": {
+      "text": "Pausar gravação",
+      "status": "machine"
+    },
+    "chat.record.pause_video": {
+      "text": "Pausar mensagem de vídeo",
+      "status": "machine"
+    },
+    "chat.record.play": {
+      "text": "Reproduzir gravação, {duration}",
+      "status": "machine"
+    },
+    "chat.record.play_video_sound": {
+      "text": "Reproduzir mensagem de vídeo com som",
+      "status": "machine"
+    },
+    "chat.record.position": {
+      "text": "Posição da gravação",
+      "status": "machine"
+    },
+    "chat.record.recording_duration": {
+      "text": "Gravando, {duration}",
+      "status": "machine"
+    },
+    "chat.record.send": {
+      "text": "Enviar gravação",
+      "status": "machine"
+    },
+    "chat.record.silent_mic": {
+      "text": "Nenhum som do microfone",
+      "status": "machine"
+    },
+    "chat.record.slide_cancel": {
+      "text": "‹ Deslize para cancelar",
+      "status": "machine"
+    },
+    "chat.record.start_failed": {
+      "text": "Não foi possível iniciar a gravação",
+      "status": "machine"
+    },
+    "chat.record.starting": {
+      "text": "Iniciando…",
+      "status": "machine"
+    },
+    "chat.record.stop": {
+      "text": "Parar gravação",
+      "status": "machine"
+    },
+    "chat.record.stop_short": {
+      "text": "Parar",
+      "status": "machine"
+    },
+    "chat.record.switch_to_video": {
+      "text": "Mudar para mensagem de vídeo",
+      "status": "machine"
+    },
+    "chat.record.switch_to_voice": {
+      "text": "Mudar para mensagem de voz",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video": {
+      "text": "Não é possível gravar mensagens de vídeo neste navegador",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video_device": {
+      "text": "Não é possível gravar mensagens de vídeo neste dispositivo",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice": {
+      "text": "Não é possível gravar mensagens de voz neste navegador",
+      "status": "machine"
+    },
+    "chat.record.video": {
+      "text": "Gravar mensagem de vídeo",
+      "status": "machine"
+    },
+    "chat.record.video_ready": {
+      "text": "Mensagem de vídeo pronta",
+      "status": "machine"
+    },
+    "chat.record.video_tooltip": {
+      "text": "Gravar mensagem de vídeo: segure para gravar, toque para mudar para voz",
+      "status": "machine"
+    },
+    "chat.record.voice": {
+      "text": "Gravar mensagem de voz",
+      "status": "machine"
+    },
+    "chat.record.voice_tooltip": {
+      "text": "Gravar mensagem de voz: segure para gravar, toque para mudar para vídeo",
+      "status": "machine"
+    },
+    "chat.refusal.add_not_admin": {
+      "text": "Só o proprietário do grupo ou um administrador pode adicionar membros.",
+      "status": "machine"
+    },
+    "chat.refusal.device_binding": {
+      "text": "Há algo errado com a chave deste dispositivo. Remova-o em Dispositivos e adicione-o de novo.",
+      "status": "machine"
+    },
+    "chat.refusal.device_limit": {
+      "text": "{count, plural, one {Até # dispositivo por conta. Remova um primeiro.} other {Até # dispositivos por conta. Remova um primeiro.}}",
+      "status": "machine"
+    },
+    "chat.refusal.fallback": {
+      "text": "Não foi possível solicitar esta alteração.",
+      "status": "machine"
+    },
+    "chat.refusal.join_not_kept": {
+      "text": "Um pedido para entrar chegou quando já havia pedidos demais aguardando, por isso não foi mantido. Peça à pessoa para enviá-lo de novo mais tarde.",
+      "status": "machine"
+    },
+    "chat.refusal.joiner_member": {
+      "text": "Essa pessoa já entrou neste grupo.",
+      "status": "machine"
+    },
+    "chat.refusal.no_join_request": {
+      "text": "Esse pedido para entrar não está mais aguardando.",
+      "status": "machine"
+    },
+    "chat.refusal.not_owner": {
+      "text": "Só o proprietário do grupo pode alterar administradores ou transferir a propriedade.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_cannot_leave": {
+      "text": "O proprietário do grupo não pode sair do grupo.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_not_member": {
+      "text": "A propriedade só pode ficar com um membro atual deste grupo.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_unremovable": {
+      "text": "O proprietário do grupo não pode ser removido.",
+      "status": "machine"
+    },
+    "chat.refusal.pending_full": {
+      "text": "Já há alterações demais aguardando ser aplicadas.",
+      "status": "machine"
+    },
+    "chat.refusal.remove_not_admin": {
+      "text": "Só o proprietário do grupo ou um administrador pode remover membros.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_many": {
+      "text": "Espere que sejam aplicadas e tente novamente.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_one": {
+      "text": "Espere que seja aplicada e tente novamente.",
+      "status": "machine"
+    },
+    "chat.refusal.role_change_pending": {
+      "text": "Uma alteração de função já está aguardando ser aplicada.",
+      "status": "machine"
+    },
+    "chat.refusal.with_retry": {
+      "text": "{fact} {retry}",
+      "status": "machine"
+    },
+    "chat.reply.cancel": {
+      "text": "Cancelar resposta",
+      "status": "machine"
+    },
+    "chat.reply.fallback_excerpt": {
+      "text": "Mensagem",
+      "status": "machine"
+    },
+    "chat.reply.quote": {
+      "text": "Resposta",
+      "status": "machine"
+    },
+    "chat.reply.quote_to": {
+      "text": "Resposta a {name}",
+      "status": "machine"
+    },
+    "chat.reply.strip_label": {
+      "text": "Respondendo a {name}",
+      "status": "machine"
+    },
+    "chat.select.count": {
+      "text": "{count, plural, one {# selecionada} other {# selecionadas}}",
+      "status": "machine"
+    },
+    "chat.select.count_limit": {
+      "text": "{count, plural, one {# selecionada, o limite} other {# selecionadas, o limite}}",
+      "status": "machine"
+    },
+    "chat.select.delete_helper": {
+      "text": "Só é possível excluir suas próprias mensagens.",
+      "status": "machine"
+    },
+    "chat.select.delete_title": {
+      "text": "{count, plural, one {Excluir # mensagem?} other {Excluir # mensagens?}}",
+      "status": "machine"
+    },
+    "chat.select.deleted_of": {
+      "text": "{done} de {total} excluídas.",
+      "status": "machine"
+    },
+    "chat.select.forwarded_of": {
+      "text": "{done} de {total} encaminhadas.",
+      "status": "machine"
+    },
+    "chat.select.state_not_selected": {
+      "text": "Não selecionada",
+      "status": "machine"
+    },
+    "chat.select.state_selected": {
+      "text": "Selecionada",
+      "status": "machine"
+    },
+    "chat.select.toolbar": {
+      "text": "Mensagens selecionadas",
+      "status": "machine"
+    },
+    "chat.send.failed": {
+      "text": "Não foi possível enviar.",
+      "status": "machine"
+    },
+    "chat.system.join_request": {
+      "text": "Pedido para entrar",
+      "status": "machine"
+    },
+    "chat.system.members_changed": {
+      "text": "Membros alterados",
+      "status": "machine"
+    },
+    "chat.timeline.empty": {
+      "text": "Nenhuma mensagem ainda. Diga oi.",
+      "status": "machine"
+    },
+    "chat.timeline.setting_up": {
+      "text": "Esta conversa ainda está sendo configurada neste dispositivo.",
+      "status": "machine"
+    },
+    "chat.transfer.action": {
+      "text": "Transferir propriedade",
+      "status": "machine"
+    },
+    "chat.transfer.action_named": {
+      "text": "Tornar {name} proprietário",
+      "status": "machine"
+    },
+    "chat.transfer.become_member": {
+      "text": "Virar membro comum",
+      "status": "machine"
+    },
+    "chat.transfer.become_member_detail": {
+      "text": "Você abre mão de todos os poderes no grupo imediatamente. Só o novo proprietário pode devolver algum deles.",
+      "status": "machine"
+    },
+    "chat.transfer.candidate_admin": {
+      "text": "{name}, administrador",
+      "status": "machine"
+    },
+    "chat.transfer.done_admin": {
+      "text": "{name} agora é o proprietário do grupo. Você continua como administrador.",
+      "status": "machine"
+    },
+    "chat.transfer.done_member": {
+      "text": "{name} agora é o proprietário do grupo. Agora você é um membro comum.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_body": {
+      "text": "Só um proprietário pode alterar funções. Depois de transferir este grupo, você não pode recuperá-lo, não pode restaurar sua função de proprietário e não pode alterar sua própria função de novo, a menos que o novo proprietário faça isso por você.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_title": {
+      "text": "Não é possível desfazer.",
+      "status": "machine"
+    },
+    "chat.transfer.leave_blocked": {
+      "text": "Transfira a propriedade primeiro: não é possível sair de um grupo deixando-o sem proprietário.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner": {
+      "text": "Agora você é o proprietário deste grupo.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_body": {
+      "text": "Você pode adicionar e remover membros, alterar administradores e transferir a propriedade para outra pessoa.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_legend": {
+      "text": "Novo proprietário",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_named": {
+      "text": "{name} tornou você o proprietário deste grupo.",
+      "status": "machine"
+    },
+    "chat.transfer.no_candidates": {
+      "text": "Não há mais ninguém neste grupo para quem transferi-lo.",
+      "status": "machine"
+    },
+    "chat.transfer.pending": {
+      "text": "Transferência de propriedade aguardando ser aplicada.",
+      "status": "machine"
+    },
+    "chat.transfer.pending_named": {
+      "text": "Aguardando tornar {name} proprietário.",
+      "status": "machine"
+    },
+    "chat.transfer.requested": {
+      "text": "Transferência de propriedade solicitada. Ela vale quando um proprietário ou administrador aplicar a alteração.",
+      "status": "machine"
+    },
+    "chat.transfer.role_change_pending": {
+      "text": "Uma alteração de função já está aguardando ser aplicada. Espere que seja aplicada e tente novamente.",
+      "status": "machine"
+    },
+    "chat.transfer.role_legend": {
+      "text": "Sua função depois",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin": {
+      "text": "Continuar como administrador",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin_detail": {
+      "text": "Você ainda poderá adicionar e remover membros. Pode abrir mão disso depois, pedindo ao novo proprietário.",
+      "status": "machine"
+    },
+    "chat.transfer.unlocks_leave": {
+      "text": "Depois que a alteração for aplicada, você poderá sair do grupo como qualquer outro membro.",
+      "status": "machine"
+    },
+    "chat.typing.named": {
+      "text": "{name} está digitando...",
+      "status": "machine"
+    },
+    "chat.typing.one_to_one": {
+      "text": "digitando...",
+      "status": "machine"
+    },
+    "chat.typing.several": {
+      "text": "Várias pessoas estão digitando...",
+      "status": "machine"
+    },
+    "chat.unpin.for_both": {
+      "text": "Desafixar para os dois",
+      "status": "machine"
+    },
+    "chat.unpin.for_everyone": {
+      "text": "Desafixar para todos",
+      "status": "machine"
+    },
+    "chat.unpin.for_me": {
+      "text": "Desafixar só para mim",
+      "status": "machine"
+    },
+    "chat.unpin.sheet_title": {
+      "text": "Desafixar mensagem",
+      "status": "machine"
+    },
+    "chat.upload.encrypting": {
+      "text": "Criptografando \"{name}\"…",
+      "status": "machine"
+    },
+    "chat.upload.encrypting_of": {
+      "text": "Criptografando \"{name}\" ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.preparing": {
+      "text": "Preparando \"{name}\"…",
+      "status": "machine"
+    },
+    "chat.upload.selected_item": {
+      "text": "Item selecionado",
+      "status": "machine"
+    },
+    "chat.upload.uploading": {
+      "text": "Enviando \"{name}\"…",
+      "status": "machine"
+    },
+    "chat.upload.uploading_of": {
+      "text": "Enviando \"{name}\" ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.working": {
+      "text": "Criptografando e enviando…",
+      "status": "machine"
+    },
+    "chat.video.load_failed": {
+      "text": "Não foi possível carregar o vídeo",
+      "status": "machine"
+    },
+    "chat.video.load_failed_retry": {
+      "text": "Não foi possível carregar o vídeo, toque para tentar novamente",
+      "status": "machine"
+    },
+    "chat.video.loading": {
+      "text": "Carregando vídeo, {size}",
+      "status": "machine"
+    },
+    "chat.video.open": {
+      "text": "Reproduzir vídeo",
+      "status": "machine"
+    },
+    "chat.video.play": {
+      "text": "Reproduzir vídeo, {size}",
+      "status": "machine"
+    },
+    "chat.video.play_failed": {
+      "text": "Não foi possível reproduzir este vídeo",
+      "status": "machine"
+    },
+    "chat.video.player": {
+      "text": "Player de vídeo",
+      "status": "machine"
+    },
+    "chat.video_note.loading": {
+      "text": "Mensagem de vídeo, carregando",
+      "status": "machine"
+    },
+    "chat.video_note.play": {
+      "text": "Reproduzir mensagem de vídeo, {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.play_sound": {
+      "text": "Reproduzir mensagem de vídeo com som, {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.poster": {
+      "text": "Capa da mensagem de vídeo",
+      "status": "machine"
+    },
+    "chat.video_note.tap_mute": {
+      "text": "Toque para silenciar",
+      "status": "machine"
+    },
+    "chat.video_note.tap_sound": {
+      "text": "Toque para ouvir",
+      "status": "machine"
+    },
+    "chat.voice.change_speed": {
+      "text": "Alterar velocidade de reprodução",
+      "status": "machine"
+    },
+    "chat.voice.not_played": {
+      "text": "Não reproduzida",
+      "status": "machine"
+    },
+    "chat.voice.pause": {
+      "text": "Pausar mensagem de voz",
+      "status": "machine"
+    },
+    "chat.voice.play": {
+      "text": "Reproduzir mensagem de voz, {duration}",
+      "status": "machine"
+    },
+    "chat.voice.position": {
+      "text": "{position} de {duration}",
+      "status": "machine"
+    },
+    "chat.voice.seek": {
+      "text": "Avançar na mensagem de voz",
+      "status": "machine"
+    },
+    "chat.voice.speed": {
+      "text": "Velocidade de reprodução {rate}",
+      "status": "machine"
+    },
+    "chats.action.archive": {
+      "text": "Arquivar",
+      "status": "machine"
+    },
+    "chats.action.mute": {
+      "text": "Silenciar",
+      "status": "machine"
+    },
+    "chats.action.pin": {
+      "text": "Fixar",
+      "status": "machine"
+    },
+    "chats.action.unarchive": {
+      "text": "Desarquivar",
+      "status": "machine"
+    },
+    "chats.action.unmute": {
+      "text": "Reativar som",
+      "status": "machine"
+    },
+    "chats.action.unpin": {
+      "text": "Desafixar",
+      "status": "machine"
+    },
+    "chats.compose": {
+      "text": "Novo",
+      "status": "machine"
+    },
+    "chats.create.channel": {
+      "text": "Criar canal",
+      "status": "machine"
+    },
+    "chats.create.chat": {
+      "text": "Nova conversa",
+      "status": "machine"
+    },
+    "chats.create.group": {
+      "text": "Criar grupo",
+      "status": "machine"
+    },
+    "chats.create.menu": {
+      "text": "Criar",
+      "status": "machine"
+    },
+    "chats.empty.action": {
+      "text": "Começar",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "Selecione uma conversa para começar",
+      "status": "machine"
+    },
+    "chats.empty.title": {
+      "text": "Nenhuma conversa ainda",
+      "status": "machine"
+    },
+    "chats.lookup.action": {
+      "text": "Procurar {name}",
+      "status": "machine"
+    },
+    "chats.lookup.nothing": {
+      "text": "Nada encontrado para {name}.",
+      "status": "machine"
+    },
+    "chats.lookup.unreachable": {
+      "text": "Não foi possível fazer a busca. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "chats.new_chat.add_contact": {
+      "text": "Adicionar contato",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts": {
+      "text": "Nenhum contato ainda",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts_body": {
+      "text": "Uma conversa começa com alguém que você conhece.",
+      "status": "machine"
+    },
+    "chats.new_chat.not_available": {
+      "text": "Conversa ainda não disponível neste dispositivo",
+      "status": "machine"
+    },
+    "chats.new_group.accept_again": {
+      "text": "Aceite este contato de novo para adicioná-lo a um grupo.",
+      "status": "machine"
+    },
+    "chats.new_group.creating": {
+      "text": "Criando...",
+      "status": "machine"
+    },
+    "chats.new_group.error": {
+      "text": "Não foi possível criar o grupo. Tente novamente.",
+      "status": "machine"
+    },
+    "chats.new_group.name_label": {
+      "text": "Nome do grupo (opcional)",
+      "status": "machine"
+    },
+    "chats.new_group.no_contacts": {
+      "text": "Um grupo começa com pessoas que você já conhece.",
+      "status": "machine"
+    },
+    "chats.new_group.open_contacts": {
+      "text": "Ir para Contatos",
+      "status": "machine"
+    },
+    "chats.new_group.title": {
+      "text": "Novo grupo",
+      "status": "machine"
+    },
+    "chats.preview.own": {
+      "text": "Você: {text}",
+      "status": "machine"
+    },
+    "chats.preview.sender": {
+      "text": "{name}: {text}",
+      "status": "machine"
+    },
+    "chats.row.actions": {
+      "text": "Ações da conversa",
+      "status": "machine"
+    },
+    "chats.row.call.label": {
+      "text": "{kind} de {name}",
+      "status": "machine"
+    },
+    "chats.row.ended": {
+      "text": "Você não é mais membro.",
+      "status": "machine"
+    },
+    "chats.row.muted": {
+      "text": "Silenciada",
+      "status": "machine"
+    },
+    "chats.row.no_messages": {
+      "text": "Nenhuma mensagem ainda",
+      "status": "machine"
+    },
+    "chats.row.people": {
+      "text": "{count, plural, one {# pessoa} other {# pessoas}}",
+      "status": "machine"
+    },
+    "chats.row.pinned": {
+      "text": "Fixada",
+      "status": "machine"
+    },
+    "chats.row.unread": {
+      "text": "{count, plural, one {# mensagem não lida} other {# mensagens não lidas}}",
+      "status": "machine"
+    },
+    "chats.row.unread_overflow": {
+      "text": "99+",
+      "status": "machine"
+    },
+    "chats.search.clear": {
+      "text": "Limpar pesquisa",
+      "status": "machine"
+    },
+    "chats.search.label": {
+      "text": "Pesquisar conversas",
+      "status": "machine"
+    },
+    "chats.search.no_results": {
+      "text": "Nenhum resultado",
+      "status": "machine"
+    },
+    "chats.search.placeholder": {
+      "text": "Pesquisar",
+      "status": "machine"
+    },
+    "chats.synchronizing": {
+      "text": "Sincronizando...",
       "status": "machine"
     },
     "common.adding": {
@@ -366,12 +2086,28 @@
       "text": "Copiar",
       "status": "machine"
     },
+    "common.delete": {
+      "text": "Excluir",
+      "status": "machine"
+    },
     "common.dismiss": {
       "text": "Dispensar",
       "status": "machine"
     },
     "common.done": {
       "text": "Concluído",
+      "status": "machine"
+    },
+    "common.duration.minutes": {
+      "text": "{count, plural, one {# minuto} other {# minutos}}",
+      "status": "machine"
+    },
+    "common.duration.minutes_seconds": {
+      "text": "{minutes} e {seconds}",
+      "status": "machine"
+    },
+    "common.duration.seconds": {
+      "text": "{count, plural, one {# segundo} other {# segundos}}",
       "status": "machine"
     },
     "common.email": {
@@ -422,6 +2158,10 @@
       "text": "Expandir",
       "status": "machine"
     },
+    "common.list_pair": {
+      "text": "{first}, {second}",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "Carregando...",
       "status": "machine"
@@ -438,8 +2178,16 @@
       "text": "Mais opções",
       "status": "machine"
     },
+    "common.not_now": {
+      "text": "Agora não",
+      "status": "machine"
+    },
     "common.off": {
       "text": "Desativado",
+      "status": "machine"
+    },
+    "common.ok": {
+      "text": "OK",
       "status": "machine"
     },
     "common.on": {
@@ -474,6 +2222,10 @@
       "text": "Removendo...",
       "status": "machine"
     },
+    "common.retry": {
+      "text": "Tentar novamente",
+      "status": "machine"
+    },
     "common.save": {
       "text": "Salvar",
       "status": "machine"
@@ -486,8 +2238,28 @@
       "text": "Enviando...",
       "status": "machine"
     },
+    "common.sentence_pair": {
+      "text": "{first} {second}",
+      "status": "machine"
+    },
     "common.set_up": {
       "text": "Configurar",
+      "status": "machine"
+    },
+    "common.size.bytes": {
+      "text": "{size} B",
+      "status": "machine"
+    },
+    "common.size.gb": {
+      "text": "{size} GB",
+      "status": "machine"
+    },
+    "common.size.kb": {
+      "text": "{size} kB",
+      "status": "machine"
+    },
+    "common.size.mb": {
+      "text": "{size} MB",
       "status": "machine"
     },
     "common.try_again": {
@@ -732,6 +2504,26 @@
     },
     "display_name.error.unknown": {
       "text": "Este nome não pode ser usado",
+      "status": "machine"
+    },
+    "ds.clock_skew": {
+      "text": "Verifique a data e a hora deste dispositivo.",
+      "status": "machine"
+    },
+    "group.join.not_taking_requests": {
+      "text": "Este grupo ainda não está aceitando pedidos. Tente novamente mais tarde.",
+      "status": "machine"
+    },
+    "group.join.request_again": {
+      "text": "Pedir de novo",
+      "status": "machine"
+    },
+    "group.join.wait_primary": {
+      "text": "Pedido enviado. Um administrador aprova e depois a alteração é aplicada ao grupo.",
+      "status": "machine"
+    },
+    "group.join.wait_secondary": {
+      "text": "Nenhuma das etapas tem prazo. Se nada acontecer, você pode enviar o pedido de novo.",
       "status": "machine"
     },
     "language.name.ar": {
@@ -1952,6 +3744,14 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "Números de segurança",
+      "status": "machine"
+    },
+    "tokens.action_allowance_used": {
+      "text": "Você usou a cota de hoje para isso. Tente novamente amanhã.",
+      "status": "machine"
+    },
+    "tokens.lookup_allowance_used": {
+      "text": "Você procurou muitas pessoas hoje. Tente novamente amanhã.",
       "status": "machine"
     },
     "username.a11y_hint": {

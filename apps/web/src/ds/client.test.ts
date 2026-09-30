@@ -194,7 +194,7 @@ describe("contract point 5 — a refused group request", () => {
     expect(err).toBeInstanceOf(DsHttpError);
     expect((err as DsHttpError).status).toBe(401);
     expect((err as DsHttpError).clockSkewed).toBe(true);
-    expect(dsClockSkewNotice({ cause: err })).toBe(CLOCK_SKEW_NOTICE);
+    expect(dsClockSkewNotice({ cause: err })).toBe(CLOCK_SKEW_NOTICE());
 
     const inSync = new Date(now + 10_000).toUTCString();
     const second = fakeFetch([

@@ -306,11 +306,20 @@ public object AttachmentBridge {
      * standard `Formatter.formatShortFileSize` output);
      * base-2 conversion is too pedantic for chat UI.
      */
-    public fun formatSize(bytes: ULong): String = when {
-        bytes < 1_000UL -> "$bytes B"
-        bytes < 1_000_000UL -> "%.1f kB".format(bytes.toDouble() / 1_000)
-        bytes < 1_000_000_000UL -> "%.1f MB".format(bytes.toDouble() / 1_000_000)
-        else -> "%.1f GB".format(bytes.toDouble() / 1_000_000_000)
+    public fun formatSize(
+        bytes: ULong,
+        strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
+    ): String {
+        // ADR-0058: the number in the interface language's digits, the unit
+        // from the catalog (`common.size.*`).
+        val locale = java.util.Locale.forLanguageTag(strings.language)
+        val (key, value) = when {
+            bytes < 1_000UL -> "common.size.bytes" to String.format(locale, "%d", bytes.toLong())
+            bytes < 1_000_000UL -> "common.size.kb" to String.format(locale, "%.1f", bytes.toDouble() / 1_000)
+            bytes < 1_000_000_000UL -> "common.size.mb" to String.format(locale, "%.1f", bytes.toDouble() / 1_000_000)
+            else -> "common.size.gb" to String.format(locale, "%.1f", bytes.toDouble() / 1_000_000_000)
+        }
+        return strings.format(key, mapOf("size" to value))
     }
 
     /**

@@ -34,6 +34,7 @@
 import type { UiRules } from "./ui-rules";
 import { anonTokenQuotaExhausted } from "../tokens/anon-token-pool";
 import { LOOKUP_ALLOWANCE_USED } from "../tokens/token-copy";
+import { t } from "../l10n";
 
 /** What a lookup turned up. */
 export type FoundByName =
@@ -107,11 +108,11 @@ export function findByNameMessage(
   const at = `@${rules.bareName(typed)}`;
   switch (result.kind) {
     case "nothing":
-      return `Nothing found for ${at}.`;
+      return t("chats.lookup.nothing", { name: at });
     case "unreachable":
-      return "Could not look that up. Check your connection and try again.";
+      return t("chats.lookup.unreachable");
     case "allowance-used":
-      return LOOKUP_ALLOWANCE_USED;
+      return LOOKUP_ALLOWANCE_USED();
     default:
       return "";
   }

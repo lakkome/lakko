@@ -16,6 +16,8 @@ import SwiftUI
 /// line each, semantic colours only, so dark mode follows the tokens.
 struct ReplyStrip: View {
 
+    /// ADR-0058 — observed so a language switch re-renders the view.
+    @ObservedObject var l10n = Localization.shared
     let reply: ReplyRef
     let onClose: () -> Void
 
@@ -45,7 +47,7 @@ struct ReplyStrip: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Close reply")
+            .accessibilityLabel(l10n.t("chat.reply.cancel"))
         }
         .padding(.leading, 10)
         .padding(.trailing, 4)
@@ -56,7 +58,10 @@ struct ReplyStrip: View {
             in: RoundedRectangle(cornerRadius: LakkoRadius.card, style: .continuous)
         )
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Replying to \(lines.name.isEmpty ? "message" : lines.name)")
+        .accessibilityLabel(
+            l10n.t(
+                "chat.reply.strip_label",
+                texts: ["name": lines.name.isEmpty ? l10n.t("chat.reply.fallback_excerpt") : lines.name]))
         .accessibilityIdentifier(ReplyStrip.accessibilityID)
     }
 
@@ -106,7 +111,10 @@ struct ReplyQuoteBlock: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Reply to \(lines.name.isEmpty ? "message" : lines.name)")
+        .accessibilityLabel(
+            lines.name.isEmpty
+                ? Localization.text("chat.reply.quote")
+                : Localization.text("chat.reply.quote_to", texts: ["name": lines.name]))
         .accessibilityIdentifier(ReplyQuoteBlock.accessibilityID)
     }
 

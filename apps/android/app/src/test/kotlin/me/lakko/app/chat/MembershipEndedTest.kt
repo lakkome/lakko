@@ -8,6 +8,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import me.lakko.app.push.GroupPushRouting
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -118,6 +120,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *     whichever of the two was changed.
  */
 class MembershipEndedTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     private companion object {
         const val ACCOUNT = "acct-A"
@@ -231,7 +237,7 @@ class MembershipEndedTest {
         val state = membershipState(isActive = false, leaveRequestedAtMs = 99L)
         assertEquals(MembershipState.Ended(left = true), state)
         assertEquals(ENDED_LEFT, terminalRow(state)?.headline)
-        assertEquals("You left this group.", ENDED_LEFT)
+        assertEquals("You left this group.", ENDED_LEFT.en)
     }
 
     @Test
@@ -244,7 +250,7 @@ class MembershipEndedTest {
         // reinstall, a restore) degrades to a sentence that is still correct.
         val state = membershipState(isActive = false, leaveRequestedAtMs = null)
         assertEquals(ENDED_REMOVED, terminalRow(state)?.headline)
-        assertEquals("You are no longer a member of this group.", ENDED_REMOVED)
+        assertEquals("You are no longer a member of this group.", ENDED_REMOVED.en)
     }
 
     @Test
@@ -258,7 +264,7 @@ class MembershipEndedTest {
         // exactly what is claimed and no more.
         assertEquals(
             "The messages you already received are still here. No new ones will arrive.",
-            ENDED_CONSEQUENCE,
+            ENDED_CONSEQUENCE.en,
         )
     }
 
@@ -267,7 +273,7 @@ class MembershipEndedTest {
         for (at in listOf(null, 12_345L)) {
             val row = terminalRow(membershipState(isActive = false, leaveRequestedAtMs = at))
             assertNotNull(row)
-            val text = "${row?.headline} ${row?.consequence}".lowercase()
+            val text = "${row?.headline?.en} ${row?.consequence?.en}".lowercase()
             for (accusation in listOf("removed by", "by an admin", "by the owner")) {
                 assertFalse(accusation, text.contains(accusation))
             }
@@ -366,7 +372,7 @@ class MembershipEndedTest {
         assertTrue(slot is ComposerSlot.Withdrawn)
         slot as ComposerSlot.Withdrawn
         assertEquals(COMPOSER_WITHDRAWN, slot.notice)
-        assertEquals("You can no longer send messages to this group.", COMPOSER_WITHDRAWN)
+        assertEquals("You can no longer send messages to this group.", COMPOSER_WITHDRAWN.en)
     }
 
     @Test
@@ -380,7 +386,7 @@ class MembershipEndedTest {
         slot as ComposerSlot.Withdrawn
         assertEquals("  see you tomorrow  ", slot.draft)
         assertEquals(UNSENT_DRAFT_LABEL, slot.draftLabel)
-        assertEquals("Unsent draft", UNSENT_DRAFT_LABEL)
+        assertEquals("Unsent draft", UNSENT_DRAFT_LABEL.en)
     }
 
     @Test
@@ -452,7 +458,7 @@ class MembershipEndedTest {
     @Test
     fun `the chat list row gains one muted line and nothing else`() {
         assertEquals(CHAT_LIST_ENDED_LINE, chatListLine(endedLeft()))
-        assertEquals("You are no longer a member.", CHAT_LIST_ENDED_LINE)
+        assertEquals("You are no longer a member.", CHAT_LIST_ENDED_LINE.en)
     }
 
     @Test
@@ -470,7 +476,7 @@ class MembershipEndedTest {
         // header is about the list.
         assertEquals(
             "This list stopped updating when your membership ended.",
-            FROZEN_ROSTER_HEADER,
+            FROZEN_ROSTER_HEADER.en,
         )
     }
 
@@ -810,12 +816,12 @@ class MembershipEndedTest {
     fun `the delete confirmation states exactly what is destroyed`() {
         // Precise rather than sweeping, and the precision is load-bearing: the
         // messages really are gone, and the inert MLS handle is not.
-        assertEquals("Delete this chat", DELETE_CHAT_CONTROL)
-        assertEquals("Delete this chat?", DELETE_CHAT_TITLE)
+        assertEquals("Delete this chat", DELETE_CHAT_CONTROL.en)
+        assertEquals("Delete this chat?", DELETE_CHAT_TITLE.en)
         assertEquals(
             "This removes the conversation and its messages from this device. " +
                 "There is no copy anywhere else and this cannot be undone.",
-            DELETE_CHAT_BODY,
+            DELETE_CHAT_BODY.en,
         )
     }
 

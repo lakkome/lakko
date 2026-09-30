@@ -61,14 +61,12 @@ import LakkoCore
 /// §6.1.1 — the owner's disabled `Leave group`. The reason names the action
 /// sitting directly above it, which is what makes this a signposted route rather
 /// than a control that always refuses.
-public let leaveBlockedByOwnershipMessage =
-    "Transfer ownership first — a group cannot be left without an owner."
+public var leaveBlockedByOwnershipMessage: String { Localization.text("chat.transfer.leave_blocked") }
 
 /// §6.1.3 — the honest terminal state of a one-person group. There is no design
 /// that produces a successor out of an empty roster, and the owner of a
 /// one-person group is not being kept anywhere against their will.
-public let noTransferCandidatesMessage =
-    "There is no one else in this group to transfer it to."
+public var noTransferCandidatesMessage: String { Localization.text("chat.transfer.no_candidates") }
 
 /// §6's **seventh** refusal string, reused verbatim in both C-65 directions — a
 /// pending role change refuses a transfer, and a pending transfer refuses a role
@@ -97,13 +95,16 @@ public let noTransferCandidatesMessage =
 /// **Now assembled from ``MembershipRefusal`` rather than written out**, since
 /// the core refuses the same thing by reason (`roleChangePending`) and the two
 /// halves have to stay one sentence. A test asserts the join equals this.
-public let roleChangeAlreadyPendingMessage =
-    "\(roleChangePendingMessage) \(retryWhenItLandsMessage)"
+public var roleChangeAlreadyPendingMessage: String {
+    Localization.text(
+        "chat.refusal.with_retry",
+        texts: ["fact": roleChangePendingMessage, "retry": retryWhenItLandsMessage])
+}
 
 /// §6.1.5 — the headline of the irreversibility statement. It sits **above** the
 /// role choice: below it, the pre-selected option reads as the safe one and the
 /// warning reads as being about the *other* one.
-public let transferIrreversibleHeadline = "This cannot be undone."
+public var transferIrreversibleHeadline: String { Localization.text("chat.transfer.irreversible_title") }
 
 /// §6.1.5 — three specific losses rather than an adjective, because all three
 /// clauses are literally true. Rewriting the role table is owner-only and the
@@ -111,25 +112,20 @@ public let transferIrreversibleHeadline = "This cannot be undone."
 /// owner, cannot rewrite the table, and therefore cannot restore the slot,
 /// cannot take the group back, and cannot change even their **own** role without
 /// the new owner doing it for them.
-public let transferIrreversibleBody =
-    "Only an owner can change roles. Once you transfer this group you cannot "
-    + "take it back, you cannot restore your own owner role, and you cannot "
-    + "change your own role again unless the new owner does it for you."
+public var transferIrreversibleBody: String { Localization.text("chat.transfer.irreversible_body") }
 
 /// §6.1.5 — the trailing line. Note **applied**, not *now*: the transfer is a
 /// proposal, and asserting the exit is open before the commit lands would be the
 /// optimistic update §3 forbids.
-public let transferUnlocksLeaveMessage =
-    "Once the change is applied, you can leave the group like any other member."
+public var transferUnlocksLeaveMessage: String { Localization.text("chat.transfer.unlocks_leave") }
 
 /// §6.1.9 — the second line of the new-owner notice. It names the exit
 /// deliberately: it is the one sentence that stops the new owner from arriving
 /// where the old one was.
-public let newOwnerNoticeBody =
-    "You can add and remove members, change admins, and transfer ownership to someone else."
+public var newOwnerNoticeBody: String { Localization.text("chat.transfer.new_owner_body") }
 
 /// §6.1.9 — the notice's dismiss control.
-public let newOwnerNoticeDismiss = "Dismiss"
+public var newOwnerNoticeDismiss: String { Localization.text("common.dismiss") }
 
 // MARK: - §6.1.1 the exit block
 
@@ -290,7 +286,7 @@ public func exitBlock(_ input: ExitBlockInput) -> ExitBlock {
                 // §5.2's existing row annotation, reused rather than a new
                 // string: the member's own row already carries it, and the
                 // control's reason should say the same thing the roster says.
-                ? GuardedControl(enabled: false, disabledReason: "Waiting to leave.")
+                ? GuardedControl(enabled: false, disabledReason: Localization.text("chat.members.pending.waiting_leave"))
                 : GuardedControl(enabled: true, disabledReason: nil))
     }
 
@@ -438,20 +434,19 @@ public struct OutgoingOwnerOption: Equatable, Identifiable {
 /// reverse mistake needs the same cooperation *and* costs the group an
 /// administrator in the meantime, at exactly the moment its leadership is
 /// changing hands.
-public let outgoingOwnerOptions: [OutgoingOwnerOption] = [
+public var outgoingOwnerOptions: [OutgoingOwnerOption] { [
+
     OutgoingOwnerOption(
         value: .admin,
-        label: "Stay an admin",
-        consequence:
-            "You can still add and remove members. You can give this up later by asking the new owner.",
+        label: Localization.text("chat.transfer.stay_admin"),
+        consequence: Localization.text("chat.transfer.stay_admin_detail"),
         preSelected: true),
     OutgoingOwnerOption(
         value: .member,
-        label: "Become a regular member",
-        consequence:
-            "You give up every group power immediately. Only the new owner can give any of it back.",
+        label: Localization.text("chat.transfer.become_member"),
+        consequence: Localization.text("chat.transfer.become_member_detail"),
         preSelected: false),
-]
+] }
 
 /// The pre-selected choice. Named *pre-selected* rather than *default* on
 /// purpose: the core has no default and this must not read as one.
@@ -480,8 +475,8 @@ public let preselectedOutgoingOwner: OutgoingOwner = .admin
 public func transferActionLabel(
     selected: TransferCandidate?
 ) -> (label: String, enabled: Bool) {
-    guard let selected else { return ("Transfer ownership", false) }
-    return ("Make \(selected.label) the owner", true)
+    guard let selected else { return (Localization.text("chat.transfer.action"), false) }
+    return (Localization.text("chat.transfer.action_named", texts: ["name": selected.label]), true)
 }
 
 // MARK: - §6.1.6 / §6.1.7 pending and outcome copy
@@ -500,8 +495,8 @@ public func transferActionLabel(
 /// panel reserves for group-level ones. This line, on the control the user
 /// touched, is where UX §10's own-request exception is satisfied instead.
 public func transferPendingLabel(successorLabel: String?) -> String {
-    guard let successorLabel else { return "Ownership transfer waiting to apply." }
-    return "Waiting to make \(successorLabel) the owner."
+    guard let successorLabel else { return Localization.text("chat.transfer.pending") }
+    return Localization.text("chat.transfer.pending_named", texts: ["name": successorLabel])
 }
 
 /// Which of the two things the publish actually did.
@@ -529,13 +524,13 @@ public func transferOutcomeNotice(
     outgoing: OutgoingOwner
 ) -> String {
     guard outcome == .committed else {
-        return "Ownership transfer requested. It applies when an owner or an admin applies the change."
+        return Localization.text("chat.transfer.requested")
     }
     switch outgoing {
     case .admin:
-        return "\(successorLabel) is now the group owner. You are still an admin."
+        return Localization.text("chat.transfer.done_admin", texts: ["name": successorLabel])
     case .member:
-        return "\(successorLabel) is now the group owner. You are now a regular member."
+        return Localization.text("chat.transfer.done_member", texts: ["name": successorLabel])
     }
 }
 
@@ -590,8 +585,9 @@ public func newOwnerNotice(
     // now names someone else.
     guard currentOwnerB64 == ownSignatureKeyB64 else { return nil }
     return NewOwnerNotice(
-        headline: previousOwnerLabel.map { "\($0) made you the owner of this group." }
-            ?? "You are now the owner of this group.",
+        headline: previousOwnerLabel.map {
+            Localization.text("chat.transfer.new_owner_named", texts: ["name": $0])
+        } ?? Localization.text("chat.transfer.new_owner"),
         body: newOwnerNoticeBody,
         dismiss: newOwnerNoticeDismiss)
 }

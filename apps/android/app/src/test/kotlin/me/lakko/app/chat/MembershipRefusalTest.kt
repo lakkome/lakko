@@ -3,6 +3,8 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -48,6 +50,10 @@ import uniffi.lakko_ffi_uniffi.FfiRefusalReason
  * observed, and the probe reverted) is recorded in `MembershipRefusal.kt`.
  */
 class MembershipRefusalTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     /**
      * The maintainer's rule, STATED here rather than read from the core:
@@ -66,7 +72,7 @@ class MembershipRefusalTest {
     private val statedRule: (FfiRefusalReason) -> Boolean = { it in expectedRetryable }
 
     private fun say(reason: FfiRefusalReason): String =
-        membershipRefusal(reason, statedRule).message
+        membershipRefusal(reason, statedRule).message.en
 
     // ---- Coverage ---------------------------------------------------------
 
@@ -135,8 +141,8 @@ class MembershipRefusalTest {
 
         // Asserted against the exported constants too, so renaming a constant
         // cannot silently change a sentence.
-        assertEquals("Only the group owner or an admin can add members.", ADD_NOT_OWNER_OR_ADMIN)
-        assertEquals("This change could not be requested.", MEMBERSHIP_REFUSAL_FALLBACK)
+        assertEquals("Only the group owner or an admin can add members.", ADD_NOT_OWNER_OR_ADMIN.en)
+        assertEquals("This change could not be requested.", MEMBERSHIP_REFUSAL_FALLBACK.en)
     }
 
     @Test
@@ -148,10 +154,10 @@ class MembershipRefusalTest {
         // read from the same constants rather than restating them.
         assertEquals(
             say(FfiRefusalReason.OWNER_CANNOT_LEAVE),
-            LeaveGroupRefusal.OWNER_CANNOT_LEAVE.message,
+            LeaveGroupRefusal.OWNER_CANNOT_LEAVE.message.en,
         )
         assertEquals(MEMBERSHIP_REFUSAL_FALLBACK, LeaveGroupRefusal.NOT_REQUESTABLE.message)
-        assertEquals(say(FfiRefusalReason.ROLE_CHANGE_PENDING), ROLE_CHANGE_ALREADY_PENDING)
+        assertEquals(say(FfiRefusalReason.ROLE_CHANGE_PENDING), ROLE_CHANGE_ALREADY_PENDING.en)
     }
 
     @Test
@@ -200,7 +206,7 @@ class MembershipRefusalTest {
             MEMBERSHIP_REFUSALS_COLLAPSED_TO_FALLBACK,
         )
         for (reason in MEMBERSHIP_REFUSALS_COLLAPSED_TO_FALLBACK) {
-            assertEquals("$reason", MEMBERSHIP_REFUSAL_FALLBACK, say(reason))
+            assertEquals("$reason", MEMBERSHIP_REFUSAL_FALLBACK.en, say(reason))
         }
     }
 
@@ -247,7 +253,7 @@ class MembershipRefusalTest {
         )) {
             val refusal = membershipRefusal(reason, inverted)
             assertFalse("$reason", refusal.retryMaySucceed)
-            assertFalse("$reason", refusal.message.contains("try again"))
+            assertFalse("$reason", refusal.message.en.contains("try again"))
         }
         assertTrue(
             membershipRefusal(FfiRefusalReason.OWNER_UNREMOVABLE, inverted).retryMaySucceed,
@@ -270,7 +276,7 @@ class MembershipRefusalTest {
             membershipRefusal(FfiRefusalReason.PENDING_SET_FULL, never).message,
         )
         // Concatenation, not two unrelated strings: joined they are §6 row 6.
-        assertEquals("$ROLE_CHANGE_PENDING $RETRY_WHEN_IT_LANDS", ROLE_CHANGE_ALREADY_PENDING)
+        assertEquals("${ROLE_CHANGE_PENDING.en} ${RETRY_WHEN_IT_LANDS.en}", ROLE_CHANGE_ALREADY_PENDING.en)
     }
 
     // ---- Recognising a refusal at all -------------------------------------
@@ -369,7 +375,7 @@ class MembershipRefusalTest {
         assertEquals(
             "A join request arrived while too many were already waiting, so it was not kept. " +
                 "Ask the person to send it again later.",
-            JOIN_REQUEST_NOT_KEPT,
+            JOIN_REQUEST_NOT_KEPT.en,
         )
     }
 }

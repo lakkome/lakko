@@ -29,7 +29,29 @@ export class KeyedError extends Error {
   }
 }
 
-/** The text of a {@link KeyedError}, or `null` for any other value. */
+/**
+ * An error whose screen text is already decided by a function that renders
+ * catalog messages (a sentence built from several keys, or picked by a helper
+ * such as the membership-refusal table). Like {@link KeyedError}, the text is
+ * re-rendered when shown.
+ */
+export class RenderedError extends Error {
+  readonly render: () => string;
+
+  constructor(render: () => string) {
+    super(render());
+    this.name = "RenderedError";
+    this.render = render;
+  }
+
+  /** The message in the current language. */
+  text(): string {
+    return this.render();
+  }
+}
+
+/** The text of a {@link KeyedError} or {@link RenderedError}, or `null` for
+ *  any other value. */
 export function keyedErrorText(err: unknown): string | null {
-  return err instanceof KeyedError ? err.text() : null;
+  return err instanceof KeyedError || err instanceof RenderedError ? err.text() : null;
 }

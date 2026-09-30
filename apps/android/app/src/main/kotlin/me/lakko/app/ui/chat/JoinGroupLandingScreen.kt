@@ -44,6 +44,7 @@ import me.lakko.app.chat.GROUP_INVITE_REQUEST_TO_JOIN
 import me.lakko.app.chat.GroupInviteCard
 import me.lakko.app.chat.groupInvitePageLines
 import me.lakko.app.chat.invitedByLine
+import me.lakko.app.l10n.text
 
 /**
  * ADR-0028 (G-3) — drives the `/g/<slug>` group join-ticket landing. Decodes +
@@ -350,10 +351,10 @@ public fun JoinGroupLandingScreen(
                 Spacer(Modifier.height(16.dp))
                 CircularProgressIndicator()
                 Spacer(Modifier.height(8.dp))
-                Text(me.lakko.app.chat.JOIN_WAIT_PRIMARY, textAlign = TextAlign.Center)
+                Text(me.lakko.app.chat.JOIN_WAIT_PRIMARY.text(), textAlign = TextAlign.Center)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = me.lakko.app.chat.JOIN_WAIT_SECONDARY,
+                    text = me.lakko.app.chat.JOIN_WAIT_SECONDARY.text(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
@@ -362,7 +363,7 @@ public fun JoinGroupLandingScreen(
                 Button(
                     onClick = { viewModel.request() },
                     enabled = !requesting,
-                ) { Text(me.lakko.app.chat.JOIN_REQUEST_AGAIN) }
+                ) { Text(me.lakko.app.chat.JOIN_REQUEST_AGAIN.text()) }
                 InviteFoot(card)
             }
             is JoinGroupLandingViewModel.State.Joined -> {

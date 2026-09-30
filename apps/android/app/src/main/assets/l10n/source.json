@@ -264,6 +264,22 @@
       "text": "Getting you into the call...",
       "comment": "Busy row while a guest account is created to join a call from a link."
     },
+    "call.incoming.accept": {
+      "text": "Accept",
+      "comment": "Button that answers an incoming call."
+    },
+    "call.incoming.accept_from": {
+      "text": "Accept call from {name}",
+      "comment": "Accessible name of the button that answers a call; {name} is the caller or conversation."
+    },
+    "call.incoming.decline": {
+      "text": "Decline",
+      "comment": "Button that declines an incoming call."
+    },
+    "call.incoming.decline_from": {
+      "text": "Decline call from {name}",
+      "comment": "Accessible name of the button that declines a call; {name} is the caller or conversation."
+    },
     "call.link.connecting": {
       "text": "Connecting...",
       "comment": "Shown while the call connects."
@@ -328,9 +344,1723 @@
       "text": "You can leave this screen; you will join when you are admitted.",
       "comment": "Hint under the waiting line."
     },
+    "chat.attachment.error.attach": {
+      "text": "Could not attach the selected item. Try again.",
+      "comment": "Composer error when a picked file could not be read or encrypted and has no name."
+    },
+    "chat.attachment.error.attach_named": {
+      "text": "Could not attach \"{name}\". Try again.",
+      "comment": "Composer error when the picked file {name} could not be read or encrypted."
+    },
+    "chat.attachment.error.download": {
+      "text": "Could not download the attachment. Try again.",
+      "comment": "Downloading or decrypting an attachment failed."
+    },
+    "chat.attachment.error.gone": {
+      "text": "The attachment is no longer available on the server.",
+      "comment": "Downloading an attachment failed because the server no longer holds it."
+    },
+    "chat.attachment.error.open_photo": {
+      "text": "Couldn't open this photo. Try again.",
+      "comment": "A photo picked from the library to send could not be read."
+    },
+    "chat.attachment.error.open_video": {
+      "text": "Couldn't open this video. Try again.",
+      "comment": "A video picked from the library to send could not be read."
+    },
+    "chat.attachment.error.prepare_video": {
+      "text": "Couldn't prepare this video. Videos up to {limit} can be sent.",
+      "comment": "A video picked to send could not be converted for sending; {limit} is the largest size allowed (for example 50 MB)."
+    },
+    "chat.attachment.error.preview": {
+      "text": "Could not show the picture. Try again.",
+      "comment": "Loading an attached picture to show inside the message failed."
+    },
+    "chat.attachment.error.too_large": {
+      "text": "That message is {size} — over the {limit} limit.",
+      "comment": "A recorded or chosen media message is too big; {size} is its size, {limit} the largest allowed."
+    },
+    "chat.attachment.error.too_large_named": {
+      "text": "\"{name}\" is {size} — over the {limit} limit.",
+      "comment": "An attached file is too big; {name} is the file, {size} its size, {limit} the largest allowed."
+    },
+    "chat.attachment.error.upload": {
+      "text": "Could not upload \"{name}\". Try again.",
+      "comment": "Encrypting or uploading an attached file failed; {name} is the file."
+    },
+    "chat.attachment.hide": {
+      "text": "Hide",
+      "comment": "Button on an attached picture shown inside the message: stop showing it."
+    },
+    "chat.attachment.image_alt": {
+      "text": "image attachment",
+      "comment": "Alternative text of an attached picture that has no file name."
+    },
+    "chat.attachment.open": {
+      "text": "Open",
+      "comment": "Button on an attached picture: show it inside the message."
+    },
+    "chat.attachment.save_title": {
+      "text": "Save attachment",
+      "comment": "Title of the system sheet that saves or shares a received file."
+    },
+    "chat.attachment.unnamed": {
+      "text": "(unnamed)",
+      "comment": "Stands in for the file name of an attachment that has none."
+    },
+    "chat.author.a_member": {
+      "text": "A member",
+      "comment": "Name for someone who reacted to a message when they cannot be named."
+    },
+    "chat.author.unknown": {
+      "text": "Unknown sender",
+      "comment": "Name shown for the author of a message when it cannot be resolved."
+    },
+    "chat.author.you": {
+      "text": "You",
+      "comment": "Name for the reader as the author of a message, of a reaction or of a quoted message."
+    },
+    "chat.call.busy": {
+      "text": "Another call is in progress.",
+      "comment": "Shown when starting or joining a group call while another call is already going on."
+    },
+    "chat.call.error.start": {
+      "text": "Could not start the call. Try again.",
+      "comment": "Placing a one-to-one call failed."
+    },
+    "chat.call.group_ended": {
+      "text": "That group call has ended.",
+      "comment": "The reader tried to join a group call that has already ended."
+    },
+    "chat.call.group_in_progress": {
+      "text": "Group call in progress",
+      "comment": "Banner above the timeline while a group call the reader is not in is going on."
+    },
+    "chat.call.group_people": {
+      "text": "{count, plural, one {# person in the call} other {# people in the call}}",
+      "comment": "Under the group call banner: how many people are in the call."
+    },
+    "chat.call.group_starting": {
+      "text": "Starting…",
+      "comment": "Under the group call banner while nobody has joined the call yet."
+    },
+    "chat.call.group_status_e2ee": {
+      "text": "{status} · end-to-end encrypted",
+      "comment": "Second line of the group call banner: {status} is how many people are in the call (or that it is starting), followed by the fact that the call is end-to-end encrypted.",
+      "security_critical": true
+    },
+    "chat.call.join": {
+      "text": "Join call",
+      "comment": "Header button in a group with a call in progress: join it with voice."
+    },
+    "chat.call.join_short": {
+      "text": "Join",
+      "comment": "Button on the group call banner that joins the call with voice."
+    },
+    "chat.call.join_video": {
+      "text": "Join with video",
+      "comment": "Button that joins the group call in progress with the camera on."
+    },
+    "chat.call.last_ended.busy": {
+      "text": "Last call ended: the other person was busy.",
+      "comment": "Line under the timeline after a call ended because the other person was in another call."
+    },
+    "chat.call.last_ended.declined": {
+      "text": "Last call ended: declined.",
+      "comment": "Line under the timeline after a call was declined."
+    },
+    "chat.call.last_ended.error": {
+      "text": "Last call ended because of an error.",
+      "comment": "Line under the timeline after a call failed."
+    },
+    "chat.call.last_ended.hung_up": {
+      "text": "Last call ended.",
+      "comment": "Line under the timeline after the last one-to-one call ended normally."
+    },
+    "chat.call.last_ended.timed_out": {
+      "text": "Last call ended: no answer.",
+      "comment": "Line under the timeline after a call was not answered in time."
+    },
+    "chat.call.unavailable": {
+      "text": "Group calls are not available right now.",
+      "comment": "Shown when group calls cannot be started on this device at the moment."
+    },
+    "chat.call.video": {
+      "text": "Video call",
+      "comment": "Header button that starts a video call."
+    },
+    "chat.call.voice": {
+      "text": "Call",
+      "comment": "Header button that starts a voice call."
+    },
+    "chat.composer.attach": {
+      "text": "Attach files",
+      "comment": "Button in the composer that picks files to send."
+    },
+    "chat.composer.attach_limit": {
+      "text": "Attach files (up to {limit} each)",
+      "comment": "Tooltip of the attach button; {limit} is the largest file size allowed."
+    },
+    "chat.composer.attach_media": {
+      "text": "Photo or video",
+      "comment": "Menu item of the attach button that picks a photo or video."
+    },
+    "chat.composer.drop_files": {
+      "text": "Drop files to attach",
+      "comment": "Shown over the conversation while files are dragged onto it."
+    },
+    "chat.composer.emoji_gifs": {
+      "text": "Emoji and GIFs",
+      "comment": "Button in the message composer that opens the emoji and GIF picker, and the picker's accessible name."
+    },
+    "chat.composer.photo_library": {
+      "text": "Photo Library",
+      "comment": "Item of the attach menu: pick photos or videos from the device's photo library."
+    },
+    "chat.composer.placeholder": {
+      "text": "Message",
+      "comment": "Placeholder of the message field."
+    },
+    "chat.composer.remove_attachment": {
+      "text": "Remove attachment",
+      "comment": "Button that removes a staged file from the message before sending."
+    },
+    "chat.composer.send": {
+      "text": "Send",
+      "comment": "Button that sends the message or the recording."
+    },
+    "chat.day.today": {
+      "text": "Today",
+      "comment": "Date separator in the timeline above today's messages."
+    },
+    "chat.day.yesterday": {
+      "text": "Yesterday",
+      "comment": "Date separator in the timeline above yesterday's messages."
+    },
+    "chat.delete.body": {
+      "text": "This removes the conversation and its messages from this device. There is no copy anywhere else and this cannot be undone.",
+      "comment": "Body of the dialog confirming that a conversation is deleted from this device.",
+      "security_critical": true
+    },
+    "chat.delete.confirm_named": {
+      "text": "Delete {name}",
+      "comment": "Button in the dialog confirming that a conversation is deleted from this device; {name} is the conversation's name."
+    },
+    "chat.delete.control": {
+      "text": "Delete this chat",
+      "comment": "Button that deletes a conversation from this device."
+    },
+    "chat.delete.title": {
+      "text": "Delete this chat?",
+      "comment": "Title of the dialog confirming that a conversation is deleted from this device."
+    },
+    "chat.edit.title": {
+      "text": "Edit message",
+      "comment": "Title of the sheet where a sent message is edited."
+    },
+    "chat.emoji.categories": {
+      "text": "Emoji categories",
+      "comment": "Accessible name of the row of category buttons at the bottom of the emoji picker."
+    },
+    "chat.emoji.choose": {
+      "text": "Choose",
+      "comment": "Screen-reader action of one skin-tone variant of an emoji."
+    },
+    "chat.emoji.choose_reaction": {
+      "text": "Choose a reaction",
+      "comment": "Accessible name of the emoji picker opened to react to a message."
+    },
+    "chat.emoji.group.activities": {
+      "text": "Activities",
+      "comment": "Emoji picker category."
+    },
+    "chat.emoji.group.animals": {
+      "text": "Animals & Nature",
+      "comment": "Emoji picker category."
+    },
+    "chat.emoji.group.flags": {
+      "text": "Flags",
+      "comment": "Emoji picker category."
+    },
+    "chat.emoji.group.food": {
+      "text": "Food & Drink",
+      "comment": "Emoji picker category."
+    },
+    "chat.emoji.group.objects": {
+      "text": "Objects",
+      "comment": "Emoji picker category."
+    },
+    "chat.emoji.group.people": {
+      "text": "People & Body",
+      "comment": "Emoji picker category."
+    },
+    "chat.emoji.group.smileys": {
+      "text": "Smileys & Emotion",
+      "comment": "Emoji picker category."
+    },
+    "chat.emoji.group.symbols": {
+      "text": "Symbols",
+      "comment": "Emoji picker category."
+    },
+    "chat.emoji.group.travel": {
+      "text": "Travel & Places",
+      "comment": "Emoji picker category."
+    },
+    "chat.emoji.insert": {
+      "text": "Insert",
+      "comment": "Screen-reader action of an emoji in the picker: puts it into the message."
+    },
+    "chat.emoji.no_results": {
+      "text": "No emoji found",
+      "comment": "The emoji search matched nothing."
+    },
+    "chat.emoji.recent": {
+      "text": "Recent",
+      "comment": "Heading above the emoji the reader used recently."
+    },
+    "chat.emoji.search": {
+      "text": "Search emoji",
+      "comment": "Search field in the emoji picker."
+    },
+    "chat.emoji.skin_tones": {
+      "text": "Skin tones for {name}",
+      "comment": "Accessible name of the skin tone choices for an emoji; {name} is the emoji's name."
+    },
+    "chat.emoji.tab": {
+      "text": "Emoji",
+      "comment": "Tab of the picker that shows emoji."
+    },
+    "chat.ended.composer": {
+      "text": "You can no longer send messages to this group.",
+      "comment": "Replaces the message field in a group the reader is no longer in."
+    },
+    "chat.ended.consequence": {
+      "text": "The messages you already received are still here. No new ones will arrive.",
+      "comment": "Second line under the ended-membership headline in the timeline."
+    },
+    "chat.ended.left": {
+      "text": "You left this group.",
+      "comment": "Headline in the timeline after the reader left a group."
+    },
+    "chat.ended.no_longer_member": {
+      "text": "You are no longer a member of this group.",
+      "comment": "Headline in the timeline once the reader is no longer in a group, whether they left or were removed. Names nobody."
+    },
+    "chat.ended.unsent_draft": {
+      "text": "Unsent draft",
+      "comment": "Label above a message the reader had typed but not sent before their membership ended."
+    },
+    "chat.error.add_member": {
+      "text": "Could not add this person. Try again.",
+      "comment": "Adding someone to a group failed."
+    },
+    "chat.error.approve_join": {
+      "text": "Could not approve the join request. Try again.",
+      "comment": "Approving someone's request to join the group failed."
+    },
+    "chat.error.change_admin": {
+      "text": "Could not change the admin role. Try again.",
+      "comment": "Making someone an admin, or removing their admin role, failed."
+    },
+    "chat.error.conversation_gone": {
+      "text": "That conversation is no longer here.",
+      "comment": "The conversation chosen as a forward target no longer exists on this device."
+    },
+    "chat.error.create_link": {
+      "text": "Could not create an invite link. Try again.",
+      "comment": "Creating a group invite link failed."
+    },
+    "chat.error.delete_chat": {
+      "text": "Could not delete this chat. Try again.",
+      "comment": "Deleting a conversation from this device failed."
+    },
+    "chat.error.delete_message": {
+      "text": "Could not delete the message. Try again.",
+      "comment": "Deleting a message for everyone failed."
+    },
+    "chat.error.edit": {
+      "text": "Could not edit the message. Try again.",
+      "comment": "Sending an edit of the reader's message failed."
+    },
+    "chat.error.leave": {
+      "text": "Could not leave the group. Try again.",
+      "comment": "Asking to leave a group failed."
+    },
+    "chat.error.membership_request": {
+      "text": "A membership change you asked for could not be sent again.",
+      "comment": "An automatic re-send of a membership request the reader made earlier failed."
+    },
+    "chat.error.message_gone": {
+      "text": "That message is no longer here.",
+      "comment": "The message being forwarded no longer exists in the timeline."
+    },
+    "chat.error.pin": {
+      "text": "Could not change the pin. Try again.",
+      "comment": "Pinning or unpinning a message failed."
+    },
+    "chat.error.react": {
+      "text": "Could not send the reaction. Try again.",
+      "comment": "Sending a reaction failed."
+    },
+    "chat.error.refresh": {
+      "text": "Could not load new messages. Try again.",
+      "comment": "Fetching new messages for the conversation failed."
+    },
+    "chat.error.reject_join": {
+      "text": "Could not reject the join request. Try again.",
+      "comment": "Rejecting someone's request to join the group failed."
+    },
+    "chat.error.remove_member": {
+      "text": "Could not remove this member. Try again.",
+      "comment": "Removing someone from a group failed."
+    },
+    "chat.error.revoke_link": {
+      "text": "Could not revoke the invite link. Try again.",
+      "comment": "Revoking a group invite link failed."
+    },
+    "chat.error.transfer": {
+      "text": "Could not transfer ownership. Try again.",
+      "comment": "Handing a group's ownership to another member failed."
+    },
+    "chat.forward.empty": {
+      "text": "No conversations to forward to",
+      "comment": "The Forward to list has no conversation the message can be sent to."
+    },
+    "chat.forward.error.generic": {
+      "text": "Could not forward the message. Try again.",
+      "comment": "Forwarding a message to the chosen conversation failed."
+    },
+    "chat.forward.from": {
+      "text": "Forwarded from {name}",
+      "comment": "Line at the top of a forwarded message; {name} is who wrote the original."
+    },
+    "chat.forward.label": {
+      "text": "Forwarded",
+      "comment": "Line at the top of a forwarded message whose original author is not named."
+    },
+    "chat.forward.list_label": {
+      "text": "Conversations",
+      "comment": "Accessible name of the list of conversations in Forward to."
+    },
+    "chat.forward.picker_title": {
+      "text": "Forward to",
+      "comment": "Title of the list of conversations to forward a message to."
+    },
+    "chat.forward.search_label": {
+      "text": "Search conversations",
+      "comment": "Accessible name of the search field in the Forward to list."
+    },
+    "chat.gif.attribution": {
+      "text": "Powered by GIPHY",
+      "comment": "Required attribution under GIF results. GIPHY is a brand name; keep it as is."
+    },
+    "chat.gif.load_failed": {
+      "text": "Couldn't load this GIF · Retry",
+      "comment": "In place of a GIF that failed to load; tapping retries."
+    },
+    "chat.gif.loading": {
+      "text": "Loading GIFs",
+      "comment": "Accessible name of the placeholders shown while GIFs load."
+    },
+    "chat.gif.no_results": {
+      "text": "No GIFs found",
+      "comment": "GIF search found nothing."
+    },
+    "chat.gif.note_dismiss": {
+      "text": "Got it",
+      "comment": "Button that dismisses the note about how GIF search works."
+    },
+    "chat.gif.open_full": {
+      "text": "Open GIF full screen",
+      "comment": "Accessible name of a GIF in a message; tapping shows it full screen."
+    },
+    "chat.gif.privacy_note": {
+      "text": "GIF search goes through Lakko's server, which sees what you search for. Sent GIFs are encrypted like any file.",
+      "comment": "Note at the top of the GIF picker: GIF search goes through Lakko's server, which learns the search terms; a sent GIF is encrypted.",
+      "security_critical": true
+    },
+    "chat.gif.rate_limited": {
+      "text": "Too many searches — try again in a moment",
+      "comment": "Too many GIF searches in a short time."
+    },
+    "chat.gif.search": {
+      "text": "Search GIF",
+      "comment": "Search field in the GIF picker."
+    },
+    "chat.gif.send": {
+      "text": "Send GIF",
+      "comment": "Accessible name of one GIF in the picker; choosing it sends it."
+    },
+    "chat.gif.trending": {
+      "text": "Trending",
+      "comment": "Heading above popular GIFs shown before anything is searched."
+    },
+    "chat.gif.unavailable": {
+      "text": "GIFs are unavailable right now",
+      "comment": "The GIF service cannot be reached right now."
+    },
+    "chat.group.default_name": {
+      "text": "New group",
+      "comment": "Title of a group that has no name and no other members yet."
+    },
+    "chat.group.fallback_name": {
+      "text": "Group",
+      "comment": "Name shown for a group when nothing better is known."
+    },
+    "chat.group.title_more": {
+      "text": "{names} +{count}",
+      "comment": "Title of a group with no name: {names} are the first three members' names, {count} how many more members there are."
+    },
+    "chat.group_name.empty": {
+      "text": "No name yet",
+      "comment": "Group info, name row, for a group that has no shared name, shown to someone who cannot rename it."
+    },
+    "chat.group_name.error.character": {
+      "text": "The name contains a character that cannot be shown.",
+      "comment": "Group name refused: it contains an invisible or control character."
+    },
+    "chat.group_name.error.generic": {
+      "text": "That name cannot be used.",
+      "comment": "Group name refused for any other reason."
+    },
+    "chat.group_name.error.line_break": {
+      "text": "The name must be one line.",
+      "comment": "Group name refused: it contains a line break."
+    },
+    "chat.group_name.error.save": {
+      "text": "Could not rename the group. Try again.",
+      "comment": "Saving a new group name failed."
+    },
+    "chat.group_name.error.too_long": {
+      "text": "The name is too long.",
+      "comment": "Group name refused: too long."
+    },
+    "chat.group_name.label": {
+      "text": "Group name",
+      "comment": "Label of the group's name field in group info."
+    },
+    "chat.group_name.only_admins": {
+      "text": "Only admins can rename this group",
+      "comment": "Shown when someone who is not an owner or admin tries to rename a group."
+    },
+    "chat.header.back": {
+      "text": "Back to chats",
+      "comment": "Button at the start of the conversation header that returns to the conversation list."
+    },
+    "chat.info.channel": {
+      "text": "Channel info",
+      "comment": "Button in the channel header and title of the layer it opens."
+    },
+    "chat.info.contact": {
+      "text": "Contact info",
+      "comment": "Button in the conversation header and title of the layer it opens: the other person's details."
+    },
+    "chat.info.group": {
+      "text": "Group info",
+      "comment": "Button in the conversation header and title of the layer it opens: the group's details and members."
+    },
+    "chat.invite_link.cleared": {
+      "text": "Link cleared (an inline link has nothing to revoke).",
+      "comment": "Notice after clearing an invite link that has no server record to revoke."
+    },
+    "chat.invite_link.copy": {
+      "text": "Copy link",
+      "comment": "Button that copies the invite link."
+    },
+    "chat.invite_link.create": {
+      "text": "Create invite link",
+      "comment": "Button in group info that makes a link anyone can use to ask to join."
+    },
+    "chat.invite_link.label": {
+      "text": "Invite link",
+      "comment": "Accessible name of the row showing the group's invite link."
+    },
+    "chat.invite_link.revoke": {
+      "text": "Revoke",
+      "comment": "Button that makes the invite link stop working."
+    },
+    "chat.invite_link.revoked": {
+      "text": "Invite link revoked.",
+      "comment": "Notice after the group invite link was revoked: it no longer works."
+    },
+    "chat.invite_link.share": {
+      "text": "Share",
+      "comment": "Button that opens the system share sheet for the invite link."
+    },
+    "chat.leave.action": {
+      "text": "Leave group",
+      "comment": "Button in group info that asks to leave the group."
+    },
+    "chat.leave.body": {
+      "text": "You will keep receiving messages until an owner or an admin applies your request. You will need a new invite to rejoin.",
+      "comment": "Body of the dialog confirming that the reader leaves a group. Leaving takes effect only when an owner or admin applies it.",
+      "security_critical": true
+    },
+    "chat.leave.confirm": {
+      "text": "Leave",
+      "comment": "Destructive button that leaves a group."
+    },
+    "chat.leave.confirm_named": {
+      "text": "Leave {name}",
+      "comment": "Button in the dialog confirming that the reader leaves a group; {name} is the group's name."
+    },
+    "chat.leave.requested": {
+      "text": "Leave requested. It applies when an owner or an admin applies the change.",
+      "comment": "Notice after the reader asked to leave a group."
+    },
+    "chat.leave.title": {
+      "text": "Leave this group?",
+      "comment": "Title of the dialog confirming that the reader leaves a group."
+    },
+    "chat.media.and_more": {
+      "text": "{label} and {count, plural, one {# more} other {# more}}",
+      "comment": "Summary of a message with several attachments: {label} is the kind of the first one (for example Photo), {count} how many more follow."
+    },
+    "chat.media.audio": {
+      "text": "Audio",
+      "comment": "Chat list preview or reply quote for a message that is an audio file without text."
+    },
+    "chat.media.file": {
+      "text": "File",
+      "comment": "Kind of a message that holds any other attached file; shown in the chat list preview."
+    },
+    "chat.media.gif": {
+      "text": "GIF",
+      "comment": "Kind of a message that holds an animated GIF; shown in the chat list preview."
+    },
+    "chat.media.not_sent_retry": {
+      "text": "Not sent · Retry",
+      "comment": "Under a media message that could not be sent; tapping retries."
+    },
+    "chat.media.open_full_hint": {
+      "text": "Opens it full screen",
+      "comment": "Screen reader hint on a photo in a conversation."
+    },
+    "chat.media.photo": {
+      "text": "Photo",
+      "comment": "Kind of a message that holds a picture; shown in the chat list preview."
+    },
+    "chat.media.play_failed": {
+      "text": "Couldn't play this message",
+      "comment": "Under a voice or video message that failed to play; tapping tries again."
+    },
+    "chat.media.row_not_sent": {
+      "text": "{label}, not sent",
+      "comment": "Screen-reader label of a voice message, video message or GIF whose send failed. {label} describes the message."
+    },
+    "chat.media.row_sending": {
+      "text": "{label}, sending",
+      "comment": "Screen-reader label of a voice message, video message or GIF that is still being sent. {label} describes the message."
+    },
+    "chat.media.video": {
+      "text": "Video",
+      "comment": "Kind of a message that holds a video file; shown in the chat list preview."
+    },
+    "chat.media.video_message": {
+      "text": "Video message",
+      "comment": "Kind of a message that holds a round recorded video note; shown in the chat list preview."
+    },
+    "chat.media.voice_message": {
+      "text": "Voice message",
+      "comment": "Kind of a message that holds a recorded voice message; shown in the chat list preview and where the message is summarised."
+    },
+    "chat.media.with_duration": {
+      "text": "{label}, {duration}",
+      "comment": "Screen-reader label of a voice or video message: {label} is its kind (Voice message, Video message), {duration} its spoken length."
+    },
+    "chat.members.add.action": {
+      "text": "Add member",
+      "comment": "Menu item in a group's header menu that opens group info with the add-member field."
+    },
+    "chat.members.add.done": {
+      "text": "{name} added.",
+      "comment": "Notice after someone was added to the group."
+    },
+    "chat.members.add.error.no_bundle": {
+      "text": "This person has not finished setting up Lakko yet. Try again later.",
+      "comment": "Adding someone failed because their account is not fully set up."
+    },
+    "chat.members.add.error.some_failed": {
+      "text": "Could not add {names}. Add them from the members panel.",
+      "comment": "After creating a group, some of the chosen people could not be added; {names} lists them."
+    },
+    "chat.members.add.error.unknown_username": {
+      "text": "No account is registered as {name}.",
+      "comment": "Adding someone by username failed: nobody has that username. {name} is the username with an @ in front."
+    },
+    "chat.members.add.placeholder": {
+      "text": "@username",
+      "comment": "Placeholder of the field for adding someone to a group by username. Keep the @."
+    },
+    "chat.members.add.requested": {
+      "text": "{name} requested. They join when an owner or an admin applies the change.",
+      "comment": "Notice after the reader asked to add {name}; the addition is applied later by an owner or admin."
+    },
+    "chat.members.add.submit": {
+      "text": "Add",
+      "comment": "Button that adds the person whose username was typed."
+    },
+    "chat.members.admin.demoted": {
+      "text": "Removed as admin.",
+      "comment": "Notice after the owner removed a member's admin role."
+    },
+    "chat.members.admin.make": {
+      "text": "Make admin",
+      "comment": "Button next to a member in the member list: make them an admin."
+    },
+    "chat.members.admin.marker": {
+      "text": "Admin",
+      "comment": "Marker next to a member who is an admin."
+    },
+    "chat.members.admin.promoted": {
+      "text": "Promoted to admin.",
+      "comment": "Notice after the owner made a member an admin."
+    },
+    "chat.members.admin.remove": {
+      "text": "Remove admin",
+      "comment": "Button next to an admin in the member list: take away their admin role."
+    },
+    "chat.members.admin.requested": {
+      "text": "Change requested. It applies when an owner or an admin applies the change.",
+      "comment": "Notice after an admin role change was requested and not yet applied."
+    },
+    "chat.members.count": {
+      "text": "{count, plural, one {# member} other {# members}}",
+      "comment": "Second line of a group conversation's header: how many members the group has."
+    },
+    "chat.members.devices": {
+      "text": "{count, plural, one {# device} other {# devices}}",
+      "comment": "Under a member's name when they use the group from several devices."
+    },
+    "chat.members.frozen": {
+      "text": "This list stopped updating when your membership ended.",
+      "comment": "Line at the top of the member list of a group the reader is no longer in: the list is no longer current."
+    },
+    "chat.members.heading": {
+      "text": "Members ({count})",
+      "comment": "Heading of the member list in group info; {count} is how many people are in the group."
+    },
+    "chat.members.join.approve": {
+      "text": "Approve",
+      "comment": "Button that approves a request to join the group."
+    },
+    "chat.members.join.approved_added": {
+      "text": "Join approved. They have been added to the group.",
+      "comment": "Notice after approving a join request that was applied at once."
+    },
+    "chat.members.join.approved_requested": {
+      "text": "Join approved. They join when an owner or an admin applies the change.",
+      "comment": "Notice after approving a join request that is applied later."
+    },
+    "chat.members.join.heading": {
+      "text": "Join requests ({count})",
+      "comment": "Heading of the list of people asking to join through a link."
+    },
+    "chat.members.join.link_unknown": {
+      "text": "Invite link not known",
+      "comment": "Under a join request when it is not known whose link it came through."
+    },
+    "chat.members.join.reject": {
+      "text": "Reject",
+      "comment": "Button that rejects a request to join the group."
+    },
+    "chat.members.join.rejected": {
+      "text": "Join request rejected.",
+      "comment": "Notice after rejecting a join request."
+    },
+    "chat.members.join.via_former": {
+      "text": "via {name} · not a current member",
+      "comment": "Under a join request: the invite link was made by {name}, who is no longer in the group.",
+      "security_critical": true
+    },
+    "chat.members.join.via_member": {
+      "text": "via {name} · member",
+      "comment": "Under a join request: the invite link was made by {name}, who is still in the group."
+    },
+    "chat.members.pending.adds_heading": {
+      "text": "Waiting to be added ({count})",
+      "comment": "Heading of the list of people whose addition was requested but not applied yet."
+    },
+    "chat.members.pending.count": {
+      "text": "{count, plural, one {# membership change is waiting to apply.} other {# membership changes are waiting to apply.}}",
+      "comment": "Notice in group info: membership changes requested but not applied yet."
+    },
+    "chat.members.pending.liveness": {
+      "text": "Membership changes are applied by the group owner or an admin. They will apply automatically when one does.",
+      "comment": "Second line of the notice about waiting membership changes."
+    },
+    "chat.members.pending.queue": {
+      "text": "{count, plural, one {# change is now waiting to apply.} other {# changes are now waiting to apply.}}",
+      "comment": "Added after an admin approves a join request: how many membership changes are now waiting to be applied."
+    },
+    "chat.members.pending.waiting_added": {
+      "text": "Waiting to be added.",
+      "comment": "Next to a person whose addition to the group was requested but not applied yet."
+    },
+    "chat.members.pending.waiting_leave": {
+      "text": "Waiting to leave.",
+      "comment": "Next to the reader in the member list: they asked to leave and it has not been applied yet."
+    },
+    "chat.members.pending.waiting_removed": {
+      "text": "Waiting to be removed.",
+      "comment": "Next to a member in the member list: their removal was requested and has not been applied yet."
+    },
+    "chat.members.remove.body": {
+      "text": "They will keep receiving messages until an owner or an admin applies the change.",
+      "comment": "Body of the dialog confirming a removal from a group: the removed person can still read new messages until the removal is applied.",
+      "security_critical": true
+    },
+    "chat.members.remove.confirm_named": {
+      "text": "Remove {name}",
+      "comment": "Button in the dialog confirming a removal from a group; {name} is the member's name."
+    },
+    "chat.members.remove.done": {
+      "text": "Member removed.",
+      "comment": "Notice after someone was removed from the group."
+    },
+    "chat.members.remove.requested": {
+      "text": "Removal requested. It applies when an owner or an admin applies the change.",
+      "comment": "Notice after the reader asked to remove someone; the removal is applied later.",
+      "security_critical": true
+    },
+    "chat.members.remove.requested_short": {
+      "text": "Removal requested.",
+      "comment": "Short notice after the reader asked to remove someone from the group."
+    },
+    "chat.members.remove.title": {
+      "text": "Remove this member?",
+      "comment": "Title of the dialog confirming that a member is removed from a group."
+    },
+    "chat.members.row_label": {
+      "text": "{name}, {state}",
+      "comment": "Accessible name of a member row that has a pending state; {state} is for example Waiting to be removed."
+    },
+    "chat.members.title": {
+      "text": "Members",
+      "comment": "Accessible name of the member list in group info."
+    },
+    "chat.members.unapplied.add_line": {
+      "text": "Not added. You can add them again.",
+      "comment": "Under a person whose addition to the group was never applied."
+    },
+    "chat.members.unapplied.explanation": {
+      "text": "These changes did not apply and will not be retried on their own.",
+      "comment": "Line under the heading listing membership changes that were not applied: they will not be tried again by themselves."
+    },
+    "chat.members.unapplied.heading": {
+      "text": "Not applied ({count})",
+      "comment": "Heading of the list of membership changes that were never applied; {count} is how many."
+    },
+    "chat.members.unapplied.join_line": {
+      "text": "Not applied. Ask them to request to join again.",
+      "comment": "Under an approved join request that was never applied: the person must ask again."
+    },
+    "chat.members.unnamed": {
+      "text": "Member",
+      "comment": "Name shown for a group member who has published no name and is not a contact."
+    },
+    "chat.message.actions": {
+      "text": "Message actions",
+      "comment": "Accessible name of the menu that opens on a message."
+    },
+    "chat.message.close_actions": {
+      "text": "Close message actions",
+      "comment": "Screen-reader label of the dimmed area around the message action menu; tapping it closes the menu."
+    },
+    "chat.message.deleted": {
+      "text": "Message deleted",
+      "comment": "Placeholder shown in place of a message its author deleted, in the timeline and as the chat list preview."
+    },
+    "chat.message.edit": {
+      "text": "Edit",
+      "comment": "Message menu item: change the text of the reader's own message."
+    },
+    "chat.message.edited": {
+      "text": "(edited)",
+      "comment": "Marker after the text of a message its author changed."
+    },
+    "chat.message.forward": {
+      "text": "Forward",
+      "comment": "Message menu item and selection-bar button: send the message to another conversation."
+    },
+    "chat.message.media_fallback": {
+      "text": "Media message",
+      "comment": "Screen reader name of a selectable message that has attachments and no text."
+    },
+    "chat.message.more_reactions": {
+      "text": "More reactions",
+      "comment": "Button in the message menu that opens the full emoji picker for reacting."
+    },
+    "chat.message.not_sent": {
+      "text": "Not sent",
+      "comment": "In place of the time under the reader's message when it could not be sent."
+    },
+    "chat.message.pin": {
+      "text": "Pin",
+      "comment": "Message menu item: pin the message."
+    },
+    "chat.message.react": {
+      "text": "React",
+      "comment": "Accessible name of the row of reaction emoji at the top of the message menu."
+    },
+    "chat.message.react_with": {
+      "text": "React {emoji}",
+      "comment": "Accessible name of one reaction button; {emoji} is the emoji itself."
+    },
+    "chat.message.read": {
+      "text": "Read",
+      "comment": "Tooltip of the double check under the reader's message: everyone else has read it."
+    },
+    "chat.message.read_by": {
+      "text": "Read by {names}",
+      "comment": "Tooltip of the double check under the reader's message; {names} lists who read it."
+    },
+    "chat.message.reply": {
+      "text": "Reply",
+      "comment": "Message menu item: answer this message with a quote of it."
+    },
+    "chat.message.select": {
+      "text": "Select",
+      "comment": "Message menu item: start selecting several messages, this one first."
+    },
+    "chat.message.sending": {
+      "text": "Sending...",
+      "comment": "In place of the time under the reader's message while it is being sent."
+    },
+    "chat.message.sent": {
+      "text": "Sent",
+      "comment": "Tooltip of the single check under the reader's message: sent, not yet read by everyone."
+    },
+    "chat.message.unpin": {
+      "text": "Unpin",
+      "comment": "Message menu item: remove the pin from the message."
+    },
+    "chat.not_found.back": {
+      "text": "Back to Chats",
+      "comment": "Link back to the conversation list."
+    },
+    "chat.not_found.body": {
+      "text": "This link does not match a conversation on this device.",
+      "comment": "Body of the page shown for a link to a conversation this device does not have."
+    },
+    "chat.not_found.title": {
+      "text": "Conversation not found",
+      "comment": "Title of the page shown for a link to a conversation this device does not have."
+    },
+    "chat.peer.fallback_name": {
+      "text": "Peer",
+      "comment": "Name shown for the other person in a one-to-one chat when nothing better is known."
+    },
+    "chat.photo.load_failed": {
+      "text": "Couldn't load photo",
+      "comment": "Shown over a photo that failed to load."
+    },
+    "chat.photo.load_failed_retry": {
+      "text": "Couldn't load photo, tap to retry",
+      "comment": "Accessible name of a photo in a message that failed to load."
+    },
+    "chat.photo.loading": {
+      "text": "Photo, loading",
+      "comment": "Accessible name of a photo in a message while it loads."
+    },
+    "chat.photo.open": {
+      "text": "Open photo",
+      "comment": "Screen-reader action of a photo in a message: opens it full screen."
+    },
+    "chat.photo.viewer": {
+      "text": "Photo viewer",
+      "comment": "Screen-reader label of the full-screen photo viewer."
+    },
+    "chat.photo.viewer_hint": {
+      "text": "Pinch to zoom. Swipe down to close.",
+      "comment": "Screen reader hint on a photo opened full screen."
+    },
+    "chat.pin.detail_personal": {
+      "text": "Only on this device",
+      "comment": "Line under the option that pins a message for the reader only: nobody else sees the pin."
+    },
+    "chat.pin.detail_shared": {
+      "text": "Every member sees it",
+      "comment": "Line under the option that pins a message for everyone in the conversation."
+    },
+    "chat.pin.for_both": {
+      "text": "Pin for both",
+      "comment": "Option in a one-to-one chat: pin the message for both people."
+    },
+    "chat.pin.for_everyone": {
+      "text": "Pin for everyone",
+      "comment": "Option in a group: pin the message for every member."
+    },
+    "chat.pin.for_me": {
+      "text": "Pin for me",
+      "comment": "Option: pin the message for the reader only."
+    },
+    "chat.pin.sheet_title": {
+      "text": "Pin message",
+      "comment": "Title of the sheet asking whether to pin a message for the reader only or for everyone."
+    },
+    "chat.pinned_bar.all": {
+      "text": "All pinned messages",
+      "comment": "Button on the pinned-message bar that opens the list of every pinned message."
+    },
+    "chat.pinned_bar.for_you": {
+      "text": "For you",
+      "comment": "Shown in the pinned-message bar in place of the author, when the pin is the reader's own personal pin."
+    },
+    "chat.pinned_bar.hint": {
+      "text": "Shows the message",
+      "comment": "Screen reader hint on the pinned message bar: tapping scrolls to the pinned message."
+    },
+    "chat.pinned_bar.label": {
+      "text": "Pinned message",
+      "comment": "Accessible name of the bar above the timeline that shows a pinned message."
+    },
+    "chat.pinned_bar.label_of": {
+      "text": "Pinned message {index} of {count}",
+      "comment": "Accessible name of the pinned-message bar when several messages are pinned; {index} is which one is shown."
+    },
+    "chat.pinned_bar.list_title": {
+      "text": "Pinned messages",
+      "comment": "Title of the list of every pinned message in the conversation."
+    },
+    "chat.reaction.add_title": {
+      "text": "React - Reacted by {names}",
+      "comment": "Tooltip of a reaction someone else made: tapping adds the reader's; {names} lists who reacted."
+    },
+    "chat.reaction.reacted_by": {
+      "text": "Reacted by {names}",
+      "comment": "Tooltip of a reaction under a message; {names} lists who reacted with this emoji."
+    },
+    "chat.reaction.reacted_by_title": {
+      "text": "Reacted by",
+      "comment": "Heading of the list of people who reacted with an emoji, opened by a long press on a reaction."
+    },
+    "chat.reaction.remove_title": {
+      "text": "Remove your reaction - Reacted by {names}",
+      "comment": "Tooltip of a reaction the reader made: tapping removes it; {names} lists who reacted."
+    },
+    "chat.reaction.single_emoji": {
+      "text": "A reaction must be a single emoji.",
+      "comment": "The reader tried to react with something that is not exactly one emoji."
+    },
+    "chat.reauth.action": {
+      "text": "Sign in again",
+      "comment": "Button that signs out and returns to sign-in."
+    },
+    "chat.reauth.body": {
+      "text": "The keys needed to decrypt and sign messages are not available in this session. Sign in again to open this chat.",
+      "comment": "Body of the page shown when this session cannot open a chat without signing in again."
+    },
+    "chat.reauth.title": {
+      "text": "Sign in again",
+      "comment": "Title of the page shown when this session cannot open a chat without signing in again."
+    },
+    "chat.record.bar_video": {
+      "text": "Recording a video message",
+      "comment": "Accessible name of the recording bar while a round video message is recorded."
+    },
+    "chat.record.bar_voice": {
+      "text": "Recording a voice message",
+      "comment": "Accessible name of the recording bar that replaces the message field."
+    },
+    "chat.record.cancelled": {
+      "text": "Cancelled",
+      "comment": "Short notice after a recording was cancelled."
+    },
+    "chat.record.delete": {
+      "text": "Delete recording",
+      "comment": "Accessible name of the button that throws away the recording."
+    },
+    "chat.record.denied_camera": {
+      "text": "Lakko needs camera access to record video messages. Allow camera access in your browser's site settings.",
+      "comment": "Card shown when the browser refused the camera."
+    },
+    "chat.record.denied_camera_app": {
+      "text": "Lakko needs camera access to record video messages",
+      "comment": "Card shown when camera access is denied for this app; an Open Settings button follows."
+    },
+    "chat.record.denied_microphone": {
+      "text": "Lakko needs microphone access to record voice messages. Allow microphone access in your browser's site settings.",
+      "comment": "Card shown when the browser refused the microphone."
+    },
+    "chat.record.denied_microphone_app": {
+      "text": "Lakko needs microphone access to record voice messages",
+      "comment": "Card shown when microphone access is denied for this app; an Open Settings button follows."
+    },
+    "chat.record.finishing": {
+      "text": "Finishing recording",
+      "comment": "Accessible name of the spinner shown while a recording is being saved."
+    },
+    "chat.record.flip_camera": {
+      "text": "Flip camera",
+      "comment": "Button that switches between the front and back camera while recording a video message."
+    },
+    "chat.record.flip_failed": {
+      "text": "Couldn't switch camera",
+      "comment": "Short notice when switching between the front and back camera failed while recording a video message."
+    },
+    "chat.record.hint_hold": {
+      "text": "Hold to record",
+      "comment": "Short hint after a quick tap on the record button: recording needs a press and hold."
+    },
+    "chat.record.in_call": {
+      "text": "Unavailable during a call",
+      "comment": "Why the record button is disabled: a call is using the microphone."
+    },
+    "chat.record.locked_hint": {
+      "text": "Starts a locked recording",
+      "comment": "Screen reader hint on the record button: activating it starts a recording that runs until it is stopped."
+    },
+    "chat.record.no_camera": {
+      "text": "No camera found",
+      "comment": "Short notice: a video message cannot be recorded because there is no camera."
+    },
+    "chat.record.open_settings": {
+      "text": "Open Settings",
+      "comment": "Button on the permission card: opens the system settings for this app."
+    },
+    "chat.record.pause": {
+      "text": "Pause recording",
+      "comment": "Button that pauses listening to the recorded voice message before it is sent."
+    },
+    "chat.record.pause_video": {
+      "text": "Pause video message",
+      "comment": "Button on a recorded video message preview that pauses it."
+    },
+    "chat.record.play": {
+      "text": "Play recording, {duration}",
+      "comment": "Button that plays the recorded voice message before it is sent; {duration} is its length written out."
+    },
+    "chat.record.play_video_sound": {
+      "text": "Play video message with sound",
+      "comment": "Button on a recorded video message preview that plays it with sound."
+    },
+    "chat.record.position": {
+      "text": "Recording position",
+      "comment": "Screen-reader label of the slider that moves through a recording before it is sent."
+    },
+    "chat.record.recording_duration": {
+      "text": "Recording, {duration}",
+      "comment": "Screen reader label of the bar while a voice message is recorded; {duration} is the spoken length so far (for example 12 seconds)."
+    },
+    "chat.record.send": {
+      "text": "Send recording",
+      "comment": "Button that sends a finished voice or video message recording."
+    },
+    "chat.record.silent_mic": {
+      "text": "No sound from the microphone",
+      "comment": "Shown on the recording bar when the microphone picks up nothing."
+    },
+    "chat.record.slide_cancel": {
+      "text": "‹ Slide to cancel",
+      "comment": "Hint on the recording bar while the record button is held: slide sideways to cancel. The arrow points the way to slide."
+    },
+    "chat.record.start_failed": {
+      "text": "Couldn't start recording",
+      "comment": "Short notice: the recording could not start."
+    },
+    "chat.record.starting": {
+      "text": "Starting…",
+      "comment": "Shown on the recording bar while the microphone or camera is being opened."
+    },
+    "chat.record.stop": {
+      "text": "Stop recording",
+      "comment": "Accessible name of the button that stops a hands-free recording."
+    },
+    "chat.record.stop_short": {
+      "text": "Stop",
+      "comment": "Button that stops a hands-free recording."
+    },
+    "chat.record.switch_to_video": {
+      "text": "Switch to video message",
+      "comment": "Button that switches the record button to recording round video messages."
+    },
+    "chat.record.switch_to_voice": {
+      "text": "Switch to voice message",
+      "comment": "Button that switches the record button to recording voice messages."
+    },
+    "chat.record.unsupported_video": {
+      "text": "Video messages can't be recorded in this browser",
+      "comment": "Why the record button is disabled: this browser cannot record video messages."
+    },
+    "chat.record.unsupported_video_device": {
+      "text": "Video messages can't be recorded on this device",
+      "comment": "Shown on the record button when this phone has no video format a video message can use."
+    },
+    "chat.record.unsupported_voice": {
+      "text": "Voice messages can't be recorded in this browser",
+      "comment": "Why the record button is disabled: this browser cannot record voice messages."
+    },
+    "chat.record.video": {
+      "text": "Record video message",
+      "comment": "Accessible name of the record button in video mode."
+    },
+    "chat.record.video_ready": {
+      "text": "Video message ready",
+      "comment": "Shown on the recording bar when a video message is recorded and waiting to be sent."
+    },
+    "chat.record.video_tooltip": {
+      "text": "Record video message: hold to record, tap to switch to voice",
+      "comment": "Tooltip of the record button in video mode."
+    },
+    "chat.record.voice": {
+      "text": "Record voice message",
+      "comment": "Accessible name of the record button in voice mode."
+    },
+    "chat.record.voice_tooltip": {
+      "text": "Record voice message: hold to record, tap to switch to video",
+      "comment": "Tooltip of the record button in voice mode."
+    },
+    "chat.refusal.add_not_admin": {
+      "text": "Only the group owner or an admin can add members.",
+      "comment": "Refusal: the reader tried to add someone to a group but is neither its owner nor an admin."
+    },
+    "chat.refusal.device_binding": {
+      "text": "Something is wrong with this device's key. Remove it from Devices and add it again.",
+      "comment": "Refusal: this device's key is not accepted by the group; the person should remove the device in Devices and add it again."
+    },
+    "chat.refusal.device_limit": {
+      "text": "{count, plural, one {Up to # device per account. Remove one first.} other {Up to # devices per account. Remove one first.}}",
+      "comment": "Refusal: the account already has the most devices it may have in a conversation; one must be removed first."
+    },
+    "chat.refusal.fallback": {
+      "text": "This change could not be requested.",
+      "comment": "A change to a group's membership or roles was refused for a reason that has no sentence of its own."
+    },
+    "chat.refusal.join_not_kept": {
+      "text": "A join request arrived while too many were already waiting, so it was not kept. Ask the person to send it again later.",
+      "comment": "Shown to a group admin: a join request arrived when too many were waiting and was dropped; the person should send it again later."
+    },
+    "chat.refusal.joiner_member": {
+      "text": "That person has already joined this group.",
+      "comment": "Refusal: the person whose join request is being approved is already in the group."
+    },
+    "chat.refusal.no_join_request": {
+      "text": "That join request is no longer waiting.",
+      "comment": "Refusal: the join request being approved or rejected is no longer pending."
+    },
+    "chat.refusal.not_owner": {
+      "text": "Only the group owner can change admins or transfer ownership.",
+      "comment": "Refusal: only the group owner can make or remove admins or hand ownership to someone else."
+    },
+    "chat.refusal.owner_cannot_leave": {
+      "text": "The group owner cannot leave the group.",
+      "comment": "Refusal: a group's owner cannot leave it (ownership must be transferred first)."
+    },
+    "chat.refusal.owner_not_member": {
+      "text": "Ownership can only be held by a current member of this group.",
+      "comment": "Refusal: ownership can only be handed to someone who is currently in the group."
+    },
+    "chat.refusal.owner_unremovable": {
+      "text": "The group owner cannot be removed.",
+      "comment": "Refusal: a group's owner cannot be removed from it."
+    },
+    "chat.refusal.pending_full": {
+      "text": "Too many changes are already waiting to apply.",
+      "comment": "Refusal: too many membership changes in this group are waiting to be applied."
+    },
+    "chat.refusal.remove_not_admin": {
+      "text": "Only the group owner or an admin can remove members.",
+      "comment": "Refusal: the reader tried to remove someone from a group but is neither its owner nor an admin."
+    },
+    "chat.refusal.retry_many": {
+      "text": "Wait for them to land, then try again.",
+      "comment": "Added after a refusal caused by pending changes: try again once they are applied."
+    },
+    "chat.refusal.retry_one": {
+      "text": "Wait for it to land, then try again.",
+      "comment": "Added after a refusal caused by one pending change: try again once it is applied."
+    },
+    "chat.refusal.role_change_pending": {
+      "text": "A role change is already waiting to apply.",
+      "comment": "Refusal: another change of admins or owner in this group has not been applied yet."
+    },
+    "chat.refusal.with_retry": {
+      "text": "{fact} {retry}",
+      "comment": "A refusal followed by when to try again: {fact} says what was refused, {retry} when to try again."
+    },
+    "chat.reply.cancel": {
+      "text": "Cancel reply",
+      "comment": "Button that closes the reply strip above the composer."
+    },
+    "chat.reply.fallback_excerpt": {
+      "text": "Message",
+      "comment": "Stands in for the quoted text of a reply when the quoted message carried none."
+    },
+    "chat.reply.quote": {
+      "text": "Reply",
+      "comment": "Accessible name of the quote block at the top of a reply when the quoted author is unknown."
+    },
+    "chat.reply.quote_to": {
+      "text": "Reply to {name}",
+      "comment": "Accessible name of the quote block at the top of a reply; {name} is who wrote the quoted message."
+    },
+    "chat.reply.strip_label": {
+      "text": "Replying to {name}",
+      "comment": "Accessible name of the strip above the composer showing the message being replied to."
+    },
+    "chat.select.count": {
+      "text": "{count, plural, one {# selected} other {# selected}}",
+      "comment": "Middle of the selection bar: how many messages are selected."
+    },
+    "chat.select.count_limit": {
+      "text": "{count, plural, one {# selected, the limit} other {# selected, the limit}}",
+      "comment": "Middle of the selection bar when the most messages that can be selected at once are selected."
+    },
+    "chat.select.delete_helper": {
+      "text": "Only your own messages can be deleted.",
+      "comment": "Line under the selection bar when the selected messages include someone else's: only the reader's own messages can be deleted."
+    },
+    "chat.select.delete_title": {
+      "text": "{count, plural, one {Delete # message?} other {Delete # messages?}}",
+      "comment": "Title of the dialog confirming deletion of the selected messages. The messages are deleted for everyone in the conversation.",
+      "security_critical": true
+    },
+    "chat.select.deleted_of": {
+      "text": "Deleted {done} of {total}.",
+      "comment": "Shown when deleting several selected messages stopped at a failure; the rest stay selected."
+    },
+    "chat.select.forwarded_of": {
+      "text": "Forwarded {done} of {total}.",
+      "comment": "Shown when forwarding several selected messages stopped at a failure; the rest stay selected."
+    },
+    "chat.select.state_not_selected": {
+      "text": "Not selected",
+      "comment": "Screen reader value of a message's selection mark while selecting messages."
+    },
+    "chat.select.state_selected": {
+      "text": "Selected",
+      "comment": "Screen reader value of a message's selection mark while selecting messages."
+    },
+    "chat.select.toolbar": {
+      "text": "Selected messages",
+      "comment": "Accessible name of the bar with Forward and Delete for the selected messages."
+    },
+    "chat.send.failed": {
+      "text": "Could not send.",
+      "comment": "Shown when a message could not be sent; the message stays in the timeline with a retry action."
+    },
+    "chat.system.join_request": {
+      "text": "Join request",
+      "comment": "Line in the timeline where someone asked to join the group."
+    },
+    "chat.system.members_changed": {
+      "text": "Members changed",
+      "comment": "Line in the timeline where the group's membership changed."
+    },
+    "chat.timeline.empty": {
+      "text": "No messages yet. Say hi.",
+      "comment": "Empty conversation."
+    },
+    "chat.timeline.setting_up": {
+      "text": "This conversation is still being set up on this device.",
+      "comment": "Shown under Loading in a conversation this device has not finished joining."
+    },
+    "chat.transfer.action": {
+      "text": "Transfer ownership",
+      "comment": "Button that hands the group's ownership to another member; disabled until a new owner is chosen."
+    },
+    "chat.transfer.action_named": {
+      "text": "Make {name} the owner",
+      "comment": "Button that hands the group's ownership to the chosen member {name}."
+    },
+    "chat.transfer.become_member": {
+      "text": "Become a regular member",
+      "comment": "Option in the ownership transfer form: the current owner becomes a plain member afterwards."
+    },
+    "chat.transfer.become_member_detail": {
+      "text": "You give up every group power immediately. Only the new owner can give any of it back.",
+      "comment": "Consequence of the Become a regular member option."
+    },
+    "chat.transfer.candidate_admin": {
+      "text": "{name}, admin",
+      "comment": "Accessible name of an admin in the list of possible new owners."
+    },
+    "chat.transfer.done_admin": {
+      "text": "{name} is now the group owner. You are still an admin.",
+      "comment": "Notice after an ownership transfer applied; the former owner kept admin."
+    },
+    "chat.transfer.done_member": {
+      "text": "{name} is now the group owner. You are now a regular member.",
+      "comment": "Notice after an ownership transfer applied; the former owner became a plain member."
+    },
+    "chat.transfer.irreversible_body": {
+      "text": "Only an owner can change roles. Once you transfer this group you cannot take it back, you cannot restore your own owner role, and you cannot change your own role again unless the new owner does it for you.",
+      "comment": "Body in the ownership transfer form: the transfer is permanent and the reader loses the power to change roles.",
+      "security_critical": true
+    },
+    "chat.transfer.irreversible_title": {
+      "text": "This cannot be undone.",
+      "comment": "Headline in the ownership transfer form.",
+      "security_critical": true
+    },
+    "chat.transfer.leave_blocked": {
+      "text": "Transfer ownership first — a group cannot be left without an owner.",
+      "comment": "Why the owner's Leave group button is disabled: ownership must be handed to someone first."
+    },
+    "chat.transfer.new_owner": {
+      "text": "You are now the owner of this group.",
+      "comment": "Headline shown to a member who has just been made the group owner."
+    },
+    "chat.transfer.new_owner_body": {
+      "text": "You can add and remove members, change admins, and transfer ownership to someone else.",
+      "comment": "Shown to a member who has just been made the group owner: what they can now do."
+    },
+    "chat.transfer.new_owner_legend": {
+      "text": "New owner",
+      "comment": "Heading of the list of members to choose the new group owner from."
+    },
+    "chat.transfer.new_owner_named": {
+      "text": "{name} made you the owner of this group.",
+      "comment": "Headline shown to a member who has just been made the group owner by {name}."
+    },
+    "chat.transfer.no_candidates": {
+      "text": "There is no one else in this group to transfer it to.",
+      "comment": "Why Transfer ownership is disabled: the owner is alone in the group."
+    },
+    "chat.transfer.pending": {
+      "text": "Ownership transfer waiting to apply.",
+      "comment": "An ownership transfer was requested and has not been applied yet."
+    },
+    "chat.transfer.pending_named": {
+      "text": "Waiting to make {name} the owner.",
+      "comment": "An ownership transfer to {name} was requested and has not been applied yet."
+    },
+    "chat.transfer.requested": {
+      "text": "Ownership transfer requested. It applies when an owner or an admin applies the change.",
+      "comment": "Notice after the owner requests an ownership transfer."
+    },
+    "chat.transfer.role_change_pending": {
+      "text": "A role change is already waiting to apply. Wait for it to land, then try again.",
+      "comment": "Why Transfer ownership is disabled: another role change has not been applied yet."
+    },
+    "chat.transfer.role_legend": {
+      "text": "Your role afterwards",
+      "comment": "Heading of the choice of what the current owner becomes after the transfer."
+    },
+    "chat.transfer.stay_admin": {
+      "text": "Stay an admin",
+      "comment": "Option in the ownership transfer form: the current owner stays an admin afterwards."
+    },
+    "chat.transfer.stay_admin_detail": {
+      "text": "You can still add and remove members. You can give this up later by asking the new owner.",
+      "comment": "Consequence of the Stay an admin option."
+    },
+    "chat.transfer.unlocks_leave": {
+      "text": "Once the change is applied, you can leave the group like any other member.",
+      "comment": "Line in the ownership transfer form: after the transfer is applied the reader may leave the group."
+    },
+    "chat.typing.named": {
+      "text": "{name} is typing...",
+      "comment": "Under the group name while one member is typing."
+    },
+    "chat.typing.one_to_one": {
+      "text": "typing...",
+      "comment": "Under the name in a one-to-one chat while the other person is typing."
+    },
+    "chat.typing.several": {
+      "text": "Several people are typing...",
+      "comment": "Under the group name while more than one member is typing."
+    },
+    "chat.unpin.for_both": {
+      "text": "Unpin for both",
+      "comment": "Option in a one-to-one chat: remove the pin both people see."
+    },
+    "chat.unpin.for_everyone": {
+      "text": "Unpin for everyone",
+      "comment": "Option in a group: remove the pin every member sees."
+    },
+    "chat.unpin.for_me": {
+      "text": "Unpin for me",
+      "comment": "Option: remove the reader's own pin from the message."
+    },
+    "chat.unpin.sheet_title": {
+      "text": "Unpin message",
+      "comment": "Title of the sheet asking whether to remove the reader's own pin or the pin everyone sees."
+    },
+    "chat.upload.encrypting": {
+      "text": "Encrypting \"{name}\"…",
+      "comment": "Shown while an attached file is encrypted on this device; {name} is the file."
+    },
+    "chat.upload.encrypting_of": {
+      "text": "Encrypting \"{name}\" ({index}/{total})…",
+      "comment": "Shown while one of several attached files is encrypted; {index} is which one, {total} how many."
+    },
+    "chat.upload.preparing": {
+      "text": "Preparing \"{name}\"…",
+      "comment": "Upload progress line for the picked file {name} before encryption starts."
+    },
+    "chat.upload.selected_item": {
+      "text": "Selected item",
+      "comment": "Stands in for a picked file's name in the upload progress line until the name is known."
+    },
+    "chat.upload.uploading": {
+      "text": "Uploading \"{name}\"…",
+      "comment": "Shown while an encrypted file is uploaded; {name} is the file."
+    },
+    "chat.upload.uploading_of": {
+      "text": "Uploading \"{name}\" ({index}/{total})…",
+      "comment": "Shown while one of several encrypted files is uploaded; {index} is which one, {total} how many."
+    },
+    "chat.upload.working": {
+      "text": "Encrypting + uploading…",
+      "comment": "Shown while attached files are being prepared."
+    },
+    "chat.video.load_failed": {
+      "text": "Couldn't load video",
+      "comment": "Shown over a video that failed to load."
+    },
+    "chat.video.load_failed_retry": {
+      "text": "Couldn't load video, tap to retry",
+      "comment": "Accessible name of a video in a message that failed to load."
+    },
+    "chat.video.loading": {
+      "text": "Loading video, {size}",
+      "comment": "Accessible name of a video in a message while it loads; {size} is its file size."
+    },
+    "chat.video.open": {
+      "text": "Play video",
+      "comment": "Screen-reader action of a video in a message: opens the player."
+    },
+    "chat.video.play": {
+      "text": "Play video, {size}",
+      "comment": "Accessible name of a video in a message; {size} is its file size."
+    },
+    "chat.video.play_failed": {
+      "text": "Couldn't play this video",
+      "comment": "Shown in the full-screen video player when the video cannot be played."
+    },
+    "chat.video.player": {
+      "text": "Video player",
+      "comment": "Screen-reader label of the full-screen video player."
+    },
+    "chat.video_note.loading": {
+      "text": "Video message, loading",
+      "comment": "Screen reader label of a video message that is still downloading."
+    },
+    "chat.video_note.play": {
+      "text": "Play video message, {duration}",
+      "comment": "Button that plays a round video message; {duration} is its length written out."
+    },
+    "chat.video_note.play_sound": {
+      "text": "Play video message with sound, {duration}",
+      "comment": "Round video message playing muted: tapping plays it with sound; {duration} is its length written out."
+    },
+    "chat.video_note.poster": {
+      "text": "Video message poster",
+      "comment": "Screen-reader label of the still picture shown on a video message before it plays."
+    },
+    "chat.video_note.tap_mute": {
+      "text": "Tap to mute",
+      "comment": "Hint over a recorded video message being previewed with sound."
+    },
+    "chat.video_note.tap_sound": {
+      "text": "Tap for sound",
+      "comment": "Corner label on a round video message playing without sound."
+    },
+    "chat.voice.change_speed": {
+      "text": "Change playback speed",
+      "comment": "Screen-reader action of the playback speed control on a voice message."
+    },
+    "chat.voice.not_played": {
+      "text": "Not played",
+      "comment": "Accessible name of the dot on a voice message nobody has played yet."
+    },
+    "chat.voice.pause": {
+      "text": "Pause voice message",
+      "comment": "Button that pauses a voice message."
+    },
+    "chat.voice.play": {
+      "text": "Play voice message, {duration}",
+      "comment": "Button that plays a voice message; {duration} is its length written out."
+    },
+    "chat.voice.position": {
+      "text": "{position} of {duration}",
+      "comment": "Spoken position in a voice message; both parts are durations written out."
+    },
+    "chat.voice.seek": {
+      "text": "Seek voice message",
+      "comment": "Accessible name of the waveform used to move through a voice message."
+    },
+    "chat.voice.speed": {
+      "text": "Playback speed {rate}",
+      "comment": "Button that changes how fast a voice message plays; {rate} is the current speed, for example 1.5x."
+    },
+    "chats.action.archive": {
+      "text": "Archive",
+      "comment": "Action on a conversation: move it to the end of the list."
+    },
+    "chats.action.mute": {
+      "text": "Mute",
+      "comment": "Action on a conversation: stop notifications from it."
+    },
+    "chats.action.pin": {
+      "text": "Pin",
+      "comment": "Action on a conversation: keep it at the top of the list."
+    },
+    "chats.action.unarchive": {
+      "text": "Unarchive",
+      "comment": "Action on an archived conversation: return it to its place in the list."
+    },
+    "chats.action.unmute": {
+      "text": "Unmute",
+      "comment": "Action on a muted conversation: notify again."
+    },
+    "chats.action.unpin": {
+      "text": "Unpin",
+      "comment": "Action on a pinned conversation: stop keeping it at the top of the list."
+    },
+    "chats.compose": {
+      "text": "New",
+      "comment": "Button at the top of the conversation list that opens the menu for starting a chat, a group or a channel."
+    },
+    "chats.create.channel": {
+      "text": "Create channel",
+      "comment": "Menu item: create a channel."
+    },
+    "chats.create.chat": {
+      "text": "New chat",
+      "comment": "Menu item: start a conversation with one person."
+    },
+    "chats.create.group": {
+      "text": "Create group",
+      "comment": "Menu item: create a group."
+    },
+    "chats.create.menu": {
+      "text": "Create",
+      "comment": "Accessible name of the menu for starting a chat, a group or a channel."
+    },
+    "chats.empty.action": {
+      "text": "Start one",
+      "comment": "Button under the empty conversation list; opens the menu for starting a chat, a group or a channel."
+    },
     "chats.empty.select": {
       "text": "Select a chat to start messaging",
       "comment": "Hint in the empty main pane when no chat is open."
+    },
+    "chats.empty.title": {
+      "text": "No conversations yet",
+      "comment": "Conversation list with nothing in it."
+    },
+    "chats.lookup.action": {
+      "text": "Look up {name}",
+      "comment": "Button under a search with no local match: look the exact name up on the server. {name} is the typed name with an @ in front."
+    },
+    "chats.lookup.nothing": {
+      "text": "Nothing found for {name}.",
+      "comment": "Search in the chat list found no person or channel with this exact name; {name} is the name as typed, with an @ in front."
+    },
+    "chats.lookup.unreachable": {
+      "text": "Could not look that up. Check your connection and try again.",
+      "comment": "Search in the chat list could not reach the server."
+    },
+    "chats.new_chat.add_contact": {
+      "text": "Add a contact",
+      "comment": "Button on the empty New chat screen that opens Contacts."
+    },
+    "chats.new_chat.no_contacts": {
+      "text": "No contacts yet",
+      "comment": "Title of the New chat screen when the person has no contacts."
+    },
+    "chats.new_chat.no_contacts_body": {
+      "text": "A chat starts from someone you know.",
+      "comment": "Line under the title of the empty New chat screen."
+    },
+    "chats.new_chat.not_available": {
+      "text": "Chat not available on this device yet",
+      "comment": "Second line of a contact on the New chat screen whose chat this device does not hold yet."
+    },
+    "chats.new_group.accept_again": {
+      "text": "Accept this contact again to add them to a group.",
+      "comment": "Second line of a contact that cannot be added to a group yet, on the screen that creates a group."
+    },
+    "chats.new_group.creating": {
+      "text": "Creating...",
+      "comment": "Create group button while the group is being created."
+    },
+    "chats.new_group.error": {
+      "text": "Could not create the group. Try again.",
+      "comment": "Error when creating a group failed."
+    },
+    "chats.new_group.name_label": {
+      "text": "Group name (optional)",
+      "comment": "Label of the group name field on the screen that creates a group."
+    },
+    "chats.new_group.no_contacts": {
+      "text": "A group starts from people you already know.",
+      "comment": "Shown on the screen that creates a group when the person has no contacts."
+    },
+    "chats.new_group.open_contacts": {
+      "text": "Go to Contacts",
+      "comment": "Button that opens Contacts from the screen that creates a group."
+    },
+    "chats.new_group.title": {
+      "text": "New group",
+      "comment": "Title of the screen that creates a group."
+    },
+    "chats.preview.own": {
+      "text": "You: {text}",
+      "comment": "Chat list row, second line: the last message was sent by the reader. {text} is that message or its kind."
+    },
+    "chats.preview.sender": {
+      "text": "{name}: {text}",
+      "comment": "Chat list row of a group, second line: {name} is who sent the last message, {text} the message or its kind."
+    },
+    "chats.row.actions": {
+      "text": "Conversation actions",
+      "comment": "Accessible name of the pin / mute / archive buttons on a chat list row."
+    },
+    "chats.row.call.label": {
+      "text": "{kind} from {name}",
+      "comment": "Accessible name of the incoming-call controls on a chat list row; {kind} is the kind of call (for example Video call), {name} the conversation."
+    },
+    "chats.row.ended": {
+      "text": "You are no longer a member.",
+      "comment": "Chat list row, second line, for a group the reader is no longer in."
+    },
+    "chats.row.muted": {
+      "text": "Muted",
+      "comment": "Tooltip of the icon on a chat list row whose notifications are muted."
+    },
+    "chats.row.no_messages": {
+      "text": "No messages yet",
+      "comment": "Chat list row, second line, for a conversation with no messages."
+    },
+    "chats.row.people": {
+      "text": "{count, plural, one {# person} other {# people}}",
+      "comment": "Chat list row, second line, of a group nothing has been said in yet: how many people are in it."
+    },
+    "chats.row.pinned": {
+      "text": "Pinned",
+      "comment": "Tooltip of the icon on a chat list row pinned to the top of the list."
+    },
+    "chats.row.unread": {
+      "text": "{count, plural, one {# unread message} other {# unread messages}}",
+      "comment": "Tooltip of the unread badge on a chat list row."
+    },
+    "chats.row.unread_overflow": {
+      "text": "99+",
+      "comment": "Unread badge on a chat list row when there are 100 or more unread messages."
+    },
+    "chats.search.clear": {
+      "text": "Clear search",
+      "comment": "Screen-reader label of the button that empties the search field of the conversation list."
+    },
+    "chats.search.label": {
+      "text": "Search chats",
+      "comment": "Accessible name of the search field above the conversation list."
+    },
+    "chats.search.no_results": {
+      "text": "No results",
+      "comment": "The conversation list search matched nothing on this device."
+    },
+    "chats.search.placeholder": {
+      "text": "Search",
+      "comment": "Placeholder of the search field above the conversation list."
+    },
+    "chats.synchronizing": {
+      "text": "Synchronizing...",
+      "comment": "Status at the top of the conversation list while a newly added or restored device is still being admitted to the account's chats."
     },
     "common.adding": {
       "text": "Adding...",
@@ -380,6 +2110,10 @@
       "text": "Copy",
       "comment": "Button that copies the text next to it to the clipboard."
     },
+    "common.delete": {
+      "text": "Delete",
+      "comment": "Destructive button that deletes something."
+    },
     "common.dismiss": {
       "text": "Dismiss",
       "comment": "Button (and accessibility label) that hides a notice."
@@ -387,6 +2121,18 @@
     "common.done": {
       "text": "Done",
       "comment": "Button that finishes a flow."
+    },
+    "common.duration.minutes": {
+      "text": "{count, plural, one {# minute} other {# minutes}}",
+      "comment": "A spoken duration in minutes, for screen readers."
+    },
+    "common.duration.minutes_seconds": {
+      "text": "{minutes} {seconds}",
+      "comment": "A spoken duration of minutes and seconds; {minutes} and {seconds} are the two parts already written out."
+    },
+    "common.duration.seconds": {
+      "text": "{count, plural, one {# second} other {# seconds}}",
+      "comment": "A spoken duration in seconds, for screen readers."
     },
     "common.email": {
       "text": "Email",
@@ -436,6 +2182,10 @@
       "text": "Expand",
       "comment": "Accessibility label of the arrow that opens a collapsed row."
     },
+    "common.list_pair": {
+      "text": "{first}, {second}",
+      "comment": "Joins items of a short list of names, applied pair by pair: {first} is everything so far, {second} the next name. Use the language's list separator, without a word for 'and'."
+    },
     "common.loading": {
       "text": "Loading...",
       "comment": "Shown while a screen is still loading."
@@ -452,9 +2202,17 @@
       "text": "More options",
       "comment": "Title of a collapsed section with less common choices."
     },
+    "common.not_now": {
+      "text": "Not now",
+      "comment": "Button that closes a request (such as a permission card) without acting on it."
+    },
     "common.off": {
       "text": "Off",
       "comment": "State of a switch that is off."
+    },
+    "common.ok": {
+      "text": "OK",
+      "comment": "Button that closes a notice after it has been read."
     },
     "common.on": {
       "text": "On",
@@ -488,6 +2246,10 @@
       "text": "Removing...",
       "comment": "Remove button while the item is being removed."
     },
+    "common.retry": {
+      "text": "Retry",
+      "comment": "Button that tries a failed action again."
+    },
     "common.save": {
       "text": "Save",
       "comment": "Button that saves a change."
@@ -500,9 +2262,29 @@
       "text": "Sending...",
       "comment": "Busy label of a button while a code is being sent."
     },
+    "common.sentence_pair": {
+      "text": "{first} {second}",
+      "comment": "Two whole sentences shown together, in this order."
+    },
     "common.set_up": {
       "text": "Set up",
       "comment": "Row action that opens a page where something is set up for the first time."
+    },
+    "common.size.bytes": {
+      "text": "{size} B",
+      "comment": "A file size in bytes; {size} is the number already formatted."
+    },
+    "common.size.gb": {
+      "text": "{size} GB",
+      "comment": "A file size in gigabytes; {size} is the number already formatted with one decimal."
+    },
+    "common.size.kb": {
+      "text": "{size} kB",
+      "comment": "A file size in kilobytes; {size} is the number already formatted with one decimal."
+    },
+    "common.size.mb": {
+      "text": "{size} MB",
+      "comment": "A file size in megabytes; {size} is the number already formatted with one decimal."
     },
     "common.try_again": {
       "text": "Try again",
@@ -769,6 +2551,26 @@
     "display_name.error.unknown": {
       "text": "This name can't be used",
       "comment": "Shown under a name field for any other refusal."
+    },
+    "ds.clock_skew": {
+      "text": "Check this device's date and time.",
+      "comment": "Shown when the server refused a request because this device's clock is wrong."
+    },
+    "group.join.not_taking_requests": {
+      "text": "This group isn't taking requests yet. Try again later.",
+      "comment": "A request to join a group through a link was refused because the group is not ready to receive requests yet."
+    },
+    "group.join.request_again": {
+      "text": "Request again",
+      "comment": "Button on the group invite page that sends the join request again."
+    },
+    "group.join.wait_primary": {
+      "text": "Request sent. An admin approves it, then the change is applied to the group.",
+      "comment": "Group invite page after the person asked to join: an admin must approve, then the change is applied."
+    },
+    "group.join.wait_secondary": {
+      "text": "Neither step has a time limit. If nothing happens, you can send the request again.",
+      "comment": "Second line on the group invite page while a join request is waiting: neither step has a deadline, and the request can be sent again."
     },
     "language.name.ar": {
       "text": "Arabic",
@@ -2081,6 +3883,14 @@
       "text": "Safety numbers",
       "comment": "Row title in Settings > Security explaining safety numbers.",
       "security_critical": true
+    },
+    "tokens.action_allowance_used": {
+      "text": "You have used today's allowance for this. Try again tomorrow.",
+      "comment": "An invite link, group link or channel name refused because the account's daily allowance for it is used up."
+    },
+    "tokens.lookup_allowance_used": {
+      "text": "You have looked up a lot of people today. Try again tomorrow.",
+      "comment": "Search for a username or channel refused because the account's daily allowance of lookups is used up."
     },
     "username.a11y_hint": {
       "text": "Username: {message}",

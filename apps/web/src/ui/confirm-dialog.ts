@@ -71,6 +71,7 @@
  * unstarted rather than half-done.
  */
 
+import { t } from "../l10n";
 import { createSignal } from "solid-js";
 
 /** How the action button is coloured. `danger` is the destructive treatment
@@ -180,4 +181,18 @@ export function namedAction(
 ): string {
   const trimmed = typeof name === "string" ? name.trim() : "";
   return trimmed.length === 0 ? verb : `${verb} ${trimmed}`;
+}
+
+/**
+ * {@link namedAction} for a catalog verb (ADR-0058): the bare verb from
+ * `bareKey`, or `namedKey` with the target as `{name}`, so a translator can
+ * put the name where the language wants it.
+ */
+export function namedActionKey(
+  bareKey: string,
+  namedKey: string,
+  name: string | null | undefined,
+): string {
+  const trimmed = typeof name === "string" ? name.trim() : "";
+  return trimmed.length === 0 ? t(bareKey) : t(namedKey, { name: trimmed });
 }

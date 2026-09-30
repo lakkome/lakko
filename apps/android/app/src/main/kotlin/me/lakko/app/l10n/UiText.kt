@@ -15,23 +15,40 @@ import java.util.Locale
  * View models put a [UiText] into their state; the screen renders it with
  * [text], so a language switch re-renders a message that is already showing.
  * Arguments follow the catalog: [texts] are strings passed as they are,
- * [counts] are numbers the formatter pluralises.
+ * [counts] are numbers the formatter pluralises, and [parts] are other
+ * catalog messages rendered in the same language first (a sentence built
+ * from two sentences, a list of names joined pair by pair), so a switch
+ * re-renders the whole of it.
  */
 public data class UiText(
     val key: String,
     val texts: Map<String, String> = emptyMap(),
     val counts: Map<String, ULong> = emptyMap(),
+    val parts: Map<String, UiText> = emptyMap(),
 ) {
     /** The text in the current language, for code outside composition. */
     public fun render(): String = renderWith(Localization.strings.value)
 
-    internal fun renderWith(strings: Strings): String =
-        if (texts.isEmpty() && counts.isEmpty()) strings[key] else strings.format(key, texts, counts)
+    internal fun renderWith(strings: Strings): String {
+        if (texts.isEmpty() && counts.isEmpty() && parts.isEmpty()) return strings[key]
+        val all = if (parts.isEmpty()) texts else texts + parts.mapValues { it.value.renderWith(strings) }
+        return strings.format(key, all, counts)
+    }
 }
 
 /** [this] in the language of the current composition. */
 @Composable
 public fun UiText.text(): String = renderWith(LocalStrings.current)
+
+/** [items] joined pair by pair through `common.list_pair` in the current composition's language. */
+@Composable
+public fun joinList(items: List<String>): String = joinList(items, LocalStrings.current)
+
+/** [items] joined pair by pair through `common.list_pair` in [strings]. */
+public fun joinList(items: List<String>, strings: Strings): String =
+    items.fold("") { acc, item ->
+        if (acc.isEmpty()) item else strings.format("common.list_pair", mapOf("first" to acc, "second" to item))
+    }
 
 /**
  * A list of word positions ("3, 7 and 15") for the `{positions}` argument of

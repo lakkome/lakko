@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import me.lakko.app.l10n.UiText
 import me.lakko.app.push.GroupPushRouting
 
 /**
@@ -208,7 +209,7 @@ public object GroupNameStore {
 }
 
 /** UX copy (docs/ux/group-and-channel-names.md section 5). */
-public const val GROUP_NAME_LABEL: String = "Group name"
-public const val GROUP_NAME_SAVE: String = "Save"
-public const val GROUP_NAME_ONLY_ADMINS: String = "Only admins can rename this group"
-public const val GROUP_NAME_SEND_FAILED: String = "Could not send. Retry."
+public val GROUP_NAME_LABEL: UiText = UiText("chat.group_name.label")
+public val GROUP_NAME_SAVE: UiText = UiText("common.save")
+public val GROUP_NAME_ONLY_ADMINS: UiText = UiText("chat.group_name.only_admins")
+public val GROUP_NAME_SEND_FAILED: UiText = UiText("chat.group_name.error.save")

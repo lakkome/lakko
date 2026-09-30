@@ -120,9 +120,13 @@ describe("what each quiet surface offers", () => {
   });
 
   it("offers Accept and Decline on the conversation row", () => {
+    // ADR-0058: the row's words come from the catalog, so the guard looks for
+    // the two catalog keys and the two host calls they drive.
     const list = code(LIST);
-    expect(list).toContain("Accept");
-    expect(list).toContain("Decline");
+    expect(list).toContain('t("call.incoming.accept")');
+    expect(list).toContain('t("call.incoming.decline")');
+    expect(list).toContain("acceptIncomingCall");
+    expect(list).toContain("declineIncomingCall");
   });
 });
 

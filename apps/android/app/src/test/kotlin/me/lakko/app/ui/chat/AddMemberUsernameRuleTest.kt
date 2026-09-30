@@ -68,10 +68,10 @@ class AddMemberUsernameRuleTest {
             vm.setAddMemberInput("pa-vel")
             vm.onAddMember()
             assertEquals(emptyList<String>(), lookups)
-            // ADR-0058: the reason is the catalog message, rendered in the
-            // current language (the host test loads no catalog, so the key).
+            // ADR-0058: the reason is the catalog message, held as its key
+            // so a language switch re-renders it.
             assertEquals(
-                me.lakko.app.profile.UsernameProblem.INVALID_CHARACTERS.text.render(),
+                me.lakko.app.profile.UsernameProblem.INVALID_CHARACTERS.text,
                 vm.membershipError.value,
             )
 
@@ -79,7 +79,7 @@ class AddMemberUsernameRuleTest {
             vm.onAddMember()
             assertEquals(emptyList<String>(), lookups)
             assertEquals(
-                me.lakko.app.profile.UsernameProblem.TOO_SHORT.text.render(),
+                me.lakko.app.profile.UsernameProblem.TOO_SHORT.text,
                 vm.membershipError.value,
             )
 

@@ -54,6 +54,9 @@ import { readIsActive } from "./membership-ended";
 import { loadMessageLog, type PersistedGroup } from "./message-log-store";
 import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
 import { uiRules } from "./ui-rules";
+import { t } from "../l10n";
+import { keyedErrorText } from "../l10n/keyed-error";
+import { createLiveText } from "../l10n/live-text";
 
 export interface ForwardPickerProps {
   readonly open: boolean;
@@ -64,7 +67,7 @@ export interface ForwardPickerProps {
 }
 
 /** Section 5.1 "Copy of the day": the picker's title is "Forward to". */
-export const FORWARD_PICKER_TITLE = "Forward to";
+export const FORWARD_PICKER_TITLE = (): string => t("chat.forward.picker_title");
 
 export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
   const chats = useChats();
@@ -86,7 +89,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
   const [accepted, setAccepted] = createSignal<AcceptedContact[]>([]);
   const [query, setQuery] = createSignal("");
   const [busyId, setBusyId] = createSignal<string | null>(null);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
 
   createEffect(() => {
     if (!props.open) return;
@@ -169,7 +172,9 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
     try {
       await props.onPick(row);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // ADR-0058 section 6: the error's code, never its prose.
+      console.warn("[forward] failed", err);
+      setError(() => keyedErrorText(err) ?? t("chat.forward.error.generic"));
     } finally {
       setBusyId(null);
     }
@@ -178,7 +183,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
   return (
     <ModalLayer
       open={props.open}
-      title={FORWARD_PICKER_TITLE}
+      title={FORWARD_PICKER_TITLE()}
       onClose={() => {
         // Cancel sends nothing - but a send already in flight is not
         // cancelled by closing over it; the layer simply goes.
@@ -190,8 +195,8 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
           <Icon name="search" size={16} />
           <input
             type="search"
-            placeholder="Search"
-            aria-label="Search conversations"
+            placeholder={t("chats.search.placeholder")}
+            aria-label={t("chat.forward.search_label")}
             value={query()}
             onInput={(e) => setQuery(e.currentTarget.value)}
           />
@@ -200,12 +205,12 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
       <Show when={error()}>{(message) => <div class="form-error">{message()}</div>}</Show>
       <Show
         when={rows().length > 0}
-        fallback={<p class="lk-pane-nomatch">No conversations to forward to</p>}
+        fallback={<p class="lk-pane-nomatch">{t("chat.forward.empty")}</p>}
       >
         <Show when={visible().length === 0}>
-          <p class="lk-pane-nomatch">No results</p>
+          <p class="lk-pane-nomatch">{t("chats.search.no_results")}</p>
         </Show>
-        <ul class="lk-forward-list" aria-label="Conversations">
+        <ul class="lk-forward-list" aria-label={t("chat.forward.list_label")}>
           <For each={visible()}>
             {(row) => {
               const busy = (): boolean => busyId() === row.id;
@@ -225,11 +230,11 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
                           <span class="lk-ellipsis">{row.title}</span>
                         </span>
                         <Show when={row.pinned}>
-                          <Icon name="pin" size={14} title="Pinned" />
+                          <Icon name="pin" size={14} title={t("chats.row.pinned")} />
                         </Show>
                       </div>
                       <div class="lk-row-line">
-                        <span class="lk-row-sub">{busy() ? "Sending..." : row.preview}</span>
+                        <span class="lk-row-sub">{busy() ? t("common.sending") : row.preview}</span>
                       </div>
                     </div>
                   </button>

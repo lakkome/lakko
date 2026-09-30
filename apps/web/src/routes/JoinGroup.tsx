@@ -327,16 +327,16 @@ export default function JoinGroup() {
             <p>Sending request…</p>
           </Show>
           <Show when={phase() === "waiting"}>
-            <p>{JOIN_WAIT_PRIMARY}</p>
+            <p>{JOIN_WAIT_PRIMARY()}</p>
             <p style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>
-              {JOIN_WAIT_SECONDARY}
+              {JOIN_WAIT_SECONDARY()}
             </p>
             <button
               type="button"
               disabled={requesting()}
               onClick={() => void onRequest(ticket()!)}
             >
-              {JOIN_REQUEST_AGAIN}
+              {JOIN_REQUEST_AGAIN()}
             </button>
           </Show>
           <Show when={phase() === "joined"}>

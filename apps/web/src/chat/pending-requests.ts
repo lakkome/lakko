@@ -55,6 +55,7 @@
  * Entries are pruned against the live set on every fold, so a swept or
  * superseded request cannot leave residue behind.
  */
+import { t } from "../l10n";
 
 /** How a proposal is classified for the panel. Mirrors the wasm
  *  `ProposalRecord.kind` strings one-for-one. */
@@ -313,18 +314,13 @@ export function pendingNotice(
   const waiting = requests.filter((r) => r.state === "waiting").length;
   if (waiting === 0) return null;
   return {
-    count:
-      waiting === 1
-        ? "1 membership change is waiting to apply."
-        : `${waiting} membership changes are waiting to apply.`,
+    count: t("chat.members.pending.count", { count: waiting }),
     // ONE line, not two. The escalated variant went with the `stalled` state:
     // ADR-0045 decision 2 gives a waiting request no deadline, so there is no
     // moment at which the client learns something new to say. This sentence is
     // true at ten seconds and at ten days, it states INACTION (the only thing
     // the client can observe), it names no person, and it blames nobody.
-    liveness:
-      "Membership changes are applied by the group owner or an admin. " +
-      "They will apply automatically when one does.",
+    liveness: t("chat.members.pending.liveness"),
   };
 }
 
@@ -354,7 +350,7 @@ export function pendingNotice(
  */
 export function waitingQueueLine(pendingCount: number): string | null {
   if (pendingCount < 2) return null;
-  return `${pendingCount} changes are now waiting to apply.`;
+  return t("chat.members.pending.queue", { count: pendingCount });
 }
 
 // The "Join requests are not saved" note that used to live here is gone with
@@ -382,7 +378,9 @@ export function rowAnnotation(
     (r) => r.state === "waiting" && (r.kind === "remove" || r.kind === "leave") && r.targetLeaf === leafIndex,
   );
   if (hit === undefined) return null;
-  return leafIndex === ownLeaf ? "Waiting to leave." : "Waiting to be removed.";
+  return leafIndex === ownLeaf
+    ? t("chat.members.pending.waiting_leave")
+    : t("chat.members.pending.waiting_removed");
 }
 
 /** The `Waiting to be added ({n})` rows — pending adds only, past the window. */

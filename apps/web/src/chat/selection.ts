@@ -22,6 +22,7 @@
 import type { MediaBubble } from "../media/inline-media";
 import type { ConfirmRequest } from "../ui/confirm-dialog";
 import { replySnapshotFor } from "./reply-snapshot";
+import { t } from "../l10n";
 
 /** Section 8 "Selecting" — "At most 100 messages can be selected". */
 export const SELECTION_LIMIT = 100;
@@ -31,11 +32,11 @@ export const SELECTION_LIMIT = 100;
 export type Selection = ReadonlySet<number>;
 
 /** Section 8 "Delete" — the helper line under the bar. */
-export const DELETE_HELPER = "Only your own messages can be deleted.";
+export const DELETE_HELPER = (): string => t("chat.select.delete_helper");
 
 /** Section 8 "Delete" — the destructive action and the exit. */
-export const BULK_DELETE_CONFIRM_LABEL = "Delete";
-export const BULK_DELETE_CANCEL_LABEL = "Cancel";
+export const BULK_DELETE_CONFIRM_LABEL = (): string => t("common.delete");
+export const BULK_DELETE_CANCEL_LABEL = (): string => t("common.cancel");
 
 /** Nothing selected — the state every exit returns to. */
 export function leaveSelection(): Selection {
@@ -89,7 +90,9 @@ export function toggleSelected(selection: Selection, messageId: number): Selecti
  *  "1 selected", "12 selected", and at the cap "100 selected, the limit". */
 export function selectionCountLabel(count: number): string {
   const n = Math.max(0, Math.floor(count));
-  return n >= SELECTION_LIMIT ? `${String(SELECTION_LIMIT)} selected, the limit` : `${String(n)} selected`;
+  return n >= SELECTION_LIMIT
+    ? t("chat.select.count_limit", { count: SELECTION_LIMIT })
+    : t("chat.select.count", { count: n });
 }
 
 /** What the `Delete` button and the line under it read. */
@@ -110,7 +113,7 @@ export interface DeleteDecision {
 export function deleteDecision(selected: ReadonlyArray<{ readonly own: boolean }>): DeleteDecision {
   if (selected.length === 0) return { enabled: false, helper: null };
   const allOwn = selected.every((m) => m.own);
-  return { enabled: allOwn, helper: allOwn ? null : DELETE_HELPER };
+  return { enabled: allOwn, helper: allOwn ? null : DELETE_HELPER() };
 }
 
 /** Section 8 "Forward" — enabled when the selection is not empty. */
@@ -121,7 +124,7 @@ export function forwardEnabled(selection: Selection): boolean {
 /** Section 8 "Delete" — the question: "Delete 12 messages?", "Delete 1 message?". */
 export function confirmDeleteLabel(count: number): string {
   const n = Math.max(0, Math.floor(count));
-  return n === 1 ? "Delete 1 message?" : `Delete ${String(n)} messages?`;
+  return t("chat.select.delete_title", { count: n });
 }
 
 /** The whole confirmation for a bulk delete: the question, a destructive
@@ -132,8 +135,8 @@ export function bulkDeleteConfirmation(count: number): ConfirmRequest {
   return {
     title: confirmDeleteLabel(count),
     body: null,
-    confirmLabel: BULK_DELETE_CONFIRM_LABEL,
-    cancelLabel: BULK_DELETE_CANCEL_LABEL,
+    confirmLabel: BULK_DELETE_CONFIRM_LABEL(),
+    cancelLabel: BULK_DELETE_CANCEL_LABEL(),
     tone: "danger",
   };
 }
@@ -142,8 +145,8 @@ export function bulkDeleteConfirmation(count: number): ConfirmRequest {
  *  "Deleted 5 of 12." / "Forwarded 5 of 12.". The unsent messages stay
  *  selected, so the person can try again from where it stopped. */
 export function progressLabel(verb: "deleted" | "forwarded", done: number, total: number): string {
-  const word = verb === "deleted" ? "Deleted" : "Forwarded";
-  return `${word} ${String(Math.max(0, done))} of ${String(Math.max(0, total))}.`;
+  const args = { done: Math.max(0, done), total: Math.max(0, total) };
+  return verb === "deleted" ? t("chat.select.deleted_of", args) : t("chat.select.forwarded_of", args);
 }
 
 /**

@@ -125,7 +125,8 @@ import type { IncomingChatEvent } from "../chat/client";
 // refuses a transfer, a pending transfer refuses a role change), so a single
 // definition is what keeps the table at seven strings rather than drifting into
 // two near-identical ones.
-import { ROLE_CHANGE_ALREADY_PENDING } from "../chat/ownership-transfer";
+import { ROLE_CHANGE_ALREADY_PENDING_KEY } from "../chat/ownership-transfer";
+import { KeyedError } from "../l10n/keyed-error";
 
 /** Optional wires the route layer hands to ContactsClient
  *  (Phase 1.16e6c2). See `ChatClientOptions` in
@@ -3057,7 +3058,7 @@ export class ContactsClient {
       // the ordinary case and a real, visible wait only when the committer is
       // absent, which is precisely when a silent loss would be worst.
       if (hasPendingRoleChange(group)) {
-        throw ContactsError.wrap(new Error(ROLE_CHANGE_ALREADY_PENDING));
+        throw ContactsError.wrap(new KeyedError(ROLE_CHANGE_ALREADY_PENDING_KEY));
       }
       let proposalBytes: Uint8Array;
       try {
@@ -3184,7 +3185,7 @@ export class ContactsClient {
       // toggles, which keep refuse-on-tap); this is the check for the window in
       // which the control is still live.
       if (hasPendingRoleChange(group)) {
-        throw ContactsError.wrap(new Error(ROLE_CHANGE_ALREADY_PENDING));
+        throw ContactsError.wrap(new KeyedError(ROLE_CHANGE_ALREADY_PENDING_KEY));
       }
       let proposalBytes: Uint8Array;
       try {

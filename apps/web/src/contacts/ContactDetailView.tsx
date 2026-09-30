@@ -412,7 +412,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                 <Icon name="trash" size={18} />
               </span>
               <div class="lk-card-row-body">
-                <span class="lk-card-row-title">{DELETE_CHAT_CONTROL}</span>
+                <span class="lk-card-row-title">{DELETE_CHAT_CONTROL()}</span>
                 <span class="lk-card-row-sub">
                   Removes this conversation and everything in it from this
                   device. It cannot be undone.

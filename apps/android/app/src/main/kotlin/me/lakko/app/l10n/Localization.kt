@@ -58,12 +58,90 @@ public class Strings internal constructor(
             null
         }
         if (rendered != null) return rendered
-        // Without the core (it failed to load): substitute arguments naively
-        // into the English text so the screen still reads.
-        var text = plain[key] ?: return key
-        texts.forEach { (name, value) -> text = text.replace("{$name}", value) }
-        return text
+        // Without the core (it failed to load, or a host JVM test): render the
+        // English text with the English plural rule so the screen still reads.
+        val text = plain[key] ?: return key
+        return try {
+            fallbackRender(text, texts, counts, null)
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "WARN fallback format failed for $key: ${e.javaClass.simpleName}")
+            text
+        }
     }
+}
+
+/**
+ * The English-only rendering of the catalog's message syntax (arguments and
+ * `plural` with `=N`, `one`, `other`, `#`), used only when the core cannot
+ * format. Quoting is not handled; a message that needs it renders raw.
+ */
+private fun fallbackRender(
+    text: String,
+    texts: Map<String, String>,
+    counts: Map<String, ULong>,
+    hash: ULong?,
+): String {
+    val out = StringBuilder()
+    var i = 0
+    while (i < text.length) {
+        val c = text[i]
+        when {
+            c == '#' && hash != null -> {
+                out.append(hash.toString())
+                i++
+            }
+            c == '{' -> {
+                val end = matchingBrace(text, i)
+                val inner = text.substring(i + 1, end)
+                val comma = inner.indexOf(',')
+                if (comma < 0) {
+                    val name = inner.trim()
+                    out.append(texts[name] ?: counts[name]?.toString() ?: "{$name}")
+                } else {
+                    val name = inner.substring(0, comma).trim()
+                    val rest = inner.substring(comma + 1)
+                    val second = rest.indexOf(',')
+                    val value = counts[name] ?: 0uL
+                    val branches = if (second < 0) "" else rest.substring(second + 1)
+                    out.append(fallbackRender(pluralBranch(branches, value), texts, counts, value))
+                }
+                i = end + 1
+            }
+            else -> {
+                out.append(c)
+                i++
+            }
+        }
+    }
+    return out.toString()
+}
+
+private fun matchingBrace(text: String, open: Int): Int {
+    var depth = 0
+    for (j in open until text.length) {
+        when (text[j]) {
+            '{' -> depth++
+            '}' -> {
+                depth--
+                if (depth == 0) return j
+            }
+        }
+    }
+    throw IllegalArgumentException("unbalanced braces")
+}
+
+private fun pluralBranch(branches: String, value: ULong): String {
+    val found = HashMap<String, String>()
+    var i = 0
+    while (i < branches.length) {
+        val open = branches.indexOf('{', i)
+        if (open < 0) break
+        val selector = branches.substring(i, open).trim()
+        val end = matchingBrace(branches, open)
+        found[selector] = branches.substring(open + 1, end)
+        i = end + 1
+    }
+    return found["=$value"] ?: (if (value == 1uL) found["one"] else null) ?: found["other"].orEmpty()
 }
 
 /** The strings the current composition renders; see [ProvideLocalization]. */
@@ -163,6 +241,16 @@ public object Localization {
     /** Configuration changed: the system language or the per-app one may have. */
     public fun refresh() {
         controller?.refresh()?.let(::apply)
+    }
+
+    /**
+     * Tests only: serve [strings] as the current language, with no core loaded
+     * (a host JVM has no native library). Unit tests that read rendered text
+     * install the English source this way.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun installForTests(strings: Strings) {
+        stringsFlow.value = strings
     }
 
     /** The own name of [code] ("Deutsch"), or the code when unknown. */

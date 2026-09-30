@@ -50,13 +50,13 @@ public final class ChatMediaController: ObservableObject {
 
         public var copy: String {
             switch self {
-            case .microphone: return "Lakko needs microphone access to record voice messages"
-            case .camera: return "Lakko needs camera access to record video messages"
+            case .microphone: return Localization.text("chat.record.denied_microphone_app")
+            case .camera: return Localization.text("chat.record.denied_camera_app")
             }
         }
     }
 
-    public static let inCallCopy = "Unavailable during a call"
+    public static var inCallCopy: String { Localization.text("chat.record.in_call") }
 
     private static let log = Logger(subsystem: "me.lakko.media", category: "chat-media")
 
@@ -247,7 +247,7 @@ public final class ChatMediaController: ObservableObject {
     public func toggleMode() {
         let next: CaptureKind = recordMode == .voice ? .videoNote : .voice
         if next == .videoNote, !hasCamera {
-            flashHint("No camera found")
+            flashHint(Localization.text("chat.record.no_camera"))
             return
         }
         recordMode = next
@@ -341,7 +341,7 @@ public final class ChatMediaController: ObservableObject {
                 voiceRecorder = recorder
             } catch {
                 Self.log.warning("voice capture failed to start")
-                flashHint("Couldn't start recording")
+                flashHint(Localization.text("chat.record.start_failed"))
                 dispatch(.captureFailed)
             }
         case .videoNote:
@@ -358,7 +358,7 @@ public final class ChatMediaController: ObservableObject {
                     self.videoRecorder = nil
                     self.videoCaptureSession = nil
                     recorder.discard()
-                    self.flashHint("Couldn't start recording")
+                    self.flashHint(Localization.text("chat.record.start_failed"))
                     self.dispatch(.captureFailed)
                 }
             }

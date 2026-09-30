@@ -45,8 +45,8 @@ function isGroupNotClaimed(err: unknown): boolean {
 
 /** The sentence for a failed join request. */
 export function joinFailureNotice(err: unknown): JoinFailureNotice {
-  if (isGroupNotClaimed(err)) return { message: GROUP_NOT_TAKING_REQUESTS, offerRetry: false };
-  if (dsClockSkewNotice(err) !== null) return { message: CLOCK_SKEW_NOTICE, offerRetry: false };
+  if (isGroupNotClaimed(err)) return { message: GROUP_NOT_TAKING_REQUESTS(), offerRetry: false };
+  if (dsClockSkewNotice(err) !== null) return { message: CLOCK_SKEW_NOTICE(), offerRetry: false };
   // The ledger's consume answered 429: the link is fine, the request can be
   // sent again after a pause (ADR-0028 short-link amendment).
   if (isDiscoveryRateLimited(err)) return { message: INVITE_LINK_RATE_LIMITED, offerRetry: true };
@@ -54,7 +54,7 @@ export function joinFailureNotice(err: unknown): JoinFailureNotice {
   // day's allowance used up says so, without a retry; tokens off or none to
   // be had is the ordinary network failure.
   if (anonTokenQuotaExhausted(err) !== null) {
-    return { message: ACTION_ALLOWANCE_USED, offerRetry: false };
+    return { message: ACTION_ALLOWANCE_USED(), offerRetry: false };
   }
   return { message: JOIN_REQUEST_FAILED, offerRetry: true };
 }

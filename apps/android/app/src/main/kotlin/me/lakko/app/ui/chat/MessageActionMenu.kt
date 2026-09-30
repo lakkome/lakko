@@ -74,6 +74,10 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 
 /**
  * The per-message action menu — `docs/ux/message-actions.md` sections 2, 3
@@ -118,10 +122,10 @@ private const val SCRIM_ALPHA: Float = 0.45f
 /** Label on the scrim, which dismisses the menu. Also the one node that says
  *  "the menu is open" whatever actions this particular message offers, which is
  *  what the UI tests anchor on. */
-internal const val CLOSE_MENU_LABEL: String = "Close message actions"
+internal const val CLOSE_MENU_LABEL: String = "chat.message.close_actions"
 
 /** Label on the reaction row's trailing control. */
-internal const val MORE_REACTIONS_LABEL: String = "More reactions"
+internal const val MORE_REACTIONS_LABEL: String = "chat.message.more_reactions"
 
 /**
  * Which rows [MessageActionCard] offers. Computed by the caller from the
@@ -147,7 +151,7 @@ internal data class MessageActions(
     val canPin: Boolean = false,
     /** Section 4.1 — what the row reads: `Pin`, or `Unpin` when this device
      *  can undo a pin in at least one scope. Decided by `pinMenuFor`. */
-    val pinLabel: String = "Pin",
+    val pinLabel: String = Localization.strings.value["chat.message.pin"],
     /** Section 8 — Select enters the multi-select mode with this message
      *  already selected. Offered where the row could be selected at all:
      *  a completed send that is not deleted. */
@@ -171,7 +175,7 @@ internal fun messageActionsFor(
      *  attachments that never reached storage; it does not offer Forward. */
     sendComplete: Boolean = true,
     /** Section 4.1 — the row's word for this message (`Pin` / `Unpin`). */
-    pinLabel: String = "Pin",
+    pinLabel: String = Localization.strings.value["chat.message.pin"],
 ): MessageActions = MessageActions(
     // Copy reads a string this device already holds and sends nothing, so it is
     // the one action that does NOT die with the membership gate. It is still
@@ -289,10 +293,11 @@ internal fun MessageActionMenuOverlay(
             // a hole drawn at the wrong offset is worse than no hole at all.
             val originNow = origin ?: return@Box
             val bubble = bubbleBounds.translate(-originNow)
+            val closeLabel = t(CLOSE_MENU_LABEL)
             Box(
                 Modifier
                     .fillMaxSize()
-                    .semantics { contentDescription = CLOSE_MENU_LABEL }
+                    .semantics { contentDescription = closeLabel }
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         // No ripple: a ripple over the whole conversation reads
@@ -373,6 +378,9 @@ internal fun MessageReactionRow(
         border = menuSurfaceBorder(),
         shadowElevation = MENU_SURFACE_ELEVATION,
     ) {
+        val strings = LocalStrings.current
+        val reactLabel = { emoji: String -> strings.format("chat.message.react_with", mapOf("emoji" to emoji)) }
+        val moreReactions = strings[MORE_REACTIONS_LABEL]
         Row(
             // A narrow window (or a longer emoji set than the six defaults)
             // scrolls rather than clipping the picker control off the end: the
@@ -387,7 +395,7 @@ internal fun MessageReactionRow(
                 Box(
                     modifier = Modifier
                         .size(REACTION_TAP_SIZE)
-                        .clickable(onClickLabel = "React $emoji") { onReact(emoji) },
+                        .clickable(onClickLabel = reactLabel(emoji)) { onReact(emoji) },
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(text = emoji, style = MaterialTheme.typography.titleMedium)
@@ -396,7 +404,7 @@ internal fun MessageReactionRow(
             Box(
                 modifier = Modifier
                     .size(REACTION_TAP_SIZE)
-                    .semantics { contentDescription = MORE_REACTIONS_LABEL }
+                    .semantics { contentDescription = moreReactions }
                     .clickable { onOpenPicker() },
                 contentAlignment = Alignment.Center,
             ) {
@@ -465,7 +473,7 @@ internal fun MessageActionCard(
         ) {
             if (actions.canReply) {
                 ActionRow(
-                    label = "Reply",
+                    label = t("chat.message.reply"),
                     icon = Icons.AutoMirrored.Filled.Reply,
                     onClick = onReply,
                 )
@@ -474,14 +482,14 @@ internal fun MessageActionCard(
                 // Section 5.1 — second: it also produces a new message, in
                 // another conversation.
                 ActionRow(
-                    label = "Forward",
+                    label = t("chat.message.forward"),
                     icon = Icons.AutoMirrored.Filled.Forward,
                     onClick = onForward,
                 )
             }
             if (actions.canCopy) {
                 ActionRow(
-                    label = "Copy",
+                    label = t("common.copy"),
                     icon = Icons.Filled.ContentCopy,
                     onClick = onCopy,
                 )
@@ -490,7 +498,7 @@ internal fun MessageActionCard(
                 // Section 8 — after Copy, with the actions that only read:
                 // entering the mode changes nothing until an action fires.
                 ActionRow(
-                    label = me.lakko.app.chat.SELECT_ACTION_LABEL,
+                    label = me.lakko.app.chat.SELECT_ACTION_LABEL.text(),
                     icon = Icons.Filled.CheckCircle,
                     onClick = onSelect,
                 )
@@ -507,7 +515,7 @@ internal fun MessageActionCard(
             }
             if (actions.canEdit) {
                 ActionRow(
-                    label = "Edit",
+                    label = t("chat.message.edit"),
                     icon = Icons.Filled.Edit,
                     onClick = onEdit,
                 )
@@ -533,7 +541,7 @@ internal fun MessageActionCard(
                         Spacer(Modifier.height(DESTRUCTIVE_GAP))
                     }
                     ActionRow(
-                        label = "Delete",
+                        label = t("common.delete"),
                         icon = Icons.Filled.Delete,
                         onClick = onDelete,
                         tint = MaterialTheme.colorScheme.error,

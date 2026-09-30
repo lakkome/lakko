@@ -13,6 +13,7 @@
  *
  * Pure: no wasm, no Solid.
  */
+import { joinList, t } from "../l10n";
 
 /** The new-group form's default label. */
 export const DEFAULT_GROUP_LABEL = "New group";
@@ -39,9 +40,11 @@ export const GROUP_TITLE_NAMES = 3;
 /** Title an unnamed group from its members' names (the reader excluded). */
 export function groupTitleFromNames(names: readonly string[]): string {
   const shown = names.slice(0, GROUP_TITLE_NAMES);
-  if (shown.length === 0) return DEFAULT_GROUP_LABEL;
+  if (shown.length === 0) return t("chat.group.default_name");
+  // Joined through the catalog so each language picks its own separator.
+  const joined = joinList(shown);
   const rest = names.length - shown.length;
-  return rest > 0 ? `${shown.join(", ")} +${rest}` : shown.join(", ");
+  return rest > 0 ? t("chat.group.title_more", { names: joined, count: rest }) : joined;
 }
 
 /** The title to show for a group with `label`, given its members' names. */

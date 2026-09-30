@@ -36,10 +36,10 @@ describe("pinRowDecision — nothing pinned", () => {
     expect(d.row).toBe("Pin");
     expect(d.action.kind).toBe("sheet");
     if (d.action.kind !== "sheet") throw new Error("unreachable");
-    expect(d.action.title).toBe(PIN_SHEET_TITLE);
+    expect(d.action.title).toBe(PIN_SHEET_TITLE());
     expect(d.action.options.map((o) => [o.label, o.detail, o.scope, o.pinned])).toEqual([
-      ["Pin for me", PIN_DETAIL_PERSONAL, "personal", true],
-      ["Pin for everyone", PIN_DETAIL_SHARED, "shared", true],
+      ["Pin for me", PIN_DETAIL_PERSONAL(), "personal", true],
+      ["Pin for everyone", PIN_DETAIL_SHARED(), "shared", true],
     ]);
   });
 
@@ -60,7 +60,7 @@ describe("pinRowDecision — pinned in one scope", () => {
     expect(d.row).toBe("Unpin");
     expect(d.action).toEqual({
       kind: "immediate",
-      option: { scope: "personal", pinned: false, label: "Unpin for me", detail: PIN_DETAIL_PERSONAL },
+      option: { scope: "personal", pinned: false, label: "Unpin for me", detail: PIN_DETAIL_PERSONAL() },
     });
   });
 
@@ -69,7 +69,7 @@ describe("pinRowDecision — pinned in one scope", () => {
     expect(d.row).toBe("Unpin");
     expect(d.action).toEqual({
       kind: "immediate",
-      option: { scope: "shared", pinned: false, label: "Unpin for everyone", detail: PIN_DETAIL_SHARED },
+      option: { scope: "shared", pinned: false, label: "Unpin for everyone", detail: PIN_DETAIL_SHARED() },
     });
   });
 
@@ -90,7 +90,7 @@ describe("pinRowDecision — pinned in both scopes", () => {
     const d = decide({ pinnedShared: true, pinnedPersonal: true });
     expect(d.row).toBe("Unpin");
     if (d.action.kind !== "sheet") throw new Error("expected a sheet");
-    expect(d.action.title).toBe(UNPIN_SHEET_TITLE);
+    expect(d.action.title).toBe(UNPIN_SHEET_TITLE());
     expect(d.action.options.map((o) => [o.label, o.scope, o.pinned])).toEqual([
       ["Unpin for me", "personal", false],
       ["Unpin for everyone", "shared", false],

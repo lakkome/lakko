@@ -69,18 +69,18 @@ public enum ChatListFormatting {
     ) -> String {
         let decision = InlineMedia.decision(kind: kind, mime: mime, allowlist: allowlist)
         switch decision.bubble {
-        case .voice: return "Voice message"
-        case .videoNote: return "Video message"
-        case .gif: return "GIF"
-        case .photo: return "Photo"
-        case .video: return "Video"
+        case .voice: return Localization.text("chat.media.voice_message")
+        case .videoNote: return Localization.text("chat.media.video_message")
+        case .gif: return Localization.text("chat.media.gif")
+        case .photo: return Localization.text("chat.media.photo")
+        case .video: return Localization.text("chat.media.video")
         case .file:
             switch decision.inline {
-            case .image?: return "Photo"
-            case .video?: return "Video"
-            case .audio?: return "Audio"
-            case nil: return "File"
-            @unknown default: return "File"
+            case .image?: return Localization.text("chat.media.photo")
+            case .video?: return Localization.text("chat.media.video")
+            case .audio?: return Localization.text("chat.media.audio")
+            case nil: return Localization.text("chat.media.file")
+            @unknown default: return Localization.text("chat.media.file")
             }
         }
     }
@@ -98,7 +98,7 @@ public enum ChatListFormatting {
     ) -> String {
         let body: String
         if deleted {
-            body = "Message deleted"
+            body = Localization.text("chat.message.deleted")
         } else if let call = CallTranscriptRow.parse(text) {
             // `docs/ux/calls.md` section 6 — the list shows the call the way
             // the conversation does, never the stored marker.
@@ -108,17 +108,22 @@ public enum ChatListFormatting {
             if !trimmed.isEmpty {
                 body = trimmed.replacingOccurrences(of: "\n", with: " ")
             } else if let first = attachmentLabels.first {
-                body = attachmentLabels.count > 1 ? "\(first) +\(attachmentLabels.count - 1)" : first
+                body = attachmentLabels.count > 1
+                    ? Localization.text(
+                        "chat.media.and_more",
+                        texts: ["label": first],
+                        counts: ["count": UInt64(attachmentLabels.count - 1)])
+                    : first
             } else {
                 body = ""
             }
         }
         switch direction {
         case .outgoing:
-            return "You: \(body)"
+            return Localization.text("chats.preview.own", texts: ["text": body])
         case .incoming:
             if isGroup, let senderName, !senderName.isEmpty {
-                return "\(senderName): \(body)"
+                return Localization.text("chats.preview.sender", texts: ["name": senderName, "text": body])
             }
             return body
         case .system:

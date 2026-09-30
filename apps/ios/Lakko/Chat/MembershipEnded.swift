@@ -231,12 +231,15 @@ import Foundation
 ///     composer fails whichever of the two was changed.
 
 // MARK: - Copy (§6.2) — one definition each, so the view cannot drift from it
+//
+// From the catalog (ADR-0058), read at every render so the text follows a
+// live language switch.
 
 /// §6.2.3 — the narrowing, applied only on positive evidence.
 ///
 /// True of exactly one of the two cases, which is why it needs the durable
 /// record and why ``endedRemovedMessage`` is the fallback rather than this.
-public let endedLeftMessage = "You left this group."
+public var endedLeftMessage: String { Localization.text("chat.ended.left") }
 
 /// §6.2.3 — the neutral string, and the FALLBACK.
 ///
@@ -253,7 +256,7 @@ public let endedLeftMessage = "You left this group."
 /// away from a serious accusation, and because §5.1's discipline — state
 /// inaction, name nobody, blame nobody — is the same discipline whether the
 /// news is a wait or an ending.
-public let endedRemovedMessage = "You are no longer a member of this group."
+public var endedRemovedMessage: String { Localization.text("chat.ended.no_longer_member") }
 
 /// §6.2.5 line 2 — the standing consequence, identical in both cases.
 ///
@@ -264,20 +267,19 @@ public let endedRemovedMessage = "You are no longer a member of this group."
 /// design deliberately does not mention that — the user cannot tell how much
 /// they are missing and no client can tell them — and *the messages you already
 /// received are still here* stays true either way.
-public let endedConsequenceMessage =
-    "The messages you already received are still here. No new ones will arrive."
+public var endedConsequenceMessage: String { Localization.text("chat.ended.consequence") }
 
 /// §6.2.4 — the chat-list row's one muted secondary line. Deliberately neutral
 /// between left and removed: the list is a glance surface and the distinction
 /// belongs in the transcript.
-public let chatListEndedLine = "You are no longer a member."
+public var chatListEndedLine: String { Localization.text("chats.row.ended") }
 
 /// §6.2.5 — the static bar that REPLACES the composer, in the same slot so the
 /// layout does not jump.
-public let composerWithdrawnMessage = "You can no longer send messages to this group."
+public var composerWithdrawnMessage: String { Localization.text("chat.ended.composer") }
 
 /// §6.2.5 — the muted label above the preserved draft.
-public let unsentDraftLabel = "Unsent draft"
+public var unsentDraftLabel: String { Localization.text("chat.ended.unsent_draft") }
 
 /// §6.2.7 — one line at the top of the frozen roster.
 ///
@@ -287,13 +289,13 @@ public let unsentDraftLabel = "Unsent draft"
 /// admin, and nothing in the UI may present that as a live role.
 /// *"Stopped updating"* is the literal truth of the frozen local view rather
 /// than a euphemism for it.
-public let frozenRosterHeader = "This list stopped updating when your membership ended."
+public var frozenRosterHeader: String { Localization.text("chat.members.frozen") }
 
 /// §6.2.4 — the one control still honest once you are out.
-public let deleteChatControl = "Delete this chat"
+public var deleteChatControl: String { Localization.text("chat.delete.control") }
 
 /// §6.2.4 — confirmation title.
-public let deleteChatTitle = "Delete this chat?"
+public var deleteChatTitle: String { Localization.text("chat.delete.title") }
 
 /// §6.2.4 — confirmation body, exact rather than sweeping, and the precision is
 /// load-bearing: **the messages really are gone, and the dead MLS handle is
@@ -301,9 +303,7 @@ public let deleteChatTitle = "Delete this chat?"
 /// provider snapshot as inert bytes — inert in the strong sense (it cannot
 /// send, decrypt, export or process) but not nothing. A `Group::delete` is a
 /// real, small core follow-up this does not ride free.
-public let deleteChatBody =
-    "This removes the conversation and its messages from this device. "
-    + "There is no copy anywhere else and this cannot be undone."
+public var deleteChatBody: String { Localization.text("chat.delete.body") }
 
 // MARK: - The state
 

@@ -250,6 +250,22 @@
       "text": "Підключаємо вас до дзвінка...",
       "status": "machine"
     },
+    "call.incoming.accept": {
+      "text": "Прийняти",
+      "status": "machine"
+    },
+    "call.incoming.accept_from": {
+      "text": "Прийняти дзвінок: {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline": {
+      "text": "Відхилити",
+      "status": "machine"
+    },
+    "call.incoming.decline_from": {
+      "text": "Відхилити дзвінок: {name}",
+      "status": "machine"
+    },
     "call.link.connecting": {
       "text": "Підключення...",
       "status": "machine"
@@ -314,8 +330,1712 @@
       "text": "Можна піти з цього екрана: ви приєднаєтеся, щойно вас впустять.",
       "status": "machine"
     },
+    "chat.attachment.error.attach": {
+      "text": "Не вдалося прикріпити вибраний елемент. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.attachment.error.attach_named": {
+      "text": "Не вдалося прикріпити «{name}». Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.attachment.error.download": {
+      "text": "Не вдалося завантажити вкладення. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.attachment.error.gone": {
+      "text": "Вкладення більше немає на сервері.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_photo": {
+      "text": "Не вдалося відкрити це фото. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_video": {
+      "text": "Не вдалося відкрити це відео. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.attachment.error.prepare_video": {
+      "text": "Не вдалося підготувати це відео. Можна надсилати відео розміром до {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.preview": {
+      "text": "Не вдалося показати зображення. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large": {
+      "text": "Розмір повідомлення — {size}, це більше за ліміт {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large_named": {
+      "text": "Розмір «{name}» — {size}, це більше за ліміт {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.upload": {
+      "text": "Не вдалося вивантажити «{name}». Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.attachment.hide": {
+      "text": "Сховати",
+      "status": "machine"
+    },
+    "chat.attachment.image_alt": {
+      "text": "вкладене зображення",
+      "status": "machine"
+    },
+    "chat.attachment.open": {
+      "text": "Відкрити",
+      "status": "machine"
+    },
+    "chat.attachment.save_title": {
+      "text": "Зберегти вкладення",
+      "status": "machine"
+    },
+    "chat.attachment.unnamed": {
+      "text": "(без назви)",
+      "status": "machine"
+    },
+    "chat.author.a_member": {
+      "text": "Учасник",
+      "status": "machine"
+    },
+    "chat.author.unknown": {
+      "text": "Невідомий відправник",
+      "status": "machine"
+    },
+    "chat.author.you": {
+      "text": "Ви",
+      "status": "machine"
+    },
+    "chat.call.busy": {
+      "text": "Уже триває інший дзвінок.",
+      "status": "machine"
+    },
+    "chat.call.error.start": {
+      "text": "Не вдалося почати дзвінок. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.call.group_ended": {
+      "text": "Цей груповий дзвінок уже завершено.",
+      "status": "machine"
+    },
+    "chat.call.group_in_progress": {
+      "text": "Триває груповий дзвінок",
+      "status": "machine"
+    },
+    "chat.call.group_people": {
+      "text": "{count, plural, one {# людина в дзвінку} few {# людини в дзвінку} many {# людей у дзвінку} other {# людини в дзвінку}}",
+      "status": "machine"
+    },
+    "chat.call.group_starting": {
+      "text": "Починається…",
+      "status": "machine"
+    },
+    "chat.call.group_status_e2ee": {
+      "text": "{status} · наскрізне шифрування",
+      "status": "machine"
+    },
+    "chat.call.join": {
+      "text": "Приєднатися до дзвінка",
+      "status": "machine"
+    },
+    "chat.call.join_short": {
+      "text": "Приєднатися",
+      "status": "machine"
+    },
+    "chat.call.join_video": {
+      "text": "Приєднатися з відео",
+      "status": "machine"
+    },
+    "chat.call.last_ended.busy": {
+      "text": "Останній дзвінок завершено: співрозмовник був зайнятий.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.declined": {
+      "text": "Останній дзвінок завершено: відхилено.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.error": {
+      "text": "Останній дзвінок завершено через помилку.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.hung_up": {
+      "text": "Останній дзвінок завершено.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.timed_out": {
+      "text": "Останній дзвінок завершено: немає відповіді.",
+      "status": "machine"
+    },
+    "chat.call.unavailable": {
+      "text": "Групові дзвінки зараз недоступні.",
+      "status": "machine"
+    },
+    "chat.call.video": {
+      "text": "Відеодзвінок",
+      "status": "machine"
+    },
+    "chat.call.voice": {
+      "text": "Подзвонити",
+      "status": "machine"
+    },
+    "chat.composer.attach": {
+      "text": "Прикріпити файли",
+      "status": "machine"
+    },
+    "chat.composer.attach_limit": {
+      "text": "Прикріпити файли (до {limit} кожен)",
+      "status": "machine"
+    },
+    "chat.composer.attach_media": {
+      "text": "Фото або відео",
+      "status": "machine"
+    },
+    "chat.composer.drop_files": {
+      "text": "Перетягніть файли сюди, щоб прикріпити",
+      "status": "machine"
+    },
+    "chat.composer.emoji_gifs": {
+      "text": "Емодзі та GIF",
+      "status": "machine"
+    },
+    "chat.composer.photo_library": {
+      "text": "Медіатека",
+      "status": "machine"
+    },
+    "chat.composer.placeholder": {
+      "text": "Повідомлення",
+      "status": "machine"
+    },
+    "chat.composer.remove_attachment": {
+      "text": "Прибрати вкладення",
+      "status": "machine"
+    },
+    "chat.composer.send": {
+      "text": "Надіслати",
+      "status": "machine"
+    },
+    "chat.day.today": {
+      "text": "Сьогодні",
+      "status": "machine"
+    },
+    "chat.day.yesterday": {
+      "text": "Учора",
+      "status": "machine"
+    },
+    "chat.delete.body": {
+      "text": "Розмову та її повідомлення буде видалено з цього пристрою. Інших копій ніде немає, і цю дію не можна скасувати.",
+      "status": "machine"
+    },
+    "chat.delete.confirm_named": {
+      "text": "Видалити: {name}",
+      "status": "machine"
+    },
+    "chat.delete.control": {
+      "text": "Видалити цей чат",
+      "status": "machine"
+    },
+    "chat.delete.title": {
+      "text": "Видалити цей чат?",
+      "status": "machine"
+    },
+    "chat.edit.title": {
+      "text": "Змінити повідомлення",
+      "status": "machine"
+    },
+    "chat.emoji.categories": {
+      "text": "Категорії емодзі",
+      "status": "machine"
+    },
+    "chat.emoji.choose": {
+      "text": "Вибрати",
+      "status": "machine"
+    },
+    "chat.emoji.choose_reaction": {
+      "text": "Виберіть реакцію",
+      "status": "machine"
+    },
+    "chat.emoji.group.activities": {
+      "text": "Заняття",
+      "status": "machine"
+    },
+    "chat.emoji.group.animals": {
+      "text": "Тварини й природа",
+      "status": "machine"
+    },
+    "chat.emoji.group.flags": {
+      "text": "Прапори",
+      "status": "machine"
+    },
+    "chat.emoji.group.food": {
+      "text": "Їжа та напої",
+      "status": "machine"
+    },
+    "chat.emoji.group.objects": {
+      "text": "Предмети",
+      "status": "machine"
+    },
+    "chat.emoji.group.people": {
+      "text": "Люди й тіло",
+      "status": "machine"
+    },
+    "chat.emoji.group.smileys": {
+      "text": "Смайлики та емоції",
+      "status": "machine"
+    },
+    "chat.emoji.group.symbols": {
+      "text": "Символи",
+      "status": "machine"
+    },
+    "chat.emoji.group.travel": {
+      "text": "Подорожі та місця",
+      "status": "machine"
+    },
+    "chat.emoji.insert": {
+      "text": "Вставити",
+      "status": "machine"
+    },
+    "chat.emoji.no_results": {
+      "text": "Емодзі не знайдено",
+      "status": "machine"
+    },
+    "chat.emoji.recent": {
+      "text": "Нещодавні",
+      "status": "machine"
+    },
+    "chat.emoji.search": {
+      "text": "Пошук емодзі",
+      "status": "machine"
+    },
+    "chat.emoji.skin_tones": {
+      "text": "Відтінки шкіри: {name}",
+      "status": "machine"
+    },
+    "chat.emoji.tab": {
+      "text": "Емодзі",
+      "status": "machine"
+    },
+    "chat.ended.composer": {
+      "text": "Ви більше не можете надсилати повідомлення в цю групу.",
+      "status": "machine"
+    },
+    "chat.ended.consequence": {
+      "text": "Уже отримані повідомлення залишаються тут. Нові не надходитимуть.",
+      "status": "machine"
+    },
+    "chat.ended.left": {
+      "text": "Ви вийшли з цієї групи.",
+      "status": "machine"
+    },
+    "chat.ended.no_longer_member": {
+      "text": "Ви більше не учасник цієї групи.",
+      "status": "machine"
+    },
+    "chat.ended.unsent_draft": {
+      "text": "Ненадіслана чернетка",
+      "status": "machine"
+    },
+    "chat.error.add_member": {
+      "text": "Не вдалося додати цю людину. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.approve_join": {
+      "text": "Не вдалося схвалити запит на приєднання. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.change_admin": {
+      "text": "Не вдалося змінити роль адміністратора. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.conversation_gone": {
+      "text": "Цієї розмови тут більше немає.",
+      "status": "machine"
+    },
+    "chat.error.create_link": {
+      "text": "Не вдалося створити посилання-запрошення. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.delete_chat": {
+      "text": "Не вдалося видалити цей чат. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.delete_message": {
+      "text": "Не вдалося видалити повідомлення. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.edit": {
+      "text": "Не вдалося змінити повідомлення. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.leave": {
+      "text": "Не вдалося вийти з групи. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.membership_request": {
+      "text": "Не вдалося повторно надіслати запитану вами зміну складу групи.",
+      "status": "machine"
+    },
+    "chat.error.message_gone": {
+      "text": "Цього повідомлення тут більше немає.",
+      "status": "machine"
+    },
+    "chat.error.pin": {
+      "text": "Не вдалося змінити закріплення. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.react": {
+      "text": "Не вдалося надіслати реакцію. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.refresh": {
+      "text": "Не вдалося завантажити нові повідомлення. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.reject_join": {
+      "text": "Не вдалося відхилити запит на приєднання. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.remove_member": {
+      "text": "Не вдалося видалити цього учасника. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.revoke_link": {
+      "text": "Не вдалося відкликати посилання-запрошення. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.error.transfer": {
+      "text": "Не вдалося передати права власника. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.forward.empty": {
+      "text": "Немає розмов, куди можна переслати",
+      "status": "machine"
+    },
+    "chat.forward.error.generic": {
+      "text": "Не вдалося переслати повідомлення. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.forward.from": {
+      "text": "Переслано від: {name}",
+      "status": "machine"
+    },
+    "chat.forward.label": {
+      "text": "Переслане повідомлення",
+      "status": "machine"
+    },
+    "chat.forward.list_label": {
+      "text": "Розмови",
+      "status": "machine"
+    },
+    "chat.forward.picker_title": {
+      "text": "Переслати до",
+      "status": "machine"
+    },
+    "chat.forward.search_label": {
+      "text": "Пошук розмов",
+      "status": "machine"
+    },
+    "chat.gif.attribution": {
+      "text": "На основі GIPHY",
+      "status": "machine"
+    },
+    "chat.gif.load_failed": {
+      "text": "Не вдалося завантажити GIF · Повторити",
+      "status": "machine"
+    },
+    "chat.gif.loading": {
+      "text": "Завантаження GIF",
+      "status": "machine"
+    },
+    "chat.gif.no_results": {
+      "text": "GIF не знайдено",
+      "status": "machine"
+    },
+    "chat.gif.note_dismiss": {
+      "text": "Зрозуміло",
+      "status": "machine"
+    },
+    "chat.gif.open_full": {
+      "text": "Відкрити GIF на весь екран",
+      "status": "machine"
+    },
+    "chat.gif.privacy_note": {
+      "text": "Пошук GIF іде через сервер Lakko, який бачить, що ви шукаєте. Надіслані GIF шифруються, як будь-які файли.",
+      "status": "machine"
+    },
+    "chat.gif.rate_limited": {
+      "text": "Забагато запитів — спробуйте трохи згодом",
+      "status": "machine"
+    },
+    "chat.gif.search": {
+      "text": "Пошук GIF",
+      "status": "machine"
+    },
+    "chat.gif.send": {
+      "text": "Надіслати GIF",
+      "status": "machine"
+    },
+    "chat.gif.trending": {
+      "text": "Популярне",
+      "status": "machine"
+    },
+    "chat.gif.unavailable": {
+      "text": "GIF зараз недоступні",
+      "status": "machine"
+    },
+    "chat.group.default_name": {
+      "text": "Нова група",
+      "status": "machine"
+    },
+    "chat.group.fallback_name": {
+      "text": "Група",
+      "status": "machine"
+    },
+    "chat.group.title_more": {
+      "text": "{names} +{count}",
+      "status": "machine"
+    },
+    "chat.group_name.empty": {
+      "text": "Назви поки немає",
+      "status": "machine"
+    },
+    "chat.group_name.error.character": {
+      "text": "У назві є символ, який не можна показати.",
+      "status": "machine"
+    },
+    "chat.group_name.error.generic": {
+      "text": "Цю назву не можна використати.",
+      "status": "machine"
+    },
+    "chat.group_name.error.line_break": {
+      "text": "Назва має бути в один рядок.",
+      "status": "machine"
+    },
+    "chat.group_name.error.save": {
+      "text": "Не вдалося перейменувати групу. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.group_name.error.too_long": {
+      "text": "Назва задовга.",
+      "status": "machine"
+    },
+    "chat.group_name.label": {
+      "text": "Назва групи",
+      "status": "machine"
+    },
+    "chat.group_name.only_admins": {
+      "text": "Перейменувати цю групу можуть лише адміністратори",
+      "status": "machine"
+    },
+    "chat.header.back": {
+      "text": "Назад до чатів",
+      "status": "machine"
+    },
+    "chat.info.channel": {
+      "text": "Про канал",
+      "status": "machine"
+    },
+    "chat.info.contact": {
+      "text": "Про контакт",
+      "status": "machine"
+    },
+    "chat.info.group": {
+      "text": "Про групу",
+      "status": "machine"
+    },
+    "chat.invite_link.cleared": {
+      "text": "Посилання прибрано (у вбудованого посилання нічого відкликати).",
+      "status": "machine"
+    },
+    "chat.invite_link.copy": {
+      "text": "Копіювати посилання",
+      "status": "machine"
+    },
+    "chat.invite_link.create": {
+      "text": "Створити посилання-запрошення",
+      "status": "machine"
+    },
+    "chat.invite_link.label": {
+      "text": "Посилання-запрошення",
+      "status": "machine"
+    },
+    "chat.invite_link.revoke": {
+      "text": "Відкликати",
+      "status": "machine"
+    },
+    "chat.invite_link.revoked": {
+      "text": "Посилання-запрошення відкликано.",
+      "status": "machine"
+    },
+    "chat.invite_link.share": {
+      "text": "Поділитися",
+      "status": "machine"
+    },
+    "chat.leave.action": {
+      "text": "Вийти з групи",
+      "status": "machine"
+    },
+    "chat.leave.body": {
+      "text": "Ви отримуватимете повідомлення, доки власник або адміністратор не застосує ваш запит. Щоб повернутися, знадобиться нове запрошення.",
+      "status": "machine"
+    },
+    "chat.leave.confirm": {
+      "text": "Вийти",
+      "status": "machine"
+    },
+    "chat.leave.confirm_named": {
+      "text": "Вийти: {name}",
+      "status": "machine"
+    },
+    "chat.leave.requested": {
+      "text": "Запит на вихід надіслано. Він набуде чинності, коли власник або адміністратор застосує зміну.",
+      "status": "machine"
+    },
+    "chat.leave.title": {
+      "text": "Вийти з цієї групи?",
+      "status": "machine"
+    },
+    "chat.media.and_more": {
+      "text": "{label} і ще {count, plural, one {#} few {#} many {#} other {#}}",
+      "status": "machine"
+    },
+    "chat.media.audio": {
+      "text": "Аудіо",
+      "status": "machine"
+    },
+    "chat.media.file": {
+      "text": "Файл",
+      "status": "machine"
+    },
+    "chat.media.gif": {
+      "text": "GIF",
+      "status": "machine"
+    },
+    "chat.media.not_sent_retry": {
+      "text": "Не надіслано · Повторити",
+      "status": "machine"
+    },
+    "chat.media.open_full_hint": {
+      "text": "Відкриває на весь екран",
+      "status": "machine"
+    },
+    "chat.media.photo": {
+      "text": "Фото",
+      "status": "machine"
+    },
+    "chat.media.play_failed": {
+      "text": "Не вдалося відтворити це повідомлення",
+      "status": "machine"
+    },
+    "chat.media.row_not_sent": {
+      "text": "{label}, не надіслано",
+      "status": "machine"
+    },
+    "chat.media.row_sending": {
+      "text": "{label}, надсилається",
+      "status": "machine"
+    },
+    "chat.media.video": {
+      "text": "Відео",
+      "status": "machine"
+    },
+    "chat.media.video_message": {
+      "text": "Відеоповідомлення",
+      "status": "machine"
+    },
+    "chat.media.voice_message": {
+      "text": "Голосове повідомлення",
+      "status": "machine"
+    },
+    "chat.media.with_duration": {
+      "text": "{label}, {duration}",
+      "status": "machine"
+    },
+    "chat.members.add.action": {
+      "text": "Додати учасника",
+      "status": "machine"
+    },
+    "chat.members.add.done": {
+      "text": "Додано: {name}.",
+      "status": "machine"
+    },
+    "chat.members.add.error.no_bundle": {
+      "text": "Ця людина ще не завершила налаштування Lakko. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "chat.members.add.error.some_failed": {
+      "text": "Не вдалося додати: {names}. Додайте їх через список учасників.",
+      "status": "machine"
+    },
+    "chat.members.add.error.unknown_username": {
+      "text": "Обліковий запис {name} не зареєстровано.",
+      "status": "machine"
+    },
+    "chat.members.add.placeholder": {
+      "text": "@username",
+      "status": "machine"
+    },
+    "chat.members.add.requested": {
+      "text": "Запитано додавання: {name}. Людина приєднається, коли власник або адміністратор застосує зміну.",
+      "status": "machine"
+    },
+    "chat.members.add.submit": {
+      "text": "Додати",
+      "status": "machine"
+    },
+    "chat.members.admin.demoted": {
+      "text": "Роль адміністратора знято.",
+      "status": "machine"
+    },
+    "chat.members.admin.make": {
+      "text": "Зробити адміністратором",
+      "status": "machine"
+    },
+    "chat.members.admin.marker": {
+      "text": "Адмін",
+      "status": "machine"
+    },
+    "chat.members.admin.promoted": {
+      "text": "Призначено адміністратора.",
+      "status": "machine"
+    },
+    "chat.members.admin.remove": {
+      "text": "Зняти роль адміністратора",
+      "status": "machine"
+    },
+    "chat.members.admin.requested": {
+      "text": "Зміну запитано. Вона набуде чинності, коли власник або адміністратор застосує її.",
+      "status": "machine"
+    },
+    "chat.members.count": {
+      "text": "{count, plural, one {# учасник} few {# учасники} many {# учасників} other {# учасника}}",
+      "status": "machine"
+    },
+    "chat.members.devices": {
+      "text": "{count, plural, one {# пристрій} few {# пристрої} many {# пристроїв} other {# пристрою}}",
+      "status": "machine"
+    },
+    "chat.members.frozen": {
+      "text": "Цей список перестав оновлюватися, коли закінчилася ваша участь у групі.",
+      "status": "machine"
+    },
+    "chat.members.heading": {
+      "text": "Учасники ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.approve": {
+      "text": "Схвалити",
+      "status": "machine"
+    },
+    "chat.members.join.approved_added": {
+      "text": "Приєднання схвалено. Людину додано до групи.",
+      "status": "machine"
+    },
+    "chat.members.join.approved_requested": {
+      "text": "Приєднання схвалено. Людина приєднається, коли власник або адміністратор застосує зміну.",
+      "status": "machine"
+    },
+    "chat.members.join.heading": {
+      "text": "Запити на приєднання ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.link_unknown": {
+      "text": "Посилання-запрошення невідоме",
+      "status": "machine"
+    },
+    "chat.members.join.reject": {
+      "text": "Відхилити",
+      "status": "machine"
+    },
+    "chat.members.join.rejected": {
+      "text": "Запит на приєднання відхилено.",
+      "status": "machine"
+    },
+    "chat.members.join.via_former": {
+      "text": "через {name} · більше не учасник",
+      "status": "machine"
+    },
+    "chat.members.join.via_member": {
+      "text": "через {name} · учасник",
+      "status": "machine"
+    },
+    "chat.members.pending.adds_heading": {
+      "text": "Очікують додавання ({count})",
+      "status": "machine"
+    },
+    "chat.members.pending.count": {
+      "text": "{count, plural, one {# зміна складу очікує застосування.} few {# зміни складу очікують застосування.} many {# змін складу очікують застосування.} other {# зміни складу очікують застосування.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.liveness": {
+      "text": "Зміни складу застосовує власник групи або адміністратор. Вони застосуються автоматично, щойно хтось із них це зробить.",
+      "status": "machine"
+    },
+    "chat.members.pending.queue": {
+      "text": "{count, plural, one {Тепер # зміна очікує застосування.} few {Тепер # зміни очікують застосування.} many {Тепер # змін очікують застосування.} other {Тепер # зміни очікують застосування.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_added": {
+      "text": "Очікує додавання.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_leave": {
+      "text": "Очікує виходу.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_removed": {
+      "text": "Очікує видалення.",
+      "status": "machine"
+    },
+    "chat.members.remove.body": {
+      "text": "Людина отримуватиме повідомлення, доки власник або адміністратор не застосує зміну.",
+      "status": "machine"
+    },
+    "chat.members.remove.confirm_named": {
+      "text": "Видалити: {name}",
+      "status": "machine"
+    },
+    "chat.members.remove.done": {
+      "text": "Учасника видалено.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested": {
+      "text": "Видалення запитано. Воно набуде чинності, коли власник або адміністратор застосує зміну.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested_short": {
+      "text": "Видалення запитано.",
+      "status": "machine"
+    },
+    "chat.members.remove.title": {
+      "text": "Видалити цього учасника?",
+      "status": "machine"
+    },
+    "chat.members.row_label": {
+      "text": "{name}, {state}",
+      "status": "machine"
+    },
+    "chat.members.title": {
+      "text": "Учасники",
+      "status": "machine"
+    },
+    "chat.members.unapplied.add_line": {
+      "text": "Додавання не застосовано. Можна додати знову.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.explanation": {
+      "text": "Ці зміни не застосувалися й самі не повторюватимуться.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.heading": {
+      "text": "Не застосовано ({count})",
+      "status": "machine"
+    },
+    "chat.members.unapplied.join_line": {
+      "text": "Не застосовано. Попросіть людину знову надіслати запит на приєднання.",
+      "status": "machine"
+    },
+    "chat.members.unnamed": {
+      "text": "Учасник",
+      "status": "machine"
+    },
+    "chat.message.actions": {
+      "text": "Дії з повідомленням",
+      "status": "machine"
+    },
+    "chat.message.close_actions": {
+      "text": "Закрити дії з повідомленням",
+      "status": "machine"
+    },
+    "chat.message.deleted": {
+      "text": "Повідомлення видалено",
+      "status": "machine"
+    },
+    "chat.message.edit": {
+      "text": "Змінити",
+      "status": "machine"
+    },
+    "chat.message.edited": {
+      "text": "(змінено)",
+      "status": "machine"
+    },
+    "chat.message.forward": {
+      "text": "Переслати",
+      "status": "machine"
+    },
+    "chat.message.media_fallback": {
+      "text": "Медіаповідомлення",
+      "status": "machine"
+    },
+    "chat.message.more_reactions": {
+      "text": "Інші реакції",
+      "status": "machine"
+    },
+    "chat.message.not_sent": {
+      "text": "Не надіслано",
+      "status": "machine"
+    },
+    "chat.message.pin": {
+      "text": "Закріпити",
+      "status": "machine"
+    },
+    "chat.message.react": {
+      "text": "Реакція",
+      "status": "machine"
+    },
+    "chat.message.react_with": {
+      "text": "Реакція {emoji}",
+      "status": "machine"
+    },
+    "chat.message.read": {
+      "text": "Прочитано",
+      "status": "machine"
+    },
+    "chat.message.read_by": {
+      "text": "Прочитали: {names}",
+      "status": "machine"
+    },
+    "chat.message.reply": {
+      "text": "Відповісти",
+      "status": "machine"
+    },
+    "chat.message.select": {
+      "text": "Вибрати",
+      "status": "machine"
+    },
+    "chat.message.sending": {
+      "text": "Надсилання...",
+      "status": "machine"
+    },
+    "chat.message.sent": {
+      "text": "Надіслано",
+      "status": "machine"
+    },
+    "chat.message.unpin": {
+      "text": "Відкріпити",
+      "status": "machine"
+    },
+    "chat.not_found.back": {
+      "text": "Назад до чатів",
+      "status": "machine"
+    },
+    "chat.not_found.body": {
+      "text": "Це посилання не відповідає жодній розмові на цьому пристрої.",
+      "status": "machine"
+    },
+    "chat.not_found.title": {
+      "text": "Розмову не знайдено",
+      "status": "machine"
+    },
+    "chat.peer.fallback_name": {
+      "text": "Співрозмовник",
+      "status": "machine"
+    },
+    "chat.photo.load_failed": {
+      "text": "Не вдалося завантажити фото",
+      "status": "machine"
+    },
+    "chat.photo.load_failed_retry": {
+      "text": "Не вдалося завантажити фото, торкніться, щоб повторити",
+      "status": "machine"
+    },
+    "chat.photo.loading": {
+      "text": "Фото завантажується",
+      "status": "machine"
+    },
+    "chat.photo.open": {
+      "text": "Відкрити фото",
+      "status": "machine"
+    },
+    "chat.photo.viewer": {
+      "text": "Перегляд фото",
+      "status": "machine"
+    },
+    "chat.photo.viewer_hint": {
+      "text": "Зведіть або розведіть пальці, щоб змінити масштаб. Проведіть униз, щоб закрити.",
+      "status": "machine"
+    },
+    "chat.pin.detail_personal": {
+      "text": "Лише на цьому пристрої",
+      "status": "machine"
+    },
+    "chat.pin.detail_shared": {
+      "text": "Бачать усі учасники",
+      "status": "machine"
+    },
+    "chat.pin.for_both": {
+      "text": "Закріпити для обох",
+      "status": "machine"
+    },
+    "chat.pin.for_everyone": {
+      "text": "Закріпити для всіх",
+      "status": "machine"
+    },
+    "chat.pin.for_me": {
+      "text": "Закріпити для себе",
+      "status": "machine"
+    },
+    "chat.pin.sheet_title": {
+      "text": "Закріпити повідомлення",
+      "status": "machine"
+    },
+    "chat.pinned_bar.all": {
+      "text": "Усі закріплені повідомлення",
+      "status": "machine"
+    },
+    "chat.pinned_bar.for_you": {
+      "text": "Для вас",
+      "status": "machine"
+    },
+    "chat.pinned_bar.hint": {
+      "text": "Показує повідомлення",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label": {
+      "text": "Закріплене повідомлення",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label_of": {
+      "text": "Закріплене повідомлення {index} з {count}",
+      "status": "machine"
+    },
+    "chat.pinned_bar.list_title": {
+      "text": "Закріплені повідомлення",
+      "status": "machine"
+    },
+    "chat.reaction.add_title": {
+      "text": "Відреагувати — Відреагували: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by": {
+      "text": "Відреагували: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by_title": {
+      "text": "Відреагували",
+      "status": "machine"
+    },
+    "chat.reaction.remove_title": {
+      "text": "Прибрати свою реакцію — Відреагували: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.single_emoji": {
+      "text": "Реакція має бути одним емодзі.",
+      "status": "machine"
+    },
+    "chat.reauth.action": {
+      "text": "Увійти знову",
+      "status": "machine"
+    },
+    "chat.reauth.body": {
+      "text": "Ключі для розшифрування й підпису повідомлень недоступні в цьому сеансі. Увійдіть знову, щоб відкрити цей чат.",
+      "status": "machine"
+    },
+    "chat.reauth.title": {
+      "text": "Увійдіть знову",
+      "status": "machine"
+    },
+    "chat.record.bar_video": {
+      "text": "Запис відеоповідомлення",
+      "status": "machine"
+    },
+    "chat.record.bar_voice": {
+      "text": "Запис голосового повідомлення",
+      "status": "machine"
+    },
+    "chat.record.cancelled": {
+      "text": "Скасовано",
+      "status": "machine"
+    },
+    "chat.record.delete": {
+      "text": "Видалити запис",
+      "status": "machine"
+    },
+    "chat.record.denied_camera": {
+      "text": "Lakko потрібен доступ до камери, щоб записувати відеоповідомлення. Дозвольте доступ до камери в налаштуваннях сайту в браузері.",
+      "status": "machine"
+    },
+    "chat.record.denied_camera_app": {
+      "text": "Lakko потрібен доступ до камери, щоб записувати відеоповідомлення",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone": {
+      "text": "Lakko потрібен доступ до мікрофона, щоб записувати голосові повідомлення. Дозвольте доступ до мікрофона в налаштуваннях сайту в браузері.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_app": {
+      "text": "Lakko потрібен доступ до мікрофона, щоб записувати голосові повідомлення",
+      "status": "machine"
+    },
+    "chat.record.finishing": {
+      "text": "Завершення запису",
+      "status": "machine"
+    },
+    "chat.record.flip_camera": {
+      "text": "Змінити камеру",
+      "status": "machine"
+    },
+    "chat.record.flip_failed": {
+      "text": "Не вдалося змінити камеру",
+      "status": "machine"
+    },
+    "chat.record.hint_hold": {
+      "text": "Утримуйте для запису",
+      "status": "machine"
+    },
+    "chat.record.in_call": {
+      "text": "Недоступно під час дзвінка",
+      "status": "machine"
+    },
+    "chat.record.locked_hint": {
+      "text": "Починає запис без утримання",
+      "status": "machine"
+    },
+    "chat.record.no_camera": {
+      "text": "Камеру не знайдено",
+      "status": "machine"
+    },
+    "chat.record.open_settings": {
+      "text": "Відкрити налаштування",
+      "status": "machine"
+    },
+    "chat.record.pause": {
+      "text": "Призупинити запис",
+      "status": "machine"
+    },
+    "chat.record.pause_video": {
+      "text": "Призупинити відеоповідомлення",
+      "status": "machine"
+    },
+    "chat.record.play": {
+      "text": "Відтворити запис, {duration}",
+      "status": "machine"
+    },
+    "chat.record.play_video_sound": {
+      "text": "Відтворити відеоповідомлення зі звуком",
+      "status": "machine"
+    },
+    "chat.record.position": {
+      "text": "Позиція в записі",
+      "status": "machine"
+    },
+    "chat.record.recording_duration": {
+      "text": "Триває запис, {duration}",
+      "status": "machine"
+    },
+    "chat.record.send": {
+      "text": "Надіслати запис",
+      "status": "machine"
+    },
+    "chat.record.silent_mic": {
+      "text": "Немає звуку з мікрофона",
+      "status": "machine"
+    },
+    "chat.record.slide_cancel": {
+      "text": "‹ Проведіть, щоб скасувати",
+      "status": "machine"
+    },
+    "chat.record.start_failed": {
+      "text": "Не вдалося почати запис",
+      "status": "machine"
+    },
+    "chat.record.starting": {
+      "text": "Запуск…",
+      "status": "machine"
+    },
+    "chat.record.stop": {
+      "text": "Зупинити запис",
+      "status": "machine"
+    },
+    "chat.record.stop_short": {
+      "text": "Стоп",
+      "status": "machine"
+    },
+    "chat.record.switch_to_video": {
+      "text": "Перейти на відеоповідомлення",
+      "status": "machine"
+    },
+    "chat.record.switch_to_voice": {
+      "text": "Перейти на голосове повідомлення",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video": {
+      "text": "У цьому браузері не можна записувати відеоповідомлення",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video_device": {
+      "text": "На цьому пристрої не можна записувати відеоповідомлення",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice": {
+      "text": "У цьому браузері не можна записувати голосові повідомлення",
+      "status": "machine"
+    },
+    "chat.record.video": {
+      "text": "Записати відеоповідомлення",
+      "status": "machine"
+    },
+    "chat.record.video_ready": {
+      "text": "Відеоповідомлення готове",
+      "status": "machine"
+    },
+    "chat.record.video_tooltip": {
+      "text": "Записати відеоповідомлення: утримуйте для запису, торкніться, щоб перейти на голос",
+      "status": "machine"
+    },
+    "chat.record.voice": {
+      "text": "Записати голосове повідомлення",
+      "status": "machine"
+    },
+    "chat.record.voice_tooltip": {
+      "text": "Записати голосове повідомлення: утримуйте для запису, торкніться, щоб перейти на відео",
+      "status": "machine"
+    },
+    "chat.refusal.add_not_admin": {
+      "text": "Додавати учасників може лише власник групи або адміністратор.",
+      "status": "machine"
+    },
+    "chat.refusal.device_binding": {
+      "text": "З ключем цього пристрою щось не так. Видаліть його в розділі «Пристрої» й додайте знову.",
+      "status": "machine"
+    },
+    "chat.refusal.device_limit": {
+      "text": "{count, plural, one {Не більше # пристрою на обліковий запис. Спершу видаліть один.} few {Не більше # пристроїв на обліковий запис. Спершу видаліть один.} many {Не більше # пристроїв на обліковий запис. Спершу видаліть один.} other {Не більше # пристрою на обліковий запис. Спершу видаліть один.}}",
+      "status": "machine"
+    },
+    "chat.refusal.fallback": {
+      "text": "Цю зміну не вдалося запитати.",
+      "status": "machine"
+    },
+    "chat.refusal.join_not_kept": {
+      "text": "Запит на приєднання надійшов, коли очікуваних було вже забагато, тому його не збережено. Попросіть людину надіслати його пізніше.",
+      "status": "machine"
+    },
+    "chat.refusal.joiner_member": {
+      "text": "Ця людина вже приєдналася до групи.",
+      "status": "machine"
+    },
+    "chat.refusal.no_join_request": {
+      "text": "Цей запит на приєднання більше не очікує.",
+      "status": "machine"
+    },
+    "chat.refusal.not_owner": {
+      "text": "Змінювати адміністраторів і передавати права власника може лише власник групи.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_cannot_leave": {
+      "text": "Власник групи не може з неї вийти.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_not_member": {
+      "text": "Власником може бути лише поточний учасник цієї групи.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_unremovable": {
+      "text": "Власника групи не можна видалити.",
+      "status": "machine"
+    },
+    "chat.refusal.pending_full": {
+      "text": "Забагато змін уже очікують застосування.",
+      "status": "machine"
+    },
+    "chat.refusal.remove_not_admin": {
+      "text": "Видаляти учасників може лише власник групи або адміністратор.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_many": {
+      "text": "Дочекайтеся їх застосування й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_one": {
+      "text": "Дочекайтеся її застосування й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.refusal.role_change_pending": {
+      "text": "Зміна ролей уже очікує застосування.",
+      "status": "machine"
+    },
+    "chat.refusal.with_retry": {
+      "text": "{fact} {retry}",
+      "status": "machine"
+    },
+    "chat.reply.cancel": {
+      "text": "Скасувати відповідь",
+      "status": "machine"
+    },
+    "chat.reply.fallback_excerpt": {
+      "text": "Повідомлення",
+      "status": "machine"
+    },
+    "chat.reply.quote": {
+      "text": "Відповідь",
+      "status": "machine"
+    },
+    "chat.reply.quote_to": {
+      "text": "Відповідь: {name}",
+      "status": "machine"
+    },
+    "chat.reply.strip_label": {
+      "text": "Відповідь: {name}",
+      "status": "machine"
+    },
+    "chat.select.count": {
+      "text": "{count, plural, one {Вибрано: #} few {Вибрано: #} many {Вибрано: #} other {Вибрано: #}}",
+      "status": "machine"
+    },
+    "chat.select.count_limit": {
+      "text": "{count, plural, one {Вибрано: # (максимум)} few {Вибрано: # (максимум)} many {Вибрано: # (максимум)} other {Вибрано: # (максимум)}}",
+      "status": "machine"
+    },
+    "chat.select.delete_helper": {
+      "text": "Видаляти можна лише власні повідомлення.",
+      "status": "machine"
+    },
+    "chat.select.delete_title": {
+      "text": "{count, plural, one {Видалити # повідомлення?} few {Видалити # повідомлення?} many {Видалити # повідомлень?} other {Видалити # повідомлення?}}",
+      "status": "machine"
+    },
+    "chat.select.deleted_of": {
+      "text": "Видалено {done} з {total}.",
+      "status": "machine"
+    },
+    "chat.select.forwarded_of": {
+      "text": "Переслано {done} з {total}.",
+      "status": "machine"
+    },
+    "chat.select.state_not_selected": {
+      "text": "Не вибрано",
+      "status": "machine"
+    },
+    "chat.select.state_selected": {
+      "text": "Вибрано",
+      "status": "machine"
+    },
+    "chat.select.toolbar": {
+      "text": "Вибрані повідомлення",
+      "status": "machine"
+    },
+    "chat.send.failed": {
+      "text": "Не вдалося надіслати.",
+      "status": "machine"
+    },
+    "chat.system.join_request": {
+      "text": "Запит на приєднання",
+      "status": "machine"
+    },
+    "chat.system.members_changed": {
+      "text": "Склад змінено",
+      "status": "machine"
+    },
+    "chat.timeline.empty": {
+      "text": "Повідомлень поки немає. Привітайтеся.",
+      "status": "machine"
+    },
+    "chat.timeline.setting_up": {
+      "text": "Ця розмова ще налаштовується на цьому пристрої.",
+      "status": "machine"
+    },
+    "chat.transfer.action": {
+      "text": "Передати права власника",
+      "status": "machine"
+    },
+    "chat.transfer.action_named": {
+      "text": "Зробити власником: {name}",
+      "status": "machine"
+    },
+    "chat.transfer.become_member": {
+      "text": "Стати звичайним учасником",
+      "status": "machine"
+    },
+    "chat.transfer.become_member_detail": {
+      "text": "Ви одразу втрачаєте всі права в групі. Повернути будь-що може лише новий власник.",
+      "status": "machine"
+    },
+    "chat.transfer.candidate_admin": {
+      "text": "{name}, адміністратор",
+      "status": "machine"
+    },
+    "chat.transfer.done_admin": {
+      "text": "Тепер власник групи — {name}. Ви залишаєтеся адміністратором.",
+      "status": "machine"
+    },
+    "chat.transfer.done_member": {
+      "text": "Тепер власник групи — {name}. Ви тепер звичайний учасник.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_body": {
+      "text": "Змінювати ролі може лише власник. Після передачі групи ви не зможете повернути її, відновити свою роль власника чи знову змінити свою роль, якщо це не зробить за вас новий власник.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_title": {
+      "text": "Це не можна скасувати.",
+      "status": "machine"
+    },
+    "chat.transfer.leave_blocked": {
+      "text": "Спершу передайте права власника — групу не можна залишити без власника.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner": {
+      "text": "Тепер ви власник цієї групи.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_body": {
+      "text": "Ви можете додавати й видаляти учасників, змінювати адміністраторів і передавати права власника іншій людині.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_legend": {
+      "text": "Новий власник",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_named": {
+      "text": "{name} передає вам права власника цієї групи.",
+      "status": "machine"
+    },
+    "chat.transfer.no_candidates": {
+      "text": "У цій групі більше нікого немає, кому її можна передати.",
+      "status": "machine"
+    },
+    "chat.transfer.pending": {
+      "text": "Передача прав власника очікує застосування.",
+      "status": "machine"
+    },
+    "chat.transfer.pending_named": {
+      "text": "Очікує передачі прав власника: {name}.",
+      "status": "machine"
+    },
+    "chat.transfer.requested": {
+      "text": "Передачу прав власника запитано. Вона набуде чинності, коли власник або адміністратор застосує зміну.",
+      "status": "machine"
+    },
+    "chat.transfer.role_change_pending": {
+      "text": "Зміна ролей уже очікує застосування. Дочекайтеся її застосування й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chat.transfer.role_legend": {
+      "text": "Ваша роль після передачі",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin": {
+      "text": "Залишитися адміністратором",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin_detail": {
+      "text": "Ви й надалі зможете додавати й видаляти учасників. Відмовитися від цього можна пізніше, попросивши нового власника.",
+      "status": "machine"
+    },
+    "chat.transfer.unlocks_leave": {
+      "text": "Щойно зміну буде застосовано, ви зможете вийти з групи, як будь-який інший учасник.",
+      "status": "machine"
+    },
+    "chat.typing.named": {
+      "text": "{name} друкує...",
+      "status": "machine"
+    },
+    "chat.typing.one_to_one": {
+      "text": "друкує...",
+      "status": "machine"
+    },
+    "chat.typing.several": {
+      "text": "Кілька людей друкують...",
+      "status": "machine"
+    },
+    "chat.unpin.for_both": {
+      "text": "Відкріпити для обох",
+      "status": "machine"
+    },
+    "chat.unpin.for_everyone": {
+      "text": "Відкріпити для всіх",
+      "status": "machine"
+    },
+    "chat.unpin.for_me": {
+      "text": "Відкріпити для себе",
+      "status": "machine"
+    },
+    "chat.unpin.sheet_title": {
+      "text": "Відкріпити повідомлення",
+      "status": "machine"
+    },
+    "chat.upload.encrypting": {
+      "text": "Шифрування «{name}»…",
+      "status": "machine"
+    },
+    "chat.upload.encrypting_of": {
+      "text": "Шифрування «{name}» ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.preparing": {
+      "text": "Підготовка «{name}»…",
+      "status": "machine"
+    },
+    "chat.upload.selected_item": {
+      "text": "Вибраний елемент",
+      "status": "machine"
+    },
+    "chat.upload.uploading": {
+      "text": "Вивантаження «{name}»…",
+      "status": "machine"
+    },
+    "chat.upload.uploading_of": {
+      "text": "Вивантаження «{name}» ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.working": {
+      "text": "Шифрування та вивантаження…",
+      "status": "machine"
+    },
+    "chat.video.load_failed": {
+      "text": "Не вдалося завантажити відео",
+      "status": "machine"
+    },
+    "chat.video.load_failed_retry": {
+      "text": "Не вдалося завантажити відео, торкніться, щоб повторити",
+      "status": "machine"
+    },
+    "chat.video.loading": {
+      "text": "Завантаження відео, {size}",
+      "status": "machine"
+    },
+    "chat.video.open": {
+      "text": "Відтворити відео",
+      "status": "machine"
+    },
+    "chat.video.play": {
+      "text": "Відтворити відео, {size}",
+      "status": "machine"
+    },
+    "chat.video.play_failed": {
+      "text": "Не вдалося відтворити це відео",
+      "status": "machine"
+    },
+    "chat.video.player": {
+      "text": "Відеоплеєр",
+      "status": "machine"
+    },
+    "chat.video_note.loading": {
+      "text": "Відеоповідомлення завантажується",
+      "status": "machine"
+    },
+    "chat.video_note.play": {
+      "text": "Відтворити відеоповідомлення, {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.play_sound": {
+      "text": "Відтворити відеоповідомлення зі звуком, {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.poster": {
+      "text": "Обкладинка відеоповідомлення",
+      "status": "machine"
+    },
+    "chat.video_note.tap_mute": {
+      "text": "Торкніться, щоб вимкнути звук",
+      "status": "machine"
+    },
+    "chat.video_note.tap_sound": {
+      "text": "Торкніться, щоб увімкнути звук",
+      "status": "machine"
+    },
+    "chat.voice.change_speed": {
+      "text": "Змінити швидкість відтворення",
+      "status": "machine"
+    },
+    "chat.voice.not_played": {
+      "text": "Не прослухано",
+      "status": "machine"
+    },
+    "chat.voice.pause": {
+      "text": "Призупинити голосове повідомлення",
+      "status": "machine"
+    },
+    "chat.voice.play": {
+      "text": "Відтворити голосове повідомлення, {duration}",
+      "status": "machine"
+    },
+    "chat.voice.position": {
+      "text": "{position} з {duration}",
+      "status": "machine"
+    },
+    "chat.voice.seek": {
+      "text": "Перемотування голосового повідомлення",
+      "status": "machine"
+    },
+    "chat.voice.speed": {
+      "text": "Швидкість відтворення {rate}",
+      "status": "machine"
+    },
+    "chats.action.archive": {
+      "text": "В архів",
+      "status": "machine"
+    },
+    "chats.action.mute": {
+      "text": "Вимкнути звук",
+      "status": "machine"
+    },
+    "chats.action.pin": {
+      "text": "Закріпити",
+      "status": "machine"
+    },
+    "chats.action.unarchive": {
+      "text": "З архіву",
+      "status": "machine"
+    },
+    "chats.action.unmute": {
+      "text": "Увімкнути звук",
+      "status": "machine"
+    },
+    "chats.action.unpin": {
+      "text": "Відкріпити",
+      "status": "machine"
+    },
+    "chats.compose": {
+      "text": "Створити",
+      "status": "machine"
+    },
+    "chats.create.channel": {
+      "text": "Створити канал",
+      "status": "machine"
+    },
+    "chats.create.chat": {
+      "text": "Новий чат",
+      "status": "machine"
+    },
+    "chats.create.group": {
+      "text": "Створити групу",
+      "status": "machine"
+    },
+    "chats.create.menu": {
+      "text": "Створити",
+      "status": "machine"
+    },
+    "chats.empty.action": {
+      "text": "Почати",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "Виберіть чат, щоб почати спілкування",
+      "status": "machine"
+    },
+    "chats.empty.title": {
+      "text": "Розмов поки немає",
+      "status": "machine"
+    },
+    "chats.lookup.action": {
+      "text": "Знайти {name}",
+      "status": "machine"
+    },
+    "chats.lookup.nothing": {
+      "text": "За запитом {name} нічого не знайдено.",
+      "status": "machine"
+    },
+    "chats.lookup.unreachable": {
+      "text": "Не вдалося виконати пошук. Перевірте з’єднання та спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chats.new_chat.add_contact": {
+      "text": "Додати контакт",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts": {
+      "text": "Контактів поки немає",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts_body": {
+      "text": "Чат починається з того, кого ви знаєте.",
+      "status": "machine"
+    },
+    "chats.new_chat.not_available": {
+      "text": "Чат поки недоступний на цьому пристрої",
+      "status": "machine"
+    },
+    "chats.new_group.accept_again": {
+      "text": "Прийміть цей контакт знову, щоб додати його до групи.",
+      "status": "machine"
+    },
+    "chats.new_group.creating": {
+      "text": "Створення...",
+      "status": "machine"
+    },
+    "chats.new_group.error": {
+      "text": "Не вдалося створити групу. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "chats.new_group.name_label": {
+      "text": "Назва групи (необов’язково)",
+      "status": "machine"
+    },
+    "chats.new_group.no_contacts": {
+      "text": "Група починається з людей, яких ви вже знаєте.",
+      "status": "machine"
+    },
+    "chats.new_group.open_contacts": {
+      "text": "Перейти до контактів",
+      "status": "machine"
+    },
+    "chats.new_group.title": {
+      "text": "Нова група",
+      "status": "machine"
+    },
+    "chats.preview.own": {
+      "text": "Ви: {text}",
+      "status": "machine"
+    },
+    "chats.preview.sender": {
+      "text": "{name}: {text}",
+      "status": "machine"
+    },
+    "chats.row.actions": {
+      "text": "Дії з розмовою",
+      "status": "machine"
+    },
+    "chats.row.call.label": {
+      "text": "{kind}: {name}",
+      "status": "machine"
+    },
+    "chats.row.ended": {
+      "text": "Ви більше не учасник.",
+      "status": "machine"
+    },
+    "chats.row.muted": {
+      "text": "Звук вимкнено",
+      "status": "machine"
+    },
+    "chats.row.no_messages": {
+      "text": "Повідомлень поки немає",
+      "status": "machine"
+    },
+    "chats.row.people": {
+      "text": "{count, plural, one {# людина} few {# людини} many {# людей} other {# людини}}",
+      "status": "machine"
+    },
+    "chats.row.pinned": {
+      "text": "Закріплено",
+      "status": "machine"
+    },
+    "chats.row.unread": {
+      "text": "{count, plural, one {# непрочитане повідомлення} few {# непрочитані повідомлення} many {# непрочитаних повідомлень} other {# непрочитаного повідомлення}}",
+      "status": "machine"
+    },
+    "chats.row.unread_overflow": {
+      "text": "99+",
+      "status": "machine"
+    },
+    "chats.search.clear": {
+      "text": "Очистити пошук",
+      "status": "machine"
+    },
+    "chats.search.label": {
+      "text": "Пошук чатів",
+      "status": "machine"
+    },
+    "chats.search.no_results": {
+      "text": "Нічого не знайдено",
+      "status": "machine"
+    },
+    "chats.search.placeholder": {
+      "text": "Пошук",
+      "status": "machine"
+    },
+    "chats.synchronizing": {
+      "text": "Синхронізація...",
       "status": "machine"
     },
     "common.adding": {
@@ -366,12 +2086,28 @@
       "text": "Копіювати",
       "status": "machine"
     },
+    "common.delete": {
+      "text": "Видалити",
+      "status": "machine"
+    },
     "common.dismiss": {
       "text": "Закрити",
       "status": "machine"
     },
     "common.done": {
       "text": "Готово",
+      "status": "machine"
+    },
+    "common.duration.minutes": {
+      "text": "{count, plural, one {# хвилина} few {# хвилини} many {# хвилин} other {# хвилини}}",
+      "status": "machine"
+    },
+    "common.duration.minutes_seconds": {
+      "text": "{minutes} {seconds}",
+      "status": "machine"
+    },
+    "common.duration.seconds": {
+      "text": "{count, plural, one {# секунда} few {# секунди} many {# секунд} other {# секунди}}",
       "status": "machine"
     },
     "common.email": {
@@ -422,6 +2158,10 @@
       "text": "Розгорнути",
       "status": "machine"
     },
+    "common.list_pair": {
+      "text": "{first}, {second}",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "Завантаження...",
       "status": "machine"
@@ -438,8 +2178,16 @@
       "text": "Інші варіанти",
       "status": "machine"
     },
+    "common.not_now": {
+      "text": "Не зараз",
+      "status": "machine"
+    },
     "common.off": {
       "text": "Вимк.",
+      "status": "machine"
+    },
+    "common.ok": {
+      "text": "OK",
       "status": "machine"
     },
     "common.on": {
@@ -474,6 +2222,10 @@
       "text": "Видалення...",
       "status": "machine"
     },
+    "common.retry": {
+      "text": "Повторити",
+      "status": "machine"
+    },
     "common.save": {
       "text": "Зберегти",
       "status": "machine"
@@ -486,8 +2238,28 @@
       "text": "Надсилання...",
       "status": "machine"
     },
+    "common.sentence_pair": {
+      "text": "{first} {second}",
+      "status": "machine"
+    },
     "common.set_up": {
       "text": "Налаштувати",
+      "status": "machine"
+    },
+    "common.size.bytes": {
+      "text": "{size} Б",
+      "status": "machine"
+    },
+    "common.size.gb": {
+      "text": "{size} ГБ",
+      "status": "machine"
+    },
+    "common.size.kb": {
+      "text": "{size} КБ",
+      "status": "machine"
+    },
+    "common.size.mb": {
+      "text": "{size} МБ",
       "status": "machine"
     },
     "common.try_again": {
@@ -732,6 +2504,26 @@
     },
     "display_name.error.unknown": {
       "text": "Це ім’я не можна використати",
+      "status": "machine"
+    },
+    "ds.clock_skew": {
+      "text": "Перевірте дату й час на цьому пристрої.",
+      "status": "machine"
+    },
+    "group.join.not_taking_requests": {
+      "text": "Ця група поки не приймає запити. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "group.join.request_again": {
+      "text": "Надіслати запит знову",
+      "status": "machine"
+    },
+    "group.join.wait_primary": {
+      "text": "Запит надіслано. Адміністратор схвалить його, потім зміну буде застосовано до групи.",
+      "status": "machine"
+    },
+    "group.join.wait_secondary": {
+      "text": "Жоден із кроків не має обмеження в часі. Якщо нічого не відбувається, запит можна надіслати знову.",
       "status": "machine"
     },
     "language.name.ar": {
@@ -1952,6 +3744,14 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "Коди безпеки",
+      "status": "machine"
+    },
+    "tokens.action_allowance_used": {
+      "text": "Ви вичерпали денний ліміт на цю дію. Спробуйте завтра.",
+      "status": "machine"
+    },
+    "tokens.lookup_allowance_used": {
+      "text": "Сьогодні ви шукали дуже багато людей. Спробуйте завтра.",
       "status": "machine"
     },
     "username.a11y_hint": {

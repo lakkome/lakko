@@ -21,6 +21,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import me.lakko.app.media.ChatMediaHub
 import me.lakko.app.media.InlineKind
 import me.lakko.app.media.MediaAllowlist
@@ -74,6 +76,10 @@ import java.util.concurrent.TimeUnit
  */
 @RunWith(RobolectricTestRunner::class)
 class SilentMicrophoneUiTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
@@ -208,8 +214,8 @@ class SilentMicrophoneUiTest {
 
     private companion object {
         const val BUTTON = "record-button"
-        const val WARNING = "No sound from the microphone"
-        const val SLIDE_TO_CANCEL = "Slide to cancel"
+        val WARNING get() = en("chat.record.silent_mic")
+        val SLIDE_TO_CANCEL get() = en("chat.record.slide_cancel")
 
         /** The spec's two seconds, written out rather than imported. */
         const val SILENCE_MS = 2_000L

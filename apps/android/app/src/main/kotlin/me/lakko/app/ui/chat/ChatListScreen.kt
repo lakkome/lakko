@@ -91,6 +91,12 @@ import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.devices.sync.FlagsState
 import me.lakko.app.devices.sync.ReadCursorState
 import me.lakko.app.discovery.DiscoveryClient
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.Strings
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.channels.channelRowModel
 import me.lakko.app.ui.components.LakkoAvatar
@@ -195,12 +201,14 @@ public fun ChatListScreen(
     }
 
     val zone = remember { ZoneId.systemDefault() }
-    val locale = remember { Locale.getDefault() }
+    // ADR-0058: dates, times and every row line in the interface language.
+    val strings = LocalStrings.current
+    val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
     val use24h = remember(context) { DateFormat.is24HourFormat(context) }
 
     // Chats and groups. They were already one store split by a filter, so they
     // merge by dropping it.
-    val threadRows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap) {
+    val threadRows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap, strings) {
         threadConversationRows(
             context = context,
             repository = repository,
@@ -212,13 +220,14 @@ public fun ChatListScreen(
             zone = zone,
             use24h = use24h,
             locale = locale,
+            strings = strings,
         )
     }
 
     // Channels are their own store, so they have to be mapped in. Their last
     // POST time becomes the same field as a chat's last MESSAGE time, or the
     // one ordering has nothing to order by.
-    val channelRows = remember(channelHandles, channelPosts, channelKeys) {
+    val channelRows = remember(channelHandles, channelPosts, channelKeys, strings) {
         val now = System.currentTimeMillis()
         channelHandles.map { channel ->
             val model = channelRowModel(
@@ -258,7 +267,7 @@ public fun ChatListScreen(
     // namespaces because the person typing does not know which one holds the
     // name they were given.
     var lookupBusy by remember { mutableStateOf(false) }
-    var lookupNote by remember { mutableStateOf<String?>(null) }
+    var lookupNote by remember { mutableStateOf<UiText?>(null) }
     val lookupOffered = remember(visible, query) {
         visible.isEmpty() && query.isNotBlank() && looksLikeANameSafely(query)
     }
@@ -267,11 +276,11 @@ public fun ChatListScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text(me.lakko.app.l10n.t("nav.chats")) },
+                title = { Text(t("nav.chats")) },
                 actions = {
                     Box {
                         IconButton(onClick = { createMenuOpen = true }) {
-                            Icon(Icons.Filled.Edit, contentDescription = "New")
+                            Icon(Icons.Filled.Edit, contentDescription = t("chats.compose"))
                         }
                         CreateMenu(
                             expanded = createMenuOpen,
@@ -315,7 +324,7 @@ public fun ChatListScreen(
                 // this device is still being admitted to the account's chats.
                 if (synchronizing) {
                     Text(
-                        "Synchronizing...",
+                        t("chats.synchronizing"),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -443,17 +452,17 @@ private fun CreateMenu(
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         DropdownMenuItem(
-            text = { Text("New chat") },
+            text = { Text(t("chats.create.chat")) },
             leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
             onClick = { onDismiss(); onNewChat() },
         )
         DropdownMenuItem(
-            text = { Text("Create group") },
+            text = { Text(t("chats.create.group")) },
             leadingIcon = { Icon(Icons.Filled.Groups, contentDescription = null) },
             onClick = { onDismiss(); onCreateGroup() },
         )
         DropdownMenuItem(
-            text = { Text("Create channel") },
+            text = { Text(t("chats.create.channel")) },
             leadingIcon = { Icon(Icons.Filled.Campaign, contentDescription = null) },
             onClick = { onDismiss(); onCreateChannel() },
         )
@@ -540,16 +549,16 @@ private fun looksLikeANameSafely(typed: String): Boolean = try {
     false
 }
 
-private fun findByNameRowLabelSafely(typed: String): String = try {
+private fun findByNameRowLabelSafely(typed: String): UiText = try {
     findByNameRowLabel(typed)
 } catch (_: Throwable) {
-    "Look up this name"
+    UiText("chats.lookup.action", texts = mapOf("name" to typed.trim()))
 }
 
-private fun findByNameMessageSafely(found: FoundByName, typed: String): String? = try {
+private fun findByNameMessageSafely(found: FoundByName, typed: String): UiText? = try {
     findByNameMessage(found, typed)
 } catch (_: Throwable) {
-    "Could not look that up. Check your connection and try again."
+    UiText("chats.lookup.unreachable")
 }
 
 /**
@@ -569,6 +578,7 @@ internal fun threadConversationRows(
     zone: ZoneId,
     use24h: Boolean,
     locale: Locale,
+    strings: Strings = Localization.strings.value,
 ): List<ConversationListRow> = threads.map { thread ->
     val kind = conversationKind(context, repository, thread.groupIdHex)
     // A call row IS the conversation's last event and belongs in the
@@ -587,12 +597,13 @@ internal fun threadConversationRows(
     ConversationListRow(
         id = thread.groupIdHex,
         kind = kind.toRowKind(),
-        title = conversationTitle(context, repository, directory, thread.groupIdHex),
+        title = conversationTitle(context, repository, directory, thread.groupIdHex, strings),
         preview = rowPreview(
             thread,
             last,
             isGroup = kind == ConversationKind.Group,
             senderName = senderName,
+            strings = strings,
         ),
         time = lastMs?.let { formatListTime(it, nowMs, zone, use24h, locale) },
         // A conversation nothing has happened in yet has no activity
@@ -623,6 +634,7 @@ internal fun rowPreview(
     last: ChatMessage?,
     isGroup: Boolean,
     senderName: String?,
+    strings: Strings = Localization.strings.value,
 ): String {
     val endedLine = me.lakko.app.chat.chatListLine(
         me.lakko.app.chat.membershipState(
@@ -630,20 +642,22 @@ internal fun rowPreview(
             leaveRequestedAtMs = null,
         ),
     )
-    if (endedLine != null) return endedLine
-    if (last == null) return "No messages yet"
+    if (endedLine != null) return endedLine.renderWith(strings)
+    val noMessages = strings["chats.row.no_messages"]
+    if (last == null) return noMessages
     if (last.direction == Direction.System) {
         // Only a row this build can render: an unreadable bookkeeping row is
         // never shown raw.
-        return last.call?.let { me.lakko.app.calls.callRowText(it) } ?: "No messages yet"
+        return last.call?.let { me.lakko.app.calls.callRowText(it) } ?: noMessages
     }
     val line = previewLine(
         text = last.text,
         attachments = last.attachments.map { PreviewAttachment(it.kind, it.mime) },
         deleted = last.deleted,
-        prefix = previewPrefix(last.direction, isGroup, senderName),
+        author = previewPrefix(last.direction, isGroup, senderName),
+        strings = strings,
     )
-    return line.ifEmpty { "No messages yet" }
+    return line.ifEmpty { noMessages }
 }
 
 /** Compute unread count for a thread.
@@ -705,13 +719,13 @@ internal fun SearchField(query: String, onQueryChange: (String) -> Unit) {
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
-        placeholder = { Text("Search") },
+        placeholder = { Text(t("chats.search.placeholder")) },
         singleLine = true,
         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
         trailingIcon = if (query.isNotEmpty()) {
             {
                 IconButton(onClick = { onQueryChange("") }) {
-                    Icon(Icons.Filled.Clear, contentDescription = "Clear search")
+                    Icon(Icons.Filled.Clear, contentDescription = t("chats.search.clear"))
                 }
             }
         } else {
@@ -768,9 +782,9 @@ private fun SwipeableThreadRow(
                 Icons.Filled.Archive
             }
             val label = if (towardsEnd) {
-                if (row.pinned) "Unpin" else "Pin"
+                t(if (row.pinned) "chats.action.unpin" else "chats.action.pin")
             } else {
-                if (row.archived) "Unarchive" else "Archive"
+                t(if (row.archived) "chats.action.unarchive" else "chats.action.archive")
             }
             Box(
                 modifier = Modifier
@@ -844,17 +858,17 @@ private fun ThreadRow(
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
             DropdownMenuItem(
-                text = { Text(if (row.pinned) "Unpin" else "Pin") },
+                text = { Text(t(if (row.pinned) "chats.action.unpin" else "chats.action.pin")) },
                 leadingIcon = { Icon(Icons.Filled.PushPin, contentDescription = null) },
                 onClick = { menuOpen = false; onToggleFlag(FlagField.Pin) },
             )
             DropdownMenuItem(
-                text = { Text(if (row.muted) "Unmute" else "Mute") },
+                text = { Text(t(if (row.muted) "chats.action.unmute" else "chats.action.mute")) },
                 leadingIcon = { Icon(Icons.Filled.NotificationsOff, contentDescription = null) },
                 onClick = { menuOpen = false; onToggleFlag(FlagField.Mute) },
             )
             DropdownMenuItem(
-                text = { Text(if (row.archived) "Unarchive" else "Archive") },
+                text = { Text(t(if (row.archived) "chats.action.unarchive" else "chats.action.archive")) },
                 leadingIcon = {
                     Icon(
                         if (row.archived) Icons.Filled.Unarchive else Icons.Filled.Archive,
@@ -927,7 +941,7 @@ internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = 
                     Spacer(Modifier.width(6.dp))
                     Icon(
                         Icons.Filled.NotificationsOff,
-                        contentDescription = "Muted",
+                        contentDescription = t("chats.row.muted"),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(16.dp),
                     )
@@ -936,7 +950,7 @@ internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = 
                     Spacer(Modifier.width(6.dp))
                     Icon(
                         Icons.Filled.PushPin,
-                        contentDescription = "Pinned",
+                        contentDescription = t("chats.row.pinned"),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(16.dp),
                     )
@@ -952,7 +966,7 @@ internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = 
 
 @Composable
 private fun UnreadBadge(count: Int, muted: Boolean) {
-    val label = if (count > 99) "99+" else count.toString()
+    val label = if (count > 99) t("chats.row.unread_overflow") else count.toString()
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
@@ -988,11 +1002,11 @@ private fun EmptyPanel(onStart: () -> Unit) {
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
-                text = "No conversations yet",
+                text = t("chats.empty.title"),
                 style = MaterialTheme.typography.titleMedium,
             )
             Spacer(Modifier.height(12.dp))
-            Button(onClick = onStart) { Text("Start one") }
+            Button(onClick = onStart) { Text(t("chats.empty.action")) }
         }
     }
 }
@@ -1008,9 +1022,9 @@ private fun EmptyPanel(onStart: () -> Unit) {
 @Composable
 private fun NoMatchPanel(
     offerLookup: Boolean,
-    label: String,
+    label: UiText,
     busy: Boolean,
-    note: String?,
+    note: UiText?,
     onLookUp: () -> Unit,
 ) {
     Box(
@@ -1024,18 +1038,18 @@ private fun NoMatchPanel(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                text = "No results",
+                text = t("chats.search.no_results"),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             if (offerLookup) {
                 Button(onClick = onLookUp, enabled = !busy) {
-                    Text(if (busy) "Looking..." else label)
+                    Text(if (busy) t("common.looking_up") else label.text())
                 }
             }
             if (note != null) {
                 Text(
-                    text = note,
+                    text = note.text(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

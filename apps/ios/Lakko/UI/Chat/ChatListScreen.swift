@@ -97,7 +97,7 @@ public struct ChatListScreen: View {
         content
             .navigationTitle(l10n.t("nav.chats"))
             .navigationBarTitleDisplayMode(.large)
-            .searchable(text: $searchText, prompt: "Search")
+            .searchable(text: $searchText, prompt: Text(l10n.t("chats.search.placeholder")))
             .onChange(of: searchText) { _, _ in lookupNote = nil }
             // Receiving is automatic; the pull gesture runs the same poll
             // once more, on demand (UX spec section 2, principle 3).
@@ -114,7 +114,7 @@ public struct ChatListScreen: View {
                 // counter, never a per-chat row.
                 if viewModel.synchronizing {
                     ToolbarItem(placement: .navigationBarLeading) {
-                        Text("Synchronizing...")
+                        Text(l10n.t("chats.synchronizing"))
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .accessibilityAddTraits(.updatesFrequently)
@@ -132,18 +132,18 @@ public struct ChatListScreen: View {
     private var createMenu: some View {
         Menu {
             Button { onCreate(.chat) } label: {
-                Label("New chat", systemImage: "bubble.left")
+                Label(l10n.t("chats.create.chat"), systemImage: "bubble.left")
             }
             Button { onCreate(.group) } label: {
-                Label("Create group", systemImage: "person.3")
+                Label(l10n.t("chats.create.group"), systemImage: "person.3")
             }
             Button { onCreate(.channel) } label: {
-                Label("Create channel", systemImage: "megaphone")
+                Label(l10n.t("chats.create.channel"), systemImage: "megaphone")
             }
         } label: {
             Image(systemName: "square.and.pencil")
         }
-        .accessibilityLabel("New conversation")
+        .accessibilityLabel(l10n.t("chats.create.menu"))
     }
 
     // MARK: - Rows
@@ -221,7 +221,7 @@ public struct ChatListScreen: View {
                 newestPostMs: lastPostMs,
                 nowMs: nowMs,
                 calendar: .current,
-                locale: .current)
+                locale: l10n.locale)
             return ConversationListRow(
                 id: channel.id,
                 kind: .channel,
@@ -242,7 +242,7 @@ public struct ChatListScreen: View {
                     emptyState
                 } else {
                     VStack(spacing: 12) {
-                        Text("No results")
+                        Text(l10n.t("chats.search.no_results"))
                             .foregroundStyle(Color.lakkoTextMuted)
                         lookupSection
                     }
@@ -302,7 +302,7 @@ public struct ChatListScreen: View {
     private func timeLabel(_ row: ConversationListRow) -> String? {
         row.lastActivityMs.map {
             ChatListFormatting.lastMessageTime(
-                ms: $0, nowMs: ChatRepository.nowMs(), calendar: .current, locale: .current)
+                ms: $0, nowMs: ChatRepository.nowMs(), calendar: .current, locale: l10n.locale)
         }
     }
 
@@ -322,7 +322,7 @@ public struct ChatListScreen: View {
                 HStack(spacing: 12) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(Color.lakkoAccent)
-                    Text(lookupBusy ? "Looking up..." : NameLookup.rowLabel(for: query))
+                    Text(lookupBusy ? l10n.t("common.looking_up") : NameLookup.rowLabel(for: query))
                         .foregroundStyle(Color.lakkoText)
                 }
             }
@@ -427,20 +427,20 @@ public struct ChatListScreen: View {
             Button {
                 Task { await toggleFlag(groupIdHex: row.id, field: .pin) }
             } label: {
-                Label(row.pinned ? "Unpin" : "Pin", systemImage: row.pinned ? "pin.slash" : "pin")
+                Label(l10n.t(row.pinned ? "chats.action.unpin" : "chats.action.pin"), systemImage: row.pinned ? "pin.slash" : "pin")
             }
             .tint(Color.lakkoAccent)
             Button {
                 Task { await toggleFlag(groupIdHex: row.id, field: .mute) }
             } label: {
-                Label(row.muted ? "Unmute" : "Mute", systemImage: row.muted ? "bell" : "bell.slash")
+                Label(l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"), systemImage: row.muted ? "bell" : "bell.slash")
             }
             .tint(.gray)
             Button {
                 Task { await toggleFlag(groupIdHex: row.id, field: .archive) }
             } label: {
                 Label(
-                    row.archived ? "Unarchive" : "Archive",
+                    l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
                     systemImage: row.archived ? "tray.and.arrow.up" : "archivebox")
             }
             .tint(Color.lakkoTextMuted)
@@ -500,20 +500,20 @@ public struct ChatListScreen: View {
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 40))
                 .foregroundStyle(Color.lakkoTextMuted)
-            Text("No conversations yet")
+            Text(l10n.t("chats.empty.title"))
                 .font(.headline)
             Menu {
                 Button { onCreate(.chat) } label: {
-                    Label("New chat", systemImage: "bubble.left")
+                    Label(l10n.t("chats.create.chat"), systemImage: "bubble.left")
                 }
                 Button { onCreate(.group) } label: {
-                    Label("Create group", systemImage: "person.3")
+                    Label(l10n.t("chats.create.group"), systemImage: "person.3")
                 }
                 Button { onCreate(.channel) } label: {
-                    Label("Create channel", systemImage: "megaphone")
+                    Label(l10n.t("chats.create.channel"), systemImage: "megaphone")
                 }
             } label: {
-                Text("Start a conversation")
+                Text(l10n.t("chats.empty.action"))
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .background(Color.lakkoAccent)
@@ -600,7 +600,7 @@ struct ConversationRowView: View {
                 // Accent capsule; a muted conversation renders it grey so a
                 // muted-but-unread row still surfaces a hint without grabbing
                 // attention.
-                Text(row.unread > 99 ? "99+" : "\(row.unread)")
+                Text(row.unread > 99 ? Localization.text("chats.row.unread_overflow") : row.unread.formatted(.number.locale(Localization.shared.locale)))
                     .font(.caption2)
                     .fontWeight(.semibold)
                     .padding(.horizontal, 7)
@@ -616,9 +616,11 @@ struct ConversationRowView: View {
         var parts = [row.title]
         if let timeLabel { parts.append(timeLabel) }
         parts.append(row.secondLine)
-        if row.showsUnread { parts.append(row.unread == 1 ? "1 unread" : "\(row.unread) unread") }
-        if row.muted { parts.append("muted") }
-        if row.pinned { parts.append("pinned") }
+        if row.showsUnread {
+            parts.append(Localization.text("chats.row.unread", counts: ["count": UInt64(max(0, row.unread))]))
+        }
+        if row.muted { parts.append(Localization.text("chats.row.muted")) }
+        if row.pinned { parts.append(Localization.text("chats.row.pinned")) }
         return parts.joined(separator: ", ")
     }
 }
@@ -713,7 +715,7 @@ public final class ChatListViewModel: ObservableObject {
     /// not a last message).
     func preview(thread: ChatThread, isGroup: Bool) -> String {
         guard let last = thread.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) }) else {
-            return "No messages yet"
+            return Localization.text("chats.row.no_messages")
         }
         let senderName = last.authorKeyB64.flatMap {
             ProfileDirectory.shared.resolve(signatureKeyB64: $0)?.name

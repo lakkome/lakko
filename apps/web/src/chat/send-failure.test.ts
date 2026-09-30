@@ -10,7 +10,7 @@ describe("sendFailureNotice", () => {
   it("says one sentence when the core named no reason", () => {
     // A dropped connection, a 500, an envelope that would not compose. The
     // person cannot act on the difference, and the action is on the bubble.
-    expect(sendFailureNotice(null)).toBe(SEND_FAILED_NOTICE);
+    expect(sendFailureNotice(null)).toBe(SEND_FAILED_NOTICE());
   });
 
   it("keeps a membership refusal's own words", () => {
@@ -22,22 +22,22 @@ describe("sendFailureNotice", () => {
   });
 
   it("falls back rather than showing an empty bar", () => {
-    expect(sendFailureNotice({ message: "   " })).toBe(SEND_FAILED_NOTICE);
+    expect(sendFailureNotice({ message: "   " })).toBe(SEND_FAILED_NOTICE());
   });
 
   it("never shows a JavaScript type name", () => {
     // The regression guard. What this replaced was
     // `ds append failed: network error: TypeError: Failed to fetch`, shown
     // to someone who was writing to a friend.
-    expect(SEND_FAILED_NOTICE).not.toMatch(/Error|TypeError|undefined|null/);
+    expect(SEND_FAILED_NOTICE()).not.toMatch(/Error|TypeError|undefined|null/);
   });
 
   it("is one sentence, with the action left to the bubble", () => {
     // docs/ux/client-redesign.md section 8. The bubble says "Not sent -
     // Retry" next to the message it belongs to; a second Retry in a bar at
     // the top would not say WHICH message.
-    expect(SEND_FAILED_NOTICE.split(".").filter((p) => p.trim() !== "")).toHaveLength(1);
-    expect(SEND_FAILED_NOTICE).not.toMatch(/Retry/);
+    expect(SEND_FAILED_NOTICE().split(".").filter((p) => p.trim() !== "")).toHaveLength(1);
+    expect(SEND_FAILED_NOTICE()).not.toMatch(/Retry/);
   });
 });
 

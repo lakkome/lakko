@@ -58,6 +58,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.ContactsRepository
+import me.lakko.app.l10n.text
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.components.LakkoAvatar
 import uniffi.lakko_ffi_uniffi.InfoSection
@@ -366,7 +367,7 @@ private fun ContactDetailBody(
             if (InfoSection.DELETE_CHAT in sections && groupIdHex != null) {
                 HorizontalDivider()
                 DetailRow(
-                    title = me.lakko.app.chat.DELETE_CHAT_CONTROL,
+                    title = me.lakko.app.chat.DELETE_CHAT_CONTROL.text(),
                     supporting = null,
                     icon = Icons.Filled.Delete,
                     onClick = onDeleteChat,

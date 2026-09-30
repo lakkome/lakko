@@ -196,7 +196,7 @@ final class Localization: ObservableObject {
         catalog = built
         strings = built?.plainStrings() ?? [:]
         if publishesSnapshot {
-            Localization.snapshot.publish(catalog: built, strings: strings)
+            Localization.snapshot.publish(catalog: built, strings: strings, language: code)
         }
     }
 
@@ -230,6 +230,21 @@ final class Localization: ObservableObject {
         counts: [String: UInt64] = [:]
     ) -> String {
         snapshot.lookup(key, texts: texts, counts: counts)
+    }
+
+    /// The interface locale, readable from any thread (the one
+    /// ``Localization/shared`` exposes as ``locale``).
+    nonisolated static var currentLocale: Locale {
+        Locale(identifier: snapshot.languageCode)
+    }
+
+    /// A list of names joined pair by pair through `common.list_pair`, so
+    /// each language picks its own separator (batch 3 convention; the web
+    /// `joinList`).
+    nonisolated static func joinList(_ items: [String]) -> String {
+        items.reduce("") { acc, item in
+            acc.isEmpty ? item : text("common.list_pair", texts: ["first": acc, "second": item])
+        }
     }
 
     // MARK: - Composition helpers
@@ -283,12 +298,22 @@ final class CatalogSnapshot: @unchecked Sendable {
     private var catalog: L10nCatalog?
     private var strings: [String: String] = [:]
     private var loaded = false
+    private var language = "en"
 
-    func publish(catalog: L10nCatalog?, strings: [String: String]) {
+    func publish(catalog: L10nCatalog?, strings: [String: String], language: String) {
         lock.withLock {
             self.catalog = catalog
             self.strings = strings
+            self.language = language
             loaded = true
+        }
+    }
+
+    /// The code of the language the catalog is in.
+    var languageCode: String {
+        lock.withLock {
+            if !loaded { loadDefault() }
+            return language
         }
     }
 
@@ -310,6 +335,7 @@ final class CatalogSnapshot: @unchecked Sendable {
             languages.contains(where: { $0.code == code }) ? code : nil
         }
         let code = l10nResolveLanguage(selected: selected, systemPreferred: Locale.preferredLanguages)
+        language = code
         catalog = Localization.buildCatalog(source: source, bundle: .main, code: code)
         strings = catalog?.plainStrings() ?? [:]
     }

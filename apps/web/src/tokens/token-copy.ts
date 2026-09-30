@@ -9,14 +9,13 @@
  *
  * Push registration has no copy: it is retried silently at the next launch.
  */
+import { t } from "../l10n";
 import { anonTokenQuotaExhausted, isAnonTokenNetworkFailure } from "./anon-token-pool";
 
 /** Search (a username or channel lookup). */
-export const LOOKUP_ALLOWANCE_USED =
-  "You have looked up a lot of people today. Try again tomorrow.";
+export const LOOKUP_ALLOWANCE_USED = (): string => t("tokens.lookup_allowance_used");
 /** An invite link, a group link, a channel name. */
-export const ACTION_ALLOWANCE_USED =
-  "You have used today's allowance for this. Try again tomorrow.";
+export const ACTION_ALLOWANCE_USED = (): string => t("tokens.action_allowance_used");
 
 /**
  * The copy for a token failure: on a quota refusal, the search copy for a
@@ -30,11 +29,11 @@ export function anonTokenMessage(err: unknown, networkCopy: string): string | nu
   if (quota !== null) {
     switch (quota.context) {
       case "discovery-lookup":
-        return LOOKUP_ALLOWANCE_USED;
+        return LOOKUP_ALLOWANCE_USED();
       case "push-register":
         return null;
       default:
-        return ACTION_ALLOWANCE_USED;
+        return ACTION_ALLOWANCE_USED();
     }
   }
   if (isAnonTokenNetworkFailure(err)) return networkCopy;

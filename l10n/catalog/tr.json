@@ -250,6 +250,22 @@
       "text": "Aramaya bağlanıyorsunuz...",
       "status": "machine"
     },
+    "call.incoming.accept": {
+      "text": "Yanıtla",
+      "status": "machine"
+    },
+    "call.incoming.accept_from": {
+      "text": "Aramayı yanıtla: {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline": {
+      "text": "Reddet",
+      "status": "machine"
+    },
+    "call.incoming.decline_from": {
+      "text": "Aramayı reddet: {name}",
+      "status": "machine"
+    },
     "call.link.connecting": {
       "text": "Bağlanıyor...",
       "status": "machine"
@@ -314,8 +330,1712 @@
       "text": "Bu ekrandan ayrılabilirsiniz; kabul edildiğinizde aramaya katılırsınız.",
       "status": "machine"
     },
+    "chat.attachment.error.attach": {
+      "text": "Seçilen öğe eklenemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.attachment.error.attach_named": {
+      "text": "Eklenemedi: \"{name}\". Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.attachment.error.download": {
+      "text": "Ek indirilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.attachment.error.gone": {
+      "text": "Ek artık sunucuda bulunmuyor.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_photo": {
+      "text": "Bu fotoğraf açılamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_video": {
+      "text": "Bu video açılamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.attachment.error.prepare_video": {
+      "text": "Bu video hazırlanamadı. En fazla {limit} boyutundaki videolar gönderilebilir.",
+      "status": "machine"
+    },
+    "chat.attachment.error.preview": {
+      "text": "Resim gösterilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large": {
+      "text": "Bu mesajın boyutu {size}; sınır {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large_named": {
+      "text": "\"{name}\" boyutu {size}; sınır {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.upload": {
+      "text": "Yüklenemedi: \"{name}\". Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.attachment.hide": {
+      "text": "Gizle",
+      "status": "machine"
+    },
+    "chat.attachment.image_alt": {
+      "text": "resim eki",
+      "status": "machine"
+    },
+    "chat.attachment.open": {
+      "text": "Aç",
+      "status": "machine"
+    },
+    "chat.attachment.save_title": {
+      "text": "Eki kaydet",
+      "status": "machine"
+    },
+    "chat.attachment.unnamed": {
+      "text": "(adsız)",
+      "status": "machine"
+    },
+    "chat.author.a_member": {
+      "text": "Bir üye",
+      "status": "machine"
+    },
+    "chat.author.unknown": {
+      "text": "Bilinmeyen gönderen",
+      "status": "machine"
+    },
+    "chat.author.you": {
+      "text": "Siz",
+      "status": "machine"
+    },
+    "chat.call.busy": {
+      "text": "Başka bir arama devam ediyor.",
+      "status": "machine"
+    },
+    "chat.call.error.start": {
+      "text": "Arama başlatılamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.call.group_ended": {
+      "text": "Bu grup araması sona erdi.",
+      "status": "machine"
+    },
+    "chat.call.group_in_progress": {
+      "text": "Grup araması devam ediyor",
+      "status": "machine"
+    },
+    "chat.call.group_people": {
+      "text": "{count, plural, one {Aramada # kişi} other {Aramada # kişi}}",
+      "status": "machine"
+    },
+    "chat.call.group_starting": {
+      "text": "Başlıyor…",
+      "status": "machine"
+    },
+    "chat.call.group_status_e2ee": {
+      "text": "{status} · uçtan uca şifreli",
+      "status": "machine"
+    },
+    "chat.call.join": {
+      "text": "Aramaya katıl",
+      "status": "machine"
+    },
+    "chat.call.join_short": {
+      "text": "Katıl",
+      "status": "machine"
+    },
+    "chat.call.join_video": {
+      "text": "Görüntülü katıl",
+      "status": "machine"
+    },
+    "chat.call.last_ended.busy": {
+      "text": "Son arama sona erdi: karşı taraf meşguldü.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.declined": {
+      "text": "Son arama sona erdi: reddedildi.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.error": {
+      "text": "Son arama bir hata nedeniyle sona erdi.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.hung_up": {
+      "text": "Son arama sona erdi.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.timed_out": {
+      "text": "Son arama sona erdi: yanıt yok.",
+      "status": "machine"
+    },
+    "chat.call.unavailable": {
+      "text": "Grup aramaları şu anda kullanılamıyor.",
+      "status": "machine"
+    },
+    "chat.call.video": {
+      "text": "Görüntülü arama",
+      "status": "machine"
+    },
+    "chat.call.voice": {
+      "text": "Ara",
+      "status": "machine"
+    },
+    "chat.composer.attach": {
+      "text": "Dosya ekle",
+      "status": "machine"
+    },
+    "chat.composer.attach_limit": {
+      "text": "Dosya ekle (her biri en fazla {limit})",
+      "status": "machine"
+    },
+    "chat.composer.attach_media": {
+      "text": "Fotoğraf veya video",
+      "status": "machine"
+    },
+    "chat.composer.drop_files": {
+      "text": "Eklemek için dosyaları bırakın",
+      "status": "machine"
+    },
+    "chat.composer.emoji_gifs": {
+      "text": "Emoji ve GIF",
+      "status": "machine"
+    },
+    "chat.composer.photo_library": {
+      "text": "Fotoğraf Arşivi",
+      "status": "machine"
+    },
+    "chat.composer.placeholder": {
+      "text": "Mesaj",
+      "status": "machine"
+    },
+    "chat.composer.remove_attachment": {
+      "text": "Eki kaldır",
+      "status": "machine"
+    },
+    "chat.composer.send": {
+      "text": "Gönder",
+      "status": "machine"
+    },
+    "chat.day.today": {
+      "text": "Bugün",
+      "status": "machine"
+    },
+    "chat.day.yesterday": {
+      "text": "Dün",
+      "status": "machine"
+    },
+    "chat.delete.body": {
+      "text": "Bu işlem sohbeti ve mesajlarını bu cihazdan kaldırır. Başka hiçbir yerde kopyası yoktur ve geri alınamaz.",
+      "status": "machine"
+    },
+    "chat.delete.confirm_named": {
+      "text": "Sil: {name}",
+      "status": "machine"
+    },
+    "chat.delete.control": {
+      "text": "Bu sohbeti sil",
+      "status": "machine"
+    },
+    "chat.delete.title": {
+      "text": "Bu sohbet silinsin mi?",
+      "status": "machine"
+    },
+    "chat.edit.title": {
+      "text": "Mesajı düzenle",
+      "status": "machine"
+    },
+    "chat.emoji.categories": {
+      "text": "Emoji kategorileri",
+      "status": "machine"
+    },
+    "chat.emoji.choose": {
+      "text": "Seç",
+      "status": "machine"
+    },
+    "chat.emoji.choose_reaction": {
+      "text": "Bir tepki seçin",
+      "status": "machine"
+    },
+    "chat.emoji.group.activities": {
+      "text": "Etkinlikler",
+      "status": "machine"
+    },
+    "chat.emoji.group.animals": {
+      "text": "Hayvanlar ve Doğa",
+      "status": "machine"
+    },
+    "chat.emoji.group.flags": {
+      "text": "Bayraklar",
+      "status": "machine"
+    },
+    "chat.emoji.group.food": {
+      "text": "Yiyecek ve İçecek",
+      "status": "machine"
+    },
+    "chat.emoji.group.objects": {
+      "text": "Nesneler",
+      "status": "machine"
+    },
+    "chat.emoji.group.people": {
+      "text": "İnsanlar ve Vücut",
+      "status": "machine"
+    },
+    "chat.emoji.group.smileys": {
+      "text": "Suratlar ve Duygular",
+      "status": "machine"
+    },
+    "chat.emoji.group.symbols": {
+      "text": "Semboller",
+      "status": "machine"
+    },
+    "chat.emoji.group.travel": {
+      "text": "Seyahat ve Yerler",
+      "status": "machine"
+    },
+    "chat.emoji.insert": {
+      "text": "Ekle",
+      "status": "machine"
+    },
+    "chat.emoji.no_results": {
+      "text": "Emoji bulunamadı",
+      "status": "machine"
+    },
+    "chat.emoji.recent": {
+      "text": "Son kullanılanlar",
+      "status": "machine"
+    },
+    "chat.emoji.search": {
+      "text": "Emoji ara",
+      "status": "machine"
+    },
+    "chat.emoji.skin_tones": {
+      "text": "Ten rengi seçenekleri: {name}",
+      "status": "machine"
+    },
+    "chat.emoji.tab": {
+      "text": "Emoji",
+      "status": "machine"
+    },
+    "chat.ended.composer": {
+      "text": "Bu gruba artık mesaj gönderemezsiniz.",
+      "status": "machine"
+    },
+    "chat.ended.consequence": {
+      "text": "Daha önce aldığınız mesajlar burada kalır. Yeni mesaj gelmeyecek.",
+      "status": "machine"
+    },
+    "chat.ended.left": {
+      "text": "Bu gruptan ayrıldınız.",
+      "status": "machine"
+    },
+    "chat.ended.no_longer_member": {
+      "text": "Artık bu grubun üyesi değilsiniz.",
+      "status": "machine"
+    },
+    "chat.ended.unsent_draft": {
+      "text": "Gönderilmemiş taslak",
+      "status": "machine"
+    },
+    "chat.error.add_member": {
+      "text": "Bu kişi eklenemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.approve_join": {
+      "text": "Katılma isteği onaylanamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.change_admin": {
+      "text": "Yönetici rolü değiştirilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.conversation_gone": {
+      "text": "Bu sohbet artık burada değil.",
+      "status": "machine"
+    },
+    "chat.error.create_link": {
+      "text": "Davet bağlantısı oluşturulamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.delete_chat": {
+      "text": "Bu sohbet silinemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.delete_message": {
+      "text": "Mesaj silinemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.edit": {
+      "text": "Mesaj düzenlenemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.leave": {
+      "text": "Gruptan ayrılınamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.membership_request": {
+      "text": "İstediğiniz bir üyelik değişikliği yeniden gönderilemedi.",
+      "status": "machine"
+    },
+    "chat.error.message_gone": {
+      "text": "Bu mesaj artık burada değil.",
+      "status": "machine"
+    },
+    "chat.error.pin": {
+      "text": "Sabitleme değiştirilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.react": {
+      "text": "Tepki gönderilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.refresh": {
+      "text": "Yeni mesajlar yüklenemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.reject_join": {
+      "text": "Katılma isteği reddedilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.remove_member": {
+      "text": "Bu üye çıkarılamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.revoke_link": {
+      "text": "Davet bağlantısı iptal edilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.error.transfer": {
+      "text": "Sahiplik devredilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.forward.empty": {
+      "text": "İletilebilecek sohbet yok",
+      "status": "machine"
+    },
+    "chat.forward.error.generic": {
+      "text": "Mesaj iletilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.forward.from": {
+      "text": "Şu kişiden iletildi: {name}",
+      "status": "machine"
+    },
+    "chat.forward.label": {
+      "text": "İletildi",
+      "status": "machine"
+    },
+    "chat.forward.list_label": {
+      "text": "Sohbetler",
+      "status": "machine"
+    },
+    "chat.forward.picker_title": {
+      "text": "Şuraya ilet",
+      "status": "machine"
+    },
+    "chat.forward.search_label": {
+      "text": "Sohbetlerde ara",
+      "status": "machine"
+    },
+    "chat.gif.attribution": {
+      "text": "GIPHY tarafından desteklenmektedir",
+      "status": "machine"
+    },
+    "chat.gif.load_failed": {
+      "text": "Bu GIF yüklenemedi · Tekrar dene",
+      "status": "machine"
+    },
+    "chat.gif.loading": {
+      "text": "GIF'ler yükleniyor",
+      "status": "machine"
+    },
+    "chat.gif.no_results": {
+      "text": "GIF bulunamadı",
+      "status": "machine"
+    },
+    "chat.gif.note_dismiss": {
+      "text": "Anladım",
+      "status": "machine"
+    },
+    "chat.gif.open_full": {
+      "text": "GIF'i tam ekran aç",
+      "status": "machine"
+    },
+    "chat.gif.privacy_note": {
+      "text": "GIF araması, ne aradığınızı gören Lakko sunucusu üzerinden yapılır. Gönderilen GIF'ler her dosya gibi şifrelenir.",
+      "status": "machine"
+    },
+    "chat.gif.rate_limited": {
+      "text": "Çok fazla arama yapıldı — biraz sonra tekrar deneyin",
+      "status": "machine"
+    },
+    "chat.gif.search": {
+      "text": "GIF ara",
+      "status": "machine"
+    },
+    "chat.gif.send": {
+      "text": "GIF gönder",
+      "status": "machine"
+    },
+    "chat.gif.trending": {
+      "text": "Gündemde",
+      "status": "machine"
+    },
+    "chat.gif.unavailable": {
+      "text": "GIF'ler şu anda kullanılamıyor",
+      "status": "machine"
+    },
+    "chat.group.default_name": {
+      "text": "Yeni grup",
+      "status": "machine"
+    },
+    "chat.group.fallback_name": {
+      "text": "Grup",
+      "status": "machine"
+    },
+    "chat.group.title_more": {
+      "text": "{names} +{count}",
+      "status": "machine"
+    },
+    "chat.group_name.empty": {
+      "text": "Henüz ad yok",
+      "status": "machine"
+    },
+    "chat.group_name.error.character": {
+      "text": "Ad, gösterilemeyen bir karakter içeriyor.",
+      "status": "machine"
+    },
+    "chat.group_name.error.generic": {
+      "text": "Bu ad kullanılamaz.",
+      "status": "machine"
+    },
+    "chat.group_name.error.line_break": {
+      "text": "Ad tek satır olmalıdır.",
+      "status": "machine"
+    },
+    "chat.group_name.error.save": {
+      "text": "Grubun adı değiştirilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.group_name.error.too_long": {
+      "text": "Ad çok uzun.",
+      "status": "machine"
+    },
+    "chat.group_name.label": {
+      "text": "Grup adı",
+      "status": "machine"
+    },
+    "chat.group_name.only_admins": {
+      "text": "Bu grubun adını yalnızca yöneticiler değiştirebilir",
+      "status": "machine"
+    },
+    "chat.header.back": {
+      "text": "Sohbetlere dön",
+      "status": "machine"
+    },
+    "chat.info.channel": {
+      "text": "Kanal bilgisi",
+      "status": "machine"
+    },
+    "chat.info.contact": {
+      "text": "Kişi bilgisi",
+      "status": "machine"
+    },
+    "chat.info.group": {
+      "text": "Grup bilgisi",
+      "status": "machine"
+    },
+    "chat.invite_link.cleared": {
+      "text": "Bağlantı temizlendi (satır içi bir bağlantıda iptal edilecek bir şey yoktur).",
+      "status": "machine"
+    },
+    "chat.invite_link.copy": {
+      "text": "Bağlantıyı kopyala",
+      "status": "machine"
+    },
+    "chat.invite_link.create": {
+      "text": "Davet bağlantısı oluştur",
+      "status": "machine"
+    },
+    "chat.invite_link.label": {
+      "text": "Davet bağlantısı",
+      "status": "machine"
+    },
+    "chat.invite_link.revoke": {
+      "text": "İptal et",
+      "status": "machine"
+    },
+    "chat.invite_link.revoked": {
+      "text": "Davet bağlantısı iptal edildi.",
+      "status": "machine"
+    },
+    "chat.invite_link.share": {
+      "text": "Paylaş",
+      "status": "machine"
+    },
+    "chat.leave.action": {
+      "text": "Gruptan ayrıl",
+      "status": "machine"
+    },
+    "chat.leave.body": {
+      "text": "Bir sahip veya yönetici isteğinizi uygulayana kadar mesaj almaya devam edeceksiniz. Yeniden katılmak için yeni bir davet gerekir.",
+      "status": "machine"
+    },
+    "chat.leave.confirm": {
+      "text": "Ayrıl",
+      "status": "machine"
+    },
+    "chat.leave.confirm_named": {
+      "text": "Ayrıl: {name}",
+      "status": "machine"
+    },
+    "chat.leave.requested": {
+      "text": "Ayrılma istendi. Bir sahip veya yönetici değişikliği uyguladığında geçerli olur.",
+      "status": "machine"
+    },
+    "chat.leave.title": {
+      "text": "Bu gruptan ayrılınsın mı?",
+      "status": "machine"
+    },
+    "chat.media.and_more": {
+      "text": "{label} ve {count, plural, one {# tane daha} other {# tane daha}}",
+      "status": "machine"
+    },
+    "chat.media.audio": {
+      "text": "Ses",
+      "status": "machine"
+    },
+    "chat.media.file": {
+      "text": "Dosya",
+      "status": "machine"
+    },
+    "chat.media.gif": {
+      "text": "GIF",
+      "status": "machine"
+    },
+    "chat.media.not_sent_retry": {
+      "text": "Gönderilmedi · Tekrar dene",
+      "status": "machine"
+    },
+    "chat.media.open_full_hint": {
+      "text": "Tam ekran açar",
+      "status": "machine"
+    },
+    "chat.media.photo": {
+      "text": "Fotoğraf",
+      "status": "machine"
+    },
+    "chat.media.play_failed": {
+      "text": "Bu mesaj oynatılamadı",
+      "status": "machine"
+    },
+    "chat.media.row_not_sent": {
+      "text": "{label}, gönderilmedi",
+      "status": "machine"
+    },
+    "chat.media.row_sending": {
+      "text": "{label}, gönderiliyor",
+      "status": "machine"
+    },
+    "chat.media.video": {
+      "text": "Video",
+      "status": "machine"
+    },
+    "chat.media.video_message": {
+      "text": "Görüntülü not",
+      "status": "machine"
+    },
+    "chat.media.voice_message": {
+      "text": "Sesli mesaj",
+      "status": "machine"
+    },
+    "chat.media.with_duration": {
+      "text": "{label}, {duration}",
+      "status": "machine"
+    },
+    "chat.members.add.action": {
+      "text": "Üye ekle",
+      "status": "machine"
+    },
+    "chat.members.add.done": {
+      "text": "Eklendi: {name}.",
+      "status": "machine"
+    },
+    "chat.members.add.error.no_bundle": {
+      "text": "Bu kişi Lakko kurulumunu henüz tamamlamadı. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.members.add.error.some_failed": {
+      "text": "Eklenemedi: {names}. Üyeler panelinden ekleyin.",
+      "status": "machine"
+    },
+    "chat.members.add.error.unknown_username": {
+      "text": "Bu adla kayıtlı hesap yok: {name}.",
+      "status": "machine"
+    },
+    "chat.members.add.placeholder": {
+      "text": "@kullaniciadi",
+      "status": "machine"
+    },
+    "chat.members.add.requested": {
+      "text": "Ekleme istendi: {name}. Bir sahip veya yönetici değişikliği uyguladığında gruba katılır.",
+      "status": "machine"
+    },
+    "chat.members.add.submit": {
+      "text": "Ekle",
+      "status": "machine"
+    },
+    "chat.members.admin.demoted": {
+      "text": "Yöneticilikten çıkarıldı.",
+      "status": "machine"
+    },
+    "chat.members.admin.make": {
+      "text": "Yönetici yap",
+      "status": "machine"
+    },
+    "chat.members.admin.marker": {
+      "text": "Yönetici",
+      "status": "machine"
+    },
+    "chat.members.admin.promoted": {
+      "text": "Yöneticiliğe yükseltildi.",
+      "status": "machine"
+    },
+    "chat.members.admin.remove": {
+      "text": "Yöneticiliği kaldır",
+      "status": "machine"
+    },
+    "chat.members.admin.requested": {
+      "text": "Değişiklik istendi. Bir sahip veya yönetici değişikliği uyguladığında geçerli olur.",
+      "status": "machine"
+    },
+    "chat.members.count": {
+      "text": "{count, plural, one {# üye} other {# üye}}",
+      "status": "machine"
+    },
+    "chat.members.devices": {
+      "text": "{count, plural, one {# cihaz} other {# cihaz}}",
+      "status": "machine"
+    },
+    "chat.members.frozen": {
+      "text": "Üyeliğiniz sona erdiğinde bu liste güncellenmeyi bıraktı.",
+      "status": "machine"
+    },
+    "chat.members.heading": {
+      "text": "Üyeler ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.approve": {
+      "text": "Onayla",
+      "status": "machine"
+    },
+    "chat.members.join.approved_added": {
+      "text": "Katılma onaylandı. Kişi gruba eklendi.",
+      "status": "machine"
+    },
+    "chat.members.join.approved_requested": {
+      "text": "Katılma onaylandı. Bir sahip veya yönetici değişikliği uyguladığında gruba katılır.",
+      "status": "machine"
+    },
+    "chat.members.join.heading": {
+      "text": "Katılma istekleri ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.link_unknown": {
+      "text": "Davet bağlantısı bilinmiyor",
+      "status": "machine"
+    },
+    "chat.members.join.reject": {
+      "text": "Reddet",
+      "status": "machine"
+    },
+    "chat.members.join.rejected": {
+      "text": "Katılma isteği reddedildi.",
+      "status": "machine"
+    },
+    "chat.members.join.via_former": {
+      "text": "davet eden: {name} · artık üye değil",
+      "status": "machine"
+    },
+    "chat.members.join.via_member": {
+      "text": "davet eden: {name} · üye",
+      "status": "machine"
+    },
+    "chat.members.pending.adds_heading": {
+      "text": "Eklenmeyi bekleyenler ({count})",
+      "status": "machine"
+    },
+    "chat.members.pending.count": {
+      "text": "{count, plural, one {# üyelik değişikliği uygulanmayı bekliyor.} other {# üyelik değişikliği uygulanmayı bekliyor.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.liveness": {
+      "text": "Üyelik değişikliklerini grup sahibi veya bir yönetici uygular. Biri bunu yaptığında otomatik olarak uygulanırlar.",
+      "status": "machine"
+    },
+    "chat.members.pending.queue": {
+      "text": "{count, plural, one {Şimdi # değişiklik uygulanmayı bekliyor.} other {Şimdi # değişiklik uygulanmayı bekliyor.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_added": {
+      "text": "Eklenmeyi bekliyor.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_leave": {
+      "text": "Ayrılmayı bekliyor.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_removed": {
+      "text": "Çıkarılmayı bekliyor.",
+      "status": "machine"
+    },
+    "chat.members.remove.body": {
+      "text": "Bir sahip veya yönetici değişikliği uygulayana kadar mesaj almaya devam eder.",
+      "status": "machine"
+    },
+    "chat.members.remove.confirm_named": {
+      "text": "Çıkar: {name}",
+      "status": "machine"
+    },
+    "chat.members.remove.done": {
+      "text": "Üye çıkarıldı.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested": {
+      "text": "Çıkarma istendi. Bir sahip veya yönetici değişikliği uyguladığında geçerli olur.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested_short": {
+      "text": "Çıkarma istendi.",
+      "status": "machine"
+    },
+    "chat.members.remove.title": {
+      "text": "Bu üye çıkarılsın mı?",
+      "status": "machine"
+    },
+    "chat.members.row_label": {
+      "text": "{name}, {state}",
+      "status": "machine"
+    },
+    "chat.members.title": {
+      "text": "Üyeler",
+      "status": "machine"
+    },
+    "chat.members.unapplied.add_line": {
+      "text": "Eklenmedi. Yeniden ekleyebilirsiniz.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.explanation": {
+      "text": "Bu değişiklikler uygulanmadı ve kendiliğinden yeniden denenmeyecek.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.heading": {
+      "text": "Uygulanmadı ({count})",
+      "status": "machine"
+    },
+    "chat.members.unapplied.join_line": {
+      "text": "Uygulanmadı. Kişiden katılma isteğini yeniden göndermesini isteyin.",
+      "status": "machine"
+    },
+    "chat.members.unnamed": {
+      "text": "Üye",
+      "status": "machine"
+    },
+    "chat.message.actions": {
+      "text": "Mesaj işlemleri",
+      "status": "machine"
+    },
+    "chat.message.close_actions": {
+      "text": "Mesaj işlemlerini kapat",
+      "status": "machine"
+    },
+    "chat.message.deleted": {
+      "text": "Mesaj silindi",
+      "status": "machine"
+    },
+    "chat.message.edit": {
+      "text": "Düzenle",
+      "status": "machine"
+    },
+    "chat.message.edited": {
+      "text": "(düzenlendi)",
+      "status": "machine"
+    },
+    "chat.message.forward": {
+      "text": "İlet",
+      "status": "machine"
+    },
+    "chat.message.media_fallback": {
+      "text": "Medya mesajı",
+      "status": "machine"
+    },
+    "chat.message.more_reactions": {
+      "text": "Diğer tepkiler",
+      "status": "machine"
+    },
+    "chat.message.not_sent": {
+      "text": "Gönderilmedi",
+      "status": "machine"
+    },
+    "chat.message.pin": {
+      "text": "Sabitle",
+      "status": "machine"
+    },
+    "chat.message.react": {
+      "text": "Tepki ver",
+      "status": "machine"
+    },
+    "chat.message.react_with": {
+      "text": "Tepki: {emoji}",
+      "status": "machine"
+    },
+    "chat.message.read": {
+      "text": "Okundu",
+      "status": "machine"
+    },
+    "chat.message.read_by": {
+      "text": "Okuyanlar: {names}",
+      "status": "machine"
+    },
+    "chat.message.reply": {
+      "text": "Yanıtla",
+      "status": "machine"
+    },
+    "chat.message.select": {
+      "text": "Seç",
+      "status": "machine"
+    },
+    "chat.message.sending": {
+      "text": "Gönderiliyor...",
+      "status": "machine"
+    },
+    "chat.message.sent": {
+      "text": "Gönderildi",
+      "status": "machine"
+    },
+    "chat.message.unpin": {
+      "text": "Sabitlemeyi kaldır",
+      "status": "machine"
+    },
+    "chat.not_found.back": {
+      "text": "Sohbetlere dön",
+      "status": "machine"
+    },
+    "chat.not_found.body": {
+      "text": "Bu bağlantı bu cihazdaki hiçbir sohbetle eşleşmiyor.",
+      "status": "machine"
+    },
+    "chat.not_found.title": {
+      "text": "Sohbet bulunamadı",
+      "status": "machine"
+    },
+    "chat.peer.fallback_name": {
+      "text": "Karşı taraf",
+      "status": "machine"
+    },
+    "chat.photo.load_failed": {
+      "text": "Fotoğraf yüklenemedi",
+      "status": "machine"
+    },
+    "chat.photo.load_failed_retry": {
+      "text": "Fotoğraf yüklenemedi, tekrar denemek için dokunun",
+      "status": "machine"
+    },
+    "chat.photo.loading": {
+      "text": "Fotoğraf yükleniyor",
+      "status": "machine"
+    },
+    "chat.photo.open": {
+      "text": "Fotoğrafı aç",
+      "status": "machine"
+    },
+    "chat.photo.viewer": {
+      "text": "Fotoğraf görüntüleyici",
+      "status": "machine"
+    },
+    "chat.photo.viewer_hint": {
+      "text": "Yakınlaştırmak için iki parmakla sıkıştırın. Kapatmak için aşağı kaydırın.",
+      "status": "machine"
+    },
+    "chat.pin.detail_personal": {
+      "text": "Yalnızca bu cihazda",
+      "status": "machine"
+    },
+    "chat.pin.detail_shared": {
+      "text": "Tüm üyeler görür",
+      "status": "machine"
+    },
+    "chat.pin.for_both": {
+      "text": "İkimiz için sabitle",
+      "status": "machine"
+    },
+    "chat.pin.for_everyone": {
+      "text": "Herkes için sabitle",
+      "status": "machine"
+    },
+    "chat.pin.for_me": {
+      "text": "Benim için sabitle",
+      "status": "machine"
+    },
+    "chat.pin.sheet_title": {
+      "text": "Mesajı sabitle",
+      "status": "machine"
+    },
+    "chat.pinned_bar.all": {
+      "text": "Tüm sabitlenmiş mesajlar",
+      "status": "machine"
+    },
+    "chat.pinned_bar.for_you": {
+      "text": "Sizin için",
+      "status": "machine"
+    },
+    "chat.pinned_bar.hint": {
+      "text": "Mesajı gösterir",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label": {
+      "text": "Sabitlenmiş mesaj",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label_of": {
+      "text": "Sabitlenmiş mesaj {index}/{count}",
+      "status": "machine"
+    },
+    "chat.pinned_bar.list_title": {
+      "text": "Sabitlenmiş mesajlar",
+      "status": "machine"
+    },
+    "chat.reaction.add_title": {
+      "text": "Tepki ver - Tepki verenler: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by": {
+      "text": "Tepki verenler: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by_title": {
+      "text": "Tepki verenler",
+      "status": "machine"
+    },
+    "chat.reaction.remove_title": {
+      "text": "Tepkinizi kaldırın - Tepki verenler: {names}",
+      "status": "machine"
+    },
+    "chat.reaction.single_emoji": {
+      "text": "Tepki tek bir emoji olmalıdır.",
+      "status": "machine"
+    },
+    "chat.reauth.action": {
+      "text": "Tekrar giriş yap",
+      "status": "machine"
+    },
+    "chat.reauth.body": {
+      "text": "Mesajların şifresini çözmek ve imzalamak için gereken anahtarlar bu oturumda yok. Bu sohbeti açmak için tekrar giriş yapın.",
+      "status": "machine"
+    },
+    "chat.reauth.title": {
+      "text": "Tekrar giriş yapın",
+      "status": "machine"
+    },
+    "chat.record.bar_video": {
+      "text": "Görüntülü not kaydediliyor",
+      "status": "machine"
+    },
+    "chat.record.bar_voice": {
+      "text": "Sesli mesaj kaydediliyor",
+      "status": "machine"
+    },
+    "chat.record.cancelled": {
+      "text": "İptal edildi",
+      "status": "machine"
+    },
+    "chat.record.delete": {
+      "text": "Kaydı sil",
+      "status": "machine"
+    },
+    "chat.record.denied_camera": {
+      "text": "Lakko'nun görüntülü not kaydetmek için kamera erişimine ihtiyacı var. Tarayıcınızın site ayarlarından kamera erişimine izin verin.",
+      "status": "machine"
+    },
+    "chat.record.denied_camera_app": {
+      "text": "Lakko'nun görüntülü not kaydetmek için kamera erişimine ihtiyacı var",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone": {
+      "text": "Lakko'nun sesli mesaj kaydetmek için mikrofon erişimine ihtiyacı var. Tarayıcınızın site ayarlarından mikrofon erişimine izin verin.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_app": {
+      "text": "Lakko'nun sesli mesaj kaydetmek için mikrofon erişimine ihtiyacı var",
+      "status": "machine"
+    },
+    "chat.record.finishing": {
+      "text": "Kayıt tamamlanıyor",
+      "status": "machine"
+    },
+    "chat.record.flip_camera": {
+      "text": "Kamerayı çevir",
+      "status": "machine"
+    },
+    "chat.record.flip_failed": {
+      "text": "Kamera değiştirilemedi",
+      "status": "machine"
+    },
+    "chat.record.hint_hold": {
+      "text": "Kaydetmek için basılı tutun",
+      "status": "machine"
+    },
+    "chat.record.in_call": {
+      "text": "Arama sırasında kullanılamaz",
+      "status": "machine"
+    },
+    "chat.record.locked_hint": {
+      "text": "Basılı tutmadan kayıt başlatır",
+      "status": "machine"
+    },
+    "chat.record.no_camera": {
+      "text": "Kamera bulunamadı",
+      "status": "machine"
+    },
+    "chat.record.open_settings": {
+      "text": "Ayarları aç",
+      "status": "machine"
+    },
+    "chat.record.pause": {
+      "text": "Kaydı duraklat",
+      "status": "machine"
+    },
+    "chat.record.pause_video": {
+      "text": "Görüntülü notu duraklat",
+      "status": "machine"
+    },
+    "chat.record.play": {
+      "text": "Kaydı oynat, {duration}",
+      "status": "machine"
+    },
+    "chat.record.play_video_sound": {
+      "text": "Görüntülü notu sesli oynat",
+      "status": "machine"
+    },
+    "chat.record.position": {
+      "text": "Kayıt konumu",
+      "status": "machine"
+    },
+    "chat.record.recording_duration": {
+      "text": "Kaydediliyor, {duration}",
+      "status": "machine"
+    },
+    "chat.record.send": {
+      "text": "Kaydı gönder",
+      "status": "machine"
+    },
+    "chat.record.silent_mic": {
+      "text": "Mikrofondan ses gelmiyor",
+      "status": "machine"
+    },
+    "chat.record.slide_cancel": {
+      "text": "‹ İptal için kaydırın",
+      "status": "machine"
+    },
+    "chat.record.start_failed": {
+      "text": "Kayıt başlatılamadı",
+      "status": "machine"
+    },
+    "chat.record.starting": {
+      "text": "Başlatılıyor…",
+      "status": "machine"
+    },
+    "chat.record.stop": {
+      "text": "Kaydı durdur",
+      "status": "machine"
+    },
+    "chat.record.stop_short": {
+      "text": "Durdur",
+      "status": "machine"
+    },
+    "chat.record.switch_to_video": {
+      "text": "Görüntülü nota geç",
+      "status": "machine"
+    },
+    "chat.record.switch_to_voice": {
+      "text": "Sesli mesaja geç",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video": {
+      "text": "Bu tarayıcıda görüntülü not kaydedilemez",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video_device": {
+      "text": "Bu cihazda görüntülü not kaydedilemez",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice": {
+      "text": "Bu tarayıcıda sesli mesaj kaydedilemez",
+      "status": "machine"
+    },
+    "chat.record.video": {
+      "text": "Görüntülü not kaydet",
+      "status": "machine"
+    },
+    "chat.record.video_ready": {
+      "text": "Görüntülü not hazır",
+      "status": "machine"
+    },
+    "chat.record.video_tooltip": {
+      "text": "Görüntülü not kaydet: kaydetmek için basılı tutun, sese geçmek için dokunun",
+      "status": "machine"
+    },
+    "chat.record.voice": {
+      "text": "Sesli mesaj kaydet",
+      "status": "machine"
+    },
+    "chat.record.voice_tooltip": {
+      "text": "Sesli mesaj kaydet: kaydetmek için basılı tutun, görüntüye geçmek için dokunun",
+      "status": "machine"
+    },
+    "chat.refusal.add_not_admin": {
+      "text": "Üye eklemeyi yalnızca grup sahibi veya bir yönetici yapabilir.",
+      "status": "machine"
+    },
+    "chat.refusal.device_binding": {
+      "text": "Bu cihazın anahtarında bir sorun var. Cihazı Cihazlar bölümünden kaldırıp yeniden ekleyin.",
+      "status": "machine"
+    },
+    "chat.refusal.device_limit": {
+      "text": "{count, plural, one {Hesap başına en fazla # cihaz. Önce birini kaldırın.} other {Hesap başına en fazla # cihaz. Önce birini kaldırın.}}",
+      "status": "machine"
+    },
+    "chat.refusal.fallback": {
+      "text": "Bu değişiklik istenemedi.",
+      "status": "machine"
+    },
+    "chat.refusal.join_not_kept": {
+      "text": "Bir katılma isteği, zaten çok fazla istek beklerken geldi ve saklanmadı. Kişiden isteği daha sonra yeniden göndermesini isteyin.",
+      "status": "machine"
+    },
+    "chat.refusal.joiner_member": {
+      "text": "Bu kişi gruba zaten katıldı.",
+      "status": "machine"
+    },
+    "chat.refusal.no_join_request": {
+      "text": "Bu katılma isteği artık beklemiyor.",
+      "status": "machine"
+    },
+    "chat.refusal.not_owner": {
+      "text": "Yöneticileri değiştirmeyi veya sahipliği devretmeyi yalnızca grup sahibi yapabilir.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_cannot_leave": {
+      "text": "Grup sahibi gruptan ayrılamaz.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_not_member": {
+      "text": "Sahiplik yalnızca bu grubun mevcut bir üyesinde olabilir.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_unremovable": {
+      "text": "Grup sahibi çıkarılamaz.",
+      "status": "machine"
+    },
+    "chat.refusal.pending_full": {
+      "text": "Uygulanmayı bekleyen çok fazla değişiklik var.",
+      "status": "machine"
+    },
+    "chat.refusal.remove_not_admin": {
+      "text": "Üye çıkarmayı yalnızca grup sahibi veya bir yönetici yapabilir.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_many": {
+      "text": "Uygulanmalarını bekleyip tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_one": {
+      "text": "Uygulanmasını bekleyip tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.refusal.role_change_pending": {
+      "text": "Bir rol değişikliği zaten uygulanmayı bekliyor.",
+      "status": "machine"
+    },
+    "chat.refusal.with_retry": {
+      "text": "{fact} {retry}",
+      "status": "machine"
+    },
+    "chat.reply.cancel": {
+      "text": "Yanıtı iptal et",
+      "status": "machine"
+    },
+    "chat.reply.fallback_excerpt": {
+      "text": "Mesaj",
+      "status": "machine"
+    },
+    "chat.reply.quote": {
+      "text": "Yanıt",
+      "status": "machine"
+    },
+    "chat.reply.quote_to": {
+      "text": "Yanıtlanan: {name}",
+      "status": "machine"
+    },
+    "chat.reply.strip_label": {
+      "text": "Yanıtlanıyor: {name}",
+      "status": "machine"
+    },
+    "chat.select.count": {
+      "text": "{count, plural, one {# seçildi} other {# seçildi}}",
+      "status": "machine"
+    },
+    "chat.select.count_limit": {
+      "text": "{count, plural, one {# seçildi, sınıra ulaşıldı} other {# seçildi, sınıra ulaşıldı}}",
+      "status": "machine"
+    },
+    "chat.select.delete_helper": {
+      "text": "Yalnızca kendi mesajlarınız silinebilir.",
+      "status": "machine"
+    },
+    "chat.select.delete_title": {
+      "text": "{count, plural, one {# mesaj silinsin mi?} other {# mesaj silinsin mi?}}",
+      "status": "machine"
+    },
+    "chat.select.deleted_of": {
+      "text": "{total} mesajdan {done} tanesi silindi.",
+      "status": "machine"
+    },
+    "chat.select.forwarded_of": {
+      "text": "{total} mesajdan {done} tanesi iletildi.",
+      "status": "machine"
+    },
+    "chat.select.state_not_selected": {
+      "text": "Seçilmedi",
+      "status": "machine"
+    },
+    "chat.select.state_selected": {
+      "text": "Seçildi",
+      "status": "machine"
+    },
+    "chat.select.toolbar": {
+      "text": "Seçili mesajlar",
+      "status": "machine"
+    },
+    "chat.send.failed": {
+      "text": "Gönderilemedi.",
+      "status": "machine"
+    },
+    "chat.system.join_request": {
+      "text": "Katılma isteği",
+      "status": "machine"
+    },
+    "chat.system.members_changed": {
+      "text": "Üyeler değişti",
+      "status": "machine"
+    },
+    "chat.timeline.empty": {
+      "text": "Henüz mesaj yok. Merhaba deyin.",
+      "status": "machine"
+    },
+    "chat.timeline.setting_up": {
+      "text": "Bu sohbet bu cihazda hâlâ ayarlanıyor.",
+      "status": "machine"
+    },
+    "chat.transfer.action": {
+      "text": "Sahipliği devret",
+      "status": "machine"
+    },
+    "chat.transfer.action_named": {
+      "text": "Sahip yap: {name}",
+      "status": "machine"
+    },
+    "chat.transfer.become_member": {
+      "text": "Normal üye ol",
+      "status": "machine"
+    },
+    "chat.transfer.become_member_detail": {
+      "text": "Tüm grup yetkilerinizi hemen bırakırsınız. Bunları yalnızca yeni sahip geri verebilir.",
+      "status": "machine"
+    },
+    "chat.transfer.candidate_admin": {
+      "text": "{name}, yönetici",
+      "status": "machine"
+    },
+    "chat.transfer.done_admin": {
+      "text": "Grubun yeni sahibi: {name}. Yönetici olarak kalıyorsunuz.",
+      "status": "machine"
+    },
+    "chat.transfer.done_member": {
+      "text": "Grubun yeni sahibi: {name}. Artık normal bir üyesiniz.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_body": {
+      "text": "Rolleri yalnızca bir sahip değiştirebilir. Bu grubu devrettikten sonra geri alamazsınız, sahip rolünüzü geri yükleyemezsiniz ve yeni sahip sizin için yapmadıkça kendi rolünüzü yeniden değiştiremezsiniz.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_title": {
+      "text": "Bu işlem geri alınamaz.",
+      "status": "machine"
+    },
+    "chat.transfer.leave_blocked": {
+      "text": "Önce sahipliği devredin — bir grup sahipsiz bırakılamaz.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner": {
+      "text": "Artık bu grubun sahibisiniz.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_body": {
+      "text": "Üye ekleyip çıkarabilir, yöneticileri değiştirebilir ve sahipliği başka birine devredebilirsiniz.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_legend": {
+      "text": "Yeni sahip",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_named": {
+      "text": "Sizi bu grubun sahibi yapan: {name}.",
+      "status": "machine"
+    },
+    "chat.transfer.no_candidates": {
+      "text": "Bu grupta devredilebilecek başka kimse yok.",
+      "status": "machine"
+    },
+    "chat.transfer.pending": {
+      "text": "Sahiplik devri uygulanmayı bekliyor.",
+      "status": "machine"
+    },
+    "chat.transfer.pending_named": {
+      "text": "Sahip yapılması bekleniyor: {name}.",
+      "status": "machine"
+    },
+    "chat.transfer.requested": {
+      "text": "Sahiplik devri istendi. Bir sahip veya yönetici değişikliği uyguladığında geçerli olur.",
+      "status": "machine"
+    },
+    "chat.transfer.role_change_pending": {
+      "text": "Bir rol değişikliği zaten uygulanmayı bekliyor. Uygulanmasını bekleyip tekrar deneyin.",
+      "status": "machine"
+    },
+    "chat.transfer.role_legend": {
+      "text": "Sonrasındaki rolünüz",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin": {
+      "text": "Yönetici olarak kal",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin_detail": {
+      "text": "Üye eklemeye ve çıkarmaya devam edebilirsiniz. Daha sonra yeni sahipten isteyerek bundan vazgeçebilirsiniz.",
+      "status": "machine"
+    },
+    "chat.transfer.unlocks_leave": {
+      "text": "Değişiklik uygulandıktan sonra gruptan diğer üyeler gibi ayrılabilirsiniz.",
+      "status": "machine"
+    },
+    "chat.typing.named": {
+      "text": "{name} yazıyor...",
+      "status": "machine"
+    },
+    "chat.typing.one_to_one": {
+      "text": "yazıyor...",
+      "status": "machine"
+    },
+    "chat.typing.several": {
+      "text": "Birkaç kişi yazıyor...",
+      "status": "machine"
+    },
+    "chat.unpin.for_both": {
+      "text": "İkimiz için sabitlemeyi kaldır",
+      "status": "machine"
+    },
+    "chat.unpin.for_everyone": {
+      "text": "Herkes için sabitlemeyi kaldır",
+      "status": "machine"
+    },
+    "chat.unpin.for_me": {
+      "text": "Benim için sabitlemeyi kaldır",
+      "status": "machine"
+    },
+    "chat.unpin.sheet_title": {
+      "text": "Mesajın sabitlemesini kaldır",
+      "status": "machine"
+    },
+    "chat.upload.encrypting": {
+      "text": "Şifreleniyor: \"{name}\"…",
+      "status": "machine"
+    },
+    "chat.upload.encrypting_of": {
+      "text": "Şifreleniyor: \"{name}\" ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.preparing": {
+      "text": "Hazırlanıyor: \"{name}\"…",
+      "status": "machine"
+    },
+    "chat.upload.selected_item": {
+      "text": "Seçilen öğe",
+      "status": "machine"
+    },
+    "chat.upload.uploading": {
+      "text": "Yükleniyor: \"{name}\"…",
+      "status": "machine"
+    },
+    "chat.upload.uploading_of": {
+      "text": "Yükleniyor: \"{name}\" ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.working": {
+      "text": "Şifreleniyor ve yükleniyor…",
+      "status": "machine"
+    },
+    "chat.video.load_failed": {
+      "text": "Video yüklenemedi",
+      "status": "machine"
+    },
+    "chat.video.load_failed_retry": {
+      "text": "Video yüklenemedi, tekrar denemek için dokunun",
+      "status": "machine"
+    },
+    "chat.video.loading": {
+      "text": "Video yükleniyor, {size}",
+      "status": "machine"
+    },
+    "chat.video.open": {
+      "text": "Videoyu oynat",
+      "status": "machine"
+    },
+    "chat.video.play": {
+      "text": "Videoyu oynat, {size}",
+      "status": "machine"
+    },
+    "chat.video.play_failed": {
+      "text": "Bu video oynatılamadı",
+      "status": "machine"
+    },
+    "chat.video.player": {
+      "text": "Video oynatıcı",
+      "status": "machine"
+    },
+    "chat.video_note.loading": {
+      "text": "Görüntülü not yükleniyor",
+      "status": "machine"
+    },
+    "chat.video_note.play": {
+      "text": "Görüntülü notu oynat, {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.play_sound": {
+      "text": "Görüntülü notu sesli oynat, {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.poster": {
+      "text": "Görüntülü not kapağı",
+      "status": "machine"
+    },
+    "chat.video_note.tap_mute": {
+      "text": "Sesi kapatmak için dokunun",
+      "status": "machine"
+    },
+    "chat.video_note.tap_sound": {
+      "text": "Ses için dokunun",
+      "status": "machine"
+    },
+    "chat.voice.change_speed": {
+      "text": "Oynatma hızını değiştir",
+      "status": "machine"
+    },
+    "chat.voice.not_played": {
+      "text": "Dinlenmedi",
+      "status": "machine"
+    },
+    "chat.voice.pause": {
+      "text": "Sesli mesajı duraklat",
+      "status": "machine"
+    },
+    "chat.voice.play": {
+      "text": "Sesli mesajı oynat, {duration}",
+      "status": "machine"
+    },
+    "chat.voice.position": {
+      "text": "{position} / {duration}",
+      "status": "machine"
+    },
+    "chat.voice.seek": {
+      "text": "Sesli mesajda ilerle",
+      "status": "machine"
+    },
+    "chat.voice.speed": {
+      "text": "Oynatma hızı {rate}",
+      "status": "machine"
+    },
+    "chats.action.archive": {
+      "text": "Arşivle",
+      "status": "machine"
+    },
+    "chats.action.mute": {
+      "text": "Sessize al",
+      "status": "machine"
+    },
+    "chats.action.pin": {
+      "text": "Sabitle",
+      "status": "machine"
+    },
+    "chats.action.unarchive": {
+      "text": "Arşivden çıkar",
+      "status": "machine"
+    },
+    "chats.action.unmute": {
+      "text": "Sesi aç",
+      "status": "machine"
+    },
+    "chats.action.unpin": {
+      "text": "Sabitlemeyi kaldır",
+      "status": "machine"
+    },
+    "chats.compose": {
+      "text": "Yeni",
+      "status": "machine"
+    },
+    "chats.create.channel": {
+      "text": "Kanal oluştur",
+      "status": "machine"
+    },
+    "chats.create.chat": {
+      "text": "Yeni sohbet",
+      "status": "machine"
+    },
+    "chats.create.group": {
+      "text": "Grup oluştur",
+      "status": "machine"
+    },
+    "chats.create.menu": {
+      "text": "Oluştur",
+      "status": "machine"
+    },
+    "chats.empty.action": {
+      "text": "Başlat",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "Mesajlaşmaya başlamak için bir sohbet seçin",
+      "status": "machine"
+    },
+    "chats.empty.title": {
+      "text": "Henüz sohbet yok",
+      "status": "machine"
+    },
+    "chats.lookup.action": {
+      "text": "Ara: {name}",
+      "status": "machine"
+    },
+    "chats.lookup.nothing": {
+      "text": "Bulunamadı: {name}.",
+      "status": "machine"
+    },
+    "chats.lookup.unreachable": {
+      "text": "Arama yapılamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "chats.new_chat.add_contact": {
+      "text": "Kişi ekle",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts": {
+      "text": "Henüz kişi yok",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts_body": {
+      "text": "Sohbet, tanıdığınız biriyle başlar.",
+      "status": "machine"
+    },
+    "chats.new_chat.not_available": {
+      "text": "Sohbet henüz bu cihazda kullanılamıyor",
+      "status": "machine"
+    },
+    "chats.new_group.accept_again": {
+      "text": "Bir gruba eklemek için bu kişiyi yeniden kabul edin.",
+      "status": "machine"
+    },
+    "chats.new_group.creating": {
+      "text": "Oluşturuluyor...",
+      "status": "machine"
+    },
+    "chats.new_group.error": {
+      "text": "Grup oluşturulamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "chats.new_group.name_label": {
+      "text": "Grup adı (isteğe bağlı)",
+      "status": "machine"
+    },
+    "chats.new_group.no_contacts": {
+      "text": "Grup, zaten tanıdığınız kişilerle başlar.",
+      "status": "machine"
+    },
+    "chats.new_group.open_contacts": {
+      "text": "Kişiler'e git",
+      "status": "machine"
+    },
+    "chats.new_group.title": {
+      "text": "Yeni grup",
+      "status": "machine"
+    },
+    "chats.preview.own": {
+      "text": "Siz: {text}",
+      "status": "machine"
+    },
+    "chats.preview.sender": {
+      "text": "{name}: {text}",
+      "status": "machine"
+    },
+    "chats.row.actions": {
+      "text": "Sohbet işlemleri",
+      "status": "machine"
+    },
+    "chats.row.call.label": {
+      "text": "{kind}: {name}",
+      "status": "machine"
+    },
+    "chats.row.ended": {
+      "text": "Artık üye değilsiniz.",
+      "status": "machine"
+    },
+    "chats.row.muted": {
+      "text": "Sessizde",
+      "status": "machine"
+    },
+    "chats.row.no_messages": {
+      "text": "Henüz mesaj yok",
+      "status": "machine"
+    },
+    "chats.row.people": {
+      "text": "{count, plural, one {# kişi} other {# kişi}}",
+      "status": "machine"
+    },
+    "chats.row.pinned": {
+      "text": "Sabitlendi",
+      "status": "machine"
+    },
+    "chats.row.unread": {
+      "text": "{count, plural, one {# okunmamış mesaj} other {# okunmamış mesaj}}",
+      "status": "machine"
+    },
+    "chats.row.unread_overflow": {
+      "text": "99+",
+      "status": "machine"
+    },
+    "chats.search.clear": {
+      "text": "Aramayı temizle",
+      "status": "machine"
+    },
+    "chats.search.label": {
+      "text": "Sohbetlerde ara",
+      "status": "machine"
+    },
+    "chats.search.no_results": {
+      "text": "Sonuç yok",
+      "status": "machine"
+    },
+    "chats.search.placeholder": {
+      "text": "Ara",
+      "status": "machine"
+    },
+    "chats.synchronizing": {
+      "text": "Eşitleniyor...",
       "status": "machine"
     },
     "common.adding": {
@@ -366,12 +2086,28 @@
       "text": "Kopyala",
       "status": "machine"
     },
+    "common.delete": {
+      "text": "Sil",
+      "status": "machine"
+    },
     "common.dismiss": {
       "text": "Kapat",
       "status": "machine"
     },
     "common.done": {
       "text": "Bitti",
+      "status": "machine"
+    },
+    "common.duration.minutes": {
+      "text": "{count, plural, one {# dakika} other {# dakika}}",
+      "status": "machine"
+    },
+    "common.duration.minutes_seconds": {
+      "text": "{minutes} {seconds}",
+      "status": "machine"
+    },
+    "common.duration.seconds": {
+      "text": "{count, plural, one {# saniye} other {# saniye}}",
       "status": "machine"
     },
     "common.email": {
@@ -422,6 +2158,10 @@
       "text": "Genişlet",
       "status": "machine"
     },
+    "common.list_pair": {
+      "text": "{first}, {second}",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "Yükleniyor...",
       "status": "machine"
@@ -438,8 +2178,16 @@
       "text": "Diğer seçenekler",
       "status": "machine"
     },
+    "common.not_now": {
+      "text": "Şimdi değil",
+      "status": "machine"
+    },
     "common.off": {
       "text": "Kapalı",
+      "status": "machine"
+    },
+    "common.ok": {
+      "text": "Tamam",
       "status": "machine"
     },
     "common.on": {
@@ -474,6 +2222,10 @@
       "text": "Kaldırılıyor...",
       "status": "machine"
     },
+    "common.retry": {
+      "text": "Tekrar dene",
+      "status": "machine"
+    },
     "common.save": {
       "text": "Kaydet",
       "status": "machine"
@@ -486,8 +2238,28 @@
       "text": "Gönderiliyor...",
       "status": "machine"
     },
+    "common.sentence_pair": {
+      "text": "{first} {second}",
+      "status": "machine"
+    },
     "common.set_up": {
       "text": "Kur",
+      "status": "machine"
+    },
+    "common.size.bytes": {
+      "text": "{size} B",
+      "status": "machine"
+    },
+    "common.size.gb": {
+      "text": "{size} GB",
+      "status": "machine"
+    },
+    "common.size.kb": {
+      "text": "{size} kB",
+      "status": "machine"
+    },
+    "common.size.mb": {
+      "text": "{size} MB",
       "status": "machine"
     },
     "common.try_again": {
@@ -732,6 +2504,26 @@
     },
     "display_name.error.unknown": {
       "text": "Bu ad kullanılamaz",
+      "status": "machine"
+    },
+    "ds.clock_skew": {
+      "text": "Bu cihazın tarih ve saatini kontrol edin.",
+      "status": "machine"
+    },
+    "group.join.not_taking_requests": {
+      "text": "Bu grup henüz istek kabul etmiyor. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "group.join.request_again": {
+      "text": "Yeniden iste",
+      "status": "machine"
+    },
+    "group.join.wait_primary": {
+      "text": "İstek gönderildi. Bir yönetici onaylar, ardından değişiklik gruba uygulanır.",
+      "status": "machine"
+    },
+    "group.join.wait_secondary": {
+      "text": "İki adımın da süre sınırı yok. Bir şey olmazsa isteği yeniden gönderebilirsiniz.",
       "status": "machine"
     },
     "language.name.ar": {
@@ -1952,6 +3744,14 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "Güvenlik numaraları",
+      "status": "machine"
+    },
+    "tokens.action_allowance_used": {
+      "text": "Bunun için bugünkü hakkınızı kullandınız. Yarın tekrar deneyin.",
+      "status": "machine"
+    },
+    "tokens.lookup_allowance_used": {
+      "text": "Bugün çok fazla kişi aradınız. Yarın tekrar deneyin.",
       "status": "machine"
     },
     "username.a11y_hint": {

@@ -12,6 +12,7 @@
 
 import { createEffect, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../ui/icons";
+import { t } from "../l10n";
 
 import {
   formatClock,
@@ -22,7 +23,7 @@ import {
   type RecState,
 } from "./recording-machine";
 import { SILENT_MIC_NOTICE } from "./microphone-silence";
-import { DENIED_COPY, NOTICE_COPY, type Recorder } from "./recording-controller";
+import { deniedCopy, noticeCopy, type Recorder } from "./recording-controller";
 import { barIsPlayed, waveformBars } from "./waveform";
 
 function holding(s: RecState): boolean {
@@ -42,9 +43,9 @@ function holding(s: RecState): boolean {
 export function RecordButton(props: { recorder: Recorder }): JSX.Element {
   const r = props.recorder;
   const isVideo = (): boolean => r.mode() === "video_note";
-  const label = (): string => (isVideo() ? "Record video message" : "Record voice message");
+  const label = (): string => (isVideo() ? t("chat.record.video") : t("chat.record.voice"));
   const switchLabel = (): string =>
-    isVideo() ? "Switch to voice message" : "Switch to video message";
+    isVideo() ? t("chat.record.switch_to_voice") : t("chat.record.switch_to_video");
   return (
     <span
       style={{
@@ -59,7 +60,7 @@ export function RecordButton(props: { recorder: Recorder }): JSX.Element {
       }}
       title={
         r.disabledReason() ??
-        `${label()}: hold to record, tap to switch to ${isVideo() ? "voice" : "video"}`
+        (isVideo() ? t("chat.record.video_tooltip") : t("chat.record.voice_tooltip"))
       }
     >
       <button
@@ -189,18 +190,18 @@ export function recorderBusy(r: Recorder): boolean {
 export function RecordingBar(props: { recorder: Recorder }): JSX.Element {
   const r = props.recorder;
   const s = (): RecState => r.state();
-  const kindWord = (): string => {
+  const barLabel = (): string => {
     const st = s();
     const kind = "kind" in st ? st.kind : r.mode();
-    return kind === "video_note" ? "video" : "voice";
+    return kind === "video_note" ? t("chat.record.bar_video") : t("chat.record.bar_voice");
   };
   return (
-    <div class="lakko-rec-bar" role="group" aria-label={`Recording a ${kindWord()} message`}>
+    <div class="lakko-rec-bar" role="group" aria-label={barLabel()}>
       <Show when={s().phase === "preview" && s()} keyed fallback={<LiveBar recorder={r} />}>
         {(p) => (
           <Show
             when={p.phase === "preview" && p.kind === "voice"}
-            fallback={<span style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>Video message ready</span>}
+            fallback={<span style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>{t("chat.record.video_ready")}</span>}
           >
             <VoicePreview recorder={r} />
           </Show>
@@ -231,7 +232,7 @@ function LiveBar(props: { recorder: Recorder }): JSX.Element {
         <span style={{ width: `${Math.round(r.level() * 100)}%` }} />
       </span>
       <Show when={s().phase === "requesting"}>
-        <span style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>Starting…</span>
+        <span style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>{t("chat.record.starting")}</span>
       </Show>
       <Show when={s().phase === "recording"}>
         {/* Cancel only, since the lock target landed (`LockTarget`). Cancel is
@@ -250,7 +251,7 @@ function LiveBar(props: { recorder: Recorder }): JSX.Element {
             overflow: "hidden",
           }}
         >
-          {r.micSilent() ? SILENT_MIC_NOTICE : "‹ Slide to cancel"}
+          {r.micSilent() ? SILENT_MIC_NOTICE() : t("chat.record.slide_cancel")}
         </span>
       </Show>
       <Show when={s().phase === "locked"}>
@@ -269,18 +270,18 @@ function LiveBar(props: { recorder: Recorder }): JSX.Element {
               overflow: "hidden",
             }}
           >
-            {SILENT_MIC_NOTICE}
+            {SILENT_MIC_NOTICE()}
           </span>
         </Show>
-        <button type="button" onClick={() => r.remove()} aria-label="Delete recording">
-          Delete
+        <button type="button" onClick={() => r.remove()} aria-label={t("chat.record.delete")}>
+          {t("common.delete")}
         </button>
-        <button type="button" class="primary" onClick={() => r.stop()} aria-label="Stop recording">
-          Stop
+        <button type="button" class="primary" onClick={() => r.stop()} aria-label={t("chat.record.stop")}>
+          {t("chat.record.stop_short")}
         </button>
       </Show>
       <Show when={s().phase === "finalizing"}>
-        <span class="lakko-spinner" aria-label="Finishing recording" />
+        <span class="lakko-spinner" aria-label={t("chat.record.finishing")} />
       </Show>
     </>
   );
@@ -315,7 +316,7 @@ function VoicePreview(props: { recorder: Recorder }): JSX.Element {
       <button
         type="button"
         class="lakko-icon-btn"
-        aria-label={playing() ? "Pause recording" : `Play recording, ${spokenDuration(duration())}`}
+        aria-label={playing() ? t("chat.record.pause") : t("chat.record.play", { duration: spokenDuration(duration()) })}
         onClick={() => (playing() ? audio.pause() : void audio.play().catch(() => undefined))}
       >
         {playing() ? "❚❚" : "▶"}
@@ -332,10 +333,10 @@ function VoicePreview(props: { recorder: Recorder }): JSX.Element {
       </span>
       <span>{playing() ? formatClock(position()) : formatTotalClock(duration())}</span>
       <button type="button" onClick={() => r.remove()}>
-        Delete
+        {t("common.delete")}
       </button>
       <button type="button" class="primary" onClick={() => r.sendPreview()}>
-        Send
+        {t("chat.composer.send")}
       </button>
     </>
   );
@@ -421,18 +422,18 @@ function LiveCircle(props: { recorder: Recorder }): JSX.Element {
           </span>
         </Show>
         <Show when={r.state().phase === "locked"}>
-          <button type="button" onClick={() => r.flipCamera()} aria-label="Flip camera">
+          <button type="button" onClick={() => r.flipCamera()} aria-label={t("chat.record.flip_camera")}>
             ⟲
           </button>
           <button type="button" onClick={() => r.remove()}>
-            Delete
+            {t("common.delete")}
           </button>
           <button type="button" class="primary" onClick={() => r.stop()}>
-            Stop
+            {t("chat.record.stop_short")}
           </button>
         </Show>
         <Show when={r.state().phase === "finalizing"}>
-          <span class="lakko-spinner" aria-label="Finishing recording" />
+          <span class="lakko-spinner" aria-label={t("chat.record.finishing")} />
         </Show>
       </div>
     </>
@@ -449,7 +450,7 @@ function PreviewCircle(props: { recorder: Recorder }): JSX.Element {
         type="button"
         class="lakko-vn-circle"
         style={{ padding: 0, border: "none" }}
-        aria-label={withSound() ? "Pause video message" : "Play video message with sound"}
+        aria-label={withSound() ? t("chat.record.pause_video") : t("chat.record.play_video_sound")}
         onClick={() => {
           if (video === undefined) return;
           if (!withSound()) {
@@ -487,10 +488,10 @@ function PreviewCircle(props: { recorder: Recorder }): JSX.Element {
       <div class="lakko-vn-controls">
         <span>{formatTotalClock(r.preview()?.result.durationMs ?? 0)}</span>
         <button type="button" onClick={() => r.remove()}>
-          Delete
+          {t("common.delete")}
         </button>
         <button type="button" class="primary" onClick={() => r.sendPreview()}>
-          Send
+          {t("chat.composer.send")}
         </button>
       </div>
     </>
@@ -505,9 +506,9 @@ export function RecorderNotices(props: { recorder: Recorder }): JSX.Element {
       <Show when={r.denied()}>
         {(kind) => (
           <div class="lakko-media-card" role="alert">
-            <span style={{ flex: 1 }}>{DENIED_COPY[kind()]}</span>
+            <span style={{ flex: 1 }}>{deniedCopy(kind())}</span>
             <button type="button" onClick={() => r.dismissDenied()} style={{ padding: "0.2rem 0.6rem" }}>
-              Dismiss
+              {t("common.dismiss")}
             </button>
           </div>
         )}
@@ -519,7 +520,7 @@ export function RecorderNotices(props: { recorder: Recorder }): JSX.Element {
               class={n() === "cancelled" ? "lakko-shake" : undefined}
               style={{ display: "inline-block", "font-size": "0.8rem", color: "var(--surface-muted)" }}
             >
-              {NOTICE_COPY[n()]}
+              {noticeCopy(n())}
             </span>
           )}
         </Show>

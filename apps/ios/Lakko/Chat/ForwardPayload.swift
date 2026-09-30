@@ -14,7 +14,7 @@ import LakkoCore
 public enum ForwardPayload {
 
     /// The line the bubble draws when a forward carries no name.
-    public static let anonymousLine = "Forwarded"
+    public static var anonymousLine: String { Localization.text("chat.forward.label") }
 
     /// What is sent when `message` is forwarded, decided at the moment a
     /// conversation is picked.
@@ -96,7 +96,7 @@ public enum ForwardPayload {
     /// to one line because it came off the wire.
     public static func attributionLine(_ forward: ForwardRef) -> String {
         let name = ReplySnapshot.oneLine(forward.author ?? "")
-        return name.isEmpty ? anonymousLine : "Forwarded from \(name)"
+        return name.isEmpty ? anonymousLine : Localization.text("chat.forward.from", texts: ["name": name])
     }
 
     // MARK: - Group id shapes

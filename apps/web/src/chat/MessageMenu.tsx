@@ -82,6 +82,7 @@
  * backdrop on the two platforms whose menu replaces the screen.
  */
 
+import { t } from "../l10n";
 import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 
@@ -251,7 +252,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
       <div
         class="lk-msg-menu"
         role="menu"
-        aria-label="Message actions"
+        aria-label={t("chat.message.actions")}
         data-row-at={layout()?.rowAt}
         style={(() => {
           const l = layout();
@@ -269,7 +270,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
           ref={row}
           class="lk-msg-menu-surface lk-msg-menu-reactions"
           role="group"
-          aria-label="React"
+          aria-label={t("chat.message.react")}
           style={offset((l) => l.row)}
         >
           <For each={REACTION_EMOJI}>
@@ -280,7 +281,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 }}
                 type="button"
                 role="menuitem"
-                aria-label={`React ${emoji}`}
+                aria-label={t("chat.message.react_with", { emoji })}
                 onClick={() => run(() => props.onReact(emoji))}
               >
                 {emoji}
@@ -291,8 +292,8 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
             type="button"
             role="menuitem"
             class="more"
-            aria-label="More reactions"
-            title="More reactions"
+            aria-label={t("chat.message.more_reactions")}
+            title={t("chat.message.more_reactions")}
             onClick={() => run(() => props.onMoreReactions())}
           >
             <Icon name="plus" size={16} />
@@ -309,12 +310,12 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
         >
             <button type="button" role="menuitem" onClick={() => run(() => props.onReply())}>
               <Icon name="reply" size={16} />
-              <span>Reply</span>
+              <span>{t("chat.message.reply")}</span>
             </button>
             <Show when={props.canForward}>
               <button type="button" role="menuitem" onClick={() => run(() => props.onForward())}>
                 <Icon name="forward" size={16} />
-                <span>Forward</span>
+                <span>{t("chat.message.forward")}</span>
               </button>
             </Show>
             <Show when={copyable()}>
@@ -325,28 +326,28 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                   onClick={() => run(() => props.onCopy(text()))}
                 >
                   <Icon name="copy" size={16} />
-                  <span>Copy</span>
+                  <span>{t("common.copy")}</span>
                 </button>
               )}
             </Show>
             <Show when={props.canSelect}>
               <button type="button" role="menuitem" onClick={() => run(() => props.onSelect())}>
                 <Icon name="select" size={16} />
-                <span>Select</span>
+                <span>{t("chat.message.select")}</span>
               </button>
             </Show>
             <Show when={props.pinLabel}>
               {(label) => (
                 <button type="button" role="menuitem" onClick={() => run(() => props.onPin())}>
                   <Icon name="pin" size={16} />
-                  <span>{label()}</span>
+                  <span>{label() === "Pin" ? t("chat.message.pin") : t("chat.message.unpin")}</span>
                 </button>
               )}
             </Show>
             <Show when={props.canEditDelete}>
               <button type="button" role="menuitem" onClick={() => run(() => props.onEdit())}>
                 <Icon name="pencil" size={16} />
-                <span>Edit</span>
+                <span>{t("chat.message.edit")}</span>
               </button>
               <div class="lk-msg-menu-destructive">
                 <button
@@ -356,7 +357,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                   onClick={() => run(() => props.onDelete())}
                 >
                   <Icon name="trash" size={16} />
-                  <span>Delete</span>
+                  <span>{t("common.delete")}</span>
                 </button>
               </div>
             </Show>

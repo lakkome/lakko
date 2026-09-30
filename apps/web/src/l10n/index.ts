@@ -57,6 +57,18 @@ export function t(key: string, args?: L10nArgs): string {
   return runtime.t(key, args);
 }
 
+/**
+ * A short list of names joined the way the interface language joins them
+ * ("Anna, Ivan, Maria"; "Anna، Ivan" in Arabic), pair by pair through
+ * `common.list_pair`, with no word for "and". Empty for no items.
+ */
+export function joinList(items: readonly string[]): string {
+  return items.reduce(
+    (acc, item) => (acc.length === 0 ? item : t("common.list_pair", { first: acc, second: item })),
+    "",
+  );
+}
+
 export const currentLanguage = runtime.language;
 export const isRtl = runtime.rtl;
 export const selectedLanguage = runtime.selected;

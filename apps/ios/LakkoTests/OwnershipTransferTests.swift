@@ -204,7 +204,7 @@ final class OwnershipTransferTests: XCTestCase {
         XCTAssertFalse(arm.transfer.enabled)
         XCTAssertEqual(arm.transfer.disabledReason, roleChangeAlreadyPendingMessage)
         XCTAssertEqual(
-            arm.transfer.disabledReason,
+            arm.transfer.disabledReason?.withoutIsolates,
             "A role change is already waiting to apply. Wait for it to land, then try again.")
     }
 
@@ -219,7 +219,7 @@ final class OwnershipTransferTests: XCTestCase {
                     waitingRoleChange: WaitingRoleChange(
                         ownTransfer: true, successorLabel: "Alice"))))
         XCTAssertFalse(arm.transfer.enabled)
-        XCTAssertEqual(arm.transfer.disabledReason, "Waiting to make Alice the owner.")
+        XCTAssertEqual(arm.transfer.disabledReason?.withoutIsolates, "Waiting to make Alice the owner.")
     }
 
     /// The successor is resolved through the LIVE roster at render time, so one
@@ -277,7 +277,7 @@ final class OwnershipTransferTests: XCTestCase {
                     candidateCount: 0,
                     waitingRoleChange: WaitingRoleChange(
                         ownTransfer: true, successorLabel: "Alice"))))
-        XCTAssertEqual(arm.transfer.disabledReason, "Waiting to make Alice the owner.")
+        XCTAssertEqual(arm.transfer.disabledReason?.withoutIsolates, "Waiting to make Alice the owner.")
     }
 
     /// §6.1.6 — below the quiet window the control stays ENABLED and a second
@@ -388,7 +388,7 @@ final class OwnershipTransferTests: XCTestCase {
             selected: TransferCandidate(
                 leafIndex: 2, signatureKeyB64: Self.bobKey, label: "b0b1c2d3", isAdmin: false))
         XCTAssertTrue(picked.enabled)
-        XCTAssertEqual(picked.label, "Make b0b1c2d3 the owner")
+        XCTAssertEqual(picked.label.withoutIsolates, "Make b0b1c2d3 the owner")
     }
 
     /// BOUNDARY GUARD — this fails when the wording drifts, which is the point:
@@ -419,10 +419,10 @@ final class OwnershipTransferTests: XCTestCase {
     /// admin toggle at once.
     func testASweptTransferNamesTheTransferorsOwnNewRole() {
         XCTAssertEqual(
-            transferOutcomeNotice(outcome: .committed, successorLabel: "Alice", outgoing: .admin),
+            transferOutcomeNotice(outcome: .committed, successorLabel: "Alice", outgoing: .admin).withoutIsolates,
             "Alice is now the group owner. You are still an admin.")
         XCTAssertEqual(
-            transferOutcomeNotice(outcome: .committed, successorLabel: "Alice", outgoing: .member),
+            transferOutcomeNotice(outcome: .committed, successorLabel: "Alice", outgoing: .member).withoutIsolates,
             "Alice is now the group owner. You are now a regular member.")
     }
 
@@ -445,7 +445,7 @@ final class OwnershipTransferTests: XCTestCase {
 
     func testThePendingLabelNamesTheSuccessorWhenTheyStillResolve() {
         XCTAssertEqual(
-            transferPendingLabel(successorLabel: "Alice"), "Waiting to make Alice the owner.")
+            transferPendingLabel(successorLabel: "Alice").withoutIsolates, "Waiting to make Alice the owner.")
     }
 
     func testThePendingLabelFallsBackWhenTheSuccessorNoLongerResolves() {
@@ -485,7 +485,7 @@ final class OwnershipTransferTests: XCTestCase {
             currentOwnerB64: Self.aliceKey,
             ownSignatureKeyB64: Self.aliceKey,
             previousOwnerLabel: "Owner")
-        XCTAssertEqual(notice?.headline, "Owner made you the owner of this group.")
+        XCTAssertEqual(notice?.headline.withoutIsolates, "Owner made you the owner of this group.")
         XCTAssertEqual(notice?.body, newOwnerNoticeBody)
         XCTAssertEqual(
             notice?.body,

@@ -71,6 +71,7 @@
  * fresh KeyPackage — the one thing that actually fixes the commonest cause.
  */
 
+import { t } from "../l10n";
 import type { RequestObservation } from "./pending-requests";
 
 /** One own `add` request that left the pending set without landing. */
@@ -142,19 +143,18 @@ export function unappliedAddRequests(
  */
 export function unappliedLine(item: UnappliedAdd): string {
   return item.viaJoinRequest
-    ? "Not applied. Ask them to request to join again."
-    : "Not added. You can add them again.";
+    ? t("chat.members.unapplied.join_line")
+    : t("chat.members.unapplied.add_line");
 }
 
 /** The one explanatory line under the section heading. True on both counts:
  *  the request left the pending set, so no sweep will carry it, and no client
  *  re-requests (UX §7's automatic re-request is designed and not built). */
-export const UNAPPLIED_EXPLANATION =
-  "These changes did not apply and will not be retried on their own.";
+export const UNAPPLIED_EXPLANATION = (): string => t("chat.members.unapplied.explanation");
 
 /** The section heading. */
 export function unappliedHeading(count: number): string {
-  return `Not applied (${count})`;
+  return t("chat.members.unapplied.heading", { count });
 }
 
 // ---------------------------------------------------------------------------
@@ -169,13 +169,11 @@ export function unappliedHeading(count: number): string {
  * truth about the wait itself, which the previous copy left out: **both** steps
  * are unbounded, and a request can quietly not happen.
  */
-export const JOIN_WAIT_PRIMARY =
-  "Request sent. An admin approves it, then the change is applied to the group.";
+export const JOIN_WAIT_PRIMARY = (): string => t("group.join.wait_primary");
 
 /** The second line — the part that was missing, and the only thing that makes
  *  the `Request again` control legible. */
-export const JOIN_WAIT_SECONDARY =
-  "Neither step has a time limit. If nothing happens, you can send the request again.";
+export const JOIN_WAIT_SECONDARY = (): string => t("group.join.wait_secondary");
 
 /** The joiner's one repair, and the ONLY thing available to this side.
  *
@@ -191,7 +189,7 @@ export const JOIN_WAIT_SECONDARY =
  *  push), so a re-request refreshes the material only where the earlier entry
  *  is gone — which is exactly the case that matters here, because a successful
  *  approve consumed it. */
-export const JOIN_REQUEST_AGAIN = "Request again";
+export const JOIN_REQUEST_AGAIN = (): string => t("group.join.request_again");
 
 // ---------------------------------------------------------------------------
 // The store

@@ -3,6 +3,8 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.UiText
+
 /**
  * ADR-0045 UX §6 — the `Remove this member?` confirmation.
  *
@@ -71,7 +73,7 @@ package me.lakko.app.chat
  * is applied, and a user should not be asked a differently-worded question
  * because of a group's internal role-table state.
  */
-internal const val REMOVE_MEMBER_TITLE = "Remove this member?"
+internal val REMOVE_MEMBER_TITLE: UiText = UiText("chat.members.remove.title")
 
 /**
  * §6 — the body, on the proposal path only.
@@ -82,25 +84,24 @@ internal const val REMOVE_MEMBER_TITLE = "Remove this member?"
  * than to a roster: the member is still cryptographically in the group — still
  * receiving, still able to decrypt — until the commit lands.
  */
-internal const val REMOVE_MEMBER_BODY =
-    "They will keep receiving messages until an owner or an admin applies the change."
+internal val REMOVE_MEMBER_BODY: UiText = UiText("chat.members.remove.body")
 
 /** §6 — the destructive action. */
-internal const val REMOVE_MEMBER_CONFIRM_LABEL = "Remove"
+internal val REMOVE_MEMBER_CONFIRM_LABEL: UiText = UiText("common.remove")
 
 /** §6 — the exit. */
-internal const val REMOVE_MEMBER_CANCEL_LABEL = "Cancel"
+internal val REMOVE_MEMBER_CANCEL_LABEL: UiText = UiText("common.cancel")
 
 /** The copy one confirmation needs, whichever widget presents it. */
 internal data class RemoveMemberConfirmation(
     /** [REMOVE_MEMBER_TITLE]. */
-    val title: String,
+    val title: UiText,
     /** [REMOVE_MEMBER_BODY], or `null` when there is nothing true to add. */
-    val body: String?,
+    val body: UiText?,
     /** [REMOVE_MEMBER_CONFIRM_LABEL] — rendered with the error colour. */
-    val confirmLabel: String,
+    val confirmLabel: UiText,
     /** [REMOVE_MEMBER_CANCEL_LABEL]. */
-    val cancelLabel: String,
+    val cancelLabel: UiText,
 )
 
 /**

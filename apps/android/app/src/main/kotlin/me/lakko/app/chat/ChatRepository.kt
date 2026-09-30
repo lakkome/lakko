@@ -1661,8 +1661,9 @@ public class ChatRepository(
                     }
                     if (blocked) {
                         throw ChatError(
-                            ROLE_CHANGE_ALREADY_PENDING,
+                            "C-65: a role change is already pending",
                             IllegalStateException("C-65: a role change is already pending"),
+                            userText = ROLE_CHANGE_ALREADY_PENDING,
                         )
                     }
                     val proposalBytes = try {
@@ -1838,8 +1839,9 @@ public class ChatRepository(
                 }
                 if (blocked) {
                     throw ChatError(
-                        ROLE_CHANGE_ALREADY_PENDING,
+                        "C-65: a role change is already pending",
                         IllegalStateException("C-65: a role change is already pending"),
+                        userText = ROLE_CHANGE_ALREADY_PENDING,
                     )
                 }
                 val proposalBytes = try {

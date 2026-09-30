@@ -250,6 +250,22 @@
       "text": "جارٍ إدخالك إلى المكالمة...",
       "status": "machine"
     },
+    "call.incoming.accept": {
+      "text": "قبول",
+      "status": "machine"
+    },
+    "call.incoming.accept_from": {
+      "text": "قبول المكالمة من {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline": {
+      "text": "رفض",
+      "status": "machine"
+    },
+    "call.incoming.decline_from": {
+      "text": "رفض المكالمة من {name}",
+      "status": "machine"
+    },
     "call.link.connecting": {
       "text": "جارٍ الاتصال...",
       "status": "machine"
@@ -314,8 +330,1712 @@
       "text": "يمكنك مغادرة هذه الشاشة؛ ستنضم عند السماح لك بالدخول.",
       "status": "machine"
     },
+    "chat.attachment.error.attach": {
+      "text": "تعذّر إرفاق العنصر المحدّد. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.attachment.error.attach_named": {
+      "text": "تعذّر إرفاق «{name}». حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.attachment.error.download": {
+      "text": "تعذّر تنزيل المرفق. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.attachment.error.gone": {
+      "text": "لم يعد المرفق متاحًا على الخادم.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_photo": {
+      "text": "تعذّر فتح هذه الصورة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.attachment.error.open_video": {
+      "text": "تعذّر فتح هذا الفيديو. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.attachment.error.prepare_video": {
+      "text": "تعذّر تجهيز هذا الفيديو. يمكن إرسال مقاطع فيديو حتى {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.preview": {
+      "text": "تعذّر عرض الصورة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large": {
+      "text": "حجم هذه الرسالة {size}، وهو أكبر من الحد المسموح {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.too_large_named": {
+      "text": "حجم «{name}» هو {size}، وهو أكبر من الحد المسموح {limit}.",
+      "status": "machine"
+    },
+    "chat.attachment.error.upload": {
+      "text": "تعذّر رفع «{name}». حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.attachment.hide": {
+      "text": "إخفاء",
+      "status": "machine"
+    },
+    "chat.attachment.image_alt": {
+      "text": "صورة مرفقة",
+      "status": "machine"
+    },
+    "chat.attachment.open": {
+      "text": "فتح",
+      "status": "machine"
+    },
+    "chat.attachment.save_title": {
+      "text": "حفظ المرفق",
+      "status": "machine"
+    },
+    "chat.attachment.unnamed": {
+      "text": "(بلا اسم)",
+      "status": "machine"
+    },
+    "chat.author.a_member": {
+      "text": "أحد الأعضاء",
+      "status": "machine"
+    },
+    "chat.author.unknown": {
+      "text": "مرسل غير معروف",
+      "status": "machine"
+    },
+    "chat.author.you": {
+      "text": "أنت",
+      "status": "machine"
+    },
+    "chat.call.busy": {
+      "text": "هناك مكالمة أخرى جارية.",
+      "status": "machine"
+    },
+    "chat.call.error.start": {
+      "text": "تعذّر بدء المكالمة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.call.group_ended": {
+      "text": "انتهت مكالمة المجموعة هذه.",
+      "status": "machine"
+    },
+    "chat.call.group_in_progress": {
+      "text": "مكالمة جماعية جارية",
+      "status": "machine"
+    },
+    "chat.call.group_people": {
+      "text": "{count, plural, zero {لا أحد في المكالمة} one {شخص واحد في المكالمة} two {شخصان في المكالمة} few {# أشخاص في المكالمة} many {# شخصًا في المكالمة} other {# شخص في المكالمة}}",
+      "status": "machine"
+    },
+    "chat.call.group_starting": {
+      "text": "جارٍ البدء…",
+      "status": "machine"
+    },
+    "chat.call.group_status_e2ee": {
+      "text": "{status} · مشفّرة تشفيرًا تامًا بين الطرفين",
+      "status": "machine"
+    },
+    "chat.call.join": {
+      "text": "الانضمام إلى المكالمة",
+      "status": "machine"
+    },
+    "chat.call.join_short": {
+      "text": "انضمام",
+      "status": "machine"
+    },
+    "chat.call.join_video": {
+      "text": "الانضمام بالفيديو",
+      "status": "machine"
+    },
+    "chat.call.last_ended.busy": {
+      "text": "انتهت آخر مكالمة: كان الطرف الآخر مشغولًا.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.declined": {
+      "text": "انتهت آخر مكالمة: رُفضت.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.error": {
+      "text": "انتهت آخر مكالمة بسبب خطأ.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.hung_up": {
+      "text": "انتهت آخر مكالمة.",
+      "status": "machine"
+    },
+    "chat.call.last_ended.timed_out": {
+      "text": "انتهت آخر مكالمة: لا يوجد رد.",
+      "status": "machine"
+    },
+    "chat.call.unavailable": {
+      "text": "المكالمات الجماعية غير متاحة حاليًا.",
+      "status": "machine"
+    },
+    "chat.call.video": {
+      "text": "مكالمة فيديو",
+      "status": "machine"
+    },
+    "chat.call.voice": {
+      "text": "اتصال",
+      "status": "machine"
+    },
+    "chat.composer.attach": {
+      "text": "إرفاق ملفات",
+      "status": "machine"
+    },
+    "chat.composer.attach_limit": {
+      "text": "إرفاق ملفات (حتى {limit} لكل ملف)",
+      "status": "machine"
+    },
+    "chat.composer.attach_media": {
+      "text": "صورة أو فيديو",
+      "status": "machine"
+    },
+    "chat.composer.drop_files": {
+      "text": "أفلت الملفات لإرفاقها",
+      "status": "machine"
+    },
+    "chat.composer.emoji_gifs": {
+      "text": "الرموز التعبيرية وصور GIF",
+      "status": "machine"
+    },
+    "chat.composer.photo_library": {
+      "text": "مكتبة الصور",
+      "status": "machine"
+    },
+    "chat.composer.placeholder": {
+      "text": "رسالة",
+      "status": "machine"
+    },
+    "chat.composer.remove_attachment": {
+      "text": "إزالة المرفق",
+      "status": "machine"
+    },
+    "chat.composer.send": {
+      "text": "إرسال",
+      "status": "machine"
+    },
+    "chat.day.today": {
+      "text": "اليوم",
+      "status": "machine"
+    },
+    "chat.day.yesterday": {
+      "text": "أمس",
+      "status": "machine"
+    },
+    "chat.delete.body": {
+      "text": "يؤدي هذا إلى إزالة المحادثة ورسائلها من هذا الجهاز. لا توجد نسخة في أي مكان آخر، ولا يمكن التراجع عن ذلك.",
+      "status": "machine"
+    },
+    "chat.delete.confirm_named": {
+      "text": "حذف {name}",
+      "status": "machine"
+    },
+    "chat.delete.control": {
+      "text": "حذف هذه الدردشة",
+      "status": "machine"
+    },
+    "chat.delete.title": {
+      "text": "هل تريد حذف هذه الدردشة؟",
+      "status": "machine"
+    },
+    "chat.edit.title": {
+      "text": "تعديل الرسالة",
+      "status": "machine"
+    },
+    "chat.emoji.categories": {
+      "text": "فئات الرموز التعبيرية",
+      "status": "machine"
+    },
+    "chat.emoji.choose": {
+      "text": "اختيار",
+      "status": "machine"
+    },
+    "chat.emoji.choose_reaction": {
+      "text": "اختر تفاعلًا",
+      "status": "machine"
+    },
+    "chat.emoji.group.activities": {
+      "text": "الأنشطة",
+      "status": "machine"
+    },
+    "chat.emoji.group.animals": {
+      "text": "الحيوانات والطبيعة",
+      "status": "machine"
+    },
+    "chat.emoji.group.flags": {
+      "text": "الأعلام",
+      "status": "machine"
+    },
+    "chat.emoji.group.food": {
+      "text": "الطعام والشراب",
+      "status": "machine"
+    },
+    "chat.emoji.group.objects": {
+      "text": "الأشياء",
+      "status": "machine"
+    },
+    "chat.emoji.group.people": {
+      "text": "الأشخاص والجسم",
+      "status": "machine"
+    },
+    "chat.emoji.group.smileys": {
+      "text": "الوجوه والمشاعر",
+      "status": "machine"
+    },
+    "chat.emoji.group.symbols": {
+      "text": "الرموز",
+      "status": "machine"
+    },
+    "chat.emoji.group.travel": {
+      "text": "السفر والأماكن",
+      "status": "machine"
+    },
+    "chat.emoji.insert": {
+      "text": "إدراج",
+      "status": "machine"
+    },
+    "chat.emoji.no_results": {
+      "text": "لم يُعثر على رموز تعبيرية",
+      "status": "machine"
+    },
+    "chat.emoji.recent": {
+      "text": "المستخدمة مؤخرًا",
+      "status": "machine"
+    },
+    "chat.emoji.search": {
+      "text": "البحث عن رمز تعبيري",
+      "status": "machine"
+    },
+    "chat.emoji.skin_tones": {
+      "text": "درجات لون البشرة لـ {name}",
+      "status": "machine"
+    },
+    "chat.emoji.tab": {
+      "text": "الرموز التعبيرية",
+      "status": "machine"
+    },
+    "chat.ended.composer": {
+      "text": "لم يعد بإمكانك إرسال رسائل إلى هذه المجموعة.",
+      "status": "machine"
+    },
+    "chat.ended.consequence": {
+      "text": "الرسائل التي تلقيتها بالفعل لا تزال هنا. لن تصل رسائل جديدة.",
+      "status": "machine"
+    },
+    "chat.ended.left": {
+      "text": "لقد غادرت هذه المجموعة.",
+      "status": "machine"
+    },
+    "chat.ended.no_longer_member": {
+      "text": "لم تعد عضوًا في هذه المجموعة.",
+      "status": "machine"
+    },
+    "chat.ended.unsent_draft": {
+      "text": "مسودة غير مرسلة",
+      "status": "machine"
+    },
+    "chat.error.add_member": {
+      "text": "تعذّرت إضافة هذا الشخص. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.approve_join": {
+      "text": "تعذّرت الموافقة على طلب الانضمام. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.change_admin": {
+      "text": "تعذّر تغيير دور المشرف. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.conversation_gone": {
+      "text": "لم تعد تلك المحادثة موجودة هنا.",
+      "status": "machine"
+    },
+    "chat.error.create_link": {
+      "text": "تعذّر إنشاء رابط دعوة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.delete_chat": {
+      "text": "تعذّر حذف هذه الدردشة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.delete_message": {
+      "text": "تعذّر حذف الرسالة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.edit": {
+      "text": "تعذّر تعديل الرسالة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.leave": {
+      "text": "تعذّرت مغادرة المجموعة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.membership_request": {
+      "text": "تعذّرت إعادة إرسال تغيير في العضوية طلبته.",
+      "status": "machine"
+    },
+    "chat.error.message_gone": {
+      "text": "لم تعد تلك الرسالة موجودة هنا.",
+      "status": "machine"
+    },
+    "chat.error.pin": {
+      "text": "تعذّر تغيير التثبيت. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.react": {
+      "text": "تعذّر إرسال التفاعل. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.refresh": {
+      "text": "تعذّر تحميل الرسائل الجديدة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.reject_join": {
+      "text": "تعذّر رفض طلب الانضمام. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.remove_member": {
+      "text": "تعذّرت إزالة هذا العضو. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.revoke_link": {
+      "text": "تعذّر إبطال رابط الدعوة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.error.transfer": {
+      "text": "تعذّر نقل الملكية. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.forward.empty": {
+      "text": "لا توجد محادثات لإعادة التوجيه إليها",
+      "status": "machine"
+    },
+    "chat.forward.error.generic": {
+      "text": "تعذّرت إعادة توجيه الرسالة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.forward.from": {
+      "text": "أُعيد توجيهها من {name}",
+      "status": "machine"
+    },
+    "chat.forward.label": {
+      "text": "رسالة معاد توجيهها",
+      "status": "machine"
+    },
+    "chat.forward.list_label": {
+      "text": "المحادثات",
+      "status": "machine"
+    },
+    "chat.forward.picker_title": {
+      "text": "إعادة التوجيه إلى",
+      "status": "machine"
+    },
+    "chat.forward.search_label": {
+      "text": "البحث في المحادثات",
+      "status": "machine"
+    },
+    "chat.gif.attribution": {
+      "text": "مدعوم من GIPHY",
+      "status": "machine"
+    },
+    "chat.gif.load_failed": {
+      "text": "تعذّر تحميل صورة GIF هذه · إعادة المحاولة",
+      "status": "machine"
+    },
+    "chat.gif.loading": {
+      "text": "جارٍ تحميل صور GIF",
+      "status": "machine"
+    },
+    "chat.gif.no_results": {
+      "text": "لم يُعثر على صور GIF",
+      "status": "machine"
+    },
+    "chat.gif.note_dismiss": {
+      "text": "حسنًا",
+      "status": "machine"
+    },
+    "chat.gif.open_full": {
+      "text": "فتح صورة GIF بملء الشاشة",
+      "status": "machine"
+    },
+    "chat.gif.privacy_note": {
+      "text": "يمر البحث عن صور GIF عبر خادم Lakko، الذي يرى ما تبحث عنه. تُشفَّر صور GIF المرسلة مثل أي ملف.",
+      "status": "machine"
+    },
+    "chat.gif.rate_limited": {
+      "text": "عمليات بحث كثيرة جدًا. حاول مجددًا بعد قليل",
+      "status": "machine"
+    },
+    "chat.gif.search": {
+      "text": "البحث عن GIF",
+      "status": "machine"
+    },
+    "chat.gif.send": {
+      "text": "إرسال صورة GIF",
+      "status": "machine"
+    },
+    "chat.gif.trending": {
+      "text": "الأكثر رواجًا",
+      "status": "machine"
+    },
+    "chat.gif.unavailable": {
+      "text": "صور GIF غير متاحة حاليًا",
+      "status": "machine"
+    },
+    "chat.group.default_name": {
+      "text": "مجموعة جديدة",
+      "status": "machine"
+    },
+    "chat.group.fallback_name": {
+      "text": "مجموعة",
+      "status": "machine"
+    },
+    "chat.group.title_more": {
+      "text": "{names} +{count}",
+      "status": "machine"
+    },
+    "chat.group_name.empty": {
+      "text": "بلا اسم بعد",
+      "status": "machine"
+    },
+    "chat.group_name.error.character": {
+      "text": "يحتوي الاسم على حرف لا يمكن عرضه.",
+      "status": "machine"
+    },
+    "chat.group_name.error.generic": {
+      "text": "لا يمكن استخدام هذا الاسم.",
+      "status": "machine"
+    },
+    "chat.group_name.error.line_break": {
+      "text": "يجب أن يكون الاسم في سطر واحد.",
+      "status": "machine"
+    },
+    "chat.group_name.error.save": {
+      "text": "تعذّرت إعادة تسمية المجموعة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.group_name.error.too_long": {
+      "text": "الاسم طويل جدًا.",
+      "status": "machine"
+    },
+    "chat.group_name.label": {
+      "text": "اسم المجموعة",
+      "status": "machine"
+    },
+    "chat.group_name.only_admins": {
+      "text": "يمكن للمشرفين فقط إعادة تسمية هذه المجموعة",
+      "status": "machine"
+    },
+    "chat.header.back": {
+      "text": "العودة إلى الدردشات",
+      "status": "machine"
+    },
+    "chat.info.channel": {
+      "text": "معلومات القناة",
+      "status": "machine"
+    },
+    "chat.info.contact": {
+      "text": "معلومات جهة الاتصال",
+      "status": "machine"
+    },
+    "chat.info.group": {
+      "text": "معلومات المجموعة",
+      "status": "machine"
+    },
+    "chat.invite_link.cleared": {
+      "text": "تم مسح الرابط (لا يوجد ما يُبطل في الرابط المضمَّن).",
+      "status": "machine"
+    },
+    "chat.invite_link.copy": {
+      "text": "نسخ الرابط",
+      "status": "machine"
+    },
+    "chat.invite_link.create": {
+      "text": "إنشاء رابط دعوة",
+      "status": "machine"
+    },
+    "chat.invite_link.label": {
+      "text": "رابط الدعوة",
+      "status": "machine"
+    },
+    "chat.invite_link.revoke": {
+      "text": "إبطال",
+      "status": "machine"
+    },
+    "chat.invite_link.revoked": {
+      "text": "تم إبطال رابط الدعوة.",
+      "status": "machine"
+    },
+    "chat.invite_link.share": {
+      "text": "مشاركة",
+      "status": "machine"
+    },
+    "chat.leave.action": {
+      "text": "مغادرة المجموعة",
+      "status": "machine"
+    },
+    "chat.leave.body": {
+      "text": "ستستمر في تلقي الرسائل إلى أن يطبّق المالك أو أحد المشرفين طلبك. ستحتاج إلى دعوة جديدة للانضمام مجددًا.",
+      "status": "machine"
+    },
+    "chat.leave.confirm": {
+      "text": "مغادرة",
+      "status": "machine"
+    },
+    "chat.leave.confirm_named": {
+      "text": "مغادرة {name}",
+      "status": "machine"
+    },
+    "chat.leave.requested": {
+      "text": "تم طلب المغادرة. يسري ذلك عندما يطبّق المالك أو أحد المشرفين التغيير.",
+      "status": "machine"
+    },
+    "chat.leave.title": {
+      "text": "هل تريد مغادرة هذه المجموعة؟",
+      "status": "machine"
+    },
+    "chat.media.and_more": {
+      "text": "{label} و{count, plural, zero {# مرفق آخر} one {مرفق آخر} two {مرفقان آخران} few {# مرفقات أخرى} many {# مرفقًا آخر} other {# مرفق آخر}}",
+      "status": "machine"
+    },
+    "chat.media.audio": {
+      "text": "صوت",
+      "status": "machine"
+    },
+    "chat.media.file": {
+      "text": "ملف",
+      "status": "machine"
+    },
+    "chat.media.gif": {
+      "text": "صورة GIF",
+      "status": "machine"
+    },
+    "chat.media.not_sent_retry": {
+      "text": "لم تُرسل · إعادة المحاولة",
+      "status": "machine"
+    },
+    "chat.media.open_full_hint": {
+      "text": "يفتحها بملء الشاشة",
+      "status": "machine"
+    },
+    "chat.media.photo": {
+      "text": "صورة",
+      "status": "machine"
+    },
+    "chat.media.play_failed": {
+      "text": "تعذّر تشغيل هذه الرسالة",
+      "status": "machine"
+    },
+    "chat.media.row_not_sent": {
+      "text": "{label}، لم تُرسل",
+      "status": "machine"
+    },
+    "chat.media.row_sending": {
+      "text": "{label}، جارٍ الإرسال",
+      "status": "machine"
+    },
+    "chat.media.video": {
+      "text": "فيديو",
+      "status": "machine"
+    },
+    "chat.media.video_message": {
+      "text": "ملاحظة فيديو",
+      "status": "machine"
+    },
+    "chat.media.voice_message": {
+      "text": "رسالة صوتية",
+      "status": "machine"
+    },
+    "chat.media.with_duration": {
+      "text": "{label}، {duration}",
+      "status": "machine"
+    },
+    "chat.members.add.action": {
+      "text": "إضافة عضو",
+      "status": "machine"
+    },
+    "chat.members.add.done": {
+      "text": "تمت إضافة {name}.",
+      "status": "machine"
+    },
+    "chat.members.add.error.no_bundle": {
+      "text": "لم ينتهِ هذا الشخص من إعداد Lakko بعد. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "chat.members.add.error.some_failed": {
+      "text": "تعذّرت إضافة {names}. أضفهم من لوحة الأعضاء.",
+      "status": "machine"
+    },
+    "chat.members.add.error.unknown_username": {
+      "text": "لا يوجد حساب مسجّل باسم {name}.",
+      "status": "machine"
+    },
+    "chat.members.add.placeholder": {
+      "text": "@username",
+      "status": "machine"
+    },
+    "chat.members.add.requested": {
+      "text": "تم طلب إضافة {name}. سينضم عندما يطبّق المالك أو أحد المشرفين التغيير.",
+      "status": "machine"
+    },
+    "chat.members.add.submit": {
+      "text": "إضافة",
+      "status": "machine"
+    },
+    "chat.members.admin.demoted": {
+      "text": "تمت إزالته من الإشراف.",
+      "status": "machine"
+    },
+    "chat.members.admin.make": {
+      "text": "تعيين كمشرف",
+      "status": "machine"
+    },
+    "chat.members.admin.marker": {
+      "text": "مشرف",
+      "status": "machine"
+    },
+    "chat.members.admin.promoted": {
+      "text": "تمت ترقيته إلى مشرف.",
+      "status": "machine"
+    },
+    "chat.members.admin.remove": {
+      "text": "إزالة الإشراف",
+      "status": "machine"
+    },
+    "chat.members.admin.requested": {
+      "text": "تم طلب التغيير. يسري عندما يطبّق المالك أو أحد المشرفين التغيير.",
+      "status": "machine"
+    },
+    "chat.members.count": {
+      "text": "{count, plural, zero {# عضو} one {عضو واحد} two {عضوان} few {# أعضاء} many {# عضوًا} other {# عضو}}",
+      "status": "machine"
+    },
+    "chat.members.devices": {
+      "text": "{count, plural, zero {# جهاز} one {جهاز واحد} two {جهازان} few {# أجهزة} many {# جهازًا} other {# جهاز}}",
+      "status": "machine"
+    },
+    "chat.members.frozen": {
+      "text": "توقفت هذه القائمة عن التحديث عندما انتهت عضويتك.",
+      "status": "machine"
+    },
+    "chat.members.heading": {
+      "text": "الأعضاء ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.approve": {
+      "text": "موافقة",
+      "status": "machine"
+    },
+    "chat.members.join.approved_added": {
+      "text": "تمت الموافقة على الانضمام. أُضيف إلى المجموعة.",
+      "status": "machine"
+    },
+    "chat.members.join.approved_requested": {
+      "text": "تمت الموافقة على الانضمام. سينضم عندما يطبّق المالك أو أحد المشرفين التغيير.",
+      "status": "machine"
+    },
+    "chat.members.join.heading": {
+      "text": "طلبات الانضمام ({count})",
+      "status": "machine"
+    },
+    "chat.members.join.link_unknown": {
+      "text": "رابط الدعوة غير معروف",
+      "status": "machine"
+    },
+    "chat.members.join.reject": {
+      "text": "رفض",
+      "status": "machine"
+    },
+    "chat.members.join.rejected": {
+      "text": "تم رفض طلب الانضمام.",
+      "status": "machine"
+    },
+    "chat.members.join.via_former": {
+      "text": "عبر {name} · ليس عضوًا حاليًا",
+      "status": "machine"
+    },
+    "chat.members.join.via_member": {
+      "text": "عبر {name} · عضو",
+      "status": "machine"
+    },
+    "chat.members.pending.adds_heading": {
+      "text": "بانتظار الإضافة ({count})",
+      "status": "machine"
+    },
+    "chat.members.pending.count": {
+      "text": "{count, plural, zero {لا توجد تغييرات في العضوية بانتظار التطبيق.} one {تغيير واحد في العضوية بانتظار التطبيق.} two {تغييران في العضوية بانتظار التطبيق.} few {# تغييرات في العضوية بانتظار التطبيق.} many {# تغييرًا في العضوية بانتظار التطبيق.} other {# تغيير في العضوية بانتظار التطبيق.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.liveness": {
+      "text": "يطبّق مالك المجموعة أو أحد المشرفين تغييرات العضوية. ستُطبَّق تلقائيًا عندما يفعل أحدهم ذلك.",
+      "status": "machine"
+    },
+    "chat.members.pending.queue": {
+      "text": "{count, plural, zero {لا توجد تغييرات بانتظار التطبيق الآن.} one {تغيير واحد بانتظار التطبيق الآن.} two {تغييران بانتظار التطبيق الآن.} few {# تغييرات بانتظار التطبيق الآن.} many {# تغييرًا بانتظار التطبيق الآن.} other {# تغيير بانتظار التطبيق الآن.}}",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_added": {
+      "text": "بانتظار الإضافة.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_leave": {
+      "text": "بانتظار المغادرة.",
+      "status": "machine"
+    },
+    "chat.members.pending.waiting_removed": {
+      "text": "بانتظار الإزالة.",
+      "status": "machine"
+    },
+    "chat.members.remove.body": {
+      "text": "سيستمر في تلقي الرسائل إلى أن يطبّق المالك أو أحد المشرفين التغيير.",
+      "status": "machine"
+    },
+    "chat.members.remove.confirm_named": {
+      "text": "إزالة {name}",
+      "status": "machine"
+    },
+    "chat.members.remove.done": {
+      "text": "تمت إزالة العضو.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested": {
+      "text": "تم طلب الإزالة. تسري عندما يطبّق المالك أو أحد المشرفين التغيير.",
+      "status": "machine"
+    },
+    "chat.members.remove.requested_short": {
+      "text": "تم طلب الإزالة.",
+      "status": "machine"
+    },
+    "chat.members.remove.title": {
+      "text": "هل تريد إزالة هذا العضو؟",
+      "status": "machine"
+    },
+    "chat.members.row_label": {
+      "text": "{name}، {state}",
+      "status": "machine"
+    },
+    "chat.members.title": {
+      "text": "الأعضاء",
+      "status": "machine"
+    },
+    "chat.members.unapplied.add_line": {
+      "text": "لم تتم الإضافة. يمكنك إضافته مجددًا.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.explanation": {
+      "text": "لم تُطبَّق هذه التغييرات ولن تُعاد محاولتها تلقائيًا.",
+      "status": "machine"
+    },
+    "chat.members.unapplied.heading": {
+      "text": "لم تُطبَّق ({count})",
+      "status": "machine"
+    },
+    "chat.members.unapplied.join_line": {
+      "text": "لم يُطبَّق. اطلب منه إرسال طلب الانضمام مجددًا.",
+      "status": "machine"
+    },
+    "chat.members.unnamed": {
+      "text": "عضو",
+      "status": "machine"
+    },
+    "chat.message.actions": {
+      "text": "إجراءات الرسالة",
+      "status": "machine"
+    },
+    "chat.message.close_actions": {
+      "text": "إغلاق إجراءات الرسالة",
+      "status": "machine"
+    },
+    "chat.message.deleted": {
+      "text": "رسالة محذوفة",
+      "status": "machine"
+    },
+    "chat.message.edit": {
+      "text": "تعديل",
+      "status": "machine"
+    },
+    "chat.message.edited": {
+      "text": "(معدّلة)",
+      "status": "machine"
+    },
+    "chat.message.forward": {
+      "text": "إعادة توجيه",
+      "status": "machine"
+    },
+    "chat.message.media_fallback": {
+      "text": "رسالة وسائط",
+      "status": "machine"
+    },
+    "chat.message.more_reactions": {
+      "text": "المزيد من التفاعلات",
+      "status": "machine"
+    },
+    "chat.message.not_sent": {
+      "text": "لم تُرسل",
+      "status": "machine"
+    },
+    "chat.message.pin": {
+      "text": "تثبيت",
+      "status": "machine"
+    },
+    "chat.message.react": {
+      "text": "تفاعل",
+      "status": "machine"
+    },
+    "chat.message.react_with": {
+      "text": "التفاعل بـ {emoji}",
+      "status": "machine"
+    },
+    "chat.message.read": {
+      "text": "مقروءة",
+      "status": "machine"
+    },
+    "chat.message.read_by": {
+      "text": "قرأها {names}",
+      "status": "machine"
+    },
+    "chat.message.reply": {
+      "text": "رد",
+      "status": "machine"
+    },
+    "chat.message.select": {
+      "text": "تحديد",
+      "status": "machine"
+    },
+    "chat.message.sending": {
+      "text": "جارٍ الإرسال...",
+      "status": "machine"
+    },
+    "chat.message.sent": {
+      "text": "مرسلة",
+      "status": "machine"
+    },
+    "chat.message.unpin": {
+      "text": "إلغاء التثبيت",
+      "status": "machine"
+    },
+    "chat.not_found.back": {
+      "text": "العودة إلى الدردشات",
+      "status": "machine"
+    },
+    "chat.not_found.body": {
+      "text": "لا يطابق هذا الرابط أي محادثة على هذا الجهاز.",
+      "status": "machine"
+    },
+    "chat.not_found.title": {
+      "text": "لم يُعثر على المحادثة",
+      "status": "machine"
+    },
+    "chat.peer.fallback_name": {
+      "text": "الطرف الآخر",
+      "status": "machine"
+    },
+    "chat.photo.load_failed": {
+      "text": "تعذّر تحميل الصورة",
+      "status": "machine"
+    },
+    "chat.photo.load_failed_retry": {
+      "text": "تعذّر تحميل الصورة، اضغط لإعادة المحاولة",
+      "status": "machine"
+    },
+    "chat.photo.loading": {
+      "text": "صورة، جارٍ التحميل",
+      "status": "machine"
+    },
+    "chat.photo.open": {
+      "text": "فتح الصورة",
+      "status": "machine"
+    },
+    "chat.photo.viewer": {
+      "text": "عارض الصور",
+      "status": "machine"
+    },
+    "chat.photo.viewer_hint": {
+      "text": "قرّب بإصبعين للتكبير. اسحب لأسفل للإغلاق.",
+      "status": "machine"
+    },
+    "chat.pin.detail_personal": {
+      "text": "على هذا الجهاز فقط",
+      "status": "machine"
+    },
+    "chat.pin.detail_shared": {
+      "text": "يراها جميع الأعضاء",
+      "status": "machine"
+    },
+    "chat.pin.for_both": {
+      "text": "تثبيت للطرفين",
+      "status": "machine"
+    },
+    "chat.pin.for_everyone": {
+      "text": "تثبيت للجميع",
+      "status": "machine"
+    },
+    "chat.pin.for_me": {
+      "text": "تثبيت لي",
+      "status": "machine"
+    },
+    "chat.pin.sheet_title": {
+      "text": "تثبيت الرسالة",
+      "status": "machine"
+    },
+    "chat.pinned_bar.all": {
+      "text": "كل الرسائل المثبّتة",
+      "status": "machine"
+    },
+    "chat.pinned_bar.for_you": {
+      "text": "لك",
+      "status": "machine"
+    },
+    "chat.pinned_bar.hint": {
+      "text": "يعرض الرسالة",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label": {
+      "text": "رسالة مثبّتة",
+      "status": "machine"
+    },
+    "chat.pinned_bar.label_of": {
+      "text": "الرسالة المثبّتة {index} من {count}",
+      "status": "machine"
+    },
+    "chat.pinned_bar.list_title": {
+      "text": "الرسائل المثبّتة",
+      "status": "machine"
+    },
+    "chat.reaction.add_title": {
+      "text": "تفاعل - تفاعل {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by": {
+      "text": "تفاعل {names}",
+      "status": "machine"
+    },
+    "chat.reaction.reacted_by_title": {
+      "text": "تفاعل بواسطة",
+      "status": "machine"
+    },
+    "chat.reaction.remove_title": {
+      "text": "إزالة تفاعلك - تفاعل {names}",
+      "status": "machine"
+    },
+    "chat.reaction.single_emoji": {
+      "text": "يجب أن يكون التفاعل رمزًا تعبيريًا واحدًا.",
+      "status": "machine"
+    },
+    "chat.reauth.action": {
+      "text": "تسجيل الدخول مجددًا",
+      "status": "machine"
+    },
+    "chat.reauth.body": {
+      "text": "المفاتيح اللازمة لفك تشفير الرسائل وتوقيعها غير متاحة في هذه الجلسة. سجّل الدخول مجددًا لفتح هذه الدردشة.",
+      "status": "machine"
+    },
+    "chat.reauth.title": {
+      "text": "سجّل الدخول مجددًا",
+      "status": "machine"
+    },
+    "chat.record.bar_video": {
+      "text": "جارٍ تسجيل ملاحظة فيديو",
+      "status": "machine"
+    },
+    "chat.record.bar_voice": {
+      "text": "جارٍ تسجيل رسالة صوتية",
+      "status": "machine"
+    },
+    "chat.record.cancelled": {
+      "text": "أُلغي",
+      "status": "machine"
+    },
+    "chat.record.delete": {
+      "text": "حذف التسجيل",
+      "status": "machine"
+    },
+    "chat.record.denied_camera": {
+      "text": "يحتاج Lakko إلى الوصول إلى الكاميرا لتسجيل ملاحظات الفيديو. اسمح بالوصول إلى الكاميرا في إعدادات الموقع في متصفحك.",
+      "status": "machine"
+    },
+    "chat.record.denied_camera_app": {
+      "text": "يحتاج Lakko إلى الوصول إلى الكاميرا لتسجيل ملاحظات الفيديو",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone": {
+      "text": "يحتاج Lakko إلى الوصول إلى الميكروفون لتسجيل الرسائل الصوتية. اسمح بالوصول إلى الميكروفون في إعدادات الموقع في متصفحك.",
+      "status": "machine"
+    },
+    "chat.record.denied_microphone_app": {
+      "text": "يحتاج Lakko إلى الوصول إلى الميكروفون لتسجيل الرسائل الصوتية",
+      "status": "machine"
+    },
+    "chat.record.finishing": {
+      "text": "جارٍ إنهاء التسجيل",
+      "status": "machine"
+    },
+    "chat.record.flip_camera": {
+      "text": "تبديل الكاميرا",
+      "status": "machine"
+    },
+    "chat.record.flip_failed": {
+      "text": "تعذّر تبديل الكاميرا",
+      "status": "machine"
+    },
+    "chat.record.hint_hold": {
+      "text": "اضغط مطولًا للتسجيل",
+      "status": "machine"
+    },
+    "chat.record.in_call": {
+      "text": "غير متاح أثناء المكالمة",
+      "status": "machine"
+    },
+    "chat.record.locked_hint": {
+      "text": "يبدأ تسجيلًا مقفلًا",
+      "status": "machine"
+    },
+    "chat.record.no_camera": {
+      "text": "لم يُعثر على كاميرا",
+      "status": "machine"
+    },
+    "chat.record.open_settings": {
+      "text": "فتح الإعدادات",
+      "status": "machine"
+    },
+    "chat.record.pause": {
+      "text": "إيقاف التسجيل مؤقتًا",
+      "status": "machine"
+    },
+    "chat.record.pause_video": {
+      "text": "إيقاف ملاحظة الفيديو مؤقتًا",
+      "status": "machine"
+    },
+    "chat.record.play": {
+      "text": "تشغيل التسجيل، {duration}",
+      "status": "machine"
+    },
+    "chat.record.play_video_sound": {
+      "text": "تشغيل ملاحظة الفيديو مع الصوت",
+      "status": "machine"
+    },
+    "chat.record.position": {
+      "text": "موضع التسجيل",
+      "status": "machine"
+    },
+    "chat.record.recording_duration": {
+      "text": "جارٍ التسجيل، {duration}",
+      "status": "machine"
+    },
+    "chat.record.send": {
+      "text": "إرسال التسجيل",
+      "status": "machine"
+    },
+    "chat.record.silent_mic": {
+      "text": "لا يوجد صوت من الميكروفون",
+      "status": "machine"
+    },
+    "chat.record.slide_cancel": {
+      "text": "› اسحب للإلغاء",
+      "status": "machine"
+    },
+    "chat.record.start_failed": {
+      "text": "تعذّر بدء التسجيل",
+      "status": "machine"
+    },
+    "chat.record.starting": {
+      "text": "جارٍ البدء…",
+      "status": "machine"
+    },
+    "chat.record.stop": {
+      "text": "إيقاف التسجيل",
+      "status": "machine"
+    },
+    "chat.record.stop_short": {
+      "text": "إيقاف",
+      "status": "machine"
+    },
+    "chat.record.switch_to_video": {
+      "text": "التبديل إلى ملاحظة فيديو",
+      "status": "machine"
+    },
+    "chat.record.switch_to_voice": {
+      "text": "التبديل إلى رسالة صوتية",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video": {
+      "text": "لا يمكن تسجيل ملاحظات الفيديو في هذا المتصفح",
+      "status": "machine"
+    },
+    "chat.record.unsupported_video_device": {
+      "text": "لا يمكن تسجيل ملاحظات الفيديو على هذا الجهاز",
+      "status": "machine"
+    },
+    "chat.record.unsupported_voice": {
+      "text": "لا يمكن تسجيل الرسائل الصوتية في هذا المتصفح",
+      "status": "machine"
+    },
+    "chat.record.video": {
+      "text": "تسجيل ملاحظة فيديو",
+      "status": "machine"
+    },
+    "chat.record.video_ready": {
+      "text": "ملاحظة الفيديو جاهزة",
+      "status": "machine"
+    },
+    "chat.record.video_tooltip": {
+      "text": "تسجيل ملاحظة فيديو: اضغط مطولًا للتسجيل، واضغط للتبديل إلى الصوت",
+      "status": "machine"
+    },
+    "chat.record.voice": {
+      "text": "تسجيل رسالة صوتية",
+      "status": "machine"
+    },
+    "chat.record.voice_tooltip": {
+      "text": "تسجيل رسالة صوتية: اضغط مطولًا للتسجيل، واضغط للتبديل إلى الفيديو",
+      "status": "machine"
+    },
+    "chat.refusal.add_not_admin": {
+      "text": "يمكن لمالك المجموعة أو أحد المشرفين فقط إضافة أعضاء.",
+      "status": "machine"
+    },
+    "chat.refusal.device_binding": {
+      "text": "هناك مشكلة في مفتاح هذا الجهاز. أزِله من «الأجهزة» ثم أضفه مجددًا.",
+      "status": "machine"
+    },
+    "chat.refusal.device_limit": {
+      "text": "{count, plural, zero {الحد الأقصى # جهاز لكل حساب. أزِل جهازًا أولًا.} one {الحد الأقصى جهاز واحد لكل حساب. أزِل جهازًا أولًا.} two {الحد الأقصى جهازان لكل حساب. أزِل جهازًا أولًا.} few {الحد الأقصى # أجهزة لكل حساب. أزِل جهازًا أولًا.} many {الحد الأقصى # جهازًا لكل حساب. أزِل جهازًا أولًا.} other {الحد الأقصى # جهاز لكل حساب. أزِل جهازًا أولًا.}}",
+      "status": "machine"
+    },
+    "chat.refusal.fallback": {
+      "text": "تعذّر طلب هذا التغيير.",
+      "status": "machine"
+    },
+    "chat.refusal.join_not_kept": {
+      "text": "وصل طلب انضمام بينما كان هناك عدد كبير جدًا من الطلبات المنتظرة، فلم يُحتفظ به. اطلب من الشخص إرساله مجددًا لاحقًا.",
+      "status": "machine"
+    },
+    "chat.refusal.joiner_member": {
+      "text": "انضم هذا الشخص إلى المجموعة بالفعل.",
+      "status": "machine"
+    },
+    "chat.refusal.no_join_request": {
+      "text": "لم يعد طلب الانضمام هذا قيد الانتظار.",
+      "status": "machine"
+    },
+    "chat.refusal.not_owner": {
+      "text": "يمكن لمالك المجموعة فقط تغيير المشرفين أو نقل الملكية.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_cannot_leave": {
+      "text": "لا يمكن لمالك المجموعة مغادرتها.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_not_member": {
+      "text": "لا يمكن أن يكون مالك المجموعة إلا عضوًا حاليًا فيها.",
+      "status": "machine"
+    },
+    "chat.refusal.owner_unremovable": {
+      "text": "لا يمكن إزالة مالك المجموعة.",
+      "status": "machine"
+    },
+    "chat.refusal.pending_full": {
+      "text": "هناك عدد كبير جدًا من التغييرات بانتظار التطبيق بالفعل.",
+      "status": "machine"
+    },
+    "chat.refusal.remove_not_admin": {
+      "text": "يمكن لمالك المجموعة أو أحد المشرفين فقط إزالة أعضاء.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_many": {
+      "text": "انتظر حتى تُطبَّق، ثم حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.refusal.retry_one": {
+      "text": "انتظر حتى يُطبَّق، ثم حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.refusal.role_change_pending": {
+      "text": "هناك تغيير في الأدوار بانتظار التطبيق بالفعل.",
+      "status": "machine"
+    },
+    "chat.refusal.with_retry": {
+      "text": "{fact} {retry}",
+      "status": "machine"
+    },
+    "chat.reply.cancel": {
+      "text": "إلغاء الرد",
+      "status": "machine"
+    },
+    "chat.reply.fallback_excerpt": {
+      "text": "رسالة",
+      "status": "machine"
+    },
+    "chat.reply.quote": {
+      "text": "رد",
+      "status": "machine"
+    },
+    "chat.reply.quote_to": {
+      "text": "رد على {name}",
+      "status": "machine"
+    },
+    "chat.reply.strip_label": {
+      "text": "الرد على {name}",
+      "status": "machine"
+    },
+    "chat.select.count": {
+      "text": "{count, plural, zero {لم تُحدَّد أي رسالة} one {رسالة واحدة محدّدة} two {رسالتان محدّدتان} few {# رسائل محدّدة} many {# رسالة محدّدة} other {# رسالة محدّدة}}",
+      "status": "machine"
+    },
+    "chat.select.count_limit": {
+      "text": "{count, plural, zero {لم تُحدَّد أي رسالة، وهذا هو الحد} one {رسالة واحدة محدّدة، وهذا هو الحد} two {رسالتان محدّدتان، وهذا هو الحد} few {# رسائل محدّدة، وهذا هو الحد} many {# رسالة محدّدة، وهذا هو الحد} other {# رسالة محدّدة، وهذا هو الحد}}",
+      "status": "machine"
+    },
+    "chat.select.delete_helper": {
+      "text": "يمكن حذف رسائلك فقط.",
+      "status": "machine"
+    },
+    "chat.select.delete_title": {
+      "text": "{count, plural, zero {هل تريد حذف # رسالة؟} one {هل تريد حذف رسالة واحدة؟} two {هل تريد حذف رسالتين؟} few {هل تريد حذف # رسائل؟} many {هل تريد حذف # رسالة؟} other {هل تريد حذف # رسالة؟}}",
+      "status": "machine"
+    },
+    "chat.select.deleted_of": {
+      "text": "تم حذف {done} من {total}.",
+      "status": "machine"
+    },
+    "chat.select.forwarded_of": {
+      "text": "تمت إعادة توجيه {done} من {total}.",
+      "status": "machine"
+    },
+    "chat.select.state_not_selected": {
+      "text": "غير محدّدة",
+      "status": "machine"
+    },
+    "chat.select.state_selected": {
+      "text": "محدّدة",
+      "status": "machine"
+    },
+    "chat.select.toolbar": {
+      "text": "الرسائل المحدّدة",
+      "status": "machine"
+    },
+    "chat.send.failed": {
+      "text": "تعذّر الإرسال.",
+      "status": "machine"
+    },
+    "chat.system.join_request": {
+      "text": "طلب انضمام",
+      "status": "machine"
+    },
+    "chat.system.members_changed": {
+      "text": "تغيّر الأعضاء",
+      "status": "machine"
+    },
+    "chat.timeline.empty": {
+      "text": "لا توجد رسائل بعد. ألقِ التحية.",
+      "status": "machine"
+    },
+    "chat.timeline.setting_up": {
+      "text": "لا يزال إعداد هذه المحادثة جاريًا على هذا الجهاز.",
+      "status": "machine"
+    },
+    "chat.transfer.action": {
+      "text": "نقل الملكية",
+      "status": "machine"
+    },
+    "chat.transfer.action_named": {
+      "text": "جعل {name} المالك",
+      "status": "machine"
+    },
+    "chat.transfer.become_member": {
+      "text": "أن تصبح عضوًا عاديًا",
+      "status": "machine"
+    },
+    "chat.transfer.become_member_detail": {
+      "text": "تتخلى فورًا عن جميع صلاحياتك في المجموعة. لا يمكن لأحد غير المالك الجديد إعادة أي منها إليك.",
+      "status": "machine"
+    },
+    "chat.transfer.candidate_admin": {
+      "text": "{name}، مشرف",
+      "status": "machine"
+    },
+    "chat.transfer.done_admin": {
+      "text": "أصبح {name} الآن مالك المجموعة. ما زلت مشرفًا.",
+      "status": "machine"
+    },
+    "chat.transfer.done_member": {
+      "text": "أصبح {name} الآن مالك المجموعة. أصبحت الآن عضوًا عاديًا.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_body": {
+      "text": "يمكن للمالك فقط تغيير الأدوار. بعد نقل هذه المجموعة لا يمكنك استعادتها، ولا يمكنك استرجاع دور المالك، ولا يمكنك تغيير دورك مجددًا إلا إذا فعل المالك الجديد ذلك نيابةً عنك.",
+      "status": "machine"
+    },
+    "chat.transfer.irreversible_title": {
+      "text": "لا يمكن التراجع عن هذا.",
+      "status": "machine"
+    },
+    "chat.transfer.leave_blocked": {
+      "text": "انقل الملكية أولًا، فلا يمكن مغادرة مجموعة وتركها بلا مالك.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner": {
+      "text": "أنت الآن مالك هذه المجموعة.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_body": {
+      "text": "يمكنك إضافة الأعضاء وإزالتهم، وتغيير المشرفين، ونقل الملكية إلى شخص آخر.",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_legend": {
+      "text": "المالك الجديد",
+      "status": "machine"
+    },
+    "chat.transfer.new_owner_named": {
+      "text": "جعلك {name} مالك هذه المجموعة.",
+      "status": "machine"
+    },
+    "chat.transfer.no_candidates": {
+      "text": "لا يوجد أحد آخر في هذه المجموعة لنقلها إليه.",
+      "status": "machine"
+    },
+    "chat.transfer.pending": {
+      "text": "نقل الملكية بانتظار التطبيق.",
+      "status": "machine"
+    },
+    "chat.transfer.pending_named": {
+      "text": "بانتظار جعل {name} المالك.",
+      "status": "machine"
+    },
+    "chat.transfer.requested": {
+      "text": "تم طلب نقل الملكية. يسري عندما يطبّق المالك أو أحد المشرفين التغيير.",
+      "status": "machine"
+    },
+    "chat.transfer.role_change_pending": {
+      "text": "هناك تغيير في الأدوار بانتظار التطبيق بالفعل. انتظر حتى يُطبَّق، ثم حاول مجددًا.",
+      "status": "machine"
+    },
+    "chat.transfer.role_legend": {
+      "text": "دورك بعد ذلك",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin": {
+      "text": "البقاء مشرفًا",
+      "status": "machine"
+    },
+    "chat.transfer.stay_admin_detail": {
+      "text": "لا يزال بإمكانك إضافة الأعضاء وإزالتهم. يمكنك التخلي عن ذلك لاحقًا بطلب ذلك من المالك الجديد.",
+      "status": "machine"
+    },
+    "chat.transfer.unlocks_leave": {
+      "text": "بعد تطبيق التغيير، يمكنك مغادرة المجموعة مثل أي عضو آخر.",
+      "status": "machine"
+    },
+    "chat.typing.named": {
+      "text": "{name} يكتب...",
+      "status": "machine"
+    },
+    "chat.typing.one_to_one": {
+      "text": "يكتب...",
+      "status": "machine"
+    },
+    "chat.typing.several": {
+      "text": "عدة أشخاص يكتبون...",
+      "status": "machine"
+    },
+    "chat.unpin.for_both": {
+      "text": "إلغاء التثبيت للطرفين",
+      "status": "machine"
+    },
+    "chat.unpin.for_everyone": {
+      "text": "إلغاء التثبيت للجميع",
+      "status": "machine"
+    },
+    "chat.unpin.for_me": {
+      "text": "إلغاء التثبيت لي",
+      "status": "machine"
+    },
+    "chat.unpin.sheet_title": {
+      "text": "إلغاء تثبيت الرسالة",
+      "status": "machine"
+    },
+    "chat.upload.encrypting": {
+      "text": "جارٍ تشفير «{name}»…",
+      "status": "machine"
+    },
+    "chat.upload.encrypting_of": {
+      "text": "جارٍ تشفير «{name}» ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.preparing": {
+      "text": "جارٍ تجهيز «{name}»…",
+      "status": "machine"
+    },
+    "chat.upload.selected_item": {
+      "text": "العنصر المحدّد",
+      "status": "machine"
+    },
+    "chat.upload.uploading": {
+      "text": "جارٍ رفع «{name}»…",
+      "status": "machine"
+    },
+    "chat.upload.uploading_of": {
+      "text": "جارٍ رفع «{name}» ({index}/{total})…",
+      "status": "machine"
+    },
+    "chat.upload.working": {
+      "text": "جارٍ التشفير والرفع…",
+      "status": "machine"
+    },
+    "chat.video.load_failed": {
+      "text": "تعذّر تحميل الفيديو",
+      "status": "machine"
+    },
+    "chat.video.load_failed_retry": {
+      "text": "تعذّر تحميل الفيديو، اضغط لإعادة المحاولة",
+      "status": "machine"
+    },
+    "chat.video.loading": {
+      "text": "جارٍ تحميل الفيديو، {size}",
+      "status": "machine"
+    },
+    "chat.video.open": {
+      "text": "تشغيل الفيديو",
+      "status": "machine"
+    },
+    "chat.video.play": {
+      "text": "تشغيل الفيديو، {size}",
+      "status": "machine"
+    },
+    "chat.video.play_failed": {
+      "text": "تعذّر تشغيل هذا الفيديو",
+      "status": "machine"
+    },
+    "chat.video.player": {
+      "text": "مشغّل الفيديو",
+      "status": "machine"
+    },
+    "chat.video_note.loading": {
+      "text": "ملاحظة فيديو، جارٍ التحميل",
+      "status": "machine"
+    },
+    "chat.video_note.play": {
+      "text": "تشغيل ملاحظة الفيديو، {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.play_sound": {
+      "text": "تشغيل ملاحظة الفيديو مع الصوت، {duration}",
+      "status": "machine"
+    },
+    "chat.video_note.poster": {
+      "text": "صورة غلاف ملاحظة الفيديو",
+      "status": "machine"
+    },
+    "chat.video_note.tap_mute": {
+      "text": "اضغط لكتم الصوت",
+      "status": "machine"
+    },
+    "chat.video_note.tap_sound": {
+      "text": "اضغط لتشغيل الصوت",
+      "status": "machine"
+    },
+    "chat.voice.change_speed": {
+      "text": "تغيير سرعة التشغيل",
+      "status": "machine"
+    },
+    "chat.voice.not_played": {
+      "text": "لم تُشغَّل",
+      "status": "machine"
+    },
+    "chat.voice.pause": {
+      "text": "إيقاف الرسالة الصوتية مؤقتًا",
+      "status": "machine"
+    },
+    "chat.voice.play": {
+      "text": "تشغيل الرسالة الصوتية، {duration}",
+      "status": "machine"
+    },
+    "chat.voice.position": {
+      "text": "{position} من {duration}",
+      "status": "machine"
+    },
+    "chat.voice.seek": {
+      "text": "التنقل في الرسالة الصوتية",
+      "status": "machine"
+    },
+    "chat.voice.speed": {
+      "text": "سرعة التشغيل {rate}",
+      "status": "machine"
+    },
+    "chats.action.archive": {
+      "text": "أرشفة",
+      "status": "machine"
+    },
+    "chats.action.mute": {
+      "text": "كتم",
+      "status": "machine"
+    },
+    "chats.action.pin": {
+      "text": "تثبيت",
+      "status": "machine"
+    },
+    "chats.action.unarchive": {
+      "text": "إلغاء الأرشفة",
+      "status": "machine"
+    },
+    "chats.action.unmute": {
+      "text": "إلغاء الكتم",
+      "status": "machine"
+    },
+    "chats.action.unpin": {
+      "text": "إلغاء التثبيت",
+      "status": "machine"
+    },
+    "chats.compose": {
+      "text": "جديد",
+      "status": "machine"
+    },
+    "chats.create.channel": {
+      "text": "إنشاء قناة",
+      "status": "machine"
+    },
+    "chats.create.chat": {
+      "text": "دردشة جديدة",
+      "status": "machine"
+    },
+    "chats.create.group": {
+      "text": "إنشاء مجموعة",
+      "status": "machine"
+    },
+    "chats.create.menu": {
+      "text": "إنشاء",
+      "status": "machine"
+    },
+    "chats.empty.action": {
+      "text": "ابدأ واحدة",
+      "status": "machine"
+    },
     "chats.empty.select": {
       "text": "اختر دردشة لبدء المراسلة",
+      "status": "machine"
+    },
+    "chats.empty.title": {
+      "text": "لا توجد محادثات بعد",
+      "status": "machine"
+    },
+    "chats.lookup.action": {
+      "text": "البحث عن {name}",
+      "status": "machine"
+    },
+    "chats.lookup.nothing": {
+      "text": "لم يُعثر على شيء لـ {name}.",
+      "status": "machine"
+    },
+    "chats.lookup.unreachable": {
+      "text": "تعذّر البحث. تحقّق من اتصالك وحاول مجددًا.",
+      "status": "machine"
+    },
+    "chats.new_chat.add_contact": {
+      "text": "إضافة جهة اتصال",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts": {
+      "text": "لا توجد جهات اتصال بعد",
+      "status": "machine"
+    },
+    "chats.new_chat.no_contacts_body": {
+      "text": "تبدأ الدردشة مع شخص تعرفه.",
+      "status": "machine"
+    },
+    "chats.new_chat.not_available": {
+      "text": "الدردشة غير متاحة على هذا الجهاز بعد",
+      "status": "machine"
+    },
+    "chats.new_group.accept_again": {
+      "text": "اقبل جهة الاتصال هذه مجددًا لإضافتها إلى مجموعة.",
+      "status": "machine"
+    },
+    "chats.new_group.creating": {
+      "text": "جارٍ الإنشاء...",
+      "status": "machine"
+    },
+    "chats.new_group.error": {
+      "text": "تعذّر إنشاء المجموعة. حاول مجددًا.",
+      "status": "machine"
+    },
+    "chats.new_group.name_label": {
+      "text": "اسم المجموعة (اختياري)",
+      "status": "machine"
+    },
+    "chats.new_group.no_contacts": {
+      "text": "تبدأ المجموعة بأشخاص تعرفهم بالفعل.",
+      "status": "machine"
+    },
+    "chats.new_group.open_contacts": {
+      "text": "الانتقال إلى جهات الاتصال",
+      "status": "machine"
+    },
+    "chats.new_group.title": {
+      "text": "مجموعة جديدة",
+      "status": "machine"
+    },
+    "chats.preview.own": {
+      "text": "أنت: {text}",
+      "status": "machine"
+    },
+    "chats.preview.sender": {
+      "text": "{name}: {text}",
+      "status": "machine"
+    },
+    "chats.row.actions": {
+      "text": "إجراءات المحادثة",
+      "status": "machine"
+    },
+    "chats.row.call.label": {
+      "text": "{kind} من {name}",
+      "status": "machine"
+    },
+    "chats.row.ended": {
+      "text": "لم تعد عضوًا.",
+      "status": "machine"
+    },
+    "chats.row.muted": {
+      "text": "مكتومة",
+      "status": "machine"
+    },
+    "chats.row.no_messages": {
+      "text": "لا توجد رسائل بعد",
+      "status": "machine"
+    },
+    "chats.row.people": {
+      "text": "{count, plural, zero {لا أحد} one {شخص واحد} two {شخصان} few {# أشخاص} many {# شخصًا} other {# شخص}}",
+      "status": "machine"
+    },
+    "chats.row.pinned": {
+      "text": "مثبّتة",
+      "status": "machine"
+    },
+    "chats.row.unread": {
+      "text": "{count, plural, zero {لا توجد رسائل غير مقروءة} one {رسالة واحدة غير مقروءة} two {رسالتان غير مقروءتين} few {# رسائل غير مقروءة} many {# رسالة غير مقروءة} other {# رسالة غير مقروءة}}",
+      "status": "machine"
+    },
+    "chats.row.unread_overflow": {
+      "text": "99+",
+      "status": "machine"
+    },
+    "chats.search.clear": {
+      "text": "مسح البحث",
+      "status": "machine"
+    },
+    "chats.search.label": {
+      "text": "البحث في الدردشات",
+      "status": "machine"
+    },
+    "chats.search.no_results": {
+      "text": "لا توجد نتائج",
+      "status": "machine"
+    },
+    "chats.search.placeholder": {
+      "text": "بحث",
+      "status": "machine"
+    },
+    "chats.synchronizing": {
+      "text": "جارٍ المزامنة...",
       "status": "machine"
     },
     "common.adding": {
@@ -366,12 +2086,28 @@
       "text": "نسخ",
       "status": "machine"
     },
+    "common.delete": {
+      "text": "حذف",
+      "status": "machine"
+    },
     "common.dismiss": {
       "text": "إغلاق",
       "status": "machine"
     },
     "common.done": {
       "text": "تم",
+      "status": "machine"
+    },
+    "common.duration.minutes": {
+      "text": "{count, plural, zero {# دقيقة} one {دقيقة واحدة} two {دقيقتان} few {# دقائق} many {# دقيقة} other {# دقيقة}}",
+      "status": "machine"
+    },
+    "common.duration.minutes_seconds": {
+      "text": "{minutes} و{seconds}",
+      "status": "machine"
+    },
+    "common.duration.seconds": {
+      "text": "{count, plural, zero {# ثانية} one {ثانية واحدة} two {ثانيتان} few {# ثوانٍ} many {# ثانية} other {# ثانية}}",
       "status": "machine"
     },
     "common.email": {
@@ -422,6 +2158,10 @@
       "text": "توسيع",
       "status": "machine"
     },
+    "common.list_pair": {
+      "text": "{first}، {second}",
+      "status": "machine"
+    },
     "common.loading": {
       "text": "جارٍ التحميل...",
       "status": "machine"
@@ -438,8 +2178,16 @@
       "text": "خيارات أخرى",
       "status": "machine"
     },
+    "common.not_now": {
+      "text": "ليس الآن",
+      "status": "machine"
+    },
     "common.off": {
       "text": "إيقاف",
+      "status": "machine"
+    },
+    "common.ok": {
+      "text": "حسنًا",
       "status": "machine"
     },
     "common.on": {
@@ -474,6 +2222,10 @@
       "text": "جارٍ الإزالة...",
       "status": "machine"
     },
+    "common.retry": {
+      "text": "إعادة المحاولة",
+      "status": "machine"
+    },
     "common.save": {
       "text": "حفظ",
       "status": "machine"
@@ -486,8 +2238,28 @@
       "text": "جارٍ الإرسال...",
       "status": "machine"
     },
+    "common.sentence_pair": {
+      "text": "{first} {second}",
+      "status": "machine"
+    },
     "common.set_up": {
       "text": "إعداد",
+      "status": "machine"
+    },
+    "common.size.bytes": {
+      "text": "{size} بايت",
+      "status": "machine"
+    },
+    "common.size.gb": {
+      "text": "{size} غيغابايت",
+      "status": "machine"
+    },
+    "common.size.kb": {
+      "text": "{size} كيلوبايت",
+      "status": "machine"
+    },
+    "common.size.mb": {
+      "text": "{size} ميغابايت",
       "status": "machine"
     },
     "common.try_again": {
@@ -732,6 +2504,26 @@
     },
     "display_name.error.unknown": {
       "text": "لا يمكن استخدام هذا الاسم",
+      "status": "machine"
+    },
+    "ds.clock_skew": {
+      "text": "تحقّق من تاريخ هذا الجهاز ووقته.",
+      "status": "machine"
+    },
+    "group.join.not_taking_requests": {
+      "text": "لا تستقبل هذه المجموعة الطلبات بعد. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "group.join.request_again": {
+      "text": "إعادة الطلب",
+      "status": "machine"
+    },
+    "group.join.wait_primary": {
+      "text": "تم إرسال الطلب. يوافق عليه أحد المشرفين، ثم يُطبَّق التغيير على المجموعة.",
+      "status": "machine"
+    },
+    "group.join.wait_secondary": {
+      "text": "لا توجد مهلة زمنية لأي من الخطوتين. إذا لم يحدث شيء، يمكنك إرسال الطلب مجددًا.",
       "status": "machine"
     },
     "language.name.ar": {
@@ -1952,6 +3744,14 @@
     },
     "settings.security.safety_numbers.title": {
       "text": "أرقام الأمان",
+      "status": "machine"
+    },
+    "tokens.action_allowance_used": {
+      "text": "لقد استنفدت الحد اليومي المسموح لهذا الإجراء. حاول مجددًا غدًا.",
+      "status": "machine"
+    },
+    "tokens.lookup_allowance_used": {
+      "text": "لقد بحثت عن عدد كبير من الأشخاص اليوم. حاول مجددًا غدًا.",
       "status": "machine"
     },
     "username.a11y_hint": {

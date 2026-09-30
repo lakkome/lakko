@@ -36,6 +36,14 @@ import uniffi.lakko_ffi_uniffi.membershipRefusalRetryMaySucceed
  */
 @RunWith(AndroidJUnit4::class)
 class MembershipRefusalInstrumentedTest {
+    init {
+        // ADR-0058: the refusal is a catalog message; render it through the
+        // real core. The English assertions below assume an English device,
+        // as they always did.
+        me.lakko.app.l10n.Localization.init(
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext,
+        )
+    }
 
     /** The real core port — what `ChatViewModel` passes in production. */
     private val real: (FfiRefusalReason) -> Boolean = ::membershipRefusalRetryMaySucceed
@@ -90,10 +98,10 @@ class MembershipRefusalInstrumentedTest {
         for (reason in FfiRefusalReason.entries) {
             val refusal = membershipRefusal(reason, real)
             assertEquals("$reason", real(reason), refusal.retryMaySucceed)
-            assertTrue("$reason rendered an empty sentence", refusal.message.isNotEmpty())
+            assertTrue("$reason rendered an empty sentence", refusal.message.render().isNotEmpty())
             // The invitation to try again appears on exactly the retryable
             // ones — which is the user-visible consequence of the whole split.
-            assertEquals("$reason", real(reason), refusal.message.contains("try again"))
+            assertEquals("$reason", real(reason), refusal.message.render().contains("try again"))
         }
     }
 
@@ -104,18 +112,18 @@ class MembershipRefusalInstrumentedTest {
         // row 6, and this is where that dependency is actually exercised.
         assertEquals(
             "A role change is already waiting to apply. Wait for it to land, then try again.",
-            membershipRefusal(FfiRefusalReason.ROLE_CHANGE_PENDING, real).message,
+            membershipRefusal(FfiRefusalReason.ROLE_CHANGE_PENDING, real).message.render(),
         )
         assertEquals(
             "Too many changes are already waiting to apply. Wait for them to land, then try again.",
-            membershipRefusal(FfiRefusalReason.PENDING_SET_FULL, real).message,
+            membershipRefusal(FfiRefusalReason.PENDING_SET_FULL, real).message.render(),
         )
         assertEquals(
             "The group owner cannot be removed.",
-            membershipRefusal(FfiRefusalReason.OWNER_UNREMOVABLE, real).message,
+            membershipRefusal(FfiRefusalReason.OWNER_UNREMOVABLE, real).message.render(),
         )
         assertFalse(
-            membershipRefusal(FfiRefusalReason.OWNER_UNREMOVABLE, real).message
+            membershipRefusal(FfiRefusalReason.OWNER_UNREMOVABLE, real).message.render()
                 .contains("try again"),
         )
     }

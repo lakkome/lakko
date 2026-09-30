@@ -219,3 +219,12 @@ final class LocalizationTests: XCTestCase {
             "Shown to the people you talk to. Not unique, at most 64 characters.")
     }
 }
+
+extension String {
+    /// The text without the bidi isolates the catalog formatter puts around
+    /// text arguments (ADR-0058), for tests that compare rendered English.
+    var withoutIsolates: String {
+        let isolates = CharacterSet(charactersIn: "\u{2066}\u{2067}\u{2068}\u{2069}")
+        return String(unicodeScalars.filter { !isolates.contains($0) })
+    }
+}

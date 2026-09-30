@@ -25,6 +25,7 @@
  * (255 bytes) on a character boundary, so counting bytes here would be a
  * second rule for the same thing.
  */
+import { t } from "../l10n";
 import type { AttachmentRefBytes, ForwardOrigin, ForwardRef } from "./attachments";
 import type { PersistedForward } from "./message-log-store";
 
@@ -99,7 +100,7 @@ export function forwardPayloadOf<A>(
  *  accessible name. */
 export function forwardLineLabel(forward: Pick<ForwardRef, "author">): string {
   const name = forward.author ?? "";
-  return name.length > 0 ? `Forwarded from ${name}` : "Forwarded";
+  return name.length > 0 ? t("chat.forward.from", { name }) : t("chat.forward.label");
 }
 
 /**

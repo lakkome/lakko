@@ -287,17 +287,14 @@ public func pendingNotice(_ requests: [PendingRequest]) -> PendingNotice? {
     let waiting = requests.filter { $0.state == .waiting }.count
     if waiting == 0 { return nil }
     return PendingNotice(
-        count: waiting == 1
-            ? "1 membership change is waiting to apply."
-            : "\(waiting) membership changes are waiting to apply.",
+        count: Localization.text("chat.members.pending.count", counts: ["count": UInt64(waiting)]),
         // ONE line, not two. The escalated variant went with the `stalled`
         // state: ADR-0045 decision 2 gives a waiting request no deadline, so
         // there is no moment at which the client learns something new to say.
         // This sentence is true at ten seconds and at ten days, it states
         // INACTION (the only thing the client can observe), it names no person,
         // and it blames nobody.
-        liveness: "Membership changes are applied by the group owner or an admin. "
-            + "They will apply automatically when one does."
+        liveness: Localization.text("chat.members.pending.liveness")
     )
 }
 
@@ -320,7 +317,9 @@ public func rowAnnotation(
             && $0.targetLeaf == leafIndex
     }
     guard hit != nil else { return nil }
-    return leafIndex == ownLeaf ? "Waiting to leave." : "Waiting to be removed."
+    return Localization.text(
+        leafIndex == ownLeaf
+            ? "chat.members.pending.waiting_leave" : "chat.members.pending.waiting_removed")
 }
 
 /// The `Waiting to be added` rows — pending adds only, past the window.
@@ -347,7 +346,9 @@ public func rowAnnotation(
 /// `nil` below two, because "1 change is now waiting" after making one change is
 /// noise rather than information.
 public func waitingQueueLine(_ pendingCount: Int) -> String? {
-    pendingCount < 2 ? nil : "\(pendingCount) changes are now waiting to apply."
+    pendingCount < 2
+        ? nil
+        : Localization.text("chat.members.pending.queue", counts: ["count": UInt64(pendingCount)])
 }
 
 // The "Join requests are not saved" note that used to live here is gone with

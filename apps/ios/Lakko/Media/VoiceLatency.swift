@@ -68,7 +68,7 @@ public enum VoiceCapture {
 public enum MicrophoneSilence {
 
     /// The one wording, so the bar and the accessibility label cannot drift.
-    public static let warningCopy = "No sound from the microphone"
+    public static var warningCopy: String { Localization.text("chat.record.silent_mic") }
 
     /// §2 — how long the level must stay at zero before the bar says so.
     ///

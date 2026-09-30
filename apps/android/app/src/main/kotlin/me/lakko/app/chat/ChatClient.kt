@@ -1473,7 +1473,12 @@ public data class PollMessagesResult(
 public class ChatClientArgError(message: String) : IllegalArgumentException(message)
 
 /** Wraps any underlying failure (DS, MLS process, FFI). The
- *  cause carries the original exception for diagnostics. */
-public class ChatError(message: String, cause: Throwable) :
-    RuntimeException(message, cause)
+ *  cause carries the original exception for diagnostics; the message is for
+ *  the log. [userText] is the sentence the screen shows when this failure
+ *  has one of its own (ADR-0058 section 6), else the action's generic key. */
+public class ChatError(
+    message: String,
+    cause: Throwable,
+    public val userText: me.lakko.app.l10n.UiText? = null,
+) : RuntimeException(message, cause)
 

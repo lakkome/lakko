@@ -3,6 +3,7 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.EnglishForTests
 import me.lakko.app.ui.chat.TimelineItem
 import me.lakko.app.ui.chat.statusLabel
 import org.junit.Assert.assertEquals
@@ -21,6 +22,10 @@ import org.junit.Test
  * to retry.
  */
 class UnsentMessageTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     private fun message(
         ack: Ack,

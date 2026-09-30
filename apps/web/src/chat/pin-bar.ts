@@ -25,6 +25,7 @@
  * timeline's own resolvers, and the bar draws what it is handed.
  */
 
+import { t } from "../l10n";
 import type { StoredPin } from "./pin-store";
 
 /** One entry of the bar, before any text is resolved. */
@@ -89,9 +90,11 @@ export function clampPinIndex(current: number, count: number): number {
 }
 
 /** Section 4.1 — the label in place of the author on a personal pin. */
-export const PIN_FOR_YOU = "For you";
+export const PIN_FOR_YOU = (): string => t("chat.pinned_bar.for_you");
 
 /** The accessible name of the bar for the pin at `index` (0-based). */
 export function pinBarLabel(index: number, count: number): string {
-  return count > 1 ? `Pinned message ${String(index + 1)} of ${String(count)}` : "Pinned message";
+  return count > 1
+    ? t("chat.pinned_bar.label_of", { index: index + 1, count })
+    : t("chat.pinned_bar.label");
 }

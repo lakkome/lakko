@@ -123,18 +123,19 @@ public func unappliedAddRequests(
 /// the action to them. An ordinary add is re-doable here.
 public func unappliedLine(_ item: UnappliedAdd) -> String {
     item.viaJoinRequest
-        ? "Not applied. Ask them to request to join again."
-        : "Not added. You can add them again."
+        ? Localization.text("chat.members.unapplied.join_line")
+        : Localization.text("chat.members.unapplied.add_line")
 }
 
 /// The one explanatory line under the section heading. True on both counts: the
 /// request left the pending set, so no sweep will carry it, and no client
 /// re-requests (UX §7's automatic re-request is designed and not built).
-public let unappliedExplanation =
-    "These changes did not apply and will not be retried on their own."
+public var unappliedExplanation: String { Localization.text("chat.members.unapplied.explanation") }
 
 /// The section heading.
-public func unappliedHeading(_ count: Int) -> String { "Not applied (\(count))" }
+public func unappliedHeading(_ count: Int) -> String {
+    Localization.text("chat.members.unapplied.heading", texts: ["count": count.formatted(.number.locale(Localization.currentLocale))])
+}
 
 // MARK: - The joiner's half of the same residual
 
@@ -143,13 +144,11 @@ public func unappliedHeading(_ count: Int) -> String { "Not applied (\(count))" 
 /// The joiner is told **nothing** about an exclusion, for the reasons in this
 /// file's header. What it is told instead is the truth about the wait itself,
 /// which the previous copy left out: **both** steps are unbounded.
-public let joinWaitPrimary =
-    "Request sent. An admin approves it, then the change is applied to the group."
+public var joinWaitPrimary: String { Localization.text("group.join.wait_primary") }
 
 /// The second line — the part that was missing, and the only thing that makes
 /// the ``joinRequestAgain`` control legible.
-public let joinWaitSecondary =
-    "Neither step has a time limit. If nothing happens, you can send the request again."
+public var joinWaitSecondary: String { Localization.text("group.join.wait_secondary") }
 
 /// The joiner's one repair, and the ONLY thing available to this side.
 ///
@@ -165,7 +164,7 @@ public let joinWaitSecondary =
 /// re-request refreshes the material only where the earlier entry is gone —
 /// which is exactly the case that matters here, because a successful approve
 /// consumed it.
-public let joinRequestAgain = "Request again"
+public var joinRequestAgain: String { Localization.text("group.join.request_again") }
 
 // MARK: - The store
 

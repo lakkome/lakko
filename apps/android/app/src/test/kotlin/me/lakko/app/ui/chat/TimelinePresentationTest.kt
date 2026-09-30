@@ -5,6 +5,7 @@ package me.lakko.app.ui.chat
 
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
+import me.lakko.app.l10n.EnglishForTests
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -19,6 +20,10 @@ import java.util.Locale
  * time, the date separators, the preview line and the run grouping, all pure.
  */
 class TimelinePresentationTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     private val zone: ZoneId = ZoneId.of("Europe/Berlin")
     private val en: Locale = Locale.UK
@@ -123,37 +128,37 @@ class TimelinePresentationTest {
 
     @Test
     fun `preview prefers text, then media, and carries the prefix`() {
-        assertEquals("You: hello", previewLine("hello", emptyList(), deleted = false, prefix = "You: "))
+        assertEquals("You: hello", previewLine("hello", emptyList(), deleted = false, author = PreviewAuthor.Own))
         assertEquals(
             "Anna: Photo",
-            previewLine("", listOf(PreviewAttachment(null, "image/png")), deleted = false, prefix = "Anna: "),
+            previewLine("", listOf(PreviewAttachment(null, "image/png")), deleted = false, author = PreviewAuthor.Named("Anna")),
         )
         assertEquals(
-            "Photo +2",
+            "Photo and 2 more",
             previewLine(
                 "",
                 listOf(PreviewAttachment(null, "image/png"), PreviewAttachment(null, "image/png"), PreviewAttachment(null, null)),
                 deleted = false,
-                prefix = "",
+                author = null,
             ),
         )
-        assertEquals("Message deleted", previewLine("gone", emptyList(), deleted = true, prefix = ""))
-        assertEquals("", previewLine("", emptyList(), deleted = false, prefix = "You: "))
+        assertEquals("Message deleted", previewLine("gone", emptyList(), deleted = true, author = null))
+        assertEquals("", previewLine("", emptyList(), deleted = false, author = PreviewAuthor.Own))
     }
 
     @Test
     fun `multi-line text collapses to one line`() {
-        assertEquals("a b c", previewLine("a\n b\n\n  c ", emptyList(), deleted = false, prefix = ""))
+        assertEquals("a b c", previewLine("a\n b\n\n  c ", emptyList(), deleted = false, author = null))
     }
 
     @Test
     fun `prefix rule`() {
-        assertEquals("You: ", previewPrefix(Direction.Outgoing, isGroup = true, senderName = "Anna"))
-        assertEquals("You: ", previewPrefix(Direction.Outgoing, isGroup = false, senderName = null))
-        assertEquals("Anna: ", previewPrefix(Direction.Incoming, isGroup = true, senderName = "Anna"))
-        assertEquals("", previewPrefix(Direction.Incoming, isGroup = true, senderName = null))
-        assertEquals("", previewPrefix(Direction.Incoming, isGroup = false, senderName = "Anna"))
-        assertEquals("", previewPrefix(Direction.System, isGroup = true, senderName = "Anna"))
+        assertEquals(PreviewAuthor.Own, previewPrefix(Direction.Outgoing, isGroup = true, senderName = "Anna"))
+        assertEquals(PreviewAuthor.Own, previewPrefix(Direction.Outgoing, isGroup = false, senderName = null))
+        assertEquals(PreviewAuthor.Named("Anna"), previewPrefix(Direction.Incoming, isGroup = true, senderName = "Anna"))
+        assertEquals(null, previewPrefix(Direction.Incoming, isGroup = true, senderName = null))
+        assertEquals(null, previewPrefix(Direction.Incoming, isGroup = false, senderName = "Anna"))
+        assertEquals(null, previewPrefix(Direction.System, isGroup = true, senderName = "Anna"))
     }
 
     // --- run grouping -------------------------------------------------------

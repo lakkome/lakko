@@ -107,17 +107,20 @@ public enum AnonTokenUnavailable: Error, Equatable, LocalizedError {
     }
 }
 
-/// The copy for token outcomes, verbatim from `docs/ux/anti-abuse.md` section 3.
+/// The copy for token outcomes (`docs/ux/anti-abuse.md` section 3), from the
+/// catalog (ADR-0058).
 public enum AnonTokenCopy {
     /// Search (a username or channel lookup) - allowance used up.
-    public static let searchAllowanceUsed =
-        "You have looked up a lot of people today. Try again tomorrow."
+    public static var searchAllowanceUsed: String {
+        Localization.text("tokens.lookup_allowance_used")
+    }
     /// Invite link, group link, channel name - allowance used up.
-    public static let allowanceUsed =
-        "You have used today's allowance for this. Try again tomorrow."
+    public static var allowanceUsed: String {
+        Localization.text("tokens.action_allowance_used")
+    }
     /// Tokens off, no token in time, or a refused token: the generic network
     /// copy the action already had.
-    public static let networkFailure = "No connection. Check your network and try again."
+    public static var networkFailure: String { Localization.text("common.error.offline") }
 
     /// The search copy for `error` when it is a used-up allowance, else `nil`.
     public static func searchMessage(for error: Error) -> String? {

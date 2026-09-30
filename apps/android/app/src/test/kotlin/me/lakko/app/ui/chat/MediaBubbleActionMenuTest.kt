@@ -26,6 +26,8 @@ import kotlinx.coroutines.cancel
 import me.lakko.app.chat.Ack
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import me.lakko.app.media.ChatMediaHub
 import me.lakko.app.media.InlineKind
 import me.lakko.app.media.KIND_GIF
@@ -63,6 +65,10 @@ import uniffi.lakko_ffi_uniffi.AttachmentRef
  */
 @RunWith(RobolectricTestRunner::class)
 class MediaBubbleActionMenuTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
@@ -126,7 +132,15 @@ class MediaBubbleActionMenuTest {
         compose.onNodeWithTag(BUBBLE).performTouchInput { longClick() }
 
         compose.onNodeWithContentDescription(MENU_SCRIM).assertExists()
-        compose.onNode(hasClickLabel("Play video message"), useUnmergedTree = true).assertExists()
+        // The label carries the duration since ADR-0058 (`chat.video_note.play`),
+        // so the stopped state is matched on its start.
+        compose.onNode(
+            androidx.compose.ui.test.SemanticsMatcher("click label starts with Play video message") {
+                it.config.getOrNull(androidx.compose.ui.semantics.SemanticsActions.OnClick)
+                    ?.label?.startsWith("Play video message") == true
+            },
+            useUnmergedTree = true,
+        ).assertExists()
     }
 
     private fun assertLongPressOpensTheMenu(ref: AttachmentRef) {
@@ -181,7 +195,7 @@ class MediaBubbleActionMenuTest {
 
         /** [CLOSE_MENU_LABEL] — the action menu's scrim, the one node present
          *  whenever the menu is open whatever rows it offers. */
-        const val MENU_SCRIM = CLOSE_MENU_LABEL
+        val MENU_SCRIM get() = en(CLOSE_MENU_LABEL)
         const val TIME = "09:00"
 
         /** Every bubble here is the message's SOLE attachment with no caption,
