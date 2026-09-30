@@ -118,7 +118,8 @@ public fun CallsScreen(
     val historyVersion by CallHistoryStore.version.collectAsStateWithLifecycle()
     val chatState by repository.state.collectAsStateWithLifecycle()
     val zone = remember { ZoneId.systemDefault() }
-    val locale = remember { Locale.getDefault() }
+    val strings = me.lakko.app.l10n.LocalStrings.current
+    val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
     val use24h = remember(context) { DateFormat.is24HourFormat(context) }
 
     // Calls placed before the index existed live only in their conversations.
@@ -142,7 +143,7 @@ public fun CallsScreen(
             TopAppBar(
                 title = { Text(me.lakko.app.l10n.t("nav.calls")) },
                 actions = {
-                    TextButton(onClick = onJoinByLink) { Text("Join by link") }
+                    TextButton(onClick = onJoinByLink) { Text(me.lakko.app.l10n.t("call.history.join_by_link")) }
                 },
             )
         },
@@ -150,7 +151,7 @@ public fun CallsScreen(
             ExtendedFloatingActionButton(
                 onClick = onNewCall,
                 icon = { Icon(Icons.Filled.Videocam, contentDescription = null) },
-                text = { Text("New call") },
+                text = { Text(me.lakko.app.l10n.t("call.history.new_call")) },
             )
         },
     ) { padding ->
@@ -168,7 +169,7 @@ public fun CallsScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = "No calls yet",
+                        text = me.lakko.app.l10n.t("call.history.empty"),
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -190,6 +191,7 @@ public fun CallsScreen(
                                     System.currentTimeMillis(),
                                     zone,
                                     locale,
+                                    strings,
                                 ),
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -206,7 +208,7 @@ public fun CallsScreen(
                             val row = day.rows[i]
                             CallHistoryRow(
                                 entry = row,
-                                title = titleOf(context, repository, directory, row),
+                                title = titleOf(context, repository, directory, row, strings),
                                 time = formatClockTime(row.startedAtMs, zone, use24h, locale),
                                 onOpen = { onOpenConversation(row.conversationIdHex) },
                                 onCallBack = { onCallBack(row.conversationIdHex, row.video) },
@@ -232,15 +234,16 @@ private fun titleOf(
     repository: ChatRepository,
     directory: ProfileDirectory,
     row: CallHistoryEntry,
+    strings: me.lakko.app.l10n.Strings,
 ): String = try {
     if (repository.memberCount(row.conversationIdHex) == null) {
-        "Unknown"
+        strings["call.history.unknown_conversation"]
     } else {
         conversationTitle(context, repository, directory, row.conversationIdHex)
     }
 } catch (cause: Throwable) {
     android.util.Log.w("CallsScreen", "resolving the call row title failed", cause)
-    "Unknown"
+    strings["call.history.unknown_conversation"]
 }
 
 @Composable
@@ -299,7 +302,7 @@ private fun CallHistoryRow(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        text = callRowText(entry.toTranscriptEntry()),
+                        text = callRowText(entry.toTranscriptEntry(), me.lakko.app.l10n.LocalStrings.current),
                         style = MaterialTheme.typography.bodyMedium,
                         color = lineColor,
                         maxLines = 1,
@@ -322,7 +325,7 @@ private fun CallHistoryRow(
         ) {
             Icon(
                 imageVector = if (entry.video) Icons.Filled.Videocam else Icons.Filled.Call,
-                contentDescription = if (entry.video) "Video call" else "Call",
+                contentDescription = me.lakko.app.l10n.t(if (entry.video) "chat.call.video" else "chat.call.voice"),
             )
         }
     }

@@ -344,7 +344,9 @@ async function handlePush(wake) {
   //     address, so the honest offer is to open the app, where the
   //     full-screen incoming call is waiting.
   const title = preview?.title ?? "Lakko";
-  const body = preview?.body ?? (wake?.isCall === true ? "Incoming call" : "New message");
+  const body =
+    preview?.body ??
+    (wake?.isCall === true ? storedIncomingCallWord(await readNotificationStrings()) : "New message");
   const tag = preview?.tag ?? wake?.groupHex ?? "lakko-default";
   const data =
     wake !== null
@@ -368,6 +370,42 @@ async function handlePush(wake) {
     // from a push event under certain conditions — best-effort, don't
     // throw past `waitUntil`.
   }
+}
+
+/**
+ * ADR-0058 — the notification words the page stored in the interface
+ * language, as a raw parsed value, or `null` when there are none (no page has
+ * run since install, storage was cleared, or it is unreadable).
+ *
+ * The cache name and key are `NOTIFICATION_STRINGS_CACHE` /
+ * `NOTIFICATION_STRINGS_URL` in `sw-call-notification.js`; repeated here
+ * because this worker may run as a classic script and cannot import it before
+ * the decrypt core loads. `src/l10n/notification-strings.test.ts` pins the
+ * page's writer to the same pair.
+ *
+ * @returns {Promise<unknown>}
+ */
+async function readNotificationStrings() {
+  try {
+    const cache = await caches.open("lakko-l10n");
+    const hit = await cache.match("/__lakko/l10n/notification-strings.json");
+    return hit === undefined ? null : await hit.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * "Incoming call" in the stored language, for the generic notification the
+ * worker shows without the decrypt core; English when nothing usable is
+ * stored.
+ *
+ * @param {unknown} raw
+ * @returns {string}
+ */
+function storedIncomingCallWord(raw) {
+  const v = typeof raw === "object" && raw !== null ? /** @type {Record<string, unknown>} */ (raw).incomingCall : undefined;
+  return typeof v === "string" && v.length > 0 && v.length <= 200 ? v : "Incoming call";
 }
 
 /**
@@ -415,9 +453,12 @@ async function handleCallNotice(call) {
     // without being allowed to interrupt: silent, no vibration, no buttons,
     // nothing that demands interaction. Still the same tag, so the end wake
     // above takes it down either way.
+    // ADR-0058: the words in the interface language, as the page stored
+    // them; English for anything missing.
+    const strings = core.notificationStrings(await readNotificationStrings());
     const { title, options } = call.silent === true
-      ? core.callSilentNotification(call)
-      : core.callRingNotification(call);
+      ? core.callSilentNotification(call, strings)
+      : core.callRingNotification(call, strings);
     await self.registration.showNotification(title, options);
   } catch {
     // Best-effort, exactly as the message path is.

@@ -64,7 +64,8 @@ struct CallsScreen: View {
     @State private var startError: String?
 
     private let calendar = Calendar.current
-    private let locale = Locale.current
+    /// The interface language, so day headings and times follow it (ADR-0058).
+    private var locale: Locale { l10n.locale }
 
     var body: some View {
         content
@@ -77,33 +78,33 @@ struct CallsScreen: View {
                     // rather than beside the action it is not.
                     Menu {
                         Button { joinByLinkPresented = true } label: {
-                            Label("Join by link", systemImage: "link")
+                            Label(l10n.t("call.history.join_by_link"), systemImage: "link")
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
-                    .accessibilityLabel("More")
+                    .accessibilityLabel(l10n.t("common.more_options"))
 
                     Button(action: startCall) {
                         if starting {
                             ProgressView()
                         } else {
-                            Text("New call")
+                            Text(l10n.t("call.history.new_call"))
                         }
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(starting)
-                    .accessibilityLabel("New call")
+                    .accessibilityLabel(l10n.t("call.history.new_call"))
                 }
             }
             .sheet(isPresented: $joinByLinkPresented) { joinByLinkSheet }
             .alert(
-                "Call",
+                l10n.t("call.alert.title"),
                 isPresented: Binding(
                     get: { startError != nil }, set: { if !$0 { startError = nil } }),
                 presenting: startError
             ) { _ in
-                Button("OK", role: .cancel) { startError = nil }
+                Button(l10n.t("common.ok"), role: .cancel) { startError = nil }
             } message: { message in
                 Text(message)
             }
@@ -200,11 +201,11 @@ struct CallsScreen: View {
 
     private var emptyState: some View {
         ContentUnavailableView {
-            Label("No calls yet", systemImage: "phone")
+            Label(l10n.t("call.history.empty"), systemImage: "phone")
         } description: {
-            Text("Calls you make and receive appear here.")
+            Text(l10n.t("call.history.empty_body"))
         } actions: {
-            Button("New call", action: startCall)
+            Button(l10n.t("call.history.new_call"), action: startCall)
                 .buttonStyle(.borderedProminent)
                 .disabled(starting)
         }
@@ -231,12 +232,12 @@ struct CallsScreen: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Paste the call link", text: $pastedLink, axis: .vertical)
+                    TextField(l10n.t("call.history.paste_label"), text: $pastedLink, axis: .vertical)
                         .lineLimit(2...4)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled(true)
                 } footer: {
-                    Text("The person who created the call shares the link.")
+                    Text(l10n.t("call.history.paste_hint"))
                 }
                 if let joinError {
                     Section {
@@ -246,14 +247,14 @@ struct CallsScreen: View {
                     }
                 }
             }
-            .navigationTitle("Join by link")
+            .navigationTitle(l10n.t("call.history.join_by_link"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismissJoinSheet() }
+                    Button(l10n.t("common.cancel")) { dismissJoinSheet() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Join") { join() }
+                    Button(l10n.t("chat.call.join_short")) { join() }
                         .disabled(pastedLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
@@ -266,7 +267,7 @@ struct CallsScreen: View {
         guard let url = URL(string: trimmed),
               InviteIntake.slug(from: url.path, prefix: CallInviteUrl.urlPrefix) != nil
         else {
-            joinError = "That does not look like a call link. Paste the whole link and try again."
+            joinError = Localization.text("call.history.join_invalid")
             return
         }
         dismissJoinSheet()

@@ -122,7 +122,14 @@ public final class JoinCallLandingViewModel: ObservableObject {
         case .ended: return .ended
         case .dead: return .dead
         case .error:
-            if let message = slot.errorMessage { return .error(UiText { message }) }
+            if let message = slot.errorMessage {
+                // The failure, then its reason (batch 5 convention).
+                return .error(UiText {
+                    Localization.text(
+                        "common.sentence_pair",
+                        texts: ["first": Localization.text("call.link.error.generic"), "second": message])
+                })
+            }
             return .error(.key("call.link.error.generic"))
         }
     }

@@ -242,12 +242,380 @@
       "text": "Відновити цю старішу резервну копію?",
       "status": "machine"
     },
+    "call.alert.title": {
+      "text": "Дзвінок",
+      "status": "machine"
+    },
+    "call.bar.camera_on_a11y": {
+      "text": "ваша камера увімкнена",
+      "status": "machine"
+    },
+    "call.bar.encrypted_a11y": {
+      "text": "зашифрований",
+      "status": "machine"
+    },
+    "call.bar.region_a11y": {
+      "text": "Триває дзвінок",
+      "status": "machine"
+    },
+    "call.bar.return_a11y": {
+      "text": "Повернутися до дзвінка. {name}",
+      "status": "machine"
+    },
+    "call.busy.call_join": {
+      "text": "Ви вже в дзвінку. Завершіть його, перш ніж приєднатися до іншого.",
+      "status": "machine"
+    },
+    "call.busy.call_start": {
+      "text": "Ви вже в дзвінку. Завершіть його, перш ніж почати інший.",
+      "status": "machine"
+    },
+    "call.busy.group_join": {
+      "text": "Ви вже в груповому дзвінку. Завершіть його, перш ніж приєднатися до іншого.",
+      "status": "machine"
+    },
+    "call.busy.group_start": {
+      "text": "Ви вже в груповому дзвінку. Завершіть його, перш ніж почати інший.",
+      "status": "machine"
+    },
+    "call.busy.link_join": {
+      "text": "Ви вже в дзвінку за посиланням. Завершіть його, перш ніж приєднатися до іншого.",
+      "status": "machine"
+    },
+    "call.busy.link_start": {
+      "text": "Ви вже в дзвінку за посиланням. Завершіть його, перш ніж почати інший.",
+      "status": "machine"
+    },
+    "call.camera_failed.not_allowed": {
+      "text": "Lakko не отримав доступу до камери. Дзвінок триватиме без неї.",
+      "status": "machine"
+    },
+    "call.camera_failed.not_found": {
+      "text": "Камеру не знайдено. Дзвінок триватиме без неї.",
+      "status": "machine"
+    },
+    "call.camera_failed.other": {
+      "text": "Не вдалося увімкнути камеру. Можливо, її використовує інший застосунок.",
+      "status": "machine"
+    },
+    "call.capture.both.failed": {
+      "text": "Не вдалося увімкнути мікрофон і камеру. Ви можете слухати й дивитися.",
+      "status": "machine"
+    },
+    "call.capture.both.not_allowed": {
+      "text": "Lakko не отримав доступу до мікрофона й камери. Ви можете слухати й дивитися.",
+      "status": "machine"
+    },
+    "call.capture.both.not_found": {
+      "text": "Мікрофон і камеру не знайдено. Ви можете слухати й дивитися.",
+      "status": "machine"
+    },
+    "call.capture.camera.failed": {
+      "text": "Не вдалося увімкнути камеру. Ви приєдналися з мікрофоном.",
+      "status": "machine"
+    },
+    "call.capture.camera.not_allowed": {
+      "text": "Lakko не отримав доступу до камери. Ви приєдналися з мікрофоном.",
+      "status": "machine"
+    },
+    "call.capture.camera.not_found": {
+      "text": "Камеру не знайдено. Ви приєдналися з мікрофоном.",
+      "status": "machine"
+    },
+    "call.chat.a11y": {
+      "text": "Чат дзвінка",
+      "status": "machine"
+    },
+    "call.chat.close_a11y": {
+      "text": "Закрити чат",
+      "status": "machine"
+    },
+    "call.chat.empty": {
+      "text": "Повідомлень поки немає. Повідомлення тут захищені наскрізним шифруванням.",
+      "status": "machine"
+    },
+    "call.chat.joined": {
+      "text": "{name} приєднується до дзвінка",
+      "status": "machine"
+    },
+    "call.chat.left": {
+      "text": "Учасник залишив дзвінок",
+      "status": "machine"
+    },
+    "call.collapse_a11y": {
+      "text": "Згорнути дзвінок і повернутися до застосунку",
+      "status": "machine"
+    },
+    "call.collapse_title": {
+      "text": "Згорнути дзвінок",
+      "status": "machine"
+    },
+    "call.control.bar_a11y": {
+      "text": "Керування дзвінком",
+      "status": "machine"
+    },
+    "call.control.camera": {
+      "text": "Камера",
+      "status": "machine"
+    },
+    "call.control.camera_start_a11y": {
+      "text": "Увімкнути камеру",
+      "status": "machine"
+    },
+    "call.control.camera_stop_a11y": {
+      "text": "Вимкнути камеру",
+      "status": "machine"
+    },
+    "call.control.chat": {
+      "text": "Чат",
+      "status": "machine"
+    },
+    "call.control.chat_hide_a11y": {
+      "text": "Сховати чат",
+      "status": "machine"
+    },
+    "call.control.chat_show_a11y": {
+      "text": "Показати чат",
+      "status": "machine"
+    },
+    "call.control.chat_unread": {
+      "text": "{count, plural, one {Чат (# непрочитане)} few {Чат (# непрочитані)} many {Чат (# непрочитаних)} other {Чат (# непрочитаного)}}",
+      "status": "machine"
+    },
+    "call.control.end": {
+      "text": "Завершити",
+      "status": "machine"
+    },
+    "call.control.end_a11y": {
+      "text": "Завершити дзвінок",
+      "status": "machine"
+    },
+    "call.control.invite": {
+      "text": "Запросити",
+      "status": "machine"
+    },
+    "call.control.invite_a11y": {
+      "text": "Запросити когось до цього дзвінка за посиланням",
+      "status": "machine"
+    },
+    "call.control.lower_hand": {
+      "text": "Опустити руку",
+      "status": "machine"
+    },
+    "call.control.more": {
+      "text": "Ще",
+      "status": "machine"
+    },
+    "call.control.more_a11y": {
+      "text": "Інші елементи керування",
+      "status": "machine"
+    },
+    "call.control.mute": {
+      "text": "Без звуку",
+      "status": "machine"
+    },
+    "call.control.mute_a11y": {
+      "text": "Вимкнути мікрофон",
+      "status": "machine"
+    },
+    "call.control.participants": {
+      "text": "Учасники",
+      "status": "machine"
+    },
+    "call.control.participants_hide_a11y": {
+      "text": "Сховати учасників",
+      "status": "machine"
+    },
+    "call.control.participants_show_a11y": {
+      "text": "Показати учасників",
+      "status": "machine"
+    },
+    "call.control.raise_hand": {
+      "text": "Підняти руку",
+      "status": "machine"
+    },
+    "call.control.share_screen": {
+      "text": "Показати екран",
+      "status": "machine"
+    },
+    "call.control.speaker": {
+      "text": "Динамік",
+      "status": "machine"
+    },
+    "call.control.speaker_a11y": {
+      "text": "Відтворювати звук через {device}",
+      "status": "machine"
+    },
+    "call.control.speaker_default_device": {
+      "text": "типовий динамік",
+      "status": "machine"
+    },
+    "call.control.speaker_next_device": {
+      "text": "наступний динамік",
+      "status": "machine"
+    },
+    "call.control.speaker_off_a11y": {
+      "text": "Вимкнути динамік",
+      "status": "machine"
+    },
+    "call.control.speaker_on_a11y": {
+      "text": "Увімкнути динамік",
+      "status": "machine"
+    },
+    "call.control.stop_share_screen": {
+      "text": "Припинити показ екрана",
+      "status": "machine"
+    },
+    "call.control.unmute_a11y": {
+      "text": "Увімкнути мікрофон",
+      "status": "machine"
+    },
+    "call.e2ee": {
+      "text": "Наскрізне шифрування",
+      "status": "machine"
+    },
+    "call.encryption.chip": {
+      "text": "Зашифрований",
+      "status": "machine"
+    },
+    "call.encryption.chip_a11y": {
+      "text": "Цей дзвінок зашифрований. Показати код безпеки",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint": {
+      "text": "Прочитайте ці цифри вголос. Якщо на обох телефонах вони збігаються, ніхто не підслуховує.",
+      "status": "machine"
+    },
+    "call.encryption.copy_a11y": {
+      "text": "Скопіювати код безпеки",
+      "status": "machine"
+    },
+    "call.encryption.number_a11y": {
+      "text": "Код безпеки: {groups}",
+      "status": "machine"
+    },
+    "call.encryption.number_unavailable": {
+      "text": "Код безпеки недоступний",
+      "status": "machine"
+    },
+    "call.encryption.sentence_group": {
+      "text": "Чути цей дзвінок можуть лише його учасники.",
+      "status": "machine"
+    },
+    "call.encryption.sentence_named": {
+      "text": "Чути цей дзвінок можете лише ви та {name}.",
+      "status": "machine"
+    },
+    "call.encryption.setting_up": {
+      "text": "Налаштування...",
+      "status": "machine"
+    },
+    "call.encryption.title": {
+      "text": "Цей дзвінок зашифрований",
+      "status": "machine"
+    },
+    "call.error.encryption_setup": {
+      "text": "Не вдалося налаштувати шифрування дзвінка, тому дзвінок не почався.",
+      "status": "machine"
+    },
+    "call.error.join_group": {
+      "text": "Не вдалося приєднатися до групового дзвінка. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "call.error.microphone_not_allowed": {
+      "text": "Lakko не отримав доступу до мікрофона.",
+      "status": "machine"
+    },
+    "call.error.microphone_not_found": {
+      "text": "Мікрофон не знайдено.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption": {
+      "text": "Цей браузер не може шифрувати звук і відео дзвінка, тому дзвінок не почався.",
+      "status": "machine"
+    },
+    "call.error.not_accepting": {
+      "text": "Цей дзвінок зараз не приймає нових учасників.",
+      "status": "machine"
+    },
+    "call.error.not_member": {
+      "text": "Ви більше не учасник цього чату.",
+      "status": "machine"
+    },
+    "call.error.signed_out_start": {
+      "text": "Ви вийшли з облікового запису. Увійдіть знову, щоб почати дзвінок.",
+      "status": "machine"
+    },
+    "call.error.start_group": {
+      "text": "Не вдалося почати груповий дзвінок. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "call.error.unavailable": {
+      "text": "Дзвінки зараз недоступні. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "call.fill.remote_camera_a11y": {
+      "text": "Камера: {name}",
+      "status": "machine"
+    },
+    "call.group_banner.join_video": {
+      "text": "Відео",
+      "status": "machine"
+    },
+    "call.group_banner.open_chat": {
+      "text": "Відкрити чат",
+      "status": "machine"
+    },
+    "call.group_banner.title": {
+      "text": "Груповий дзвінок: {name}",
+      "status": "machine"
+    },
     "call.guest.default_name": {
       "text": "Гість",
       "status": "machine"
     },
     "call.guest.working.title": {
       "text": "Підключаємо вас до дзвінка...",
+      "status": "machine"
+    },
+    "call.history.call_back_a11y": {
+      "text": "Передзвонити",
+      "status": "machine"
+    },
+    "call.history.call_back_video_a11y": {
+      "text": "Передзвонити з відео",
+      "status": "machine"
+    },
+    "call.history.empty": {
+      "text": "Дзвінків поки немає",
+      "status": "machine"
+    },
+    "call.history.empty_body": {
+      "text": "Тут з’являться ваші вхідні й вихідні дзвінки.",
+      "status": "machine"
+    },
+    "call.history.join_by_link": {
+      "text": "Приєднатися за посиланням",
+      "status": "machine"
+    },
+    "call.history.join_invalid": {
+      "text": "Це не схоже на посилання на дзвінок. Вставте посилання повністю й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "call.history.new_call": {
+      "text": "Новий дзвінок",
+      "status": "machine"
+    },
+    "call.history.paste_hint": {
+      "text": "Посиланням ділиться той, хто створив дзвінок.",
+      "status": "machine"
+    },
+    "call.history.paste_label": {
+      "text": "Вставте посилання на дзвінок",
+      "status": "machine"
+    },
+    "call.history.unknown_conversation": {
+      "text": "Невідомо",
       "status": "machine"
     },
     "call.incoming.accept": {
@@ -258,12 +626,96 @@
       "text": "Прийняти дзвінок: {name}",
       "status": "machine"
     },
+    "call.incoming.accept_video_a11y": {
+      "text": "Прийняти відеодзвінок: {name}",
+      "status": "machine"
+    },
+    "call.incoming.accept_voice_a11y": {
+      "text": "Прийняти голосовий дзвінок: {name}",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video": {
+      "text": "Прийняти без відео",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video_a11y": {
+      "text": "Прийняти дзвінок без відео: {name}",
+      "status": "machine"
+    },
     "call.incoming.decline": {
       "text": "Відхилити",
       "status": "machine"
     },
     "call.incoming.decline_from": {
       "text": "Відхилити дзвінок: {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline_video_a11y": {
+      "text": "Відхилити відеодзвінок: {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline_voice_a11y": {
+      "text": "Відхилити голосовий дзвінок: {name}",
+      "status": "machine"
+    },
+    "call.incoming.video_a11y": {
+      "text": "Вхідний відеодзвінок: {name}",
+      "status": "machine"
+    },
+    "call.incoming.voice_a11y": {
+      "text": "Вхідний голосовий дзвінок: {name}",
+      "status": "machine"
+    },
+    "call.invite.copied": {
+      "text": "Посилання скопійовано. Будь-хто, кому ви його надішлете, зможе попросити приєднатися.",
+      "status": "machine"
+    },
+    "call.invite.link_a11y": {
+      "text": "Посилання на дзвінок",
+      "status": "machine"
+    },
+    "call.invite.minting": {
+      "text": "Готуємо посилання на цей дзвінок. Це займе кілька секунд.",
+      "status": "machine"
+    },
+    "call.invite.ready": {
+      "text": "Будь-хто з цим посиланням може попросити приєднатися до дзвінка. Ви вирішуєте, кого впустити.",
+      "status": "machine"
+    },
+    "call.invite.retry_a11y": {
+      "text": "Спробувати ще раз підготувати посилання-запрошення",
+      "status": "machine"
+    },
+    "call.invite.share_a11y": {
+      "text": "Поділитися посиланням-запрошенням",
+      "status": "machine"
+    },
+    "call.invite.shared": {
+      "text": "Посилання надіслано.",
+      "status": "machine"
+    },
+    "call.invite.shown": {
+      "text": "Скопіюйте це посилання: {url}",
+      "status": "machine"
+    },
+    "call.invite.signed_out": {
+      "text": "Ви вийшли з облікового запису. Увійдіть знову, щоб отримати посилання на цей дзвінок.",
+      "status": "machine"
+    },
+    "call.invite.unavailable": {
+      "text": "Не вдалося підготувати посилання. Дзвінок не зачеплено, можна спробувати ще раз.",
+      "status": "machine"
+    },
+    "call.kind.video": {
+      "text": "Відеодзвінок",
+      "status": "machine"
+    },
+    "call.kind.voice": {
+      "text": "Голосовий дзвінок",
+      "status": "machine"
+    },
+    "call.label.group": {
+      "text": "Груповий дзвінок",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -310,6 +762,14 @@
       "text": "Завантаження посилання на дзвінок...",
       "status": "machine"
     },
+    "call.link.notice.a11y": {
+      "text": "Дзвінок за посиланням",
+      "status": "machine"
+    },
+    "call.link.notice.connecting": {
+      "text": "Підключення до дзвінка...",
+      "status": "machine"
+    },
     "call.link.start": {
       "text": "Почати дзвінок",
       "status": "machine"
@@ -328,6 +788,318 @@
     },
     "call.link.waiting_hint": {
       "text": "Можна піти з цього екрана: ви приєднаєтеся, щойно вас впустять.",
+      "status": "machine"
+    },
+    "call.log.a11y.call_back": {
+      "text": "{head}. Передзвонити",
+      "status": "machine"
+    },
+    "call.log.a11y.lasted": {
+      "text": "{head}, тривалість {duration}",
+      "status": "machine"
+    },
+    "call.log.a11y.video_declined": {
+      "text": "Відеодзвінок відхилено",
+      "status": "machine"
+    },
+    "call.log.a11y.video_incoming": {
+      "text": "Відеодзвінок, вхідний",
+      "status": "machine"
+    },
+    "call.log.a11y.video_missed": {
+      "text": "Пропущений відеодзвінок",
+      "status": "machine"
+    },
+    "call.log.a11y.video_outgoing": {
+      "text": "Відеодзвінок, вихідний",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_declined": {
+      "text": "Дзвінок відхилено",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_incoming": {
+      "text": "Дзвінок, вхідний",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_missed": {
+      "text": "Пропущений дзвінок",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_outgoing": {
+      "text": "Дзвінок, вихідний",
+      "status": "machine"
+    },
+    "call.log.declined": {
+      "text": "Відхилено",
+      "status": "machine"
+    },
+    "call.log.incoming": {
+      "text": "Вхідний дзвінок",
+      "status": "machine"
+    },
+    "call.log.incoming_duration": {
+      "text": "Вхідний дзвінок, {duration}",
+      "status": "machine"
+    },
+    "call.log.missed": {
+      "text": "Пропущений дзвінок",
+      "status": "machine"
+    },
+    "call.log.outgoing": {
+      "text": "Вихідний дзвінок",
+      "status": "machine"
+    },
+    "call.log.outgoing_duration": {
+      "text": "Вихідний дзвінок, {duration}",
+      "status": "machine"
+    },
+    "call.notification.channel_description": {
+      "text": "Вхідні дзвінки Lakko",
+      "status": "machine"
+    },
+    "call.notification.incoming": {
+      "text": "Вхідний дзвінок",
+      "status": "machine"
+    },
+    "call.participant.hand_raised": {
+      "text": "Руку піднято",
+      "status": "machine"
+    },
+    "call.participant.muted": {
+      "text": "Мікрофон вимкнено",
+      "status": "machine"
+    },
+    "call.participant.muted_a11y": {
+      "text": "Мікрофон вимкнено",
+      "status": "machine"
+    },
+    "call.participant.numbered": {
+      "text": "Учасник {number}",
+      "status": "machine"
+    },
+    "call.participant.pinned": {
+      "text": "Закріплено",
+      "status": "machine"
+    },
+    "call.participant.sharing": {
+      "text": "Показує екран",
+      "status": "machine"
+    },
+    "call.participant.sharing_a11y": {
+      "text": "Показує екран",
+      "status": "machine"
+    },
+    "call.participant.unnamed": {
+      "text": "Учасник",
+      "status": "machine"
+    },
+    "call.participant.you": {
+      "text": "Ви",
+      "status": "machine"
+    },
+    "call.participants.close_a11y": {
+      "text": "Закрити список учасників",
+      "status": "machine"
+    },
+    "call.participants.title": {
+      "text": "Учасники ({count})",
+      "status": "machine"
+    },
+    "call.permission.audio_only": {
+      "text": "Лише звук",
+      "status": "machine"
+    },
+    "call.permission.camera.body": {
+      "text": "Для відео потрібна камера. Можна продовжити лише зі звуком або дозволити Lakko доступ до камери в налаштуваннях застосунку.",
+      "status": "machine"
+    },
+    "call.permission.camera.title": {
+      "text": "Потрібен доступ до камери",
+      "status": "machine"
+    },
+    "call.permission.microphone.body": {
+      "text": "Для дзвінків потрібен мікрофон. Дозвольте Lakko доступ до мікрофона в налаштуваннях застосунку й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "call.permission.microphone.title": {
+      "text": "Потрібен доступ до мікрофона",
+      "status": "machine"
+    },
+    "call.quality.a11y": {
+      "text": "Якість зв’язку: {tier}",
+      "status": "machine"
+    },
+    "call.quality.bps": {
+      "text": "{value} біт/с",
+      "status": "machine"
+    },
+    "call.quality.details_a11y": {
+      "text": "Параметри з’єднання",
+      "status": "machine"
+    },
+    "call.quality.direct": {
+      "text": "Напряму",
+      "status": "machine"
+    },
+    "call.quality.down": {
+      "text": "Вхідний",
+      "status": "machine"
+    },
+    "call.quality.kbps": {
+      "text": "{value} кбіт/с",
+      "status": "machine"
+    },
+    "call.quality.mbps": {
+      "text": "{value} Мбіт/с",
+      "status": "machine"
+    },
+    "call.quality.ms": {
+      "text": "{value} мс",
+      "status": "machine"
+    },
+    "call.quality.relay": {
+      "text": "Через ретранслятор",
+      "status": "machine"
+    },
+    "call.quality.round_trip": {
+      "text": "Затримка",
+      "status": "machine"
+    },
+    "call.quality.tier.bad": {
+      "text": "погана",
+      "status": "machine"
+    },
+    "call.quality.tier.excellent": {
+      "text": "відмінна",
+      "status": "machine"
+    },
+    "call.quality.tier.fair": {
+      "text": "задовільна",
+      "status": "machine"
+    },
+    "call.quality.tier.good": {
+      "text": "добра",
+      "status": "machine"
+    },
+    "call.quality.tier.poor": {
+      "text": "слабка",
+      "status": "machine"
+    },
+    "call.quality.title": {
+      "text": "Зв’язок: {tier}",
+      "status": "machine"
+    },
+    "call.quality.up": {
+      "text": "Вихідний",
+      "status": "machine"
+    },
+    "call.self.camera_a11y": {
+      "text": "Ваша камера",
+      "status": "machine"
+    },
+    "call.self.flip_a11y": {
+      "text": "Перемкнутися на іншу камеру",
+      "status": "machine"
+    },
+    "call.self.starting_camera": {
+      "text": "Увімкнення камери...",
+      "status": "machine"
+    },
+    "call.settings.devices": {
+      "text": "Аудіо- й відеопристрої",
+      "status": "machine"
+    },
+    "call.settings.low_data": {
+      "text": "Економія трафіку",
+      "status": "machine"
+    },
+    "call.settings.low_data_hint": {
+      "text": "Обмежує відео до 360p — корисно за лімітованого мобільного інтернету.",
+      "status": "machine"
+    },
+    "call.settings.microphone": {
+      "text": "Мікрофон",
+      "status": "machine"
+    },
+    "call.settings.mirror": {
+      "text": "Віддзеркалювати своє зображення",
+      "status": "machine"
+    },
+    "call.settings.no_devices": {
+      "text": "Пристрої поки не знайдено. Вони з’являться тут, коли ви дозволите доступ до мікрофона або камери.",
+      "status": "machine"
+    },
+    "call.settings.system_default": {
+      "text": "Типово",
+      "status": "machine"
+    },
+    "call.settings.video": {
+      "text": "Відео",
+      "status": "machine"
+    },
+    "call.start.no_camera": {
+      "text": "Камера недоступна, тому це голосовий дзвінок.",
+      "status": "machine"
+    },
+    "call.status.calling": {
+      "text": "Виклик...",
+      "status": "machine"
+    },
+    "call.status.calling_spoken": {
+      "text": "Виклик",
+      "status": "machine"
+    },
+    "call.status.connected": {
+      "text": "З’єднано",
+      "status": "machine"
+    },
+    "call.status.connecting_spoken": {
+      "text": "Підключення",
+      "status": "machine"
+    },
+    "call.status.ended": {
+      "text": "Дзвінок завершено",
+      "status": "machine"
+    },
+    "call.status.group_count": {
+      "text": "Груповий дзвінок · {count}",
+      "status": "machine"
+    },
+    "call.status.in_call_spoken": {
+      "text": "у дзвінку, {duration}",
+      "status": "machine"
+    },
+    "call.status.reconnecting": {
+      "text": "Повторне підключення...",
+      "status": "machine"
+    },
+    "call.status.reconnecting_spoken": {
+      "text": "Повторне підключення",
+      "status": "machine"
+    },
+    "call.status.ringing": {
+      "text": "Дзвонить...",
+      "status": "machine"
+    },
+    "call.undecryptable.named": {
+      "text": "Не вдається розшифрувати звук і відео: {name}",
+      "status": "machine"
+    },
+    "call.undecryptable.notice": {
+      "text": "Не вдається розшифрувати вхідні звук і відео",
+      "status": "machine"
+    },
+    "call.undecryptable.notice_many": {
+      "text": "{count, plural, one {Не вдається розшифрувати звук і відео # учасника} few {Не вдається розшифрувати звук і відео # учасників} many {Не вдається розшифрувати звук і відео # учасників} other {Не вдається розшифрувати звук і відео # учасника}}",
+      "status": "machine"
+    },
+    "call.undecryptable.tile": {
+      "text": "Не розшифровано",
+      "status": "machine"
+    },
+    "call.undecryptable.tile_a11y": {
+      "text": "Не вдається розшифрувати звук і відео цього учасника",
       "status": "machine"
     },
     "channels.back": {
@@ -2582,12 +3354,20 @@
       "text": "Готово",
       "status": "machine"
     },
+    "common.duration.hours": {
+      "text": "{count, plural, one {# година} few {# години} many {# годин} other {# години}}",
+      "status": "machine"
+    },
     "common.duration.minutes": {
       "text": "{count, plural, one {# хвилина} few {# хвилини} many {# хвилин} other {# хвилини}}",
       "status": "machine"
     },
     "common.duration.minutes_seconds": {
       "text": "{minutes} {seconds}",
+      "status": "machine"
+    },
+    "common.duration.pair": {
+      "text": "{first} {second}",
       "status": "machine"
     },
     "common.duration.seconds": {
@@ -2680,6 +3460,10 @@
     },
     "common.on": {
       "text": "Увімк.",
+      "status": "machine"
+    },
+    "common.open": {
+      "text": "Відкрити",
       "status": "machine"
     },
     "common.open_chat": {
@@ -3792,6 +4576,22 @@
     },
     "new_group.subtitle": {
       "text": "Ви будете власником групи. Пізніше можна додати ще людей.",
+      "status": "machine"
+    },
+    "notification.channel.messages": {
+      "text": "Повідомлення",
+      "status": "machine"
+    },
+    "notification.channel.messages_desc": {
+      "text": "Сповіщення про нові повідомлення Lakko",
+      "status": "machine"
+    },
+    "notification.message.attachments": {
+      "text": "{count, plural, one {Надіслано # вкладення} few {Надіслано # вкладення} many {Надіслано # вкладень} other {Надіслано # вкладення}}",
+      "status": "machine"
+    },
+    "notification.message.new": {
+      "text": "Нове повідомлення",
       "status": "machine"
     },
     "recovery.access_only_note": {

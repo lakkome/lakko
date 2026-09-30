@@ -3,6 +3,8 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.UiText
+
 /**
  * Which surface a call button opens — `docs/ux/calls.md` sections 3.1 and 3.2.
  *
@@ -57,8 +59,7 @@ public enum class CallEntrySurface {
  * device has no camera. Deliberately one sentence: what happened, in the words
  * of what the user asked for.
  */
-public const val NO_CAMERA_VOICE_FALLBACK_NOTICE: String =
-    "This device has no camera, so Lakko is placing a voice call."
+public val NO_CAMERA_VOICE_FALLBACK_NOTICE: UiText = UiText("call.start.no_camera")
 
 /**
  * The surface [kind] opens on a device where a camera is or is not usable.
@@ -89,5 +90,5 @@ public fun immediateDialMedia(kind: RequestedCallKind, hasCamera: Boolean): Call
  * say. Only the no-camera fallback speaks: a voice call behaving like a voice
  * call needs no explanation.
  */
-public fun callEntryNotice(kind: RequestedCallKind, hasCamera: Boolean): String? =
+public fun callEntryNotice(kind: RequestedCallKind, hasCamera: Boolean): UiText? =
     if (kind == RequestedCallKind.VIDEO && !hasCamera) NO_CAMERA_VOICE_FALLBACK_NOTICE else null

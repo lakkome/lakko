@@ -98,6 +98,9 @@ public class LakkoMessagingService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
+        // A push can arrive before any Activity has run in this process: load
+        // the interface language for the notification words (ADR-0058).
+        me.lakko.app.l10n.Localization.init(applicationContext)
         val wake = parseWakeBody(message.data)
         // Silent-push background decrypt (mirror of web sw.js):
         //   * Foreground → defer. The live poll loop does the durable
@@ -248,7 +251,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             // Real decrypted preview when the background decrypt
             // yielded one; the generic fallback otherwise.
             .setContentTitle(preview?.title ?: "Lakko")
-            .setContentText(preview?.body ?: "New message")
+            .setContentText(preview?.body ?: me.lakko.app.l10n.Localization.strings.value["notification.message.new"])
             .setAutoCancel(true)
             // Tag-replace by group so a burst within the same
             // chat collapses into one OS notification — matches
@@ -276,10 +279,10 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Messages",
+            me.lakko.app.l10n.Localization.strings.value["notification.channel.messages"],
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
-            description = "Wake notifications for new Lakko messages"
+            description = me.lakko.app.l10n.Localization.strings.value["notification.channel.messages_desc"]
         }
         val manager = context.getSystemService(NotificationManager::class.java)
         manager?.createNotificationChannel(channel)

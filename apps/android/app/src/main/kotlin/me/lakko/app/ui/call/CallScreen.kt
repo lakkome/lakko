@@ -123,6 +123,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.ui.platform.LocalContext
 import me.lakko.app.calls.CALL_CONTROLS_AUTO_HIDE_MS
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.Strings
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.calls.CallAudioRouter
 import me.lakko.app.calls.CallControlKind
 import me.lakko.app.calls.CallSession
@@ -382,14 +387,18 @@ public fun CallScreen(
             for (p in remoteParts) {
                 if (p.id !in lastRemoteIds) {
                     sounds.playOnce(CallSoundController.SoundName.JOIN)
-                    callState.addSystemEvent("${p.displayName} joined the call")
+                    callState.addSystemEvent(
+                        p.displayName.trim().takeIf { it.isNotEmpty() }
+                            ?.let { UiText("call.chat.joined", mapOf("name" to it)) }
+                            ?: UiText("call.chat.joined", parts = mapOf("name" to UiText("call.participant.unnamed"))),
+                    )
                 }
             }
             val currentIds = remoteIds.toSet()
             for (prevId in lastRemoteIds) {
                 if (prevId !in currentIds) {
                     sounds.playOnce(CallSoundController.SoundName.LEAVE)
-                    callState.addSystemEvent("A participant left the call")
+                    callState.addSystemEvent(UiText("call.chat.left"))
                     // Display name has been dropped from state
                     // by the time we observe the deletion;
                     // future refinement preserves it. Out of
@@ -544,6 +553,7 @@ private fun InCallView(
         groupName = groupName,
         peerName = remoteName ?: soleRemote?.displayName,
         groupCall = groupCall,
+        strings = LocalStrings.current,
     )
     val seed = avatarSeed?.takeIf { it.isNotBlank() } ?: displayName
 
@@ -808,6 +818,7 @@ private fun InCallView(
  */
 @Composable
 private fun CollapseCallButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val collapseLabel = t("call.collapse_a11y")
     Box(
         modifier = modifier
             .size(44.dp)
@@ -815,7 +826,7 @@ private fun CollapseCallButton(onClick: () -> Unit, modifier: Modifier = Modifie
             .background(LakkoDark.background.copy(alpha = 0.45f))
             .clickable(onClick = onClick)
             .semantics(mergeDescendants = true) {
-                contentDescription = "Put the call away. The call keeps running."
+                contentDescription = collapseLabel
                 role = Role.Button
             },
         contentAlignment = Alignment.Center,
@@ -1017,13 +1028,14 @@ private fun SelfViewPip(
  */
 @Composable
 private fun SwitchCameraButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val flipLabel = t("call.self.flip_a11y")
     Box(
         modifier = modifier
             .size(36.dp)
             .clip(CircleShape)
             .background(LakkoDark.background.copy(alpha = 0.6f))
             .clickable(onClick = onClick)
-            .semantics { contentDescription = "Switch camera"; role = Role.Button },
+            .semantics { contentDescription = flipLabel; role = Role.Button },
         contentAlignment = Alignment.Center,
     ) {
         Icon(
@@ -1124,15 +1136,15 @@ private fun SettingsSheet(state: CallUiState) {
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text(
-                "Settings",
+                t("nav.settings"),
                 color = LakkoDark.text,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
             )
 
-            DeviceSectionLabel("Devices")
+            DeviceSectionLabel(t("call.settings.devices"))
             DevicePickerRow(
-                label = "Microphone",
+                label = t("call.settings.microphone"),
                 devices = settings.availableDevices.filter {
                     it.kind == CallUiState.CallDevice.Kind.AudioInput
                 },
@@ -1140,7 +1152,7 @@ private fun SettingsSheet(state: CallUiState) {
                 onPick = { state.setSelectedAudioInput(it) },
             )
             DevicePickerRow(
-                label = "Camera",
+                label = t("call.control.camera"),
                 devices = settings.availableDevices.filter {
                     it.kind == CallUiState.CallDevice.Kind.VideoInput
                 },
@@ -1148,7 +1160,7 @@ private fun SettingsSheet(state: CallUiState) {
                 onPick = { state.setSelectedVideoInput(it) },
             )
             DevicePickerRow(
-                label = "Speaker",
+                label = t("call.control.speaker"),
                 devices = settings.availableDevices.filter {
                     it.kind == CallUiState.CallDevice.Kind.AudioOutput
                 },
@@ -1163,17 +1175,17 @@ private fun SettingsSheet(state: CallUiState) {
             // three switches that sat here changed a stored flag nothing read.
             // A switch that does nothing is worse than none.
 
-            DeviceSectionLabel("Video")
+            DeviceSectionLabel(t("call.settings.video"))
             SettingsToggleRow(
-                label = "Mirror local preview",
+                label = t("call.settings.mirror"),
                 checked = settings.mirrorLocal,
                 onChange = { state.setMirrorLocal(it) },
             )
 
-            DeviceSectionLabel("Network")
+            DeviceSectionLabel(t("settings.section.network"))
             SettingsToggleRow(
-                label = "Low-data mode",
-                description = "Caps video at 360p — useful on metered mobile connections.",
+                label = t("call.settings.low_data"),
+                description = t("call.settings.low_data_hint"),
                 checked = settings.lowDataMode,
                 onChange = { state.setLowDataMode(it) },
             )
@@ -1201,7 +1213,7 @@ private fun DevicePickerRow(
 ) {
     var expanded by remember { mutableStateOf(false) }
     val selectedLabel = devices.firstOrNull { it.id == selectedId }?.label
-        ?: "System default"
+        ?: t("call.settings.system_default")
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(label, color = LakkoDark.text, fontSize = 13.sp)
@@ -1232,7 +1244,7 @@ private fun DevicePickerRow(
                 onDismissRequest = { expanded = false },
             ) {
                 DropdownMenuItem(
-                    text = { Text("System default") },
+                    text = { Text(t("call.settings.system_default")) },
                     onClick = {
                         onPick(null)
                         expanded = false
@@ -1240,7 +1252,19 @@ private fun DevicePickerRow(
                 )
                 for (d in devices) {
                     DropdownMenuItem(
-                        text = { Text(d.label.ifEmpty { d.kind.name }) },
+                        text = {
+                            Text(
+                                d.label.ifEmpty {
+                                    t(
+                                        when (d.kind) {
+                                            CallUiState.CallDevice.Kind.AudioInput -> "call.settings.microphone"
+                                            CallUiState.CallDevice.Kind.VideoInput -> "call.control.camera"
+                                            CallUiState.CallDevice.Kind.AudioOutput -> "call.control.speaker"
+                                        },
+                                    )
+                                },
+                            )
+                        },
                         onClick = {
                             onPick(d.id)
                             expanded = false
@@ -1251,8 +1275,7 @@ private fun DevicePickerRow(
         }
         if (devices.isEmpty()) {
             Text(
-                "No devices reported yet. They appear here once you grant " +
-                    "microphone or camera permission.",
+                t("call.settings.no_devices"),
                 color = LakkoDark.textMuted,
                 fontSize = 11.sp,
             )
@@ -1325,7 +1348,7 @@ private fun ChatSheet(state: CallUiState) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                "Chat",
+                t("call.control.chat"),
                 color = LakkoDark.text,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -1339,7 +1362,7 @@ private fun ChatSheet(state: CallUiState) {
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        "No messages yet. Messages here are end-to-end encrypted.",
+                        t("call.chat.empty"),
                         color = LakkoDark.textMuted,
                         fontSize = 13.sp,
                         textAlign = TextAlign.Center,
@@ -1368,7 +1391,7 @@ private fun ChatSheet(state: CallUiState) {
                     value = compose,
                     onValueChange = { state.setComposeText(it) },
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text("Send a message") },
+                    placeholder = { Text(t("chat.composer.placeholder")) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(
@@ -1379,7 +1402,7 @@ private fun ChatSheet(state: CallUiState) {
                     onClick = { state.sendChatMessage(compose) },
                     enabled = compose.trim().isNotEmpty(),
                 ) {
-                    Text("Send")
+                    Text(t("chat.composer.send"))
                 }
             }
         }
@@ -1390,7 +1413,7 @@ private fun ChatSheet(state: CallUiState) {
 private fun ChatMessageRow(msg: CallUiState.ChatMessage) {
     if (msg.kind == CallUiState.ChatMessage.Kind.System) {
         Text(
-            msg.text,
+            msg.systemText?.text() ?: msg.text,
             color = LakkoDark.textMuted,
             fontSize = 12.sp,
             fontStyle = FontStyle.Italic,
@@ -1404,7 +1427,7 @@ private fun ChatMessageRow(msg: CallUiState.ChatMessage) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    msg.senderName,
+                    msg.senderName.ifEmpty { t("call.participant.you") },
                     color = LakkoDark.accent,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -1488,7 +1511,8 @@ private fun CallStatusLine(
 
     // Already decided by [callScreenTitle] at the stage; passed through whole so
     // the line cannot re-derive a different answer from the roster.
-    val title = remoteName?.trim()?.takeIf { it.isNotEmpty() } ?: "Call"
+    val strings = LocalStrings.current
+    val title = remoteName?.trim()?.takeIf { it.isNotEmpty() } ?: strings["chat.call.voice"]
     val status = callStatusText(
         calling = phase is CallUiState.CallPhase.Calling,
         connecting = phase is CallUiState.CallPhase.Connecting,
@@ -1496,8 +1520,9 @@ private fun CallStatusLine(
         reconnecting = phase is CallUiState.CallPhase.Reconnecting,
         ended = phase is CallUiState.CallPhase.Ended,
         elapsedSecs = elapsedSecs,
+        strings = strings,
     )
-    val spoken = callStatusSpokenLabel(title, status, elapsedSecs)
+    val spoken = callStatusSpokenLabel(title, status, elapsedSecs, strings)
     Column(
         modifier = modifier,
         horizontalAlignment = if (portrait) Alignment.CenterHorizontally else Alignment.Start,
@@ -1547,6 +1572,7 @@ private fun CallStatusLine(
  */
 @Composable
 private fun CallEncryptionChip(onClick: () -> Unit) {
+    val chipSpoken = t("call.encryption.chip_a11y")
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(50))
@@ -1554,7 +1580,7 @@ private fun CallEncryptionChip(onClick: () -> Unit) {
             .border(1.dp, LakkoDark.border, RoundedCornerShape(50))
             .clickable(onClick = onClick)
             .semantics(mergeDescendants = true) {
-                contentDescription = "Encrypted call. Double tap to see the safety number."
+                contentDescription = chipSpoken
             }
             .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1567,7 +1593,7 @@ private fun CallEncryptionChip(onClick: () -> Unit) {
             modifier = Modifier.size(12.dp),
         )
         Text(
-            text = CALL_ENCRYPTION_CHIP_LABEL,
+            text = CALL_ENCRYPTION_CHIP_LABEL.text(),
             color = LakkoDark.text,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
@@ -1590,7 +1616,8 @@ private fun CallEncryptionSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val clipboard = LocalClipboardManager.current
     val groups = remember(safetyNumber) { safetyNumberGroups(safetyNumber) }
-    val spoken = remember(safetyNumber) { safetyNumberSpokenLabel(safetyNumber) }
+    val strings = LocalStrings.current
+    val spoken = remember(safetyNumber, strings) { safetyNumberSpokenLabel(safetyNumber, strings) }
     var copied by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
@@ -1606,13 +1633,13 @@ private fun CallEncryptionSheet(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text(
-                CALL_ENCRYPTION_SHEET_TITLE,
+                CALL_ENCRYPTION_SHEET_TITLE.text(),
                 color = LakkoDark.text,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                callEncryptionSentence(otherName),
+                callEncryptionSentence(otherName).text(),
                 color = LakkoDark.textMuted,
                 fontSize = 14.sp,
             )
@@ -1635,7 +1662,7 @@ private fun CallEncryptionSheet(
                 }
             }
             Text(
-                CALL_ENCRYPTION_SHEET_HINT,
+                CALL_ENCRYPTION_SHEET_HINT.text(),
                 color = LakkoDark.textMuted,
                 fontSize = 13.sp,
             )
@@ -1651,7 +1678,7 @@ private fun CallEncryptionSheet(
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(8.dp),
                 ) {
-                    Text(if (copied) "Copied" else "Copy", color = LakkoDark.text)
+                    Text(t(if (copied) "common.copied" else "common.copy"), color = LakkoDark.text)
                 }
                 Button(
                     onClick = onDismiss,
@@ -1662,7 +1689,7 @@ private fun CallEncryptionSheet(
                     ),
                     shape = RoundedCornerShape(8.dp),
                 ) {
-                    Text("Done")
+                    Text(t("common.done"))
                 }
             }
         }
@@ -1705,15 +1732,15 @@ private fun QualityIndicator(state: CallUiState) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text(
-                        tier.name,
+                        t("call.quality.title", mapOf("tier" to t("call.quality.tier.${tier.name.lowercase()}"))),
                         color = LakkoDark.text,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
                         when (detail.connectionType) {
-                            CallUiState.ConnectionDetail.ConnectionType.Direct -> "Direct"
-                            CallUiState.ConnectionDetail.ConnectionType.Relay -> "Relay"
+                            CallUiState.ConnectionDetail.ConnectionType.Direct -> t("call.quality.direct")
+                            CallUiState.ConnectionDetail.ConnectionType.Relay -> t("call.quality.relay")
                             CallUiState.ConnectionDetail.ConnectionType.Unknown -> "—"
                         },
                         color = when (detail.connectionType) {
@@ -1725,13 +1752,23 @@ private fun QualityIndicator(state: CallUiState) {
                     )
                 }
                 Divider(color = LakkoDark.border)
+                val strings = LocalStrings.current
+                val locale = remember(strings.language) { java.util.Locale.forLanguageTag(strings.language) }
+                val rtt = detail.rttMs?.let {
+                    strings.format("call.quality.ms", mapOf("value" to java.text.NumberFormat.getIntegerInstance(locale).format(it)))
+                } ?: "—"
                 Text(
-                    "RTT: ${detail.rttMs?.toString()?.plus(" ms") ?: "—"}",
+                    strings.format("common.fact_pair", mapOf("first" to strings["call.quality.round_trip"], "second" to rtt)),
                     color = LakkoDark.text,
                     fontSize = 11.sp,
                 )
                 Text(
-                    "↓ ${formatBps(detail.downBps)}   ↑ ${formatBps(detail.upBps)}",
+                    strings.format("common.fact_pair", mapOf("first" to strings["call.quality.down"], "second" to formatBps(detail.downBps, strings, locale))),
+                    color = LakkoDark.text,
+                    fontSize = 11.sp,
+                )
+                Text(
+                    strings.format("common.fact_pair", mapOf("first" to strings["call.quality.up"], "second" to formatBps(detail.upBps, strings, locale))),
                     color = LakkoDark.text,
                     fontSize = 11.sp,
                 )
@@ -1740,12 +1777,29 @@ private fun QualityIndicator(state: CallUiState) {
     }
 }
 
-private fun formatBps(bps: Int?): String {
+/** A bitrate with its unit as its own message; the number formatted for the interface language. */
+private fun formatBps(bps: Int?, strings: Strings, locale: java.util.Locale): String {
     if (bps == null) return "—"
-    if (bps >= 1_000_000) return "%.1f Mbps".format(bps / 1_000_000.0)
-    if (bps >= 1_000) return "${bps / 1_000} kbps"
-    return "$bps bps"
+    val number = java.text.NumberFormat.getNumberInstance(locale)
+    if (bps >= 1_000_000) {
+        number.minimumFractionDigits = 1
+        number.maximumFractionDigits = 1
+        return strings.format("call.quality.mbps", mapOf("value" to number.format(bps / 1_000_000.0)))
+    }
+    number.maximumFractionDigits = 0
+    if (bps >= 1_000) return strings.format("call.quality.kbps", mapOf("value" to number.format(bps / 1_000)))
+    return strings.format("call.quality.bps", mapOf("value" to number.format(bps)))
 }
+
+/**
+ * The name on a participant's tile and row (ADR-0058): the name the call
+ * carries, else `call.participant.you` for this device and
+ * `call.participant.unnamed` for someone this device cannot name.
+ */
+@Composable
+private fun participantName(participant: CallUiState.Participant): String =
+    participant.displayName.takeIf { it.isNotEmpty() }
+        ?: t(if (participant.isLocal) "call.participant.you" else "call.participant.unnamed")
 
 @Composable
 private fun ParticipantTile(
@@ -1880,7 +1934,7 @@ private fun ParticipantTile(
                         strokeWidth = 2.dp,
                     )
                     Text(
-                        "Starting camera...",
+                        t("call.self.starting_camera"),
                         color = LakkoDark.text,
                         fontSize = 12.sp,
                     )
@@ -1899,7 +1953,7 @@ private fun ParticipantTile(
             ) {
                 Icon(
                     Icons.Filled.MicOff,
-                    contentDescription = "Muted",
+                    contentDescription = t("call.participant.muted_a11y"),
                     tint = LakkoDark.danger,
                     modifier = Modifier.size(if (large) 32.dp else 20.dp),
                 )
@@ -1915,7 +1969,7 @@ private fun ParticipantTile(
                     .background(LakkoDark.background.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
                     .padding(horizontal = 6.dp, vertical = 2.dp),
             ) {
-                Text("Sharing", color = LakkoDark.text, fontSize = 10.sp)
+                Text(t("call.participant.sharing"), color = LakkoDark.text, fontSize = 10.sp)
             }
         }
 
@@ -1930,7 +1984,7 @@ private fun ParticipantTile(
             ) {
                 Icon(
                     Icons.Filled.FrontHand,
-                    contentDescription = "Hand raised",
+                    contentDescription = t("call.participant.hand_raised"),
                     tint = LakkoDark.text,
                     modifier = Modifier.size(14.dp),
                 )
@@ -1950,19 +2004,13 @@ private fun ParticipantTile(
             if (!participant.micOn) {
                 Icon(
                     Icons.Filled.MicOff,
-                    contentDescription = "Muted",
+                    contentDescription = t("call.participant.muted_a11y"),
                     tint = LakkoDark.danger,
                     modifier = Modifier.size(12.dp),
                 )
             }
             Text(
-                text = if (participant.displayName.isNotEmpty()) {
-                    participant.displayName
-                } else if (participant.isLocal) {
-                    "You"
-                } else {
-                    "Unknown"
-                },
+                text = participantName(participant),
                 color = LakkoDark.text,
                 fontSize = 12.sp,
                 maxLines = 1,
@@ -1977,7 +2025,7 @@ private fun ParticipantTile(
             if (isPinned) {
                 Icon(
                     Icons.Filled.PushPin,
-                    contentDescription = "Pinned",
+                    contentDescription = t("call.participant.pinned"),
                     tint = LakkoDark.accent,
                     modifier = Modifier.size(12.dp),
                 )
@@ -2011,7 +2059,7 @@ private fun CallMoreMenu(state: CallUiState, expanded: Boolean, onDismiss: () ->
 
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         DropdownMenuItem(
-            text = { Text("Participants") },
+            text = { Text(t("call.control.participants")) },
             leadingIcon = { Icon(Icons.Filled.Group, contentDescription = null) },
             onClick = {
                 onDismiss()
@@ -2019,7 +2067,15 @@ private fun CallMoreMenu(state: CallUiState, expanded: Boolean, onDismiss: () ->
             },
         )
         DropdownMenuItem(
-            text = { Text(if (chatUnread > 0) "Chat ($chatUnread unread)" else "Chat") },
+            text = {
+                Text(
+                    if (chatUnread > 0) {
+                        t("call.control.chat_unread", emptyMap(), mapOf("count" to chatUnread.toULong()))
+                    } else {
+                        t("call.control.chat")
+                    },
+                )
+            },
             leadingIcon = { Icon(Icons.Filled.Chat, contentDescription = null) },
             onClick = {
                 onDismiss()
@@ -2027,7 +2083,7 @@ private fun CallMoreMenu(state: CallUiState, expanded: Boolean, onDismiss: () ->
             },
         )
         DropdownMenuItem(
-            text = { Text(if (local?.handRaised == true) "Lower hand" else "Raise hand") },
+            text = { Text(t(if (local?.handRaised == true) "call.control.lower_hand" else "call.control.raise_hand")) },
             leadingIcon = { Icon(Icons.Filled.PanTool, contentDescription = null) },
             onClick = {
                 onDismiss()
@@ -2036,7 +2092,7 @@ private fun CallMoreMenu(state: CallUiState, expanded: Boolean, onDismiss: () ->
         )
         DropdownMenuItem(
             text = {
-                Text(if (local?.screenSharing == true) "Stop sharing screen" else "Share screen")
+                Text(t(if (local?.screenSharing == true) "call.control.stop_share_screen" else "call.control.share_screen"))
             },
             leadingIcon = { Icon(Icons.Filled.ScreenShare, contentDescription = null) },
             onClick = {
@@ -2045,7 +2101,7 @@ private fun CallMoreMenu(state: CallUiState, expanded: Boolean, onDismiss: () ->
             },
         )
         DropdownMenuItem(
-            text = { Text("Settings") },
+            text = { Text(t("nav.settings")) },
             leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) },
             onClick = {
                 onDismiss()
@@ -2071,7 +2127,7 @@ private fun ParticipantListDrawer(state: CallUiState) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "Participants (${participants.size})",
+                t("call.participants.title", mapOf("count" to participants.size.toString())),
                 color = LakkoDark.text,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -2080,7 +2136,7 @@ private fun ParticipantListDrawer(state: CallUiState) {
             IconButton(onClick = { state.setParticipantListOpen(false) }) {
                 Icon(
                     Icons.Filled.Close,
-                    contentDescription = "Close participant list",
+                    contentDescription = t("call.participants.close_a11y"),
                     tint = LakkoDark.textMuted,
                 )
             }
@@ -2101,15 +2157,14 @@ private fun ParticipantListDrawer(state: CallUiState) {
                             .background(p.quality.colour(), CircleShape),
                     )
                     Text(
-                        text = if (p.displayName.isNotEmpty()) p.displayName
-                               else if (p.isLocal) "You" else "Unknown",
+                        text = participantName(p),
                         color = LakkoDark.text,
                         modifier = Modifier.weight(1f),
                     )
                     if (p.handRaised) {
                         Icon(
                             Icons.Filled.FrontHand,
-                            contentDescription = "Hand raised",
+                            contentDescription = t("call.participant.hand_raised"),
                             tint = LakkoDark.text,
                             modifier = Modifier.size(16.dp),
                         )
@@ -2117,7 +2172,7 @@ private fun ParticipantListDrawer(state: CallUiState) {
                     if (!p.micOn) {
                         Icon(
                             Icons.Filled.MicOff,
-                            contentDescription = "Muted",
+                            contentDescription = t("call.participant.muted_a11y"),
                             tint = LakkoDark.danger,
                             modifier = Modifier.size(14.dp),
                         )
@@ -2125,7 +2180,7 @@ private fun ParticipantListDrawer(state: CallUiState) {
                     if (p.screenSharing) {
                         Icon(
                             Icons.Filled.ScreenShare,
-                            contentDescription = "Sharing screen",
+                            contentDescription = t("call.participant.sharing_a11y"),
                             tint = LakkoDark.text,
                             modifier = Modifier.size(14.dp),
                         )

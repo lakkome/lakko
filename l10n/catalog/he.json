@@ -242,12 +242,380 @@
       "text": "לשחזר את הגיבוי הישן הזה?",
       "status": "machine"
     },
+    "call.alert.title": {
+      "text": "שיחה",
+      "status": "machine"
+    },
+    "call.bar.camera_on_a11y": {
+      "text": "המצלמה שלכם פועלת",
+      "status": "machine"
+    },
+    "call.bar.encrypted_a11y": {
+      "text": "מוצפנת",
+      "status": "machine"
+    },
+    "call.bar.region_a11y": {
+      "text": "שיחה פעילה",
+      "status": "machine"
+    },
+    "call.bar.return_a11y": {
+      "text": "חזרה לשיחה. {name}",
+      "status": "machine"
+    },
+    "call.busy.call_join": {
+      "text": "אתם כבר בשיחה. סיימו אותה לפני שתצטרפו לשיחה אחרת.",
+      "status": "machine"
+    },
+    "call.busy.call_start": {
+      "text": "אתם כבר בשיחה. סיימו אותה לפני שתתחילו שיחה אחרת.",
+      "status": "machine"
+    },
+    "call.busy.group_join": {
+      "text": "אתם כבר בשיחה קבוצתית. סיימו אותה לפני שתצטרפו לשיחה אחרת.",
+      "status": "machine"
+    },
+    "call.busy.group_start": {
+      "text": "אתם כבר בשיחה קבוצתית. סיימו אותה לפני שתתחילו שיחה אחרת.",
+      "status": "machine"
+    },
+    "call.busy.link_join": {
+      "text": "אתם כבר בשיחה שנפתחה מקישור. סיימו אותה לפני שתצטרפו לשיחה אחרת.",
+      "status": "machine"
+    },
+    "call.busy.link_start": {
+      "text": "אתם כבר בשיחה שנפתחה מקישור. סיימו אותה לפני שתתחילו שיחה אחרת.",
+      "status": "machine"
+    },
+    "call.camera_failed.not_allowed": {
+      "text": "ל-Lakko לא ניתנה הרשאה להשתמש במצלמה. השיחה ממשיכה בלעדיה.",
+      "status": "machine"
+    },
+    "call.camera_failed.not_found": {
+      "text": "לא נמצאה מצלמה. השיחה ממשיכה בלעדיה.",
+      "status": "machine"
+    },
+    "call.camera_failed.other": {
+      "text": "לא ניתן היה להפעיל את המצלמה. ייתכן שאפליקציה אחרת משתמשת בה.",
+      "status": "machine"
+    },
+    "call.capture.both.failed": {
+      "text": "לא ניתן היה להפעיל את המיקרופון ואת המצלמה. אפשר להקשיב ולצפות.",
+      "status": "machine"
+    },
+    "call.capture.both.not_allowed": {
+      "text": "ל-Lakko לא ניתנה הרשאה להשתמש במיקרופון או במצלמה. אפשר להקשיב ולצפות.",
+      "status": "machine"
+    },
+    "call.capture.both.not_found": {
+      "text": "לא נמצאו מיקרופון או מצלמה. אפשר להקשיב ולצפות.",
+      "status": "machine"
+    },
+    "call.capture.camera.failed": {
+      "text": "לא ניתן היה להפעיל את המצלמה. הצטרפתם עם המיקרופון.",
+      "status": "machine"
+    },
+    "call.capture.camera.not_allowed": {
+      "text": "ל-Lakko לא ניתנה הרשאה להשתמש במצלמה. הצטרפתם עם המיקרופון.",
+      "status": "machine"
+    },
+    "call.capture.camera.not_found": {
+      "text": "לא נמצאה מצלמה. הצטרפתם עם המיקרופון.",
+      "status": "machine"
+    },
+    "call.chat.a11y": {
+      "text": "הצ׳אט של השיחה",
+      "status": "machine"
+    },
+    "call.chat.close_a11y": {
+      "text": "סגירת הצ׳אט",
+      "status": "machine"
+    },
+    "call.chat.empty": {
+      "text": "אין עדיין הודעות. ההודעות כאן מוצפנות מקצה לקצה.",
+      "status": "machine"
+    },
+    "call.chat.joined": {
+      "text": "הצטרפות לשיחה: {name}",
+      "status": "machine"
+    },
+    "call.chat.left": {
+      "text": "אחד המשתתפים יצא מהשיחה",
+      "status": "machine"
+    },
+    "call.collapse_a11y": {
+      "text": "מזעור השיחה וחזרה לאפליקציה",
+      "status": "machine"
+    },
+    "call.collapse_title": {
+      "text": "מזעור השיחה",
+      "status": "machine"
+    },
+    "call.control.bar_a11y": {
+      "text": "פקדי השיחה",
+      "status": "machine"
+    },
+    "call.control.camera": {
+      "text": "מצלמה",
+      "status": "machine"
+    },
+    "call.control.camera_start_a11y": {
+      "text": "הפעלת המצלמה",
+      "status": "machine"
+    },
+    "call.control.camera_stop_a11y": {
+      "text": "כיבוי המצלמה",
+      "status": "machine"
+    },
+    "call.control.chat": {
+      "text": "צ׳אט",
+      "status": "machine"
+    },
+    "call.control.chat_hide_a11y": {
+      "text": "הסתרת הצ׳אט",
+      "status": "machine"
+    },
+    "call.control.chat_show_a11y": {
+      "text": "הצגת הצ׳אט",
+      "status": "machine"
+    },
+    "call.control.chat_unread": {
+      "text": "{count, plural, one {צ׳אט (הודעה אחת שלא נקראה)} two {צ׳אט (# שלא נקראו)} other {צ׳אט (# שלא נקראו)}}",
+      "status": "machine"
+    },
+    "call.control.end": {
+      "text": "סיום",
+      "status": "machine"
+    },
+    "call.control.end_a11y": {
+      "text": "סיום השיחה",
+      "status": "machine"
+    },
+    "call.control.invite": {
+      "text": "הזמנה",
+      "status": "machine"
+    },
+    "call.control.invite_a11y": {
+      "text": "הזמנת מישהו לשיחה הזו בקישור",
+      "status": "machine"
+    },
+    "call.control.lower_hand": {
+      "text": "הורדת היד",
+      "status": "machine"
+    },
+    "call.control.more": {
+      "text": "עוד",
+      "status": "machine"
+    },
+    "call.control.more_a11y": {
+      "text": "פקדים נוספים",
+      "status": "machine"
+    },
+    "call.control.mute": {
+      "text": "השתקה",
+      "status": "machine"
+    },
+    "call.control.mute_a11y": {
+      "text": "השתקת המיקרופון",
+      "status": "machine"
+    },
+    "call.control.participants": {
+      "text": "משתתפים",
+      "status": "machine"
+    },
+    "call.control.participants_hide_a11y": {
+      "text": "הסתרת המשתתפים",
+      "status": "machine"
+    },
+    "call.control.participants_show_a11y": {
+      "text": "הצגת המשתתפים",
+      "status": "machine"
+    },
+    "call.control.raise_hand": {
+      "text": "הרמת יד",
+      "status": "machine"
+    },
+    "call.control.share_screen": {
+      "text": "שיתוף מסך",
+      "status": "machine"
+    },
+    "call.control.speaker": {
+      "text": "רמקול",
+      "status": "machine"
+    },
+    "call.control.speaker_a11y": {
+      "text": "השמעת הקול דרך {device}",
+      "status": "machine"
+    },
+    "call.control.speaker_default_device": {
+      "text": "רמקול ברירת המחדל",
+      "status": "machine"
+    },
+    "call.control.speaker_next_device": {
+      "text": "הרמקול הבא",
+      "status": "machine"
+    },
+    "call.control.speaker_off_a11y": {
+      "text": "כיבוי הרמקול",
+      "status": "machine"
+    },
+    "call.control.speaker_on_a11y": {
+      "text": "הפעלת הרמקול",
+      "status": "machine"
+    },
+    "call.control.stop_share_screen": {
+      "text": "הפסקת שיתוף המסך",
+      "status": "machine"
+    },
+    "call.control.unmute_a11y": {
+      "text": "ביטול השתקת המיקרופון",
+      "status": "machine"
+    },
+    "call.e2ee": {
+      "text": "מוצפנת מקצה לקצה",
+      "status": "machine"
+    },
+    "call.encryption.chip": {
+      "text": "מוצפנת",
+      "status": "machine"
+    },
+    "call.encryption.chip_a11y": {
+      "text": "השיחה הזו מוצפנת. הצגת מספר הבטיחות",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint": {
+      "text": "הקריאו את המספרים האלה בקול. אם הם זהים בשני הטלפונים, אף אחד לא מאזין.",
+      "status": "machine"
+    },
+    "call.encryption.copy_a11y": {
+      "text": "העתקת מספר הבטיחות",
+      "status": "machine"
+    },
+    "call.encryption.number_a11y": {
+      "text": "מספר בטיחות: {groups}",
+      "status": "machine"
+    },
+    "call.encryption.number_unavailable": {
+      "text": "מספר הבטיחות לא זמין",
+      "status": "machine"
+    },
+    "call.encryption.sentence_group": {
+      "text": "רק האנשים שבשיחה הזו יכולים לשמוע אותה.",
+      "status": "machine"
+    },
+    "call.encryption.sentence_named": {
+      "text": "רק אתם ו-{name} יכולים לשמוע את השיחה הזו.",
+      "status": "machine"
+    },
+    "call.encryption.setting_up": {
+      "text": "בהגדרה...",
+      "status": "machine"
+    },
+    "call.encryption.title": {
+      "text": "השיחה הזו מוצפנת",
+      "status": "machine"
+    },
+    "call.error.encryption_setup": {
+      "text": "לא ניתן היה להגדיר את ההצפנה של השיחה, ולכן השיחה לא התחילה.",
+      "status": "machine"
+    },
+    "call.error.join_group": {
+      "text": "לא ניתן היה להצטרף לשיחה הקבוצתית. נסו שוב.",
+      "status": "machine"
+    },
+    "call.error.microphone_not_allowed": {
+      "text": "ל-Lakko לא ניתנה הרשאה להשתמש במיקרופון.",
+      "status": "machine"
+    },
+    "call.error.microphone_not_found": {
+      "text": "לא נמצא מיקרופון.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption": {
+      "text": "הדפדפן הזה לא יכול להצפין את השמע והווידאו של השיחה, ולכן השיחה לא התחילה.",
+      "status": "machine"
+    },
+    "call.error.not_accepting": {
+      "text": "השיחה הזו לא מקבלת משתתפים חדשים כרגע.",
+      "status": "machine"
+    },
+    "call.error.not_member": {
+      "text": "אתם כבר לא חברים בצ׳אט הזה.",
+      "status": "machine"
+    },
+    "call.error.signed_out_start": {
+      "text": "התנתקתם. התחברו מחדש כדי להתחיל שיחה.",
+      "status": "machine"
+    },
+    "call.error.start_group": {
+      "text": "לא ניתן היה להתחיל את השיחה הקבוצתית. נסו שוב.",
+      "status": "machine"
+    },
+    "call.error.unavailable": {
+      "text": "שיחות לא זמינות כרגע. נסו שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "call.fill.remote_camera_a11y": {
+      "text": "המצלמה של {name}",
+      "status": "machine"
+    },
+    "call.group_banner.join_video": {
+      "text": "וידאו",
+      "status": "machine"
+    },
+    "call.group_banner.open_chat": {
+      "text": "פתיחת הצ׳אט",
+      "status": "machine"
+    },
+    "call.group_banner.title": {
+      "text": "שיחה קבוצתית ב-{name}",
+      "status": "machine"
+    },
     "call.guest.default_name": {
       "text": "אורח",
       "status": "machine"
     },
     "call.guest.working.title": {
       "text": "מכניסים אתכם לשיחה...",
+      "status": "machine"
+    },
+    "call.history.call_back_a11y": {
+      "text": "חיוג חוזר",
+      "status": "machine"
+    },
+    "call.history.call_back_video_a11y": {
+      "text": "חיוג חוזר עם וידאו",
+      "status": "machine"
+    },
+    "call.history.empty": {
+      "text": "אין עדיין שיחות",
+      "status": "machine"
+    },
+    "call.history.empty_body": {
+      "text": "השיחות שאתם מבצעים ומקבלים יופיעו כאן.",
+      "status": "machine"
+    },
+    "call.history.join_by_link": {
+      "text": "הצטרפות בקישור",
+      "status": "machine"
+    },
+    "call.history.join_invalid": {
+      "text": "זה לא נראה כמו קישור לשיחה. הדביקו את הקישור המלא ונסו שוב.",
+      "status": "machine"
+    },
+    "call.history.new_call": {
+      "text": "שיחה חדשה",
+      "status": "machine"
+    },
+    "call.history.paste_hint": {
+      "text": "מי שיצר את השיחה משתף את הקישור.",
+      "status": "machine"
+    },
+    "call.history.paste_label": {
+      "text": "הדביקו קישור לשיחה",
+      "status": "machine"
+    },
+    "call.history.unknown_conversation": {
+      "text": "לא ידוע",
       "status": "machine"
     },
     "call.incoming.accept": {
@@ -258,12 +626,96 @@
       "text": "מענה לשיחה מ-{name}",
       "status": "machine"
     },
+    "call.incoming.accept_video_a11y": {
+      "text": "מענה לשיחת וידאו מ-{name}",
+      "status": "machine"
+    },
+    "call.incoming.accept_voice_a11y": {
+      "text": "מענה לשיחה קולית מ-{name}",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video": {
+      "text": "מענה בלי וידאו",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video_a11y": {
+      "text": "מענה לשיחה מ-{name} בלי וידאו",
+      "status": "machine"
+    },
     "call.incoming.decline": {
       "text": "דחייה",
       "status": "machine"
     },
     "call.incoming.decline_from": {
       "text": "דחיית השיחה מ-{name}",
+      "status": "machine"
+    },
+    "call.incoming.decline_video_a11y": {
+      "text": "דחיית שיחת וידאו מ-{name}",
+      "status": "machine"
+    },
+    "call.incoming.decline_voice_a11y": {
+      "text": "דחיית שיחה קולית מ-{name}",
+      "status": "machine"
+    },
+    "call.incoming.video_a11y": {
+      "text": "שיחת וידאו נכנסת מ-{name}",
+      "status": "machine"
+    },
+    "call.incoming.voice_a11y": {
+      "text": "שיחה קולית נכנסת מ-{name}",
+      "status": "machine"
+    },
+    "call.invite.copied": {
+      "text": "הקישור הועתק. כל מי שתשלחו לו אותו יוכל לבקש להצטרף.",
+      "status": "machine"
+    },
+    "call.invite.link_a11y": {
+      "text": "קישור לשיחה",
+      "status": "machine"
+    },
+    "call.invite.minting": {
+      "text": "מכינים קישור לשיחה הזו. זה לוקח כמה שניות.",
+      "status": "machine"
+    },
+    "call.invite.ready": {
+      "text": "כל מי שיש לו את הקישור הזה יכול לבקש להצטרף לשיחה. אתם מחליטים מי נכנס.",
+      "status": "machine"
+    },
+    "call.invite.retry_a11y": {
+      "text": "ניסיון חוזר להכין את קישור ההזמנה",
+      "status": "machine"
+    },
+    "call.invite.share_a11y": {
+      "text": "שיתוף קישור ההזמנה",
+      "status": "machine"
+    },
+    "call.invite.shared": {
+      "text": "הקישור שותף.",
+      "status": "machine"
+    },
+    "call.invite.shown": {
+      "text": "העתיקו את הקישור הזה: {url}",
+      "status": "machine"
+    },
+    "call.invite.signed_out": {
+      "text": "התנתקתם. התחברו מחדש כדי לקבל קישור לשיחה הזו.",
+      "status": "machine"
+    },
+    "call.invite.unavailable": {
+      "text": "לא ניתן היה להכין את הקישור. השיחה לא הושפעה, אז אפשר לנסות שוב.",
+      "status": "machine"
+    },
+    "call.kind.video": {
+      "text": "שיחת וידאו",
+      "status": "machine"
+    },
+    "call.kind.voice": {
+      "text": "שיחה קולית",
+      "status": "machine"
+    },
+    "call.label.group": {
+      "text": "שיחה קבוצתית",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -310,6 +762,14 @@
       "text": "טוען את קישור השיחה...",
       "status": "machine"
     },
+    "call.link.notice.a11y": {
+      "text": "שיחה מקישור",
+      "status": "machine"
+    },
+    "call.link.notice.connecting": {
+      "text": "מתחברים לשיחה...",
+      "status": "machine"
+    },
     "call.link.start": {
       "text": "התחלת שיחה",
       "status": "machine"
@@ -328,6 +788,318 @@
     },
     "call.link.waiting_hint": {
       "text": "אפשר לצאת מהמסך הזה; תצטרפו ברגע שתאושרו.",
+      "status": "machine"
+    },
+    "call.log.a11y.call_back": {
+      "text": "{head}. חיוג חוזר",
+      "status": "machine"
+    },
+    "call.log.a11y.lasted": {
+      "text": "{head}, נמשכה {duration}",
+      "status": "machine"
+    },
+    "call.log.a11y.video_declined": {
+      "text": "שיחת וידאו שנדחתה",
+      "status": "machine"
+    },
+    "call.log.a11y.video_incoming": {
+      "text": "שיחת וידאו, נכנסת",
+      "status": "machine"
+    },
+    "call.log.a11y.video_missed": {
+      "text": "שיחת וידאו שלא נענתה",
+      "status": "machine"
+    },
+    "call.log.a11y.video_outgoing": {
+      "text": "שיחת וידאו, יוצאת",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_declined": {
+      "text": "שיחה שנדחתה",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_incoming": {
+      "text": "שיחה, נכנסת",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_missed": {
+      "text": "שיחה שלא נענתה",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_outgoing": {
+      "text": "שיחה, יוצאת",
+      "status": "machine"
+    },
+    "call.log.declined": {
+      "text": "נדחתה",
+      "status": "machine"
+    },
+    "call.log.incoming": {
+      "text": "שיחה נכנסת",
+      "status": "machine"
+    },
+    "call.log.incoming_duration": {
+      "text": "שיחה נכנסת, {duration}",
+      "status": "machine"
+    },
+    "call.log.missed": {
+      "text": "שיחה שלא נענתה",
+      "status": "machine"
+    },
+    "call.log.outgoing": {
+      "text": "שיחה יוצאת",
+      "status": "machine"
+    },
+    "call.log.outgoing_duration": {
+      "text": "שיחה יוצאת, {duration}",
+      "status": "machine"
+    },
+    "call.notification.channel_description": {
+      "text": "שיחות נכנסות ב-Lakko",
+      "status": "machine"
+    },
+    "call.notification.incoming": {
+      "text": "שיחה נכנסת",
+      "status": "machine"
+    },
+    "call.participant.hand_raised": {
+      "text": "יד מורמת",
+      "status": "machine"
+    },
+    "call.participant.muted": {
+      "text": "מושתק",
+      "status": "machine"
+    },
+    "call.participant.muted_a11y": {
+      "text": "המיקרופון מושתק",
+      "status": "machine"
+    },
+    "call.participant.numbered": {
+      "text": "משתתף {number}",
+      "status": "machine"
+    },
+    "call.participant.pinned": {
+      "text": "מוצמד",
+      "status": "machine"
+    },
+    "call.participant.sharing": {
+      "text": "משתף",
+      "status": "machine"
+    },
+    "call.participant.sharing_a11y": {
+      "text": "משתף מסך",
+      "status": "machine"
+    },
+    "call.participant.unnamed": {
+      "text": "משתתף",
+      "status": "machine"
+    },
+    "call.participant.you": {
+      "text": "את/ה",
+      "status": "machine"
+    },
+    "call.participants.close_a11y": {
+      "text": "סגירת רשימת המשתתפים",
+      "status": "machine"
+    },
+    "call.participants.title": {
+      "text": "משתתפים ({count})",
+      "status": "machine"
+    },
+    "call.permission.audio_only": {
+      "text": "שמע בלבד",
+      "status": "machine"
+    },
+    "call.permission.camera.body": {
+      "text": "וידאו דורש מצלמה. אפשר להמשיך עם שמע בלבד, או לאפשר ל-Lakko גישה למצלמה בהגדרות האפליקציה.",
+      "status": "machine"
+    },
+    "call.permission.camera.title": {
+      "text": "נדרשת גישה למצלמה",
+      "status": "machine"
+    },
+    "call.permission.microphone.body": {
+      "text": "שיחות דורשות מיקרופון. אפשרו ל-Lakko גישה למיקרופון בהגדרות האפליקציה ונסו שוב.",
+      "status": "machine"
+    },
+    "call.permission.microphone.title": {
+      "text": "נדרשת גישה למיקרופון",
+      "status": "machine"
+    },
+    "call.quality.a11y": {
+      "text": "איכות החיבור: {tier}",
+      "status": "machine"
+    },
+    "call.quality.bps": {
+      "text": "{value} bps",
+      "status": "machine"
+    },
+    "call.quality.details_a11y": {
+      "text": "פרטי החיבור",
+      "status": "machine"
+    },
+    "call.quality.direct": {
+      "text": "ישיר",
+      "status": "machine"
+    },
+    "call.quality.down": {
+      "text": "הורדה",
+      "status": "machine"
+    },
+    "call.quality.kbps": {
+      "text": "{value} kbps",
+      "status": "machine"
+    },
+    "call.quality.mbps": {
+      "text": "{value} Mbps",
+      "status": "machine"
+    },
+    "call.quality.ms": {
+      "text": "{value} ms",
+      "status": "machine"
+    },
+    "call.quality.relay": {
+      "text": "דרך שרת ממסר",
+      "status": "machine"
+    },
+    "call.quality.round_trip": {
+      "text": "זמן הלוך ושוב",
+      "status": "machine"
+    },
+    "call.quality.tier.bad": {
+      "text": "גרועה",
+      "status": "machine"
+    },
+    "call.quality.tier.excellent": {
+      "text": "מצוינת",
+      "status": "machine"
+    },
+    "call.quality.tier.fair": {
+      "text": "סבירה",
+      "status": "machine"
+    },
+    "call.quality.tier.good": {
+      "text": "טובה",
+      "status": "machine"
+    },
+    "call.quality.tier.poor": {
+      "text": "חלשה",
+      "status": "machine"
+    },
+    "call.quality.title": {
+      "text": "חיבור: {tier}",
+      "status": "machine"
+    },
+    "call.quality.up": {
+      "text": "העלאה",
+      "status": "machine"
+    },
+    "call.self.camera_a11y": {
+      "text": "המצלמה שלכם",
+      "status": "machine"
+    },
+    "call.self.flip_a11y": {
+      "text": "מעבר למצלמה השנייה",
+      "status": "machine"
+    },
+    "call.self.starting_camera": {
+      "text": "מפעילים את המצלמה...",
+      "status": "machine"
+    },
+    "call.settings.devices": {
+      "text": "מכשירים",
+      "status": "machine"
+    },
+    "call.settings.low_data": {
+      "text": "מצב חיסכון בנתונים",
+      "status": "machine"
+    },
+    "call.settings.low_data_hint": {
+      "text": "מגביל את הווידאו ל-360p, שימושי בחיבורים סלולריים עם נפח מוגבל.",
+      "status": "machine"
+    },
+    "call.settings.microphone": {
+      "text": "מיקרופון",
+      "status": "machine"
+    },
+    "call.settings.mirror": {
+      "text": "היפוך התצוגה המקדימה שלי",
+      "status": "machine"
+    },
+    "call.settings.no_devices": {
+      "text": "עדיין לא דווחו מכשירים. הם יופיעו כאן אחרי שתאשרו גישה למיקרופון או למצלמה.",
+      "status": "machine"
+    },
+    "call.settings.system_default": {
+      "text": "ברירת המחדל של המערכת",
+      "status": "machine"
+    },
+    "call.settings.video": {
+      "text": "וידאו",
+      "status": "machine"
+    },
+    "call.start.no_camera": {
+      "text": "אין מצלמה זמינה, לכן זו שיחה קולית.",
+      "status": "machine"
+    },
+    "call.status.calling": {
+      "text": "מחייגים...",
+      "status": "machine"
+    },
+    "call.status.calling_spoken": {
+      "text": "מחייגים",
+      "status": "machine"
+    },
+    "call.status.connected": {
+      "text": "מחובר",
+      "status": "machine"
+    },
+    "call.status.connecting_spoken": {
+      "text": "מתחברים",
+      "status": "machine"
+    },
+    "call.status.ended": {
+      "text": "השיחה הסתיימה",
+      "status": "machine"
+    },
+    "call.status.group_count": {
+      "text": "שיחה קבוצתית · {count}",
+      "status": "machine"
+    },
+    "call.status.in_call_spoken": {
+      "text": "בשיחה, {duration}",
+      "status": "machine"
+    },
+    "call.status.reconnecting": {
+      "text": "מתחברים מחדש...",
+      "status": "machine"
+    },
+    "call.status.reconnecting_spoken": {
+      "text": "מתחברים מחדש",
+      "status": "machine"
+    },
+    "call.status.ringing": {
+      "text": "מצלצל...",
+      "status": "machine"
+    },
+    "call.undecryptable.named": {
+      "text": "לא ניתן לפענח את השמע והווידאו של {name}",
+      "status": "machine"
+    },
+    "call.undecryptable.notice": {
+      "text": "לא ניתן לפענח את השמע והווידאו הנכנסים",
+      "status": "machine"
+    },
+    "call.undecryptable.notice_many": {
+      "text": "{count, plural, one {לא ניתן לפענח את השמע והווידאו של משתתף אחד} two {לא ניתן לפענח את השמע והווידאו של שני משתתפים} other {לא ניתן לפענח את השמע והווידאו של # משתתפים}}",
+      "status": "machine"
+    },
+    "call.undecryptable.tile": {
+      "text": "לא ניתן לפענח",
+      "status": "machine"
+    },
+    "call.undecryptable.tile_a11y": {
+      "text": "לא ניתן לפענח את השמע והווידאו של המשתתף הזה",
       "status": "machine"
     },
     "channels.back": {
@@ -2582,12 +3354,20 @@
       "text": "סיום",
       "status": "machine"
     },
+    "common.duration.hours": {
+      "text": "{count, plural, one {שעה} two {שעתיים} other {# שעות}}",
+      "status": "machine"
+    },
     "common.duration.minutes": {
       "text": "{count, plural, one {דקה} two {שתי דקות} other {# דקות}}",
       "status": "machine"
     },
     "common.duration.minutes_seconds": {
       "text": "{minutes} ו-{seconds}",
+      "status": "machine"
+    },
+    "common.duration.pair": {
+      "text": "{first} ו-{second}",
       "status": "machine"
     },
     "common.duration.seconds": {
@@ -2680,6 +3460,10 @@
     },
     "common.on": {
       "text": "פועל",
+      "status": "machine"
+    },
+    "common.open": {
+      "text": "פתיחה",
       "status": "machine"
     },
     "common.open_chat": {
@@ -3792,6 +4576,22 @@
     },
     "new_group.subtitle": {
       "text": "אתם תהיו הבעלים של הקבוצה. אפשר להוסיף עוד אנשים מאוחר יותר.",
+      "status": "machine"
+    },
+    "notification.channel.messages": {
+      "text": "הודעות",
+      "status": "machine"
+    },
+    "notification.channel.messages_desc": {
+      "text": "התראות השכמה להודעות חדשות ב-Lakko",
+      "status": "machine"
+    },
+    "notification.message.attachments": {
+      "text": "{count, plural, one {שלח/ה קובץ מצורף} two {שלח/ה שני קבצים מצורפים} other {שלח/ה # קבצים מצורפים}}",
+      "status": "machine"
+    },
+    "notification.message.new": {
+      "text": "הודעה חדשה",
       "status": "machine"
     },
     "recovery.access_only_note": {

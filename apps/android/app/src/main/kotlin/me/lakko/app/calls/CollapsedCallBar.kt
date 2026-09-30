@@ -3,6 +3,9 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.Strings
+
 import uniffi.lakko_ffi_uniffi.CallBarPhase
 import uniffi.lakko_ffi_uniffi.CallBarStatus
 
@@ -95,10 +98,13 @@ public fun callBarPhaseOf(phase: CallUiState.CallPhase): CallBarPhase = when (ph
  * the rule returning a sum type: there is no reachable way to render two of
  * these at once, and adding a fifth arm to the wire breaks the build here.
  */
-public fun callBarStatusText(status: CallBarStatus): String = when (status) {
-    CallBarStatus.Calling -> stateWord(calling = true)
-    CallBarStatus.Connecting -> stateWord(connecting = true)
-    CallBarStatus.Reconnecting -> stateWord(reconnecting = true)
+public fun callBarStatusText(
+    status: CallBarStatus,
+    strings: Strings = Localization.strings.value,
+): String = when (status) {
+    CallBarStatus.Calling -> stateWord(strings, calling = true)
+    CallBarStatus.Connecting -> stateWord(strings, connecting = true)
+    CallBarStatus.Reconnecting -> stateWord(strings, reconnecting = true)
     // The rule carries milliseconds because "how long it has been is not a
     // presentation decision"; the seconds and the `m:ss` are.
     is CallBarStatus.Elapsed -> callStatusText(
@@ -108,12 +114,14 @@ public fun callBarStatusText(status: CallBarStatus): String = when (status) {
         reconnecting = false,
         ended = false,
         elapsedSecs = (status.ms / MILLIS_PER_SECOND).toLong(),
+        strings = strings,
     )
 }
 
 private const val MILLIS_PER_SECOND: ULong = 1_000uL
 
 private fun stateWord(
+    strings: Strings,
     calling: Boolean = false,
     connecting: Boolean = false,
     reconnecting: Boolean = false,
@@ -124,6 +132,7 @@ private fun stateWord(
     reconnecting = reconnecting,
     ended = false,
     elapsedSecs = null,
+    strings = strings,
 )
 
 /**

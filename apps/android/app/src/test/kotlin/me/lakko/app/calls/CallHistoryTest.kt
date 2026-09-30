@@ -3,6 +3,7 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.EnglishForTests
 import me.lakko.app.chat.ConversationKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -21,6 +22,11 @@ import java.time.ZoneId
  * to survive whatever a partial write or an older build left behind.
  */
 class CallHistoryTest {
+    init {
+        // ADR-0058: the words under test are the English catalog's.
+        EnglishForTests.install()
+    }
+
 
     private val zone: ZoneId = ZoneId.of("UTC")
 

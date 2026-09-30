@@ -41,10 +41,11 @@
  */
 
 import type { CallMediaChoice, CallStartKind } from "./call-media-choice";
+import { t } from "../l10n";
+import type { CallText } from "./call-slot";
 
 /** The one line shown when the video button could not open a camera (§3.2). */
-export const CAMERA_UNAVAILABLE_NOTICE =
-  "No camera available, so this is a voice call.";
+export const CAMERA_UNAVAILABLE_NOTICE: CallText = () => t("call.start.no_camera");
 
 /**
  * What a press of a call button leads to.
@@ -57,7 +58,7 @@ export const CAMERA_UNAVAILABLE_NOTICE =
 export type CallStartPlan =
   /** Place the call now. `notice` is the one line §3.2 owes the user when the
    *  call they asked for is not the call they are getting. */
-  { readonly kind: "dial"; readonly media: CallMediaChoice; readonly notice: string | null };
+  { readonly kind: "dial"; readonly media: CallMediaChoice; readonly notice: CallText | null };
 
 /**
  * What the chat header's two buttons do.

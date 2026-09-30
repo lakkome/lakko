@@ -126,16 +126,17 @@ enum QuietIncomingCallPresentation {
     /// The two words on both surfaces. Stated once so the panel and the row
     /// cannot drift apart, and so they read the same as the full-screen
     /// incoming call's own buttons (`docs/ux/calls.md` section 2.2).
-    static let acceptLabel = "Accept"
-    static let declineLabel = "Decline"
+    static var acceptLabel: String { Localization.text("call.incoming.accept") }
+    static var declineLabel: String { Localization.text("call.incoming.decline") }
     /// Section 2.2's third choice, offered by the panel on a video call. The
     /// list row does not carry it: the row has space for the two the spec names
     /// and nothing more, and accepting from it takes the call as it was
     /// offered.
-    static let acceptWithoutVideoLabel = "Accept without video"
+    static var acceptWithoutVideoLabel: String { Localization.text("call.incoming.accept_without_video") }
 
     /// What VoiceOver reads for the panel and the row as a whole.
     static func spokenSummary(_ offer: QuietIncomingCall) -> String {
-        "\(offer.kindLabel) from \(offer.displayName)"
+        Localization.text(
+            "chats.row.call.label", texts: ["kind": offer.kindLabel, "name": offer.displayName])
     }
 }

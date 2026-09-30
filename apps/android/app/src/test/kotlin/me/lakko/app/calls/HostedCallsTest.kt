@@ -795,7 +795,9 @@ class HostedCallsTest {
         val outcome = h.host.start(request(owner = false))
         assertEquals(LinkCallStartOutcome.Failed("mint refused"), outcome)
         assertEquals(LinkCallPhase.ERROR, h.host.slot.value?.phase)
-        assertEquals("mint refused", h.host.slot.value?.errorMessage)
+        // The diagnostic stays in the outcome for the log; a failure of no
+        // known kind carries no reason to the screen (ADR-0058).
+        assertNull(h.host.slot.value?.error)
         assertFalse(h.host.occupiesSlot)
     }
 

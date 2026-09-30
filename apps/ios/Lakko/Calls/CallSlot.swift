@@ -57,14 +57,16 @@ enum CallSlot {
     /// `verb` what the user tried to do. Says what to do about it, because the
     /// refusal is the whole outcome — nothing else happens.
     static func busyMessage(_ occupant: CallKind, verb: Verb) -> String {
-        let what: String
+        // One whole sentence per (running call, start or join): `call.busy.*`,
+        // never a phrase slotted into a frame (batch 5 convention).
+        let start = verb == .start
+        let key: String
         switch occupant {
-        case .oneToOne: what = "a call"
-        case .group: what = "a group call"
-        case .link: what = "a call from a link"
+        case .oneToOne: key = start ? "call.busy.call_start" : "call.busy.call_join"
+        case .group: key = start ? "call.busy.group_start" : "call.busy.group_join"
+        case .link: key = start ? "call.busy.link_start" : "call.busy.link_join"
         }
-        let action = verb == .start ? "start" : "join"
-        return "You are already in \(what). End it before you \(action) another one."
+        return Localization.text(key)
     }
 }
 
@@ -101,4 +103,53 @@ enum CallSlotWiring {
             }
         }
     }
+}
+
+/// The words for a call flow's failure, from the KIND of failure and never from
+/// its prose (ADR-0058, batch 5; the web `calls/call-errors.ts`). Core, SFU and
+/// server prose goes to the log only.
+enum CallErrorText {
+
+    /// The reason a call flow failed, or `nil` when the kind has no sentence of
+    /// its own and the flow's fallback is the whole message.
+    static func reason(for error: Error) -> String? {
+        switch error {
+        case CallJwtClientError.http(let status, _, _):
+            switch status {
+            case 429: return Localization.text("call.error.not_accepting")
+            case 401: return Localization.text("common.error.session_expired")
+            case 503: return Localization.text("call.error.unavailable")
+            default: return nil
+            }
+        case CallJwtClientError.network:
+            return Localization.text("common.error.offline")
+        case LinkCallHostError.signedOut:
+            return Localization.text("call.error.signed_out_start")
+        case let urlError as URLError where Self.offlineCodes.contains(urlError.code):
+            return Localization.text("common.error.offline")
+        default:
+            return nil
+        }
+    }
+
+    /// The whole message: the reason when the kind has one, else the flow's own
+    /// fallback (`call.error.start_group`, `call.error.join_group`, ...).
+    static func message(for error: Error, fallbackKey: String) -> String {
+        reason(for: error) ?? Localization.text(fallbackKey)
+    }
+
+    /// A mid-call camera start that failed: the call continues without it.
+    static func cameraFailure(_ error: Error) -> String {
+        switch error {
+        case SfuCallSession.SfuCallError.noCamera, CallSessionError.noCamera:
+            return Localization.text("call.camera_failed.not_found")
+        default:
+            return Localization.text("call.camera_failed.other")
+        }
+    }
+
+    private static let offlineCodes: Set<URLError.Code> = [
+        .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost,
+        .cannotFindHost, .dnsLookupFailed, .timedOut,
+    ]
 }

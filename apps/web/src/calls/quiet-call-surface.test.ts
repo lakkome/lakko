@@ -116,7 +116,8 @@ describe("what each quiet surface offers", () => {
     // only other place that carries them — is the surface mute withholds. So
     // without this, a muted video call could be answered in no way except
     // with the camera on.
-    expect(code(PANEL)).toContain("Accept without video");
+    // ADR-0058: the words come from the catalog, so the guard looks for the key.
+    expect(code(PANEL)).toContain('t("call.incoming.accept_without_video")');
   });
 
   it("offers Accept and Decline on the conversation row", () => {

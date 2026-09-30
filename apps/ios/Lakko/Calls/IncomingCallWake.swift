@@ -28,7 +28,7 @@ import Foundation
 public enum CallKindLabel {
     /// `Voice call` / `Video call` — never "audio", never a protocol word.
     public static func text(video: Bool) -> String {
-        video ? "Video call" : "Voice call"
+        Localization.text(video ? "call.kind.video" : "call.kind.voice")
     }
 }
 
@@ -64,7 +64,7 @@ public enum IncomingCallReport {
     /// report is deliberately vague rather than invented, and the real name and
     /// kind arrive moments later as a call update. Saying "Incoming call" and
     /// then correcting it is honest; guessing a name would not be.
-    public static let unknownCaller = "Incoming call"
+    public static var unknownCaller: String { Localization.text("call.notification.incoming") }
 
     /// The placeholder report: an unnamed voice call.
     ///

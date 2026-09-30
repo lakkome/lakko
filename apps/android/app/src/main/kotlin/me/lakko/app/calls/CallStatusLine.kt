@@ -3,6 +3,10 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.Strings
+import me.lakko.app.l10n.joinList
+
 /**
  * The call screen's status line — `docs/ux/calls.md` section 4, item 1: the
  * other person's name, and under it the call state in one word or the running
@@ -14,7 +18,9 @@ package me.lakko.app.calls
  * over the stage. Section 4 puts both on this line and the lock chip beside it,
  * which is what gave the digits somewhere else to live (section 5).
  *
- * Pure and Android-free, so the wording is unit-tested on the host JVM.
+ * Pure and Android-free, so the wording is unit-tested on the host JVM. The
+ * words come from the catalog in [Strings] (ADR-0058); the running time is a
+ * clock value (`12:04`) in every language.
  */
 
 /**
@@ -40,16 +46,19 @@ public fun callStatusText(
     reconnecting: Boolean,
     ended: Boolean,
     elapsedSecs: Long?,
+    strings: Strings = Localization.strings.value,
 ): String = when {
     // Section 4.1's state table: "`Call ended` and the duration". The duration
     // is the one the line was last given, so a call that never connected ends
     // with no number rather than a zero.
-    ended -> elapsedSecs?.let { "Call ended, ${formatCallDuration(it)}" } ?: "Call ended"
-    reconnecting -> "Reconnecting..."
-    connected -> elapsedSecs?.let(::formatCallDuration) ?: "Connected"
-    connecting -> "Connecting..."
-    calling -> "Calling..."
-    else -> "Ringing..."
+    ended -> elapsedSecs?.let(::formatCallDuration)?.let {
+        strings.format("common.fact_pair", mapOf("first" to strings["call.status.ended"], "second" to it))
+    } ?: strings["call.status.ended"]
+    reconnecting -> strings["call.status.reconnecting"]
+    connected -> elapsedSecs?.let(::formatCallDuration) ?: strings["call.status.connected"]
+    connecting -> strings["common.connecting"]
+    calling -> strings["call.status.calling"]
+    else -> strings["call.status.ringing"]
 }
 
 /**
@@ -113,28 +122,40 @@ public fun callElapsedSecs(connectedSinceMs: Long?, nowMs: Long): Long? {
  * What TalkBack reads for the whole line (section 8: the running time is
  * announced as a duration, not digit by digit).
  */
-public fun callStatusSpokenLabel(name: String?, status: String, elapsedSecs: Long?): String {
-    val who = name?.trim()?.takeIf { it.isNotEmpty() } ?: "Call"
+public fun callStatusSpokenLabel(
+    name: String?,
+    status: String,
+    elapsedSecs: Long?,
+    strings: Strings = Localization.strings.value,
+): String {
+    val who = name?.trim()?.takeIf { it.isNotEmpty() } ?: strings["chat.call.voice"]
     val spokenStatus = when {
         elapsedSecs == null -> status
-        else -> "in call, " + (spokenCallDuration(elapsedSecs) ?: status)
+        else -> spokenCallDuration(elapsedSecs, strings)
+            ?.let { strings.format("call.status.in_call_spoken", mapOf("duration" to it)) }
+            ?: status
     }
-    return "$who, $spokenStatus"
+    return joinList(listOf(who, spokenStatus), strings)
 }
 
-/** "3 minutes 20 seconds" — the readable form of a running time. */
-internal fun spokenCallDuration(durationSecs: Long): String? {
+/**
+ * "3 minutes 20 seconds" — the readable form of a running time, in the
+ * interface language: each unit is its own plural message
+ * (`common.duration.hours` / `minutes` / `seconds`), joined pair by pair
+ * through `common.duration.pair`, so no unit word and no word order is written
+ * here. The Kotlin twin of the web `durationWords`.
+ */
+internal fun spokenCallDuration(durationSecs: Long, strings: Strings = Localization.strings.value): String? {
     if (durationSecs < 0L) return null
     val hours = durationSecs / 3600L
     val minutes = (durationSecs % 3600L) / 60L
     val seconds = durationSecs % 60L
     val parts = buildList {
-        if (hours > 0L) add(spokenUnit(hours, "hour"))
-        if (minutes > 0L) add(spokenUnit(minutes, "minute"))
-        if (seconds > 0L || isEmpty()) add(spokenUnit(seconds, "second"))
+        if (hours > 0L) add(strings.format("common.duration.hours", counts = mapOf("count" to hours.toULong())))
+        if (minutes > 0L) add(strings.format("common.duration.minutes", counts = mapOf("count" to minutes.toULong())))
+        if (seconds > 0L || isEmpty()) {
+            add(strings.format("common.duration.seconds", counts = mapOf("count" to seconds.toULong())))
+        }
     }
-    return parts.joinToString(" ")
+    return parts.reduce { acc, part -> strings.format("common.duration.pair", mapOf("first" to acc, "second" to part)) }
 }
-
-private fun spokenUnit(value: Long, noun: String): String =
-    if (value == 1L) "$value $noun" else "$value ${noun}s"

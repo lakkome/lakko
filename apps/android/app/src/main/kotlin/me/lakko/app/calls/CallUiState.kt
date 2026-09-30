@@ -4,6 +4,7 @@
 package me.lakko.app.calls
 
 import kotlinx.coroutines.CoroutineScope
+import me.lakko.app.l10n.UiText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -147,6 +148,9 @@ public class CallUiState(
         val text: String,
         /** Unix milliseconds. */
         val tsMs: Long,
+        /** A system event's words, rendered in the interface language
+         *  (ADR-0058); [text] is empty for one. */
+        val systemText: UiText? = null,
     ) {
         public enum class Kind { Text, System }
     }
@@ -496,7 +500,8 @@ public class CallUiState(
         if (trimmed.isEmpty()) return null
         val local = _participants.value.firstOrNull { it.isLocal }
         val senderId = local?.id ?: "local"
-        val senderName = local?.displayName ?: "You"
+        // Empty: this device's own name is drawn as `call.participant.you`.
+        val senderName = local?.displayName.orEmpty()
         val msg = ChatMessage(
             id = nextChatId(),
             kind = ChatMessage.Kind.Text,
@@ -523,14 +528,15 @@ public class CallUiState(
     /** Append a system event ("Alice joined the call"). Does
      *  NOT bump the unread counter — system events are
      *  background context. */
-    public fun addSystemEvent(text: String) {
+    public fun addSystemEvent(text: UiText) {
         val msg = ChatMessage(
             id = nextChatId(),
             kind = ChatMessage.Kind.System,
             senderId = null,
             senderName = "",
-            text = text,
+            text = "",
             tsMs = System.currentTimeMillis(),
+            systemText = text,
         )
         _chatMessages.value = _chatMessages.value + msg
     }
@@ -686,7 +692,8 @@ public class CallUiState(
         val roster = mutableListOf(
             Participant(
                 id = "local",
-                displayName = "You",
+                // Empty: the tile draws `call.participant.you` (ADR-0058).
+                displayName = "",
                 isLocal = true,
                 micOn = session.micEnabled.value,
                 camOn = session.cameraEnabled.value,

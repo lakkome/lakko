@@ -177,7 +177,7 @@ final class LinkCallHost: ObservableObject {
     /// choice, no participants, no name, and no link.
     func startNewCall() async -> StartOutcome {
         guard let own = ports.ownIdentity() else {
-            return .failed(message: CallInviteOfferRules.signedOutMessage)
+            return .failed(message: Localization.text("call.error.signed_out_start"))
         }
         return await start(Request(
             slug: nil,
@@ -211,10 +211,11 @@ final class LinkCallHost: ObservableObject {
             break
         }
         guard let session = ports.session() else {
-            return .failed(message: "Re-authenticate to join this call (no live session).")
+            return .failed(message: Localization.text("common.error.session_ended"))
         }
         guard let base = ports.sfuBaseUrl() else {
-            return .failed(message: "This client has no SFU endpoint — set LakkoSfuUrl and rebuild.")
+            NSLog("link call: SFU URL not configured (LakkoSfuUrl); refusing")
+            return .failed(message: Localization.text("call.error.unavailable"))
         }
 
         let attempt = UUID()
@@ -256,15 +257,18 @@ final class LinkCallHost: ObservableObject {
             onEnded: { [weak self] in self?.apply(attempt, .ended) },
             onNoCommitter: { [weak self] in self?.apply(attempt, .noCommitter) },
             onError: { [weak self] error in
-                self?.apply(attempt, .error, errorMessage: error.localizedDescription)
+                NSLog("multi-joiner call: failed: %@", String(describing: error))
+                self?.apply(attempt, .error, errorMessage: CallErrorText.reason(for: error))
             }
         )
         let started: LinkCallHandle
         do {
             started = try await ports.startCall(request, session, base, joinWithVideo, ui, callbacks)
         } catch {
-            apply(attempt, .error, errorMessage: error.localizedDescription)
-            return .failed(message: error.localizedDescription)
+            NSLog("multi-joiner call: start failed: %@", String(describing: error))
+            let reason = CallErrorText.reason(for: error)
+            apply(attempt, .error, errorMessage: reason)
+            return .failed(message: reason ?? Localization.text("call.link.error.generic"))
         }
         guard self.attempt == attempt, occupiesSlot else {
             // Left, replaced, or already over while the start was in flight.
@@ -412,7 +416,7 @@ final class LinkCallHost: ObservableObject {
                 // Fail-safe (invariant #4): revert the toggle and say why; the
                 // call stays up audio-only.
                 ui.setCamera(false)
-                ui.addSystemEvent("Could not start the camera: \(error.localizedDescription)")
+                ui.addSystemEvent(CallErrorText.cameraFailure(error))
                 NSLog("multi-joiner call: publishVideo failed: %@", String(describing: error))
             }
         }
@@ -498,7 +502,7 @@ enum LinkCallHostError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .identityUnavailable:
-            return "Could not rebuild the identity for this call."
+            return Localization.text("call.link.error.generic")
         case .signedOut:
             return CallInviteOfferRules.signedOutMessage
         }

@@ -4,6 +4,7 @@
 package me.lakko.app.calls
 
 import java.util.concurrent.atomic.AtomicBoolean
+import me.lakko.app.l10n.UiText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
@@ -133,8 +134,8 @@ public data class LinkCallSlot(
     val slug: String?,
     val owner: Boolean,
     val phase: LinkCallPhase,
-    /** The reason, for [LinkCallPhase.ERROR]. */
-    val errorMessage: String?,
+    /** The reason, for [LinkCallPhase.ERROR], from the kind of failure (ADR-0058); `null` names none. */
+    val error: UiText?,
 )
 
 /** What a start / join came to. */
@@ -143,8 +144,9 @@ public sealed interface LinkCallStartOutcome {
 
     public data object AlreadyInThisCall : LinkCallStartOutcome
 
-    public data class Busy(val message: String) : LinkCallStartOutcome
+    public data class Busy(val message: UiText) : LinkCallStartOutcome
 
+    /** [message] is diagnostic English for the log; a screen shows its own catalog line. */
     public data class Failed(val message: String) : LinkCallStartOutcome
 }
 
@@ -268,7 +270,7 @@ public class LinkCallHost(
         handle?.takeIf { mutableSlot.value?.phase == LinkCallPhase.LIVE }
 
     /** Why starting or joining now would be refused, or `null` when the slot is free. */
-    public fun busyMessage(verb: CallVerb, requestedCallIdHex: String): String? {
+    public fun busyMessage(verb: CallVerb, requestedCallIdHex: String): UiText? {
         val decision = decideLinkCallStart(
             occupant = occupant(),
             activeLinkCallIdHex = mutableSlot.value?.takeIf { linkCallOccupiesSlot(it.phase) }?.callIdHex,
@@ -432,14 +434,14 @@ public class LinkCallHost(
                 slug = request.slug,
                 owner = request.isOwner,
                 phase = LinkCallPhase.STARTING,
-                errorMessage = null,
+                error = null,
             ),
         )
         val events = LinkCallEvents(
             onJoined = { apply(thisAttempt, LinkCallEvent.Joined) },
             onEnded = { apply(thisAttempt, LinkCallEvent.Ended) },
             onNoCommitter = { apply(thisAttempt, LinkCallEvent.NoCommitter) },
-            onError = { error -> apply(thisAttempt, LinkCallEvent.Error, error.message ?: error.toString()) },
+            onError = { error -> apply(thisAttempt, LinkCallEvent.Error, callErrorReason(error)) },
         )
         return try {
             // Owner founds + hosts (`onJoined` fires inside); a joiner connects
@@ -460,22 +462,22 @@ public class LinkCallHost(
         } catch (error: Throwable) {
             val message = error.message ?: error.toString()
             warn("link call: start failed", error)
-            apply(thisAttempt, LinkCallEvent.Error, message)
+            apply(thisAttempt, LinkCallEvent.Error, callErrorReason(error))
             LinkCallStartOutcome.Failed(message)
         }
     }
 
-    private fun apply(forAttempt: Any, event: LinkCallEvent, errorMessage: String? = null) {
+    private fun apply(forAttempt: Any, event: LinkCallEvent, error: UiText? = null) {
         if (attempt !== forAttempt) return
         val s = mutableSlot.value ?: return
         val next = reduceLinkCallPhase(s.phase, event)
-        val message = if (next == LinkCallPhase.ERROR && s.phase != LinkCallPhase.ERROR) {
-            errorMessage ?: s.errorMessage
+        val reason = if (next == LinkCallPhase.ERROR && s.phase != LinkCallPhase.ERROR) {
+            error ?: s.error
         } else {
-            s.errorMessage
+            s.error
         }
-        if (next == s.phase && message == s.errorMessage) return
-        setSlot(s.copy(phase = next, errorMessage = message))
+        if (next == s.phase && reason == s.error) return
+        setSlot(s.copy(phase = next, error = reason))
         if (next == LinkCallPhase.LIVE) {
             mutableOverlay.value = true
             // A call is born expanded — see [collapsed].

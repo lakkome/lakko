@@ -30,12 +30,12 @@ describe("callSlotOccupant", () => {
 
 describe("callBusyMessage", () => {
   it("names the call that is running and what to do about it", () => {
-    expect(callBusyMessage("group", "join")).toBe(
+    expect(callBusyMessage("group", "join")()).toBe(
       "You are already in a group call. End it before you join another one.",
     );
-    expect(callBusyMessage("link", "start")).toBe(
+    expect(callBusyMessage("link", "start")()).toBe(
       "You are already in a call from a link. End it before you start another one.",
     );
-    expect(callBusyMessage("one-to-one", "join")).toContain("already in a call.");
+    expect(callBusyMessage("one-to-one", "join")()).toContain("already in a call.");
   });
 });

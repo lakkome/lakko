@@ -257,25 +257,28 @@ final class CollapsedCallBarTests: XCTestCase {
     /// (section 8).
     func testTheSpokenLineReadsADurationAsADuration() {
         XCTAssertEqual(
-            CallBarPresentation.spokenLine(.elapsed(ms: 724_000)), "12 minutes 4 seconds")
-        XCTAssertEqual(CallBarPresentation.spokenLine(.connecting), "Connecting...")
+            l10nPlain(CallBarPresentation.spokenLine(.elapsed(ms: 724_000))), "12 minutes 4 seconds")
+        XCTAssertEqual(CallBarPresentation.spokenLine(.connecting), "Connecting")
     }
 
-    /// The bar is one button, spoken as the whole sentence section 4.5 gives.
+    /// The bar is one button, spoken as one sentence: what a tap does and who
+    /// is on the call, then the duration, then the lock and the camera when
+    /// they show (section 4.5; the web bar reads the same parts).
     func testTheWholeBarIsSpokenAsOneSentence() {
         XCTAssertEqual(
-            CallBarPresentation.spokenLabel(
-                name: "Anna", isPerson: true, status: .elapsed(ms: 724_000)),
-            "Call with Anna, 12 minutes 4 seconds, return to call")
+            l10nPlain(CallBarPresentation.spokenLabel(name: "Anna", status: .elapsed(ms: 724_000))),
+            "Return to the call. Anna, 12 minutes 4 seconds")
+        XCTAssertEqual(
+            l10nPlain(CallBarPresentation.spokenLabel(
+                name: "Anna", status: .elapsed(ms: 724_000), encrypted: true, cameraSending: true)),
+            "Return to the call. Anna, 12 minutes 4 seconds, encrypted, your camera is on")
     }
 
-    /// …and a call nobody is "the other person" on is not read "Call with Group
-    /// call".
-    func testAGroupCallIsNotSpokenAsACallWithACall() {
+    /// A group call is named by its label and read with the spoken state.
+    func testAGroupCallIsSpokenWithItsLabel() {
         XCTAssertEqual(
-            CallBarPresentation.spokenLabel(
-                name: "Group call", isPerson: false, status: .connecting),
-            "Group call, Connecting..., return to call")
+            l10nPlain(CallBarPresentation.spokenLabel(name: "Group call", status: .connecting)),
+            "Return to the call. Group call, Connecting")
     }
 
     // MARK: - The label
@@ -321,4 +324,10 @@ final class CollapsedCallBarTests: XCTestCase {
             "an upward swipe is not a collapse")
         XCTAssertFalse(CallBarPresentation.isCollapseSwipe(.zero))
     }
+}
+
+/// The text without the bidi isolates the catalog formatter puts around an
+/// argument, for comparing a rendered message with plain English.
+func l10nPlain(_ text: String) -> String {
+    text.filter { !"\u{2066}\u{2067}\u{2068}\u{2069}".contains($0) }
 }

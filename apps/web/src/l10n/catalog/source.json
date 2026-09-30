@@ -256,6 +256,348 @@
       "comment": "Confirmation dialog title when the backup found is older than the newest one this account has made (a possible rollback).",
       "security_critical": true
     },
+    "call.alert.title": {
+      "text": "Call",
+      "comment": "Title of the alert that explains why a call did not start or ended (the message under it says why)."
+    },
+    "call.bar.camera_on_a11y": {
+      "text": "your camera is on",
+      "comment": "Added to what the screen reader says for the call bar while your camera is sending; joined into a list."
+    },
+    "call.bar.encrypted_a11y": {
+      "text": "encrypted",
+      "comment": "Added to what the screen reader says for the call bar when the call is end-to-end encrypted; joined into a list after the call's state.",
+      "security_critical": true
+    },
+    "call.bar.region_a11y": {
+      "text": "Call in progress",
+      "comment": "Accessible name of the bar at the top of the app that holds a call which was put away."
+    },
+    "call.bar.return_a11y": {
+      "text": "Return to the call. {name}",
+      "comment": "Start of what the screen reader says for the call bar; {name} is who the call is with (or the group-call label). The call's state follows, joined as a list."
+    },
+    "call.busy.call_join": {
+      "text": "You are already in a call. End it before you join another one.",
+      "comment": "Joining a call was refused because a one-to-one call is already going on."
+    },
+    "call.busy.call_start": {
+      "text": "You are already in a call. End it before you start another one.",
+      "comment": "A new call was refused because a one-to-one call is already going on."
+    },
+    "call.busy.group_join": {
+      "text": "You are already in a group call. End it before you join another one.",
+      "comment": "Joining a call was refused because a group call is already going on."
+    },
+    "call.busy.group_start": {
+      "text": "You are already in a group call. End it before you start another one.",
+      "comment": "A new call was refused because a group call is already going on."
+    },
+    "call.busy.link_join": {
+      "text": "You are already in a call from a link. End it before you join another one.",
+      "comment": "Joining a call was refused because a call opened from a link is already going on."
+    },
+    "call.busy.link_start": {
+      "text": "You are already in a call from a link. End it before you start another one.",
+      "comment": "A new call was refused because a call opened from a link is already going on."
+    },
+    "call.camera_failed.not_allowed": {
+      "text": "Lakko was not allowed to use the camera. The call continues without it.",
+      "comment": "Shown in a call when turning the camera on failed because permission was refused."
+    },
+    "call.camera_failed.not_found": {
+      "text": "No camera was found. The call continues without it.",
+      "comment": "Shown in a call when turning the camera on failed because there is no camera."
+    },
+    "call.camera_failed.other": {
+      "text": "The camera could not be started. It may be in use by another app.",
+      "comment": "Shown in a call when turning the camera on failed for another reason."
+    },
+    "call.capture.both.failed": {
+      "text": "The microphone and camera could not be started. You can listen and watch.",
+      "comment": "Shown in a group call when neither the microphone nor the camera could start; the person can still hear and see the others."
+    },
+    "call.capture.both.not_allowed": {
+      "text": "Lakko was not allowed to use the microphone or camera. You can listen and watch.",
+      "comment": "Shown in a group call when microphone and camera permission were refused; the person can still hear and see the others."
+    },
+    "call.capture.both.not_found": {
+      "text": "No microphone or camera was found. You can listen and watch.",
+      "comment": "Shown in a group call when this device has neither a microphone nor a camera; the person can still hear and see the others."
+    },
+    "call.capture.camera.failed": {
+      "text": "The camera could not be started. You joined with your microphone.",
+      "comment": "Shown in a group call joined with video when the camera failed to start."
+    },
+    "call.capture.camera.not_allowed": {
+      "text": "Lakko was not allowed to use the camera. You joined with your microphone.",
+      "comment": "Shown in a group call joined with video when camera permission was refused."
+    },
+    "call.capture.camera.not_found": {
+      "text": "No camera was found. You joined with your microphone.",
+      "comment": "Shown in a group call joined with video when this device has no camera."
+    },
+    "call.chat.a11y": {
+      "text": "Call chat",
+      "comment": "Accessible name of the chat panel inside a group call."
+    },
+    "call.chat.close_a11y": {
+      "text": "Close chat",
+      "comment": "Accessible name of the button that closes the chat panel inside a group call."
+    },
+    "call.chat.empty": {
+      "text": "No messages yet. Messages here are end-to-end encrypted.",
+      "comment": "Empty state of the chat panel inside a group call.",
+      "security_critical": true
+    },
+    "call.chat.joined": {
+      "text": "{name} joined the call",
+      "comment": "Line in the call's chat when someone joins; {name} is the person."
+    },
+    "call.chat.left": {
+      "text": "A participant left the call",
+      "comment": "Line in the call's chat when someone leaves."
+    },
+    "call.collapse_a11y": {
+      "text": "Put the call away and return to the app",
+      "comment": "Accessible name of the chevron that shrinks the call screen into the call bar without ending the call."
+    },
+    "call.collapse_title": {
+      "text": "Put the call away",
+      "comment": "Tooltip of the chevron that shrinks the call screen into the call bar without ending the call."
+    },
+    "call.control.bar_a11y": {
+      "text": "Call controls",
+      "comment": "Accessible name of the row of in-call buttons."
+    },
+    "call.control.camera": {
+      "text": "Camera",
+      "comment": "Label under the in-call camera button."
+    },
+    "call.control.camera_start_a11y": {
+      "text": "Start camera",
+      "comment": "Accessible name of the in-call camera button while the camera is off."
+    },
+    "call.control.camera_stop_a11y": {
+      "text": "Stop camera",
+      "comment": "Accessible name of the in-call camera button while the camera is on."
+    },
+    "call.control.chat": {
+      "text": "Chat",
+      "comment": "Label under the group-call button that opens the call's chat; also the chat panel's heading."
+    },
+    "call.control.chat_hide_a11y": {
+      "text": "Hide chat",
+      "comment": "Accessible name of the group-call button that closes the call's chat."
+    },
+    "call.control.chat_show_a11y": {
+      "text": "Show chat",
+      "comment": "Accessible name of the group-call button that opens the call's chat."
+    },
+    "call.control.chat_unread": {
+      "text": "{count, plural, one {Chat (# unread)} other {Chat (# unread)}}",
+      "comment": "Group call menu item that opens the call's chat, when messages are unread. {count} is the number of unread messages."
+    },
+    "call.control.end": {
+      "text": "End",
+      "comment": "Label under the red in-call button that ends the call."
+    },
+    "call.control.end_a11y": {
+      "text": "End call",
+      "comment": "Accessible name of the red in-call button that ends the call."
+    },
+    "call.control.invite": {
+      "text": "Invite",
+      "comment": "Label under the in-call button that hands out a link to the call."
+    },
+    "call.control.invite_a11y": {
+      "text": "Invite someone to this call with a link",
+      "comment": "Accessible name of the in-call Invite button."
+    },
+    "call.control.lower_hand": {
+      "text": "Lower hand",
+      "comment": "Group call menu item that lowers the hand you raised."
+    },
+    "call.control.more": {
+      "text": "More",
+      "comment": "Short word under the round button that opens a group call's menu (participants, chat, settings). One word; it names the action."
+    },
+    "call.control.more_a11y": {
+      "text": "More controls",
+      "comment": "Screen reader label of the button that opens a group call's menu."
+    },
+    "call.control.mute": {
+      "text": "Mute",
+      "comment": "Label under the in-call microphone button."
+    },
+    "call.control.mute_a11y": {
+      "text": "Mute microphone",
+      "comment": "Accessible name of the in-call microphone button while the microphone is on."
+    },
+    "call.control.participants": {
+      "text": "Participants",
+      "comment": "Label under the group-call button that opens the list of people in the call; also the list's heading and accessible name."
+    },
+    "call.control.participants_hide_a11y": {
+      "text": "Hide participants",
+      "comment": "Accessible name of the group-call button that closes the list of people in the call."
+    },
+    "call.control.participants_show_a11y": {
+      "text": "Show participants",
+      "comment": "Accessible name of the group-call button that opens the list of people in the call."
+    },
+    "call.control.raise_hand": {
+      "text": "Raise hand",
+      "comment": "Group call menu item that raises your hand so the others see you want to speak."
+    },
+    "call.control.share_screen": {
+      "text": "Share screen",
+      "comment": "Group call menu item that starts showing your screen to the call."
+    },
+    "call.control.speaker": {
+      "text": "Speaker",
+      "comment": "Label under the in-call button that moves the call's sound to the next speaker."
+    },
+    "call.control.speaker_a11y": {
+      "text": "Play sound through {device}",
+      "comment": "Accessible name of the in-call Speaker button; {device} is the speaker it switches to (its own name, or the words of call.control.speaker_default_device / call.control.speaker_next_device)."
+    },
+    "call.control.speaker_default_device": {
+      "text": "the default speaker",
+      "comment": "Fills {device} in call.control.speaker_a11y when the system's default speaker has no name."
+    },
+    "call.control.speaker_next_device": {
+      "text": "the next speaker",
+      "comment": "Fills {device} in call.control.speaker_a11y when the next speaker has no name."
+    },
+    "call.control.speaker_off_a11y": {
+      "text": "Turn off speaker",
+      "comment": "Screen reader label of the speaker button while the loudspeaker is on."
+    },
+    "call.control.speaker_on_a11y": {
+      "text": "Turn on speaker",
+      "comment": "Screen reader label of the speaker button while the loudspeaker is off (sound through the earpiece)."
+    },
+    "call.control.stop_share_screen": {
+      "text": "Stop sharing screen",
+      "comment": "Group call menu item that stops showing your screen."
+    },
+    "call.control.unmute_a11y": {
+      "text": "Unmute microphone",
+      "comment": "Accessible name of the in-call microphone button while the microphone is muted."
+    },
+    "call.e2ee": {
+      "text": "End-to-end encrypted",
+      "comment": "Line with a lock on the incoming-call screen and the group-call banner: the call is end-to-end encrypted.",
+      "security_critical": true
+    },
+    "call.encryption.chip": {
+      "text": "Encrypted",
+      "comment": "Chip on the call screen saying the call is end-to-end encrypted; pressing it shows the safety number.",
+      "security_critical": true
+    },
+    "call.encryption.chip_a11y": {
+      "text": "This call is encrypted. Show the safety number",
+      "comment": "Accessible name of the Encrypted chip on the call screen.",
+      "security_critical": true
+    },
+    "call.encryption.compare_hint": {
+      "text": "Read these numbers aloud. If they match on both phones, no one is listening.",
+      "comment": "Under the call's safety number: how to compare it with the other person.",
+      "security_critical": true
+    },
+    "call.encryption.copy_a11y": {
+      "text": "Copy the safety number",
+      "comment": "Screen reader label of the Copy button in the call encryption sheet."
+    },
+    "call.encryption.number_a11y": {
+      "text": "Safety number: {groups}",
+      "comment": "Spoken by the screen reader for the call's safety number; {groups} is the four-digit groups in order, already joined as a list.",
+      "security_critical": true
+    },
+    "call.encryption.number_unavailable": {
+      "text": "Safety number unavailable",
+      "comment": "Spoken by the screen reader when the call has no safety number to show.",
+      "security_critical": true
+    },
+    "call.encryption.sentence_group": {
+      "text": "Only the people on this call can hear it.",
+      "comment": "The safety-number sheet's sentence in a group call, or when the other person has no name on this device.",
+      "security_critical": true
+    },
+    "call.encryption.sentence_named": {
+      "text": "Only you and {name} can hear this call.",
+      "comment": "The safety-number sheet's sentence in a one-to-one call; {name} is the other person.",
+      "security_critical": true
+    },
+    "call.encryption.setting_up": {
+      "text": "Setting up...",
+      "comment": "Shown in place of the Encrypted chip on the call screen while the call's end-to-end encryption is not yet in place. Must never claim the call is protected.",
+      "security_critical": true
+    },
+    "call.encryption.title": {
+      "text": "This call is encrypted",
+      "comment": "Title of the sheet that shows the call's safety number.",
+      "security_critical": true
+    },
+    "call.error.encryption_setup": {
+      "text": "Could not set up call encryption, so the call did not start.",
+      "comment": "Shown when the device could not derive the call's encryption key; the call is refused rather than started unencrypted.",
+      "security_critical": true
+    },
+    "call.error.join_group": {
+      "text": "Could not join the group call. Try again.",
+      "comment": "Joining a group call failed and no more specific reason is known."
+    },
+    "call.error.microphone_not_allowed": {
+      "text": "Lakko was not allowed to use the microphone.",
+      "comment": "A call could not start because microphone permission was refused."
+    },
+    "call.error.microphone_not_found": {
+      "text": "No microphone was found.",
+      "comment": "A call could not start because this device has no microphone."
+    },
+    "call.error.no_media_encryption": {
+      "text": "This browser cannot encrypt call media, so the call did not start.",
+      "comment": "A group call or a call from a link was refused because this browser cannot end-to-end encrypt call audio and video; Lakko never falls back to an unencrypted call.",
+      "security_critical": true
+    },
+    "call.error.not_accepting": {
+      "text": "This call is not accepting new participants right now.",
+      "comment": "Joining a call was refused because too many new accounts joined it in a short time."
+    },
+    "call.error.not_member": {
+      "text": "You are no longer a member of this chat.",
+      "comment": "A group call in a chat could not be started or joined because this person is no longer in the chat."
+    },
+    "call.error.signed_out_start": {
+      "text": "You are signed out. Sign in again to start a call.",
+      "comment": "The New call button on the Calls screen was pressed without a signed-in session."
+    },
+    "call.error.start_group": {
+      "text": "Could not start the group call. Try again.",
+      "comment": "Starting a group call failed and no more specific reason is known."
+    },
+    "call.error.unavailable": {
+      "text": "Calls are not available right now. Try again later.",
+      "comment": "A call could not start because the call service is not reachable or not set up."
+    },
+    "call.fill.remote_camera_a11y": {
+      "text": "{name}'s camera",
+      "comment": "Accessible name of the other person's video filling the call screen; {name} is who the call is with."
+    },
+    "call.group_banner.join_video": {
+      "text": "Video",
+      "comment": "Button on the group call banner that joins the call with the camera on."
+    },
+    "call.group_banner.open_chat": {
+      "text": "Open chat",
+      "comment": "Button on the group call banner that opens the chat the call is in."
+    },
+    "call.group_banner.title": {
+      "text": "Group call in {name}",
+      "comment": "Banner shown on any screen while a group call is going on in a chat that is not open; {name} is the chat."
+    },
     "call.guest.default_name": {
       "text": "Guest",
       "comment": "Name prefilled for a visitor without an account who joins a call from a link; it becomes the new account's profile name."
@@ -263,6 +605,46 @@
     "call.guest.working.title": {
       "text": "Getting you into the call...",
       "comment": "Busy row while a guest account is created to join a call from a link."
+    },
+    "call.history.call_back_a11y": {
+      "text": "Call back",
+      "comment": "Screen reader label of the call-back button at the end of a row in the call history."
+    },
+    "call.history.call_back_video_a11y": {
+      "text": "Call back with video",
+      "comment": "Screen reader label of the call-back button on a row for a video call in the call history."
+    },
+    "call.history.empty": {
+      "text": "No calls yet",
+      "comment": "Empty state of the Calls screen."
+    },
+    "call.history.empty_body": {
+      "text": "Calls you make and receive appear here.",
+      "comment": "Second line of the empty call history, under 'No calls yet'."
+    },
+    "call.history.join_by_link": {
+      "text": "Join by link",
+      "comment": "Button on the Calls screen that opens a field to paste a call link."
+    },
+    "call.history.join_invalid": {
+      "text": "That does not look like a call link. Paste the whole link and try again.",
+      "comment": "Error under the call-link field on the Calls screen when the text is not a call link."
+    },
+    "call.history.new_call": {
+      "text": "New call",
+      "comment": "Button on the Calls screen that starts a new group video call."
+    },
+    "call.history.paste_hint": {
+      "text": "The person who created the call shares the link.",
+      "comment": "Hint under the field where a call link is pasted to join a call."
+    },
+    "call.history.paste_label": {
+      "text": "Paste a call link",
+      "comment": "Label of the field on the Calls screen where a call link is pasted."
+    },
+    "call.history.unknown_conversation": {
+      "text": "Unknown",
+      "comment": "Name of a call history row whose conversation is no longer on this device."
     },
     "call.incoming.accept": {
       "text": "Accept",
@@ -272,6 +654,22 @@
       "text": "Accept call from {name}",
       "comment": "Accessible name of the button that answers a call; {name} is the caller or conversation."
     },
+    "call.incoming.accept_video_a11y": {
+      "text": "Accept video call from {name}",
+      "comment": "Accessible name of the button that answers a video call with the camera on; {name} is the caller or conversation."
+    },
+    "call.incoming.accept_voice_a11y": {
+      "text": "Accept voice call from {name}",
+      "comment": "Accessible name of the button that answers a voice call; {name} is the caller or conversation."
+    },
+    "call.incoming.accept_without_video": {
+      "text": "Accept without video",
+      "comment": "Button that answers an incoming video call with the camera off."
+    },
+    "call.incoming.accept_without_video_a11y": {
+      "text": "Accept call from {name} without video",
+      "comment": "Accessible name of the button that answers an incoming video call with the camera off; {name} is the caller or conversation."
+    },
     "call.incoming.decline": {
       "text": "Decline",
       "comment": "Button that declines an incoming call."
@@ -279,6 +677,74 @@
     "call.incoming.decline_from": {
       "text": "Decline call from {name}",
       "comment": "Accessible name of the button that declines a call; {name} is the caller or conversation."
+    },
+    "call.incoming.decline_video_a11y": {
+      "text": "Decline video call from {name}",
+      "comment": "Accessible name of the button that declines a video call; {name} is the caller or conversation."
+    },
+    "call.incoming.decline_voice_a11y": {
+      "text": "Decline voice call from {name}",
+      "comment": "Accessible name of the button that declines a voice call; {name} is the caller or conversation."
+    },
+    "call.incoming.video_a11y": {
+      "text": "Incoming video call from {name}",
+      "comment": "Accessible name of the full-screen incoming video call; {name} is the caller or conversation."
+    },
+    "call.incoming.voice_a11y": {
+      "text": "Incoming voice call from {name}",
+      "comment": "Accessible name of the full-screen incoming voice call; {name} is the caller or conversation."
+    },
+    "call.invite.copied": {
+      "text": "Link copied. Anyone you send it to can ask to join.",
+      "comment": "Line on the call screen after the link to the call was copied."
+    },
+    "call.invite.link_a11y": {
+      "text": "Call link",
+      "comment": "Screen reader label of the call link shown in the Invite panel of a call."
+    },
+    "call.invite.minting": {
+      "text": "Preparing a link to this call. This takes a few seconds.",
+      "comment": "Line on the call screen while a link to the call is being prepared."
+    },
+    "call.invite.ready": {
+      "text": "Anyone with this link can ask to join this call. You decide who comes in.",
+      "comment": "Shown above a call link that is ready to share, in the Invite panel of a call."
+    },
+    "call.invite.retry_a11y": {
+      "text": "Try preparing the invite link again",
+      "comment": "Screen reader label of the call's Invite button after preparing its link failed."
+    },
+    "call.invite.share_a11y": {
+      "text": "Share the invite link",
+      "comment": "Screen reader label of the call's Invite button once its link is ready to share."
+    },
+    "call.invite.shared": {
+      "text": "Link shared.",
+      "comment": "Line on the call screen after the link to the call was handed to the share sheet."
+    },
+    "call.invite.shown": {
+      "text": "Copy this link: {url}",
+      "comment": "Line on the call screen when the link could be neither shared nor copied; {url} is the link."
+    },
+    "call.invite.signed_out": {
+      "text": "You are signed out. Sign in again to get a link for this call.",
+      "comment": "Line on the call screen when a link cannot be prepared because the session ended."
+    },
+    "call.invite.unavailable": {
+      "text": "The link could not be prepared. The call is unaffected, so you can try again.",
+      "comment": "Line on the call screen when preparing a link to the call failed."
+    },
+    "call.kind.video": {
+      "text": "Video call",
+      "comment": "The kind of an incoming video call, under the caller's name on the incoming-call screen, the muted-call panel, the chat list row and the notification."
+    },
+    "call.kind.voice": {
+      "text": "Voice call",
+      "comment": "The kind of an incoming voice call, under the caller's name on the incoming-call screen, the muted-call panel, the chat list row and the notification."
+    },
+    "call.label.group": {
+      "text": "Group call",
+      "comment": "Name shown at the top of a group call screen and on the call bar when the group has no name."
     },
     "call.link.connecting": {
       "text": "Connecting...",
@@ -324,6 +790,14 @@
       "text": "Loading call link...",
       "comment": "Shown while the call link is read."
     },
+    "call.link.notice.a11y": {
+      "text": "Call from a link",
+      "comment": "Accessible name of the strip at the bottom of the app that shows a call opened from a link while another screen is up."
+    },
+    "call.link.notice.connecting": {
+      "text": "Connecting to the call...",
+      "comment": "Strip at the bottom of the app while a call opened from a link connects."
+    },
     "call.link.start": {
       "text": "Start call",
       "comment": "Button for the owner of the call link."
@@ -343,6 +817,323 @@
     "call.link.waiting_hint": {
       "text": "You can leave this screen; you will join when you are admitted.",
       "comment": "Hint under the waiting line."
+    },
+    "call.log.a11y.call_back": {
+      "text": "{head}. Call back",
+      "comment": "Spoken for a call history row that places the same call again when pressed; {head} describes the call."
+    },
+    "call.log.a11y.lasted": {
+      "text": "{head}, lasted {duration}",
+      "comment": "Spoken for a call history row with a length; {head} is one of the call.log.a11y.* phrases, {duration} the length in words."
+    },
+    "call.log.a11y.video_declined": {
+      "text": "Video call declined",
+      "comment": "Spoken for a call history row: a video call that was declined."
+    },
+    "call.log.a11y.video_incoming": {
+      "text": "Video call, incoming",
+      "comment": "Spoken for a call history row: a video call this person answered."
+    },
+    "call.log.a11y.video_missed": {
+      "text": "Missed video call",
+      "comment": "Spoken for a call history row: a video call nobody answered."
+    },
+    "call.log.a11y.video_outgoing": {
+      "text": "Video call, outgoing",
+      "comment": "Spoken for a call history row: a video call this person placed."
+    },
+    "call.log.a11y.voice_declined": {
+      "text": "Call declined",
+      "comment": "Spoken for a call history row: a voice call that was declined."
+    },
+    "call.log.a11y.voice_incoming": {
+      "text": "Call, incoming",
+      "comment": "Spoken for a call history row: a voice call this person answered."
+    },
+    "call.log.a11y.voice_missed": {
+      "text": "Missed call",
+      "comment": "Spoken for a call history row: a voice call nobody answered."
+    },
+    "call.log.a11y.voice_outgoing": {
+      "text": "Call, outgoing",
+      "comment": "Spoken for a call history row: a voice call this person placed."
+    },
+    "call.log.declined": {
+      "text": "Declined",
+      "comment": "Call history row: a call that was declined."
+    },
+    "call.log.incoming": {
+      "text": "Incoming call",
+      "comment": "Call history row: a call this person answered, with no length known."
+    },
+    "call.log.incoming_duration": {
+      "text": "Incoming call, {duration}",
+      "comment": "Call history row: a call this person answered; {duration} is its length as a clock value such as 12:04."
+    },
+    "call.log.missed": {
+      "text": "Missed call",
+      "comment": "Call history row: an incoming call nobody answered."
+    },
+    "call.log.outgoing": {
+      "text": "Outgoing call",
+      "comment": "Call history row: a call this person placed, with no length known."
+    },
+    "call.log.outgoing_duration": {
+      "text": "Outgoing call, {duration}",
+      "comment": "Call history row: a call this person placed; {duration} is its length as a clock value such as 12:04."
+    },
+    "call.notification.channel_description": {
+      "text": "Incoming Lakko calls",
+      "comment": "Description of the notification category that rings for incoming calls, shown in the phone's notification settings."
+    },
+    "call.notification.incoming": {
+      "text": "Incoming call",
+      "comment": "Body of the web notification for a call when the call's details could not be read in the background."
+    },
+    "call.participant.hand_raised": {
+      "text": "Hand raised",
+      "comment": "Screen reader label of the hand icon on a participant's tile or row: they want to speak."
+    },
+    "call.participant.muted": {
+      "text": "Muted",
+      "comment": "Tooltip of the muted-microphone icon on a call tile or in the participants list."
+    },
+    "call.participant.muted_a11y": {
+      "text": "Microphone muted",
+      "comment": "Accessible name of the muted-microphone icon on a call tile."
+    },
+    "call.participant.numbered": {
+      "text": "Participant {number}",
+      "comment": "Name of a call participant this device cannot identify. {number} tells two such participants apart, in the order they joined."
+    },
+    "call.participant.pinned": {
+      "text": "Pinned",
+      "comment": "Tooltip of the pin icon on the call tile that was pinned to the large spot."
+    },
+    "call.participant.sharing": {
+      "text": "Sharing",
+      "comment": "Small badge on a participant's tile while they show their screen."
+    },
+    "call.participant.sharing_a11y": {
+      "text": "Sharing screen",
+      "comment": "Screen reader label of the screen-share icon on a participant's row."
+    },
+    "call.participant.unnamed": {
+      "text": "Participant",
+      "comment": "Name on a call tile or the call screen for a person the device cannot name."
+    },
+    "call.participant.you": {
+      "text": "You",
+      "comment": "Name on your own tile in a call when you have not set a profile name."
+    },
+    "call.participants.close_a11y": {
+      "text": "Close participants",
+      "comment": "Accessible name of the button that closes the list of people in a group call."
+    },
+    "call.participants.title": {
+      "text": "Participants ({count})",
+      "comment": "Heading of the list of people in a group call; {count} is how many, as a plain number."
+    },
+    "call.permission.audio_only": {
+      "text": "Audio only",
+      "comment": "Button in the camera permission dialog: continue the call with the microphone only."
+    },
+    "call.permission.camera.body": {
+      "text": "Video needs the camera. You can continue with audio only, or allow camera access for Lakko in the app settings.",
+      "comment": "Body of the dialog shown when the camera permission was refused for a video call."
+    },
+    "call.permission.camera.title": {
+      "text": "Camera access needed",
+      "comment": "Title of the dialog shown when the camera permission was refused for a video call."
+    },
+    "call.permission.microphone.body": {
+      "text": "Calls need the microphone. Allow microphone access for Lakko in the app settings, then try again.",
+      "comment": "Body of the dialog shown when the microphone permission was refused; a call cannot start without it."
+    },
+    "call.permission.microphone.title": {
+      "text": "Microphone access needed",
+      "comment": "Title of the dialog shown when the microphone permission was refused."
+    },
+    "call.quality.a11y": {
+      "text": "Connection quality: {tier}",
+      "comment": "Accessible name of the connection-quality dot in a call; {tier} is one of the call.quality.tier.* words."
+    },
+    "call.quality.bps": {
+      "text": "{value} bps",
+      "comment": "A bitrate in bits per second; {value} is the number, already formatted."
+    },
+    "call.quality.details_a11y": {
+      "text": "Connection details",
+      "comment": "Accessible name of the small panel with the call's connection measurements."
+    },
+    "call.quality.direct": {
+      "text": "Direct",
+      "comment": "Connection details: the call's media goes straight between the devices."
+    },
+    "call.quality.down": {
+      "text": "Down",
+      "comment": "Connection details: label of the incoming bitrate."
+    },
+    "call.quality.kbps": {
+      "text": "{value} kbps",
+      "comment": "A bitrate in kilobits per second; {value} is the number, already formatted."
+    },
+    "call.quality.mbps": {
+      "text": "{value} Mbps",
+      "comment": "A bitrate in megabits per second; {value} is the number, already formatted."
+    },
+    "call.quality.ms": {
+      "text": "{value} ms",
+      "comment": "A round-trip time in milliseconds; {value} is the number, already formatted."
+    },
+    "call.quality.relay": {
+      "text": "Relay",
+      "comment": "Connection details: the call's media goes through a relay server."
+    },
+    "call.quality.round_trip": {
+      "text": "Round trip",
+      "comment": "Connection details: label of the round-trip time."
+    },
+    "call.quality.tier.bad": {
+      "text": "bad",
+      "comment": "Connection quality word, used in call.quality.a11y / call.quality.title and at the top of the connection details."
+    },
+    "call.quality.tier.excellent": {
+      "text": "excellent",
+      "comment": "Connection quality word, used in call.quality.a11y / call.quality.title and at the top of the connection details."
+    },
+    "call.quality.tier.fair": {
+      "text": "fair",
+      "comment": "Connection quality word, used in call.quality.a11y / call.quality.title and at the top of the connection details."
+    },
+    "call.quality.tier.good": {
+      "text": "good",
+      "comment": "Connection quality word, used in call.quality.a11y / call.quality.title and at the top of the connection details."
+    },
+    "call.quality.tier.poor": {
+      "text": "poor",
+      "comment": "Connection quality word, used in call.quality.a11y / call.quality.title and at the top of the connection details."
+    },
+    "call.quality.title": {
+      "text": "Connection: {tier}",
+      "comment": "Tooltip of the connection-quality dot in a call; {tier} is one of the call.quality.tier.* words."
+    },
+    "call.quality.up": {
+      "text": "Up",
+      "comment": "Connection details: label of the outgoing bitrate."
+    },
+    "call.self.camera_a11y": {
+      "text": "Your camera",
+      "comment": "Accessible name of the video of your own camera in a call."
+    },
+    "call.self.flip_a11y": {
+      "text": "Switch to the other camera",
+      "comment": "Accessible name and tooltip of the small button on your own picture that switches cameras."
+    },
+    "call.self.starting_camera": {
+      "text": "Starting camera...",
+      "comment": "Shown over your own picture in a call while the camera starts."
+    },
+    "call.settings.devices": {
+      "text": "Devices",
+      "comment": "Heading of the section in the call settings that picks the microphone, camera and speaker. Audio and video devices, not linked phones."
+    },
+    "call.settings.low_data": {
+      "text": "Low-data mode",
+      "comment": "Switch in the call settings that lowers video quality to save mobile data."
+    },
+    "call.settings.low_data_hint": {
+      "text": "Caps video at 360p — useful on metered mobile connections.",
+      "comment": "Explanation under the Low-data mode switch in the call settings. 360p is a video resolution."
+    },
+    "call.settings.microphone": {
+      "text": "Microphone",
+      "comment": "Picker in the call settings that chooses which microphone the call uses."
+    },
+    "call.settings.mirror": {
+      "text": "Mirror local preview",
+      "comment": "Switch in the call settings that shows your own camera picture mirrored, as in a mirror."
+    },
+    "call.settings.no_devices": {
+      "text": "No devices reported yet. They appear here once you grant microphone or camera permission.",
+      "comment": "Hint under a device picker in the call settings when the phone has listed no microphone, camera or speaker yet."
+    },
+    "call.settings.system_default": {
+      "text": "System default",
+      "comment": "Option in a call settings device picker: use the device the phone picks."
+    },
+    "call.settings.video": {
+      "text": "Video",
+      "comment": "Heading of the video section in the call settings."
+    },
+    "call.start.no_camera": {
+      "text": "No camera available, so this is a voice call.",
+      "comment": "Shown in the chat when the video call button could not open a camera and a voice call was placed instead."
+    },
+    "call.status.calling": {
+      "text": "Calling...",
+      "comment": "Status line on the call screen and the call bar while the other side has not answered yet."
+    },
+    "call.status.calling_spoken": {
+      "text": "Calling",
+      "comment": "Spoken by the screen reader for the call bar while the other side has not answered yet."
+    },
+    "call.status.connected": {
+      "text": "Connected",
+      "comment": "Status line under the name on the call screen when the call is connected but its running time is not known yet."
+    },
+    "call.status.connecting_spoken": {
+      "text": "Connecting",
+      "comment": "Spoken by the screen reader for the call bar while the call connects."
+    },
+    "call.status.ended": {
+      "text": "Call ended",
+      "comment": "Status line and closing screen when a call is over. The call's length may follow it, joined through common.fact_pair."
+    },
+    "call.status.group_count": {
+      "text": "Group call · {count}",
+      "comment": "Name line on the call screen and the call bar for a group call; {count} is the number of people in the call, as a plain number."
+    },
+    "call.status.in_call_spoken": {
+      "text": "in call, {duration}",
+      "comment": "Screen reader reading of the call status line, after the other person's name. {duration} is the running time in words, for example \"3 minutes 20 seconds\"."
+    },
+    "call.status.reconnecting": {
+      "text": "Reconnecting...",
+      "comment": "Status line on the call screen and the call bar while a dropped connection is being restored."
+    },
+    "call.status.reconnecting_spoken": {
+      "text": "Reconnecting",
+      "comment": "Spoken by the screen reader for the call bar while a dropped connection is being restored."
+    },
+    "call.status.ringing": {
+      "text": "Ringing...",
+      "comment": "Status line under the caller's name while an incoming call rings."
+    },
+    "call.undecryptable.named": {
+      "text": "Can't decrypt {name}'s media",
+      "comment": "Shown in a call when the sound or picture from one participant cannot be decrypted on this device, so nothing from them is played. {name} is that person's name.",
+      "security_critical": true
+    },
+    "call.undecryptable.notice": {
+      "text": "Can't decrypt the incoming media",
+      "comment": "Shown in a call when the other person's sound or picture cannot be decrypted on this device and there is no name to show.",
+      "security_critical": true
+    },
+    "call.undecryptable.notice_many": {
+      "text": "{count, plural, one {Can't decrypt media from # participant} other {Can't decrypt media from # participants}}",
+      "comment": "Shown in a call when the sound or picture from several participants cannot be decrypted on this device.",
+      "security_critical": true
+    },
+    "call.undecryptable.tile": {
+      "text": "Can't decrypt",
+      "comment": "Short badge on a participant's tile in a group call when their media cannot be decrypted on this device. Keep it short.",
+      "security_critical": true
+    },
+    "call.undecryptable.tile_a11y": {
+      "text": "Can't decrypt this participant's media",
+      "comment": "Screen reader label of the 'Can't decrypt' badge when the participant has no name.",
+      "security_critical": true
     },
     "channels.back": {
       "text": "Back to channels",
@@ -2615,6 +3406,10 @@
       "text": "Done",
       "comment": "Button that finishes a flow."
     },
+    "common.duration.hours": {
+      "text": "{count, plural, one {# hour} other {# hours}}",
+      "comment": "A spoken duration in hours, for screen readers and the call history."
+    },
     "common.duration.minutes": {
       "text": "{count, plural, one {# minute} other {# minutes}}",
       "comment": "A spoken duration in minutes, for screen readers."
@@ -2622,6 +3417,10 @@
     "common.duration.minutes_seconds": {
       "text": "{minutes} {seconds}",
       "comment": "A spoken duration of minutes and seconds; {minutes} and {seconds} are the two parts already written out."
+    },
+    "common.duration.pair": {
+      "text": "{first} {second}",
+      "comment": "Joins two parts of a spoken duration, largest first, such as '1 hour' and '5 minutes'; applied pair by pair for three parts."
     },
     "common.duration.seconds": {
       "text": "{count, plural, one {# second} other {# seconds}}",
@@ -2714,6 +3513,10 @@
     "common.on": {
       "text": "On",
       "comment": "State of a switch that is on."
+    },
+    "common.open": {
+      "text": "Open",
+      "comment": "Button that opens the thing it stands next to, such as a pasted call link or a call from a link."
     },
     "common.open_chat": {
       "text": "Open chat",
@@ -3878,6 +4681,22 @@
     "new_group.subtitle": {
       "text": "You will be the group's owner. You can add more people later.",
       "comment": "Line under \"New group\" on the create-group form."
+    },
+    "notification.channel.messages": {
+      "text": "Messages",
+      "comment": "Name of the notification category for new messages, shown in the phone's notification settings."
+    },
+    "notification.channel.messages_desc": {
+      "text": "Wake notifications for new Lakko messages",
+      "comment": "Description of the notification category for new messages, shown in the phone's notification settings."
+    },
+    "notification.message.attachments": {
+      "text": "{count, plural, one {Sent an attachment} other {Sent # attachments}}",
+      "comment": "Notification text for a new message that has attachments and no text."
+    },
+    "notification.message.new": {
+      "text": "New message",
+      "comment": "Notification text when a new message arrived but its content could not be shown on this device."
     },
     "recovery.access_only_note": {
       "text": "An authenticator or a code gets you back in; your chats then need your recovery phrase or another device.",

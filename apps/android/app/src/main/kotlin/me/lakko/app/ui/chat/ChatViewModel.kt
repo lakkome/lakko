@@ -2230,11 +2230,11 @@ public class ChatViewModel(
         }
     }
 
-    private val mutableCallNotice: MutableStateFlow<String?> = MutableStateFlow(null)
+    private val mutableCallNotice: MutableStateFlow<UiText?> = MutableStateFlow(null)
 
     /** A call-related message for the user — why a call could not start or
      *  join. `null` when there is nothing to say. Cleared by [dismissCallNotice]. */
-    public val callNotice: StateFlow<String?> = mutableCallNotice.asStateFlow()
+    public val callNotice: StateFlow<UiText?> = mutableCallNotice.asStateFlow()
 
     private val mutableCallNoticeOffersEnd: MutableStateFlow<Boolean> = MutableStateFlow(false)
 
@@ -2249,7 +2249,7 @@ public class ChatViewModel(
 
     /** Surface a call failure the user would otherwise only see as nothing
      *  happening. */
-    public fun showCallNotice(message: String) {
+    public fun showCallNotice(message: UiText) {
         mutableCallNoticeOffersEnd.value = false
         mutableCallNotice.value = message
     }
@@ -2263,7 +2263,7 @@ public class ChatViewModel(
     private fun showBusyNotice(verb: me.lakko.app.calls.CallVerb) {
         val occupant = callOccupant.value
         if (occupant == null) {
-            showCallNotice(Localization.strings.value["chat.call.busy"])
+            showCallNotice(UiText("chat.call.busy"))
             return
         }
         mutableCallNotice.value = me.lakko.app.calls.callBusyMessage(occupant, verb)
@@ -2317,7 +2317,7 @@ public class ChatViewModel(
      */
     public fun joinGroupCall(video: Boolean = false) {
         val record = liveGroupCallRecord() ?: run {
-            showCallNotice(Localization.strings.value["chat.call.group_ended"])
+            showCallNotice(UiText("chat.call.group_ended"))
             return
         }
         requestGroupCall(video = video, joinCallIdHex = record.callIdHex)
@@ -2325,7 +2325,7 @@ public class ChatViewModel(
 
     private fun requestGroupCall(video: Boolean, joinCallIdHex: String?) {
         val host = groupCallHost ?: run {
-            showCallNotice(Localization.strings.value["chat.call.unavailable"])
+            showCallNotice(UiText("chat.call.unavailable"))
             return
         }
         viewModelScope.launch {
@@ -2337,7 +2337,7 @@ public class ChatViewModel(
                     mutableCallNotice.value = outcome.message
                     mutableCallNoticeOffersEnd.value = true
                 }
-                GroupCallStartOutcome.Ended -> showCallNotice(Localization.strings.value["chat.call.group_ended"])
+                GroupCallStartOutcome.Ended -> showCallNotice(UiText("chat.call.group_ended"))
                 is GroupCallStartOutcome.Failed -> showCallNotice(outcome.message)
             }
         }

@@ -3,6 +3,7 @@
 
 package me.lakko.app.profile
 
+import me.lakko.app.l10n.EnglishForTests
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
@@ -21,6 +22,11 @@ import org.junit.Test
  * changed claim verifies afresh; concurrent callers share one lookup.
  */
 class UsernameVerifierTest {
+    init {
+        // ADR-0058: the words under test are the English catalog's.
+        EnglishForTests.install()
+    }
+
 
     private val passesRule: (String) -> Boolean = { it.matches(Regex("[a-z0-9_]{3,32}")) }
 

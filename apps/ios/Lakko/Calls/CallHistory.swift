@@ -194,10 +194,10 @@ public enum CallHistory {
         _ day: String, now: Date, calendar: Calendar, locale: Locale
     ) -> String {
         let nowMs = Int64(now.timeIntervalSince1970 * 1000)
-        if day == localDay(ms: nowMs, calendar: calendar) { return "Today" }
+        if day == localDay(ms: nowMs, calendar: calendar) { return Localization.text("chat.day.today") }
         if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
            day == localDay(ms: Int64(yesterday.timeIntervalSince1970 * 1000), calendar: calendar) {
-            return "Yesterday"
+            return Localization.text("chat.day.yesterday")
         }
         let fields = day.split(separator: "-").compactMap { Int($0) }
         guard fields.count == 3 else { return day }
@@ -225,7 +225,7 @@ public enum CallHistory {
         _ entry: CallHistoryEntry, calendar: Calendar, locale: Locale
     ) -> String {
         let clock = timeOfDay(ms: entry.startedAtMs, calendar: calendar, locale: locale)
-        return "\(entry.transcriptRow.text), \(clock)"
+        return Localization.joinList([entry.transcriptRow.text, clock])
     }
 
     /// What VoiceOver reads for a row: the conversation, then the call, then
@@ -240,23 +240,36 @@ public enum CallHistory {
         _ entry: CallHistoryEntry, title: String, calendar: Calendar, locale: Locale
     ) -> String {
         let clock = timeOfDay(ms: entry.startedAtMs, calendar: calendar, locale: locale)
-        let call: String
+        let video = entry.video
+        let outgoing = entry.direction == .outgoing
+        let head: String
         switch entry.outcome {
         case .answered:
-            let noun = entry.direction == .outgoing ? "Outgoing call" : "Incoming call"
-            call = "\(noun), \(CallTranscriptRow.spokenDuration(ms: entry.durationMs))"
+            let key: String
+            switch (video, outgoing) {
+            case (true, true): key = "call.log.a11y.video_outgoing"
+            case (true, false): key = "call.log.a11y.video_incoming"
+            case (false, true): key = "call.log.a11y.voice_outgoing"
+            case (false, false): key = "call.log.a11y.voice_incoming"
+            }
+            head = Localization.text(
+                "call.log.a11y.lasted",
+                texts: [
+                    "head": Localization.text(key),
+                    "duration": CallTranscriptRow.spokenDuration(ms: entry.durationMs),
+                ])
         case .missed:
-            call = "Missed call"
+            head = Localization.text(video ? "call.log.a11y.video_missed" : "call.log.a11y.voice_missed")
         case .declined:
-            call = "Declined call"
+            head = Localization.text(video ? "call.log.a11y.video_declined" : "call.log.a11y.voice_declined")
         }
-        return "\(title). \(call), \(clock). Double tap to open the conversation."
+        return Localization.joinList([title, head, clock])
     }
 
     /// What VoiceOver reads for the trailing button, which is a second target
     /// with a second job and so needs its own label.
     public static func callBackAccessibilityLabel(_ entry: CallHistoryEntry) -> String {
-        entry.video ? "Call back with video" : "Call back"
+        Localization.text(entry.video ? "call.history.call_back_video_a11y" : "call.history.call_back_a11y")
     }
 
     /// The direction glyph at the leading edge, so the direction does not rest

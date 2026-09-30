@@ -3,6 +3,11 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.Strings
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.joinList
+
 /**
  * How a call says it is encrypted — `docs/ux/calls.md` sections 4 and 5.
  *
@@ -33,22 +38,22 @@ package me.lakko.app.calls
  * number, which is a security signal that says nothing and cannot be acted on.
  *
  * Pure and Android-free, so the copy and the grouping are unit-tested on the
- * host JVM.
+ * host JVM. The words are catalog messages (ADR-0058), all `security_critical`:
+ * they render in English until a translation is reviewed.
  */
 
 /** The one word beside the lock on the call screen. */
-public const val CALL_ENCRYPTION_CHIP_LABEL: String = "Encrypted"
+public val CALL_ENCRYPTION_CHIP_LABEL: UiText = UiText("call.encryption.chip")
 
 /** The encryption sheet's title. */
-public const val CALL_ENCRYPTION_SHEET_TITLE: String = "This call is encrypted"
+public val CALL_ENCRYPTION_SHEET_TITLE: UiText = UiText("call.encryption.title")
 
 /**
  * The line under the digits saying what they are for — the only place in the
  * call surface that explains the safety number, and it does so without naming a
  * single protocol.
  */
-public const val CALL_ENCRYPTION_SHEET_HINT: String =
-    "Read these numbers aloud. If they match on both phones, no one is listening."
+public val CALL_ENCRYPTION_SHEET_HINT: UiText = UiText("call.encryption.compare_hint")
 
 /**
  * The sheet's plain sentence, naming the other person when this device knows
@@ -59,12 +64,12 @@ public const val CALL_ENCRYPTION_SHEET_HINT: String =
  * been able to name — the sentence stays true rather than inventing "Someone",
  * which would read as a claim about a specific person.
  */
-public fun callEncryptionSentence(otherName: String?): String {
+public fun callEncryptionSentence(otherName: String?): UiText {
     val name = otherName?.trim()?.takeIf { it.isNotEmpty() }
     return if (name == null) {
-        "Only the people on this call can hear it."
+        UiText("call.encryption.sentence_group")
     } else {
-        "Only you and $name can hear this call."
+        UiText("call.encryption.sentence_named", mapOf("name" to name))
     }
 }
 
@@ -93,10 +98,10 @@ private const val SAFETY_NUMBER_GROUP_SIZE: Int = 4
  * four"). Commas make the reader pause between groups instead of running
  * sixteen digits together.
  */
-public fun safetyNumberSpokenLabel(value: String?): String {
+public fun safetyNumberSpokenLabel(value: String?, strings: Strings = Localization.strings.value): String {
     val groups = safetyNumberGroups(value)
-    if (groups.isEmpty()) return "Safety number unavailable"
-    return "Safety number: " + groups.joinToString(", ")
+    if (groups.isEmpty()) return strings["call.encryption.number_unavailable"]
+    return strings.format("call.encryption.number_a11y", mapOf("groups" to joinList(groups, strings)))
 }
 
 /**

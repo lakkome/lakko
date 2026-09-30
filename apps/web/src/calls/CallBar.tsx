@@ -54,6 +54,7 @@
 import { Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js";
 
 import { Icon } from "../ui/icons";
+import { joinList, t } from "../l10n";
 import { callActions, callState, type Participant } from "../state/call-state";
 import { uiRules } from "../chat/ui-rules";
 import { showsEncryptionChip } from "./encryption-chip";
@@ -162,10 +163,10 @@ export function CallBar(props: CallBarProps): JSX.Element {
    * still sending, which is the one thing the glyph exists to say.
    */
   const spokenName = createMemo(() => {
-    const parts = [`Return to the call. ${label()}`, status().spoken];
-    if (encrypted()) parts.push("encrypted");
-    if (cameraSending()) parts.push("your camera is on");
-    return parts.filter((part) => part.length > 0).join(", ");
+    const parts = [t("call.bar.return_a11y", { name: label() }), status().spoken];
+    if (encrypted()) parts.push(t("call.bar.encrypted_a11y"));
+    if (cameraSending()) parts.push(t("call.bar.camera_on_a11y"));
+    return joinList(parts.filter((part) => part.length > 0));
   });
 
   // Make room rather than cover: see the module note. Tied to `shown()` so a
@@ -183,7 +184,7 @@ export function CallBar(props: CallBarProps): JSX.Element {
 
   return (
     <Show when={shown()}>
-      <div class="lk-callbar" role="region" aria-label="Call in progress">
+      <div class="lk-callbar" role="region" aria-label={t("call.bar.region_a11y")}>
         {/* Everything except the mute circle expands the call. A real button
             rather than a `role` on the container, so `Enter` and `Space` work
             without being re-implemented and the mute button is a sibling

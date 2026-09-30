@@ -22,11 +22,11 @@ import SwiftUI
 /// in `lakko-ui-rules` answers with a sum type, and
 /// ``CallBarPresentation/line(_:)`` prints it.
 struct CollapsedCallBar: View {
+    /// Re-renders the bar's words on a language switch (ADR-0058).
+    @ObservedObject var l10n = Localization.shared
     /// Who is on the call — ``CallPeerName/callLabel(profileName:groupCall:)``,
     /// the same label the call screen's status line carries.
     let label: String
-    /// `true` when the label names a person, for the spoken sentence only.
-    let isPerson: Bool
     let phase: CallBarPhase
     /// When media started flowing, or `nil`. Non-`nil` exactly when the call is
     /// connected, so it doubles as "is there a clock to read" and the view
@@ -128,7 +128,8 @@ struct CollapsedCallBar: View {
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(
-            CallBarPresentation.spokenLabel(name: label, isPerson: isPerson, status: status))
+            CallBarPresentation.spokenLabel(
+                name: label, status: status, encrypted: encrypted, cameraSending: cameraSending))
     }
 
     private static func elapsedMs(since start: Date, at now: Date) -> UInt64 {

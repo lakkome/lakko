@@ -109,9 +109,9 @@ final class SfuCallUi {
     init(
         config: SfuCallSession.Config,
         ui: CallUiState,
-        localDisplayName: String = "You",
+        localDisplayName: String = "",
         resolveDisplayName: @escaping (_ peerId: String, _ accountPseudonym: String, _ peerTag: String) -> String = { _, pseudonym, _ in
-            pseudonym.isEmpty ? "Peer" : String(pseudonym.prefix(8))
+            pseudonym.isEmpty ? Localization.text("chat.peer.fallback_name") : String(pseudonym.prefix(8))
         }
     ) {
         self.ui = ui

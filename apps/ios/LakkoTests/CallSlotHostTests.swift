@@ -295,16 +295,16 @@ final class LinkCallHostRulesTests: XCTestCase {
         XCTAssertNil(Rules.notice(phase: nil, landingShowing: false, errorMessage: nil))
         XCTAssertEqual(
             Rules.notice(phase: .waiting, landingShowing: false, errorMessage: nil),
-            .init(text: "Waiting for the owner to admit you…", actions: [.open, .cancel]))
+            .init(text: "Waiting for the owner to admit you...", actions: [.open, .cancel]))
         XCTAssertEqual(
             Rules.notice(phase: .starting, landingShowing: false, errorMessage: nil),
-            .init(text: "Connecting to the call…", actions: [.open, .cancel]))
+            .init(text: "Connecting to the call...", actions: [.open, .cancel]))
         XCTAssertEqual(
             Rules.notice(phase: .dead, landingShowing: false, errorMessage: nil),
-            .init(text: "This call has ended or isn't active.", actions: [.dismiss]))
+            .init(text: "This call has ended or is not active.", actions: [.dismiss]))
         XCTAssertEqual(
-            Rules.notice(phase: .error, landingShowing: false, errorMessage: "boom"),
-            .init(text: "The call failed: boom", actions: [.dismiss]))
+            Rules.notice(phase: .error, landingShowing: false, errorMessage: "boom").map(\.text).map(l10nPlain),
+            "The call failed. boom")
     }
 }
 
@@ -806,7 +806,8 @@ final class GroupCallHostTests: XCTestCase {
         let host = makeHost(h)
         host.start(groupIdHex: group, video: false, joinCallId: nil)
         try await waitUntil { host.callError != nil }
-        XCTAssertEqual(host.callError, "Could not connect to the call: down")
+        // Rendered from the kind; the error's own prose goes to the log.
+        XCTAssertEqual(host.callError, "Could not start the group call. Try again.")
         XCTAssertFalse(host.occupiesSlot)
         XCTAssertNil(host.presentation, "the explanation is not hidden behind the call screen")
         // The initiator announced the call, so it owes the End.
@@ -1025,7 +1026,7 @@ final class LinkCallHostTests: XCTestCase {
         h.ownIdentity = nil
         let host = makeHost(h)
         let outcome = await host.startNewCall()
-        XCTAssertEqual(outcome, .failed(message: CallInviteOfferRules.signedOutMessage))
+        XCTAssertEqual(outcome, .failed(message: Localization.text("call.error.signed_out_start")))
         XCTAssertNil(host.slot)
     }
 
@@ -1052,7 +1053,7 @@ final class LinkCallHostTests: XCTestCase {
         XCTAssertEqual(host.slot?.phase, .dead)
         XCTAssertFalse(host.occupiesSlot)
         XCTAssertEqual(h.handles[0].hangUps, 1)
-        XCTAssertEqual(host.notice?.text, "This call has ended or isn't active.")
+        XCTAssertEqual(host.notice?.text, "This call has ended or is not active.")
         host.dismissOutcome()
         XCTAssertNil(host.slot)
     }

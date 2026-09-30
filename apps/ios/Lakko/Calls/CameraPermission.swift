@@ -26,9 +26,8 @@ enum CameraPermission {
     }
 
     /// The copy every call surface shows when the gate refuses.
-    static let deniedMessage =
-        "Lakko needs camera access for video. Turn it on in Settings > Lakko > Camera, "
-        + "or turn the camera off to continue with audio only."
+    /// Rendered in the interface language when it is read.
+    static var deniedMessage: String { Localization.text("call.permission.camera.body") }
 
     /// Grant state now, then — only when undetermined — the system prompt.
     ///

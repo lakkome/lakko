@@ -146,7 +146,7 @@ data class JoinCallUiState(
     /** The reason the typed guest name fails the rule, or `null`. */
     val guestNameError: UiText? = null,
     /** Why Join was refused while another call holds the one call slot. */
-    val busyMessage: String? = null,
+    val busyMessage: UiText? = null,
     /** ADR-0054 UX section 1 - the guest account is being created (the one
      *  heavy proof of work): `Getting you into the call...`. */
     val guestWorking: Boolean = false,
@@ -221,10 +221,12 @@ class JoinCallViewModel(
             LinkCallPhase.DEAD -> JoinCallPhase.Dead
             LinkCallPhase.ERROR -> JoinCallPhase.Error
         }
-        // The slot's error is the host's diagnostic English; the screen shows
-        // the catalog line (ADR-0058).
-        val shownError = if (phase == JoinCallPhase.Error && slot.errorMessage != null) {
-            UiText("call.link.error.generic")
+        // The slot's error is the kind of failure, already a catalog line
+        // (ADR-0058); an error with no kind reads the generic line.
+        val shownError = if (phase == JoinCallPhase.Error) {
+            slot.error?.let {
+                UiText("common.sentence_pair", parts = mapOf("first" to UiText("call.link.error.generic"), "second" to it))
+            } ?: error ?: UiText("call.link.error.generic")
         } else {
             error
         }
@@ -579,7 +581,7 @@ fun JoinCallScreen(
                     )
                 }
                 ui.busyMessage?.let { message ->
-                    Text(text = message, color = MaterialTheme.colorScheme.error)
+                    Text(text = message.text(), color = MaterialTheme.colorScheme.error)
                     androidx.compose.foundation.layout.Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {

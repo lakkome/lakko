@@ -242,12 +242,380 @@
       "text": "यह पुराना बैकअप रीस्टोर करें?",
       "status": "machine"
     },
+    "call.alert.title": {
+      "text": "कॉल",
+      "status": "machine"
+    },
+    "call.bar.camera_on_a11y": {
+      "text": "आपका कैमरा चालू है",
+      "status": "machine"
+    },
+    "call.bar.encrypted_a11y": {
+      "text": "एन्क्रिप्टेड",
+      "status": "machine"
+    },
+    "call.bar.region_a11y": {
+      "text": "कॉल चल रही है",
+      "status": "machine"
+    },
+    "call.bar.return_a11y": {
+      "text": "कॉल पर वापस जाएँ। {name}",
+      "status": "machine"
+    },
+    "call.busy.call_join": {
+      "text": "आप पहले से एक कॉल में हैं। दूसरी कॉल में शामिल होने से पहले इसे खत्म करें।",
+      "status": "machine"
+    },
+    "call.busy.call_start": {
+      "text": "आप पहले से एक कॉल में हैं। दूसरी कॉल शुरू करने से पहले इसे खत्म करें।",
+      "status": "machine"
+    },
+    "call.busy.group_join": {
+      "text": "आप पहले से एक ग्रुप कॉल में हैं। दूसरी कॉल में शामिल होने से पहले इसे खत्म करें।",
+      "status": "machine"
+    },
+    "call.busy.group_start": {
+      "text": "आप पहले से एक ग्रुप कॉल में हैं। दूसरी कॉल शुरू करने से पहले इसे खत्म करें।",
+      "status": "machine"
+    },
+    "call.busy.link_join": {
+      "text": "आप पहले से लिंक से खोली गई एक कॉल में हैं। दूसरी कॉल में शामिल होने से पहले इसे खत्म करें।",
+      "status": "machine"
+    },
+    "call.busy.link_start": {
+      "text": "आप पहले से लिंक से खोली गई एक कॉल में हैं। दूसरी कॉल शुरू करने से पहले इसे खत्म करें।",
+      "status": "machine"
+    },
+    "call.camera_failed.not_allowed": {
+      "text": "Lakko को कैमरा इस्तेमाल करने की अनुमति नहीं मिली। कॉल इसके बिना जारी है।",
+      "status": "machine"
+    },
+    "call.camera_failed.not_found": {
+      "text": "कोई कैमरा नहीं मिला। कॉल इसके बिना जारी है।",
+      "status": "machine"
+    },
+    "call.camera_failed.other": {
+      "text": "कैमरा शुरू नहीं हो सका। हो सकता है कोई दूसरा ऐप इसका इस्तेमाल कर रहा हो।",
+      "status": "machine"
+    },
+    "call.capture.both.failed": {
+      "text": "माइक्रोफ़ोन और कैमरा शुरू नहीं हो सके। आप सुन और देख सकते हैं।",
+      "status": "machine"
+    },
+    "call.capture.both.not_allowed": {
+      "text": "Lakko को माइक्रोफ़ोन या कैमरा इस्तेमाल करने की अनुमति नहीं मिली। आप सुन और देख सकते हैं।",
+      "status": "machine"
+    },
+    "call.capture.both.not_found": {
+      "text": "कोई माइक्रोफ़ोन या कैमरा नहीं मिला। आप सुन और देख सकते हैं।",
+      "status": "machine"
+    },
+    "call.capture.camera.failed": {
+      "text": "कैमरा शुरू नहीं हो सका। आप माइक्रोफ़ोन के साथ शामिल हुए हैं।",
+      "status": "machine"
+    },
+    "call.capture.camera.not_allowed": {
+      "text": "Lakko को कैमरा इस्तेमाल करने की अनुमति नहीं मिली। आप माइक्रोफ़ोन के साथ शामिल हुए हैं।",
+      "status": "machine"
+    },
+    "call.capture.camera.not_found": {
+      "text": "कोई कैमरा नहीं मिला। आप माइक्रोफ़ोन के साथ शामिल हुए हैं।",
+      "status": "machine"
+    },
+    "call.chat.a11y": {
+      "text": "कॉल चैट",
+      "status": "machine"
+    },
+    "call.chat.close_a11y": {
+      "text": "चैट बंद करें",
+      "status": "machine"
+    },
+    "call.chat.empty": {
+      "text": "अभी कोई मैसेज नहीं है। यहाँ के मैसेज एंड-टू-एंड एन्क्रिप्टेड हैं।",
+      "status": "machine"
+    },
+    "call.chat.joined": {
+      "text": "{name} कॉल में शामिल हुए",
+      "status": "machine"
+    },
+    "call.chat.left": {
+      "text": "एक प्रतिभागी ने कॉल छोड़ दी",
+      "status": "machine"
+    },
+    "call.collapse_a11y": {
+      "text": "कॉल को छोटा करें और ऐप पर लौटें",
+      "status": "machine"
+    },
+    "call.collapse_title": {
+      "text": "कॉल को छोटा करें",
+      "status": "machine"
+    },
+    "call.control.bar_a11y": {
+      "text": "कॉल कंट्रोल",
+      "status": "machine"
+    },
+    "call.control.camera": {
+      "text": "कैमरा",
+      "status": "machine"
+    },
+    "call.control.camera_start_a11y": {
+      "text": "कैमरा चालू करें",
+      "status": "machine"
+    },
+    "call.control.camera_stop_a11y": {
+      "text": "कैमरा बंद करें",
+      "status": "machine"
+    },
+    "call.control.chat": {
+      "text": "चैट",
+      "status": "machine"
+    },
+    "call.control.chat_hide_a11y": {
+      "text": "चैट छिपाएँ",
+      "status": "machine"
+    },
+    "call.control.chat_show_a11y": {
+      "text": "चैट दिखाएँ",
+      "status": "machine"
+    },
+    "call.control.chat_unread": {
+      "text": "{count, plural, one {चैट (# बिना पढ़ा)} other {चैट (# बिना पढ़े)}}",
+      "status": "machine"
+    },
+    "call.control.end": {
+      "text": "खत्म करें",
+      "status": "machine"
+    },
+    "call.control.end_a11y": {
+      "text": "कॉल खत्म करें",
+      "status": "machine"
+    },
+    "call.control.invite": {
+      "text": "इनवाइट करें",
+      "status": "machine"
+    },
+    "call.control.invite_a11y": {
+      "text": "लिंक से किसी को इस कॉल में इनवाइट करें",
+      "status": "machine"
+    },
+    "call.control.lower_hand": {
+      "text": "हाथ नीचे करें",
+      "status": "machine"
+    },
+    "call.control.more": {
+      "text": "और",
+      "status": "machine"
+    },
+    "call.control.more_a11y": {
+      "text": "और कंट्रोल",
+      "status": "machine"
+    },
+    "call.control.mute": {
+      "text": "म्यूट",
+      "status": "machine"
+    },
+    "call.control.mute_a11y": {
+      "text": "माइक्रोफ़ोन म्यूट करें",
+      "status": "machine"
+    },
+    "call.control.participants": {
+      "text": "प्रतिभागी",
+      "status": "machine"
+    },
+    "call.control.participants_hide_a11y": {
+      "text": "प्रतिभागी छिपाएँ",
+      "status": "machine"
+    },
+    "call.control.participants_show_a11y": {
+      "text": "प्रतिभागी दिखाएँ",
+      "status": "machine"
+    },
+    "call.control.raise_hand": {
+      "text": "हाथ उठाएँ",
+      "status": "machine"
+    },
+    "call.control.share_screen": {
+      "text": "स्क्रीन शेयर करें",
+      "status": "machine"
+    },
+    "call.control.speaker": {
+      "text": "स्पीकर",
+      "status": "machine"
+    },
+    "call.control.speaker_a11y": {
+      "text": "आवाज़ {device} पर चलाएँ",
+      "status": "machine"
+    },
+    "call.control.speaker_default_device": {
+      "text": "डिफ़ॉल्ट स्पीकर",
+      "status": "machine"
+    },
+    "call.control.speaker_next_device": {
+      "text": "अगले स्पीकर",
+      "status": "machine"
+    },
+    "call.control.speaker_off_a11y": {
+      "text": "स्पीकर बंद करें",
+      "status": "machine"
+    },
+    "call.control.speaker_on_a11y": {
+      "text": "स्पीकर चालू करें",
+      "status": "machine"
+    },
+    "call.control.stop_share_screen": {
+      "text": "स्क्रीन शेयर करना बंद करें",
+      "status": "machine"
+    },
+    "call.control.unmute_a11y": {
+      "text": "माइक्रोफ़ोन अनम्यूट करें",
+      "status": "machine"
+    },
+    "call.e2ee": {
+      "text": "एंड-टू-एंड एन्क्रिप्टेड",
+      "status": "machine"
+    },
+    "call.encryption.chip": {
+      "text": "एन्क्रिप्टेड",
+      "status": "machine"
+    },
+    "call.encryption.chip_a11y": {
+      "text": "यह कॉल एन्क्रिप्टेड है। सुरक्षा नंबर दिखाएँ",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint": {
+      "text": "ये नंबर ज़ोर से पढ़ें। अगर दोनों फ़ोन पर ये एक जैसे हैं, तो कोई नहीं सुन रहा।",
+      "status": "machine"
+    },
+    "call.encryption.copy_a11y": {
+      "text": "सुरक्षा नंबर कॉपी करें",
+      "status": "machine"
+    },
+    "call.encryption.number_a11y": {
+      "text": "सुरक्षा नंबर: {groups}",
+      "status": "machine"
+    },
+    "call.encryption.number_unavailable": {
+      "text": "सुरक्षा नंबर उपलब्ध नहीं",
+      "status": "machine"
+    },
+    "call.encryption.sentence_group": {
+      "text": "इसे सिर्फ़ इस कॉल में मौजूद लोग सुन सकते हैं।",
+      "status": "machine"
+    },
+    "call.encryption.sentence_named": {
+      "text": "इस कॉल को सिर्फ़ आप और {name} सुन सकते हैं।",
+      "status": "machine"
+    },
+    "call.encryption.setting_up": {
+      "text": "सेट अप हो रहा है...",
+      "status": "machine"
+    },
+    "call.encryption.title": {
+      "text": "यह कॉल एन्क्रिप्टेड है",
+      "status": "machine"
+    },
+    "call.error.encryption_setup": {
+      "text": "कॉल का एन्क्रिप्शन सेट अप नहीं हो सका, इसलिए कॉल शुरू नहीं हुई।",
+      "status": "machine"
+    },
+    "call.error.join_group": {
+      "text": "ग्रुप कॉल में शामिल नहीं हो सके। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "call.error.microphone_not_allowed": {
+      "text": "Lakko को माइक्रोफ़ोन इस्तेमाल करने की अनुमति नहीं मिली।",
+      "status": "machine"
+    },
+    "call.error.microphone_not_found": {
+      "text": "कोई माइक्रोफ़ोन नहीं मिला।",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption": {
+      "text": "यह ब्राउज़र कॉल की आवाज़ और वीडियो एन्क्रिप्ट नहीं कर सकता, इसलिए कॉल शुरू नहीं हुई।",
+      "status": "machine"
+    },
+    "call.error.not_accepting": {
+      "text": "यह कॉल अभी नए प्रतिभागी नहीं ले रही है।",
+      "status": "machine"
+    },
+    "call.error.not_member": {
+      "text": "आप अब इस चैट के सदस्य नहीं हैं।",
+      "status": "machine"
+    },
+    "call.error.signed_out_start": {
+      "text": "आप साइन आउट हो चुके हैं। कॉल शुरू करने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "call.error.start_group": {
+      "text": "ग्रुप कॉल शुरू नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "call.error.unavailable": {
+      "text": "कॉल अभी उपलब्ध नहीं हैं। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "call.fill.remote_camera_a11y": {
+      "text": "{name} का कैमरा",
+      "status": "machine"
+    },
+    "call.group_banner.join_video": {
+      "text": "वीडियो",
+      "status": "machine"
+    },
+    "call.group_banner.open_chat": {
+      "text": "चैट खोलें",
+      "status": "machine"
+    },
+    "call.group_banner.title": {
+      "text": "{name} में ग्रुप कॉल",
+      "status": "machine"
+    },
     "call.guest.default_name": {
       "text": "मेहमान",
       "status": "machine"
     },
     "call.guest.working.title": {
       "text": "आपको कॉल में जोड़ा जा रहा है...",
+      "status": "machine"
+    },
+    "call.history.call_back_a11y": {
+      "text": "वापस कॉल करें",
+      "status": "machine"
+    },
+    "call.history.call_back_video_a11y": {
+      "text": "वीडियो के साथ वापस कॉल करें",
+      "status": "machine"
+    },
+    "call.history.empty": {
+      "text": "अभी कोई कॉल नहीं",
+      "status": "machine"
+    },
+    "call.history.empty_body": {
+      "text": "आप जो कॉल करते हैं और जो कॉल आपको आती हैं, वे यहाँ दिखती हैं।",
+      "status": "machine"
+    },
+    "call.history.join_by_link": {
+      "text": "लिंक से शामिल हों",
+      "status": "machine"
+    },
+    "call.history.join_invalid": {
+      "text": "यह कॉल लिंक जैसा नहीं दिखता। पूरा लिंक पेस्ट करें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "call.history.new_call": {
+      "text": "नई कॉल",
+      "status": "machine"
+    },
+    "call.history.paste_hint": {
+      "text": "कॉल बनाने वाला व्यक्ति लिंक शेयर करता है।",
+      "status": "machine"
+    },
+    "call.history.paste_label": {
+      "text": "कॉल लिंक पेस्ट करें",
+      "status": "machine"
+    },
+    "call.history.unknown_conversation": {
+      "text": "अज्ञात",
       "status": "machine"
     },
     "call.incoming.accept": {
@@ -258,12 +626,96 @@
       "text": "{name} की कॉल स्वीकार करें",
       "status": "machine"
     },
+    "call.incoming.accept_video_a11y": {
+      "text": "{name} की वीडियो कॉल स्वीकार करें",
+      "status": "machine"
+    },
+    "call.incoming.accept_voice_a11y": {
+      "text": "{name} की वॉइस कॉल स्वीकार करें",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video": {
+      "text": "बिना वीडियो के स्वीकार करें",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video_a11y": {
+      "text": "{name} की कॉल बिना वीडियो के स्वीकार करें",
+      "status": "machine"
+    },
     "call.incoming.decline": {
       "text": "अस्वीकार करें",
       "status": "machine"
     },
     "call.incoming.decline_from": {
       "text": "{name} की कॉल अस्वीकार करें",
+      "status": "machine"
+    },
+    "call.incoming.decline_video_a11y": {
+      "text": "{name} की वीडियो कॉल अस्वीकार करें",
+      "status": "machine"
+    },
+    "call.incoming.decline_voice_a11y": {
+      "text": "{name} की वॉइस कॉल अस्वीकार करें",
+      "status": "machine"
+    },
+    "call.incoming.video_a11y": {
+      "text": "{name} की आने वाली वीडियो कॉल",
+      "status": "machine"
+    },
+    "call.incoming.voice_a11y": {
+      "text": "{name} की आने वाली वॉइस कॉल",
+      "status": "machine"
+    },
+    "call.invite.copied": {
+      "text": "लिंक कॉपी हो गया। जिसे भी आप इसे भेजेंगे, वह शामिल होने का अनुरोध कर सकता है।",
+      "status": "machine"
+    },
+    "call.invite.link_a11y": {
+      "text": "कॉल लिंक",
+      "status": "machine"
+    },
+    "call.invite.minting": {
+      "text": "इस कॉल का लिंक तैयार हो रहा है। इसमें कुछ सेकंड लगते हैं।",
+      "status": "machine"
+    },
+    "call.invite.ready": {
+      "text": "इस लिंक वाला कोई भी व्यक्ति इस कॉल में शामिल होने का अनुरोध कर सकता है। कौन अंदर आएगा, यह आप तय करते हैं।",
+      "status": "machine"
+    },
+    "call.invite.retry_a11y": {
+      "text": "इनवाइट लिंक फिर से तैयार करने की कोशिश करें",
+      "status": "machine"
+    },
+    "call.invite.share_a11y": {
+      "text": "इनवाइट लिंक शेयर करें",
+      "status": "machine"
+    },
+    "call.invite.shared": {
+      "text": "लिंक शेयर किया गया।",
+      "status": "machine"
+    },
+    "call.invite.shown": {
+      "text": "यह लिंक कॉपी करें: {url}",
+      "status": "machine"
+    },
+    "call.invite.signed_out": {
+      "text": "आप साइन आउट हो चुके हैं। इस कॉल का लिंक पाने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "call.invite.unavailable": {
+      "text": "लिंक तैयार नहीं हो सका। कॉल पर कोई असर नहीं पड़ा, इसलिए आप फिर से कोशिश कर सकते हैं।",
+      "status": "machine"
+    },
+    "call.kind.video": {
+      "text": "वीडियो कॉल",
+      "status": "machine"
+    },
+    "call.kind.voice": {
+      "text": "वॉइस कॉल",
+      "status": "machine"
+    },
+    "call.label.group": {
+      "text": "ग्रुप कॉल",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -310,6 +762,14 @@
       "text": "कॉल लिंक लोड हो रहा है...",
       "status": "machine"
     },
+    "call.link.notice.a11y": {
+      "text": "लिंक से कॉल",
+      "status": "machine"
+    },
+    "call.link.notice.connecting": {
+      "text": "कॉल से कनेक्ट हो रहा है...",
+      "status": "machine"
+    },
     "call.link.start": {
       "text": "कॉल शुरू करें",
       "status": "machine"
@@ -328,6 +788,318 @@
     },
     "call.link.waiting_hint": {
       "text": "आप यह स्क्रीन छोड़ सकते हैं; अनुमति मिलते ही आप कॉल में शामिल हो जाएंगे।",
+      "status": "machine"
+    },
+    "call.log.a11y.call_back": {
+      "text": "{head}। वापस कॉल करें",
+      "status": "machine"
+    },
+    "call.log.a11y.lasted": {
+      "text": "{head}, {duration} चली",
+      "status": "machine"
+    },
+    "call.log.a11y.video_declined": {
+      "text": "अस्वीकार की गई वीडियो कॉल",
+      "status": "machine"
+    },
+    "call.log.a11y.video_incoming": {
+      "text": "वीडियो कॉल, आने वाली",
+      "status": "machine"
+    },
+    "call.log.a11y.video_missed": {
+      "text": "मिस्ड वीडियो कॉल",
+      "status": "machine"
+    },
+    "call.log.a11y.video_outgoing": {
+      "text": "वीडियो कॉल, जाने वाली",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_declined": {
+      "text": "अस्वीकार की गई कॉल",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_incoming": {
+      "text": "कॉल, आने वाली",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_missed": {
+      "text": "मिस्ड कॉल",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_outgoing": {
+      "text": "कॉल, जाने वाली",
+      "status": "machine"
+    },
+    "call.log.declined": {
+      "text": "अस्वीकार की गई",
+      "status": "machine"
+    },
+    "call.log.incoming": {
+      "text": "आने वाली कॉल",
+      "status": "machine"
+    },
+    "call.log.incoming_duration": {
+      "text": "आने वाली कॉल, {duration}",
+      "status": "machine"
+    },
+    "call.log.missed": {
+      "text": "मिस्ड कॉल",
+      "status": "machine"
+    },
+    "call.log.outgoing": {
+      "text": "जाने वाली कॉल",
+      "status": "machine"
+    },
+    "call.log.outgoing_duration": {
+      "text": "जाने वाली कॉल, {duration}",
+      "status": "machine"
+    },
+    "call.notification.channel_description": {
+      "text": "Lakko की आने वाली कॉल",
+      "status": "machine"
+    },
+    "call.notification.incoming": {
+      "text": "आने वाली कॉल",
+      "status": "machine"
+    },
+    "call.participant.hand_raised": {
+      "text": "हाथ उठाया है",
+      "status": "machine"
+    },
+    "call.participant.muted": {
+      "text": "म्यूट है",
+      "status": "machine"
+    },
+    "call.participant.muted_a11y": {
+      "text": "माइक्रोफ़ोन म्यूट है",
+      "status": "machine"
+    },
+    "call.participant.numbered": {
+      "text": "प्रतिभागी {number}",
+      "status": "machine"
+    },
+    "call.participant.pinned": {
+      "text": "पिन है",
+      "status": "machine"
+    },
+    "call.participant.sharing": {
+      "text": "शेयर कर रहे हैं",
+      "status": "machine"
+    },
+    "call.participant.sharing_a11y": {
+      "text": "स्क्रीन शेयर कर रहे हैं",
+      "status": "machine"
+    },
+    "call.participant.unnamed": {
+      "text": "प्रतिभागी",
+      "status": "machine"
+    },
+    "call.participant.you": {
+      "text": "आप",
+      "status": "machine"
+    },
+    "call.participants.close_a11y": {
+      "text": "प्रतिभागी सूची बंद करें",
+      "status": "machine"
+    },
+    "call.participants.title": {
+      "text": "प्रतिभागी ({count})",
+      "status": "machine"
+    },
+    "call.permission.audio_only": {
+      "text": "सिर्फ़ ऑडियो",
+      "status": "machine"
+    },
+    "call.permission.camera.body": {
+      "text": "वीडियो के लिए कैमरा चाहिए। आप सिर्फ़ ऑडियो के साथ जारी रख सकते हैं, या ऐप सेटिंग में Lakko को कैमरे की अनुमति दे सकते हैं।",
+      "status": "machine"
+    },
+    "call.permission.camera.title": {
+      "text": "कैमरे की अनुमति चाहिए",
+      "status": "machine"
+    },
+    "call.permission.microphone.body": {
+      "text": "कॉल के लिए माइक्रोफ़ोन चाहिए। ऐप सेटिंग में Lakko को माइक्रोफ़ोन की अनुमति दें, फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "call.permission.microphone.title": {
+      "text": "माइक्रोफ़ोन की अनुमति चाहिए",
+      "status": "machine"
+    },
+    "call.quality.a11y": {
+      "text": "कनेक्शन की गुणवत्ता: {tier}",
+      "status": "machine"
+    },
+    "call.quality.bps": {
+      "text": "{value} bps",
+      "status": "machine"
+    },
+    "call.quality.details_a11y": {
+      "text": "कनेक्शन की जानकारी",
+      "status": "machine"
+    },
+    "call.quality.direct": {
+      "text": "सीधा",
+      "status": "machine"
+    },
+    "call.quality.down": {
+      "text": "डाउन",
+      "status": "machine"
+    },
+    "call.quality.kbps": {
+      "text": "{value} kbps",
+      "status": "machine"
+    },
+    "call.quality.mbps": {
+      "text": "{value} Mbps",
+      "status": "machine"
+    },
+    "call.quality.ms": {
+      "text": "{value} ms",
+      "status": "machine"
+    },
+    "call.quality.relay": {
+      "text": "रिले से",
+      "status": "machine"
+    },
+    "call.quality.round_trip": {
+      "text": "राउंड ट्रिप",
+      "status": "machine"
+    },
+    "call.quality.tier.bad": {
+      "text": "खराब",
+      "status": "machine"
+    },
+    "call.quality.tier.excellent": {
+      "text": "बहुत अच्छी",
+      "status": "machine"
+    },
+    "call.quality.tier.fair": {
+      "text": "ठीक-ठाक",
+      "status": "machine"
+    },
+    "call.quality.tier.good": {
+      "text": "अच्छी",
+      "status": "machine"
+    },
+    "call.quality.tier.poor": {
+      "text": "कमज़ोर",
+      "status": "machine"
+    },
+    "call.quality.title": {
+      "text": "कनेक्शन: {tier}",
+      "status": "machine"
+    },
+    "call.quality.up": {
+      "text": "अप",
+      "status": "machine"
+    },
+    "call.self.camera_a11y": {
+      "text": "आपका कैमरा",
+      "status": "machine"
+    },
+    "call.self.flip_a11y": {
+      "text": "दूसरे कैमरे पर जाएँ",
+      "status": "machine"
+    },
+    "call.self.starting_camera": {
+      "text": "कैमरा शुरू हो रहा है...",
+      "status": "machine"
+    },
+    "call.settings.devices": {
+      "text": "डिवाइस",
+      "status": "machine"
+    },
+    "call.settings.low_data": {
+      "text": "कम डेटा मोड",
+      "status": "machine"
+    },
+    "call.settings.low_data_hint": {
+      "text": "वीडियो को 360p तक सीमित करता है, सीमित मोबाइल डेटा वाले कनेक्शन पर उपयोगी।",
+      "status": "machine"
+    },
+    "call.settings.microphone": {
+      "text": "माइक्रोफ़ोन",
+      "status": "machine"
+    },
+    "call.settings.mirror": {
+      "text": "अपना प्रीव्यू मिरर करें",
+      "status": "machine"
+    },
+    "call.settings.no_devices": {
+      "text": "अभी कोई डिवाइस नहीं मिला। माइक्रोफ़ोन या कैमरे की अनुमति देने के बाद वे यहाँ दिखेंगे।",
+      "status": "machine"
+    },
+    "call.settings.system_default": {
+      "text": "सिस्टम डिफ़ॉल्ट",
+      "status": "machine"
+    },
+    "call.settings.video": {
+      "text": "वीडियो",
+      "status": "machine"
+    },
+    "call.start.no_camera": {
+      "text": "कोई कैमरा उपलब्ध नहीं है, इसलिए यह वॉइस कॉल है।",
+      "status": "machine"
+    },
+    "call.status.calling": {
+      "text": "कॉल की जा रही है...",
+      "status": "machine"
+    },
+    "call.status.calling_spoken": {
+      "text": "कॉल की जा रही है",
+      "status": "machine"
+    },
+    "call.status.connected": {
+      "text": "कनेक्ट हो गई",
+      "status": "machine"
+    },
+    "call.status.connecting_spoken": {
+      "text": "कनेक्ट हो रहा है",
+      "status": "machine"
+    },
+    "call.status.ended": {
+      "text": "कॉल खत्म हुई",
+      "status": "machine"
+    },
+    "call.status.group_count": {
+      "text": "ग्रुप कॉल · {count}",
+      "status": "machine"
+    },
+    "call.status.in_call_spoken": {
+      "text": "कॉल में, {duration}",
+      "status": "machine"
+    },
+    "call.status.reconnecting": {
+      "text": "फिर से कनेक्ट हो रहा है...",
+      "status": "machine"
+    },
+    "call.status.reconnecting_spoken": {
+      "text": "फिर से कनेक्ट हो रहा है",
+      "status": "machine"
+    },
+    "call.status.ringing": {
+      "text": "घंटी बज रही है...",
+      "status": "machine"
+    },
+    "call.undecryptable.named": {
+      "text": "{name} की आवाज़ और वीडियो डिक्रिप्ट नहीं हो सकते",
+      "status": "machine"
+    },
+    "call.undecryptable.notice": {
+      "text": "आने वाली आवाज़ और वीडियो डिक्रिप्ट नहीं हो सकते",
+      "status": "machine"
+    },
+    "call.undecryptable.notice_many": {
+      "text": "{count, plural, one {# प्रतिभागी की आवाज़ और वीडियो डिक्रिप्ट नहीं हो सकते} other {# प्रतिभागियों की आवाज़ और वीडियो डिक्रिप्ट नहीं हो सकते}}",
+      "status": "machine"
+    },
+    "call.undecryptable.tile": {
+      "text": "डिक्रिप्ट नहीं हो सकता",
+      "status": "machine"
+    },
+    "call.undecryptable.tile_a11y": {
+      "text": "इस प्रतिभागी की आवाज़ और वीडियो डिक्रिप्ट नहीं हो सकते",
       "status": "machine"
     },
     "channels.back": {
@@ -2582,12 +3354,20 @@
       "text": "हो गया",
       "status": "machine"
     },
+    "common.duration.hours": {
+      "text": "{count, plural, one {# घंटा} other {# घंटे}}",
+      "status": "machine"
+    },
     "common.duration.minutes": {
       "text": "{count, plural, one {# मिनट} other {# मिनट}}",
       "status": "machine"
     },
     "common.duration.minutes_seconds": {
       "text": "{minutes} {seconds}",
+      "status": "machine"
+    },
+    "common.duration.pair": {
+      "text": "{first} {second}",
       "status": "machine"
     },
     "common.duration.seconds": {
@@ -2680,6 +3460,10 @@
     },
     "common.on": {
       "text": "चालू",
+      "status": "machine"
+    },
+    "common.open": {
+      "text": "खोलें",
       "status": "machine"
     },
     "common.open_chat": {
@@ -3792,6 +4576,22 @@
     },
     "new_group.subtitle": {
       "text": "आप ग्रुप के मालिक होंगे। आप बाद में और लोगों को जोड़ सकते हैं।",
+      "status": "machine"
+    },
+    "notification.channel.messages": {
+      "text": "मैसेज",
+      "status": "machine"
+    },
+    "notification.channel.messages_desc": {
+      "text": "Lakko के नए मैसेज के लिए नोटिफ़िकेशन",
+      "status": "machine"
+    },
+    "notification.message.attachments": {
+      "text": "{count, plural, one {एक अटैचमेंट भेजा} other {# अटैचमेंट भेजे}}",
+      "status": "machine"
+    },
+    "notification.message.new": {
+      "text": "नया मैसेज",
       "status": "machine"
     },
     "recovery.access_only_note": {

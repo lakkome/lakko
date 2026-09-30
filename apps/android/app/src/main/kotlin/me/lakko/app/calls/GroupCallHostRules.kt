@@ -3,6 +3,8 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.UiText
+
 /**
  * The decisions the app-level [GroupCallHost] takes for a group (SFU) call,
  * kept pure so they can be unit-tested. The Kotlin twin of
@@ -147,7 +149,7 @@ public sealed interface GroupCallStartDecision {
      *  second session for it. */
     public data object AlreadyInThisCall : GroupCallStartDecision
 
-    public data class Busy(val message: String) : GroupCallStartDecision
+    public data class Busy(val message: UiText) : GroupCallStartDecision
 }
 
 /**

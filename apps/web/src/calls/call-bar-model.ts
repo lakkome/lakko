@@ -37,6 +37,7 @@
 
 import type { CallBarPhase } from "../../wasm/lakko_ffi_wasm";
 import type { Wasm } from "../wasm";
+import { t } from "../l10n";
 import { callControls, type CallControlSpec } from "./call-controls";
 import {
   formatCallDuration,
@@ -190,11 +191,11 @@ export function callBarStatus(
   const kind = rules.callBarStatusKind(input.phase);
   switch (kind) {
     case "calling":
-      return { text: "Calling...", spoken: "Calling" };
+      return { text: t("call.status.calling"), spoken: t("call.status.calling_spoken") };
     case "connecting":
-      return { text: "Connecting...", spoken: "Connecting" };
+      return { text: t("common.connecting"), spoken: t("call.status.connecting_spoken") };
     case "reconnecting":
-      return { text: "Reconnecting...", spoken: "Reconnecting" };
+      return { text: t("call.status.reconnecting"), spoken: t("call.status.reconnecting_spoken") };
     case "elapsed": {
       const since = input.connectedAtMs;
       const ms = rules.callBarElapsedMs(

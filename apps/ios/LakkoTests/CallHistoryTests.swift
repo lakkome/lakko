@@ -140,7 +140,7 @@ final class CallHistoryTests: XCTestCase {
         XCTAssertEqual(
             answered.transcriptRow,
             CallTranscriptRow(direction: .outgoing, outcome: .answered(durationMs: 74_000)))
-        XCTAssertEqual(answered.transcriptRow.text, "Outgoing call, 1:14")
+        XCTAssertEqual(l10nPlain(answered.transcriptRow.text), "Outgoing call, 1:14")
 
         let missed = entry("b", direction: .incoming, outcome: .missed, at: 0)
         XCTAssertEqual(missed.transcriptRow.text, "Missed call")
@@ -169,7 +169,7 @@ final class CallHistoryTests: XCTestCase {
     func testTheSecondLineCarriesTheOutcomeAndTheTime() {
         let row = entry("a", at: ms(2026, 9, 23, 12, 4), durationMs: 74_000)
         XCTAssertEqual(
-            CallHistory.rowSubtitle(row, calendar: calendar, locale: locale),
+            l10nPlain(CallHistory.rowSubtitle(row, calendar: calendar, locale: locale)),
             "Outgoing call, 1:14, 12:04")
     }
 
@@ -196,15 +196,14 @@ final class CallHistoryTests: XCTestCase {
     // MARK: - Accessibility
 
     /// A duration is announced as a duration, never read digit by digit, and
-    /// the row says what a tap on IT does rather than what the button beside
-    /// it does.
+    /// the row does not promise what the button beside it does.
     func testTheSpokenRowNamesTheConversationAndTheDuration() {
         let row = entry("a", at: ms(2026, 9, 23, 12, 4), durationMs: 74_000)
         let spoken = CallHistory.rowAccessibilityLabel(
             row, title: "Anna", calendar: calendar, locale: locale)
         XCTAssertEqual(
-            spoken, "Anna. Outgoing call, 1 minute 14 seconds, 12:04. Double tap to open the conversation.")
-        XCTAssertFalse(spoken.contains("call back"))
+            l10nPlain(spoken), "Anna, Call, outgoing, lasted 1 minute 14 seconds, 12:04")
+        XCTAssertFalse(spoken.contains("Call back"))
     }
 
     func testTheCallBackButtonSaysWhichModeItWillUse() {

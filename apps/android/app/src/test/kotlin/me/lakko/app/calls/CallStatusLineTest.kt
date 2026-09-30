@@ -3,6 +3,7 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.EnglishForTests
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -12,6 +13,11 @@ import org.junit.Test
  * what the safety number's strip of digits used to occupy.
  */
 class CallStatusLineTest {
+    init {
+        // ADR-0058: the words under test are the English catalog's.
+        EnglishForTests.install()
+    }
+
 
     @Suppress("LongParameterList")
     private fun status(
@@ -71,7 +77,7 @@ class CallStatusLineTest {
         // Section 4.1's state table: "`Call ended` and the duration". The clock
         // stops — the screen does not keep counting while it dismisses itself —
         // but the number it stopped at is the last thing the line says.
-        assertEquals("Call ended, 12:04", status(connected = true, ended = true, elapsedSecs = 724))
+        assertEquals("Call ended · 12:04", status(connected = true, ended = true, elapsedSecs = 724))
     }
 
     @Test

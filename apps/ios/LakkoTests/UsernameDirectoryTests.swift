@@ -527,6 +527,6 @@ final class CameraPermissionTests: XCTestCase {
         // The system mapping reads the live permission database, so it is not
         // driven here; the copy every surface shows is.
         XCTAssertTrue(CameraPermission.deniedMessage.contains("audio only"))
-        XCTAssertTrue(CameraPermission.deniedMessage.contains("Settings > Lakko > Camera"))
+        XCTAssertTrue(CameraPermission.deniedMessage.contains("app settings"))
     }
 }

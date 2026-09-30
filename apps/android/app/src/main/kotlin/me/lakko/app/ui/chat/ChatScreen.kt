@@ -816,7 +816,7 @@ public fun ChatScreen(
             AlertDialog(
                 onDismissRequest = viewModel::dismissCallNotice,
                 title = { Text(t("chat.call.voice")) },
-                text = { Text(notice) },
+                text = { Text(notice.text()) },
                 confirmButton = {
                     if (callNoticeOffersEnd) {
                         TextButton(onClick = viewModel::onEndCurrentCall) { Text(t("call.link.end_current")) }
@@ -1588,7 +1588,8 @@ private fun CallHistoryRow(
     val missed = entry.outcome == me.lakko.app.calls.CallOutcome.MISSED ||
         entry.outcome == me.lakko.app.calls.CallOutcome.DECLINED
     val tint = if (missed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-    val spoken = remember(entry) { me.lakko.app.calls.callRowSpokenLabel(entry) }
+    val strings = me.lakko.app.l10n.LocalStrings.current
+    val spoken = remember(entry, strings) { me.lakko.app.calls.callRowSpokenLabel(entry, strings) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1615,7 +1616,7 @@ private fun CallHistoryRow(
                     modifier = Modifier.size(16.dp),
                 )
                 Text(
-                    text = me.lakko.app.calls.callRowText(entry),
+                    text = me.lakko.app.calls.callRowText(entry, strings),
                     style = MaterialTheme.typography.labelMedium,
                     color = tint,
                     textAlign = TextAlign.Center,

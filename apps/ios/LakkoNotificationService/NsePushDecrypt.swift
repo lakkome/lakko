@@ -622,8 +622,25 @@ public func nseRingVerdict(muted: Bool, createdAt: String, nowMs: Int64) -> NseR
 /// not read from the core, and for the test that keeps it equal.
 public let nseCallRingWindowMs: UInt64 = 45_000
 
+// MARK: - Notification words (ADR-0058)
+
+/// Where the extension's notification words come from. The app renders them in
+/// the interface language into the App Group suite
+/// (`SharedStorage.notificationWordsKey`); ``NotificationService`` points this
+/// at that store when it wakes. The default answers nothing, so a caller that
+/// never set it (a unit test) reads English.
+public var nseNotificationWordLookup: (String) -> String? = { _ in nil }
+
+/// One notification word in the interface language, or `english` when the app
+/// has not stored it: the fallback is per word, never all-or-nothing.
+func nseWord(_ key: String, english: String) -> String {
+    nseNotificationWordLookup(key) ?? english
+}
+
 /// What a passive call notification says when the call is already over.
-public let nseMissedCallBody = "Missed call"
+public var nseMissedCallBody: String {
+    nseWord("call.log.missed", english: "Missed call")
+}
 
 // MARK: - Call wording
 
@@ -635,13 +652,17 @@ public let nseMissedCallBody = "Missed call"
 /// the extension is a separate process that links neither the app module nor
 /// the full FFI, and the alternative — compiling the app's file into a third
 /// target — puts two copies of the same symbol in the unit-test target.
-public let nseUnknownCallerTitle = "Incoming call"
+public var nseUnknownCallerTitle: String {
+    nseWord("call.notification.incoming", english: "Incoming call")
+}
 
 /// `Voice call` / `Video call` (`docs/ux/calls.md` section 2.2). The
 /// extension's copy of ``CallKindLabel``; see ``nseUnknownCallerTitle`` for why
 /// it is a copy.
 public func nseCallKindLabel(video: Bool) -> String {
-    video ? "Video call" : "Voice call"
+    video
+        ? nseWord("call.kind.video", english: "Video call")
+        : nseWord("call.kind.voice", english: "Voice call")
 }
 
 /// What the extension shows for a call that has ENDED, given whether it found
@@ -666,7 +687,7 @@ public func nseEndedCallContent(
     callerName: String?
 ) -> (title: String, body: String, passive: Bool) {
     if hadDeliveredAlert {
-        return (title: callerName ?? nseUnknownCallerTitle, body: "Missed call", passive: false)
+        return (title: callerName ?? nseUnknownCallerTitle, body: nseMissedCallBody, passive: false)
     }
     return (title: "", body: "", passive: true)
 }
@@ -1077,8 +1098,8 @@ private func hexToData(_ hex: String) -> Data? {
 /// attachment line, exactly as the timeline renders it as a file chip.
 func nseMediaLabel(kind: String?) -> String? {
     switch kind {
-    case "voice": return "Voice message"
-    case "video_note": return "Video message"
+    case "voice": return nseWord("chat.media.voice_message", english: "Voice message")
+    case "video_note": return nseWord("chat.media.video_message", english: "Video message")
     case "gif": return "GIF"
     default: return nil
     }

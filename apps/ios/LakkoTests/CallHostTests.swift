@@ -638,7 +638,7 @@ final class CallHostTests: XCTestCase {
         XCTAssertEqual(host.outgoingSurface, .dial(video: false))
         XCTAssertFalse(h.placed[0].video)
         XCTAssertEqual(
-            host.outgoingNotice, "This device has no camera. Calling with voice only.")
+            host.outgoingNotice, "No camera available, so this is a voice call.")
     }
 
     /// An incoming call has no button of ours, and section 3.3 says accepting

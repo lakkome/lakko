@@ -3,6 +3,7 @@
 
 package me.lakko.app.profile
 
+import me.lakko.app.l10n.EnglishForTests
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -15,6 +16,11 @@ import org.junit.Test
  * The fingerprint is never a name; it stays on a separate accessor.
  */
 class DisplayNameResolverTest {
+    init {
+        // ADR-0058: the words under test are the English catalog's.
+        EnglishForTests.install()
+    }
+
 
     private val key = byteArrayOf(0xa1.toByte(), 0xb2.toByte(), 0xc3.toByte(), 0xd4.toByte(), 0x55, 0x66)
 

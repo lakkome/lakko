@@ -101,6 +101,43 @@ public enum SharedStorage {
         sharedDefaults()?.bool(forKey: antiCensorshipArmedKey) ?? false
     }
 
+    // MARK: - Notification words (ADR-0058)
+
+    /// The shared-suite key holding the few words the notification extension
+    /// puts on a notification, rendered in the interface language by the app
+    /// (a `[catalog key: text]` dictionary). The extension is a separate
+    /// process without the app's catalog, so the app writes them whenever the
+    /// language changes and the extension reads them at push time, falling
+    /// back to English word by word (the web `notification-strings.ts`).
+    /// Nothing here leaves the device.
+    public static let notificationWordsKey = "lakko.l10n.notification-words"
+
+    /// The catalog keys the extension reads. Written by the app; read by the
+    /// extension with its own English fallback per word.
+    public static let notificationWordKeys: [String] = [
+        "call.kind.voice",
+        "call.kind.video",
+        "call.notification.incoming",
+        "call.log.missed",
+        "chat.media.voice_message",
+        "chat.media.video_message",
+    ]
+
+    /// Store the words (app side). Best-effort: a `nil` suite is a silent
+    /// no-op and notifications stay in English.
+    public static func setNotificationWords(_ words: [String: String]) {
+        sharedDefaults()?.set(words, forKey: notificationWordsKey)
+    }
+
+    /// One stored word (extension side, READ-ONLY), or `nil` when the app has
+    /// not stored it (never ran since the update, an unprovisioned App Group,
+    /// a key this build does not know); the caller falls back to English.
+    public static func storedNotificationWord(_ key: String) -> String? {
+        let words = sharedDefaults()?.dictionary(forKey: notificationWordsKey) as? [String: String]
+        guard let word = words?[key], !word.isEmpty else { return nil }
+        return word
+    }
+
     // MARK: - Pure migration-decision primitives (unit-tested)
 
     /// Copy-if-absent decision for the one-time, idempotent migration:

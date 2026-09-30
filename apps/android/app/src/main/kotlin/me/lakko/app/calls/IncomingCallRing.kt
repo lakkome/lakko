@@ -3,6 +3,9 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.Strings
+
 /**
  * What it means for the phone to ring, written once, with no Android types.
  *
@@ -98,11 +101,16 @@ public data class CallRingContent(val title: String, val body: String)
  * The body is the kind and nothing else — never "Incoming Lakko call", never a
  * message preview. A caller this device cannot name falls back to the same word
  * the in-app banner has always used rather than to an account id, which would
- * be both meaningless and a leak onto a locked screen.
+ * be both meaningless and a leak onto a locked screen. The words are the
+ * catalog's (ADR-0058), in the interface language.
  */
-public fun callRingContent(callerName: String?, video: Boolean): CallRingContent = CallRingContent(
-    title = callerName?.trim()?.takeIf { it.isNotEmpty() } ?: "Someone",
-    body = if (video) "Video call" else "Voice call",
+public fun callRingContent(
+    callerName: String?,
+    video: Boolean,
+    strings: Strings = Localization.strings.value,
+): CallRingContent = CallRingContent(
+    title = callerName?.trim()?.takeIf { it.isNotEmpty() } ?: strings["contacts.request.someone"],
+    body = strings[if (video) "call.kind.video" else "call.kind.voice"],
 )
 
 /**

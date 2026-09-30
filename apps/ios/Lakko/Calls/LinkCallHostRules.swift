@@ -141,16 +141,21 @@ enum LinkCallHostRules {
         case .live:
             return nil
         case .starting:
-            return Notice(text: "Connecting to the call…", actions: [.open, .cancel])
+            return Notice(text: Localization.text("call.link.notice.connecting"), actions: [.open, .cancel])
         case .waiting:
-            return Notice(text: "Waiting for the owner to admit you…", actions: [.open, .cancel])
+            return Notice(text: Localization.text("call.link.waiting"), actions: [.open, .cancel])
         case .ended:
-            return Notice(text: "The call has ended.", actions: [.dismiss])
+            return Notice(text: Localization.text("call.link.ended"), actions: [.dismiss])
         case .dead:
-            return Notice(text: "This call has ended or isn't active.", actions: [.dismiss])
+            return Notice(text: Localization.text("call.link.dead"), actions: [.dismiss])
         case .error:
+            // Two sentences through `common.sentence_pair`: the failure, then
+            // the reason when its kind has one (batch 5 convention).
+            let failed = Localization.text("call.link.error.generic")
             return Notice(
-                text: errorMessage.map { "The call failed: \($0)" } ?? "The call failed.",
+                text: errorMessage.map {
+                    Localization.text("common.sentence_pair", texts: ["first": failed, "second": $0])
+                } ?? failed,
                 actions: [.dismiss]
             )
         }

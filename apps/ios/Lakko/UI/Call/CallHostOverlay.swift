@@ -24,6 +24,7 @@ struct CallHostOverlay: ViewModifier {
     @ObservedObject var group: GroupCallHost
     @ObservedObject var link: LinkCallHost
     @ObservedObject var inviteIntake: InviteIntake
+    @ObservedObject var l10n = Localization.shared
 
     /// Collapsed / expanded, and when the live call connected. Lives as long as
     /// this modifier, which is as long as the signed-in session.
@@ -269,7 +270,7 @@ struct CallHostOverlay: ViewModifier {
                 }
             }
             .alert(
-                "Call",
+                l10n.t("call.alert.title"),
                 isPresented: Binding(
                     get: { errorMessage != nil },
                     set: { presented in
@@ -278,7 +279,7 @@ struct CallHostOverlay: ViewModifier {
                 ),
                 presenting: errorMessage
             ) { _ in
-                Button("OK", role: .cancel) { dismissErrors() }
+                Button(l10n.t("common.ok"), role: .cancel) { dismissErrors() }
             } message: { message in
                 Text(message)
             }
@@ -328,7 +329,6 @@ private struct OneToOneCallBar: View {
     var body: some View {
         CollapsedCallBar(
             label: label,
-            isPerson: true,
             phase: phase,
             connectedAt: connectedAt,
             // Exactly what decides the call screen's chip, read from the same
@@ -360,7 +360,6 @@ private struct ExternalCallBar: View {
         let micOn = local?.micOn ?? true
         CollapsedCallBar(
             label: label,
-            isPerson: false,
             phase: phase,
             connectedAt: connectedAt,
             encrypted: state.e2ee.active,
@@ -375,6 +374,7 @@ private struct ExternalCallBar: View {
 /// admission (Open / Cancel), or how it ended (Dismiss). Same shape as the
 /// ringing banner above.
 private struct LinkCallNoticeBanner: View {
+    @ObservedObject var l10n = Localization.shared
     let notice: LinkCallHostRules.Notice
     /// `nil` when there is no landing to return to.
     let onOpen: (() -> Void)?
@@ -394,18 +394,18 @@ private struct LinkCallNoticeBanner: View {
             }
             HStack(spacing: 8) {
                 if notice.actions.contains(.open), let onOpen {
-                    Button("Open", action: onOpen)
+                    Button(l10n.t("common.open"), action: onOpen)
                         .buttonStyle(.borderedProminent)
                         .tint(Color.lakkoAccent)
                 }
                 Spacer()
                 if notice.actions.contains(.cancel) {
-                    Button("Cancel", role: .destructive, action: onCancel)
+                    Button(l10n.t("common.cancel"), role: .destructive, action: onCancel)
                         .buttonStyle(.bordered)
                         .tint(Color.lakkoDanger)
                 }
                 if notice.actions.contains(.dismiss) {
-                    Button("Dismiss", action: onDismiss)
+                    Button(l10n.t("common.dismiss"), action: onDismiss)
                         .buttonStyle(.bordered)
                         .tint(Color.lakkoAccent)
                 }
@@ -419,6 +419,6 @@ private struct LinkCallNoticeBanner: View {
             Rectangle().fill(Color.lakkoBorder).frame(height: 1)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Call from a link")
+        .accessibilityLabel(l10n.t("call.link.notice.a11y"))
     }
 }

@@ -3,6 +3,7 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.EnglishForTests
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -24,6 +25,11 @@ import org.junit.Test
  * offer finally carries.
  */
 class OutgoingCallMediaTest {
+    init {
+        // ADR-0058: the words under test are the English catalog's.
+        EnglishForTests.install()
+    }
+
 
     @Test
     fun `the phone button is a voice call and the video button a video one`() {

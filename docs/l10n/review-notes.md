@@ -389,3 +389,129 @@ recovery area (`docs/l10n/batch-1-auth.md`).
   "ссылка / посилання"; pt-BR "Novo" with "link".
 - **`common.qr_code`:** pt-BR keeps "QR code" (common in Brazil), matching
   batch 1.
+
+## Batch 5 (calls): ar, es, fa, he, hi
+
+### Terms used
+
+| en | ar | es | fa | he | hi |
+|---|---|---|---|---|---|
+| voice call | مكالمة صوتية | llamada de voz | تماس صوتی | שיחה קולית | वॉइस कॉल |
+| video call | مكالمة فيديو | videollamada | تماس تصویری | שיחת וידאו | वीडियो कॉल |
+| end call | إنهاء المكالمة | Terminar llamada (label "Colgar") | پایان تماس | סיום השיחה | कॉल खत्म करें |
+| mute (mic) | كتم | silenciar | بی‌صدا | השתקה | म्यूट |
+| speaker | مكبّر الصوت | altavoz | بلندگو | רמקול | स्पीकर |
+| missed call | مكالمة فائتة | llamada perdida | تماس بی‌پاسخ | שיחה שלא נענתה | मिस्ड कॉल |
+| put the call away | تصغير | minimizar | کوچک کردن | מזעור | छोटा करें |
+
+### Across languages
+
+- **Screen share**: no batch 5 key mentions it, so there is no term yet.
+- **Relay** (`call.quality.relay`): ar and he add "server" ("عبر خادم ترحيل",
+  "דרך שרת ממסר"); fa "از طریق رله" and hi "रिले से" are loanwords.
+- **Bitrate units**: fa, he and hi keep bps/kbps/Mbps and ms in Latin; ar
+  uses "بت/ث", "ك.بت/ث", "م.بت/ث", "م.ث"; es is identical to English.
+- **`call.control.speaker_a11y`**: {device} is either a device name or the
+  default/next speaker phrase. ar, fa and he build it without a definite
+  article, which may read oddly around a real device name.
+- **`common.duration.pair`**: ar, fa and he add "and"; es and hi a space.
+
+### Per language
+
+- **ar**: "Calling..." is "يرن..." (ringing), because "جارٍ الاتصال" already
+  means "Connecting" (`call.link.connecting`). `call.participant.muted` is
+  masculine.
+- **es**: `call.control.end` is "Colgar" under the button, with "Terminar
+  llamada" as its accessible name; `call.encryption.sentence_named` is
+  "Nadie más que tú y {name} puede oír esta llamada" to avoid
+  vosotros/ustedes. `call.participant.muted` / `pinned` are masculine.
+- **fa**: `call.encryption.compare_hint` uses "گوشی" for phone.
+- **he**: `call.chat.joined` is "הצטרפות לשיחה: {name}" to avoid a gendered
+  verb. `call.participant.you` is "את/ה" (slash form). "מושתק", "מוצמד" and
+  "משתתף" are masculine.
+- **hi**: `call.status.calling` is "कॉल की जा रही है...";
+  `call.log.a11y.lasted` puts the duration before "चली".
+
+## Batch 5 (calls): pt-BR, ru, tr, uk, zh-Hans
+
+- **Glossary.** call: chamada / звонок / arama / дзвінок / 通话; voice call:
+  chamada de voz / голосовой звонок / sesli arama / голосовий дзвінок /
+  语音通话; video call: chamada de vídeo / видеозвонок / görüntülü arama /
+  відеодзвінок / 视频通话; speaker: alto-falante / динамик / hoparlör /
+  динамік / 扬声器; safety number and end-to-end encrypted as in earlier
+  batches.
+- **"Mute" label under the mic button** (`call.control.mute`): pt-BR
+  "Mudo", ru "Без звука", uk "Без звуку", tr "Sessiz", zh-Hans 静音; the
+  a11y names say "turn the microphone off/on". ru/uk "Без звука" is also
+  the chat-list mute action; check the two do not appear side by side.
+- **Quality tier words** (`call.quality.tier.*`) are adjectives agreeing
+  with the noun in `call.quality.a11y`: ru neuter ("качество ... хорошее"),
+  so the ru tooltip `call.quality.title` became "Качество связи: {tier}"
+  instead of "Связь:"; uk and pt-BR feminine (якість / qualidade,
+  conexão). If the tier word is also shown alone at the top of the
+  connection details, the agreement may look odd there.
+- **`call.control.speaker_a11y`:** "{device}" is a device name or the
+  default/next-speaker phrase; zh-Hans joins with no spaces
+  ("通过{device}播放声音"), tr uses label form.
+- **`common.duration.pair`:** pt-BR "{first} e {second}" repeats "e" when
+  applied pair by pair for three parts ("1 hora e 5 minutos e 3 segundos").
+- **Bitrate units:** ru/uk localize (бит/с, кбит/с, Мбит/с, мс);
+  pt-BR/tr/zh-Hans keep bps/kbps/Mbps (zh-Hans uses 毫秒 for ms).
+- **`call.encryption.chip` / `call.bar.encrypted_a11y`:** gender agrees with
+  "call": pt-BR "Criptografada", ru "Зашифрован", uk "Зашифрований".
+- **`call.chat.joined`:** ru/uk use the present ("присоединяется /
+  приєднується") to avoid a gendered past; tr label form.
+- **Collapse the call** ("Put the call away"): rendered as
+  minimize/collapse (Minimizar / Свернуть / küçült / Згорнути / 收起).
+- **Tooling note:** `scratchpad/merge.py` was overwritten by another agent
+  with an en.json key-adder; my five runs of it aborted with "EXISTS"
+  before writing anything. I merged with a new `b_merge_lang.py` and did
+  not touch `merge.py`.
+
+### Batch 5 top-up (keys added by iOS and Android)
+
+
+- **Screen share** now has a term: es "Compartir pantalla", ar "مشاركة
+  الشاشة", fa "اشتراک‌گذاری صفحه", he "שיתוף מסך", hi "स्क्रीन शेयर करें".
+- **`call.undecryptable.*`** (security-critical): "media" is rendered as
+  "sound and picture" (es "audio y vídeo", ar "الصوت والصورة", fa "صدا و
+  تصویر", he "השמע והווידאו", hi "आवाज़ और वीडियो"), because the literal word
+  "media" reads like files. The tile badge is the short "Can't decrypt" in
+  each language.
+- **Arabic "Ringing..."** (`call.status.ringing`) is "يرن...", the same text
+  the batch 5 pass used for "Calling..." (outgoing); on screen the caller's
+  side and the callee's side now read the same. Consider "جارٍ الرنين"
+  for one of them.
+- **`call.participant.sharing`**: ar, he and hi use a verb form ("يشارك الشاشة",
+  "משתף", "शेयर कर रहे हैं") and fa "در حال اشتراک"; he "משתף" is
+  masculine. The same applies to `call.participant.hand_raised`.
+- **he `notification.message.attachments`** uses the slash form "שלח/ה"
+  (a notification with no subject; a neutral noun phrase would be better).
+- **`notification.channel.messages_desc`**: "wake notifications" is rendered
+  as "notifications for new messages" in hi; the others keep "wake"
+  (ar "إشعارات تنبيه", fa "بیدارباش", he "השכמה", es "despertar la app").
+- **`call.settings.low_data`**: es "Modo de bajo consumo de datos" is long
+  for a switch label.
+
+
+- **`call.undecryptable.*` (security-critical):** "media" is rendered as
+  "sound and video" in ru/uk ("звук и видео / звук і відео"), as "mídia" in
+  pt-BR, "medya" in tr and 媒体 in zh-Hans. tr "çözülemiyor" means
+  "cannot be decoded/decrypted"; "şifresi çözülemiyor" would be more
+  explicit but long for the tile badge. pt-BR tile "Sem descriptografia"
+  is a noun phrase to stay short. ru/uk `named` uses label form
+  ("...: {name}") to avoid declining the name.
+- **`call.settings.devices`:** spelled out as "audio and video devices" in
+  all five, per the comment (to avoid confusion with linked phones); longer
+  than the English heading.
+- **Screen share:** pt-BR "Compartilhar tela", ru/uk "Показать экран /
+  Показати екран" (not "поделиться"), tr "Ekranı paylaş", zh-Hans 共享屏幕.
+  The badge `call.participant.sharing` in ru/uk says "shows the screen".
+- **`call.permission.*.body`:** pt-BR "ajustes do app" follows the iOS
+  name; Android says "configurações".
+- **`call.status.connected`:** pt-BR "Conectada" agrees with "chamada";
+  ru/uk "Соединено / З’єднано", zh-Hans 已接通.
+- **`notification.message.attachments`:** ru/uk are impersonal passive
+  ("Отправлено # вложение") because the sender is not the subject;
+  pt-BR/tr keep "sent" with an implied sender.
+- **`call.settings.mirror`:** ru "Зеркалить" is colloquial.

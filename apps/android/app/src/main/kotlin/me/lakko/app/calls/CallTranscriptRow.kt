@@ -3,6 +3,9 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.Strings
+
 /**
  * What a finished call leaves behind in the conversation — `docs/ux/calls.md`
  * section 6.
@@ -124,34 +127,38 @@ public fun formatCallDuration(durationSecs: Long): String? {
  * comma, exactly as the spec writes it; one that ended before media flowed says
  * only which way it went.
  */
-public fun callRowText(entry: CallTranscriptEntry): String {
-    val head = when (entry.outcome) {
-        CallOutcome.OUTGOING -> "Outgoing call"
-        CallOutcome.INCOMING -> "Incoming call"
-        CallOutcome.MISSED -> return "Missed call"
-        CallOutcome.DECLINED -> return "Declined"
+public fun callRowText(entry: CallTranscriptEntry, strings: Strings = Localization.strings.value): String {
+    val duration = entry.durationSecs?.let(::formatCallDuration)
+    return when (entry.outcome) {
+        CallOutcome.MISSED -> strings["call.log.missed"]
+        CallOutcome.DECLINED -> strings["call.log.declined"]
+        CallOutcome.OUTGOING -> duration
+            ?.let { strings.format("call.log.outgoing_duration", mapOf("duration" to it)) }
+            ?: strings["call.log.outgoing"]
+        CallOutcome.INCOMING -> duration
+            ?.let { strings.format("call.log.incoming_duration", mapOf("duration" to it)) }
+            ?: strings["call.log.incoming"]
     }
-    val duration = entry.durationSecs?.let(::formatCallDuration) ?: return head
-    return "$head, $duration"
 }
 
 /**
  * What TalkBack reads for the row (section 8: nothing relies on a glyph, and a
  * duration is announced as a duration rather than digit by digit).
  */
-public fun callRowSpokenLabel(entry: CallTranscriptEntry): String {
-    val kind = if (entry.video) "Video call" else "Call"
-    val head = when (entry.outcome) {
-        CallOutcome.OUTGOING -> "$kind, outgoing"
-        CallOutcome.INCOMING -> "$kind, incoming"
-        CallOutcome.MISSED -> "Missed $kind".replaceFirstChar { it.titlecase() }
-        CallOutcome.DECLINED -> "$kind declined"
+public fun callRowSpokenLabel(entry: CallTranscriptEntry, strings: Strings = Localization.strings.value): String {
+    val kind = if (entry.video) "video" else "voice"
+    val direction = when (entry.outcome) {
+        CallOutcome.OUTGOING -> "outgoing"
+        CallOutcome.INCOMING -> "incoming"
+        CallOutcome.MISSED -> "missed"
+        CallOutcome.DECLINED -> "declined"
     }
+    val head = strings["call.log.a11y.${kind}_$direction"]
     // The same readable duration the call screen's status line announces, so a
     // screen reader hears one call described the same way live and afterwards.
-    val spoken = entry.durationSecs?.let(::spokenCallDuration)
-    val body = if (spoken == null) head else "$head, lasted $spoken"
-    return "$body. Double tap to call back."
+    val spoken = entry.durationSecs?.let { spokenCallDuration(it, strings) }
+    val body = if (spoken == null) head else strings.format("call.log.a11y.lasted", mapOf("head" to head, "duration" to spoken))
+    return strings.format("call.log.a11y.call_back", mapOf("head" to body))
 }
 
 /**

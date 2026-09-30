@@ -649,7 +649,7 @@ internal fun rowPreview(
     if (last.direction == Direction.System) {
         // Only a row this build can render: an unreadable bookkeeping row is
         // never shown raw.
-        return last.call?.let { me.lakko.app.calls.callRowText(it) } ?: noMessages
+        return last.call?.let { me.lakko.app.calls.callRowText(it, strings) } ?: noMessages
     }
     val line = previewLine(
         text = last.text,

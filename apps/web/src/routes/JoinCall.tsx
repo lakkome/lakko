@@ -79,6 +79,7 @@ import { linkCallOccupiesSlot, type LinkCallPhase } from "../calls/link-call-hos
 import { paths } from "./paths";
 import { PublicLayout } from "../ui/PublicLayout";
 import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 
 /** What this screen shows: its own pre-call states (`idle`, and `starting`
  *  while a guest account is being created) until the host holds this call,
@@ -177,9 +178,9 @@ export default function JoinCall() {
 
   /** This screen's own state before the host holds the call. */
   const [localPhase, setLocalPhase] = createSignal<"idle" | "starting" | "error">("idle");
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
   /** Why the start was refused while another call holds the slot. */
-  const [busyMessage, setBusyMessage] = createSignal<string | null>(null);
+  const [busyMessage, setBusyMessage] = createLiveText();
   // The join to resume once a guest account's session has landed (after the
   // SaveFreshPhrasePrompt acknowledgement). `null` on the logged-in path.
   const [pendingJoin, setPendingJoin] = createSignal<DecodedCall | null>(null);
@@ -206,7 +207,7 @@ export default function JoinCall() {
     if (slot !== null) return slot.phase;
     return localPhase();
   };
-  const shownError = (): string | null => hostSlot()?.errorMessage ?? error();
+  const shownError = (): string | null => hostSlot()?.errorMessage?.() ?? error();
 
   // While this screen is up it shows the host's state for its call itself, so
   // the host does not repeat it as a notice. An outcome seen here is not
@@ -457,7 +458,11 @@ export default function JoinCall() {
               <A href={paths.home}>{t("common.open_lakko")}</A>
             </Show>
             <Show when={phase() === "error"}>
-              <p style={{ color: "var(--error)" }}>{t("call.link.failed", { reason: shownError() ?? "" })}</p>
+              <p style={{ color: "var(--error)" }}>
+                {shownError() === null
+                  ? t("call.link.error.generic")
+                  : t("call.link.failed", { reason: shownError() ?? "" })}
+              </p>
               <button type="button" onClick={onTryAgain}>
                 {t("common.try_again")}
               </button>

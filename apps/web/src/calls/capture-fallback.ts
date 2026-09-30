@@ -22,6 +22,8 @@
  */
 
 /** Why a capture request failed, as the browser's error name says. */
+import { t } from "../l10n";
+
 export type CaptureFailureReason = "not-found" | "not-allowed" | "other";
 
 /** What the person joined without. */
@@ -103,20 +105,20 @@ export function captureFallbackNotice(fallback: CaptureFallback): string {
   if (fallback.missing === "camera") {
     switch (fallback.reason) {
       case "not-found":
-        return "No camera was found. You joined with your microphone.";
+        return t("call.capture.camera.not_found");
       case "not-allowed":
-        return "Lakko was not allowed to use the camera. You joined with your microphone.";
+        return t("call.capture.camera.not_allowed");
       default:
-        return "The camera could not be started. You joined with your microphone.";
+        return t("call.capture.camera.failed");
     }
   }
   switch (fallback.reason) {
     case "not-found":
-      return "No microphone or camera was found. You can listen and watch.";
+      return t("call.capture.both.not_found");
     case "not-allowed":
-      return "Lakko was not allowed to use the microphone or camera. You can listen and watch.";
+      return t("call.capture.both.not_allowed");
     default:
-      return "The microphone and camera could not be started. You can listen and watch.";
+      return t("call.capture.both.failed");
   }
 }
 
@@ -166,10 +168,10 @@ export function cameraStartFailure(err: unknown): CameraStartFailure {
 export function cameraStartFailureNotice(reason: CaptureFailureReason): string {
   switch (reason) {
     case "not-allowed":
-      return "Lakko was not allowed to use the camera. The call continues without it.";
+      return t("call.camera_failed.not_allowed");
     case "not-found":
-      return "No camera was found. The call continues without it.";
+      return t("call.camera_failed.not_found");
     default:
-      return "The camera could not be started. It may be in use by another app.";
+      return t("call.camera_failed.other");
   }
 }

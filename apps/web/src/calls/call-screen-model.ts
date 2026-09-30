@@ -42,6 +42,9 @@
  * redesign out of scope, and the roster is what works today.
  */
 
+import { t } from "../l10n";
+import { durationWords } from "./duration-words";
+
 /** Which layout the call screen draws. */
 export type CallSurfaceKind = "voice" | "video" | "group";
 
@@ -170,11 +173,13 @@ export interface CallPeerLabelInput {
  * exact word as "no name" so the sheet's sentence stays consistent with it.
  */
 export function callPeerLabel(input: CallPeerLabelInput): string {
-  if (input.surface === "group") return `Group call · ${input.participantCount}`;
+  if (input.surface === "group") {
+    return t("call.status.group_count", { count: input.participantCount });
+  }
   const given = input.peerName?.trim() ?? "";
   if (given !== "") return given;
   const sole = input.soleRemoteName?.trim() ?? "";
-  return sole !== "" ? sole : "Participant";
+  return sole !== "" ? sole : t("call.participant.unnamed");
 }
 
 /** Whose picture fills the video surface. */
@@ -230,15 +235,15 @@ export function callStatusDetail(input: CallStatusInput): string {
     case "idle":
       return "";
     case "calling":
-      return "Calling...";
+      return t("call.status.calling");
     case "connecting":
-      return "Connecting...";
+      return t("common.connecting");
     case "reconnecting":
-      return "Reconnecting...";
+      return t("call.status.reconnecting");
     case "connected":
       return formatCallDuration(elapsedMs(input.connectedAtMs, input.nowMs));
     case "ended":
-      return "Call ended";
+      return t("call.status.ended");
   }
 }
 
@@ -274,15 +279,7 @@ export function formatCallDuration(ms: number): string {
  * what it is.
  */
 export function spokenCallDuration(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const seconds = total % 60;
-  const minutes = Math.floor(total / 60) % 60;
-  const hours = Math.floor(total / 3600);
-  const parts: string[] = [];
-  if (hours > 0) parts.push(`${hours} ${hours === 1 ? "hour" : "hours"}`);
-  if (minutes > 0) parts.push(`${minutes} ${minutes === 1 ? "minute" : "minutes"}`);
-  parts.push(`${seconds} ${seconds === 1 ? "second" : "seconds"}`);
-  return parts.join(" ");
+  return durationWords(Math.floor(Math.max(0, ms) / 1000), true);
 }
 
 /**
@@ -293,8 +290,11 @@ export function spokenCallDuration(ms: number): string {
  * so the sentence simply stops.
  */
 export function endedSummary(connectedAtMs: number | null, endedAtMs: number): string {
-  if (connectedAtMs === null) return "Call ended";
-  return `Call ended · ${formatCallDuration(elapsedMs(connectedAtMs, endedAtMs))}`;
+  if (connectedAtMs === null) return t("call.status.ended");
+  return t("common.fact_pair", {
+    first: t("call.status.ended"),
+    second: formatCallDuration(elapsedMs(connectedAtMs, endedAtMs)),
+  });
 }
 
 /** How long a connected video call waits before the controls fade (§4). */

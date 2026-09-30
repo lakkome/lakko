@@ -51,13 +51,16 @@ public class IncomingCallActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         showOverLockScreen()
         IncomingCallRinger.attach(applicationContext)
+        // The ring can be the first screen of this process (a push woke it):
+        // load the interface language before drawing (ADR-0058). Idempotent.
+        me.lakko.app.l10n.Localization.init(applicationContext)
 
         readAnswerAction(intent)
 
         setContent {
             // Call surfaces are dark by design (design system, section 6): the
             // ring is the same surface as the call it becomes.
-            LakkoTheme(dark = true) {
+            LakkoTheme(dark = true) { me.lakko.app.l10n.ProvideLocalization {
                 val ring by IncomingCallRinger.ringing.collectAsStateWithLifecycle()
                 val current = ring
                 LaunchedEffect(current) {
@@ -80,7 +83,7 @@ public class IncomingCallActivity : ComponentActivity() {
                         onDecline = { decline(current) },
                     )
                 }
-            }
+            } }
         }
     }
 

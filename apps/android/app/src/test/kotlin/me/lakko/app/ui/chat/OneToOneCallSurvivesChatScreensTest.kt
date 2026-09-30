@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.chat
 
+import me.lakko.app.l10n.en
 import androidx.lifecycle.ViewModelStore
 import java.time.Instant
 import kotlinx.coroutines.Dispatchers
@@ -105,7 +106,7 @@ class OneToOneCallSurvivesChatScreensTest {
             vmC.startCall()
             runCurrent()
             assertEquals(1, port.created.size)
-            assertEquals("Another call is in progress.", vmC.callNotice.value)
+            assertEquals("Another call is in progress.", vmC.callNotice.value?.en)
             assertFalse(host.startOutgoing(groupB))
         } finally {
             repo.close()

@@ -31,6 +31,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import me.lakko.app.calls.QuietCallOffer
 import me.lakko.app.calls.callRingContent
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.t
 import me.lakko.app.ui.components.LakkoAvatar
 
 /**
@@ -73,7 +75,7 @@ public fun QuietIncomingCallPanel(
     // The same two lines the ring screen and the call notification use, from
     // the same function, so a muted call is described in the words an unmuted
     // one would have used.
-    val content = callRingContent(callerName, offer.video)
+    val content = callRingContent(callerName, offer.video, LocalStrings.current)
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         modifier = modifier
@@ -117,7 +119,7 @@ public fun QuietIncomingCallPanel(
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error,
                     ),
-                ) { Text("Decline") }
+                ) { Text(t("call.incoming.decline")) }
                 if (offer.video) {
                     // Answering a video call with the camera off. The panel has
                     // room for it; the list row does not, and the permission
@@ -133,7 +135,7 @@ public fun QuietIncomingCallPanel(
                         modifier = Modifier.weight(1f, fill = false),
                     ) {
                         Text(
-                            text = "Accept without video",
+                            text = t("call.incoming.accept_without_video"),
                             style = MaterialTheme.typography.labelLarge,
                             maxLines = 2,
                             textAlign = TextAlign.Center,
@@ -142,7 +144,7 @@ public fun QuietIncomingCallPanel(
                 }
                 Button(
                     onClick = { permissions.request(video = offer.video) { withVideo -> onAccept(withVideo) } },
-                ) { Text("Accept") }
+                ) { Text(t("call.incoming.accept")) }
             }
         }
     }
@@ -169,7 +171,15 @@ public fun QuietIncomingCallRowActions(
     modifier: Modifier = Modifier,
 ) {
     val permissions = rememberCallPermissionGate()
-    val content = callRingContent(callerName, offer.video)
+    val content = callRingContent(callerName, offer.video, LocalStrings.current)
+    val declineSpoken = t(
+        if (offer.video) "call.incoming.decline_video_a11y" else "call.incoming.decline_voice_a11y",
+        mapOf("name" to content.title),
+    )
+    val acceptSpoken = t(
+        if (offer.video) "call.incoming.accept_video_a11y" else "call.incoming.accept_voice_a11y",
+        mapOf("name" to content.title),
+    )
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
@@ -196,14 +206,14 @@ public fun QuietIncomingCallRowActions(
             // the click action off the one affordance whose entire purpose is
             // being pressable.
             modifier = Modifier.semantics {
-                contentDescription = "Decline ${content.body.lowercase()} from ${content.title}"
+                contentDescription = declineSpoken
             },
-        ) { Text("Decline") }
+        ) { Text(t("call.incoming.decline")) }
         Button(
             onClick = { permissions.request(video = offer.video) { withVideo -> onAccept(withVideo) } },
             modifier = Modifier.semantics {
-                contentDescription = "Accept ${content.body.lowercase()} from ${content.title}"
+                contentDescription = acceptSpoken
             },
-        ) { Text("Accept") }
+        ) { Text(t("call.incoming.accept")) }
     }
 }

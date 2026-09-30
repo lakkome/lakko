@@ -242,12 +242,380 @@
       "text": "¿Restaurar esta copia de seguridad antigua?",
       "status": "machine"
     },
+    "call.alert.title": {
+      "text": "Llamada",
+      "status": "machine"
+    },
+    "call.bar.camera_on_a11y": {
+      "text": "tu cámara está encendida",
+      "status": "machine"
+    },
+    "call.bar.encrypted_a11y": {
+      "text": "cifrada",
+      "status": "machine"
+    },
+    "call.bar.region_a11y": {
+      "text": "Llamada en curso",
+      "status": "machine"
+    },
+    "call.bar.return_a11y": {
+      "text": "Volver a la llamada. {name}",
+      "status": "machine"
+    },
+    "call.busy.call_join": {
+      "text": "Ya estás en una llamada. Termínala antes de unirte a otra.",
+      "status": "machine"
+    },
+    "call.busy.call_start": {
+      "text": "Ya estás en una llamada. Termínala antes de iniciar otra.",
+      "status": "machine"
+    },
+    "call.busy.group_join": {
+      "text": "Ya estás en una llamada de grupo. Termínala antes de unirte a otra.",
+      "status": "machine"
+    },
+    "call.busy.group_start": {
+      "text": "Ya estás en una llamada de grupo. Termínala antes de iniciar otra.",
+      "status": "machine"
+    },
+    "call.busy.link_join": {
+      "text": "Ya estás en una llamada abierta desde un enlace. Termínala antes de unirte a otra.",
+      "status": "machine"
+    },
+    "call.busy.link_start": {
+      "text": "Ya estás en una llamada abierta desde un enlace. Termínala antes de iniciar otra.",
+      "status": "machine"
+    },
+    "call.camera_failed.not_allowed": {
+      "text": "Lakko no tiene permiso para usar la cámara. La llamada continúa sin ella.",
+      "status": "machine"
+    },
+    "call.camera_failed.not_found": {
+      "text": "No se encontró ninguna cámara. La llamada continúa sin ella.",
+      "status": "machine"
+    },
+    "call.camera_failed.other": {
+      "text": "No se pudo iniciar la cámara. Puede que otra app la esté usando.",
+      "status": "machine"
+    },
+    "call.capture.both.failed": {
+      "text": "No se pudieron iniciar el micrófono ni la cámara. Puedes escuchar y ver.",
+      "status": "machine"
+    },
+    "call.capture.both.not_allowed": {
+      "text": "Lakko no tiene permiso para usar el micrófono ni la cámara. Puedes escuchar y ver.",
+      "status": "machine"
+    },
+    "call.capture.both.not_found": {
+      "text": "No se encontró ningún micrófono ni cámara. Puedes escuchar y ver.",
+      "status": "machine"
+    },
+    "call.capture.camera.failed": {
+      "text": "No se pudo iniciar la cámara. Te uniste con el micrófono.",
+      "status": "machine"
+    },
+    "call.capture.camera.not_allowed": {
+      "text": "Lakko no tiene permiso para usar la cámara. Te uniste con el micrófono.",
+      "status": "machine"
+    },
+    "call.capture.camera.not_found": {
+      "text": "No se encontró ninguna cámara. Te uniste con el micrófono.",
+      "status": "machine"
+    },
+    "call.chat.a11y": {
+      "text": "Chat de la llamada",
+      "status": "machine"
+    },
+    "call.chat.close_a11y": {
+      "text": "Cerrar chat",
+      "status": "machine"
+    },
+    "call.chat.empty": {
+      "text": "Aún no hay mensajes. Los mensajes de aquí están cifrados de extremo a extremo.",
+      "status": "machine"
+    },
+    "call.chat.joined": {
+      "text": "{name} se unió a la llamada",
+      "status": "machine"
+    },
+    "call.chat.left": {
+      "text": "Un participante salió de la llamada",
+      "status": "machine"
+    },
+    "call.collapse_a11y": {
+      "text": "Minimizar la llamada y volver a la app",
+      "status": "machine"
+    },
+    "call.collapse_title": {
+      "text": "Minimizar la llamada",
+      "status": "machine"
+    },
+    "call.control.bar_a11y": {
+      "text": "Controles de la llamada",
+      "status": "machine"
+    },
+    "call.control.camera": {
+      "text": "Cámara",
+      "status": "machine"
+    },
+    "call.control.camera_start_a11y": {
+      "text": "Encender cámara",
+      "status": "machine"
+    },
+    "call.control.camera_stop_a11y": {
+      "text": "Apagar cámara",
+      "status": "machine"
+    },
+    "call.control.chat": {
+      "text": "Chat",
+      "status": "machine"
+    },
+    "call.control.chat_hide_a11y": {
+      "text": "Ocultar chat",
+      "status": "machine"
+    },
+    "call.control.chat_show_a11y": {
+      "text": "Mostrar chat",
+      "status": "machine"
+    },
+    "call.control.chat_unread": {
+      "text": "{count, plural, one {Chat (# sin leer)} other {Chat (# sin leer)}}",
+      "status": "machine"
+    },
+    "call.control.end": {
+      "text": "Colgar",
+      "status": "machine"
+    },
+    "call.control.end_a11y": {
+      "text": "Terminar llamada",
+      "status": "machine"
+    },
+    "call.control.invite": {
+      "text": "Invitar",
+      "status": "machine"
+    },
+    "call.control.invite_a11y": {
+      "text": "Invitar a alguien a esta llamada con un enlace",
+      "status": "machine"
+    },
+    "call.control.lower_hand": {
+      "text": "Bajar la mano",
+      "status": "machine"
+    },
+    "call.control.more": {
+      "text": "Más",
+      "status": "machine"
+    },
+    "call.control.more_a11y": {
+      "text": "Más controles",
+      "status": "machine"
+    },
+    "call.control.mute": {
+      "text": "Silenciar",
+      "status": "machine"
+    },
+    "call.control.mute_a11y": {
+      "text": "Silenciar micrófono",
+      "status": "machine"
+    },
+    "call.control.participants": {
+      "text": "Participantes",
+      "status": "machine"
+    },
+    "call.control.participants_hide_a11y": {
+      "text": "Ocultar participantes",
+      "status": "machine"
+    },
+    "call.control.participants_show_a11y": {
+      "text": "Mostrar participantes",
+      "status": "machine"
+    },
+    "call.control.raise_hand": {
+      "text": "Levantar la mano",
+      "status": "machine"
+    },
+    "call.control.share_screen": {
+      "text": "Compartir pantalla",
+      "status": "machine"
+    },
+    "call.control.speaker": {
+      "text": "Altavoz",
+      "status": "machine"
+    },
+    "call.control.speaker_a11y": {
+      "text": "Reproducir el sonido por {device}",
+      "status": "machine"
+    },
+    "call.control.speaker_default_device": {
+      "text": "el altavoz predeterminado",
+      "status": "machine"
+    },
+    "call.control.speaker_next_device": {
+      "text": "el siguiente altavoz",
+      "status": "machine"
+    },
+    "call.control.speaker_off_a11y": {
+      "text": "Desactivar altavoz",
+      "status": "machine"
+    },
+    "call.control.speaker_on_a11y": {
+      "text": "Activar altavoz",
+      "status": "machine"
+    },
+    "call.control.stop_share_screen": {
+      "text": "Dejar de compartir pantalla",
+      "status": "machine"
+    },
+    "call.control.unmute_a11y": {
+      "text": "Activar micrófono",
+      "status": "machine"
+    },
+    "call.e2ee": {
+      "text": "Cifrada de extremo a extremo",
+      "status": "machine"
+    },
+    "call.encryption.chip": {
+      "text": "Cifrada",
+      "status": "machine"
+    },
+    "call.encryption.chip_a11y": {
+      "text": "Esta llamada está cifrada. Mostrar el número de seguridad",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint": {
+      "text": "Lee estos números en voz alta con la otra persona. Si coinciden en ambos teléfonos, nadie está escuchando.",
+      "status": "machine"
+    },
+    "call.encryption.copy_a11y": {
+      "text": "Copiar el número de seguridad",
+      "status": "machine"
+    },
+    "call.encryption.number_a11y": {
+      "text": "Número de seguridad: {groups}",
+      "status": "machine"
+    },
+    "call.encryption.number_unavailable": {
+      "text": "Número de seguridad no disponible",
+      "status": "machine"
+    },
+    "call.encryption.sentence_group": {
+      "text": "Solo las personas de esta llamada pueden oírla.",
+      "status": "machine"
+    },
+    "call.encryption.sentence_named": {
+      "text": "Nadie más que tú y {name} puede oír esta llamada.",
+      "status": "machine"
+    },
+    "call.encryption.setting_up": {
+      "text": "Configurando...",
+      "status": "machine"
+    },
+    "call.encryption.title": {
+      "text": "Esta llamada está cifrada",
+      "status": "machine"
+    },
+    "call.error.encryption_setup": {
+      "text": "No se pudo configurar el cifrado de la llamada, así que la llamada no se inició.",
+      "status": "machine"
+    },
+    "call.error.join_group": {
+      "text": "No se pudo unir a la llamada de grupo. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "call.error.microphone_not_allowed": {
+      "text": "Lakko no tiene permiso para usar el micrófono.",
+      "status": "machine"
+    },
+    "call.error.microphone_not_found": {
+      "text": "No se encontró ningún micrófono.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption": {
+      "text": "Este navegador no puede cifrar el audio y el vídeo de la llamada, así que la llamada no se inició.",
+      "status": "machine"
+    },
+    "call.error.not_accepting": {
+      "text": "Esta llamada no acepta nuevos participantes en este momento.",
+      "status": "machine"
+    },
+    "call.error.not_member": {
+      "text": "Ya no eres miembro de este chat.",
+      "status": "machine"
+    },
+    "call.error.signed_out_start": {
+      "text": "Cerraste sesión. Vuelve a iniciar sesión para empezar una llamada.",
+      "status": "machine"
+    },
+    "call.error.start_group": {
+      "text": "No se pudo iniciar la llamada de grupo. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "call.error.unavailable": {
+      "text": "Las llamadas no están disponibles ahora mismo. Inténtalo más tarde.",
+      "status": "machine"
+    },
+    "call.fill.remote_camera_a11y": {
+      "text": "Cámara de {name}",
+      "status": "machine"
+    },
+    "call.group_banner.join_video": {
+      "text": "Vídeo",
+      "status": "machine"
+    },
+    "call.group_banner.open_chat": {
+      "text": "Abrir chat",
+      "status": "machine"
+    },
+    "call.group_banner.title": {
+      "text": "Llamada de grupo en {name}",
+      "status": "machine"
+    },
     "call.guest.default_name": {
       "text": "Invitado",
       "status": "machine"
     },
     "call.guest.working.title": {
       "text": "Entrando en la llamada...",
+      "status": "machine"
+    },
+    "call.history.call_back_a11y": {
+      "text": "Devolver la llamada",
+      "status": "machine"
+    },
+    "call.history.call_back_video_a11y": {
+      "text": "Devolver la llamada con vídeo",
+      "status": "machine"
+    },
+    "call.history.empty": {
+      "text": "Aún no hay llamadas",
+      "status": "machine"
+    },
+    "call.history.empty_body": {
+      "text": "Aquí aparecen las llamadas que haces y recibes.",
+      "status": "machine"
+    },
+    "call.history.join_by_link": {
+      "text": "Unirse con un enlace",
+      "status": "machine"
+    },
+    "call.history.join_invalid": {
+      "text": "Eso no parece un enlace de llamada. Pega el enlace completo e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "call.history.new_call": {
+      "text": "Nueva llamada",
+      "status": "machine"
+    },
+    "call.history.paste_hint": {
+      "text": "Quien creó la llamada comparte el enlace.",
+      "status": "machine"
+    },
+    "call.history.paste_label": {
+      "text": "Pega un enlace de llamada",
+      "status": "machine"
+    },
+    "call.history.unknown_conversation": {
+      "text": "Desconocido",
       "status": "machine"
     },
     "call.incoming.accept": {
@@ -258,12 +626,96 @@
       "text": "Aceptar llamada de {name}",
       "status": "machine"
     },
+    "call.incoming.accept_video_a11y": {
+      "text": "Aceptar videollamada de {name}",
+      "status": "machine"
+    },
+    "call.incoming.accept_voice_a11y": {
+      "text": "Aceptar llamada de voz de {name}",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video": {
+      "text": "Aceptar sin vídeo",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video_a11y": {
+      "text": "Aceptar llamada de {name} sin vídeo",
+      "status": "machine"
+    },
     "call.incoming.decline": {
       "text": "Rechazar",
       "status": "machine"
     },
     "call.incoming.decline_from": {
       "text": "Rechazar llamada de {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline_video_a11y": {
+      "text": "Rechazar videollamada de {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline_voice_a11y": {
+      "text": "Rechazar llamada de voz de {name}",
+      "status": "machine"
+    },
+    "call.incoming.video_a11y": {
+      "text": "Videollamada entrante de {name}",
+      "status": "machine"
+    },
+    "call.incoming.voice_a11y": {
+      "text": "Llamada de voz entrante de {name}",
+      "status": "machine"
+    },
+    "call.invite.copied": {
+      "text": "Enlace copiado. Cualquiera a quien se lo envíes podrá pedir unirse.",
+      "status": "machine"
+    },
+    "call.invite.link_a11y": {
+      "text": "Enlace de la llamada",
+      "status": "machine"
+    },
+    "call.invite.minting": {
+      "text": "Preparando un enlace a esta llamada. Tarda unos segundos.",
+      "status": "machine"
+    },
+    "call.invite.ready": {
+      "text": "Cualquiera con este enlace puede pedir unirse a esta llamada. Tú decides quién entra.",
+      "status": "machine"
+    },
+    "call.invite.retry_a11y": {
+      "text": "Volver a preparar el enlace de invitación",
+      "status": "machine"
+    },
+    "call.invite.share_a11y": {
+      "text": "Compartir el enlace de invitación",
+      "status": "machine"
+    },
+    "call.invite.shared": {
+      "text": "Enlace compartido.",
+      "status": "machine"
+    },
+    "call.invite.shown": {
+      "text": "Copia este enlace: {url}",
+      "status": "machine"
+    },
+    "call.invite.signed_out": {
+      "text": "Cerraste sesión. Vuelve a iniciar sesión para obtener un enlace a esta llamada.",
+      "status": "machine"
+    },
+    "call.invite.unavailable": {
+      "text": "No se pudo preparar el enlace. La llamada sigue igual, así que puedes volver a intentarlo.",
+      "status": "machine"
+    },
+    "call.kind.video": {
+      "text": "Videollamada",
+      "status": "machine"
+    },
+    "call.kind.voice": {
+      "text": "Llamada de voz",
+      "status": "machine"
+    },
+    "call.label.group": {
+      "text": "Llamada de grupo",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -310,6 +762,14 @@
       "text": "Cargando el enlace de llamada...",
       "status": "machine"
     },
+    "call.link.notice.a11y": {
+      "text": "Llamada desde un enlace",
+      "status": "machine"
+    },
+    "call.link.notice.connecting": {
+      "text": "Conectando con la llamada...",
+      "status": "machine"
+    },
     "call.link.start": {
       "text": "Iniciar llamada",
       "status": "machine"
@@ -328,6 +788,318 @@
     },
     "call.link.waiting_hint": {
       "text": "Puedes salir de esta pantalla; te unirás cuando se apruebe tu entrada.",
+      "status": "machine"
+    },
+    "call.log.a11y.call_back": {
+      "text": "{head}. Devolver la llamada",
+      "status": "machine"
+    },
+    "call.log.a11y.lasted": {
+      "text": "{head}, duró {duration}",
+      "status": "machine"
+    },
+    "call.log.a11y.video_declined": {
+      "text": "Videollamada rechazada",
+      "status": "machine"
+    },
+    "call.log.a11y.video_incoming": {
+      "text": "Videollamada, entrante",
+      "status": "machine"
+    },
+    "call.log.a11y.video_missed": {
+      "text": "Videollamada perdida",
+      "status": "machine"
+    },
+    "call.log.a11y.video_outgoing": {
+      "text": "Videollamada, saliente",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_declined": {
+      "text": "Llamada rechazada",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_incoming": {
+      "text": "Llamada, entrante",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_missed": {
+      "text": "Llamada perdida",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_outgoing": {
+      "text": "Llamada, saliente",
+      "status": "machine"
+    },
+    "call.log.declined": {
+      "text": "Rechazada",
+      "status": "machine"
+    },
+    "call.log.incoming": {
+      "text": "Llamada entrante",
+      "status": "machine"
+    },
+    "call.log.incoming_duration": {
+      "text": "Llamada entrante, {duration}",
+      "status": "machine"
+    },
+    "call.log.missed": {
+      "text": "Llamada perdida",
+      "status": "machine"
+    },
+    "call.log.outgoing": {
+      "text": "Llamada saliente",
+      "status": "machine"
+    },
+    "call.log.outgoing_duration": {
+      "text": "Llamada saliente, {duration}",
+      "status": "machine"
+    },
+    "call.notification.channel_description": {
+      "text": "Llamadas entrantes de Lakko",
+      "status": "machine"
+    },
+    "call.notification.incoming": {
+      "text": "Llamada entrante",
+      "status": "machine"
+    },
+    "call.participant.hand_raised": {
+      "text": "Mano levantada",
+      "status": "machine"
+    },
+    "call.participant.muted": {
+      "text": "Silenciado",
+      "status": "machine"
+    },
+    "call.participant.muted_a11y": {
+      "text": "Micrófono silenciado",
+      "status": "machine"
+    },
+    "call.participant.numbered": {
+      "text": "Participante {number}",
+      "status": "machine"
+    },
+    "call.participant.pinned": {
+      "text": "Fijado",
+      "status": "machine"
+    },
+    "call.participant.sharing": {
+      "text": "Compartiendo",
+      "status": "machine"
+    },
+    "call.participant.sharing_a11y": {
+      "text": "Compartiendo pantalla",
+      "status": "machine"
+    },
+    "call.participant.unnamed": {
+      "text": "Participante",
+      "status": "machine"
+    },
+    "call.participant.you": {
+      "text": "Tú",
+      "status": "machine"
+    },
+    "call.participants.close_a11y": {
+      "text": "Cerrar participantes",
+      "status": "machine"
+    },
+    "call.participants.title": {
+      "text": "Participantes ({count})",
+      "status": "machine"
+    },
+    "call.permission.audio_only": {
+      "text": "Solo audio",
+      "status": "machine"
+    },
+    "call.permission.camera.body": {
+      "text": "El vídeo necesita la cámara. Puedes continuar solo con audio o permitir el acceso a la cámara para Lakko en los ajustes de la app.",
+      "status": "machine"
+    },
+    "call.permission.camera.title": {
+      "text": "Se necesita acceso a la cámara",
+      "status": "machine"
+    },
+    "call.permission.microphone.body": {
+      "text": "Las llamadas necesitan el micrófono. Permite el acceso al micrófono para Lakko en los ajustes de la app y vuelve a intentarlo.",
+      "status": "machine"
+    },
+    "call.permission.microphone.title": {
+      "text": "Se necesita acceso al micrófono",
+      "status": "machine"
+    },
+    "call.quality.a11y": {
+      "text": "Calidad de la conexión: {tier}",
+      "status": "machine"
+    },
+    "call.quality.bps": {
+      "text": "{value} bps",
+      "status": "machine"
+    },
+    "call.quality.details_a11y": {
+      "text": "Detalles de la conexión",
+      "status": "machine"
+    },
+    "call.quality.direct": {
+      "text": "Directa",
+      "status": "machine"
+    },
+    "call.quality.down": {
+      "text": "Bajada",
+      "status": "machine"
+    },
+    "call.quality.kbps": {
+      "text": "{value} kbps",
+      "status": "machine"
+    },
+    "call.quality.mbps": {
+      "text": "{value} Mbps",
+      "status": "machine"
+    },
+    "call.quality.ms": {
+      "text": "{value} ms",
+      "status": "machine"
+    },
+    "call.quality.relay": {
+      "text": "Retransmitida",
+      "status": "machine"
+    },
+    "call.quality.round_trip": {
+      "text": "Ida y vuelta",
+      "status": "machine"
+    },
+    "call.quality.tier.bad": {
+      "text": "mala",
+      "status": "machine"
+    },
+    "call.quality.tier.excellent": {
+      "text": "excelente",
+      "status": "machine"
+    },
+    "call.quality.tier.fair": {
+      "text": "aceptable",
+      "status": "machine"
+    },
+    "call.quality.tier.good": {
+      "text": "buena",
+      "status": "machine"
+    },
+    "call.quality.tier.poor": {
+      "text": "deficiente",
+      "status": "machine"
+    },
+    "call.quality.title": {
+      "text": "Conexión: {tier}",
+      "status": "machine"
+    },
+    "call.quality.up": {
+      "text": "Subida",
+      "status": "machine"
+    },
+    "call.self.camera_a11y": {
+      "text": "Tu cámara",
+      "status": "machine"
+    },
+    "call.self.flip_a11y": {
+      "text": "Cambiar a la otra cámara",
+      "status": "machine"
+    },
+    "call.self.starting_camera": {
+      "text": "Iniciando la cámara...",
+      "status": "machine"
+    },
+    "call.settings.devices": {
+      "text": "Dispositivos",
+      "status": "machine"
+    },
+    "call.settings.low_data": {
+      "text": "Modo de bajo consumo de datos",
+      "status": "machine"
+    },
+    "call.settings.low_data_hint": {
+      "text": "Limita el vídeo a 360p: útil con conexiones móviles con datos limitados.",
+      "status": "machine"
+    },
+    "call.settings.microphone": {
+      "text": "Micrófono",
+      "status": "machine"
+    },
+    "call.settings.mirror": {
+      "text": "Reflejar la vista previa local",
+      "status": "machine"
+    },
+    "call.settings.no_devices": {
+      "text": "Aún no se ha detectado ningún dispositivo. Aparecerán aquí cuando concedas permiso al micrófono o a la cámara.",
+      "status": "machine"
+    },
+    "call.settings.system_default": {
+      "text": "Predeterminado del sistema",
+      "status": "machine"
+    },
+    "call.settings.video": {
+      "text": "Vídeo",
+      "status": "machine"
+    },
+    "call.start.no_camera": {
+      "text": "No hay ninguna cámara disponible, así que es una llamada de voz.",
+      "status": "machine"
+    },
+    "call.status.calling": {
+      "text": "Llamando...",
+      "status": "machine"
+    },
+    "call.status.calling_spoken": {
+      "text": "Llamando",
+      "status": "machine"
+    },
+    "call.status.connected": {
+      "text": "Conectado",
+      "status": "machine"
+    },
+    "call.status.connecting_spoken": {
+      "text": "Conectando",
+      "status": "machine"
+    },
+    "call.status.ended": {
+      "text": "Llamada terminada",
+      "status": "machine"
+    },
+    "call.status.group_count": {
+      "text": "Llamada de grupo · {count}",
+      "status": "machine"
+    },
+    "call.status.in_call_spoken": {
+      "text": "en llamada, {duration}",
+      "status": "machine"
+    },
+    "call.status.reconnecting": {
+      "text": "Reconectando...",
+      "status": "machine"
+    },
+    "call.status.reconnecting_spoken": {
+      "text": "Reconectando",
+      "status": "machine"
+    },
+    "call.status.ringing": {
+      "text": "Sonando...",
+      "status": "machine"
+    },
+    "call.undecryptable.named": {
+      "text": "No se puede descifrar el audio y el vídeo de {name}",
+      "status": "machine"
+    },
+    "call.undecryptable.notice": {
+      "text": "No se puede descifrar el audio y el vídeo entrantes",
+      "status": "machine"
+    },
+    "call.undecryptable.notice_many": {
+      "text": "{count, plural, one {No se puede descifrar el audio y el vídeo de # participante} other {No se puede descifrar el audio y el vídeo de # participantes}}",
+      "status": "machine"
+    },
+    "call.undecryptable.tile": {
+      "text": "No se puede descifrar",
+      "status": "machine"
+    },
+    "call.undecryptable.tile_a11y": {
+      "text": "No se puede descifrar el audio y el vídeo de este participante",
       "status": "machine"
     },
     "channels.back": {
@@ -2582,12 +3354,20 @@
       "text": "Listo",
       "status": "machine"
     },
+    "common.duration.hours": {
+      "text": "{count, plural, one {# hora} other {# horas}}",
+      "status": "machine"
+    },
     "common.duration.minutes": {
       "text": "{count, plural, one {# minuto} other {# minutos}}",
       "status": "machine"
     },
     "common.duration.minutes_seconds": {
       "text": "{minutes} {seconds}",
+      "status": "machine"
+    },
+    "common.duration.pair": {
+      "text": "{first} {second}",
       "status": "machine"
     },
     "common.duration.seconds": {
@@ -2680,6 +3460,10 @@
     },
     "common.on": {
       "text": "Activado",
+      "status": "machine"
+    },
+    "common.open": {
+      "text": "Abrir",
       "status": "machine"
     },
     "common.open_chat": {
@@ -3792,6 +4576,22 @@
     },
     "new_group.subtitle": {
       "text": "Serás el propietario del grupo. Puedes añadir a más personas después.",
+      "status": "machine"
+    },
+    "notification.channel.messages": {
+      "text": "Mensajes",
+      "status": "machine"
+    },
+    "notification.channel.messages_desc": {
+      "text": "Notificaciones para despertar la app con los mensajes nuevos de Lakko",
+      "status": "machine"
+    },
+    "notification.message.attachments": {
+      "text": "{count, plural, one {Envió un archivo adjunto} other {Envió # archivos adjuntos}}",
+      "status": "machine"
+    },
+    "notification.message.new": {
+      "text": "Mensaje nuevo",
       "status": "machine"
     },
     "recovery.access_only_note": {

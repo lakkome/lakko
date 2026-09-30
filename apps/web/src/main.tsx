@@ -20,6 +20,7 @@ import { registerServiceWorker } from "./sw/register";
 import { runBootUpdateCheck } from "./update/release-check";
 import { bootstrapTheme } from "./ui/theme";
 import { bootstrapL10n, LANGUAGE_STORAGE_KEY } from "./l10n";
+import { publishNotificationStrings } from "./l10n/notification-strings";
 
 /** Longest the first paint waits for a non-English catalog. Chosen, not measured. */
 const FIRST_PAINT_WAIT_MS = 2000;
@@ -61,6 +62,8 @@ bootstrapTheme();
 // English for a moment and then switch; the wait is capped so a slow or
 // failed load never keeps the app from rendering. Never rejects.
 const l10nReady = bootstrapL10n();
+// ADR-0058: the service worker's notification words follow the language.
+void l10nReady.then(publishNotificationStrings);
 const mount = (): void => {
   render(() => <App />, root);
 };

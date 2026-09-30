@@ -197,6 +197,12 @@ final class Localization: ObservableObject {
         strings = built?.plainStrings() ?? [:]
         if publishesSnapshot {
             Localization.snapshot.publish(catalog: built, strings: strings, language: code)
+            // The notification extension's words, in this language.
+            var words: [String: String] = [:]
+            for key in SharedStorage.notificationWordKeys {
+                if let word = strings[key] { words[key] = word }
+            }
+            SharedStorage.setNotificationWords(words)
         }
     }
 

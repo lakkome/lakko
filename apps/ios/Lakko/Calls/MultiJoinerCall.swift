@@ -93,7 +93,7 @@ final class MultiJoinerCall {
         /// default).
         var authBaseUrl: String?
         /// The name on the local tile (`docs/ux/calls.md` section 4.4).
-        var localDisplayName: String = "You"
+        var localDisplayName: String = ""
         /// The user's own ADR-0048 profile envelope, or `nil` when none is
         /// set. Sealed into the call's MLS group and relayed, so every other
         /// member — a guest with no contact list included — names this tile.
@@ -918,7 +918,7 @@ final class MultiJoinerCall {
         if let resolve = opts.resolveDisplayName {
             return resolve(peerId, pseudonym, peerTag)
         }
-        return pseudonym.isEmpty ? "Peer" : String(pseudonym.prefix(8))
+        return pseudonym.isEmpty ? Localization.text("chat.peer.fallback_name") : String(pseudonym.prefix(8))
     }
 
     private func localParticipant() -> CallUiState.Participant {

@@ -3,6 +3,7 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.EnglishForTests
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import org.junit.Assert.assertEquals
@@ -17,6 +18,11 @@ import org.junit.Test
  * no UniFFI `.so` is needed.
  */
 class PeerTagLabelsTest {
+    init {
+        // ADR-0058: the words under test are the English catalog's.
+        EnglishForTests.install()
+    }
+
 
     /** A deterministic stand-in for `sfuPeerTag(callId, accountIdHex)`. */
     private val tagOf: (String) -> String = { accountIdHex -> "tag:$accountIdHex" }

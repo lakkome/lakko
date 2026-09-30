@@ -3,6 +3,7 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.EnglishForTests
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
@@ -16,6 +17,11 @@ import org.junit.Test
  * back to the SFU account pseudonym.
  */
 class CallScreenTitleTest {
+    init {
+        // ADR-0058: the words under test are the English catalog's.
+        EnglishForTests.install()
+    }
+
 
     @Test
     fun `a group call is titled by its group`() {

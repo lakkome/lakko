@@ -242,12 +242,380 @@
       "text": "Bu eski yedek geri yüklensin mi?",
       "status": "machine"
     },
+    "call.alert.title": {
+      "text": "Arama",
+      "status": "machine"
+    },
+    "call.bar.camera_on_a11y": {
+      "text": "kameranız açık",
+      "status": "machine"
+    },
+    "call.bar.encrypted_a11y": {
+      "text": "şifreli",
+      "status": "machine"
+    },
+    "call.bar.region_a11y": {
+      "text": "Arama devam ediyor",
+      "status": "machine"
+    },
+    "call.bar.return_a11y": {
+      "text": "Aramaya dön. {name}",
+      "status": "machine"
+    },
+    "call.busy.call_join": {
+      "text": "Zaten bir aramadasınız. Başka birine katılmadan önce onu bitirin.",
+      "status": "machine"
+    },
+    "call.busy.call_start": {
+      "text": "Zaten bir aramadasınız. Başka bir arama başlatmadan önce onu bitirin.",
+      "status": "machine"
+    },
+    "call.busy.group_join": {
+      "text": "Zaten bir grup aramasındasınız. Başka birine katılmadan önce onu bitirin.",
+      "status": "machine"
+    },
+    "call.busy.group_start": {
+      "text": "Zaten bir grup aramasındasınız. Başka bir arama başlatmadan önce onu bitirin.",
+      "status": "machine"
+    },
+    "call.busy.link_join": {
+      "text": "Zaten bağlantıyla açılan bir aramadasınız. Başka birine katılmadan önce onu bitirin.",
+      "status": "machine"
+    },
+    "call.busy.link_start": {
+      "text": "Zaten bağlantıyla açılan bir aramadasınız. Başka bir arama başlatmadan önce onu bitirin.",
+      "status": "machine"
+    },
+    "call.camera_failed.not_allowed": {
+      "text": "Lakko'nun kamerayı kullanmasına izin verilmedi. Arama kamerasız devam ediyor.",
+      "status": "machine"
+    },
+    "call.camera_failed.not_found": {
+      "text": "Kamera bulunamadı. Arama kamerasız devam ediyor.",
+      "status": "machine"
+    },
+    "call.camera_failed.other": {
+      "text": "Kamera başlatılamadı. Başka bir uygulama kullanıyor olabilir.",
+      "status": "machine"
+    },
+    "call.capture.both.failed": {
+      "text": "Mikrofon ve kamera başlatılamadı. Dinleyebilir ve izleyebilirsiniz.",
+      "status": "machine"
+    },
+    "call.capture.both.not_allowed": {
+      "text": "Lakko'nun mikrofonu ve kamerayı kullanmasına izin verilmedi. Dinleyebilir ve izleyebilirsiniz.",
+      "status": "machine"
+    },
+    "call.capture.both.not_found": {
+      "text": "Mikrofon veya kamera bulunamadı. Dinleyebilir ve izleyebilirsiniz.",
+      "status": "machine"
+    },
+    "call.capture.camera.failed": {
+      "text": "Kamera başlatılamadı. Mikrofonunuzla katıldınız.",
+      "status": "machine"
+    },
+    "call.capture.camera.not_allowed": {
+      "text": "Lakko'nun kamerayı kullanmasına izin verilmedi. Mikrofonunuzla katıldınız.",
+      "status": "machine"
+    },
+    "call.capture.camera.not_found": {
+      "text": "Kamera bulunamadı. Mikrofonunuzla katıldınız.",
+      "status": "machine"
+    },
+    "call.chat.a11y": {
+      "text": "Arama sohbeti",
+      "status": "machine"
+    },
+    "call.chat.close_a11y": {
+      "text": "Sohbeti kapat",
+      "status": "machine"
+    },
+    "call.chat.empty": {
+      "text": "Henüz mesaj yok. Buradaki mesajlar uçtan uca şifrelidir.",
+      "status": "machine"
+    },
+    "call.chat.joined": {
+      "text": "Aramaya katıldı: {name}",
+      "status": "machine"
+    },
+    "call.chat.left": {
+      "text": "Bir katılımcı aramadan ayrıldı",
+      "status": "machine"
+    },
+    "call.collapse_a11y": {
+      "text": "Aramayı küçült ve uygulamaya dön",
+      "status": "machine"
+    },
+    "call.collapse_title": {
+      "text": "Aramayı küçült",
+      "status": "machine"
+    },
+    "call.control.bar_a11y": {
+      "text": "Arama denetimleri",
+      "status": "machine"
+    },
+    "call.control.camera": {
+      "text": "Kamera",
+      "status": "machine"
+    },
+    "call.control.camera_start_a11y": {
+      "text": "Kamerayı aç",
+      "status": "machine"
+    },
+    "call.control.camera_stop_a11y": {
+      "text": "Kamerayı kapat",
+      "status": "machine"
+    },
+    "call.control.chat": {
+      "text": "Sohbet",
+      "status": "machine"
+    },
+    "call.control.chat_hide_a11y": {
+      "text": "Sohbeti gizle",
+      "status": "machine"
+    },
+    "call.control.chat_show_a11y": {
+      "text": "Sohbeti göster",
+      "status": "machine"
+    },
+    "call.control.chat_unread": {
+      "text": "{count, plural, one {Sohbet (# okunmamış)} other {Sohbet (# okunmamış)}}",
+      "status": "machine"
+    },
+    "call.control.end": {
+      "text": "Bitir",
+      "status": "machine"
+    },
+    "call.control.end_a11y": {
+      "text": "Aramayı bitir",
+      "status": "machine"
+    },
+    "call.control.invite": {
+      "text": "Davet et",
+      "status": "machine"
+    },
+    "call.control.invite_a11y": {
+      "text": "Birini bu aramaya bir bağlantıyla davet et",
+      "status": "machine"
+    },
+    "call.control.lower_hand": {
+      "text": "Eli indir",
+      "status": "machine"
+    },
+    "call.control.more": {
+      "text": "Diğer",
+      "status": "machine"
+    },
+    "call.control.more_a11y": {
+      "text": "Diğer denetimler",
+      "status": "machine"
+    },
+    "call.control.mute": {
+      "text": "Sessiz",
+      "status": "machine"
+    },
+    "call.control.mute_a11y": {
+      "text": "Mikrofonu kapat",
+      "status": "machine"
+    },
+    "call.control.participants": {
+      "text": "Katılımcılar",
+      "status": "machine"
+    },
+    "call.control.participants_hide_a11y": {
+      "text": "Katılımcıları gizle",
+      "status": "machine"
+    },
+    "call.control.participants_show_a11y": {
+      "text": "Katılımcıları göster",
+      "status": "machine"
+    },
+    "call.control.raise_hand": {
+      "text": "El kaldır",
+      "status": "machine"
+    },
+    "call.control.share_screen": {
+      "text": "Ekranı paylaş",
+      "status": "machine"
+    },
+    "call.control.speaker": {
+      "text": "Hoparlör",
+      "status": "machine"
+    },
+    "call.control.speaker_a11y": {
+      "text": "Sesi şuradan çal: {device}",
+      "status": "machine"
+    },
+    "call.control.speaker_default_device": {
+      "text": "varsayılan hoparlör",
+      "status": "machine"
+    },
+    "call.control.speaker_next_device": {
+      "text": "sonraki hoparlör",
+      "status": "machine"
+    },
+    "call.control.speaker_off_a11y": {
+      "text": "Hoparlörü kapat",
+      "status": "machine"
+    },
+    "call.control.speaker_on_a11y": {
+      "text": "Hoparlörü aç",
+      "status": "machine"
+    },
+    "call.control.stop_share_screen": {
+      "text": "Ekran paylaşımını durdur",
+      "status": "machine"
+    },
+    "call.control.unmute_a11y": {
+      "text": "Mikrofonu aç",
+      "status": "machine"
+    },
+    "call.e2ee": {
+      "text": "Uçtan uca şifreli",
+      "status": "machine"
+    },
+    "call.encryption.chip": {
+      "text": "Şifreli",
+      "status": "machine"
+    },
+    "call.encryption.chip_a11y": {
+      "text": "Bu arama şifreli. Güvenlik numarasını göster",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint": {
+      "text": "Bu numaraları yüksek sesle okuyun. İki telefonda da aynıysa kimse dinlemiyor demektir.",
+      "status": "machine"
+    },
+    "call.encryption.copy_a11y": {
+      "text": "Güvenlik numarasını kopyala",
+      "status": "machine"
+    },
+    "call.encryption.number_a11y": {
+      "text": "Güvenlik numarası: {groups}",
+      "status": "machine"
+    },
+    "call.encryption.number_unavailable": {
+      "text": "Güvenlik numarası kullanılamıyor",
+      "status": "machine"
+    },
+    "call.encryption.sentence_group": {
+      "text": "Bu aramayı yalnızca aramadaki kişiler duyabilir.",
+      "status": "machine"
+    },
+    "call.encryption.sentence_named": {
+      "text": "Bu aramayı yalnızca siz ve {name} duyabilir.",
+      "status": "machine"
+    },
+    "call.encryption.setting_up": {
+      "text": "Hazırlanıyor...",
+      "status": "machine"
+    },
+    "call.encryption.title": {
+      "text": "Bu arama şifreli",
+      "status": "machine"
+    },
+    "call.error.encryption_setup": {
+      "text": "Arama şifrelemesi kurulamadı, bu yüzden arama başlamadı.",
+      "status": "machine"
+    },
+    "call.error.join_group": {
+      "text": "Grup aramasına katılınamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "call.error.microphone_not_allowed": {
+      "text": "Lakko'nun mikrofonu kullanmasına izin verilmedi.",
+      "status": "machine"
+    },
+    "call.error.microphone_not_found": {
+      "text": "Mikrofon bulunamadı.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption": {
+      "text": "Bu tarayıcı arama medyasını şifreleyemiyor, bu yüzden arama başlamadı.",
+      "status": "machine"
+    },
+    "call.error.not_accepting": {
+      "text": "Bu arama şu anda yeni katılımcı kabul etmiyor.",
+      "status": "machine"
+    },
+    "call.error.not_member": {
+      "text": "Artık bu sohbetin üyesi değilsiniz.",
+      "status": "machine"
+    },
+    "call.error.signed_out_start": {
+      "text": "Oturumunuz kapalı. Arama başlatmak için tekrar giriş yapın.",
+      "status": "machine"
+    },
+    "call.error.start_group": {
+      "text": "Grup araması başlatılamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "call.error.unavailable": {
+      "text": "Aramalar şu anda kullanılamıyor. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "call.fill.remote_camera_a11y": {
+      "text": "Kamera: {name}",
+      "status": "machine"
+    },
+    "call.group_banner.join_video": {
+      "text": "Görüntülü",
+      "status": "machine"
+    },
+    "call.group_banner.open_chat": {
+      "text": "Sohbeti aç",
+      "status": "machine"
+    },
+    "call.group_banner.title": {
+      "text": "Grup araması: {name}",
+      "status": "machine"
+    },
     "call.guest.default_name": {
       "text": "Misafir",
       "status": "machine"
     },
     "call.guest.working.title": {
       "text": "Aramaya bağlanıyorsunuz...",
+      "status": "machine"
+    },
+    "call.history.call_back_a11y": {
+      "text": "Geri ara",
+      "status": "machine"
+    },
+    "call.history.call_back_video_a11y": {
+      "text": "Görüntülü geri ara",
+      "status": "machine"
+    },
+    "call.history.empty": {
+      "text": "Henüz arama yok",
+      "status": "machine"
+    },
+    "call.history.empty_body": {
+      "text": "Yaptığınız ve aldığınız aramalar burada görünür.",
+      "status": "machine"
+    },
+    "call.history.join_by_link": {
+      "text": "Bağlantıyla katıl",
+      "status": "machine"
+    },
+    "call.history.join_invalid": {
+      "text": "Bu bir arama bağlantısına benzemiyor. Bağlantının tamamını yapıştırıp tekrar deneyin.",
+      "status": "machine"
+    },
+    "call.history.new_call": {
+      "text": "Yeni arama",
+      "status": "machine"
+    },
+    "call.history.paste_hint": {
+      "text": "Aramayı oluşturan kişi bağlantıyı paylaşır.",
+      "status": "machine"
+    },
+    "call.history.paste_label": {
+      "text": "Bir arama bağlantısı yapıştırın",
+      "status": "machine"
+    },
+    "call.history.unknown_conversation": {
+      "text": "Bilinmiyor",
       "status": "machine"
     },
     "call.incoming.accept": {
@@ -258,12 +626,96 @@
       "text": "Aramayı yanıtla: {name}",
       "status": "machine"
     },
+    "call.incoming.accept_video_a11y": {
+      "text": "Görüntülü aramayı yanıtla: {name}",
+      "status": "machine"
+    },
+    "call.incoming.accept_voice_a11y": {
+      "text": "Sesli aramayı yanıtla: {name}",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video": {
+      "text": "Görüntüsüz yanıtla",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video_a11y": {
+      "text": "Aramayı görüntüsüz yanıtla: {name}",
+      "status": "machine"
+    },
     "call.incoming.decline": {
       "text": "Reddet",
       "status": "machine"
     },
     "call.incoming.decline_from": {
       "text": "Aramayı reddet: {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline_video_a11y": {
+      "text": "Görüntülü aramayı reddet: {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline_voice_a11y": {
+      "text": "Sesli aramayı reddet: {name}",
+      "status": "machine"
+    },
+    "call.incoming.video_a11y": {
+      "text": "Gelen görüntülü arama: {name}",
+      "status": "machine"
+    },
+    "call.incoming.voice_a11y": {
+      "text": "Gelen sesli arama: {name}",
+      "status": "machine"
+    },
+    "call.invite.copied": {
+      "text": "Bağlantı kopyalandı. Gönderdiğiniz herkes katılmak isteyebilir.",
+      "status": "machine"
+    },
+    "call.invite.link_a11y": {
+      "text": "Arama bağlantısı",
+      "status": "machine"
+    },
+    "call.invite.minting": {
+      "text": "Bu arama için bir bağlantı hazırlanıyor. Birkaç saniye sürer.",
+      "status": "machine"
+    },
+    "call.invite.ready": {
+      "text": "Bu bağlantıya sahip herkes bu aramaya katılmak isteyebilir. Kimin gireceğine siz karar verirsiniz.",
+      "status": "machine"
+    },
+    "call.invite.retry_a11y": {
+      "text": "Davet bağlantısını yeniden hazırlamayı dene",
+      "status": "machine"
+    },
+    "call.invite.share_a11y": {
+      "text": "Davet bağlantısını paylaş",
+      "status": "machine"
+    },
+    "call.invite.shared": {
+      "text": "Bağlantı paylaşıldı.",
+      "status": "machine"
+    },
+    "call.invite.shown": {
+      "text": "Bu bağlantıyı kopyalayın: {url}",
+      "status": "machine"
+    },
+    "call.invite.signed_out": {
+      "text": "Oturumunuz kapalı. Bu arama için bağlantı almak üzere tekrar giriş yapın.",
+      "status": "machine"
+    },
+    "call.invite.unavailable": {
+      "text": "Bağlantı hazırlanamadı. Arama etkilenmedi, tekrar deneyebilirsiniz.",
+      "status": "machine"
+    },
+    "call.kind.video": {
+      "text": "Görüntülü arama",
+      "status": "machine"
+    },
+    "call.kind.voice": {
+      "text": "Sesli arama",
+      "status": "machine"
+    },
+    "call.label.group": {
+      "text": "Grup araması",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -310,6 +762,14 @@
       "text": "Arama bağlantısı yükleniyor...",
       "status": "machine"
     },
+    "call.link.notice.a11y": {
+      "text": "Bağlantıyla açılan arama",
+      "status": "machine"
+    },
+    "call.link.notice.connecting": {
+      "text": "Aramaya bağlanılıyor...",
+      "status": "machine"
+    },
     "call.link.start": {
       "text": "Aramayı başlat",
       "status": "machine"
@@ -328,6 +788,318 @@
     },
     "call.link.waiting_hint": {
       "text": "Bu ekrandan ayrılabilirsiniz; kabul edildiğinizde aramaya katılırsınız.",
+      "status": "machine"
+    },
+    "call.log.a11y.call_back": {
+      "text": "{head}. Geri ara",
+      "status": "machine"
+    },
+    "call.log.a11y.lasted": {
+      "text": "{head}, süre {duration}",
+      "status": "machine"
+    },
+    "call.log.a11y.video_declined": {
+      "text": "Görüntülü arama reddedildi",
+      "status": "machine"
+    },
+    "call.log.a11y.video_incoming": {
+      "text": "Görüntülü arama, gelen",
+      "status": "machine"
+    },
+    "call.log.a11y.video_missed": {
+      "text": "Cevapsız görüntülü arama",
+      "status": "machine"
+    },
+    "call.log.a11y.video_outgoing": {
+      "text": "Görüntülü arama, giden",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_declined": {
+      "text": "Arama reddedildi",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_incoming": {
+      "text": "Arama, gelen",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_missed": {
+      "text": "Cevapsız arama",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_outgoing": {
+      "text": "Arama, giden",
+      "status": "machine"
+    },
+    "call.log.declined": {
+      "text": "Reddedildi",
+      "status": "machine"
+    },
+    "call.log.incoming": {
+      "text": "Gelen arama",
+      "status": "machine"
+    },
+    "call.log.incoming_duration": {
+      "text": "Gelen arama, {duration}",
+      "status": "machine"
+    },
+    "call.log.missed": {
+      "text": "Cevapsız arama",
+      "status": "machine"
+    },
+    "call.log.outgoing": {
+      "text": "Giden arama",
+      "status": "machine"
+    },
+    "call.log.outgoing_duration": {
+      "text": "Giden arama, {duration}",
+      "status": "machine"
+    },
+    "call.notification.channel_description": {
+      "text": "Gelen Lakko aramaları",
+      "status": "machine"
+    },
+    "call.notification.incoming": {
+      "text": "Gelen arama",
+      "status": "machine"
+    },
+    "call.participant.hand_raised": {
+      "text": "El kaldırıldı",
+      "status": "machine"
+    },
+    "call.participant.muted": {
+      "text": "Sessizde",
+      "status": "machine"
+    },
+    "call.participant.muted_a11y": {
+      "text": "Mikrofon kapalı",
+      "status": "machine"
+    },
+    "call.participant.numbered": {
+      "text": "Katılımcı {number}",
+      "status": "machine"
+    },
+    "call.participant.pinned": {
+      "text": "Sabitlendi",
+      "status": "machine"
+    },
+    "call.participant.sharing": {
+      "text": "Paylaşıyor",
+      "status": "machine"
+    },
+    "call.participant.sharing_a11y": {
+      "text": "Ekran paylaşıyor",
+      "status": "machine"
+    },
+    "call.participant.unnamed": {
+      "text": "Katılımcı",
+      "status": "machine"
+    },
+    "call.participant.you": {
+      "text": "Siz",
+      "status": "machine"
+    },
+    "call.participants.close_a11y": {
+      "text": "Katılımcıları kapat",
+      "status": "machine"
+    },
+    "call.participants.title": {
+      "text": "Katılımcılar ({count})",
+      "status": "machine"
+    },
+    "call.permission.audio_only": {
+      "text": "Yalnızca ses",
+      "status": "machine"
+    },
+    "call.permission.camera.body": {
+      "text": "Görüntü için kamera gerekir. Yalnızca sesle devam edebilir veya uygulama ayarlarından Lakko'ya kamera erişimi verebilirsiniz.",
+      "status": "machine"
+    },
+    "call.permission.camera.title": {
+      "text": "Kamera erişimi gerekli",
+      "status": "machine"
+    },
+    "call.permission.microphone.body": {
+      "text": "Aramalar için mikrofon gerekir. Uygulama ayarlarından Lakko'ya mikrofon erişimi verin ve tekrar deneyin.",
+      "status": "machine"
+    },
+    "call.permission.microphone.title": {
+      "text": "Mikrofon erişimi gerekli",
+      "status": "machine"
+    },
+    "call.quality.a11y": {
+      "text": "Bağlantı kalitesi: {tier}",
+      "status": "machine"
+    },
+    "call.quality.bps": {
+      "text": "{value} bps",
+      "status": "machine"
+    },
+    "call.quality.details_a11y": {
+      "text": "Bağlantı ayrıntıları",
+      "status": "machine"
+    },
+    "call.quality.direct": {
+      "text": "Doğrudan",
+      "status": "machine"
+    },
+    "call.quality.down": {
+      "text": "İndirme",
+      "status": "machine"
+    },
+    "call.quality.kbps": {
+      "text": "{value} kbps",
+      "status": "machine"
+    },
+    "call.quality.mbps": {
+      "text": "{value} Mbps",
+      "status": "machine"
+    },
+    "call.quality.ms": {
+      "text": "{value} ms",
+      "status": "machine"
+    },
+    "call.quality.relay": {
+      "text": "Aktarıcı",
+      "status": "machine"
+    },
+    "call.quality.round_trip": {
+      "text": "Gidiş-dönüş",
+      "status": "machine"
+    },
+    "call.quality.tier.bad": {
+      "text": "kötü",
+      "status": "machine"
+    },
+    "call.quality.tier.excellent": {
+      "text": "mükemmel",
+      "status": "machine"
+    },
+    "call.quality.tier.fair": {
+      "text": "orta",
+      "status": "machine"
+    },
+    "call.quality.tier.good": {
+      "text": "iyi",
+      "status": "machine"
+    },
+    "call.quality.tier.poor": {
+      "text": "zayıf",
+      "status": "machine"
+    },
+    "call.quality.title": {
+      "text": "Bağlantı: {tier}",
+      "status": "machine"
+    },
+    "call.quality.up": {
+      "text": "Yükleme",
+      "status": "machine"
+    },
+    "call.self.camera_a11y": {
+      "text": "Kameranız",
+      "status": "machine"
+    },
+    "call.self.flip_a11y": {
+      "text": "Diğer kameraya geç",
+      "status": "machine"
+    },
+    "call.self.starting_camera": {
+      "text": "Kamera başlatılıyor...",
+      "status": "machine"
+    },
+    "call.settings.devices": {
+      "text": "Ses ve görüntü aygıtları",
+      "status": "machine"
+    },
+    "call.settings.low_data": {
+      "text": "Az veri modu",
+      "status": "machine"
+    },
+    "call.settings.low_data_hint": {
+      "text": "Görüntüyü 360p ile sınırlar; kotalı mobil bağlantılarda kullanışlıdır.",
+      "status": "machine"
+    },
+    "call.settings.microphone": {
+      "text": "Mikrofon",
+      "status": "machine"
+    },
+    "call.settings.mirror": {
+      "text": "Önizlemeyi aynala",
+      "status": "machine"
+    },
+    "call.settings.no_devices": {
+      "text": "Henüz aygıt bildirilmedi. Mikrofon veya kamera izni verdiğinizde burada görünürler.",
+      "status": "machine"
+    },
+    "call.settings.system_default": {
+      "text": "Sistem varsayılanı",
+      "status": "machine"
+    },
+    "call.settings.video": {
+      "text": "Görüntü",
+      "status": "machine"
+    },
+    "call.start.no_camera": {
+      "text": "Kamera yok, bu yüzden bu bir sesli arama.",
+      "status": "machine"
+    },
+    "call.status.calling": {
+      "text": "Aranıyor...",
+      "status": "machine"
+    },
+    "call.status.calling_spoken": {
+      "text": "Aranıyor",
+      "status": "machine"
+    },
+    "call.status.connected": {
+      "text": "Bağlandı",
+      "status": "machine"
+    },
+    "call.status.connecting_spoken": {
+      "text": "Bağlanıyor",
+      "status": "machine"
+    },
+    "call.status.ended": {
+      "text": "Arama sona erdi",
+      "status": "machine"
+    },
+    "call.status.group_count": {
+      "text": "Grup araması · {count}",
+      "status": "machine"
+    },
+    "call.status.in_call_spoken": {
+      "text": "aramada, {duration}",
+      "status": "machine"
+    },
+    "call.status.reconnecting": {
+      "text": "Yeniden bağlanıyor...",
+      "status": "machine"
+    },
+    "call.status.reconnecting_spoken": {
+      "text": "Yeniden bağlanıyor",
+      "status": "machine"
+    },
+    "call.status.ringing": {
+      "text": "Çalıyor...",
+      "status": "machine"
+    },
+    "call.undecryptable.named": {
+      "text": "Medya çözülemiyor: {name}",
+      "status": "machine"
+    },
+    "call.undecryptable.notice": {
+      "text": "Gelen medya çözülemiyor",
+      "status": "machine"
+    },
+    "call.undecryptable.notice_many": {
+      "text": "{count, plural, one {# katılımcının medyası çözülemiyor} other {# katılımcının medyası çözülemiyor}}",
+      "status": "machine"
+    },
+    "call.undecryptable.tile": {
+      "text": "Çözülemiyor",
+      "status": "machine"
+    },
+    "call.undecryptable.tile_a11y": {
+      "text": "Bu katılımcının medyası çözülemiyor",
       "status": "machine"
     },
     "channels.back": {
@@ -2582,12 +3354,20 @@
       "text": "Bitti",
       "status": "machine"
     },
+    "common.duration.hours": {
+      "text": "{count, plural, one {# saat} other {# saat}}",
+      "status": "machine"
+    },
     "common.duration.minutes": {
       "text": "{count, plural, one {# dakika} other {# dakika}}",
       "status": "machine"
     },
     "common.duration.minutes_seconds": {
       "text": "{minutes} {seconds}",
+      "status": "machine"
+    },
+    "common.duration.pair": {
+      "text": "{first} {second}",
       "status": "machine"
     },
     "common.duration.seconds": {
@@ -2680,6 +3460,10 @@
     },
     "common.on": {
       "text": "Açık",
+      "status": "machine"
+    },
+    "common.open": {
+      "text": "Aç",
       "status": "machine"
     },
     "common.open_chat": {
@@ -3792,6 +4576,22 @@
     },
     "new_group.subtitle": {
       "text": "Grubun sahibi siz olacaksınız. Daha sonra başka kişiler ekleyebilirsiniz.",
+      "status": "machine"
+    },
+    "notification.channel.messages": {
+      "text": "Mesajlar",
+      "status": "machine"
+    },
+    "notification.channel.messages_desc": {
+      "text": "Yeni Lakko mesajları için bildirimler",
+      "status": "machine"
+    },
+    "notification.message.attachments": {
+      "text": "{count, plural, one {Bir ek gönderdi} other {# ek gönderdi}}",
+      "status": "machine"
+    },
+    "notification.message.new": {
+      "text": "Yeni mesaj",
       "status": "machine"
     },
     "recovery.access_only_note": {

@@ -242,12 +242,380 @@
       "text": "هل تريد استعادة هذه النسخة الاحتياطية الأقدم؟",
       "status": "machine"
     },
+    "call.alert.title": {
+      "text": "مكالمة",
+      "status": "machine"
+    },
+    "call.bar.camera_on_a11y": {
+      "text": "الكاميرا الخاصة بك قيد التشغيل",
+      "status": "machine"
+    },
+    "call.bar.encrypted_a11y": {
+      "text": "مشفّرة",
+      "status": "machine"
+    },
+    "call.bar.region_a11y": {
+      "text": "مكالمة جارية",
+      "status": "machine"
+    },
+    "call.bar.return_a11y": {
+      "text": "العودة إلى المكالمة. {name}",
+      "status": "machine"
+    },
+    "call.busy.call_join": {
+      "text": "أنت في مكالمة بالفعل. أنهِها قبل الانضمام إلى مكالمة أخرى.",
+      "status": "machine"
+    },
+    "call.busy.call_start": {
+      "text": "أنت في مكالمة بالفعل. أنهِها قبل بدء مكالمة أخرى.",
+      "status": "machine"
+    },
+    "call.busy.group_join": {
+      "text": "أنت في مكالمة جماعية بالفعل. أنهِها قبل الانضمام إلى مكالمة أخرى.",
+      "status": "machine"
+    },
+    "call.busy.group_start": {
+      "text": "أنت في مكالمة جماعية بالفعل. أنهِها قبل بدء مكالمة أخرى.",
+      "status": "machine"
+    },
+    "call.busy.link_join": {
+      "text": "أنت في مكالمة فُتحت من رابط بالفعل. أنهِها قبل الانضمام إلى مكالمة أخرى.",
+      "status": "machine"
+    },
+    "call.busy.link_start": {
+      "text": "أنت في مكالمة فُتحت من رابط بالفعل. أنهِها قبل بدء مكالمة أخرى.",
+      "status": "machine"
+    },
+    "call.camera_failed.not_allowed": {
+      "text": "لم يُسمح لـ Lakko باستخدام الكاميرا. تستمر المكالمة من دونها.",
+      "status": "machine"
+    },
+    "call.camera_failed.not_found": {
+      "text": "لم يُعثر على كاميرا. تستمر المكالمة من دونها.",
+      "status": "machine"
+    },
+    "call.camera_failed.other": {
+      "text": "تعذّر تشغيل الكاميرا. ربما يستخدمها تطبيق آخر.",
+      "status": "machine"
+    },
+    "call.capture.both.failed": {
+      "text": "تعذّر تشغيل الميكروفون والكاميرا. يمكنك الاستماع والمشاهدة.",
+      "status": "machine"
+    },
+    "call.capture.both.not_allowed": {
+      "text": "لم يُسمح لـ Lakko باستخدام الميكروفون أو الكاميرا. يمكنك الاستماع والمشاهدة.",
+      "status": "machine"
+    },
+    "call.capture.both.not_found": {
+      "text": "لم يُعثر على ميكروفون أو كاميرا. يمكنك الاستماع والمشاهدة.",
+      "status": "machine"
+    },
+    "call.capture.camera.failed": {
+      "text": "تعذّر تشغيل الكاميرا. انضممت بالميكروفون.",
+      "status": "machine"
+    },
+    "call.capture.camera.not_allowed": {
+      "text": "لم يُسمح لـ Lakko باستخدام الكاميرا. انضممت بالميكروفون.",
+      "status": "machine"
+    },
+    "call.capture.camera.not_found": {
+      "text": "لم يُعثر على كاميرا. انضممت بالميكروفون.",
+      "status": "machine"
+    },
+    "call.chat.a11y": {
+      "text": "دردشة المكالمة",
+      "status": "machine"
+    },
+    "call.chat.close_a11y": {
+      "text": "إغلاق الدردشة",
+      "status": "machine"
+    },
+    "call.chat.empty": {
+      "text": "لا توجد رسائل بعد. الرسائل هنا مشفّرة تشفيرًا تامًا بين الطرفين.",
+      "status": "machine"
+    },
+    "call.chat.joined": {
+      "text": "انضم {name} إلى المكالمة",
+      "status": "machine"
+    },
+    "call.chat.left": {
+      "text": "غادر أحد المشاركين المكالمة",
+      "status": "machine"
+    },
+    "call.collapse_a11y": {
+      "text": "تصغير المكالمة والعودة إلى التطبيق",
+      "status": "machine"
+    },
+    "call.collapse_title": {
+      "text": "تصغير المكالمة",
+      "status": "machine"
+    },
+    "call.control.bar_a11y": {
+      "text": "عناصر التحكم في المكالمة",
+      "status": "machine"
+    },
+    "call.control.camera": {
+      "text": "الكاميرا",
+      "status": "machine"
+    },
+    "call.control.camera_start_a11y": {
+      "text": "تشغيل الكاميرا",
+      "status": "machine"
+    },
+    "call.control.camera_stop_a11y": {
+      "text": "إيقاف الكاميرا",
+      "status": "machine"
+    },
+    "call.control.chat": {
+      "text": "الدردشة",
+      "status": "machine"
+    },
+    "call.control.chat_hide_a11y": {
+      "text": "إخفاء الدردشة",
+      "status": "machine"
+    },
+    "call.control.chat_show_a11y": {
+      "text": "إظهار الدردشة",
+      "status": "machine"
+    },
+    "call.control.chat_unread": {
+      "text": "{count, plural, zero {الدردشة (لا رسائل غير مقروءة)} one {الدردشة (رسالة واحدة غير مقروءة)} two {الدردشة (رسالتان غير مقروءتين)} few {الدردشة (# رسائل غير مقروءة)} many {الدردشة (# رسالة غير مقروءة)} other {الدردشة (# رسالة غير مقروءة)}}",
+      "status": "machine"
+    },
+    "call.control.end": {
+      "text": "إنهاء",
+      "status": "machine"
+    },
+    "call.control.end_a11y": {
+      "text": "إنهاء المكالمة",
+      "status": "machine"
+    },
+    "call.control.invite": {
+      "text": "دعوة",
+      "status": "machine"
+    },
+    "call.control.invite_a11y": {
+      "text": "دعوة شخص إلى هذه المكالمة برابط",
+      "status": "machine"
+    },
+    "call.control.lower_hand": {
+      "text": "خفض اليد",
+      "status": "machine"
+    },
+    "call.control.more": {
+      "text": "المزيد",
+      "status": "machine"
+    },
+    "call.control.more_a11y": {
+      "text": "مزيد من عناصر التحكم",
+      "status": "machine"
+    },
+    "call.control.mute": {
+      "text": "كتم",
+      "status": "machine"
+    },
+    "call.control.mute_a11y": {
+      "text": "كتم الميكروفون",
+      "status": "machine"
+    },
+    "call.control.participants": {
+      "text": "المشاركون",
+      "status": "machine"
+    },
+    "call.control.participants_hide_a11y": {
+      "text": "إخفاء المشاركين",
+      "status": "machine"
+    },
+    "call.control.participants_show_a11y": {
+      "text": "إظهار المشاركين",
+      "status": "machine"
+    },
+    "call.control.raise_hand": {
+      "text": "رفع اليد",
+      "status": "machine"
+    },
+    "call.control.share_screen": {
+      "text": "مشاركة الشاشة",
+      "status": "machine"
+    },
+    "call.control.speaker": {
+      "text": "مكبّر الصوت",
+      "status": "machine"
+    },
+    "call.control.speaker_a11y": {
+      "text": "تشغيل الصوت عبر {device}",
+      "status": "machine"
+    },
+    "call.control.speaker_default_device": {
+      "text": "مكبّر الصوت الافتراضي",
+      "status": "machine"
+    },
+    "call.control.speaker_next_device": {
+      "text": "مكبّر الصوت التالي",
+      "status": "machine"
+    },
+    "call.control.speaker_off_a11y": {
+      "text": "إيقاف مكبّر الصوت",
+      "status": "machine"
+    },
+    "call.control.speaker_on_a11y": {
+      "text": "تشغيل مكبّر الصوت",
+      "status": "machine"
+    },
+    "call.control.stop_share_screen": {
+      "text": "إيقاف مشاركة الشاشة",
+      "status": "machine"
+    },
+    "call.control.unmute_a11y": {
+      "text": "إلغاء كتم الميكروفون",
+      "status": "machine"
+    },
+    "call.e2ee": {
+      "text": "مشفّرة تشفيرًا تامًا بين الطرفين",
+      "status": "machine"
+    },
+    "call.encryption.chip": {
+      "text": "مشفّرة",
+      "status": "machine"
+    },
+    "call.encryption.chip_a11y": {
+      "text": "هذه المكالمة مشفّرة. عرض رقم الأمان",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint": {
+      "text": "اقرأ هذه الأرقام بصوت عالٍ. إذا تطابقت على الهاتفين، فلا أحد يستمع.",
+      "status": "machine"
+    },
+    "call.encryption.copy_a11y": {
+      "text": "نسخ رقم الأمان",
+      "status": "machine"
+    },
+    "call.encryption.number_a11y": {
+      "text": "رقم الأمان: {groups}",
+      "status": "machine"
+    },
+    "call.encryption.number_unavailable": {
+      "text": "رقم الأمان غير متاح",
+      "status": "machine"
+    },
+    "call.encryption.sentence_group": {
+      "text": "لا يسمعها إلا الأشخاص الموجودون في هذه المكالمة.",
+      "status": "machine"
+    },
+    "call.encryption.sentence_named": {
+      "text": "لا يسمع هذه المكالمة غيرك أنت و{name}.",
+      "status": "machine"
+    },
+    "call.encryption.setting_up": {
+      "text": "جارٍ الإعداد...",
+      "status": "machine"
+    },
+    "call.encryption.title": {
+      "text": "هذه المكالمة مشفّرة",
+      "status": "machine"
+    },
+    "call.error.encryption_setup": {
+      "text": "تعذّر إعداد تشفير المكالمة، لذلك لم تبدأ المكالمة.",
+      "status": "machine"
+    },
+    "call.error.join_group": {
+      "text": "تعذّر الانضمام إلى المكالمة الجماعية. حاول مجددًا.",
+      "status": "machine"
+    },
+    "call.error.microphone_not_allowed": {
+      "text": "لم يُسمح لـ Lakko باستخدام الميكروفون.",
+      "status": "machine"
+    },
+    "call.error.microphone_not_found": {
+      "text": "لم يُعثر على ميكروفون.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption": {
+      "text": "لا يستطيع هذا المتصفح تشفير صوت المكالمة وصورتها، لذلك لم تبدأ المكالمة.",
+      "status": "machine"
+    },
+    "call.error.not_accepting": {
+      "text": "لا تقبل هذه المكالمة مشاركين جددًا حاليًا.",
+      "status": "machine"
+    },
+    "call.error.not_member": {
+      "text": "لم تعد عضوًا في هذه الدردشة.",
+      "status": "machine"
+    },
+    "call.error.signed_out_start": {
+      "text": "لقد سجّلت الخروج. سجّل الدخول مجددًا لبدء مكالمة.",
+      "status": "machine"
+    },
+    "call.error.start_group": {
+      "text": "تعذّر بدء المكالمة الجماعية. حاول مجددًا.",
+      "status": "machine"
+    },
+    "call.error.unavailable": {
+      "text": "المكالمات غير متاحة حاليًا. حاول لاحقًا.",
+      "status": "machine"
+    },
+    "call.fill.remote_camera_a11y": {
+      "text": "كاميرا {name}",
+      "status": "machine"
+    },
+    "call.group_banner.join_video": {
+      "text": "فيديو",
+      "status": "machine"
+    },
+    "call.group_banner.open_chat": {
+      "text": "فتح الدردشة",
+      "status": "machine"
+    },
+    "call.group_banner.title": {
+      "text": "مكالمة جماعية في {name}",
+      "status": "machine"
+    },
     "call.guest.default_name": {
       "text": "ضيف",
       "status": "machine"
     },
     "call.guest.working.title": {
       "text": "جارٍ إدخالك إلى المكالمة...",
+      "status": "machine"
+    },
+    "call.history.call_back_a11y": {
+      "text": "معاودة الاتصال",
+      "status": "machine"
+    },
+    "call.history.call_back_video_a11y": {
+      "text": "معاودة الاتصال بالفيديو",
+      "status": "machine"
+    },
+    "call.history.empty": {
+      "text": "لا توجد مكالمات بعد",
+      "status": "machine"
+    },
+    "call.history.empty_body": {
+      "text": "تظهر هنا المكالمات التي تجريها وتتلقاها.",
+      "status": "machine"
+    },
+    "call.history.join_by_link": {
+      "text": "الانضمام برابط",
+      "status": "machine"
+    },
+    "call.history.join_invalid": {
+      "text": "لا يبدو هذا رابط مكالمة. الصق الرابط كاملًا وحاول مجددًا.",
+      "status": "machine"
+    },
+    "call.history.new_call": {
+      "text": "مكالمة جديدة",
+      "status": "machine"
+    },
+    "call.history.paste_hint": {
+      "text": "يشارك الشخص الذي أنشأ المكالمة الرابط.",
+      "status": "machine"
+    },
+    "call.history.paste_label": {
+      "text": "الصق رابط مكالمة",
+      "status": "machine"
+    },
+    "call.history.unknown_conversation": {
+      "text": "غير معروف",
       "status": "machine"
     },
     "call.incoming.accept": {
@@ -258,12 +626,96 @@
       "text": "قبول المكالمة من {name}",
       "status": "machine"
     },
+    "call.incoming.accept_video_a11y": {
+      "text": "قبول مكالمة الفيديو من {name}",
+      "status": "machine"
+    },
+    "call.incoming.accept_voice_a11y": {
+      "text": "قبول المكالمة الصوتية من {name}",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video": {
+      "text": "قبول دون فيديو",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video_a11y": {
+      "text": "قبول المكالمة من {name} دون فيديو",
+      "status": "machine"
+    },
     "call.incoming.decline": {
       "text": "رفض",
       "status": "machine"
     },
     "call.incoming.decline_from": {
       "text": "رفض المكالمة من {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline_video_a11y": {
+      "text": "رفض مكالمة الفيديو من {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline_voice_a11y": {
+      "text": "رفض المكالمة الصوتية من {name}",
+      "status": "machine"
+    },
+    "call.incoming.video_a11y": {
+      "text": "مكالمة فيديو واردة من {name}",
+      "status": "machine"
+    },
+    "call.incoming.voice_a11y": {
+      "text": "مكالمة صوتية واردة من {name}",
+      "status": "machine"
+    },
+    "call.invite.copied": {
+      "text": "تم نسخ الرابط. يمكن لأي شخص ترسله إليه أن يطلب الانضمام.",
+      "status": "machine"
+    },
+    "call.invite.link_a11y": {
+      "text": "رابط المكالمة",
+      "status": "machine"
+    },
+    "call.invite.minting": {
+      "text": "جارٍ تجهيز رابط لهذه المكالمة. يستغرق ذلك بضع ثوانٍ.",
+      "status": "machine"
+    },
+    "call.invite.ready": {
+      "text": "يمكن لأي شخص لديه هذا الرابط أن يطلب الانضمام إلى هذه المكالمة. أنت من يقرر من يدخل.",
+      "status": "machine"
+    },
+    "call.invite.retry_a11y": {
+      "text": "إعادة محاولة تجهيز رابط الدعوة",
+      "status": "machine"
+    },
+    "call.invite.share_a11y": {
+      "text": "مشاركة رابط الدعوة",
+      "status": "machine"
+    },
+    "call.invite.shared": {
+      "text": "تمت مشاركة الرابط.",
+      "status": "machine"
+    },
+    "call.invite.shown": {
+      "text": "انسخ هذا الرابط: {url}",
+      "status": "machine"
+    },
+    "call.invite.signed_out": {
+      "text": "لقد سجّلت الخروج. سجّل الدخول مجددًا للحصول على رابط لهذه المكالمة.",
+      "status": "machine"
+    },
+    "call.invite.unavailable": {
+      "text": "تعذّر تجهيز الرابط. لم تتأثر المكالمة، لذا يمكنك المحاولة مجددًا.",
+      "status": "machine"
+    },
+    "call.kind.video": {
+      "text": "مكالمة فيديو",
+      "status": "machine"
+    },
+    "call.kind.voice": {
+      "text": "مكالمة صوتية",
+      "status": "machine"
+    },
+    "call.label.group": {
+      "text": "مكالمة جماعية",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -310,6 +762,14 @@
       "text": "جارٍ تحميل رابط المكالمة...",
       "status": "machine"
     },
+    "call.link.notice.a11y": {
+      "text": "مكالمة من رابط",
+      "status": "machine"
+    },
+    "call.link.notice.connecting": {
+      "text": "جارٍ الاتصال بالمكالمة...",
+      "status": "machine"
+    },
     "call.link.start": {
       "text": "بدء المكالمة",
       "status": "machine"
@@ -328,6 +788,318 @@
     },
     "call.link.waiting_hint": {
       "text": "يمكنك مغادرة هذه الشاشة؛ ستنضم عند السماح لك بالدخول.",
+      "status": "machine"
+    },
+    "call.log.a11y.call_back": {
+      "text": "{head}. معاودة الاتصال",
+      "status": "machine"
+    },
+    "call.log.a11y.lasted": {
+      "text": "{head}، استمرت {duration}",
+      "status": "machine"
+    },
+    "call.log.a11y.video_declined": {
+      "text": "مكالمة فيديو مرفوضة",
+      "status": "machine"
+    },
+    "call.log.a11y.video_incoming": {
+      "text": "مكالمة فيديو، واردة",
+      "status": "machine"
+    },
+    "call.log.a11y.video_missed": {
+      "text": "مكالمة فيديو فائتة",
+      "status": "machine"
+    },
+    "call.log.a11y.video_outgoing": {
+      "text": "مكالمة فيديو، صادرة",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_declined": {
+      "text": "مكالمة مرفوضة",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_incoming": {
+      "text": "مكالمة، واردة",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_missed": {
+      "text": "مكالمة فائتة",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_outgoing": {
+      "text": "مكالمة، صادرة",
+      "status": "machine"
+    },
+    "call.log.declined": {
+      "text": "مرفوضة",
+      "status": "machine"
+    },
+    "call.log.incoming": {
+      "text": "مكالمة واردة",
+      "status": "machine"
+    },
+    "call.log.incoming_duration": {
+      "text": "مكالمة واردة، {duration}",
+      "status": "machine"
+    },
+    "call.log.missed": {
+      "text": "مكالمة فائتة",
+      "status": "machine"
+    },
+    "call.log.outgoing": {
+      "text": "مكالمة صادرة",
+      "status": "machine"
+    },
+    "call.log.outgoing_duration": {
+      "text": "مكالمة صادرة، {duration}",
+      "status": "machine"
+    },
+    "call.notification.channel_description": {
+      "text": "مكالمات Lakko الواردة",
+      "status": "machine"
+    },
+    "call.notification.incoming": {
+      "text": "مكالمة واردة",
+      "status": "machine"
+    },
+    "call.participant.hand_raised": {
+      "text": "يد مرفوعة",
+      "status": "machine"
+    },
+    "call.participant.muted": {
+      "text": "مكتوم",
+      "status": "machine"
+    },
+    "call.participant.muted_a11y": {
+      "text": "الميكروفون مكتوم",
+      "status": "machine"
+    },
+    "call.participant.numbered": {
+      "text": "المشارك {number}",
+      "status": "machine"
+    },
+    "call.participant.pinned": {
+      "text": "مثبّت",
+      "status": "machine"
+    },
+    "call.participant.sharing": {
+      "text": "يشارك الشاشة",
+      "status": "machine"
+    },
+    "call.participant.sharing_a11y": {
+      "text": "يشارك الشاشة",
+      "status": "machine"
+    },
+    "call.participant.unnamed": {
+      "text": "مشارك",
+      "status": "machine"
+    },
+    "call.participant.you": {
+      "text": "أنت",
+      "status": "machine"
+    },
+    "call.participants.close_a11y": {
+      "text": "إغلاق المشاركين",
+      "status": "machine"
+    },
+    "call.participants.title": {
+      "text": "المشاركون ({count})",
+      "status": "machine"
+    },
+    "call.permission.audio_only": {
+      "text": "الصوت فقط",
+      "status": "machine"
+    },
+    "call.permission.camera.body": {
+      "text": "يحتاج الفيديو إلى الكاميرا. يمكنك المتابعة بالصوت فقط، أو السماح لـ Lakko بالوصول إلى الكاميرا من إعدادات التطبيق.",
+      "status": "machine"
+    },
+    "call.permission.camera.title": {
+      "text": "يلزم الوصول إلى الكاميرا",
+      "status": "machine"
+    },
+    "call.permission.microphone.body": {
+      "text": "تحتاج المكالمات إلى الميكروفون. اسمح لـ Lakko بالوصول إلى الميكروفون من إعدادات التطبيق، ثم حاول مجددًا.",
+      "status": "machine"
+    },
+    "call.permission.microphone.title": {
+      "text": "يلزم الوصول إلى الميكروفون",
+      "status": "machine"
+    },
+    "call.quality.a11y": {
+      "text": "جودة الاتصال: {tier}",
+      "status": "machine"
+    },
+    "call.quality.bps": {
+      "text": "{value} بت/ث",
+      "status": "machine"
+    },
+    "call.quality.details_a11y": {
+      "text": "تفاصيل الاتصال",
+      "status": "machine"
+    },
+    "call.quality.direct": {
+      "text": "مباشر",
+      "status": "machine"
+    },
+    "call.quality.down": {
+      "text": "تنزيل",
+      "status": "machine"
+    },
+    "call.quality.kbps": {
+      "text": "{value} ك.بت/ث",
+      "status": "machine"
+    },
+    "call.quality.mbps": {
+      "text": "{value} م.بت/ث",
+      "status": "machine"
+    },
+    "call.quality.ms": {
+      "text": "{value} م.ث",
+      "status": "machine"
+    },
+    "call.quality.relay": {
+      "text": "عبر خادم ترحيل",
+      "status": "machine"
+    },
+    "call.quality.round_trip": {
+      "text": "زمن الذهاب والعودة",
+      "status": "machine"
+    },
+    "call.quality.tier.bad": {
+      "text": "سيئة",
+      "status": "machine"
+    },
+    "call.quality.tier.excellent": {
+      "text": "ممتازة",
+      "status": "machine"
+    },
+    "call.quality.tier.fair": {
+      "text": "مقبولة",
+      "status": "machine"
+    },
+    "call.quality.tier.good": {
+      "text": "جيدة",
+      "status": "machine"
+    },
+    "call.quality.tier.poor": {
+      "text": "ضعيفة",
+      "status": "machine"
+    },
+    "call.quality.title": {
+      "text": "الاتصال: {tier}",
+      "status": "machine"
+    },
+    "call.quality.up": {
+      "text": "رفع",
+      "status": "machine"
+    },
+    "call.self.camera_a11y": {
+      "text": "الكاميرا الخاصة بك",
+      "status": "machine"
+    },
+    "call.self.flip_a11y": {
+      "text": "التبديل إلى الكاميرا الأخرى",
+      "status": "machine"
+    },
+    "call.self.starting_camera": {
+      "text": "جارٍ تشغيل الكاميرا...",
+      "status": "machine"
+    },
+    "call.settings.devices": {
+      "text": "الأجهزة",
+      "status": "machine"
+    },
+    "call.settings.low_data": {
+      "text": "وضع توفير البيانات",
+      "status": "machine"
+    },
+    "call.settings.low_data_hint": {
+      "text": "يحدّ الفيديو بدقة 360p، وهو مفيد مع اتصالات الجوال محدودة البيانات.",
+      "status": "machine"
+    },
+    "call.settings.microphone": {
+      "text": "الميكروفون",
+      "status": "machine"
+    },
+    "call.settings.mirror": {
+      "text": "عكس المعاينة المحلية",
+      "status": "machine"
+    },
+    "call.settings.no_devices": {
+      "text": "لم تُكتشف أجهزة بعد. ستظهر هنا بعد منح إذن الميكروفون أو الكاميرا.",
+      "status": "machine"
+    },
+    "call.settings.system_default": {
+      "text": "الافتراضي في النظام",
+      "status": "machine"
+    },
+    "call.settings.video": {
+      "text": "الفيديو",
+      "status": "machine"
+    },
+    "call.start.no_camera": {
+      "text": "لا توجد كاميرا متاحة، لذا هذه مكالمة صوتية.",
+      "status": "machine"
+    },
+    "call.status.calling": {
+      "text": "يرن...",
+      "status": "machine"
+    },
+    "call.status.calling_spoken": {
+      "text": "يرن",
+      "status": "machine"
+    },
+    "call.status.connected": {
+      "text": "متصل",
+      "status": "machine"
+    },
+    "call.status.connecting_spoken": {
+      "text": "جارٍ الاتصال",
+      "status": "machine"
+    },
+    "call.status.ended": {
+      "text": "انتهت المكالمة",
+      "status": "machine"
+    },
+    "call.status.group_count": {
+      "text": "مكالمة جماعية · {count}",
+      "status": "machine"
+    },
+    "call.status.in_call_spoken": {
+      "text": "في مكالمة، {duration}",
+      "status": "machine"
+    },
+    "call.status.reconnecting": {
+      "text": "جارٍ إعادة الاتصال...",
+      "status": "machine"
+    },
+    "call.status.reconnecting_spoken": {
+      "text": "جارٍ إعادة الاتصال",
+      "status": "machine"
+    },
+    "call.status.ringing": {
+      "text": "يرن...",
+      "status": "machine"
+    },
+    "call.undecryptable.named": {
+      "text": "تعذّر فك تشفير صوت {name} وصورته",
+      "status": "machine"
+    },
+    "call.undecryptable.notice": {
+      "text": "تعذّر فك تشفير الصوت والصورة الواردين",
+      "status": "machine"
+    },
+    "call.undecryptable.notice_many": {
+      "text": "{count, plural, zero {تعذّر فك تشفير الصوت والصورة من # مشارك} one {تعذّر فك تشفير الصوت والصورة من مشارك واحد} two {تعذّر فك تشفير الصوت والصورة من مشاركَين} few {تعذّر فك تشفير الصوت والصورة من # مشاركين} many {تعذّر فك تشفير الصوت والصورة من # مشاركًا} other {تعذّر فك تشفير الصوت والصورة من # مشارك}}",
+      "status": "machine"
+    },
+    "call.undecryptable.tile": {
+      "text": "تعذّر فك التشفير",
+      "status": "machine"
+    },
+    "call.undecryptable.tile_a11y": {
+      "text": "تعذّر فك تشفير صوت هذا المشارك وصورته",
       "status": "machine"
     },
     "channels.back": {
@@ -2582,12 +3354,20 @@
       "text": "تم",
       "status": "machine"
     },
+    "common.duration.hours": {
+      "text": "{count, plural, zero {# ساعة} one {ساعة واحدة} two {ساعتان} few {# ساعات} many {# ساعة} other {# ساعة}}",
+      "status": "machine"
+    },
     "common.duration.minutes": {
       "text": "{count, plural, zero {# دقيقة} one {دقيقة واحدة} two {دقيقتان} few {# دقائق} many {# دقيقة} other {# دقيقة}}",
       "status": "machine"
     },
     "common.duration.minutes_seconds": {
       "text": "{minutes} و{seconds}",
+      "status": "machine"
+    },
+    "common.duration.pair": {
+      "text": "{first} و{second}",
       "status": "machine"
     },
     "common.duration.seconds": {
@@ -2680,6 +3460,10 @@
     },
     "common.on": {
       "text": "تشغيل",
+      "status": "machine"
+    },
+    "common.open": {
+      "text": "فتح",
       "status": "machine"
     },
     "common.open_chat": {
@@ -3792,6 +4576,22 @@
     },
     "new_group.subtitle": {
       "text": "ستكون مالك المجموعة. يمكنك إضافة أشخاص آخرين لاحقًا.",
+      "status": "machine"
+    },
+    "notification.channel.messages": {
+      "text": "الرسائل",
+      "status": "machine"
+    },
+    "notification.channel.messages_desc": {
+      "text": "إشعارات تنبيه لرسائل Lakko الجديدة",
+      "status": "machine"
+    },
+    "notification.message.attachments": {
+      "text": "{count, plural, zero {أرسل # مرفق} one {أرسل مرفقًا} two {أرسل مرفقين} few {أرسل # مرفقات} many {أرسل # مرفقًا} other {أرسل # مرفق}}",
+      "status": "machine"
+    },
+    "notification.message.new": {
+      "text": "رسالة جديدة",
       "status": "machine"
     },
     "recovery.access_only_note": {

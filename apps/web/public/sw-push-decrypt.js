@@ -71,6 +71,7 @@
 export {
   callRingNotification,
   callSilentNotification,
+  notificationStrings,
   callNotificationTag,
   isCallNotificationTag,
   callClickPlan,

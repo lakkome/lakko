@@ -38,6 +38,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import me.lakko.app.calls.callRingContent
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.t
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.theme.LakkoDark
 
@@ -71,7 +73,9 @@ internal fun IncomingCallContent(
     onDecline: () -> Unit,
 ) {
     val permissions = rememberCallPermissionGate()
-    val content = callRingContent(callerName, video)
+    val content = callRingContent(callerName, video, LocalStrings.current)
+    val e2eeLabel = t("call.e2ee")
+    val acceptWithoutVideoSpoken = t("call.incoming.accept_without_video_a11y", mapOf("name" to content.title))
     LaunchedEffect(avatarSeed, pendingAnswer) {
         val choice = pendingAnswer ?: return@LaunchedEffect
         onAnswerConsumed()
@@ -114,7 +118,7 @@ internal fun IncomingCallContent(
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.clearAndSetSemantics {
-                        contentDescription = "This call is end-to-end encrypted"
+                        contentDescription = e2eeLabel
                     },
                 ) {
                     Icon(
@@ -125,7 +129,7 @@ internal fun IncomingCallContent(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        text = "End-to-end encrypted",
+                        text = e2eeLabel,
                         color = LakkoDark.textMuted,
                         fontSize = 13.sp,
                     )
@@ -144,8 +148,11 @@ internal fun IncomingCallContent(
                     container = LakkoDark.danger,
                     contentColor = LakkoDark.dangerFg,
                     icon = Icons.Filled.CallEnd,
-                    label = "Decline",
-                    spokenLabel = "Decline ${spokenKind(video)} from ${content.title}",
+                    label = t("call.incoming.decline"),
+                    spokenLabel = t(
+                        if (video) "call.incoming.decline_video_a11y" else "call.incoming.decline_voice_a11y",
+                        mapOf("name" to content.title),
+                    ),
                 )
                 // A video call's lesser third option, between the two
                 // (docs/ux/calls.md section 2.2).
@@ -153,11 +160,11 @@ internal fun IncomingCallContent(
                     TextButton(
                         onClick = { permissions.request(video = false) { onAccept(false) } },
                         modifier = Modifier.clearAndSetSemantics {
-                            contentDescription = "Accept video call from ${content.title} without video"
+                            contentDescription = acceptWithoutVideoSpoken
                         },
                     ) {
                         Text(
-                            text = "Accept without\nvideo",
+                            text = t("call.incoming.accept_without_video"),
                             color = LakkoDark.textMuted,
                             fontSize = 13.sp,
                         )
@@ -168,16 +175,16 @@ internal fun IncomingCallContent(
                     container = LakkoDark.success,
                     contentColor = LakkoDark.accentFg,
                     icon = Icons.Filled.Call,
-                    label = "Accept",
-                    spokenLabel = "Accept ${spokenKind(video)} from ${content.title}",
+                    label = t("call.incoming.accept"),
+                    spokenLabel = t(
+                        if (video) "call.incoming.accept_video_a11y" else "call.incoming.accept_voice_a11y",
+                        mapOf("name" to content.title),
+                    ),
                 )
             }
         }
     }
 }
-
-/** `voice call` / `video call`, for a spoken label that reads as a sentence. */
-private fun spokenKind(video: Boolean): String = if (video) "video call" else "voice call"
 
 @Composable
 private fun RoundCallButton(

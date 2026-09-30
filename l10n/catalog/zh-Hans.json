@@ -242,12 +242,380 @@
       "text": "恢复这个较旧的备份？",
       "status": "machine"
     },
+    "call.alert.title": {
+      "text": "通话",
+      "status": "machine"
+    },
+    "call.bar.camera_on_a11y": {
+      "text": "你的摄像头已开启",
+      "status": "machine"
+    },
+    "call.bar.encrypted_a11y": {
+      "text": "已加密",
+      "status": "machine"
+    },
+    "call.bar.region_a11y": {
+      "text": "通话进行中",
+      "status": "machine"
+    },
+    "call.bar.return_a11y": {
+      "text": "返回通话。{name}",
+      "status": "machine"
+    },
+    "call.busy.call_join": {
+      "text": "你已在通话中。请先结束当前通话，再加入其他通话。",
+      "status": "machine"
+    },
+    "call.busy.call_start": {
+      "text": "你已在通话中。请先结束当前通话，再发起新的通话。",
+      "status": "machine"
+    },
+    "call.busy.group_join": {
+      "text": "你已在群组通话中。请先结束当前通话，再加入其他通话。",
+      "status": "machine"
+    },
+    "call.busy.group_start": {
+      "text": "你已在群组通话中。请先结束当前通话，再发起新的通话。",
+      "status": "machine"
+    },
+    "call.busy.link_join": {
+      "text": "你已在通过链接加入的通话中。请先结束当前通话，再加入其他通话。",
+      "status": "machine"
+    },
+    "call.busy.link_start": {
+      "text": "你已在通过链接加入的通话中。请先结束当前通话，再发起新的通话。",
+      "status": "machine"
+    },
+    "call.camera_failed.not_allowed": {
+      "text": "Lakko 未获准使用摄像头。通话将在不开摄像头的情况下继续。",
+      "status": "machine"
+    },
+    "call.camera_failed.not_found": {
+      "text": "未找到摄像头。通话将在不开摄像头的情况下继续。",
+      "status": "machine"
+    },
+    "call.camera_failed.other": {
+      "text": "无法启动摄像头。它可能正被其他应用占用。",
+      "status": "machine"
+    },
+    "call.capture.both.failed": {
+      "text": "无法启动麦克风和摄像头。你仍可以收听和观看。",
+      "status": "machine"
+    },
+    "call.capture.both.not_allowed": {
+      "text": "Lakko 未获准使用麦克风和摄像头。你仍可以收听和观看。",
+      "status": "machine"
+    },
+    "call.capture.both.not_found": {
+      "text": "未找到麦克风或摄像头。你仍可以收听和观看。",
+      "status": "machine"
+    },
+    "call.capture.camera.failed": {
+      "text": "无法启动摄像头。你已使用麦克风加入。",
+      "status": "machine"
+    },
+    "call.capture.camera.not_allowed": {
+      "text": "Lakko 未获准使用摄像头。你已使用麦克风加入。",
+      "status": "machine"
+    },
+    "call.capture.camera.not_found": {
+      "text": "未找到摄像头。你已使用麦克风加入。",
+      "status": "machine"
+    },
+    "call.chat.a11y": {
+      "text": "通话聊天",
+      "status": "machine"
+    },
+    "call.chat.close_a11y": {
+      "text": "关闭聊天",
+      "status": "machine"
+    },
+    "call.chat.empty": {
+      "text": "还没有消息。这里的消息均为端到端加密。",
+      "status": "machine"
+    },
+    "call.chat.joined": {
+      "text": "{name} 加入了通话",
+      "status": "machine"
+    },
+    "call.chat.left": {
+      "text": "一位参与者离开了通话",
+      "status": "machine"
+    },
+    "call.collapse_a11y": {
+      "text": "收起通话并返回应用",
+      "status": "machine"
+    },
+    "call.collapse_title": {
+      "text": "收起通话",
+      "status": "machine"
+    },
+    "call.control.bar_a11y": {
+      "text": "通话控制",
+      "status": "machine"
+    },
+    "call.control.camera": {
+      "text": "摄像头",
+      "status": "machine"
+    },
+    "call.control.camera_start_a11y": {
+      "text": "开启摄像头",
+      "status": "machine"
+    },
+    "call.control.camera_stop_a11y": {
+      "text": "关闭摄像头",
+      "status": "machine"
+    },
+    "call.control.chat": {
+      "text": "聊天",
+      "status": "machine"
+    },
+    "call.control.chat_hide_a11y": {
+      "text": "隐藏聊天",
+      "status": "machine"
+    },
+    "call.control.chat_show_a11y": {
+      "text": "显示聊天",
+      "status": "machine"
+    },
+    "call.control.chat_unread": {
+      "text": "{count, plural, other {聊天（# 条未读）}}",
+      "status": "machine"
+    },
+    "call.control.end": {
+      "text": "结束",
+      "status": "machine"
+    },
+    "call.control.end_a11y": {
+      "text": "结束通话",
+      "status": "machine"
+    },
+    "call.control.invite": {
+      "text": "邀请",
+      "status": "machine"
+    },
+    "call.control.invite_a11y": {
+      "text": "通过链接邀请他人加入此通话",
+      "status": "machine"
+    },
+    "call.control.lower_hand": {
+      "text": "放下手",
+      "status": "machine"
+    },
+    "call.control.more": {
+      "text": "更多",
+      "status": "machine"
+    },
+    "call.control.more_a11y": {
+      "text": "更多控制",
+      "status": "machine"
+    },
+    "call.control.mute": {
+      "text": "静音",
+      "status": "machine"
+    },
+    "call.control.mute_a11y": {
+      "text": "关闭麦克风",
+      "status": "machine"
+    },
+    "call.control.participants": {
+      "text": "参与者",
+      "status": "machine"
+    },
+    "call.control.participants_hide_a11y": {
+      "text": "隐藏参与者",
+      "status": "machine"
+    },
+    "call.control.participants_show_a11y": {
+      "text": "显示参与者",
+      "status": "machine"
+    },
+    "call.control.raise_hand": {
+      "text": "举手",
+      "status": "machine"
+    },
+    "call.control.share_screen": {
+      "text": "共享屏幕",
+      "status": "machine"
+    },
+    "call.control.speaker": {
+      "text": "扬声器",
+      "status": "machine"
+    },
+    "call.control.speaker_a11y": {
+      "text": "通过{device}播放声音",
+      "status": "machine"
+    },
+    "call.control.speaker_default_device": {
+      "text": "默认扬声器",
+      "status": "machine"
+    },
+    "call.control.speaker_next_device": {
+      "text": "下一个扬声器",
+      "status": "machine"
+    },
+    "call.control.speaker_off_a11y": {
+      "text": "关闭扬声器",
+      "status": "machine"
+    },
+    "call.control.speaker_on_a11y": {
+      "text": "开启扬声器",
+      "status": "machine"
+    },
+    "call.control.stop_share_screen": {
+      "text": "停止共享屏幕",
+      "status": "machine"
+    },
+    "call.control.unmute_a11y": {
+      "text": "开启麦克风",
+      "status": "machine"
+    },
+    "call.e2ee": {
+      "text": "端到端加密",
+      "status": "machine"
+    },
+    "call.encryption.chip": {
+      "text": "已加密",
+      "status": "machine"
+    },
+    "call.encryption.chip_a11y": {
+      "text": "此通话已加密。显示安全码",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint": {
+      "text": "请大声读出这些数字。如果两部手机上的数字一致，就没有人在偷听。",
+      "status": "machine"
+    },
+    "call.encryption.copy_a11y": {
+      "text": "复制安全码",
+      "status": "machine"
+    },
+    "call.encryption.number_a11y": {
+      "text": "安全码：{groups}",
+      "status": "machine"
+    },
+    "call.encryption.number_unavailable": {
+      "text": "安全码不可用",
+      "status": "machine"
+    },
+    "call.encryption.sentence_group": {
+      "text": "只有此通话中的人能听到它。",
+      "status": "machine"
+    },
+    "call.encryption.sentence_named": {
+      "text": "只有你和 {name} 能听到此通话。",
+      "status": "machine"
+    },
+    "call.encryption.setting_up": {
+      "text": "正在设置…",
+      "status": "machine"
+    },
+    "call.encryption.title": {
+      "text": "此通话已加密",
+      "status": "machine"
+    },
+    "call.error.encryption_setup": {
+      "text": "无法设置通话加密，因此通话未开始。",
+      "status": "machine"
+    },
+    "call.error.join_group": {
+      "text": "无法加入群组通话。请重试。",
+      "status": "machine"
+    },
+    "call.error.microphone_not_allowed": {
+      "text": "Lakko 未获准使用麦克风。",
+      "status": "machine"
+    },
+    "call.error.microphone_not_found": {
+      "text": "未找到麦克风。",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption": {
+      "text": "此浏览器无法加密通话媒体，因此通话未开始。",
+      "status": "machine"
+    },
+    "call.error.not_accepting": {
+      "text": "此通话暂不接受新的参与者。",
+      "status": "machine"
+    },
+    "call.error.not_member": {
+      "text": "你已不再是此聊天的成员。",
+      "status": "machine"
+    },
+    "call.error.signed_out_start": {
+      "text": "你已退出登录。请重新登录以发起通话。",
+      "status": "machine"
+    },
+    "call.error.start_group": {
+      "text": "无法发起群组通话。请重试。",
+      "status": "machine"
+    },
+    "call.error.unavailable": {
+      "text": "通话暂时不可用。请稍后再试。",
+      "status": "machine"
+    },
+    "call.fill.remote_camera_a11y": {
+      "text": "{name} 的摄像头",
+      "status": "machine"
+    },
+    "call.group_banner.join_video": {
+      "text": "视频",
+      "status": "machine"
+    },
+    "call.group_banner.open_chat": {
+      "text": "打开聊天",
+      "status": "machine"
+    },
+    "call.group_banner.title": {
+      "text": "{name} 中的群组通话",
+      "status": "machine"
+    },
     "call.guest.default_name": {
       "text": "访客",
       "status": "machine"
     },
     "call.guest.working.title": {
       "text": "正在让你加入通话…",
+      "status": "machine"
+    },
+    "call.history.call_back_a11y": {
+      "text": "回拨",
+      "status": "machine"
+    },
+    "call.history.call_back_video_a11y": {
+      "text": "视频回拨",
+      "status": "machine"
+    },
+    "call.history.empty": {
+      "text": "还没有通话",
+      "status": "machine"
+    },
+    "call.history.empty_body": {
+      "text": "你拨打和接听的通话会显示在这里。",
+      "status": "machine"
+    },
+    "call.history.join_by_link": {
+      "text": "通过链接加入",
+      "status": "machine"
+    },
+    "call.history.join_invalid": {
+      "text": "这看起来不是通话链接。请粘贴完整链接后重试。",
+      "status": "machine"
+    },
+    "call.history.new_call": {
+      "text": "新通话",
+      "status": "machine"
+    },
+    "call.history.paste_hint": {
+      "text": "发起通话的人会分享链接。",
+      "status": "machine"
+    },
+    "call.history.paste_label": {
+      "text": "粘贴通话链接",
+      "status": "machine"
+    },
+    "call.history.unknown_conversation": {
+      "text": "未知",
       "status": "machine"
     },
     "call.incoming.accept": {
@@ -258,12 +626,96 @@
       "text": "接听来自 {name} 的通话",
       "status": "machine"
     },
+    "call.incoming.accept_video_a11y": {
+      "text": "接听来自 {name} 的视频通话",
+      "status": "machine"
+    },
+    "call.incoming.accept_voice_a11y": {
+      "text": "接听来自 {name} 的语音通话",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video": {
+      "text": "不开视频接听",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video_a11y": {
+      "text": "不开视频接听来自 {name} 的通话",
+      "status": "machine"
+    },
     "call.incoming.decline": {
       "text": "拒绝",
       "status": "machine"
     },
     "call.incoming.decline_from": {
       "text": "拒绝来自 {name} 的通话",
+      "status": "machine"
+    },
+    "call.incoming.decline_video_a11y": {
+      "text": "拒绝来自 {name} 的视频通话",
+      "status": "machine"
+    },
+    "call.incoming.decline_voice_a11y": {
+      "text": "拒绝来自 {name} 的语音通话",
+      "status": "machine"
+    },
+    "call.incoming.video_a11y": {
+      "text": "来自 {name} 的视频来电",
+      "status": "machine"
+    },
+    "call.incoming.voice_a11y": {
+      "text": "来自 {name} 的语音来电",
+      "status": "machine"
+    },
+    "call.invite.copied": {
+      "text": "链接已复制。你发送给的任何人都可以申请加入。",
+      "status": "machine"
+    },
+    "call.invite.link_a11y": {
+      "text": "通话链接",
+      "status": "machine"
+    },
+    "call.invite.minting": {
+      "text": "正在为此通话准备链接，需要几秒钟。",
+      "status": "machine"
+    },
+    "call.invite.ready": {
+      "text": "任何拥有此链接的人都可以申请加入此通话。由你决定让谁加入。",
+      "status": "machine"
+    },
+    "call.invite.retry_a11y": {
+      "text": "重新尝试准备邀请链接",
+      "status": "machine"
+    },
+    "call.invite.share_a11y": {
+      "text": "分享邀请链接",
+      "status": "machine"
+    },
+    "call.invite.shared": {
+      "text": "链接已分享。",
+      "status": "machine"
+    },
+    "call.invite.shown": {
+      "text": "复制此链接：{url}",
+      "status": "machine"
+    },
+    "call.invite.signed_out": {
+      "text": "你已退出登录。请重新登录以获取此通话的链接。",
+      "status": "machine"
+    },
+    "call.invite.unavailable": {
+      "text": "无法准备链接。通话不受影响，你可以重试。",
+      "status": "machine"
+    },
+    "call.kind.video": {
+      "text": "视频通话",
+      "status": "machine"
+    },
+    "call.kind.voice": {
+      "text": "语音通话",
+      "status": "machine"
+    },
+    "call.label.group": {
+      "text": "群组通话",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -310,6 +762,14 @@
       "text": "正在加载通话链接…",
       "status": "machine"
     },
+    "call.link.notice.a11y": {
+      "text": "通过链接加入的通话",
+      "status": "machine"
+    },
+    "call.link.notice.connecting": {
+      "text": "正在连接通话…",
+      "status": "machine"
+    },
     "call.link.start": {
       "text": "开始通话",
       "status": "machine"
@@ -328,6 +788,318 @@
     },
     "call.link.waiting_hint": {
       "text": "你可以离开此界面；获准后你会自动加入。",
+      "status": "machine"
+    },
+    "call.log.a11y.call_back": {
+      "text": "{head}。回拨",
+      "status": "machine"
+    },
+    "call.log.a11y.lasted": {
+      "text": "{head}，时长 {duration}",
+      "status": "machine"
+    },
+    "call.log.a11y.video_declined": {
+      "text": "视频通话已拒绝",
+      "status": "machine"
+    },
+    "call.log.a11y.video_incoming": {
+      "text": "视频通话，来电",
+      "status": "machine"
+    },
+    "call.log.a11y.video_missed": {
+      "text": "未接视频通话",
+      "status": "machine"
+    },
+    "call.log.a11y.video_outgoing": {
+      "text": "视频通话，去电",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_declined": {
+      "text": "通话已拒绝",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_incoming": {
+      "text": "通话，来电",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_missed": {
+      "text": "未接来电",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_outgoing": {
+      "text": "通话，去电",
+      "status": "machine"
+    },
+    "call.log.declined": {
+      "text": "已拒绝",
+      "status": "machine"
+    },
+    "call.log.incoming": {
+      "text": "来电",
+      "status": "machine"
+    },
+    "call.log.incoming_duration": {
+      "text": "来电，{duration}",
+      "status": "machine"
+    },
+    "call.log.missed": {
+      "text": "未接来电",
+      "status": "machine"
+    },
+    "call.log.outgoing": {
+      "text": "去电",
+      "status": "machine"
+    },
+    "call.log.outgoing_duration": {
+      "text": "去电，{duration}",
+      "status": "machine"
+    },
+    "call.notification.channel_description": {
+      "text": "Lakko 来电",
+      "status": "machine"
+    },
+    "call.notification.incoming": {
+      "text": "来电",
+      "status": "machine"
+    },
+    "call.participant.hand_raised": {
+      "text": "已举手",
+      "status": "machine"
+    },
+    "call.participant.muted": {
+      "text": "已静音",
+      "status": "machine"
+    },
+    "call.participant.muted_a11y": {
+      "text": "麦克风已关闭",
+      "status": "machine"
+    },
+    "call.participant.numbered": {
+      "text": "参与者 {number}",
+      "status": "machine"
+    },
+    "call.participant.pinned": {
+      "text": "已置顶",
+      "status": "machine"
+    },
+    "call.participant.sharing": {
+      "text": "共享中",
+      "status": "machine"
+    },
+    "call.participant.sharing_a11y": {
+      "text": "正在共享屏幕",
+      "status": "machine"
+    },
+    "call.participant.unnamed": {
+      "text": "参与者",
+      "status": "machine"
+    },
+    "call.participant.you": {
+      "text": "你",
+      "status": "machine"
+    },
+    "call.participants.close_a11y": {
+      "text": "关闭参与者列表",
+      "status": "machine"
+    },
+    "call.participants.title": {
+      "text": "参与者（{count}）",
+      "status": "machine"
+    },
+    "call.permission.audio_only": {
+      "text": "仅音频",
+      "status": "machine"
+    },
+    "call.permission.camera.body": {
+      "text": "视频需要使用摄像头。你可以仅用音频继续，或在应用设置中允许 Lakko 访问摄像头。",
+      "status": "machine"
+    },
+    "call.permission.camera.title": {
+      "text": "需要摄像头权限",
+      "status": "machine"
+    },
+    "call.permission.microphone.body": {
+      "text": "通话需要使用麦克风。请在应用设置中允许 Lakko 访问麦克风，然后重试。",
+      "status": "machine"
+    },
+    "call.permission.microphone.title": {
+      "text": "需要麦克风权限",
+      "status": "machine"
+    },
+    "call.quality.a11y": {
+      "text": "连接质量：{tier}",
+      "status": "machine"
+    },
+    "call.quality.bps": {
+      "text": "{value} bps",
+      "status": "machine"
+    },
+    "call.quality.details_a11y": {
+      "text": "连接详情",
+      "status": "machine"
+    },
+    "call.quality.direct": {
+      "text": "直连",
+      "status": "machine"
+    },
+    "call.quality.down": {
+      "text": "下行",
+      "status": "machine"
+    },
+    "call.quality.kbps": {
+      "text": "{value} kbps",
+      "status": "machine"
+    },
+    "call.quality.mbps": {
+      "text": "{value} Mbps",
+      "status": "machine"
+    },
+    "call.quality.ms": {
+      "text": "{value} 毫秒",
+      "status": "machine"
+    },
+    "call.quality.relay": {
+      "text": "中继",
+      "status": "machine"
+    },
+    "call.quality.round_trip": {
+      "text": "往返时延",
+      "status": "machine"
+    },
+    "call.quality.tier.bad": {
+      "text": "差",
+      "status": "machine"
+    },
+    "call.quality.tier.excellent": {
+      "text": "极佳",
+      "status": "machine"
+    },
+    "call.quality.tier.fair": {
+      "text": "一般",
+      "status": "machine"
+    },
+    "call.quality.tier.good": {
+      "text": "良好",
+      "status": "machine"
+    },
+    "call.quality.tier.poor": {
+      "text": "较差",
+      "status": "machine"
+    },
+    "call.quality.title": {
+      "text": "连接：{tier}",
+      "status": "machine"
+    },
+    "call.quality.up": {
+      "text": "上行",
+      "status": "machine"
+    },
+    "call.self.camera_a11y": {
+      "text": "你的摄像头",
+      "status": "machine"
+    },
+    "call.self.flip_a11y": {
+      "text": "切换到另一个摄像头",
+      "status": "machine"
+    },
+    "call.self.starting_camera": {
+      "text": "正在启动摄像头…",
+      "status": "machine"
+    },
+    "call.settings.devices": {
+      "text": "音视频设备",
+      "status": "machine"
+    },
+    "call.settings.low_data": {
+      "text": "省流量模式",
+      "status": "machine"
+    },
+    "call.settings.low_data_hint": {
+      "text": "将视频限制为 360p，适合按流量计费的移动网络。",
+      "status": "machine"
+    },
+    "call.settings.microphone": {
+      "text": "麦克风",
+      "status": "machine"
+    },
+    "call.settings.mirror": {
+      "text": "镜像显示本地预览",
+      "status": "machine"
+    },
+    "call.settings.no_devices": {
+      "text": "尚未检测到设备。授予麦克风或摄像头权限后，设备会显示在这里。",
+      "status": "machine"
+    },
+    "call.settings.system_default": {
+      "text": "系统默认",
+      "status": "machine"
+    },
+    "call.settings.video": {
+      "text": "视频",
+      "status": "machine"
+    },
+    "call.start.no_camera": {
+      "text": "没有可用的摄像头，因此这是语音通话。",
+      "status": "machine"
+    },
+    "call.status.calling": {
+      "text": "正在呼叫…",
+      "status": "machine"
+    },
+    "call.status.calling_spoken": {
+      "text": "正在呼叫",
+      "status": "machine"
+    },
+    "call.status.connected": {
+      "text": "已接通",
+      "status": "machine"
+    },
+    "call.status.connecting_spoken": {
+      "text": "正在连接",
+      "status": "machine"
+    },
+    "call.status.ended": {
+      "text": "通话已结束",
+      "status": "machine"
+    },
+    "call.status.group_count": {
+      "text": "群组通话 · {count}",
+      "status": "machine"
+    },
+    "call.status.in_call_spoken": {
+      "text": "通话中，{duration}",
+      "status": "machine"
+    },
+    "call.status.reconnecting": {
+      "text": "正在重新连接…",
+      "status": "machine"
+    },
+    "call.status.reconnecting_spoken": {
+      "text": "正在重新连接",
+      "status": "machine"
+    },
+    "call.status.ringing": {
+      "text": "正在响铃…",
+      "status": "machine"
+    },
+    "call.undecryptable.named": {
+      "text": "无法解密 {name} 的媒体",
+      "status": "machine"
+    },
+    "call.undecryptable.notice": {
+      "text": "无法解密收到的媒体",
+      "status": "machine"
+    },
+    "call.undecryptable.notice_many": {
+      "text": "{count, plural, other {无法解密 # 位参与者的媒体}}",
+      "status": "machine"
+    },
+    "call.undecryptable.tile": {
+      "text": "无法解密",
+      "status": "machine"
+    },
+    "call.undecryptable.tile_a11y": {
+      "text": "无法解密此参与者的媒体",
       "status": "machine"
     },
     "channels.back": {
@@ -2582,12 +3354,20 @@
       "text": "完成",
       "status": "machine"
     },
+    "common.duration.hours": {
+      "text": "{count, plural, other {# 小时}}",
+      "status": "machine"
+    },
     "common.duration.minutes": {
       "text": "{count, plural, other {# 分钟}}",
       "status": "machine"
     },
     "common.duration.minutes_seconds": {
       "text": "{minutes}{seconds}",
+      "status": "machine"
+    },
+    "common.duration.pair": {
+      "text": "{first}{second}",
       "status": "machine"
     },
     "common.duration.seconds": {
@@ -2680,6 +3460,10 @@
     },
     "common.on": {
       "text": "开",
+      "status": "machine"
+    },
+    "common.open": {
+      "text": "打开",
       "status": "machine"
     },
     "common.open_chat": {
@@ -3792,6 +4576,22 @@
     },
     "new_group.subtitle": {
       "text": "你将成为群主。之后可以再添加更多人。",
+      "status": "machine"
+    },
+    "notification.channel.messages": {
+      "text": "消息",
+      "status": "machine"
+    },
+    "notification.channel.messages_desc": {
+      "text": "Lakko 新消息通知",
+      "status": "machine"
+    },
+    "notification.message.attachments": {
+      "text": "{count, plural, other {发送了 # 个附件}}",
+      "status": "machine"
+    },
+    "notification.message.new": {
+      "text": "新消息",
       "status": "machine"
     },
     "recovery.access_only_note": {

@@ -622,7 +622,8 @@ public final class CallUiState: ObservableObject {
         guard !trimmed.isEmpty else { return nil }
         let local = participants.first(where: { $0.isLocal })
         let senderId = local?.id ?? "local"
-        let senderName = local?.displayName ?? "You"
+        let senderName = CallPeerName.tileLabel(
+            displayName: local?.displayName ?? "", isLocal: true)
         let msg = ChatMessage(
             id: nextChatId(),
             kind: .text,
@@ -896,7 +897,7 @@ extension CallUiState {
             let tier = Self.qualityTier(forRttMs: session.rttMs)
             var roster: [Participant] = [
                 Participant(
-                    id: "local", displayName: "You", isLocal: true,
+                    id: "local", displayName: "", isLocal: true,
                     micOn: session.micEnabled, camOn: session.cameraEnabled,
                     handRaised: false, quality: tier, speaking: false,
                     screenSharing: false

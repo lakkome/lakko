@@ -101,9 +101,9 @@ enum CallBarPresentation {
     /// already prints.
     static func line(_ status: CallBarStatus) -> String {
         switch status {
-        case .calling: return "Calling..."
-        case .connecting: return "Connecting..."
-        case .reconnecting: return "Reconnecting..."
+        case .calling: return Localization.text("call.status.calling")
+        case .connecting: return Localization.text("common.connecting")
+        case .reconnecting: return Localization.text("call.status.reconnecting")
         case .elapsed(let ms): return CallTranscriptRow.durationLabel(ms: Int64(clamping: ms))
         }
     }
@@ -111,22 +111,31 @@ enum CallBarPresentation {
     /// What VoiceOver reads instead of the line: a duration as a duration,
     /// never digit by digit (`docs/ux/calls.md` section 8).
     static func spokenLine(_ status: CallBarStatus) -> String {
-        if case .elapsed(let ms) = status {
-            return CallTranscriptRow.spokenDuration(ms: Int64(clamping: ms))
+        switch status {
+        case .calling: return Localization.text("call.status.calling_spoken")
+        case .connecting: return Localization.text("call.status.connecting_spoken")
+        case .reconnecting: return Localization.text("call.status.reconnecting_spoken")
+        case .elapsed(let ms): return CallTranscriptRow.spokenDuration(ms: Int64(clamping: ms))
         }
-        return line(status)
     }
 
-    /// The whole bar spoken as one button: who is on the call, how long it has
-    /// been, and what tapping it does (section 4.5).
-    ///
-    /// `isPerson` is what keeps a group call from being read "Call with Group
-    /// call": the spec's example sentence (`Call with Anna, …`) is the 1x1
-    /// shape, and a call whose label is already the name of a call carries it
-    /// on its own.
-    static func spokenLabel(name: String, isPerson: Bool, status: CallBarStatus) -> String {
-        let subject = isPerson ? "Call with \(name)" : name
-        return "\(subject), \(spokenLine(status)), return to call"
+    /// The whole bar spoken as one button: what tapping it does and who is on
+    /// the call, how long it has been, then the lock and the camera when they
+    /// show (section 4.5). The parts are joined as a list in the interface
+    /// language (`common.list_pair`), the same sentence the web bar reads.
+    static func spokenLabel(
+        name: String,
+        status: CallBarStatus,
+        encrypted: Bool = false,
+        cameraSending: Bool = false
+    ) -> String {
+        var parts = [
+            Localization.text("call.bar.return_a11y", texts: ["name": name]),
+            spokenLine(status),
+        ]
+        if encrypted { parts.append(Localization.text("call.bar.encrypted_a11y")) }
+        if cameraSending { parts.append(Localization.text("call.bar.camera_on_a11y")) }
+        return Localization.joinList(parts)
     }
 
     // MARK: - The swipe

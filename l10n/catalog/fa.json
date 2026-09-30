@@ -242,12 +242,380 @@
       "text": "این نسخه پشتیبان قدیمی‌تر بازیابی شود؟",
       "status": "machine"
     },
+    "call.alert.title": {
+      "text": "تماس",
+      "status": "machine"
+    },
+    "call.bar.camera_on_a11y": {
+      "text": "دوربین شما روشن است",
+      "status": "machine"
+    },
+    "call.bar.encrypted_a11y": {
+      "text": "رمزگذاری‌شده",
+      "status": "machine"
+    },
+    "call.bar.region_a11y": {
+      "text": "تماس در جریان است",
+      "status": "machine"
+    },
+    "call.bar.return_a11y": {
+      "text": "بازگشت به تماس. {name}",
+      "status": "machine"
+    },
+    "call.busy.call_join": {
+      "text": "شما در حال حاضر در یک تماس هستید. پیش از پیوستن به تماس دیگر آن را تمام کنید.",
+      "status": "machine"
+    },
+    "call.busy.call_start": {
+      "text": "شما در حال حاضر در یک تماس هستید. پیش از شروع تماس دیگر آن را تمام کنید.",
+      "status": "machine"
+    },
+    "call.busy.group_join": {
+      "text": "شما در حال حاضر در یک تماس گروهی هستید. پیش از پیوستن به تماس دیگر آن را تمام کنید.",
+      "status": "machine"
+    },
+    "call.busy.group_start": {
+      "text": "شما در حال حاضر در یک تماس گروهی هستید. پیش از شروع تماس دیگر آن را تمام کنید.",
+      "status": "machine"
+    },
+    "call.busy.link_join": {
+      "text": "شما در حال حاضر در تماسی هستید که از یک پیوند باز شده است. پیش از پیوستن به تماس دیگر آن را تمام کنید.",
+      "status": "machine"
+    },
+    "call.busy.link_start": {
+      "text": "شما در حال حاضر در تماسی هستید که از یک پیوند باز شده است. پیش از شروع تماس دیگر آن را تمام کنید.",
+      "status": "machine"
+    },
+    "call.camera_failed.not_allowed": {
+      "text": "Lakko اجازه استفاده از دوربین را نداشت. تماس بدون دوربین ادامه می‌یابد.",
+      "status": "machine"
+    },
+    "call.camera_failed.not_found": {
+      "text": "دوربینی پیدا نشد. تماس بدون دوربین ادامه می‌یابد.",
+      "status": "machine"
+    },
+    "call.camera_failed.other": {
+      "text": "روشن کردن دوربین ممکن نشد. شاید برنامه دیگری از آن استفاده می‌کند.",
+      "status": "machine"
+    },
+    "call.capture.both.failed": {
+      "text": "روشن کردن میکروفون و دوربین ممکن نشد. می‌توانید بشنوید و ببینید.",
+      "status": "machine"
+    },
+    "call.capture.both.not_allowed": {
+      "text": "Lakko اجازه استفاده از میکروفون یا دوربین را نداشت. می‌توانید بشنوید و ببینید.",
+      "status": "machine"
+    },
+    "call.capture.both.not_found": {
+      "text": "میکروفون یا دوربینی پیدا نشد. می‌توانید بشنوید و ببینید.",
+      "status": "machine"
+    },
+    "call.capture.camera.failed": {
+      "text": "روشن کردن دوربین ممکن نشد. با میکروفون به تماس پیوستید.",
+      "status": "machine"
+    },
+    "call.capture.camera.not_allowed": {
+      "text": "Lakko اجازه استفاده از دوربین را نداشت. با میکروفون به تماس پیوستید.",
+      "status": "machine"
+    },
+    "call.capture.camera.not_found": {
+      "text": "دوربینی پیدا نشد. با میکروفون به تماس پیوستید.",
+      "status": "machine"
+    },
+    "call.chat.a11y": {
+      "text": "گفتگوی تماس",
+      "status": "machine"
+    },
+    "call.chat.close_a11y": {
+      "text": "بستن گفتگو",
+      "status": "machine"
+    },
+    "call.chat.empty": {
+      "text": "هنوز پیامی نیست. پیام‌های اینجا با رمزگذاری سرتاسری محافظت می‌شوند.",
+      "status": "machine"
+    },
+    "call.chat.joined": {
+      "text": "{name} به تماس پیوست",
+      "status": "machine"
+    },
+    "call.chat.left": {
+      "text": "یکی از شرکت‌کنندگان تماس را ترک کرد",
+      "status": "machine"
+    },
+    "call.collapse_a11y": {
+      "text": "کوچک کردن تماس و بازگشت به برنامه",
+      "status": "machine"
+    },
+    "call.collapse_title": {
+      "text": "کوچک کردن تماس",
+      "status": "machine"
+    },
+    "call.control.bar_a11y": {
+      "text": "کنترل‌های تماس",
+      "status": "machine"
+    },
+    "call.control.camera": {
+      "text": "دوربین",
+      "status": "machine"
+    },
+    "call.control.camera_start_a11y": {
+      "text": "روشن کردن دوربین",
+      "status": "machine"
+    },
+    "call.control.camera_stop_a11y": {
+      "text": "خاموش کردن دوربین",
+      "status": "machine"
+    },
+    "call.control.chat": {
+      "text": "گفتگو",
+      "status": "machine"
+    },
+    "call.control.chat_hide_a11y": {
+      "text": "پنهان کردن گفتگو",
+      "status": "machine"
+    },
+    "call.control.chat_show_a11y": {
+      "text": "نمایش گفتگو",
+      "status": "machine"
+    },
+    "call.control.chat_unread": {
+      "text": "{count, plural, one {گفتگو (# خوانده‌نشده)} other {گفتگو (# خوانده‌نشده)}}",
+      "status": "machine"
+    },
+    "call.control.end": {
+      "text": "پایان",
+      "status": "machine"
+    },
+    "call.control.end_a11y": {
+      "text": "پایان تماس",
+      "status": "machine"
+    },
+    "call.control.invite": {
+      "text": "دعوت",
+      "status": "machine"
+    },
+    "call.control.invite_a11y": {
+      "text": "دعوت کسی به این تماس با پیوند",
+      "status": "machine"
+    },
+    "call.control.lower_hand": {
+      "text": "پایین آوردن دست",
+      "status": "machine"
+    },
+    "call.control.more": {
+      "text": "بیشتر",
+      "status": "machine"
+    },
+    "call.control.more_a11y": {
+      "text": "کنترل‌های بیشتر",
+      "status": "machine"
+    },
+    "call.control.mute": {
+      "text": "بی‌صدا",
+      "status": "machine"
+    },
+    "call.control.mute_a11y": {
+      "text": "بی‌صدا کردن میکروفون",
+      "status": "machine"
+    },
+    "call.control.participants": {
+      "text": "شرکت‌کنندگان",
+      "status": "machine"
+    },
+    "call.control.participants_hide_a11y": {
+      "text": "پنهان کردن شرکت‌کنندگان",
+      "status": "machine"
+    },
+    "call.control.participants_show_a11y": {
+      "text": "نمایش شرکت‌کنندگان",
+      "status": "machine"
+    },
+    "call.control.raise_hand": {
+      "text": "بالا بردن دست",
+      "status": "machine"
+    },
+    "call.control.share_screen": {
+      "text": "اشتراک‌گذاری صفحه",
+      "status": "machine"
+    },
+    "call.control.speaker": {
+      "text": "بلندگو",
+      "status": "machine"
+    },
+    "call.control.speaker_a11y": {
+      "text": "پخش صدا از {device}",
+      "status": "machine"
+    },
+    "call.control.speaker_default_device": {
+      "text": "بلندگوی پیش‌فرض",
+      "status": "machine"
+    },
+    "call.control.speaker_next_device": {
+      "text": "بلندگوی بعدی",
+      "status": "machine"
+    },
+    "call.control.speaker_off_a11y": {
+      "text": "خاموش کردن بلندگو",
+      "status": "machine"
+    },
+    "call.control.speaker_on_a11y": {
+      "text": "روشن کردن بلندگو",
+      "status": "machine"
+    },
+    "call.control.stop_share_screen": {
+      "text": "توقف اشتراک‌گذاری صفحه",
+      "status": "machine"
+    },
+    "call.control.unmute_a11y": {
+      "text": "روشن کردن صدای میکروفون",
+      "status": "machine"
+    },
+    "call.e2ee": {
+      "text": "رمزگذاری‌شده سرتاسری",
+      "status": "machine"
+    },
+    "call.encryption.chip": {
+      "text": "رمزگذاری‌شده",
+      "status": "machine"
+    },
+    "call.encryption.chip_a11y": {
+      "text": "این تماس رمزگذاری شده است. نمایش شماره امنیتی",
+      "status": "machine"
+    },
+    "call.encryption.compare_hint": {
+      "text": "این شماره‌ها را بلند بخوانید. اگر روی هر دو گوشی یکسان باشند، کسی گوش نمی‌دهد.",
+      "status": "machine"
+    },
+    "call.encryption.copy_a11y": {
+      "text": "کپی شماره امنیتی",
+      "status": "machine"
+    },
+    "call.encryption.number_a11y": {
+      "text": "شماره امنیتی: {groups}",
+      "status": "machine"
+    },
+    "call.encryption.number_unavailable": {
+      "text": "شماره امنیتی در دسترس نیست",
+      "status": "machine"
+    },
+    "call.encryption.sentence_group": {
+      "text": "فقط افراد حاضر در این تماس می‌توانند آن را بشنوند.",
+      "status": "machine"
+    },
+    "call.encryption.sentence_named": {
+      "text": "فقط شما و {name} می‌توانید این تماس را بشنوید.",
+      "status": "machine"
+    },
+    "call.encryption.setting_up": {
+      "text": "در حال راه‌اندازی...",
+      "status": "machine"
+    },
+    "call.encryption.title": {
+      "text": "این تماس رمزگذاری شده است",
+      "status": "machine"
+    },
+    "call.error.encryption_setup": {
+      "text": "راه‌اندازی رمزگذاری تماس ممکن نشد، برای همین تماس شروع نشد.",
+      "status": "machine"
+    },
+    "call.error.join_group": {
+      "text": "پیوستن به تماس گروهی ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "call.error.microphone_not_allowed": {
+      "text": "Lakko اجازه استفاده از میکروفون را نداشت.",
+      "status": "machine"
+    },
+    "call.error.microphone_not_found": {
+      "text": "میکروفونی پیدا نشد.",
+      "status": "machine"
+    },
+    "call.error.no_media_encryption": {
+      "text": "این مرورگر نمی‌تواند صدا و تصویر تماس را رمزگذاری کند، برای همین تماس شروع نشد.",
+      "status": "machine"
+    },
+    "call.error.not_accepting": {
+      "text": "این تماس در حال حاضر شرکت‌کننده جدید نمی‌پذیرد.",
+      "status": "machine"
+    },
+    "call.error.not_member": {
+      "text": "دیگر عضو این گفتگو نیستید.",
+      "status": "machine"
+    },
+    "call.error.signed_out_start": {
+      "text": "از حساب خارج شده‌اید. برای شروع تماس دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "call.error.start_group": {
+      "text": "شروع تماس گروهی ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "call.error.unavailable": {
+      "text": "تماس‌ها در حال حاضر در دسترس نیستند. بعداً دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "call.fill.remote_camera_a11y": {
+      "text": "دوربین {name}",
+      "status": "machine"
+    },
+    "call.group_banner.join_video": {
+      "text": "ویدیو",
+      "status": "machine"
+    },
+    "call.group_banner.open_chat": {
+      "text": "باز کردن گفتگو",
+      "status": "machine"
+    },
+    "call.group_banner.title": {
+      "text": "تماس گروهی در {name}",
+      "status": "machine"
+    },
     "call.guest.default_name": {
       "text": "مهمان",
       "status": "machine"
     },
     "call.guest.working.title": {
       "text": "در حال ورود شما به تماس...",
+      "status": "machine"
+    },
+    "call.history.call_back_a11y": {
+      "text": "تماس دوباره",
+      "status": "machine"
+    },
+    "call.history.call_back_video_a11y": {
+      "text": "تماس دوباره با ویدیو",
+      "status": "machine"
+    },
+    "call.history.empty": {
+      "text": "هنوز تماسی نیست",
+      "status": "machine"
+    },
+    "call.history.empty_body": {
+      "text": "تماس‌هایی که می‌گیرید و دریافت می‌کنید اینجا نمایش داده می‌شوند.",
+      "status": "machine"
+    },
+    "call.history.join_by_link": {
+      "text": "پیوستن با پیوند",
+      "status": "machine"
+    },
+    "call.history.join_invalid": {
+      "text": "این شبیه پیوند تماس نیست. کل پیوند را جای‌گذاری کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "call.history.new_call": {
+      "text": "تماس جدید",
+      "status": "machine"
+    },
+    "call.history.paste_hint": {
+      "text": "کسی که تماس را ساخته، پیوند را به اشتراک می‌گذارد.",
+      "status": "machine"
+    },
+    "call.history.paste_label": {
+      "text": "پیوند تماس را جای‌گذاری کنید",
+      "status": "machine"
+    },
+    "call.history.unknown_conversation": {
+      "text": "ناشناس",
       "status": "machine"
     },
     "call.incoming.accept": {
@@ -258,12 +626,96 @@
       "text": "پاسخ به تماس {name}",
       "status": "machine"
     },
+    "call.incoming.accept_video_a11y": {
+      "text": "پاسخ به تماس تصویری {name}",
+      "status": "machine"
+    },
+    "call.incoming.accept_voice_a11y": {
+      "text": "پاسخ به تماس صوتی {name}",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video": {
+      "text": "پاسخ بدون ویدیو",
+      "status": "machine"
+    },
+    "call.incoming.accept_without_video_a11y": {
+      "text": "پاسخ به تماس {name} بدون ویدیو",
+      "status": "machine"
+    },
     "call.incoming.decline": {
       "text": "رد کردن",
       "status": "machine"
     },
     "call.incoming.decline_from": {
       "text": "رد تماس {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline_video_a11y": {
+      "text": "رد تماس تصویری {name}",
+      "status": "machine"
+    },
+    "call.incoming.decline_voice_a11y": {
+      "text": "رد تماس صوتی {name}",
+      "status": "machine"
+    },
+    "call.incoming.video_a11y": {
+      "text": "تماس تصویری ورودی از {name}",
+      "status": "machine"
+    },
+    "call.incoming.voice_a11y": {
+      "text": "تماس صوتی ورودی از {name}",
+      "status": "machine"
+    },
+    "call.invite.copied": {
+      "text": "پیوند کپی شد. هر کسی که آن را برایش بفرستید می‌تواند درخواست پیوستن بدهد.",
+      "status": "machine"
+    },
+    "call.invite.link_a11y": {
+      "text": "پیوند تماس",
+      "status": "machine"
+    },
+    "call.invite.minting": {
+      "text": "در حال آماده‌سازی پیوند این تماس. چند ثانیه طول می‌کشد.",
+      "status": "machine"
+    },
+    "call.invite.ready": {
+      "text": "هر کسی این پیوند را داشته باشد می‌تواند درخواست پیوستن به این تماس بدهد. شما تصمیم می‌گیرید چه کسی وارد شود.",
+      "status": "machine"
+    },
+    "call.invite.retry_a11y": {
+      "text": "تلاش دوباره برای آماده‌سازی پیوند دعوت",
+      "status": "machine"
+    },
+    "call.invite.share_a11y": {
+      "text": "اشتراک‌گذاری پیوند دعوت",
+      "status": "machine"
+    },
+    "call.invite.shared": {
+      "text": "پیوند به اشتراک گذاشته شد.",
+      "status": "machine"
+    },
+    "call.invite.shown": {
+      "text": "این پیوند را کپی کنید: {url}",
+      "status": "machine"
+    },
+    "call.invite.signed_out": {
+      "text": "از حساب خارج شده‌اید. برای گرفتن پیوند این تماس دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "call.invite.unavailable": {
+      "text": "آماده‌سازی پیوند ممکن نشد. تماس تحت تأثیر قرار نگرفته است، پس می‌توانید دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "call.kind.video": {
+      "text": "تماس تصویری",
+      "status": "machine"
+    },
+    "call.kind.voice": {
+      "text": "تماس صوتی",
+      "status": "machine"
+    },
+    "call.label.group": {
+      "text": "تماس گروهی",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -310,6 +762,14 @@
       "text": "در حال بارگیری پیوند تماس...",
       "status": "machine"
     },
+    "call.link.notice.a11y": {
+      "text": "تماس از پیوند",
+      "status": "machine"
+    },
+    "call.link.notice.connecting": {
+      "text": "در حال اتصال به تماس...",
+      "status": "machine"
+    },
     "call.link.start": {
       "text": "شروع تماس",
       "status": "machine"
@@ -328,6 +788,318 @@
     },
     "call.link.waiting_hint": {
       "text": "می‌توانید این صفحه را ترک کنید؛ پس از پذیرش به تماس می‌پیوندید.",
+      "status": "machine"
+    },
+    "call.log.a11y.call_back": {
+      "text": "{head}. تماس دوباره",
+      "status": "machine"
+    },
+    "call.log.a11y.lasted": {
+      "text": "{head}، مدت {duration}",
+      "status": "machine"
+    },
+    "call.log.a11y.video_declined": {
+      "text": "تماس تصویری ردشده",
+      "status": "machine"
+    },
+    "call.log.a11y.video_incoming": {
+      "text": "تماس تصویری، ورودی",
+      "status": "machine"
+    },
+    "call.log.a11y.video_missed": {
+      "text": "تماس تصویری بی‌پاسخ",
+      "status": "machine"
+    },
+    "call.log.a11y.video_outgoing": {
+      "text": "تماس تصویری، خروجی",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_declined": {
+      "text": "تماس ردشده",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_incoming": {
+      "text": "تماس، ورودی",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_missed": {
+      "text": "تماس بی‌پاسخ",
+      "status": "machine"
+    },
+    "call.log.a11y.voice_outgoing": {
+      "text": "تماس، خروجی",
+      "status": "machine"
+    },
+    "call.log.declined": {
+      "text": "ردشده",
+      "status": "machine"
+    },
+    "call.log.incoming": {
+      "text": "تماس ورودی",
+      "status": "machine"
+    },
+    "call.log.incoming_duration": {
+      "text": "تماس ورودی، {duration}",
+      "status": "machine"
+    },
+    "call.log.missed": {
+      "text": "تماس بی‌پاسخ",
+      "status": "machine"
+    },
+    "call.log.outgoing": {
+      "text": "تماس خروجی",
+      "status": "machine"
+    },
+    "call.log.outgoing_duration": {
+      "text": "تماس خروجی، {duration}",
+      "status": "machine"
+    },
+    "call.notification.channel_description": {
+      "text": "تماس‌های ورودی Lakko",
+      "status": "machine"
+    },
+    "call.notification.incoming": {
+      "text": "تماس ورودی",
+      "status": "machine"
+    },
+    "call.participant.hand_raised": {
+      "text": "دست بالا رفته",
+      "status": "machine"
+    },
+    "call.participant.muted": {
+      "text": "بی‌صدا",
+      "status": "machine"
+    },
+    "call.participant.muted_a11y": {
+      "text": "میکروفون بی‌صدا است",
+      "status": "machine"
+    },
+    "call.participant.numbered": {
+      "text": "شرکت‌کننده {number}",
+      "status": "machine"
+    },
+    "call.participant.pinned": {
+      "text": "سنجاق‌شده",
+      "status": "machine"
+    },
+    "call.participant.sharing": {
+      "text": "در حال اشتراک",
+      "status": "machine"
+    },
+    "call.participant.sharing_a11y": {
+      "text": "در حال اشتراک‌گذاری صفحه",
+      "status": "machine"
+    },
+    "call.participant.unnamed": {
+      "text": "شرکت‌کننده",
+      "status": "machine"
+    },
+    "call.participant.you": {
+      "text": "شما",
+      "status": "machine"
+    },
+    "call.participants.close_a11y": {
+      "text": "بستن شرکت‌کنندگان",
+      "status": "machine"
+    },
+    "call.participants.title": {
+      "text": "شرکت‌کنندگان ({count})",
+      "status": "machine"
+    },
+    "call.permission.audio_only": {
+      "text": "فقط صدا",
+      "status": "machine"
+    },
+    "call.permission.camera.body": {
+      "text": "ویدیو به دوربین نیاز دارد. می‌توانید فقط با صدا ادامه دهید، یا در تنظیمات برنامه به Lakko اجازه دسترسی به دوربین بدهید.",
+      "status": "machine"
+    },
+    "call.permission.camera.title": {
+      "text": "دسترسی به دوربین لازم است",
+      "status": "machine"
+    },
+    "call.permission.microphone.body": {
+      "text": "تماس‌ها به میکروفون نیاز دارند. در تنظیمات برنامه به Lakko اجازه دسترسی به میکروفون بدهید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "call.permission.microphone.title": {
+      "text": "دسترسی به میکروفون لازم است",
+      "status": "machine"
+    },
+    "call.quality.a11y": {
+      "text": "کیفیت اتصال: {tier}",
+      "status": "machine"
+    },
+    "call.quality.bps": {
+      "text": "{value} bps",
+      "status": "machine"
+    },
+    "call.quality.details_a11y": {
+      "text": "جزئیات اتصال",
+      "status": "machine"
+    },
+    "call.quality.direct": {
+      "text": "مستقیم",
+      "status": "machine"
+    },
+    "call.quality.down": {
+      "text": "دریافت",
+      "status": "machine"
+    },
+    "call.quality.kbps": {
+      "text": "{value} kbps",
+      "status": "machine"
+    },
+    "call.quality.mbps": {
+      "text": "{value} Mbps",
+      "status": "machine"
+    },
+    "call.quality.ms": {
+      "text": "{value} میلی‌ثانیه",
+      "status": "machine"
+    },
+    "call.quality.relay": {
+      "text": "از طریق رله",
+      "status": "machine"
+    },
+    "call.quality.round_trip": {
+      "text": "زمان رفت‌وبرگشت",
+      "status": "machine"
+    },
+    "call.quality.tier.bad": {
+      "text": "بد",
+      "status": "machine"
+    },
+    "call.quality.tier.excellent": {
+      "text": "عالی",
+      "status": "machine"
+    },
+    "call.quality.tier.fair": {
+      "text": "متوسط",
+      "status": "machine"
+    },
+    "call.quality.tier.good": {
+      "text": "خوب",
+      "status": "machine"
+    },
+    "call.quality.tier.poor": {
+      "text": "ضعیف",
+      "status": "machine"
+    },
+    "call.quality.title": {
+      "text": "اتصال: {tier}",
+      "status": "machine"
+    },
+    "call.quality.up": {
+      "text": "ارسال",
+      "status": "machine"
+    },
+    "call.self.camera_a11y": {
+      "text": "دوربین شما",
+      "status": "machine"
+    },
+    "call.self.flip_a11y": {
+      "text": "رفتن به دوربین دیگر",
+      "status": "machine"
+    },
+    "call.self.starting_camera": {
+      "text": "در حال روشن کردن دوربین...",
+      "status": "machine"
+    },
+    "call.settings.devices": {
+      "text": "دستگاه‌ها",
+      "status": "machine"
+    },
+    "call.settings.low_data": {
+      "text": "حالت کم‌مصرف داده",
+      "status": "machine"
+    },
+    "call.settings.low_data_hint": {
+      "text": "کیفیت ویدیو را به 360p محدود می‌کند؛ برای اتصال‌های موبایل با حجم محدود مفید است.",
+      "status": "machine"
+    },
+    "call.settings.microphone": {
+      "text": "میکروفون",
+      "status": "machine"
+    },
+    "call.settings.mirror": {
+      "text": "آینه‌ای کردن پیش‌نمایش خود",
+      "status": "machine"
+    },
+    "call.settings.no_devices": {
+      "text": "هنوز دستگاهی گزارش نشده است. پس از دادن اجازه دسترسی به میکروفون یا دوربین اینجا نمایش داده می‌شوند.",
+      "status": "machine"
+    },
+    "call.settings.system_default": {
+      "text": "پیش‌فرض سیستم",
+      "status": "machine"
+    },
+    "call.settings.video": {
+      "text": "ویدیو",
+      "status": "machine"
+    },
+    "call.start.no_camera": {
+      "text": "دوربینی در دسترس نیست، برای همین این یک تماس صوتی است.",
+      "status": "machine"
+    },
+    "call.status.calling": {
+      "text": "در حال تماس...",
+      "status": "machine"
+    },
+    "call.status.calling_spoken": {
+      "text": "در حال تماس",
+      "status": "machine"
+    },
+    "call.status.connected": {
+      "text": "متصل",
+      "status": "machine"
+    },
+    "call.status.connecting_spoken": {
+      "text": "در حال اتصال",
+      "status": "machine"
+    },
+    "call.status.ended": {
+      "text": "تماس پایان یافت",
+      "status": "machine"
+    },
+    "call.status.group_count": {
+      "text": "تماس گروهی · {count}",
+      "status": "machine"
+    },
+    "call.status.in_call_spoken": {
+      "text": "در تماس، {duration}",
+      "status": "machine"
+    },
+    "call.status.reconnecting": {
+      "text": "در حال اتصال دوباره...",
+      "status": "machine"
+    },
+    "call.status.reconnecting_spoken": {
+      "text": "در حال اتصال دوباره",
+      "status": "machine"
+    },
+    "call.status.ringing": {
+      "text": "در حال زنگ خوردن...",
+      "status": "machine"
+    },
+    "call.undecryptable.named": {
+      "text": "رمزگشایی صدا و تصویر {name} ممکن نیست",
+      "status": "machine"
+    },
+    "call.undecryptable.notice": {
+      "text": "رمزگشایی صدا و تصویر دریافتی ممکن نیست",
+      "status": "machine"
+    },
+    "call.undecryptable.notice_many": {
+      "text": "{count, plural, one {رمزگشایی صدا و تصویر # شرکت‌کننده ممکن نیست} other {رمزگشایی صدا و تصویر # شرکت‌کننده ممکن نیست}}",
+      "status": "machine"
+    },
+    "call.undecryptable.tile": {
+      "text": "رمزگشایی ممکن نیست",
+      "status": "machine"
+    },
+    "call.undecryptable.tile_a11y": {
+      "text": "رمزگشایی صدا و تصویر این شرکت‌کننده ممکن نیست",
       "status": "machine"
     },
     "channels.back": {
@@ -2582,12 +3354,20 @@
       "text": "تمام",
       "status": "machine"
     },
+    "common.duration.hours": {
+      "text": "{count, plural, one {# ساعت} other {# ساعت}}",
+      "status": "machine"
+    },
     "common.duration.minutes": {
       "text": "{count, plural, one {# دقیقه} other {# دقیقه}}",
       "status": "machine"
     },
     "common.duration.minutes_seconds": {
       "text": "{minutes} و {seconds}",
+      "status": "machine"
+    },
+    "common.duration.pair": {
+      "text": "{first} و {second}",
       "status": "machine"
     },
     "common.duration.seconds": {
@@ -2680,6 +3460,10 @@
     },
     "common.on": {
       "text": "روشن",
+      "status": "machine"
+    },
+    "common.open": {
+      "text": "باز کردن",
       "status": "machine"
     },
     "common.open_chat": {
@@ -3792,6 +4576,22 @@
     },
     "new_group.subtitle": {
       "text": "شما مالک گروه خواهید بود. بعداً می‌توانید افراد دیگری اضافه کنید.",
+      "status": "machine"
+    },
+    "notification.channel.messages": {
+      "text": "پیام‌ها",
+      "status": "machine"
+    },
+    "notification.channel.messages_desc": {
+      "text": "اعلان‌های بیدارباش برای پیام‌های جدید Lakko",
+      "status": "machine"
+    },
+    "notification.message.attachments": {
+      "text": "{count, plural, one {یک پیوست فرستاد} other {# پیوست فرستاد}}",
+      "status": "machine"
+    },
+    "notification.message.new": {
+      "text": "پیام جدید",
       "status": "machine"
     },
     "recovery.access_only_note": {

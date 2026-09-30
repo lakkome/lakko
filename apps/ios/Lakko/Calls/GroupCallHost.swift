@@ -254,12 +254,12 @@ final class GroupCallHost: ObservableObject {
         guard isCurrent(attempt) else { return }
         guard let base = ports.sfuBaseUrl() else {
             NSLog("group call: SFU URL not configured (LakkoSfuUrl); refusing")
-            callError = "Group calls are not available: this build has no SFU endpoint."
+            callError = Localization.text("chat.call.unavailable")
             return
         }
         guard let token = ports.sessionToken() else {
             NSLog("group call: no session token; refusing")
-            callError = "Sign in again to start or join a group call."
+            callError = Localization.text("call.error.signed_out_start")
             return
         }
         if let joinCallId {
@@ -275,7 +275,7 @@ final class GroupCallHost: ObservableObject {
                   GroupCallReducer.isLive(
                       record, nowMs: ports.nowMs(),
                       ignoringDevice: ports.ownDeviceKey(groupIdHex)) else {
-                callNotice = "That group call has ended."
+                callNotice = Localization.text("chat.call.group_ended")
                 return
             }
         }
@@ -285,7 +285,7 @@ final class GroupCallHost: ObservableObject {
         let keyedEpoch = ports.epoch(groupIdHex)
         guard let key = ports.deriveCallKey(groupIdHex, callId) else {
             NSLog("group call: call-key derivation failed; refusing per invariant #4")
-            callError = "Could not derive the call key for this chat."
+            callError = Localization.text("call.error.encryption_setup")
             return
         }
         let jwt: String
@@ -294,7 +294,9 @@ final class GroupCallHost: ObservableObject {
         } catch {
             NSLog("group call: JWT mint failed: %@", error.localizedDescription)
             if isCurrent(attempt) {
-                callError = "Could not get admission to the call: \(error.localizedDescription)"
+                callError = CallErrorText.message(
+                    for: error,
+                    fallbackKey: joinCallId == nil ? "call.error.start_group" : "call.error.join_group")
             }
             return
         }
@@ -322,7 +324,7 @@ final class GroupCallHost: ObservableObject {
             guard announced else {
                 // Not announced: nobody could join, so the call is refused
                 // rather than connected as an invisible room.
-                callError = "Could not announce the call to this chat. Try again."
+                callError = Localization.text("call.error.start_group")
                 return
             }
             ports.applySignal(
@@ -389,12 +391,13 @@ final class GroupCallHost: ObservableObject {
                 NSLog("group call: the SFU says call %@ ended before we joined", callIdHex)
                 leave(hungUp: false)
                 dismissPresentation()
-                callError = "That group call has ended."
+                callError = Localization.text("chat.call.group_ended")
                 await endRecordReportedBySfu(groupIdHex: groupIdHex, callId: callId)
                 return
             }
             NSLog("group call connect failed: %@", error.localizedDescription)
-            callError = "Could not connect to the call: \(error.localizedDescription)"
+            callError = CallErrorText.message(
+                for: error, fallbackKey: initiator ? "call.error.start_group" : "call.error.join_group")
             leave(hungUp: false)
             // Take the call screen down at once, so the explanation is not
             // hidden behind a "Call ended" overlay.
@@ -773,7 +776,7 @@ final class GroupCallHost: ObservableObject {
                 // Fail-safe (invariant #4): revert the toggle and say why. The
                 // call stays up audio-only.
                 ui.setCamera(false)
-                ui.addSystemEvent("Could not start the camera: \(error.localizedDescription)")
+                ui.addSystemEvent(CallErrorText.cameraFailure(error))
                 NSLog("SFU group call: publishVideo failed: %@", String(describing: error))
             }
         }
@@ -886,7 +889,9 @@ extension GroupCallHost {
     static func ownTileName() -> String {
         let name = ProfileDirectory.shared.ownProfile?.displayName?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return name.isEmpty ? "You" : name
+        // Empty renders as the localized "You" at the tile
+        // (``CallPeerName/tileLabel(displayName:isLocal:)``).
+        return name
     }
 
     /// ADR-0021 — the per-call peer_tag -> label resolver, so the SFU roster

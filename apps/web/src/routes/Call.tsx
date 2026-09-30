@@ -101,6 +101,7 @@ import {
 import { paths } from "./paths";
 import { Icon } from "../ui/icons";
 import { initialsOf, toneOf } from "../ui/Avatar";
+import { currentLanguage, t } from "../l10n";
 
 // ============================================================================
 // Small shared pieces
@@ -156,8 +157,8 @@ const QualityDot: Component<QualityDotProps> = (props) => (
     data-tier={qualityColour(props.tier)}
     role={props.interactive === true ? "button" : undefined}
     tabindex={props.interactive === true ? 0 : undefined}
-    aria-label={`Connection quality: ${props.tier}`}
-    title={`Connection: ${props.tier}`}
+    aria-label={t("call.quality.a11y", { tier: qualityWord(props.tier) })}
+    title={t("call.quality.title", { tier: qualityWord(props.tier) })}
     onClick={(e): void => {
       if (props.interactive !== true) return;
       e.stopPropagation();
@@ -178,11 +179,35 @@ function localQualityTier(): QualityTier {
   return local?.quality ?? "good";
 }
 
+/** The word for a quality tier, in the interface language. */
+function qualityWord(tier: QualityTier): string {
+  switch (tier) {
+    case "excellent":
+      return t("call.quality.tier.excellent");
+    case "good":
+      return t("call.quality.tier.good");
+    case "fair":
+      return t("call.quality.tier.fair");
+    case "poor":
+      return t("call.quality.tier.poor");
+    case "bad":
+      return t("call.quality.tier.bad");
+  }
+}
+
+/** A number with a fixed count of decimals, in the interface language. */
+function formatNumber(value: number, decimals: number): string {
+  return new Intl.NumberFormat(currentLanguage(), {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  }).format(value);
+}
+
 function formatBps(bps: number | null): string {
   if (bps === null) return "—";
-  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
-  if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)} kbps`;
-  return `${bps} bps`;
+  if (bps >= 1_000_000) return t("call.quality.mbps", { value: formatNumber(bps / 1_000_000, 1) });
+  if (bps >= 1_000) return t("call.quality.kbps", { value: formatNumber(bps / 1_000, 0) });
+  return t("call.quality.bps", { value: formatNumber(bps, 0) });
 }
 
 /**
@@ -198,9 +223,9 @@ const QualityIndicator: Component = () => (
     <div class="lk-call-quality">
       <QualityDot tier={localQualityTier()} interactive={true} />
       <Show when={callState.qualityPopoverOpen()}>
-        <div class="lk-call-popover" role="dialog" aria-label="Connection details">
+        <div class="lk-call-popover" role="dialog" aria-label={t("call.quality.details_a11y")}>
           <div class="lk-call-popover-head">
-            <span>{localQualityTier()}</span>
+            <span>{qualityWord(localQualityTier())}</span>
             <span
               classList={{
                 ok: callState.connectionDetail().connectionType === "direct",
@@ -208,22 +233,24 @@ const QualityIndicator: Component = () => (
               }}
             >
               {callState.connectionDetail().connectionType === "direct"
-                ? "Direct"
+                ? t("call.quality.direct")
                 : callState.connectionDetail().connectionType === "relay"
-                  ? "Relay"
+                  ? t("call.quality.relay")
                   : "—"}
             </span>
           </div>
           <dl class="lk-call-popover-stats">
-            <dt>Round trip</dt>
+            <dt>{t("call.quality.round_trip")}</dt>
             <dd>
               {callState.connectionDetail().rttMs !== null
-                ? `${callState.connectionDetail().rttMs} ms`
+                ? t("call.quality.ms", {
+                    value: formatNumber(callState.connectionDetail().rttMs ?? 0, 0),
+                  })
                 : "—"}
             </dd>
-            <dt>Down</dt>
+            <dt>{t("call.quality.down")}</dt>
             <dd>{formatBps(callState.connectionDetail().downBps)}</dd>
-            <dt>Up</dt>
+            <dt>{t("call.quality.up")}</dt>
             <dd>{formatBps(callState.connectionDetail().upBps)}</dd>
           </dl>
         </div>
@@ -247,14 +274,14 @@ const EncryptionChip: Component<{ onOpen: () => void }> = (props) => (
       // button: there is nothing to show behind it.
       <span class="lk-call-chip negotiating" role="status">
         <Icon name="lock" size={13} />
-        <span>Setting up...</span>
+        <span>{t("call.encryption.setting_up")}</span>
       </span>
     }
   >
     <button
       type="button"
       class="lk-call-chip secure"
-      aria-label="This call is encrypted. Show the safety number"
+      aria-label={t("call.encryption.chip_a11y")}
       aria-haspopup="dialog"
       onClick={(e): void => {
         e.stopPropagation();
@@ -262,7 +289,7 @@ const EncryptionChip: Component<{ onOpen: () => void }> = (props) => (
       }}
     >
       <Icon name="lock" size={13} />
-      <span>Encrypted</span>
+      <span>{t("call.encryption.chip")}</span>
     </button>
   </Show>
 );
@@ -318,7 +345,7 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
       }}
     >
       <div class="lk-call-modal lk-encryption-sheet">
-        <h2 id="lk-encryption-sheet-title">This call is encrypted</h2>
+        <h2 id="lk-encryption-sheet-title">{t("call.encryption.title")}</h2>
         <p class="lk-encryption-sheet-lead">{encryptionSheetSentence(props.peerName)}</p>
 
         {/* One atomic thing to a screen reader: `role="img"` with a label that
@@ -334,14 +361,12 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
           </For>
         </p>
 
-        <p class="lk-encryption-sheet-hint">
-          Read these numbers aloud. If they match on both phones, no one is listening.
-        </p>
+        <p class="lk-encryption-sheet-hint">{t("call.encryption.compare_hint")}</p>
 
         <div class="lk-encryption-sheet-actions">
           <button type="button" class="ghost" onClick={copy}>
             <Icon name="copy" size={16} />
-            {copied() ? "Copied" : "Copy"}
+            {copied() ? t("common.copied") : t("common.copy")}
           </button>
           <button
             type="button"
@@ -351,7 +376,7 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
             }}
             onClick={() => props.onClose()}
           >
-            Done
+            {t("common.done")}
           </button>
         </div>
       </div>
@@ -439,7 +464,7 @@ const ControlBar: Component<{
     data-surface={props.surface}
     classList={{ faded: props.hidden }}
     role="toolbar"
-    aria-label="Call controls"
+    aria-label={t("call.control.bar_a11y")}
   >
     <For each={props.controls}>
       {(spec) => (
@@ -633,7 +658,7 @@ const SelfView: Component<{
             autoplay
             playsinline
             muted
-            aria-label="Your camera"
+            aria-label={t("call.self.camera_a11y")}
             ref={(el) => {
               el.srcObject = stream();
             }}
@@ -644,7 +669,7 @@ const SelfView: Component<{
       <Show when={props.starting}>
         <div class="lk-call-self-overlay" role="status" aria-live="polite">
           <Spinner size={20} />
-          <span>Starting camera...</span>
+          <span>{t("call.self.starting_camera")}</span>
         </div>
       </Show>
 
@@ -652,8 +677,8 @@ const SelfView: Component<{
         <button
           type="button"
           class="lk-call-self-flip"
-          aria-label="Switch to the other camera"
-          title="Switch to the other camera"
+          aria-label={t("call.self.flip_a11y")}
+          title={t("call.self.flip_a11y")}
           onClick={(e): void => {
             e.stopPropagation();
             props.onFlip();
@@ -689,7 +714,8 @@ const ParticipantTile: Component<TileProps> = (props) => {
       ? props.localStream?.()
       : props.remoteStreamFor?.(props.participant.id);
   const name = (): string =>
-    props.participant.displayName || (props.participant.isLocal ? "You" : "Participant");
+    props.participant.displayName ||
+    (props.participant.isLocal ? t("call.participant.you") : t("call.participant.unnamed"));
   return (
     <div
       class="lk-call-tile"
@@ -742,7 +768,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
       <Show when={props.participant.isLocal && callState.videoPublishState() === "starting"}>
         <div class="lk-call-tile-overlay" role="status" aria-live="polite">
           <Spinner size={props.large ? 30 : 24} />
-          <span>Starting camera...</span>
+          <span>{t("call.self.starting_camera")}</span>
         </div>
       </Show>
 
@@ -754,14 +780,18 @@ const ParticipantTile: Component<TileProps> = (props) => {
 
       <div class="lk-call-tile-strip">
         <Show when={!props.participant.micOn}>
-          <span class="lk-call-tile-muted" aria-label="Microphone muted" title="Muted">
+          <span
+            class="lk-call-tile-muted"
+            aria-label={t("call.participant.muted_a11y")}
+            title={t("call.participant.muted")}
+          >
             <Icon name="micOff" size={14} />
           </span>
         </Show>
         <span class="lk-call-tile-name">{name()}</span>
         <QualityDot tier={props.participant.quality} />
         <Show when={isPinned()}>
-          <span class="lk-call-tile-pin" title="Pinned">
+          <span class="lk-call-tile-pin" title={t("call.participant.pinned")}>
             <Icon name="pin" size={14} />
           </span>
         </Show>
@@ -810,13 +840,13 @@ const GroupStage: Component<{
 
 const ParticipantList: Component = () => (
   <Show when={callState.participantListOpen()}>
-    <aside class="lk-call-drawer" aria-label="Participants">
+    <aside class="lk-call-drawer" aria-label={t("call.control.participants")}>
       <div class="lk-call-drawer-head">
-        <h2>Participants ({callState.participants().length})</h2>
+        <h2>{t("call.participants.title", { count: callState.participants().length })}</h2>
         <button
           type="button"
           class="lk-icon-button"
-          aria-label="Close participants"
+          aria-label={t("call.participants.close_a11y")}
           onClick={(): void => callActions.setParticipantListOpen(false)}
         >
           <Icon name="close" size={18} />
@@ -828,10 +858,15 @@ const ParticipantList: Component = () => (
             <li class="lk-call-person">
               <QualityDot tier={p.quality} />
               <span class="lk-call-person-name">
-                {p.displayName || (p.isLocal ? "You" : "Participant")}
+                {p.displayName ||
+                  (p.isLocal ? t("call.participant.you") : t("call.participant.unnamed"))}
               </span>
               <Show when={!p.micOn}>
-                <span class="lk-call-tile-muted" title="Muted" aria-label="Muted">
+                <span
+                  class="lk-call-tile-muted"
+                  title={t("call.participant.muted")}
+                  aria-label={t("call.participant.muted")}
+                >
                   <Icon name="micOff" size={14} />
                 </span>
               </Show>
@@ -883,13 +918,13 @@ const ChatPanel: Component = () => {
 
   return (
     <Show when={callState.chatOpen()}>
-      <aside class="lk-call-drawer lk-call-chat" aria-label="Call chat">
+      <aside class="lk-call-drawer lk-call-chat" aria-label={t("call.chat.a11y")}>
         <header class="lk-call-drawer-head">
-          <h2>Chat</h2>
+          <h2>{t("call.control.chat")}</h2>
           <button
             type="button"
             class="lk-icon-button"
-            aria-label="Close chat"
+            aria-label={t("call.chat.close_a11y")}
             onClick={(): void => callActions.setChatOpen(false)}
           >
             <Icon name="close" size={18} />
@@ -900,9 +935,7 @@ const ChatPanel: Component = () => {
           <Show
             when={callState.chatMessages().length > 0}
             fallback={
-              <div class="lk-call-chat-empty">
-                No messages yet. Messages here are end-to-end encrypted.
-              </div>
+              <div class="lk-call-chat-empty">{t("call.chat.empty")}</div>
             }
           >
             <For each={callState.chatMessages()}>
@@ -922,8 +955,8 @@ const ChatPanel: Component = () => {
             ref={inputRef}
             class="lk-composer-input"
             type="text"
-            placeholder="Message"
-            aria-label="Message"
+            placeholder={t("chat.composer.placeholder")}
+            aria-label={t("chat.composer.placeholder")}
             autocomplete="off"
             value={callState.composeText()}
             onInput={(e): void => callActions.setComposeText(e.currentTarget.value)}
@@ -932,8 +965,8 @@ const ChatPanel: Component = () => {
             type="submit"
             class="lk-icon-button lk-send"
             disabled={callState.composeText().trim().length === 0}
-            aria-label="Send"
-            title="Send"
+            aria-label={t("chat.composer.send")}
+            title={t("chat.composer.send")}
           >
             <Icon name="send" size={20} />
           </button>
@@ -1012,7 +1045,7 @@ function seedMockCall(): () => void {
   callActions.setParticipants([
     {
       id: "local",
-      displayName: "You",
+      displayName: t("call.participant.you"),
       isLocal: true,
       micOn: true,
       camOn: true,
@@ -1157,14 +1190,18 @@ const Call: Component<{
       for (const p of remote) {
         if (!lastRemoteIds.includes(p.id)) {
           sounds.playOnce("join");
-          callActions.addSystemEvent(`${p.displayName} joined the call`);
+          callActions.addSystemEvent(
+            t("call.chat.joined", {
+              name: p.displayName || t("call.participant.unnamed"),
+            }),
+          );
         }
       }
       const present = new Set(remoteIds);
       for (const prevId of lastRemoteIds) {
         if (!present.has(prevId)) {
           sounds.playOnce("leave");
-          callActions.addSystemEvent("A participant left the call");
+          callActions.addSystemEvent(t("call.chat.left"));
         }
       }
     }
@@ -1367,8 +1404,8 @@ const Call: Component<{
           <button
             type="button"
             class="lk-call-collapse"
-            aria-label="Put the call away and return to the app"
-            title="Put the call away"
+            aria-label={t("call.collapse_a11y")}
+            title={t("call.collapse_title")}
             onClick={(event): void => {
               event.stopPropagation();
               collapse()();
@@ -1397,7 +1434,7 @@ const Call: Component<{
               autoplay
               playsinline
               muted
-              aria-label={`${peerLabel()}'s camera`}
+              aria-label={t("call.fill.remote_camera_a11y", { name: peerLabel() })}
               ref={(el) => {
                 el.srcObject = stream();
               }}
@@ -1413,7 +1450,7 @@ const Call: Component<{
               autoplay
               playsinline
               muted
-              aria-label="Your camera"
+              aria-label={t("call.self.camera_a11y")}
               ref={(el) => {
                 el.srcObject = stream();
               }}

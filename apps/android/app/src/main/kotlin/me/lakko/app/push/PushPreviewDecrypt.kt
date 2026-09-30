@@ -482,8 +482,10 @@ private fun previewBodyOf(row: ProcessedRow?): String? {
                 truncate(row.text)
             } else {
                 when {
-                    row.attachmentCount == 1 -> "Sent an attachment"
-                    row.attachmentCount > 1 -> "Sent ${row.attachmentCount} attachments"
+                    row.attachmentCount >= 1 -> me.lakko.app.l10n.Localization.strings.value.format(
+                        "notification.message.attachments",
+                        counts = mapOf("count" to row.attachmentCount.toULong()),
+                    )
                     else -> null
                 }
             }

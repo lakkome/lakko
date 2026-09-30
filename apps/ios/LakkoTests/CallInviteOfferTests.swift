@@ -89,18 +89,19 @@ final class CallInviteOfferRulesTests: XCTestCase {
     }
 
     /// Section 5: "One sentence on what happened and that it can be tried
-    /// again. The call is unaffected and does not end."
+    /// again. The call is unaffected and does not end." Rendered from the kind
+    /// of failure (ADR-0058): the failure's own prose never reaches the screen.
     func testTheFailureSaysWhatHappenedAndThatTheCallIsStillRunning() {
-        let message = Rules.failureMessage("the server said no")
-        XCTAssertTrue(message.contains("the server said no"))
-        XCTAssertTrue(message.contains("The call is still running"))
+        struct Refused: Error {}
+        let message = Rules.failureMessage(for: Refused())
+        XCTAssertEqual(message, Localization.text("call.invite.unavailable"))
+        XCTAssertTrue(message.contains("The call is unaffected"))
         XCTAssertTrue(message.contains("try again"))
         XCTAssertFalse(message.contains("!"))
     }
 
-    func testAFailureWithNoReasonStillSaysSomething() {
-        let message = Rules.failureMessage("   ")
-        XCTAssertEqual(message, "The link could not be made. The call is still running — try again.")
+    func testASignedOutFailureSaysSo() {
+        XCTAssertEqual(Rules.failureMessage(for: LinkCallHostError.signedOut), Rules.signedOutMessage)
     }
 
     /// The copy rules: no protocol names anywhere a person can read.
@@ -115,7 +116,7 @@ final class CallInviteOfferRulesTests: XCTestCase {
         ]
         let copy = [
             Rules.controlLabel, Rules.mintingMessage, Rules.readyMessage,
-            Rules.signedOutMessage, Rules.failureMessage("timed out"),
+            Rules.signedOutMessage, Rules.failureMessage(for: URLError(.timedOut)),
         ]
         for line in copy {
             for word in banned {
@@ -130,7 +131,7 @@ final class CallInviteOfferRulesTests: XCTestCase {
     /// Section 5: the busy state "says what it is doing rather than only
     /// spinning".
     func testTheBusyStateSaysWhatItIsDoing() {
-        XCTAssertTrue(Rules.mintingMessage.hasPrefix("Making a link"))
+        XCTAssertTrue(Rules.mintingMessage.hasPrefix("Preparing a link"))
         XCTAssertTrue(Rules.mintingMessage.contains("seconds"))
     }
 }
@@ -196,8 +197,9 @@ final class CallInviteOfferTests: XCTestCase {
         guard case .failed(let message) = offer.state else {
             return XCTFail("expected a failure, got \(offer.state)")
         }
-        XCTAssertTrue(message.contains("the upload was refused"))
-        XCTAssertTrue(message.contains("The call is still running"))
+        // Rendered from the kind; the error's own prose never reaches the screen.
+        XCTAssertFalse(message.contains("the upload was refused"))
+        XCTAssertTrue(message.contains("The call is unaffected"))
 
         mints.failure = nil
         await offer.retry()

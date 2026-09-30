@@ -30,6 +30,7 @@ import SwiftUI
 /// The `Invite` entry in a group call's overflow menu.
 struct CallInviteMenuButton: View {
     @ObservedObject var offer: CallInviteOffer
+    @ObservedObject var l10n = Localization.shared
 
     var body: some View {
         Button {
@@ -45,6 +46,7 @@ struct CallInviteMenuButton: View {
 /// What `Invite` opens: the work, then the link.
 struct CallInviteSheet: View {
     @ObservedObject var offer: CallInviteOffer
+    @ObservedObject var l10n = Localization.shared
     let onDone: () -> Void
 
     /// Confirms the copy for a moment, then goes back. Local to the sheet: it
@@ -66,11 +68,11 @@ struct CallInviteSheet: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.lakkoBackground)
-            .navigationTitle("Invite")
+            .navigationTitle(l10n.t("call.control.invite"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done", action: onDone)
+                    Button(l10n.t("common.done"), action: onDone)
                 }
             }
         }
@@ -138,11 +140,11 @@ struct CallInviteSheet: View {
                 .padding(.vertical, 12)
                 .background(Color.lakkoSurfaceSunken)
                 .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
-                .accessibilityLabel("Call link")
+                .accessibilityLabel(l10n.t("call.invite.link_a11y"))
                 .accessibilityValue(url)
 
             ShareLink(item: url) {
-                Label("Share link", systemImage: "square.and.arrow.up")
+                Label(l10n.t("chat.invite_link.share"), systemImage: "square.and.arrow.up")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -152,7 +154,7 @@ struct CallInviteSheet: View {
                 UIPasteboard.general.string = url
                 copied = true
             } label: {
-                Label(copied ? "Copied" : "Copy link", systemImage: copied ? "checkmark" : "doc.on.doc")
+                Label(l10n.t(copied ? "common.copied" : "chat.invite_link.copy"), systemImage: copied ? "checkmark" : "doc.on.doc")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
@@ -166,7 +168,7 @@ struct CallInviteSheet: View {
             Text(message)
                 .font(.body)
                 .foregroundStyle(Color.lakkoDanger)
-            Button("Try again") {
+            Button(l10n.t("common.try_again")) {
                 Task { await offer.retry() }
             }
             .buttonStyle(.borderedProminent)

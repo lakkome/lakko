@@ -49,6 +49,8 @@ import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { paths } from "./paths";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 
 export default function Calls(): JSX.Element {
   const auth = useAuth();
@@ -68,7 +70,7 @@ export default function Calls(): JSX.Element {
    */
   const titleOf = (groupIdB64: string): string => {
     const entry = chats.get(groupIdB64);
-    if (entry === undefined) return "Unknown";
+    if (entry === undefined) return t("call.history.unknown_conversation");
     const ownB64 = ownPersonKeyB64(chats.identity());
     const memberKeysB64 = personKeysOf(entry.group);
     return conversationTitle({
@@ -90,9 +92,9 @@ export default function Calls(): JSX.Element {
   /** The pasted link, while "Join by link" is open. */
   const [joinOpen, setJoinOpen] = createSignal(false);
   const [joinInput, setJoinInput] = createSignal("");
-  const [joinError, setJoinError] = createSignal<string | null>(null);
+  const [joinError, setJoinError] = createLiveText();
   /** Why `New call` could not start, or `null`. */
-  const [startError, setStartError] = createSignal<string | null>(null);
+  const [startError, setStartError] = createLiveText();
 
   /**
    * Start a group video call and land in it. No form, no media choice, no
@@ -111,7 +113,7 @@ export default function Calls(): JSX.Element {
     const identity = chats.identity();
     const secrets = auth.identitySecrets();
     if (identity === null || secrets === null) {
-      setStartError("You are signed out. Sign in again to start a call.");
+      setStartError(() => t("call.error.signed_out_start"));
       return;
     }
     const outcome = await callHost.startLinkCall(
@@ -128,7 +130,7 @@ export default function Calls(): JSX.Element {
     e.preventDefault();
     const slug = callLinkSlug(joinInput());
     if (slug === null) {
-      setJoinError("That does not look like a call link. Paste the whole link and try again.");
+      setJoinError(() => t("call.history.join_invalid"));
       return;
     }
     setJoinError(null);
@@ -159,9 +161,9 @@ export default function Calls(): JSX.Element {
   };
 
   return (
-    <aside class="lk-pane" aria-label="Calls">
+    <aside class="lk-pane" aria-label={t("nav.calls")}>
       <div class="lk-pane-head">
-        <h1>Calls</h1>
+        <h1>{t("nav.calls")}</h1>
         <div class="lk-actions">
           {/* Section 2: `Join by link` stays but is not given the weight of a
               main action — a quiet button beside the accent one, not a second
@@ -176,11 +178,11 @@ export default function Calls(): JSX.Element {
             aria-expanded={joinOpen()}
           >
             <Icon name="link" size={16} />
-            Join by link
+            {t("call.history.join_by_link")}
           </button>
           <button type="button" class="primary" onClick={() => void newCall()}>
             <Icon name="video" size={16} />
-            New call
+            {t("call.history.new_call")}
           </button>
         </div>
       </div>
@@ -191,7 +193,7 @@ export default function Calls(): JSX.Element {
         <Show when={joinOpen()}>
           <form onSubmit={joinByLink} style={{ padding: "4px 8px 12px" }}>
             <label style={{ display: "block" }}>
-              <span>Paste a call link</span>
+              <span>{t("call.history.paste_label")}</span>
               <input
                 type="text"
                 value={joinInput()}
@@ -207,7 +209,7 @@ export default function Calls(): JSX.Element {
               {(message) => <div class="form-error">{message()}</div>}
             </Show>
             <div class="lk-actions" style={{ "margin-top": "8px" }}>
-              <button type="submit">Open</button>
+              <button type="submit">{t("common.open")}</button>
               <button
                 type="button"
                 class="ghost"
@@ -217,7 +219,7 @@ export default function Calls(): JSX.Element {
                   setJoinError(null);
                 }}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
             </div>
           </form>
@@ -227,7 +229,7 @@ export default function Calls(): JSX.Element {
           fallback={
             <div class="lk-empty">
               <Icon name="calls" size={40} strokeWidth={1.4} />
-              <strong>No calls yet</strong>
+              <strong>{t("call.history.empty")}</strong>
             </div>
           }
         >
@@ -266,8 +268,8 @@ export default function Calls(): JSX.Element {
                         <button
                           type="button"
                           class="lk-icon-button"
-                          title={row.entry.video ? "Video call" : "Call"}
-                          aria-label={row.entry.video ? "Video call" : "Call"}
+                          title={row.entry.video ? t("chat.call.video") : t("chat.call.voice")}
+                          aria-label={row.entry.video ? t("chat.call.video") : t("chat.call.voice")}
                           onClick={() => callBack(row)}
                         >
                           <Icon name={row.entry.video ? "video" : "phone"} size={18} />
