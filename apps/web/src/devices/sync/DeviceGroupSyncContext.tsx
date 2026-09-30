@@ -1069,9 +1069,10 @@ export function DeviceGroupSyncProvider(props: {
 
   function applyParsed(parsed: ParsedDeviceGroupPayload): void {
     if (parsed.kind === "serviceEnvelope") {
-      // ADR-0060 section 7 - a Visibility or ReachState envelope from another
-      // device of this account, ordered by its own stamp (not the HLC) and not
-      // a synced register; anything else inside is dropped by the intake.
+      // ADR-0060 section 7 - a Visibility, ReachState or (ADR-0048 section 4a)
+      // own Profile envelope from another device of this account, ordered by
+      // its own stamp (not the HLC) and not a synced register; anything else
+      // inside is dropped by the intake.
       void receiveServiceEnvelope(parsed.serviceEnvelope);
       return;
     }

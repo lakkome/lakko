@@ -131,6 +131,18 @@ by construction, and profile verification (section 3) never shows a username tha
 modified client could still register a non-conforming hash; no conforming client can find it
 or display it. With nothing deployed, no existing names need migrating.
 
+### 4a. The own name between the account's own devices (amended 2026-09-30)
+
+The own name was kept per device (`own-profile.ts`, `ProfileStore.swift`, `OwnProfile.kt`) and
+nothing carried it to the account's other devices: a second device showed only `@username`,
+and a name set there diverged from the first. The own profile envelope now also rides the
+account's DeviceGroup, on the ADR-0060 section 7 `ServiceEnvelope` carrier beside the
+Visibility setting: composed with the stored stamp (never re-stamped), no username certificate
+and no grants, sent when the name is saved or cleared and handed to a device when it is added.
+A receiving device keeps only the display name and only when its stamp is strictly greater
+than the one stored; the username stays the session's. It does not republish to its groups:
+the device that made the change already has.
+
 ### 5. Display precedence (all clients)
 
 local rename → profile `display_name` → verified `@username` → fingerprint without `@`.

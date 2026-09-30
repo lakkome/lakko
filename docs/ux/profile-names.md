@@ -52,6 +52,11 @@ that is not Pavel is exactly the impersonation this must not enable.
 - **Guest accounts** (call links, no username): `Your name` is asked on the join screen,
   prefilled `Guest`.
 - Saving shows `Your name will update for your contacts.` There is no per-contact name.
+- **Your other devices (2026-09-30):** the name is the person's, not the device's. A name
+  saved or cleared on one device shows on every other device of the account (Settings header,
+  Settings → Profile) as soon as that device next syncs; the most recent change wins. A device
+  just added to the account shows the name right after it is added. Until the name arrives a
+  device shows `@username`, as for an account with no name. No new control, no new message.
 
 Username at signup: Latin letters, digits and underscore only, 3–32 characters, validated as
 the user types with the reason shown (`Only Latin letters, digits and _`, `At least 3

@@ -406,6 +406,9 @@ class JoinCallViewModel(
                 )
                 if (updated != null) {
                     me.lakko.app.profile.OwnProfileStore.save(applicationContext, secrets.accountId, updated)
+                    // ADR-0048 section 4a — to the account's other devices
+                    // too (nothing is sent before a session binds).
+                    me.lakko.app.reach.ReachManager.get(applicationContext).publishOwnProfileToDevices()
                 }
             } catch (err: Throwable) {
                 Log.w("JoinCall", "guest profile not saved", err)

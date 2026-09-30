@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { EMPTY_OWN_PROFILE, clearOwnProfile, loadOwnProfile, saveOwnProfile } from "./own-profile";
+import { EMPTY_OWN_PROFILE, adoptOwnProfile, clearOwnProfile, loadOwnProfile, saveOwnProfile } from "./own-profile";
 
 function memoryStorage() {
   const map = new Map<string, string>();
@@ -54,5 +54,17 @@ describe("own profile", () => {
     saveOwnProfile("acct", "Alice", 1, storage);
     clearOwnProfile("acct", storage);
     expect(loadOwnProfile("acct", storage)).toEqual(EMPTY_OWN_PROFILE);
+  });
+
+  it("adopts a name from another device only when strictly newer, keeping its stamp", () => {
+    const storage = memoryStorage();
+    saveOwnProfile("acct", "Alice", 5000, storage);
+    expect(adoptOwnProfile("acct", "Same", 5000n, storage)).toBeNull();
+    expect(adoptOwnProfile("acct", "Older", 4000n, storage)).toBeNull();
+    expect(adoptOwnProfile("acct", "Alice B.", 9000n, storage)).toEqual({ displayName: "Alice B.", updatedAtMs: 9000 });
+    expect(adoptOwnProfile("acct", null, 9001n, storage)).toEqual({ displayName: null, updatedAtMs: 9001 });
+    expect(loadOwnProfile("acct", storage)).toEqual({ displayName: null, updatedAtMs: 9001 });
+    // A stamp a JS number cannot hold exactly is refused.
+    expect(adoptOwnProfile("acct", "Far", 2n ** 60n, storage)).toBeNull();
   });
 });

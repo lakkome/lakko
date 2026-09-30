@@ -92,6 +92,12 @@ public final class ReachCenter: ObservableObject {
     /// the DeviceGroup (set by the app shell). Never called for an envelope
     /// adopted from another device: that one is already on the journal.
     public var onDeviceEnvelope: ((Data) -> Void)?
+    /// ADR-0048 section 4a — where ``adoptDeviceEnvelope(_:)`` hands the own
+    /// profile envelope another of this account's devices sent. The default is
+    /// the process-wide ``ProfileDirectory``; tests inject their own.
+    var ownProfileAdopter: @MainActor (Data) -> ProfileDirectory.OwnProfileAdoption = { envelope in
+        ProfileDirectory.shared.adoptOwnProfileFromDevice(envelope: envelope)
+    }
     private var syncTask: Task<Void, Never>?
     private var syncAgain = false
 
@@ -327,15 +333,19 @@ public final class ReachCenter: ObservableObject {
     /// What ``adoptDeviceEnvelope(_:)`` did with a DeviceGroup `ServiceEnvelope`.
     public enum DeviceEnvelopeOutcome: Equatable {
         case adoptedSetting
+        /// The own display name another of this account's devices set, strictly
+        /// newer than the one kept (ADR-0048 section 4a).
+        case adoptedOwnProfile
         /// The incoming reach state was adopted as it came.
         case adoptedReachState
         /// The two devices each held a version the other lacked (or this one
         /// held one the incoming state would overwrite): the merge is kept
         /// and sent back to the other devices.
         case mergedReachState
-        /// A Visibility or ReachState no newer than what is kept.
+        /// A Visibility, ReachState or own profile no newer than what is kept.
         case notNewer
-        /// Anything else, or bytes the dispatcher refuses: dropped.
+        /// Anything else, bytes the dispatcher refuses, or a profile of
+        /// another account: dropped.
         case foreign
         /// No account is active.
         case inactive
@@ -344,7 +354,9 @@ public final class ReachCenter: ObservableObject {
     /// ADR-0060 section 7 — the receiving end of the DeviceGroup
     /// `ServiceEnvelope`: dispatch the carried bytes and keep only a
     /// Visibility or a ReachState, each only when strictly newer by its own
-    /// stamp. Every other envelope kind is dropped.
+    /// stamp, and (ADR-0048 section 4a) this account's own profile, whose
+    /// display name ``ownProfileAdopter`` keeps when strictly newer. Every
+    /// other envelope kind is dropped.
     @discardableResult
     public func adoptDeviceEnvelope(_ envelope: Data) -> DeviceEnvelopeOutcome {
         guard isActive else { return .inactive }
@@ -356,6 +368,13 @@ public final class ReachCenter: ObservableObject {
             return adoptSetting(envelope: envelope) ? .adoptedSetting : .notNewer
         case .reachState:
             return adoptReachState(envelope: envelope)
+        case .profile:
+            switch ownProfileAdopter(envelope) {
+            case .adopted: return .adoptedOwnProfile
+            case .notNewer: return .notNewer
+            case .inactive: return .inactive
+            case .foreignAccount, .notAProfile: return .foreign
+            }
         default:
             return .foreign
         }

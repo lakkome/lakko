@@ -63,6 +63,9 @@ export default function Profile(): JSX.Element {
     try {
       await profiles.saveOwnDisplayName(savedDisplayName(c));
       setName(profiles.ownProfile().displayName ?? "");
+      // The field holds the saved name again: follow it once more, so a name
+      // saved on another device of the account replaces it here.
+      edited = false;
       setNotice(PROFILE_SAVED_NOTICE);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

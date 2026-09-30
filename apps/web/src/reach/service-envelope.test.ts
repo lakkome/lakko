@@ -21,7 +21,7 @@ import type { Wasm } from "../wasm";
 import type { DsClient } from "../ds/client";
 import { EMPTY_REACH_BOOK, adoptReachState, bumpVersion, reachStateEntries } from "./reach-model";
 import { ReachSession } from "./reach-service";
-import { classifyServiceEnvelope } from "./service-envelope-intake";
+import { classifyServiceEnvelope, receiveServiceEnvelope } from "./service-envelope-intake";
 import {
   currentServiceEnvelopes,
   flushServiceEnvelopes,
@@ -32,6 +32,14 @@ import {
   setServiceEnvelopeComposer,
 } from "./service-envelope-outbox";
 import { loadVisibility, receiveVisibility, visibilitySetting } from "./visibility-store";
+import { loadOwnProfile, saveOwnProfile, type OwnProfileStorage } from "../profile/own-profile";
+import {
+  bindOwnProfileSync,
+  composeOwnProfileForDevices,
+  ownProfileChanged,
+  subscribeOwnProfileAdopted,
+  unbindOwnProfileSync,
+} from "../profile/own-profile-sync";
 
 const W = (): Wasm => wasm as unknown as Wasm;
 
@@ -86,7 +94,7 @@ async function session(clock: { now: number }): Promise<ReachSession> {
 }
 
 describe("classifyServiceEnvelope", () => {
-  const held = { visibility: 100n };
+  const held = { visibility: 100n, ownProfile: null };
 
   it("keeps a newer Visibility", () => {
     expect(classifyServiceEnvelope(W(), visibilityAt(101n, true), held)).toEqual({
@@ -373,5 +381,166 @@ describe("handing the setting to a newly added device", () => {
     setServiceEnvelopeComposer("visibility", null);
     setServiceEnvelopeComposer("reachState", null);
     resetServiceEnvelopeOutbox();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0048 section 4a - the own display name on the same carrier.
+// ---------------------------------------------------------------------------
+
+const ACCOUNT = new Uint8Array(16).fill(0x11);
+const OTHER_ACCOUNT = new Uint8Array(16).fill(0x22);
+
+function memoryStorage(): OwnProfileStorage {
+  const map = new Map<string, string>();
+  return {
+    getItem: (k) => map.get(k) ?? null,
+    setItem: (k, v) => {
+      map.set(k, v);
+    },
+    removeItem: (k) => {
+      map.delete(k);
+    },
+  };
+}
+
+/** An own-profile envelope as another device of the account sends it. */
+function ownProfileAt(stamp: bigint, name: string | null, accountId: Uint8Array | undefined = ACCOUNT): Uint8Array {
+  return wasm.composeProfileEnvelope(name, undefined, stamp, accountId);
+}
+
+describe("classifyServiceEnvelope: the own profile", () => {
+  const held = { visibility: null, ownProfile: { stamp: 100n, accountId: ACCOUNT } };
+
+  it("keeps a strictly newer name, with its stamp", () => {
+    expect(classifyServiceEnvelope(W(), ownProfileAt(101n, "Alice"), held)).toEqual({
+      kind: "profile",
+      updatedAtMs: 101n,
+      displayName: "Alice",
+    });
+  });
+
+  it("refuses an equal or an older one", () => {
+    for (const stamp of [99n, 100n]) {
+      expect(classifyServiceEnvelope(W(), ownProfileAt(stamp, "Alice"), held)).toEqual({
+        kind: "stale",
+        of: "profile",
+      });
+    }
+  });
+
+  it("drops a profile that names another account", () => {
+    expect(classifyServiceEnvelope(W(), ownProfileAt(500n, "Mallory", OTHER_ACCOUNT), held)).toEqual({
+      kind: "foreign",
+    });
+    // Nothing to compare with: an id is never taken on trust.
+    expect(
+      classifyServiceEnvelope(W(), ownProfileAt(500n, "Mallory"), {
+        visibility: null,
+        ownProfile: { stamp: 100n, accountId: null },
+      }),
+    ).toEqual({ kind: "foreign" });
+  });
+
+  it("keeps a newer cleared name, and one that carries no account id", () => {
+    expect(classifyServiceEnvelope(W(), ownProfileAt(200n, null), held)).toEqual({
+      kind: "profile",
+      updatedAtMs: 200n,
+      displayName: null,
+    });
+    expect(classifyServiceEnvelope(W(), ownProfileAt(200n, "Alice", undefined), held)).toEqual({
+      kind: "profile",
+      updatedAtMs: 200n,
+      displayName: "Alice",
+    });
+  });
+});
+
+describe("the own-profile intake", () => {
+  it("adopts a strictly newer name with the received stamp, and nothing else", async () => {
+    const storage = memoryStorage();
+    saveOwnProfile("acct", "Old", 1_000, storage);
+    bindOwnProfileSync("acct", ACCOUNT, storage);
+    const adopted: (string | null)[] = [];
+    const stop = subscribeOwnProfileAdopted((own) => adopted.push(own.displayName));
+    try {
+      expect(await receiveServiceEnvelope(ownProfileAt(5_000n, "Alice"))).toMatchObject({ kind: "profile" });
+      expect(loadOwnProfile("acct", storage)).toEqual({ displayName: "Alice", updatedAtMs: 5_000 });
+
+      // Equal (a re-send) and older: ignored.
+      expect(await receiveServiceEnvelope(ownProfileAt(5_000n, "Again"))).toEqual({ kind: "stale", of: "profile" });
+      expect(await receiveServiceEnvelope(ownProfileAt(4_000n, "Older"))).toEqual({ kind: "stale", of: "profile" });
+      // Another account's: dropped.
+      expect(await receiveServiceEnvelope(ownProfileAt(9_000n, "Mallory", OTHER_ACCOUNT))).toEqual({
+        kind: "foreign",
+      });
+      expect(loadOwnProfile("acct", storage)).toEqual({ displayName: "Alice", updatedAtMs: 5_000 });
+
+      // A cleared name, newer: adopted as no name.
+      await receiveServiceEnvelope(ownProfileAt(6_000n, null));
+      expect(loadOwnProfile("acct", storage)).toEqual({ displayName: null, updatedAtMs: 6_000 });
+      expect(adopted).toEqual(["Alice", null]);
+
+      // A later local save still orders after the adopted stamp.
+      expect(saveOwnProfile("acct", "Local", 10, storage).updatedAtMs).toBe(6_001);
+    } finally {
+      stop();
+      unbindOwnProfileSync();
+    }
+  });
+});
+
+describe("sending the own profile to the other devices", () => {
+  it("composes with the stored stamp, the name and this account's id, no username", async () => {
+    const storage = memoryStorage();
+    saveOwnProfile("acct", "Alice", 7_000, storage);
+    const own = loadOwnProfile("acct", storage);
+    const bytes = composeOwnProfileForDevices(W(), own, ACCOUNT)!;
+    const decoded = wasm.decodeProfileEnvelope(bytes);
+    try {
+      expect(decoded.updatedAtMs).toBe(7_000n);
+      expect(decoded.displayName).toBe("Alice");
+      expect(decoded.username).toBeUndefined();
+      expect(decoded.usernameCertificate).toBeUndefined();
+      expect(decoded.grants).toEqual([]);
+      expect(decoded.accountId).toEqual(ACCOUNT);
+    } finally {
+      decoded.free();
+    }
+    // Never saved: nothing to send.
+    expect(composeOwnProfileForDevices(W(), { displayName: null, updatedAtMs: 0 }, ACCOUNT)).toBeNull();
+  });
+
+  it("goes out on a save, and in the pairing hand-over when a name was saved", async () => {
+    resetServiceEnvelopeOutbox();
+    setServiceEnvelopeComposer("visibility", null);
+    setServiceEnvelopeComposer("reachState", null);
+    const storage = memoryStorage();
+    bindOwnProfileSync("acct", ACCOUNT, storage);
+    const sent: Uint8Array[] = [];
+    const unregister = registerServiceEnvelopeSender(async (bytes) => {
+      sent.push(bytes);
+    });
+    try {
+      // No name ever saved: the hand-over carries no profile.
+      resendServiceEnvelopes();
+      await flushServiceEnvelopes();
+      expect(sent).toEqual([]);
+
+      saveOwnProfile("acct", "Alice", 7_000, storage);
+      ownProfileChanged();
+      await flushServiceEnvelopes();
+      const expected = composeOwnProfileForDevices(W(), loadOwnProfile("acct", storage), ACCOUNT);
+      expect(sent).toEqual([expected]);
+
+      // A device was added: the same envelope, same stamp, again.
+      resendServiceEnvelopes();
+      await flushServiceEnvelopes();
+      expect(sent).toEqual([expected, expected]);
+    } finally {
+      unregister();
+      unbindOwnProfileSync();
+      resetServiceEnvelopeOutbox();
+    }
   });
 });

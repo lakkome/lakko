@@ -39,6 +39,12 @@ public final class ProfileDirectory: ObservableObject {
     /// Whether a lookup may be started from a render. Off in tests that drive
     /// the directory without a network.
     var verifiesOnResolve = true
+    /// ADR-0048 section 4a — called with the own profile envelope when this
+    /// device saves or clears the own name, so the account's other devices
+    /// get it over the DeviceGroup `ServiceEnvelope` (set by the app shell to
+    /// the DeviceGroup sync runtime's own send). Never called for a profile
+    /// adopted from another device: that one is already on the journal.
+    var onOwnDeviceEnvelope: ((Data) -> Void)?
 
     init(
         received: ReceivedProfileStore? = nil,
@@ -108,8 +114,96 @@ public final class ProfileDirectory: ObservableObject {
         if account == self.accountIdB64 {
             ownProfile = saved
             bump()
+            // The account's other devices learn the change too (ADR-0048
+            // section 4a). A save for an account not yet active (a signup
+            // name stored before the session activates the directory) has no
+            // other device to reach; a device added later is handed it by
+            // ``ownDeviceEnvelopes(accountIdB64:)``.
+            if let envelope = ownDeviceEnvelope() {
+                onOwnDeviceEnvelope?(envelope)
+            }
         }
         return saved
+    }
+
+    // MARK: - Own profile between the account's devices (ADR-0048 section 4a)
+
+    /// The own profile as the envelope the account's OTHER devices get over
+    /// the DeviceGroup, or `nil` without an active account or when the name
+    /// was never set (stamp 0: a receiver holds the same and would refuse it).
+    ///
+    /// Composed with the STORED stamp, never a fresh one (a re-send carries
+    /// its original stamp, the ADR-0044 lesson), with the display name (none
+    /// when cleared), this account's id so a receiver can refuse another
+    /// account's, and no username, certificate or grants: a receiver keeps
+    /// only the display name, the username stays its own session's.
+    func ownDeviceEnvelope() -> Data? {
+        guard let accountIdB64, let own = ownProfile, own.updatedAtMs > 0 else { return nil }
+        let profile = FfiProfile(
+            displayName: own.displayName,
+            username: nil,
+            updatedAtMs: own.updatedAtMs,
+            accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil },
+            usernameCertificate: nil,
+            grants: []
+        )
+        do {
+            return try composeProfileEnvelope(profile: profile)
+        } catch {
+            NSLog("ADR-0048 own profile device envelope refused: \(error)")
+            return nil
+        }
+    }
+
+    /// The own profile envelope for a device this one has just admitted to
+    /// the DeviceGroup: ``ownDeviceEnvelope()`` when `accountIdB64` is the
+    /// active account, else nothing.
+    func ownDeviceEnvelopes(accountIdB64: String) -> [Data] {
+        guard self.accountIdB64 == accountIdB64, let envelope = ownDeviceEnvelope() else {
+            return []
+        }
+        return [envelope]
+    }
+
+    /// What ``adoptOwnProfileFromDevice(envelope:)`` did.
+    enum OwnProfileAdoption: Equatable {
+        /// Strictly newer than the stored own profile: kept, stamp as received.
+        case adopted
+        /// Equal to or older than the stored one: nothing changed.
+        case notNewer
+        /// It names an account other than this one: dropped.
+        case foreignAccount
+        /// Not a profile envelope the core accepts: dropped.
+        case notAProfile
+        /// No account is active.
+        case inactive
+    }
+
+    /// Adopt the own profile another of this account's devices sent over the
+    /// DeviceGroup (ADR-0048 section 4a). Only the display name is kept, and
+    /// only when the received stamp is strictly greater than the stored one
+    /// (`profileIsNewer`); the stamp is kept as received. A profile that names
+    /// another account is dropped. Not republished to any group: the device
+    /// that made the change already did, and not handed back to
+    /// ``onOwnDeviceEnvelope``.
+    @discardableResult
+    func adoptOwnProfileFromDevice(envelope: Data) -> OwnProfileAdoption {
+        guard let accountIdB64 else { return .inactive }
+        guard let incoming = try? decodeProfileEnvelope(plaintext: envelope) else {
+            return .notAProfile
+        }
+        if let claimed = incoming.accountId, claimed != Data(base64Encoded: accountIdB64) {
+            return .foreignAccount
+        }
+        guard profileIsNewer(
+            incomingUpdatedAtMs: incoming.updatedAtMs,
+            storedUpdatedAtMs: ownProfile?.updatedAtMs ?? 0)
+        else { return .notNewer }
+        let adopted = OwnProfile(displayName: incoming.displayName, updatedAtMs: incoming.updatedAtMs)
+        ownStore.store(adopted, accountIdB64: accountIdB64)
+        ownProfile = adopted
+        bump()
+        return .adopted
     }
 
     /// The own profile as an envelope ready to publish into one conversation,

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import SwiftUI
 
 // MARK: - Username rule hint
@@ -52,6 +53,11 @@ final class ProfileSettingsViewModel: ObservableObject {
     let username: String?
     private let directory: ProfileDirectory
     private let publishToAllGroups: () async -> Void
+    /// The saved name the draft last mirrored. While the draft still equals
+    /// it, the person has not edited the field, and a name saved on another
+    /// device of the account (ADR-0048 section 4a) replaces it.
+    private var mirroredName: String
+    private var ownProfileWatch: AnyCancellable?
 
     init(
         directory: ProfileDirectory? = nil,
@@ -60,8 +66,21 @@ final class ProfileSettingsViewModel: ObservableObject {
         let directory = directory ?? .shared
         self.directory = directory
         self.username = directory.ownUsername
-        self.draftName = directory.ownProfile?.displayName ?? ""
+        let saved = directory.ownProfile?.displayName ?? ""
+        self.draftName = saved
+        self.mirroredName = saved
         self.publishToAllGroups = publishToAllGroups
+        ownProfileWatch = directory.$ownProfile
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] profile in
+                self?.followSavedName(profile?.displayName ?? "")
+            }
+    }
+
+    /// Follow the saved name while the field is unedited.
+    func followSavedName(_ saved: String) {
+        if draftName == mirroredName { draftName = saved }
+        mirroredName = saved
     }
 
     /// The live validation message for the draft, or `nil` when it is fine.
@@ -103,6 +122,7 @@ final class ProfileSettingsViewModel: ObservableObject {
             return
         }
         draftName = directory.ownProfile?.displayName ?? ""
+        mirroredName = draftName
         savedNotice = "Your name will update for your contacts."
         Task {
             await publishToAllGroups()

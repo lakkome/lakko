@@ -193,6 +193,12 @@ struct LakkoApp: App {
         ReachCenter.shared.onDeviceEnvelope = { [weak sync] envelope in
             Task { @MainActor in await sync?.sendServiceEnvelope(envelope) }
         }
+        // ADR-0048 section 4a — the own name saved or cleared here goes to the
+        // account's other devices the same way, through the sync runtime's own
+        // DeviceGroup handle.
+        ProfileDirectory.shared.onOwnDeviceEnvelope = { [weak sync] envelope in
+            Task { @MainActor in await sync?.sendServiceEnvelope(envelope) }
+        }
         let intake = InviteIntake()
         self._deviceGroupSync = StateObject(wrappedValue: sync)
         self._inviteIntake = StateObject(wrappedValue: intake)

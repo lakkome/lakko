@@ -12,6 +12,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.lakko_ffi_uniffi.FfiIncomingEnvelope
 import uniffi.lakko_ffi_uniffi.FfiIncomingEnvelopeKind
+import uniffi.lakko_ffi_uniffi.FfiProfile
 import uniffi.lakko_ffi_uniffi.FfiReachClass
 import uniffi.lakko_ffi_uniffi.FfiReachState
 import uniffi.lakko_ffi_uniffi.FfiReachStateEntry
@@ -45,12 +46,13 @@ class ReachDeviceSyncTest {
         kind: FfiIncomingEnvelopeKind,
         visibility: FfiVisibilitySetting? = null,
         reachState: FfiReachState? = null,
+        profile: FfiProfile? = null,
     ) = FfiIncomingEnvelope(
         kind = kind,
         payload = ByteArray(0),
         cameraOn = null,
         mintEpoch = null,
-        profile = null,
+        profile = profile,
         groupName = null,
         pin = null,
         introductionRecord = null,
@@ -90,9 +92,35 @@ class ReachDeviceSyncTest {
     }
 
     @Test
+    fun `an own profile envelope is kept (ADR-0048 section 4a)`() {
+        val profile = FfiProfile(
+            displayName = "Alice",
+            username = null,
+            updatedAtMs = 5uL,
+            accountId = null,
+            usernameCertificate = null,
+            grants = emptyList(),
+        )
+        val got = classifyDeviceSync(byteArrayOf(1)) { envelope(FfiIncomingEnvelopeKind.PROFILE, profile = profile) }
+        got as ReceivedDeviceSync.Profile
+        assertEquals("Alice", got.profile.displayName)
+        assertEquals(5uL, got.profile.updatedAtMs)
+        // The right kind without its decoded body.
+        assertSame(
+            ReceivedDeviceSync.Foreign,
+            classifyDeviceSync(byteArrayOf(1)) { envelope(FfiIncomingEnvelopeKind.PROFILE) },
+        )
+    }
+
+    @Test
     fun `any other envelope, or one that does not decode, is dropped`() {
+        val kept = setOf(
+            FfiIncomingEnvelopeKind.VISIBILITY,
+            FfiIncomingEnvelopeKind.REACH_STATE,
+            FfiIncomingEnvelopeKind.PROFILE,
+        )
         for (kind in FfiIncomingEnvelopeKind.entries) {
-            if (kind == FfiIncomingEnvelopeKind.VISIBILITY || kind == FfiIncomingEnvelopeKind.REACH_STATE) continue
+            if (kind in kept) continue
             assertSame(ReceivedDeviceSync.Foreign, classifyDeviceSync(byteArrayOf(1)) { envelope(kind) })
         }
         // The right kind without its decoded body.
@@ -118,6 +146,27 @@ class ReachDeviceSyncTest {
         // Only what is held goes out.
         assertEquals(1, deviceSyncEnvelopesToSend(reachHex(visibility), null).size)
         assertTrue(deviceSyncEnvelopesToSend(null, null).isEmpty())
+    }
+
+    @Test
+    fun `the hand-over to an admitted device includes the own profile when a name was saved`() {
+        val visibility = byteArrayOf(0x6c, 1)
+        val accountId = ByteArray(16) { it.toByte() }
+        val compose: (FfiProfile) -> ByteArray = { byteArrayOf(0x6c, 0x70, it.updatedAtMs.toByte()) }
+
+        val named = me.lakko.app.profile.OwnProfile("Alice", "alice", updatedAtMs = 900L, nameUpdatedAtMs = 42L)
+        val profileWire = me.lakko.app.profile.ownProfileDeviceEnvelope(named, accountId, compose)
+        val sent = deviceSyncEnvelopesToSend(reachHex(visibility), null, profileWire)
+        assertEquals(2, sent.size)
+        assertArrayEquals(visibility, sent[0])
+        // Composed with the name's stored stamp.
+        assertArrayEquals(byteArrayOf(0x6c, 0x70, 42), sent[1])
+
+        // No name ever saved: the profile kind is not in the hand-over.
+        val unnamed = me.lakko.app.profile.OwnProfile(null, "alice", updatedAtMs = 900L)
+        val none = me.lakko.app.profile.ownProfileDeviceEnvelope(unnamed, accountId, compose)
+        assertNull(none)
+        assertEquals(1, deviceSyncEnvelopesToSend(reachHex(visibility), null, none).size)
     }
 
     @Test

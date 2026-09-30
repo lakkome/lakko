@@ -4,6 +4,7 @@
 package me.lakko.app.profile
 
 import android.content.Context
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -24,6 +25,19 @@ public data class OwnProfile(
     val username: String?,
     /** When this profile was last changed, UNIX milliseconds. */
     val updatedAtMs: Long,
+    /**
+     * When [displayName] was last set or cleared by the person (on this device
+     * or, adopted with its stamp as is, on another of the account's devices),
+     * UNIX milliseconds; 0 when no name was ever saved.
+     *
+     * Separate from [updatedAtMs] because that one also moves when the
+     * session's username is stated ([OwnProfileStore.ensureUsername]): a fresh
+     * device stamps its first profile at sign-in, which would otherwise read
+     * as newer than a name saved earlier on another device and refuse it
+     * (ADR-0048 section 4a). This is the stamp the own name travels between
+     * the account's devices with.
+     */
+    val nameUpdatedAtMs: Long = if (displayName != null) updatedAtMs else 0L,
 )
 
 /**
@@ -47,10 +61,13 @@ public fun applyOwnNameChange(
     nowMs: Long,
 ): OwnProfile? {
     if (current != null && current.displayName == newName && current.username == username) return null
+    val stamp = nextProfileStamp(current?.let { maxOf(it.updatedAtMs, it.nameUpdatedAtMs) }, nowMs)
+    val nameChanged = current == null || current.displayName != newName
     return OwnProfile(
         displayName = newName,
         username = username,
-        updatedAtMs = nextProfileStamp(current?.updatedAtMs, nowMs),
+        updatedAtMs = stamp,
+        nameUpdatedAtMs = if (nameChanged) stamp else current?.nameUpdatedAtMs ?: 0L,
     )
 }
 
@@ -116,11 +133,19 @@ public object OwnProfileStore {
     private const val PREFS = "lakko-own-profile"
     private val json = Json { ignoreUnknownKeys = true }
 
+    private val mutableRevision = kotlinx.coroutines.flow.MutableStateFlow(0L)
+
+    /** Moves on every [save] and [delete], so a screen showing the own name
+     *  re-reads it when another of the account's devices changed it. */
+    public val revision: kotlinx.coroutines.flow.StateFlow<Long> = mutableRevision
+
     @Serializable
     private data class Stored(
         val displayName: String? = null,
         val username: String? = null,
         val updatedAtMs: Long = 0L,
+        /** Absent in a profile written before ADR-0048 section 4a. */
+        val nameUpdatedAtMs: Long? = null,
     )
 
     private fun key(accountId: ByteArray): String =
@@ -131,7 +156,12 @@ public object OwnProfileStore {
         val raw = prefs(context).getString(key(accountId), null) ?: return null
         return try {
             val s = json.decodeFromString<Stored>(raw)
-            OwnProfile(s.displayName, s.username, s.updatedAtMs)
+            OwnProfile(
+                displayName = s.displayName,
+                username = s.username,
+                updatedAtMs = s.updatedAtMs,
+                nameUpdatedAtMs = s.nameUpdatedAtMs ?: if (s.displayName != null) s.updatedAtMs else 0L,
+            )
         } catch (_: Exception) {
             null
         }
@@ -139,13 +169,31 @@ public object OwnProfileStore {
 
     /** Persist [profile] for [accountId]. */
     public fun save(context: Context, accountId: ByteArray, profile: OwnProfile) {
-        val stored = Stored(profile.displayName, profile.username, profile.updatedAtMs)
+        val stored = Stored(profile.displayName, profile.username, profile.updatedAtMs, profile.nameUpdatedAtMs)
         prefs(context).edit().putString(key(accountId), json.encodeToString(stored)).apply()
+        mutableRevision.update { it + 1 }
+    }
+
+    /**
+     * Apply [transform] to the stored profile of [accountId] as one
+     * read-modify-write (ADR-0048 section 4a: a name from another of the
+     * account's devices); a `null` result stores nothing. Returns whether
+     * something was stored.
+     */
+    public fun update(
+        context: Context,
+        accountId: ByteArray,
+        transform: (OwnProfile?) -> OwnProfile?,
+    ): Boolean = synchronized(this) {
+        val next = transform(load(context, accountId)) ?: return false
+        save(context, accountId, next)
+        true
     }
 
     /** Remove the profile for [accountId] (forget device). */
     public fun delete(context: Context, accountId: ByteArray) {
         prefs(context).edit().remove(key(accountId)).apply()
+        mutableRevision.update { it + 1 }
     }
 
     /**
@@ -158,7 +206,9 @@ public object OwnProfileStore {
         accountId: ByteArray,
         username: String?,
         nowMs: Long = System.currentTimeMillis(),
-    ): Pair<OwnProfile, Boolean> {
+    ): Pair<OwnProfile, Boolean> = synchronized(this) {
+        // Under the store's lock, as [update]: a name adopted from another
+        // device between this read and the write below would be lost.
         val canonical = username?.takeIf { it.isNotBlank() }
         val current = load(context, accountId)
         if (current != null && current.username == canonical) return current to false
@@ -166,6 +216,8 @@ public object OwnProfileStore {
             displayName = current?.displayName,
             username = canonical,
             updatedAtMs = nextProfileStamp(current?.updatedAtMs, nowMs),
+            // The name did not change: its stamp stays (ADR-0048 section 4a).
+            nameUpdatedAtMs = current?.nameUpdatedAtMs ?: 0L,
         )
         save(context, accountId, updated)
         return updated to true

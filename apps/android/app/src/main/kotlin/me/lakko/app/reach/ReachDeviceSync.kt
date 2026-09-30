@@ -5,6 +5,7 @@ package me.lakko.app.reach
 
 import uniffi.lakko_ffi_uniffi.FfiIncomingEnvelope
 import uniffi.lakko_ffi_uniffi.FfiIncomingEnvelopeKind
+import uniffi.lakko_ffi_uniffi.FfiProfile
 import uniffi.lakko_ffi_uniffi.FfiReachState
 import uniffi.lakko_ffi_uniffi.FfiReachStateEntry
 import uniffi.lakko_ffi_uniffi.FfiReachStateMerge
@@ -16,8 +17,9 @@ import uniffi.lakko_ffi_uniffi.FfiVisibilitySetting
  * `ServiceEnvelope` body carrying a `lakko-contacts` envelope verbatim.
  *
  * The rules, host-testable (every native call is passed in):
- *   - a received envelope is dispatched, and only Visibility and ReachState
- *     are kept from it; anything else is dropped;
+ *   - a received envelope is dispatched, and only Visibility, ReachState and
+ *     (ADR-0048 section 4a) the own profile are kept from it; anything else
+ *     is dropped;
  *   - a Visibility is kept only when STRICTLY newer than the one held
  *     (`visibilityIsNewer`), so an equal stamp changes nothing; a ReachState
  *     is folded by the core's `mergeReachState` (versions by maximum, the
@@ -34,6 +36,10 @@ internal sealed interface ReceivedDeviceSync {
 
     /** The reach-key version counters, with the bytes they arrived as. */
     class ReachState(val state: FfiReachState, val wire: ByteArray) : ReceivedDeviceSync
+
+    /** This account's own profile, set on another of its devices (ADR-0048
+     *  section 4a): only its display name and stamp are kept. */
+    class Profile(val profile: FfiProfile) : ReceivedDeviceSync
 
     /** Any other envelope kind, or one that does not decode: dropped. */
     data object Foreign : ReceivedDeviceSync
@@ -57,6 +63,8 @@ internal fun classifyDeviceSync(
         FfiIncomingEnvelopeKind.REACH_STATE ->
             dispatched.reachState?.let { ReceivedDeviceSync.ReachState(it, wire.copyOf()) }
                 ?: ReceivedDeviceSync.Foreign
+        FfiIncomingEnvelopeKind.PROFILE ->
+            dispatched.profile?.let { ReceivedDeviceSync.Profile(it) } ?: ReceivedDeviceSync.Foreign
         else -> ReceivedDeviceSync.Foreign
     }
 }
@@ -147,6 +155,12 @@ internal fun adoptReachStateMerge(
 
 /** What a device admitting a new one to the DeviceGroup sends it: the stored
  *  Visibility and ReachState envelopes, verbatim (each with its original
- *  stamp), those this device holds at all. */
-internal fun deviceSyncEnvelopesToSend(visibilityHex: String?, reachStateHex: String?): List<ByteArray> =
-    listOfNotNull(visibilityHex?.let(::reachUnhex), reachStateHex?.let(::reachUnhex))
+ *  stamp), and the own profile envelope ([profileWire], composed with the
+ *  name's stored stamp; `null` when no name was ever saved), those this
+ *  device holds at all. */
+internal fun deviceSyncEnvelopesToSend(
+    visibilityHex: String?,
+    reachStateHex: String?,
+    profileWire: ByteArray? = null,
+): List<ByteArray> =
+    listOfNotNull(visibilityHex?.let(::reachUnhex), reachStateHex?.let(::reachUnhex), profileWire)

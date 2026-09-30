@@ -67,6 +67,13 @@ import { reachSession, reachSessionSignal, reachVersionsTick } from "../reach/re
 import { foldProfileGrants } from "../reach/grant-intake";
 import { ScopedDiscoveryClient, usernameCertKey } from "../reach/scoped-discovery";
 import { visibilitySetting } from "../reach/visibility-store";
+import { applyHeldServiceEnvelopes } from "../reach/service-envelope-intake";
+import {
+  bindOwnProfileSync,
+  ownProfileChanged,
+  subscribeOwnProfileAdopted,
+  unbindOwnProfileSync,
+} from "./own-profile-sync";
 
 export interface ProfileApi {
   /** Bumped on any change a resolved name may depend on. `resolve` reads it,
@@ -76,8 +83,9 @@ export interface ProfileApi {
   readonly ownProfile: Accessor<OwnProfile>;
   /** The viewer's registered username, `null` for a guest account. */
   readonly ownUsername: Accessor<string | null>;
-  /** Save the viewer's display name (already validated) and publish it into
-   *  every group this device is in. `null` clears the name. */
+  /** Save the viewer's display name (already validated), publish it into
+   *  every group this device is in and send it to this account's other
+   *  devices. `null` clears the name. */
   saveOwnDisplayName(name: string | null): Promise<void>;
   /** Resolve a person — a 32-byte key or its base64. Reactive. */
   resolve(key: Uint8Array | string): ResolvedName;
@@ -389,10 +397,14 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       if (account === boundAccount) return;
       boundAccount = account;
       if (account === null) {
+        unbindOwnProfileSync();
         scheduler.stop();
         store.close();
         return;
       }
+      // ADR-0048 section 4a — the own name between this account's devices.
+      bindOwnProfileSync(account, ownAccountIdBytes());
+      void applyHeldServiceEnvelopes();
       scheduler.start();
       void store.open(account).then(() => {
         // Verify every held claim that has no fresh verdict yet.
@@ -428,6 +440,14 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     });
   });
 
+  // ADR-0048 section 4a — a name set on another device of this account was
+  // adopted: re-read the own profile. Not republished into groups (the device
+  // that made the change already did).
+  const unsubscribeOwnAdopted = subscribeOwnProfileAdopted(() => {
+    setOwnProfileTick((t) => t + 1);
+    bump();
+  });
+
   const unsubscribeRenames = subscribeAcceptedChanged(() => {
     setRenames(loadRenames());
     bump();
@@ -438,6 +458,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
   onCleanup(() => {
     unsubscribeStore();
     unsubscribeRenames();
+    unsubscribeOwnAdopted();
     scheduler.stop();
   });
 
@@ -451,6 +472,8 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       saveOwnProfile(account, name, Date.now());
       setOwnProfileTick((t) => t + 1);
       bump();
+      // ADR-0048 section 4a — and to this account's other devices.
+      ownProfileChanged();
       await scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));
     },
     resolve(key) {

@@ -332,7 +332,8 @@ S4/S5): a DeviceGroup body `ServiceEnvelope { bytes envelope }` at field 20 of
 `DeviceGroupPayload` (14-17 stay ADR-0050's, 18-19 are the chat-folders
 branch's), carrying a `lakko-contacts` envelope verbatim; the receiver
 dispatches it and keeps only Visibility and ReachState from it, ordered by
-their own stamps. A device that joins the DeviceGroup is sent the current
+their own stamps (since 2026-09-30 also the own profile envelope, see
+ADR-0048 section 4a). A device that joins the DeviceGroup is sent the current
 Visibility and ReachState by the device that admits it, through that device's
 DeviceGroup sync runtime after it reloads at the post-add epoch, never through
 the pairing flow's own handle of the same DeviceGroup: two handles sealing at

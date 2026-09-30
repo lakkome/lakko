@@ -273,7 +273,10 @@ public struct OwnProfile: Codable, Equatable, Sendable {
 /// Local persistence of the own profile, per account.
 ///
 /// Local only: there is no per-account profile on any server (ADR-0048
-/// alternatives), and a second device of the same account keeps its own.
+/// alternatives). The account's other devices learn it over the DeviceGroup
+/// (ADR-0048 section 4a): ``ProfileDirectory`` sends the stored profile with
+/// its stored stamp, and a device that receives a strictly newer one keeps it
+/// through ``store(_:accountIdB64:)``, stamp unchanged.
 struct OwnProfileStore {
     let defaults: UserDefaults
     let keyPrefix: String
@@ -303,6 +306,15 @@ struct OwnProfileStore {
             defaults.set(data, forKey: keyPrefix + accountIdB64)
         }
         return profile
+    }
+
+    /// Keep `profile` exactly as given, stamp included: the own profile
+    /// another of this account's devices set (ADR-0048 section 4a). Never
+    /// re-stamped, or the next device it reaches would order it wrongly.
+    func store(_ profile: OwnProfile, accountIdB64: String) {
+        if let data = try? JSONEncoder().encode(profile) {
+            defaults.set(data, forKey: keyPrefix + accountIdB64)
+        }
     }
 
     func delete(accountIdB64: String) {

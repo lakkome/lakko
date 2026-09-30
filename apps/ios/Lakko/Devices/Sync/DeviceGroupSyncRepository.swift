@@ -118,7 +118,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     private var pendingServiceEnvelopes: [String: Data] = [:]
     /// Where the bytes a received `ServiceEnvelope` carries go. The default
     /// hands them to ``ReachCenter``, which keeps a strictly newer Visibility,
-    /// merges a ReachState, and drops everything else.
+    /// merges a ReachState, passes this account's own profile to
+    /// ``ProfileDirectory`` (ADR-0048 section 4a), and drops everything else.
     var onServiceEnvelope: @MainActor (Data) -> Void = { envelope in
         let outcome = ReachCenter.shared.adoptDeviceEnvelope(envelope)
         if outcome == .foreign {
@@ -502,6 +503,17 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         let slot = Self.serviceEnvelopeSlot(envelope)
         pendingServiceEnvelopes[slot] = envelope
         await flushPendingServiceEnvelopes()
+    }
+
+    /// Every service envelope a device newly admitted to the DeviceGroup is
+    /// handed: the Visibility setting and the ReachState (ADR-0060 section 7)
+    /// and the own profile (ADR-0048 section 4a), each verbatim with its
+    /// stored stamp, and each only when it was ever set.
+    static func handOverEnvelopes(
+        accountIdB64: String, reach: ReachCenter, profiles: ProfileDirectory
+    ) -> [Data] {
+        reach.deviceEnvelopes(accountIdB64: accountIdB64)
+            + profiles.ownDeviceEnvelopes(accountIdB64: accountIdB64)
     }
 
     /// The pending-send slot of `envelope`: its dispatched kind, so a newer
@@ -971,15 +983,17 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 return
             }
             noteMembershipChange(before: before, group: ensured.group)
-            // ADR-0060 section 7 — a device was added: send it the setting and
-            // the reach-key versions (original stamps) through THIS handle,
-            // reloaded at the post-add epoch. Never from the pairing's own
-            // handle: two handles of one DeviceGroup sealing at the same
-            // sender generation reuse a key and nonce (seen live on web
-            // 2026-09-30, SecretReuseError on the new device).
+            // ADR-0060 section 7 — a device was added: send it the setting,
+            // the reach-key versions and (ADR-0048 section 4a) the own
+            // profile, original stamps, through THIS handle, reloaded at the
+            // post-add epoch. Never from the pairing's own handle: two handles
+            // of one DeviceGroup sealing at the same sender generation reuse a
+            // key and nonce (seen live on web 2026-09-30, SecretReuseError on
+            // the new device).
             let after = (try? ensured.group.devices()) ?? []
             if after.count > before.count {
-                let envelopes = ReachCenter.shared.deviceEnvelopes(accountIdB64: accountIdB64)
+                let envelopes = Self.handOverEnvelopes(
+                    accountIdB64: accountIdB64, reach: .shared, profiles: .shared)
                 Task { @MainActor [weak self] in
                     for envelope in envelopes {
                         await self?.sendServiceEnvelope(envelope)

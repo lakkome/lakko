@@ -3,12 +3,14 @@
 
 /**
  * ADR-0060 section 7 - the outgoing half of carrying the "who can find me"
- * setting (Visibility envelope) and the reach-key version counters
- * (ReachState envelope) to the account's other devices, over the DeviceGroup
- * body `ServiceEnvelope`.
+ * setting (Visibility envelope), the reach-key version counters (ReachState
+ * envelope) and, since ADR-0048 section 4a, the own display name (Profile
+ * envelope) to the account's other devices, over the DeviceGroup body
+ * `ServiceEnvelope`.
  *
  * Two parties meet here without importing each other:
- * - the owners of the two states (`visibility-store.ts`, `reach-service.ts`)
+ * - the owners of the states (`visibility-store.ts`, `reach-service.ts`,
+ *   `profile/own-profile-sync.ts`)
  *   register a COMPOSER that returns the current envelope, carrying the
  *   state's own stamp, and mark their kind dirty after a local change;
  * - the DeviceGroup sync runtime registers a SENDER once its DeviceGroup is
@@ -21,8 +23,10 @@
  * dirty for the next change or the next registration of a sender.
  */
 
-/** The two envelopes that ride the DeviceGroup `ServiceEnvelope` body. */
-export type ServiceEnvelopeKind = "visibility" | "reachState";
+/** The envelopes that ride the DeviceGroup `ServiceEnvelope` body: the
+ *  setting, the reach key versions, and (ADR-0048 section 4a) the own
+ *  display name (`profile/own-profile-sync.ts`). */
+export type ServiceEnvelopeKind = "visibility" | "reachState" | "profile";
 
 /** Returns the current envelope, or `null` while the state is not loaded. */
 export type ServiceEnvelopeComposer = () => Promise<Uint8Array | null>;
@@ -30,7 +34,7 @@ export type ServiceEnvelopeComposer = () => Promise<Uint8Array | null>;
 /** Publishes one `lakko-contacts` envelope over the DeviceGroup. */
 export type ServiceEnvelopeSender = (envelope: Uint8Array) => Promise<void>;
 
-const KINDS: readonly ServiceEnvelopeKind[] = ["visibility", "reachState"];
+const KINDS: readonly ServiceEnvelopeKind[] = ["visibility", "reachState", "profile"];
 
 const composers = new Map<ServiceEnvelopeKind, ServiceEnvelopeComposer>();
 /** Kind -> generation of its latest mark. A send clears the kind only when
@@ -94,7 +98,7 @@ export function flushServiceEnvelopes(): Promise<void> {
 /**
  * A device was just added to the DeviceGroup: send every kind again, through
  * the sync runtime's own handle (the registered sender), so the new device
- * takes the setting and the key versions. Never through a second handle of
+ * takes the setting, the key versions and the own name. Never through a second handle of
  * the same DeviceGroup: two handles sealing at the same sender generation
  * reuse a key and nonce, and the receiver refuses the second as a reuse.
  */

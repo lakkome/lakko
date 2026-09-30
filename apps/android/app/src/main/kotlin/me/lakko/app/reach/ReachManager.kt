@@ -70,7 +70,24 @@ public enum class ReachApplyStatus {
 public class ReachManager internal constructor(
     private val store: ReachDocStore,
     private val dsFactory: () -> DsClient = { DsClient() },
+    private val ownProfiles: OwnProfileAccess? = null,
 ) {
+    /** The own-profile store (ADR-0048 section 4a), keyed by the raw account
+     *  id: the own name travels between the account's devices beside the
+     *  setting. */
+    public interface OwnProfileAccess {
+        /** The stored own profile of [accountId], or `null`. */
+        public fun load(accountId: ByteArray): me.lakko.app.profile.OwnProfile?
+
+        /** Apply [transform] to the stored profile of [accountId] as one
+         *  read-modify-write; a `null` result stores nothing. Returns whether
+         *  something was stored. */
+        public fun update(
+            accountId: ByteArray,
+            transform: (me.lakko.app.profile.OwnProfile?) -> me.lakko.app.profile.OwnProfile?,
+        ): Boolean
+    }
+
     private class Binding(
         val accountIdB64: String,
         /** The account identity's 32-byte Ed25519 seed (`reachSeed` input). */
@@ -362,10 +379,36 @@ public class ReachManager internal constructor(
     }
 
     /** The Visibility and ReachState envelopes in force here, verbatim with
-     *  their original stamps: what this device sends a device it admits to
-     *  the DeviceGroup (ADR-0060 §7). Empty for what was never set. */
-    public fun deviceSyncEnvelopes(): List<ByteArray> =
-        if (binding.get() == null) emptyList() else deviceSyncEnvelopesToSend(doc.visibilityHex, doc.reachStateHex)
+     *  their original stamps, and the own profile envelope with its name's
+     *  stored stamp (ADR-0048 section 4a): what this device sends a device it
+     *  admits to the DeviceGroup (ADR-0060 §7). Empty for what was never set. */
+    public fun deviceSyncEnvelopes(): List<ByteArray> {
+        val b = binding.get() ?: return emptyList()
+        return deviceSyncEnvelopesToSend(doc.visibilityHex, doc.reachStateHex, ownProfileEnvelope(b))
+    }
+
+    /**
+     * ADR-0048 section 4a — the own name was saved or cleared on this device:
+     * send the own profile envelope to the account's other devices, with the
+     * name's stored stamp. Nothing is sent when no name was ever saved, or
+     * before a session binds (the hand-over to a device admitted later
+     * carries it through [deviceSyncEnvelopes]).
+     */
+    public fun publishOwnProfileToDevices() {
+        val b = binding.get() ?: return
+        ownProfileEnvelope(b)?.let(::publishToDevices)
+    }
+
+    private fun ownProfileEnvelope(b: Binding): ByteArray? {
+        val profiles = ownProfiles ?: return null
+        val accountId = rawAccountId(b) ?: return null
+        return me.lakko.app.profile.ownProfileDeviceEnvelope(profiles.load(accountId), accountId) {
+            uniffi.lakko_ffi_uniffi.composeProfileEnvelope(it)
+        }
+    }
+
+    private fun rawAccountId(b: Binding): ByteArray? =
+        runCatching { me.lakko.app.auth.base64Decode(b.accountIdB64) }.getOrNull()
 
     /**
      * A DeviceGroup service envelope from another of the account's devices
@@ -384,6 +427,7 @@ public class ReachManager internal constructor(
         when (val received = classifyDeviceSync(envelope) { uniffi.lakko_ffi_uniffi.dispatchIncomingEnvelope(it) }) {
             is ReceivedDeviceSync.Visibility -> scope.launch { adoptVisibility(b, received) }
             is ReceivedDeviceSync.ReachState -> scope.launch { adoptReachState(b, received) }
+            is ReceivedDeviceSync.Profile -> scope.launch { adoptOwnProfile(b, received) }
             ReceivedDeviceSync.Foreign -> Log.i(LOG_TAG, "device sync: foreign envelope dropped")
         }
     }
@@ -406,6 +450,21 @@ public class ReachManager internal constructor(
             received.setting
         }
         rerunAfterAdopt(accepted)
+    }
+
+    /** ADR-0048 section 4a — keep the own name from a sibling when its stamp
+     *  is strictly newer; one naming another account is dropped. Not
+     *  republished to groups: the device that made the change already has. */
+    private suspend fun adoptOwnProfile(b: Binding, received: ReceivedDeviceSync.Profile) {
+        val profiles = ownProfiles ?: return
+        lock.withLock {
+            if (binding.get() !== b) return
+            val accountId = rawAccountId(b) ?: return
+            val adopted = profiles.update(accountId) { stored ->
+                me.lakko.app.profile.adoptOwnProfileFromDevice(stored, received.profile, accountId)
+            }
+            if (!adopted) Log.i(LOG_TAG, "device sync: own profile not newer or not this account's")
+        }
     }
 
     private suspend fun adoptReachState(b: Binding, received: ReceivedDeviceSync.ReachState) {
@@ -1071,12 +1130,26 @@ public class ReachManager internal constructor(
         /** The process-wide manager. */
         public fun get(context: Context): ReachManager =
             instance ?: synchronized(this) {
-                instance ?: ReachManager(EncryptedReachDocStore(context)).also { instance = it }
+                instance ?: ReachManager(
+                    store = EncryptedReachDocStore(context),
+                    ownProfiles = ContextOwnProfileAccess(context.applicationContext),
+                ).also { instance = it }
             }
 
         /** The manager if one was created, else `null` (background readers). */
         public fun peek(): ReachManager? = instance
     }
+}
+
+/** [ReachManager.OwnProfileAccess] over [me.lakko.app.profile.OwnProfileStore]. */
+private class ContextOwnProfileAccess(private val context: Context) : ReachManager.OwnProfileAccess {
+    override fun load(accountId: ByteArray): me.lakko.app.profile.OwnProfile? =
+        me.lakko.app.profile.OwnProfileStore.load(context, accountId)
+
+    override fun update(
+        accountId: ByteArray,
+        transform: (me.lakko.app.profile.OwnProfile?) -> me.lakko.app.profile.OwnProfile?,
+    ): Boolean = me.lakko.app.profile.OwnProfileStore.update(context, accountId, transform)
 }
 
 /** What a profile carries (ADR-0060 §3). SECRET grants. */

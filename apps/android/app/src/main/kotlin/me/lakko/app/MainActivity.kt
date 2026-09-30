@@ -1529,7 +1529,11 @@ private fun SessionRoot(
                 }
                 composable(Routes.SETTINGS) {
                     val secrets = identitySecrets
-                    val ownProfile = remember(secrets?.accountId) {
+                    // ADR-0048 section 4a — the name may change on another of
+                    // the account's devices: re-read on every store write.
+                    val ownProfileRevision by me.lakko.app.profile.OwnProfileStore.revision
+                        .collectAsStateWithLifecycle()
+                    val ownProfile = remember(secrets?.accountId, ownProfileRevision) {
                         secrets?.let { me.lakko.app.profile.OwnProfileStore.load(chatRepository.context, it.accountId) }
                     }
                     SettingsScreen(
@@ -1733,14 +1737,19 @@ private fun SessionRoot(
                     if (secrets != null) {
                         val ctx = chatRepository.context
                         val accountId = secrets.accountId
+                        val ownProfileRevision by me.lakko.app.profile.OwnProfileStore.revision
+                            .collectAsStateWithLifecycle()
                         me.lakko.app.ui.profile.ProfileSettingsScreen(
-                            current = remember(accountId) {
+                            current = remember(accountId, ownProfileRevision) {
                                 me.lakko.app.profile.OwnProfileStore.load(ctx, accountId)
                             },
                             username = account.username.takeIf { it.isNotBlank() },
                             onSaved = { updated ->
                                 me.lakko.app.profile.OwnProfileStore.save(ctx, accountId, updated)
                                 chatRepository.publishOwnProfileToAllGroups()
+                                // ADR-0048 section 4a — and to the account's
+                                // other devices, with the name's stored stamp.
+                                me.lakko.app.reach.ReachManager.get(ctx).publishOwnProfileToDevices()
                             },
                             onBack = { navController.popBackStack() },
                         )
