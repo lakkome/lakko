@@ -1167,6 +1167,28 @@ private fun SessionRoot(
         }
     }
 
+    // ADR-0059 section 4 — letting new subscribers in: while the app is
+    // started, every channel this device holds publisher keys for (owned or
+    // co-published) has the current seed sealed to each subscriber not yet
+    // let in, every 15 s whatever screen is showing. The channel screens poll
+    // the same shared state faster while open. Restarts when the set of
+    // publisher channels changes (keys re-open after bind); stops on sign-out.
+    val subscriberAdmission = remember(channelsState, channelsClient) {
+        me.lakko.app.channels.SubscriberAdmission.forChannels(channelsState, channelsClient)
+    }
+    val publisherChannels by channelsState.keysByChannel.collectAsStateWithLifecycle()
+    LaunchedEffect(lifecycleOwner, subscriberAdmission, identitySecrets, publisherChannels.keys) {
+        if (identitySecrets == null || publisherChannels.isEmpty()) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) {
+                if (channelsState.boundAccount != null) {
+                    subscriberAdmission.admitAll(channelsState.keysByChannel.value.keys.toList())
+                }
+                kotlinx.coroutines.delay(me.lakko.app.channels.SubscriberAdmission.APP_INTERVAL_MS)
+            }
+        }
+    }
+
     // A tapped shared-feed link pushes the import screen.
     val pendingFeedImport by me.lakko.app.ui.feed.FeedImportIntake.pending.collectAsStateWithLifecycle()
     LaunchedEffect(pendingFeedImport) {
@@ -1215,6 +1237,7 @@ private fun SessionRoot(
         // In-memory only, like chat.clear(): the persisted channel log and
         // the publisher provider snapshot stay for the next sign-in.
         channelsState.unbind()
+        subscriberAdmission.clear()
         chatRepository.clear()
         authRepository.logout()
     }
@@ -1224,6 +1247,7 @@ private fun SessionRoot(
         // The account's channel log + publisher provider snapshot go with the
         // device, like the chat snapshot below.
         channelsState.forgetAccount()
+        subscriberAdmission.clear()
         // ADR-0058 — the channel-post log and the saved feeds go with the
         // device too.
         chatRepository.currentAccountIdB64()?.let {

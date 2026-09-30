@@ -925,6 +925,19 @@ private struct SessionRoot: View, Equatable {
             models.channelPostSync.start()
             openPendingFeedImport()
         }
+        // ADR-0059 section 4 — let new subscribers into every channel this
+        // device posts to while the app is in front, whatever screen is
+        // showing, not only while that channel's Manage screen is open. The
+        // task ends with the session root (sign-out, forget, account switch),
+        // and the shared state is dropped with it.
+        .task(id: account.accountIdB64) {
+            let admission = SubscriberAdmission.shared
+            admission.reset()
+            defer { admission.reset() }
+            await admission.runLoop(
+                channels: models.channelsState,
+                accountIdentitySeed: { authRepository.identitySecrets?.accountIdentitySeed })
+        }
         // A landing popped with the back gesture (not its own Done) drops the
         // parked slug, so the next tap of the same link opens it again; and a
         // chat popped from every stack releases its view model.

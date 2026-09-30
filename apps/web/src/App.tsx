@@ -36,6 +36,7 @@ import { CallActionListener } from "./calls/CallActionListener";
 import { CallHostProvider, CallHostView } from "./calls/CallHostContext";
 import { ChannelsHydration } from "./channels/ChannelsHydration";
 import { ChannelPostSync } from "./feed/ChannelPostSync";
+import { SubscriberAdmission } from "./channels/SubscriberAdmission";
 import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
 import {
   MailboxJoinFailureBanner,
@@ -172,6 +173,11 @@ const App: Component = () => (
            * fetched and filed into the log the Feed ranks.
            */}
           <ChannelPostSync />
+          {/*
+           * ADR-0059 section 4: new subscribers to this device's channels are
+           * let in while the app is open, whatever screen is showing.
+           */}
+          <SubscriberAdmission />
           {/*
            * A Welcome this device could not open. Top level for the same
            * reason as the update banner below: it is received for the whole

@@ -104,6 +104,7 @@ import me.lakko.app.channels.PostView
 import me.lakko.app.channels.RotationCron
 import me.lakko.app.channels.SharedPreferencesChannelLogStore
 import me.lakko.app.channels.StoredRotationState
+import me.lakko.app.channels.SubscriberAdmission
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ui.components.LakkoAvatar
@@ -467,7 +468,9 @@ public fun ChannelDetailScreen(
     var infoOpen by remember { mutableStateOf(false) }
     // Only a publisher ever lists subscribers, so only a publisher has a count
     // (section 2.3: "where the client has it").
-    val subscriberCount = SubscriberFanoutRegistry.subscriberCounts()[channelId]
+    val admission = remember(state, client) { SubscriberAdmission.forChannels(state, client) }
+    val admissions by admission.state.collectAsState()
+    val subscriberCount = admissions[channelId]?.subscribers?.size
 
     if (infoOpen && channel != null) {
         ChannelInfoSheet(
@@ -1364,109 +1367,29 @@ private fun StatusLine(text: String) {
 // Subscriber key fan-out (owner side) — the headless part of the old panel
 // ============================================================================
 
-/** Fan-out cadence: the owner re-lists subscribers and seals the key for each new one. */
+/** Fan-out cadence while a channel screen is open (the session shell's own
+ *  loop runs every [SubscriberAdmission.APP_INTERVAL_MS]). */
 private const val SUBSCRIBERS_POLL_INTERVAL_MS: Long = 5_000L
 private const val SEED_WAIT_MS: Long = 3_000L
 private const val READER_REFRESH_MS: Long = 5_000L
 private const val EPOCH_RECHECK_EVERY_TICKS: Int = 6
 
-internal enum class DeliveryStatus { Sent, Failed }
-
-/** One channel's subscriber fan-out state, shared by the channel view and Manage. */
-internal class SubscriberFanout {
-    var subscribers by mutableStateOf<List<String>?>(null)
-    val statusByPk = mutableStateMapOf<String, DeliveryStatus>()
-}
-
 /**
- * Process-wide registry so the channel view and the Manage screen (which
- * replace each other in the composition) share one fan-out record per channel,
- * and the list can show a subscriber count the owner already learned.
- */
-internal object SubscriberFanoutRegistry {
-    private val byChannel = mutableStateMapOf<String, SubscriberFanout>()
-
-    fun forChannel(channelId: String): SubscriberFanout =
-        byChannel.getOrPut(channelId) { SubscriberFanout() }
-
-    /** Channel id -> known subscriber count (snapshot-read, so callers recompose). */
-    @Composable
-    fun subscriberCounts(): Map<String, Int> =
-        byChannel.entries.mapNotNull { (id, f) -> f.subscribers?.let { id to it.size } }.toMap()
-}
-
-/**
- * Seal the current channel key for [pubkeyHex] and file it at the current
- * epoch (ADR-0031 — never a future one). Returns the resulting status.
- */
-private suspend fun deliverKeyTo(
-    channelId: String,
-    pubkeyHex: String,
-    state: ChannelsUiState,
-    client: ChannelsClient,
-): DeliveryStatus {
-    val keys = state.keysByChannel.value[channelId] ?: return DeliveryStatus.Failed
-    val parsed = hexToBytesOrNull(pubkeyHex) ?: return DeliveryStatus.Failed
-    return try {
-        // The current server epoch — fetched here when nothing on this screen
-        // has learned it yet, so a delivery is never filed at a guessed 0.
-        val epoch = state.epochByChannel.value[channelId]
-            ?: client.fetchEpoch(channelId).also { state.setEpoch(channelId, it) }
-        val wire = ChannelsComposer.sealSubscriberSeedEnvelope(
-            subscriberPub = parsed,
-            channelIdHex = channelId,
-            epochId = epoch,
-            seed = keys.seed,
-        )
-        client.deliverEnvelope(channelId, pubkeyHex, wire, epoch = epoch.toInt())
-        DeliveryStatus.Sent
-    } catch (e: Throwable) {
-        Log.w(TAG, "key delivery failed", e)
-        DeliveryStatus.Failed
-    }
-}
-
-/**
- * The owner's fan-out loop: every 5 s re-list the subscribers and seal the
- * key for each one not yet delivered (or whose delivery failed). Sequential,
- * cancelled when the hosting screen leaves the composition.
+ * The channel screens' faster let-in poll: while the channel view or its
+ * Manage screen is open, every 5 s run the same pass the session shell runs
+ * every 15 s ([SubscriberAdmission]), so a subscriber who registers now is
+ * served within seconds. Cancelled when the hosting screen leaves the
+ * composition; the shared record of who was let in stays.
  */
 @Composable
 private fun SubscriberFanoutEffect(channelId: String, state: ChannelsUiState, client: ChannelsClient) {
-    val fanout = remember(channelId) { SubscriberFanoutRegistry.forChannel(channelId) }
-    LaunchedEffect(channelId) {
+    val admission = remember(state, client) { SubscriberAdmission.forChannels(state, client) }
+    LaunchedEffect(channelId, admission) {
         while (true) {
-            try {
-                val pub = state.publisher
-                    ?: throw IllegalStateException("channel publisher identity not available")
-                val owner = pub.withIdentity(persist = false) { identity ->
-                    ChannelsClient.ownerSigner(identity, channelId)
-                }
-                fanout.subscribers = owner.use { client.listSubscribers(channelId, it) }
-            } catch (e: Throwable) {
-                Log.w(TAG, "list subscribers failed", e)
-            }
-            val list = fanout.subscribers
-            if (list != null) {
-                for (pk in list) {
-                    if (fanout.statusByPk[pk] != DeliveryStatus.Sent) {
-                        fanout.statusByPk[pk] = deliverKeyTo(channelId, pk, state, client)
-                    }
-                }
-            }
+            admission.admitNewSubscribers(channelId)
             delay(SUBSCRIBERS_POLL_INTERVAL_MS)
         }
     }
-}
-
-private fun hexToBytesOrNull(hex: String): ByteArray? {
-    if (hex.length % 2 != 0) return null
-    val out = ByteArray(hex.length / 2)
-    for (i in out.indices) {
-        val byte = hex.substring(i * 2, i * 2 + 2).toIntOrNull(16) ?: return null
-        out[i] = byte.toByte()
-    }
-    return out
 }
 
 // ============================================================================
@@ -1706,8 +1629,11 @@ private fun SectionCard(title: String, description: String? = null, content: @Co
 /** "Subscriber N" rows with their key-delivery state; never a key. */
 @Composable
 private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: ChannelsClient) {
-    val fanout = remember(channelId) { SubscriberFanoutRegistry.forChannel(channelId) }
-    val subs = fanout.subscribers
+    val admission = remember(state, client) { SubscriberAdmission.forChannels(state, client) }
+    val admissions by admission.state.collectAsState()
+    val entry = admissions[channelId]
+    val subs = entry?.subscribers
+    val epoch = state.epochByChannel.collectAsState().value[channelId]
     val scope = rememberCoroutineScope()
     SectionCard(
         title = subs?.let { "Subscribers (${it.size})" } ?: "Subscribers",
@@ -1721,7 +1647,9 @@ private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: C
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             else -> subs.forEachIndexed { index, pk ->
-                val status = fanout.statusByPk[pk]
+                // A key sealed for an older epoch is being let in again.
+                val st = entry?.statusByKey?.get(pk)
+                val status = st?.takeIf { epoch == null || it.epoch == epoch }?.status
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth(),
@@ -1730,17 +1658,13 @@ private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: C
                     Spacer(Modifier.width(12.dp))
                     Text("Subscriber ${index + 1}", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
                     when (status) {
-                        DeliveryStatus.Sent -> Text(
+                        SubscriberAdmission.Status.Ready -> Text(
                             "Receiving posts",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        DeliveryStatus.Failed -> TextButton(
-                            onClick = {
-                                scope.launch {
-                                    fanout.statusByPk[pk] = deliverKeyTo(channelId, pk, state, client)
-                                }
-                            },
+                        SubscriberAdmission.Status.Failed -> TextButton(
+                            onClick = { scope.launch { admission.admit(channelId, pk) } },
                         ) { Text("Retry") }
                         null -> Text(
                             "Setting up...",
