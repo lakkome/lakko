@@ -276,7 +276,13 @@ pub(crate) enum Gated {
     Unclaimed,
     /// The group is claimed and the request carried a valid proof - the
     /// caller holds an epoch key of the tier it asked for.
-    Proven,
+    Proven {
+        /// The newest epoch registered for the group. A read hands it to the
+        /// member, so a device that has consumed the whole journal and is
+        /// still behind it can tell it will never catch up (its state forked
+        /// from the chain) rather than wait forever.
+        latest_epoch: u64,
+    },
 }
 
 /// Gate a group-journal request: open when the group is unclaimed, else a
@@ -305,13 +311,15 @@ pub(crate) async fn gate_group(
         Access::Read => keys.len(),
         Access::Write => WRITE_EPOCHS.min(keys.len()),
     };
+    // `group_keys` orders newest first.
+    let latest_epoch = keys[0].0;
     let usable = &keys[..tier];
     let req = parts(method, uri, body);
     check_proof(&state.db, group_id, headers, &req, |epoch| {
         usable.iter().find(|(e, _)| *e == epoch).map(|(_, k)| *k)
     })
     .await?;
-    Ok(Gated::Proven)
+    Ok(Gated::Proven { latest_epoch })
 }
 
 /// Gate a mailbox read: open when the mailbox is unclaimed, else a valid
@@ -632,7 +640,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        let (status, _) = send(
+        let (status, body) = send(
             &app,
             Req {
                 method: "GET",
@@ -643,6 +651,9 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // An unclaimed journal has no chain to report.
+        assert!(parsed.get("latest_epoch").is_none());
     }
 
     /// ADR-0054: the wake header is parsed before the append, so a malformed
@@ -860,6 +871,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A signed read names the newest registered epoch, so a device that has
+    /// read the whole journal and is still behind it knows its state forked
+    /// from the chain and will never catch up by waiting.
+    #[tokio::test]
+    async fn a_signed_read_names_the_latest_epoch() {
+        let Some((app, _pool)) = app().await else {
+            return;
+        };
+        let gid = fresh_name(12);
+        let k3 = key(3);
+        assert_eq!(
+            claim(&app, &gid, &fresh_signer(0x5c), 3, &k3).await,
+            StatusCode::NO_CONTENT
+        );
+        let uri = messages_uri("group", &gid);
+        let (status, body) = send(
+            &app,
+            Req {
+                method: "GET",
+                uri: &format!("{uri}?after=0"),
+                body: vec![],
+                proof: Some((&k3, 3)),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(0));
+        assert_eq!(parsed["latest_epoch"], 3);
     }
 
     #[tokio::test]

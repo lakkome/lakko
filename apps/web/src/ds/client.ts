@@ -114,6 +114,10 @@ export interface FetchResult {
   /** `true` if there are more rows past the last returned id;
    *  client should call again with `after = lastMessage.id`. */
   hasMore: boolean;
+  /** A signed read of a CLAIMED group journal only: the newest epoch
+   *  registered on the DS for it (`latest_epoch`). Absent for an unclaimed
+   *  journal and for a mailbox. */
+  latestEpoch?: number;
 }
 
 /** Programmer error — surfaced before any network call. */
@@ -704,6 +708,7 @@ export class DsClient implements StatementSender {
     const json = (await response.json()) as {
       messages: { id: number; payload_b64: string; created_at: string }[];
       has_more: boolean;
+      latest_epoch?: number;
     };
     return {
       messages: json.messages.map((m) => ({
@@ -712,6 +717,7 @@ export class DsClient implements StatementSender {
         createdAt: m.created_at,
       })),
       hasMore: json.has_more,
+      ...(typeof json.latest_epoch === "number" ? { latestEpoch: json.latest_epoch } : {}),
     };
   }
 }

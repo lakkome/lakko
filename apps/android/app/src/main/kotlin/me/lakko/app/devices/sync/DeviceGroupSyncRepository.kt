@@ -137,6 +137,10 @@ public class DeviceGroupSyncRepository(
     private val activeAccountId = AtomicReference<ByteArray?>(null)
     @Volatile private var pollJob: Job? = null
 
+    /** The account whose forked DeviceGroup this session already re-founded
+     *  ([repairFork]); the repair runs at most once per session per account. */
+    @Volatile private var forkRepairedFor: String? = null
+
     /** The folded state. Created lazily so constructing the repository never
      *  touches the native library. Every read-modify-republish runs under
      *  [stateLock] so the published maps always come from one state. */
@@ -188,6 +192,7 @@ public class DeviceGroupSyncRepository(
         accountIdB64: String,
         seedState: Boolean,
         accountIdentitySeed: ByteArray? = null,
+        startCursor: Long = 0L,
     ) {
         val seed = try {
             me.lakko.app.auth.DeviceIdentityStore.ensureDeviceIdentitySeed(
@@ -265,11 +270,64 @@ public class DeviceGroupSyncRepository(
         installJournalSigner(groupId)
         pollJob = scope.launch {
             claimJournalBestEffort(groupId, refounded = true)
-            runPollLoop(
+            val forkedAt = runPollLoop(
                 accountIdB64 = accountIdB64,
                 groupId = groupId,
+                startCursor = startCursor,
             )
+            if (forkedAt != null) {
+                repairFork(accountIdBytes, accountIdB64, forkedAt)
+            }
         }
+    }
+
+    /**
+     * The DeviceGroup this device holds forked from the chain on the DS
+     * ([DeviceGroupFork]): it read the whole journal and is still behind the
+     * newest registered epoch, which nothing that arrives will ever change.
+     * Re-found it. The poll loop has already stopped.
+     *
+     * Only this account's DeviceGroup MLS snapshot is deleted. It lives in
+     * its own store ([DeviceGroupSnapshotStore], its own folder and wrap key),
+     * apart from the conversation groups (`IdentitySnapshotStore`); the folded
+     * sync state in [DeviceGroupSnapshotStore.SYNC_STATE_DIR], the device
+     * identity seed and everything else stay. Android keeps no stored
+     * DeviceGroup cursor (every open polls from the cursor it is given).
+     *
+     * [openAndPoll] then finds no snapshot, so [DeviceGroupLifecycle] founds a
+     * fresh DeviceGroup under the same deterministic id with the SAME device
+     * identity (its conversation leaves in chats are unaffected) and marks the
+     * founding unconfirmed, and [claimJournalBestEffort] claims the journal
+     * with the account root and, on the `409` the old chain answers, RESETS
+     * it (ADR-0057 obligation 7). If the claim or reset does not land, the
+     * founding stays unconfirmed: no Welcome can leave for it
+     * ([DeviceGroupJournalAccess.claimFoundingIfUnconfirmed]) and the next
+     * open claims and resets again.
+     *
+     * Polling restarts at [headCursor], the head this device last saw: the
+     * old group's rows cannot be read by the new one.
+     *
+     * Consequence: every OTHER device of the account loses the DeviceGroup.
+     * The reset drops the chain their epoch keys were registered on, so their
+     * reads answer 401, and each must be added again. A 401 is not a drained
+     * poll, so none of them ever runs a repair of its own.
+     */
+    private fun repairFork(accountIdBytes: ByteArray, accountIdB64: String, headCursor: Long) {
+        if (activeAccountIdB64.get() != accountIdB64) return
+        // Nothing may go out on the forked handle while the new one is made.
+        group.set(null)
+        identity.set(null)
+        try {
+            DeviceGroupSnapshotStore.deleteSnapshot(
+                context = applicationContext,
+                accountIdB64 = accountIdB64,
+            )
+        } catch (cause: Throwable) {
+            // The old snapshot is then restored below and polling resumes on
+            // it; the repair is not tried again this session.
+            Log.w(LOG_TAG, "forked DeviceGroup snapshot not deleted (${cause.javaClass.simpleName})")
+        }
+        openAndPoll(accountIdBytes, accountIdB64, seedState = false, startCursor = headCursor)
     }
 
     /**
@@ -293,6 +351,7 @@ public class DeviceGroupSyncRepository(
         }
         activeAccountIdB64.set(null)
         activeAccountId.set(null)
+        forkRepairedFor = null
         synchronized(stateLock) {
             syncedState = null
         }
@@ -687,11 +746,18 @@ public class DeviceGroupSyncRepository(
     // Poll loop
     // ------------------------------------------------------------
 
+    /**
+     * Returns the journal head it stopped at when the DeviceGroup forked
+     * ([DeviceGroupFork]) and this session may still re-found it, else
+     * `null` (cancelled, or the handle is gone).
+     */
     private suspend fun runPollLoop(
         accountIdB64: String,
         groupId: ByteArray,
-    ) {
-        var cursor = 0L
+        startCursor: Long = 0L,
+    ): Long? {
+        var cursor = startCursor
+        var suspectSince: Long? = null
         DsClient().use { ds ->
             while (currentCoroutineContextActive()) {
                 val result = try {
@@ -722,23 +788,28 @@ public class DeviceGroupSyncRepository(
                 flushPendingIfAny()
 
                 // G-13 (ADR-0015): the 32-byte verifying key peers feed to
-                // processIncomingVerifyingRemovals. A zero key is a fail-closed
-                // fallback when the device-attest endpoint is unreachable — it
-                // parses but verifies nothing, so a removal the policy requires
-                // to be attested is refused rather than applied unverified;
-                // while the policy is off, entries apply normally regardless.
+                // processIncomingVerifyingRemovals. Without it the batch is
+                // HELD, not applied under a zero key: a zero key refuses a
+                // removal the policy requires to be attested, and a refused
+                // row is skipped for good once the cursor moves past it. A
+                // device removed that way would stay an epoch behind, drain the
+                // journal, read as forked and re-found the DeviceGroup over
+                // every healthy device (ADR-0057, 2026-09-30).
                 val attestVk: ByteArray = try {
                     DeviceAttestKey.fetch()
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
                 } catch (cause: Throwable) {
-                    Log.w(LOG_TAG, "device-attest key fetch failed", cause)
-                    ByteArray(32)
+                    Log.w(LOG_TAG, "device-attest key fetch failed; holding the batch", cause)
+                    delay(5000)
+                    continue
                 }
 
                 var mutated = false
                 for (message in result.messages) {
                     cursor = message.id
-                    val g = group.get() ?: return
-                    val id = identity.get() ?: return
+                    val g = group.get() ?: return null
+                    val id = identity.get() ?: return null
                     // Unwrap the journal envelope (MLS message + any attestation).
                     val entry = try {
                         DeviceGroupJournalEnvelope.decode(message.payload)
@@ -796,8 +867,52 @@ public class DeviceGroupSyncRepository(
                         )
                     }
                 }
+
+                // A drained journal whose chain is ahead of this device means
+                // its DeviceGroup forked. A handle that derives no signer (a
+                // removed device's inactive group) is never suspected.
+                val localEpoch = currentLocalEpoch()
+                val verdict = if (localEpoch == null) {
+                    ForkVerdict.InSync
+                } else {
+                    DeviceGroupFork.forkVerdict(
+                        localEpoch = localEpoch,
+                        drained = DeviceGroupFork.isDrained(result.messages.size, result.hasMore),
+                        latestEpoch = result.latestEpoch,
+                        suspectSince = suspectSince,
+                        nowMs = System.currentTimeMillis(),
+                    )
+                }
+                when (verdict) {
+                    ForkVerdict.InSync -> suspectSince = null
+                    is ForkVerdict.Suspect -> suspectSince = verdict.since
+                    ForkVerdict.Forked -> {
+                        Log.w(
+                            LOG_TAG,
+                            "DeviceGroup forked: local epoch $localEpoch, DS epoch ${result.latestEpoch}",
+                        )
+                        if (forkRepairedFor != accountIdB64 && rootSigner != null) {
+                            forkRepairedFor = accountIdB64
+                            return cursor
+                        }
+                        // Already re-founded this session, or no account root
+                        // on this device to claim a new founding with: keep
+                        // polling and do not repair again.
+                        Log.w(LOG_TAG, "DeviceGroup fork not repaired in this session")
+                        suspectSince = null
+                    }
+                }
             }
         }
+        return null
+    }
+
+    /** The epoch of the DeviceGroup handle held now, read from its journal
+     *  signer (the FFI `DeviceGroup` has no epoch read), or `null`. */
+    private fun currentLocalEpoch(): ULong? {
+        val g = group.get() ?: return null
+        val id = identity.get() ?: return null
+        return DeviceGroupJournalAccess.signerOf(g, id)?.epoch
     }
 
     /** ADR-0053 — install the DeviceGroup journal's signer source: derived

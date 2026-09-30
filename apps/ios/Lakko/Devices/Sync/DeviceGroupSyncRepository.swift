@@ -93,6 +93,16 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// The pending growth re-send, so two growths in a row send once.
     private var resendTask: Task<Void, Never>?
     private var restoreObserver: NSObjectProtocol?
+    /// The raw account id of the active session, for re-founding the
+    /// DeviceGroup (``repairForkedDeviceGroup``).
+    private var activeAccountId: Data?
+    /// When the current fork suspicion started (``DeviceGroupFork``), `nil`
+    /// when there is none.
+    private var forkSuspectSince: Int64?
+    /// Accounts whose forked DeviceGroup this process already tried to
+    /// repair: at most one repair per session per account. Deliberately not
+    /// reset by ``clear()``.
+    private var forkRepairAttempted: Set<String> = []
 
     public init() {
         restoreObserver = NotificationCenter.default.addObserver(
@@ -119,6 +129,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             cancelPollAndDropHandles()
         }
         activeAccountIdB64 = accountIdB64
+        activeAccountId = secrets.accountId
         let seed: Data
         do {
             seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(
@@ -188,6 +199,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             SyncedStateStore.delete(accountIdB64: closing)
         }
         activeAccountIdB64 = nil
+        activeAccountId = nil
         ready = false
         syncedState = SyncedState()
         pending?.clear()
@@ -289,6 +301,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         persistTask = nil
         identity = nil
         group = nil
+        forkSuspectSince = nil
     }
 
     // MARK: - Lookup helpers
@@ -447,9 +460,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
 
     // MARK: - Inbound poll loop
 
-    private func runPollLoop(accountIdB64: String, groupId: Data) async {
+    private func runPollLoop(accountIdB64: String, groupId: Data, startCursor: Int64 = 0) async {
         let ds = DsClient()
-        var cursor: Int64 = 0
+        var cursor: Int64 = startCursor
         while !Task.isCancelled {
             let result: FetchResult
             // ADR-0053 point 1 — the read is signed under the DeviceGroup's
@@ -494,12 +507,19 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             // parses but verifies nothing, so a removal the policy requires to
             // be attested is refused rather than applied unverified; while the
             // policy is off, entries apply normally regardless.
-            var attestVk: Data
+            // Without the key the batch is HELD, not applied under a zero key:
+            // a zero key refuses a removal the policy requires to be attested,
+            // and a refused row is skipped for good once the cursor moves past
+            // it. A device removed that way would stay an epoch behind, drain
+            // the journal, read as forked and re-found the DeviceGroup over
+            // every healthy device (ADR-0057, 2026-09-30).
+            let attestVk: Data
             do {
                 attestVk = try await DeviceAttestKey.fetch()
             } catch {
-                NSLog("DeviceGroupSync device-attest key fetch failed: %@", error.localizedDescription)
-                attestVk = Data(count: 32)
+                NSLog("DeviceGroupSync device-attest key fetch failed; holding the batch: %@", error.localizedDescription)
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                continue
             }
 
             var mutated = false
@@ -563,7 +583,151 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     // registered the epoch under the account's root.
                 }
             }
+
+            // Live walk 2026-09-30 — a DeviceGroup that forked from the one
+            // on the DS (``DeviceGroupFork``) repairs itself, once.
+            let drained = result.messages.isEmpty && !result.hasMore
+            var localEpoch: UInt64?
+            if let g = group, let id = identity {
+                localEpoch = try? g.dsAccessSigner(identity: id).epoch()
+            }
+            if let localEpoch {
+                let verdict = DeviceGroupFork.verdict(
+                    localEpoch: localEpoch,
+                    drained: drained,
+                    latestEpoch: result.latestEpoch,
+                    suspectSince: forkSuspectSince,
+                    now: Int64(Date().timeIntervalSince1970 * 1000))
+                switch verdict {
+                case .inSync:
+                    forkSuspectSince = nil
+                case .suspect(let since):
+                    forkSuspectSince = since
+                case .forked:
+                    forkSuspectSince = nil
+                    if await repairForkedDeviceGroup(
+                        accountIdB64: accountIdB64,
+                        groupId: groupId,
+                        localEpoch: localEpoch,
+                        latestEpoch: result.latestEpoch ?? 0,
+                        cursor: cursor
+                    ) {
+                        // The poll loop stopped: either a new one runs over
+                        // the re-founded DeviceGroup, or the repair failed
+                        // and the next session retries.
+                        return
+                    }
+                }
+            }
         }
+    }
+
+    // MARK: - Fork repair (live walk 2026-09-30)
+
+    /// Re-found this account's DeviceGroup after it forked from the one on
+    /// the DS: this device holds epoch `localEpoch` while the chain the
+    /// account root registered is at `latestEpoch`, and the journal carries
+    /// nothing more this device can apply.
+    ///
+    /// Only the DeviceGroup snapshot is deleted. It is a separate store
+    /// (``DeviceGroupSnapshotStore``, its own folder under Application
+    /// Support) holding the provider of the DeviceGroup's own `Identity`; the
+    /// conversation groups live in ``IdentitySnapshotStore`` under another
+    /// `Identity` instance, and the device identity seed, the device binding,
+    /// contacts and the synced state (``SyncedStateStore``, its own folder) are
+    /// all untouched. The device identity is the same seed and signature key,
+    /// so this device's leaves in conversation groups are unaffected. iOS keeps
+    /// no DeviceGroup journal cursor on disk (the poll starts from 0 each
+    /// session), so there is none to delete.
+    ///
+    /// The founding path then runs as for a new account: `createFounder`, and
+    /// the founding mark makes the claim a claim-or-reset under the account
+    /// root (ADR-0057 obligation 7), which replaces the old chain.
+    ///
+    /// Consequence: every OTHER device of the account loses the DeviceGroup.
+    /// Its epoch keys are gone after the reset, so its reads answer `401` and
+    /// it must be added again. A `401` is not a drained fetch, so those devices
+    /// never trigger a repair of their own.
+    ///
+    /// Returns `true` when this poll loop must stop (the repair ran, whether
+    /// or not it succeeded), `false` when nothing was changed and polling
+    /// continues.
+    private func repairForkedDeviceGroup(
+        accountIdB64: String,
+        groupId: Data,
+        localEpoch: UInt64,
+        latestEpoch: UInt64,
+        cursor: Int64
+    ) async -> Bool {
+        guard !forkRepairAttempted.contains(accountIdB64) else {
+            NSLog("DeviceGroupSync fork persists (local epoch %llu, DS epoch %llu); already repaired this session",
+                  localEpoch, latestEpoch)
+            return false
+        }
+        forkRepairAttempted.insert(accountIdB64)
+        NSLog("DeviceGroupSync DeviceGroup forked: local epoch %llu, DS epoch %llu; re-founding",
+              localEpoch, latestEpoch)
+        guard let accountId = activeAccountId,
+              activeAccountIdB64 == accountIdB64 else { return true }
+        // The reset is signed by the journal root, derived from the account
+        // identity seed. Without it nothing could be claimed, so nothing is
+        // deleted either.
+        guard DeviceGroupDsAccess.rootSigner(accountIdB64: accountIdB64, groupId: groupId) != nil else {
+            NSLog("DeviceGroupSync fork repair skipped: the account identity seed is not on this device")
+            return false
+        }
+
+        // Stop this poll loop: from here on it runs no further.
+        resendTask?.cancel()
+        resendTask = nil
+        identity = nil
+        group = nil
+
+        DeviceGroupSnapshotStore().deleteSnapshot(accountIdB64: accountIdB64)
+        let ensured: DeviceGroupLifecycle.Ensured
+        do {
+            let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
+            ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
+                accountIdBytes: accountId,
+                accountIdB64: accountIdB64,
+                deviceIdentitySeed: seed)
+        } catch {
+            NSLog("DeviceGroupSync fork repair: founding failed, retried next session: %@",
+                  error.localizedDescription)
+            return true
+        }
+        guard ensured.bootstrapped, (try? ensured.group.groupId()) == groupId else {
+            NSLog("DeviceGroupSync fork repair: the DeviceGroup was not re-founded; retried next session")
+            return true
+        }
+
+        // The claim: the founding mark set by ``DeviceGroupLifecycle`` turns
+        // it into claim-or-reset, and it is cleared only when one landed.
+        let ds = DsClient()
+        await DeviceGroupDsAccess.claim(
+            group: ensured.group, identity: ensured.identity,
+            accountIdB64: accountIdB64, ds: ds)
+        if JournalFoundingMarks.shared.isMarked(journalIdHex: DsClient.pseudonymHex(groupId)) {
+            // Fail closed: the re-founded group is not on the DS. Nothing is
+            // sent under it (``DeviceGroupDsAccess/requireFoundingClaim``), and
+            // the next session's open claims-or-resets again because the mark
+            // is still set.
+            NSLog("DeviceGroupSync fork repair: the journal reset did not land; retried next session")
+            return true
+        }
+        guard !Task.isCancelled, activeAccountIdB64 == accountIdB64 else { return true }
+
+        identity = ensured.identity
+        group = ensured.group
+        NSLog("DeviceGroupSync fork repair: DeviceGroup re-founded at epoch %llu; other devices must be added again",
+              (try? ensured.group.dsAccessSigner(identity: ensured.identity).epoch()) ?? 0)
+        // The old group's rows cannot be read by the new group: resume at the
+        // journal head this loop last saw.
+        pollTask = Task { [weak self] in
+            await self?.runPollLoop(
+                accountIdB64: accountIdB64, groupId: groupId, startCursor: cursor)
+        }
+        return true
     }
 
     /// Fold one payload another device sent. Every kind goes through the one

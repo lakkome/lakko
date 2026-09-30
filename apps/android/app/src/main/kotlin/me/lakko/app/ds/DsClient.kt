@@ -348,6 +348,7 @@ public class DsClient(
                 )
             },
             hasMore = parsed.has_more,
+            latestEpoch = parsed.latest_epoch?.takeIf { it >= 0 }?.toULong(),
         )
     }
 
@@ -748,6 +749,7 @@ private data class PublishWireResponse(
 private data class FetchWireResponse(
     val messages: List<FetchWireMessage>,
     val has_more: Boolean,
+    val latest_epoch: Long? = null,
 )
 
 @Serializable
@@ -825,6 +827,11 @@ public data class FetchResult(
     /** `true` if there are more rows past the last returned id;
      *  caller should call again with `after = lastMessage.id`. */
     val hasMore: Boolean,
+    /** The newest epoch registered on the DS for a CLAIMED group journal,
+     *  present on a signed read only; `null` for an unclaimed journal and
+     *  for mailboxes. A DeviceGroup reader compares it with its own epoch to
+     *  notice a fork it can never catch up from ([me.lakko.app.devices.sync.DeviceGroupFork]). */
+    val latestEpoch: ULong? = null,
 )
 
 // =============================================================================

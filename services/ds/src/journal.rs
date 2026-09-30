@@ -268,6 +268,10 @@ pub(crate) struct FetchResponse {
     /// `true` if there might be more rows past the last returned id —
     /// client should call again with `after = last_id`.
     pub(crate) has_more: bool,
+    /// For a signed read of a claimed group journal: the newest epoch
+    /// registered for it. Absent for an unclaimed group and a mailbox.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) latest_epoch: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -329,7 +333,11 @@ async fn fetch(
         })
         .collect();
 
-    Ok(Json(FetchResponse { messages, has_more }))
+    Ok(Json(FetchResponse {
+        messages,
+        has_more,
+        latest_epoch: None,
+    }))
 }
 
 /// Fetch with optional long-poll. If `wait_secs` is zero we behave like
@@ -427,7 +435,7 @@ pub(crate) async fn post_group(
     // claimed journal gets one. Fire-and-forget: it cannot delay or fail
     // this response.
     if let Some(wake) = wake {
-        if gated != crate::access::Gated::Proven {
+        if !matches!(gated, crate::access::Gated::Proven { .. }) {
             tracing::debug!(
                 kind = wake.kind.as_str(),
                 outcome = "unclaimed",
@@ -457,7 +465,7 @@ pub(crate) async fn get_group(
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&group_hex)?;
     // ADR-0053: a claimed group's journal is read by members only.
-    crate::access::gate_group(
+    let gated = crate::access::gate_group(
         &state,
         &owner,
         crate::access::Access::Read,
@@ -469,7 +477,7 @@ pub(crate) async fn get_group(
     .await?;
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT);
     let wait = q.wait.unwrap_or(0);
-    let resp = fetch_with_wait(
+    let Json(mut resp) = fetch_with_wait(
         &state.db,
         &state.notifiers,
         Queue::Group,
@@ -479,7 +487,10 @@ pub(crate) async fn get_group(
         wait,
     )
     .await?;
-    let mut response = resp.into_response();
+    if let crate::access::Gated::Proven { latest_epoch } = gated {
+        resp.latest_epoch = Some(latest_epoch);
+    }
+    let mut response = Json(resp).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),

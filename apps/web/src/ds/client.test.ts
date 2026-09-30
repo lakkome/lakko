@@ -115,6 +115,21 @@ describe("contract point 1 — a group read is signed over the service path and 
     expect(sent[0]?.proof).toBe(`proof:g@4:GET:/ds/group/${GID_HEX}/knocks:after=3&wait=0:0`);
   });
 
+  it("surfaces the DS's latest epoch of a claimed journal, and nothing when absent", async () => {
+    const reg = registryWith(() => fakeSigner(4n));
+    const { fetchImpl } = fakeFetch([
+      { status: 200, json: { messages: [], has_more: false, latest_epoch: 5 } },
+      EMPTY,
+    ]);
+    const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
+
+    const claimed = await ds.fetchGroup(GID, { after: 0 });
+    expect(claimed.latestEpoch).toBe(5);
+    const unclaimed = await ds.fetchGroup(GID, { after: 0 });
+    expect(unclaimed.latestEpoch).toBeUndefined();
+    expect("latestEpoch" in unclaimed).toBe(false);
+  });
+
   it("a group nobody on this device holds is read unsigned", async () => {
     const reg = registryWith(() => null);
     const { fetchImpl, sent } = fakeFetch([EMPTY]);

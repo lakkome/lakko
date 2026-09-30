@@ -321,3 +321,54 @@ above.
 8. (INFO) the registrar table tells the DS each journal's member count and
    when members are appointed and dismissed. New metadata under invariant #5,
    pseudonymous per journal; accepted and stated.
+
+## A DeviceGroup that forked from its own chain (2026-09-30)
+
+Found live on `test.lakko.me`. A web device removed another device from the
+account's DeviceGroup. The removal persisted its snapshot after publishing
+and never told the sync runtime, whose long-lived handle was an epoch behind.
+That handle met the removal commit (the device's own, which MLS cannot apply),
+and persisted the old epoch with the journal cursor past the commit. The next
+add from the device registered an epoch the DS already had, and the server
+refused it (`409`, *Append* only at `latest + 1`). The root had registered
+epoch N+1, and nothing outranks the root, so the device could never follow
+its own DeviceGroup again.
+
+Three fixes, on web, iOS and Android:
+
+1. **Order.** Every one-shot DeviceGroup commit (add, remove, the
+   attested-removal policy) persists the advanced snapshot and reloads the
+   sync runtime's handle BEFORE the commit is published. On web, a poll that
+   was stopped mid-batch no longer persists.
+2. **Repair (the maintainer chose automatic).** A signed read of a claimed
+   group journal now answers `latest_epoch`, the newest epoch registered for
+   it (`services/ds`, `Gated::Proven { latest_epoch }`). A device whose read
+   of its DeviceGroup journal is drained (no rows after the cursor, no more
+   pages) while `latest_epoch` is above its local epoch, continuously for
+   `FORK_GRACE_MS` (120 s, chosen, not measured), has forked. The grace
+   covers the legitimate window between another device's registration of
+   N+1 and its commit reaching the journal (ADR-0053: register before
+   publish). The device then deletes only its DeviceGroup snapshot and
+   re-founds under the same id. Obligation 7 already exists for this: claim,
+   and on `409` a root reset. Its conversation leaves are unaffected (same
+   device identity). At most once per session.
+
+3. **A refused removal is not a fork.** The repair cannot tell a forked
+   device from a removed one that refused its own removal and moved its
+   cursor past it. That happened when the device-attest key could not be
+   fetched and the loop applied the batch under a zero key, which refuses a
+   removal the attested-removal policy requires. Such a device would re-found
+   over every healthy device. The sync loop now holds the batch when the key
+   is unavailable, so the removal is applied on a later poll. A removed
+   device's group is then inactive, no DS signer derives from it, and the
+   rule never runs. Cost: a DeviceGroup with the policy off also waits out
+   an unreachable attest endpoint.
+
+Consequence, stated: a reset removes every other device's epoch keys, so
+those devices read `401` and must be added again. A `401` is not a drained
+read, so they never trigger a repair of their own and cannot reset the
+re-founder in turn. A crash between another device's registration and its
+publish leaves the same wedge (N+1 registered, no commit), and after the
+grace every device reads it as forked. Every reset replaces the chain, so
+the last one wins. The others then read `401` and wait to be added again:
+a recovery, not a loss, and recorded as such.

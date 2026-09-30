@@ -270,7 +270,8 @@ public final class DsClient {
                 createdAt: msg.createdAt
             )
         }
-        return FetchResult(messages: messages, hasMore: parsed.hasMore)
+        return FetchResult(
+            messages: messages, hasMore: parsed.hasMore, latestEpoch: parsed.latestEpoch)
     }
 
     // MARK: - ADR-0053 claim and knock
@@ -593,10 +594,12 @@ private struct PublishWireResponse: Decodable {
 private struct FetchWireResponse: Decodable {
     let messages: [FetchWireMessage]
     let hasMore: Bool
+    let latestEpoch: UInt64?
 
     enum CodingKeys: String, CodingKey {
         case messages
         case hasMore = "has_more"
+        case latestEpoch = "latest_epoch"
     }
 }
 
@@ -677,10 +680,16 @@ public struct FetchResult: Equatable {
     /// `true` if there are more rows past the last returned id;
     /// caller should call again with `after = lastMessage.id`.
     public let hasMore: Bool
+    /// The newest epoch registered on the DS for this journal. Present only
+    /// on a signed read of a CLAIMED group journal; `nil` for an unclaimed
+    /// journal and for mailboxes. The DeviceGroup sync runtime compares it
+    /// with its own epoch to notice a forked DeviceGroup (``DeviceGroupFork``).
+    public let latestEpoch: UInt64?
 
-    public init(messages: [MailboxMessage], hasMore: Bool) {
+    public init(messages: [MailboxMessage], hasMore: Bool, latestEpoch: UInt64? = nil) {
         self.messages = messages
         self.hasMore = hasMore
+        self.latestEpoch = latestEpoch
     }
 }
 

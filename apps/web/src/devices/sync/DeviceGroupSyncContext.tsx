@@ -60,7 +60,7 @@ import { ensureDeviceIdentitySeed } from "../../auth/device-identity-store";
 import { getDeviceKey } from "../../auth/key-store";
 import { deleteSyncState, loadSyncState, saveSyncState } from "./sync-state-idb";
 import { DsClient, DsHttpError, DsNetworkError } from "../../ds/client";
-import { dsAccess } from "../../ds/access";
+import { dsAccess, takeSigner } from "../../ds/access";
 import { loadWasm } from "../../wasm";
 import type {
   DeviceGroup as WasmDeviceGroup,
@@ -74,8 +74,12 @@ import {
   persistDeviceGroupSnapshot,
   persistDeviceGroupSnapshotWithCursor,
 } from "../lifecycle";
-import { getDeviceGroupJournalCursor } from "../device-group-snapshot-store";
+import {
+  deleteDeviceGroupSnapshot,
+  getDeviceGroupJournalCursor,
+} from "../device-group-snapshot-store";
 import { applyDeviceJournalBatch, startingCursor } from "./journal-batch";
+import { forkVerdict } from "./fork-verdict";
 import { decodeJournalEntry, encodeJournalEntry } from "../journal-envelope";
 import { fetchDeviceAttestKey } from "../../auth/device-attest-key";
 import { mintHlc, observeHlc } from "./hlc";
@@ -237,6 +241,11 @@ export function DeviceGroupSyncProvider(props: {
    *  other device's row can carry an id this device got from its own publish.
    *  See `sync/journal-batch.ts`. */
   const ownPublishedIds = new Set<number>();
+  /** Accounts whose forked DeviceGroup this provider has already re-founded.
+   *  The repair runs at most once per account for the provider's lifetime
+   *  (kept across logout), so a device that forks again waits for the next
+   *  page load rather than resetting the account's chain in a loop. */
+  const forkRepaired = new Set<string>();
 
   // ADR-0053 contract point 1 — every request to the DeviceGroup journal is
   // proven under the access key of the epoch this device's DeviceGroup is at.
@@ -646,6 +655,9 @@ export function DeviceGroupSyncProvider(props: {
       // eslint-disable-next-line no-console
       console.warn("DeviceGroup journal cursor read failed; starting from 0", err);
     }
+    /** When this loop started suspecting a fork (`fork-verdict.ts`). */
+    let suspectSince: number | undefined;
+    let forkReported = false;
 
     while (!signal.aborted) {
       // ADR-0057 obligation 2 - every device of the account holds the
@@ -687,17 +699,21 @@ export function DeviceGroupSyncProvider(props: {
       if (outbox().length > 0) void drainFolderOutbox();
 
       // G-13 (ADR-0015): the 32-byte verifying key peers feed to
-      // `processIncomingVerifyingRemovals`. Cached (24 h). A zero key is a
-      // fail-closed fallback — a removal the policy requires to be attested
-      // is refused rather than applied unverified; while the policy is off,
-      // non-remove entries and unattested removals pass through regardless.
+      // `processIncomingVerifyingRemovals`. Cached (24 h). Without it the
+      // batch is HELD, not applied under a zero key: a zero key refuses a
+      // removal the policy requires to be attested, and a refused row is
+      // skipped for good once the cursor moves past it. A device removed that
+      // way would stay an epoch behind, drain the journal, read as forked and
+      // re-found the DeviceGroup over every healthy device (ADR-0057,
+      // 2026-09-30). Holding keeps the removal for the next poll.
       let attestVk: Uint8Array;
       try {
         attestVk = await fetchDeviceAttestKey();
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.warn("device-attest key fetch failed; attested removals will be refused", err);
-        attestVk = new Uint8Array(32);
+        console.warn("device-attest key fetch failed; holding the DeviceGroup batch", err);
+        await sleepCancellable(5000, signal);
+        continue;
       }
 
       // ADR-0058 section 5.1 — who was here before this batch.
@@ -789,7 +805,175 @@ export function DeviceGroupSyncProvider(props: {
         // Held: give storage a moment before the same rows are fetched again.
         await sleepCancellable(2000, signal);
       }
+
+      // Forked off the account's chain? A drained read (no rows, nothing
+      // more) while the DS names a newer epoch than this handle's means
+      // nothing left in the journal can bring it forward (`fork-verdict.ts`).
+      // The epoch is only derived when it can matter: a read with rows, or
+      // one the DS named no epoch for, is in sync whatever the epoch is.
+      const drained = raw.messages.length === 0 && !raw.hasMore;
+      const latestEpoch = raw.latestEpoch === undefined ? undefined : BigInt(raw.latestEpoch);
+      const localEpoch = drained && latestEpoch !== undefined ? deviceGroupEpoch(g, id) : null;
+      const verdict =
+        localEpoch === null
+          ? ({ kind: "in-sync" } as const)
+          : forkVerdict(localEpoch, drained, latestEpoch, suspectSince, Date.now());
+      suspectSince = verdict.kind === "suspect" ? verdict.since : undefined;
+      if (verdict.kind === "forked") {
+        if (forkRepaired.has(accountIdB64)) {
+          if (!forkReported) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `DeviceGroup still behind the DS after a repair this session: local epoch ${localEpoch}, DS epoch ${latestEpoch}; not repairing again`,
+            );
+            forkReported = true;
+          }
+        } else if (auth.identitySecrets()?.accountIdentitySeed === undefined) {
+          // The re-founding claims (or resets) the journal with the account's
+          // root, which needs the phrase seed. Without it nothing is deleted;
+          // the loop keeps polling and repairs once the seed is available.
+          if (!forkReported) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `DeviceGroup forked: local epoch ${localEpoch}, DS epoch ${latestEpoch}; account root not available, not repairing yet`,
+            );
+            forkReported = true;
+          }
+        } else {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `DeviceGroup forked: local epoch ${localEpoch}, DS epoch ${latestEpoch}; re-founding it`,
+          );
+          // The repair waits for this loop to finish, so it is started, not
+          // awaited, and the loop stops here.
+          void repairForkedDeviceGroup(accountIdB64, cursor);
+          return;
+        }
+      }
     }
+  }
+
+  /**
+   * Re-found a DeviceGroup that has forked off the account's chain
+   * (`fork-verdict.ts`): stop the poll loop, delete ONLY this account's
+   * DeviceGroup snapshot (its journal cursor lives in the same row), found a
+   * fresh DeviceGroup through `ensureDeviceGroup` - which claims the journal
+   * with the account's root and, on the 409 the old chain answers, RESETS it
+   * (ADR-0057 obligation 7) - and resume polling at the journal head as last
+   * seen: the old group's rows cannot be read by the new one, re-reading them
+   * only produces refused rows.
+   *
+   * What it keeps: the DeviceGroup snapshot store (`lakko-device-group-
+   * snapshots`) is its own IndexedDB database, separate from the chat MLS
+   * store, and the device identity seed, contacts and the synced-state row are
+   * not touched. The device identity is the same seed and the same signature
+   * key, so its conversation leaves in chats are unaffected.
+   *
+   * CONSEQUENCE: the reset removes every epoch key of the old chain, so every
+   * OTHER device of the account loses the DeviceGroup - its reads answer 401 -
+   * and must be added again from this one. A 401 is not a drained read, so
+   * those devices never start a repair of their own.
+   *
+   * The founding is fail-closed (`ensureDeviceGroup`): a claim or reset that
+   * does not land persists nothing, and the founding is tried again after
+   * `BOOTSTRAP_RETRY_MS` while the session lasts; the next session founds too,
+   * since the snapshot is gone.
+   */
+  async function repairForkedDeviceGroup(account: string, headCursor: number): Promise<void> {
+    const accountBytes = accountIdBytesActive;
+    if (activeAccountIdB64 !== account || accountBytes === null || group === null) return;
+    if (forkRepaired.has(account)) return;
+    forkRepaired.add(account);
+    reloading = true;
+    try {
+      pollAbort?.abort();
+      pollAbort = null;
+      if (pollDone !== null) await pollDone;
+      pollDone = null;
+      const deviceKey = await getDeviceKey(account);
+      if (deviceKey === null || activeAccountIdB64 !== account) return;
+      try {
+        await deleteDeviceGroupSnapshot(account);
+      } catch (err) {
+        // The stale snapshot is still there, and founding over it would load
+        // it again: keep following with the handle held, as before.
+        // eslint-disable-next-line no-console
+        console.warn("DeviceGroup snapshot delete failed; not re-founding", err);
+        startPollLoop(account, deviceKey);
+        return;
+      }
+      try {
+        group?.free();
+        identity?.free();
+      } catch {
+        // best-effort
+      }
+      group = null;
+      identity = null;
+      ownPublishedIds.clear();
+      await installRefoundedDeviceGroup(account, accountBytes, deviceKey, headCursor);
+    } finally {
+      reloading = false;
+    }
+  }
+
+  /** The founding half of {@link repairForkedDeviceGroup}, retried on its own
+   *  while the session lasts when the claim or reset does not land. */
+  async function installRefoundedDeviceGroup(
+    account: string,
+    accountBytes: Uint8Array,
+    deviceKey: CryptoKey,
+    headCursor: number,
+  ): Promise<void> {
+    if (activeAccountIdB64 !== account || group !== null) return;
+    let ensured;
+    try {
+      const seed = await ensureDeviceIdentitySeed(account, deviceKey);
+      try {
+        ensured = await ensureDeviceGroup(
+          accountBytes,
+          account,
+          seed,
+          deviceKey,
+          auth.identitySecrets()?.accountIdentitySeed,
+        );
+      } finally {
+        seed.fill(0);
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("DeviceGroup re-founding failed; trying again later", err);
+      setReady(false);
+      setTimeout(() => {
+        void installRefoundedDeviceGroup(account, accountBytes, deviceKey, headCursor);
+      }, BOOTSTRAP_RETRY_MS);
+      return;
+    }
+    if (activeAccountIdB64 !== account || group !== null) {
+      ensured.group.free();
+      ensured.identity.free();
+      return;
+    }
+    if (!ensured.bootstrapped) {
+      // eslint-disable-next-line no-console
+      // A write from the stale handle (a publish that was already out) landed
+      // after the delete. It is the forked state again; the next page load
+      // detects it and repairs then.
+      console.warn("DeviceGroup snapshot rewritten during the re-founding; not re-founded this session");
+    }
+    try {
+      await persistDeviceGroupSnapshotWithCursor(ensured.identity, account, deviceKey, headCursor);
+    } catch (err) {
+      // The founding is on disk without a cursor: the loop starts from 0 and
+      // the old group's rows are refused, which costs only the re-read.
+      // eslint-disable-next-line no-console
+      console.warn("DeviceGroup re-founding cursor persist failed", err);
+    }
+    group = ensured.group;
+    identity = ensured.identity;
+    setReady(true);
+    startPollLoop(account, deviceKey);
+    void drainFolderOutbox();
   }
 
   function applyParsed(parsed: ParsedDeviceGroupPayload): void {
@@ -1022,6 +1206,19 @@ export function useDeviceGroupSync(): DeviceGroupSyncApi {
 }
 
 // ----- Helpers -----------------------------------------------------
+
+/** The DeviceGroup's current epoch, or `null` when it cannot be read. The
+ *  wasm DeviceGroup exposes no `epoch()` accessor; the DS access signer is
+ *  derived at the group's current epoch and carries it. */
+function deviceGroupEpoch(g: WasmDeviceGroup, id: WasmIdentity): bigint | null {
+  const signer = takeSigner(() => g.dsAccessSigner(id));
+  if (signer === null) return null;
+  try {
+    return signer.epoch;
+  } finally {
+    signer.free();
+  }
+}
 
 function sleepCancellable(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
