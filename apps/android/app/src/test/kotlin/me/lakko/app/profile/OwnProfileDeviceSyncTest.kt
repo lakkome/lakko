@@ -142,4 +142,19 @@ class OwnProfileDeviceSyncTest {
         assertEquals("Alice", followSavedName(draft = "", mirrored = "", incoming = "Alice"))
         assertEquals("Alicia", followSavedName(draft = "Alicia", mirrored = "Alice", incoming = "Alice B"))
     }
+
+    @Test
+    fun aDeviceWithoutAProfileStatesItsUsernameAtStampZero() {
+        val fresh = withSessionUsername(current = null, username = "alice", nowMs = 900L)
+        assertEquals(OwnProfile(displayName = null, username = "alice", updatedAtMs = 0L, nameUpdatedAtMs = 0L), fresh)
+        // A name another device saved at 300 still outranks it at every member.
+        assertTrue(300L > fresh!!.updatedAtMs)
+        assertNull(withSessionUsername(current = fresh, username = "alice", nowMs = 950L))
+
+        val named = OwnProfile(displayName = "Alice", username = null, updatedAtMs = 500L, nameUpdatedAtMs = 500L)
+        val claimed = withSessionUsername(current = named, username = "alice", nowMs = 900L)!!
+        assertEquals(900L, claimed.updatedAtMs)
+        assertEquals(500L, claimed.nameUpdatedAtMs)
+        assertEquals("Alice", claimed.displayName)
+    }
 }

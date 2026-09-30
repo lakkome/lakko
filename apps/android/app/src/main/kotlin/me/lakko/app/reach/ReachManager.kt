@@ -123,6 +123,11 @@ public class ReachManager internal constructor(
     @Volatile
     public var onVisibilityChanged: (suspend (FfiVisibilitySetting) -> Unit)? = null
 
+    /** ADR-0048 section 4a — the own name was adopted from another of the
+     *  account's devices: what follows the name here (the Everyone
+     *  publication) is refreshed. Never a group republish. */
+    public var onOwnNameAdopted: (suspend () -> Unit)? = null
+
     /** Sends one `lakko-contacts` envelope to the account's other devices over
      *  the DeviceGroup (ADR-0060 §7). Installed by the DeviceGroup sync
      *  runtime; `null` while none runs, when a change stays on this device
@@ -463,8 +468,12 @@ public class ReachManager internal constructor(
             val adopted = profiles.update(accountId) { stored ->
                 me.lakko.app.profile.adoptOwnProfileFromDevice(stored, received.profile, accountId)
             }
-            if (!adopted) Log.i(LOG_TAG, "device sync: own profile not newer or not this account's")
+            if (!adopted) {
+                Log.i(LOG_TAG, "device sync: own profile not newer or not this account's")
+                return
+            }
         }
+        onOwnNameAdopted?.invoke()
     }
 
     private suspend fun adoptReachState(b: Binding, received: ReceivedDeviceSync.ReachState) {

@@ -1108,6 +1108,9 @@ public class ChatRepository(
         try {
             val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
             reach.onVisibilityChanged = { onVisibilityChanged(it) }
+            // ADR-0048 section 4a / ADR-0060 section 5 — Everyone follows the
+            // name, an adopted one included.
+            reach.onOwnNameAdopted = { refreshEveryoneBestEffort() }
             reach.bind(accountIdB64, account)
             publishThreadList()
             // ADR-0060 §4 — the introduction record and the relayed bundle,

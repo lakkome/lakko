@@ -141,7 +141,13 @@ Visibility setting: composed with the stored stamp (never re-stamped), no userna
 and no grants, sent when the name is saved or cleared and handed to a device when it is added.
 A receiving device keeps only the display name and only when its stamp is strictly greater
 than the one stored; the username stays the session's. It does not republish to its groups:
-the device that made the change already has.
+the device that made the change already has. It does refresh what follows the name on this
+device, the ADR-0060 Everyone publication.
+
+A device that holds no own profile yet publishes one at stamp 0 (web and iOS always did;
+Android stamped the record it created at sign-in with the current time until 2026-09-30, so a
+nameless profile published when that device joined the account's groups outranked the name
+another device had set, and every member dropped the name).
 
 ### 5. Display precedence (all clients)
 

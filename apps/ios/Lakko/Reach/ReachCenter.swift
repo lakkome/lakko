@@ -370,7 +370,12 @@ public final class ReachCenter: ObservableObject {
             return adoptReachState(envelope: envelope)
         case .profile:
             switch ownProfileAdopter(envelope) {
-            case .adopted: return .adoptedOwnProfile
+            case .adopted:
+                // ADR-0060 section 5 — Everyone follows the name, one adopted
+                // from another of the account's devices included (the group
+                // profile is not republished: ADR-0048 section 4a).
+                sync()
+                return .adoptedOwnProfile
             case .notNewer: return .notNewer
             case .inactive: return .inactive
             case .foreignAccount, .notAProfile: return .foreign

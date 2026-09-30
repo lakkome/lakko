@@ -47,6 +47,32 @@ public data class OwnProfile(
  * backwards, because a receiver keeps only a STRICTLY newer profile — an
  * equal or older stamp would make this change invisible to every contact.
  */
+/**
+ * The own profile once it states the session's [username], or `null` when it
+ * already does (nothing to save or republish).
+ *
+ * A device that holds no profile yet creates one at stamp 0, as the web and
+ * iOS clients do for a name never saved here: it knows nothing newer than any
+ * other device of the account, and a fresh stamp on a nameless profile would
+ * outrank the name that device set when this one publishes into the account's
+ * groups (every member keeps the strictly newest profile per account). Only a
+ * username CHANGE of a record that exists moves the stamp.
+ */
+public fun withSessionUsername(current: OwnProfile?, username: String?, nowMs: Long): OwnProfile? {
+    val canonical = username?.takeIf { it.isNotBlank() }
+    if (current != null && current.username == canonical) return null
+    if (current == null) {
+        return OwnProfile(displayName = null, username = canonical, updatedAtMs = 0L, nameUpdatedAtMs = 0L)
+    }
+    return OwnProfile(
+        displayName = current.displayName,
+        username = canonical,
+        updatedAtMs = nextProfileStamp(current.updatedAtMs, nowMs),
+        // The name did not change: its stamp stays (ADR-0048 section 4a).
+        nameUpdatedAtMs = current.nameUpdatedAtMs,
+    )
+}
+
 public fun nextProfileStamp(previousMs: Long?, nowMs: Long): Long =
     if (previousMs == null) nowMs else maxOf(nowMs, previousMs + 1)
 
@@ -209,16 +235,10 @@ public object OwnProfileStore {
     ): Pair<OwnProfile, Boolean> = synchronized(this) {
         // Under the store's lock, as [update]: a name adopted from another
         // device between this read and the write below would be lost.
-        val canonical = username?.takeIf { it.isNotBlank() }
         val current = load(context, accountId)
-        if (current != null && current.username == canonical) return current to false
-        val updated = OwnProfile(
-            displayName = current?.displayName,
-            username = canonical,
-            updatedAtMs = nextProfileStamp(current?.updatedAtMs, nowMs),
-            // The name did not change: its stamp stays (ADR-0048 section 4a).
-            nameUpdatedAtMs = current?.nameUpdatedAtMs ?: 0L,
-        )
+        val updated = withSessionUsername(current, username, nowMs)
+            // Null only when a stored profile already states this username.
+            ?: return checkNotNull(current) to false
         save(context, accountId, updated)
         return updated to true
     }
