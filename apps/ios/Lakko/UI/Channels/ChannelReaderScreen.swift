@@ -278,7 +278,13 @@ struct ChannelReaderScreen: View {
                 )
             } catch let token as AnonTokenUnavailable {
                 NSLog("Channels: subscribe token: %@", String(describing: token))
-                bootstrapError = token.errorDescription
+                // ADR-0059 section 4 — a used-up `channel-subscribe` allowance
+                // has its own line (UX spec section 7).
+                if case .quotaExhausted = token {
+                    bootstrapError = AnonTokenCopy.subscribeAllowanceUsed
+                } else {
+                    bootstrapError = token.errorDescription
+                }
                 bootstrap = .errorState
                 return
             } catch {
@@ -303,8 +309,10 @@ struct ChannelReaderScreen: View {
         // retention window, or nothing fanned out yet), a re-subscribe is
         // idempotent and makes the publisher reseal this device on its next
         // fanout. Beyond-retention posts stay the "older key window"
-        // placeholder.
-        if !haveCurrent {
+        // placeholder. At most one registration per open: a device that
+        // just registered above has nothing to re-register, and a second
+        // `channel-subscribe` token would be spent for nothing.
+        if !haveCurrent && alreadyFollowing {
             _ = try? await client.subscribe(
                 channelIdHex: channelId,
                 subscriberPubkeyHex: pubHex

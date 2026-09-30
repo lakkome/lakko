@@ -107,6 +107,8 @@ import me.lakko.app.feed.upsertFeed
 import me.lakko.app.feed.whyLine
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.channels.channelTitle
+import me.lakko.app.ui.discover.DiscoverCardView
+import me.lakko.app.ui.discover.DiscoverView
 import me.lakko.app.ui.chat.conversationTitle
 import me.lakko.app.ui.chat.formatListTime
 import me.lakko.app.ui.chat.isGroupConversation
@@ -130,8 +132,12 @@ import java.util.Locale
  * devices a read cursor at the new watermark, never past a message the person
  * did not see. Channel posts are not marked.
  *
- * Not yet here: the "New" divider, unpinning a preset, the item menu, and
- * Discover (ADR-0059).
+ * Discover (ADR-0059, UX spec section 6) is the chip after the presets:
+ * channel suggestions instead of items ([DiscoverView]). A saved feed whose
+ * rule asks for suggestions ("rarely" / "sometimes") mixes the same cards in
+ * between its items ([cardsAfterItems]).
+ *
+ * Not yet here: the "New" divider, unpinning a preset, and the item menu.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -144,6 +150,10 @@ public fun FeedScreen(
     onOpenGroupMessage: (groupIdHex: String, messageId: Long) -> Unit,
     onOpenChannel: (channelId: String) -> Unit,
     onGoToChats: () -> Unit,
+    /** ADR-0059 — the directory routes Discover reads. */
+    channelsClient: me.lakko.app.channels.ChannelsClient,
+    /** ADR-0059 — subscribe to a channel a card verified (the subscribe route). */
+    onSubscribeChannel: (channelId: String, handle: String) -> Unit,
     core: FeedCore = UniffiFeedCore,
 ) {
     val context = LocalContext.current
@@ -201,6 +211,55 @@ public fun FeedScreen(
     val selectedSaved = saved.firstOrNull { CUSTOM_PREFIX + it.id == selection }
     val whyPreset: FeedPresetKey = presetOf(selection)
         ?: if ((selectedSaved?.rule?.weights?.reactions?.toInt() ?: 0) > 0) FeedPresetKey.POPULAR else FeedPresetKey.LATEST
+
+    // ----- Discover (ADR-0059) ----------------------------------------------
+
+    val discover = remember(account) {
+        me.lakko.app.discover.DiscoverModel(
+            backend = me.lakko.app.discover.ChannelsDiscoverBackend(context.applicationContext, channelsClient),
+            account = { chatRepository.currentAccountIdB64() },
+            scope = scope,
+            appLanguageCode = me.lakko.app.discover.appLanguage(Locale.getDefault().toLanguageTag()),
+        )
+    }
+    LaunchedEffect(discover) {
+        discover.load()
+        runCatching { chatRepository.sharedChannels.open() }
+    }
+    val discoverPrefs by discover.prefs.collectAsStateWithLifecycle()
+    val discoverDetails by discover.details.collectAsStateWithLifecycle()
+    val discoverGone by discover.gone.collectAsStateWithLifecycle()
+    val sharedRow by chatRepository.sharedChannels.row.collectAsStateWithLifecycle()
+    val suggestionRate = when (selectedSaved?.rule?.suggestions) {
+        uniffi.lakko_ffi_uniffi.FeedSuggestions.RARELY -> me.lakko.app.discover.SuggestionRate.RARELY
+        uniffi.lakko_ffi_uniffi.FeedSuggestions.SOMETIMES -> me.lakko.app.discover.SuggestionRate.SOMETIMES
+        else -> me.lakko.app.discover.SuggestionRate.NEVER
+    }
+    val discoverLoaded by discover.loaded.collectAsStateWithLifecycle()
+    LaunchedEffect(suggestionRate, discoverLoaded) {
+        if (suggestionRate != me.lakko.app.discover.SuggestionRate.NEVER && discoverLoaded) discover.refresh()
+    }
+    val discoverCards: List<me.lakko.app.discover.DirectoryCard> = remember(
+        discoverPrefs, discoverDetails, discoverGone, sharedRow, channelList, contactsState, chatState, nameVersion, groupNameVersion,
+    ) {
+        val liveGroups = chatState.threads
+            .filter { !it.membershipEnded && isGroupConversation(context, chatRepository, it.groupIdHex) }
+            .map { it.groupIdHex }
+            .toSet()
+        val contactKeys = contactsState.accepted
+            .map { java.util.Base64.getEncoder().encodeToString(it.request.fromPubkey) }
+            .toSet()
+        val shared = me.lakko.app.discover.aggregateShared(sharedRow, chatRepository.ownPersonKeyB64(), liveGroups)
+        val group = discover.groupCards(
+            shared = shared,
+            groupTitle = { hex -> conversationTitle(context, chatRepository, directory, hex) },
+            contactName = { key -> if (key in contactKeys) directory.resolve(key).primary else null },
+        )
+        me.lakko.app.discover.rankCards(
+            discover.bucketCards() + group,
+            discover.context(channelList.map { it.id }.toSet()),
+        )
+    }
 
     var editing by remember { mutableStateOf<Editing?>(null) }
     var editError by remember { mutableStateOf<String?>(null) }
@@ -512,6 +571,11 @@ public fun FeedScreen(
                         label = { Text(p.label) },
                     )
                 }
+                FilterChip(
+                    selected = selection == DISCOVER,
+                    onClick = { choose(DISCOVER) },
+                    label = { Text("Discover") },
+                )
                 for (v in saved) {
                     FilterChip(
                         selected = selection == CUSTOM_PREFIX + v.id,
@@ -534,6 +598,9 @@ public fun FeedScreen(
                 }
             }
 
+            if (selection == DISCOVER) {
+                DiscoverView(model = discover, cards = discoverCards, onSubscribe = onSubscribeChannel)
+            } else {
             if (!bannerDismissed && input.candidates.isNotEmpty()) {
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceVariant,
@@ -586,7 +653,7 @@ public fun FeedScreen(
                 items.isEmpty() -> EmptyFeed(
                     hasSources = sources.isNotEmpty(),
                     hasCandidates = input.candidates.isNotEmpty(),
-                    onGoToChats = onGoToChats,
+                    onDiscover = { choose(DISCOVER) },
                     onEditFeed = selectedSaved?.let { v ->
                         {
                             editError = null
@@ -599,7 +666,10 @@ public fun FeedScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(vertical = 4.dp),
                 ) {
-                    for (item in items) {
+                    // A saved feed that asks for suggestions shows a channel card
+                    // after some items (ADR-0059, UX spec section 4.1).
+                    val cardAfter = me.lakko.app.discover.cardsAfterItems(items.size, discoverCards.size, suggestionRate)
+                    for ((index, item) in items.withIndex()) {
                         val key = item.key
                         item(key = key) {
                             FeedItemCard(
@@ -625,6 +695,13 @@ public fun FeedScreen(
                             }
                         }
                         item(key = "$key/divider") { HorizontalDivider() }
+                        cardAfter[index]?.let { discoverCards.getOrNull(it) }?.let { card ->
+                            item(key = "$key/suggestion:${card.channelIdHex}") {
+                                Box(Modifier.padding(horizontal = 12.dp)) {
+                                    DiscoverCardView(card = card, model = discover, onSubscribe = onSubscribeChannel)
+                                }
+                            }
+                        }
                     }
                     item(key = "end") {
                         Text(
@@ -638,6 +715,7 @@ public fun FeedScreen(
                     }
                 }
             }
+            }
         }
     }
 
@@ -649,6 +727,9 @@ public fun FeedScreen(
 // ============================================================================
 
 private const val CUSTOM_PREFIX = "custom:"
+
+/** The Discover chip's selection key (ADR-0059). */
+private const val DISCOVER = "DISCOVER"
 private const val REPLY_PREFIX = "reply:"
 private const val PREVIEW_ITEMS = 8
 private const val SEEN_TICK_MS = 250L
@@ -666,6 +747,7 @@ private sealed interface Editing {
 
 private fun initialSelection(stored: String?): String {
     if (stored != null && stored.startsWith(CUSTOM_PREFIX)) return stored
+    if (stored == DISCOVER) return DISCOVER
     return FeedPresetKey.entries.firstOrNull { it.name == stored }?.name ?: FeedPresetKey.LATEST.name
 }
 
@@ -735,7 +817,7 @@ private fun hexToBytes(hex: String): ByteArray? {
 private fun EmptyFeed(
     hasSources: Boolean,
     hasCandidates: Boolean,
-    onGoToChats: () -> Unit,
+    onDiscover: () -> Unit,
     onEditFeed: (() -> Unit)?,
 ) {
     Column(
@@ -750,7 +832,7 @@ private fun EmptyFeed(
             !hasSources -> {
                 Text("Your feed fills up from your groups and channels.", color = muted)
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = onGoToChats) { Text("Go to chats") }
+                Button(onClick = onDiscover) { Text("Discover channels") }
             }
             !hasCandidates -> Text(
                 "Nothing here yet. New messages from your groups and channels will show up here.",

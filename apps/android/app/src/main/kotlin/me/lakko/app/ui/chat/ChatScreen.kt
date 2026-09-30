@@ -3937,6 +3937,13 @@ private fun MembersSheet(
                         }
                     }
                 }
+                // ADR-0059 section 6 — share the listed channels this person
+                // follows with this group. Not a block of the shared info rule
+                // (`lakko-ui-rules`), like web: shown in every group this
+                // device is still a member of.
+                if (!membershipEnded) {
+                    ShareChannelsSwitch(viewModel)
+                }
                 // ADR-0045 (UX §6.1.1) — THE EXIT BLOCK: one block at the
                 // panel's bottom whose meaning is *the exit*, holding two
                 // ROLE-DISJOINT controls of which exactly one is ever live.
@@ -4332,6 +4339,47 @@ private fun SelectionActionBar(
                         .semantics { liveRegion = LiveRegionMode.Polite },
                 )
             }
+        }
+    }
+}
+
+
+/**
+ * "Share my channels with this group" (docs/ux/feed.md 6.3, ADR-0059 section
+ * 6). Off by default. Turning it on sends this person's listed channels to the
+ * group, end-to-end encrypted; off sends an empty list. The switch changes only
+ * once the send succeeded. Mirror of web `ShareChannelsSwitch.tsx`.
+ */
+@Composable
+private fun ShareChannelsSwitch(viewModel: ChatViewModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val isGroup = remember(viewModel.groupIdHex) { viewModel.isGroupConversation(context) }
+    if (!isGroup) return
+    LaunchedEffect(viewModel.groupIdHex) { viewModel.openSharedChannels() }
+    val row by viewModel.sharedChannelsRow.collectAsStateWithLifecycle()
+    val busy by viewModel.shareChannelsBusy.collectAsStateWithLifecycle()
+    val error by viewModel.shareChannelsError.collectAsStateWithLifecycle()
+    val on = viewModel.groupIdHex in row.shareOn
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                me.lakko.app.discover.DiscoverCopy.SHARE_CHANNELS_LABEL,
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.weight(1f),
+            )
+            androidx.compose.material3.Switch(
+                checked = on,
+                enabled = !busy,
+                onCheckedChange = { viewModel.setShareChannels(it) },
+            )
+        }
+        Text(
+            me.lakko.app.discover.DiscoverCopy.SHARE_CHANNELS_LINE,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        error?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
     }
 }

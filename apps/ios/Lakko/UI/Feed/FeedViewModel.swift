@@ -8,12 +8,15 @@ import LakkoCore
 /// The selected feed: a preset, or a saved feed by its local id.
 enum FeedSelection: Hashable {
     case preset(FeedPresetKey)
+    /// ADR-0059 — Discover: channel suggestions instead of items.
+    case discover
     case saved(String)
 
     /// The form kept in `UserDefaults` (the web's `localStorage` value).
     var storageValue: String {
         switch self {
         case .preset(let key): return key.rawValue
+        case .discover: return "discover"
         case .saved(let id): return "custom:\(id)"
         }
     }
@@ -21,6 +24,8 @@ enum FeedSelection: Hashable {
     init(storageValue: String?) {
         if let v = storageValue, v.hasPrefix("custom:") {
             self = .saved(String(v.dropFirst("custom:".count)))
+        } else if storageValue == "discover" {
+            self = .discover
         } else if let v = storageValue, let key = FeedPresetKey(rawValue: v) {
             self = .preset(key)
         } else {
@@ -115,6 +120,9 @@ final class FeedViewModel: ObservableObject {
     private let contacts: ContactsRepository
     private let feedStore: FeedStore
     private let defaults: UserDefaults
+    /// ADR-0059 — Discover's model: the Discover chip, and the cards a saved
+    /// feed that asks for suggestions mixes in.
+    let discover: DiscoverModel
 
     private var input: FeedInput?
     private var savedState = FeedState()
@@ -130,6 +138,7 @@ final class FeedViewModel: ObservableObject {
         postSync: ChannelPostSync,
         deviceGroupSync: DeviceGroupSyncRepository,
         contacts: ContactsRepository,
+        discover: DiscoverModel,
         feedStore: FeedStore = FeedStore(),
         defaults: UserDefaults = .standard
     ) {
@@ -140,6 +149,7 @@ final class FeedViewModel: ObservableObject {
         self.postSync = postSync
         self.deviceGroupSync = deviceGroupSync
         self.contacts = contacts
+        self.discover = discover
         self.feedStore = feedStore
         self.defaults = defaults
         self.selection = FeedSelection(storageValue: defaults.string(forKey: Self.selectionKey))
@@ -168,6 +178,7 @@ final class FeedViewModel: ObservableObject {
     /// hours.
     func start() {
         rebuild()
+        if suggestionRate != .never { Task { await discover.refresh() } }
         guard clock == nil else { return }
         clock = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -193,7 +204,19 @@ final class FeedViewModel: ObservableObject {
         selection = next
         defaults.set(next.storageValue, forKey: Self.selectionKey)
         rerank()
+        if suggestionRate != .never { Task { await discover.refresh() } }
     }
+
+    /// How often the selected feed mixes suggestions in: its rule's field for
+    /// a saved feed; the presets never do (their rules say never).
+    var suggestionRate: SuggestionRate {
+        switch selectedSaved?.rule.suggestions {
+        case .rarely: return .rarely
+        case .sometimes: return .sometimes
+        case .never, .none: return .never
+        }
+    }
+
 
     var selectedSaved: SavedFeedView? {
         guard case .saved(let id) = selection else { return nil }
@@ -205,6 +228,7 @@ final class FeedViewModel: ObservableObject {
     var whyPreset: FeedPresetKey {
         switch selection {
         case .preset(let key): return key
+        case .discover: return .latest
         case .saved: return (selectedSaved?.rule.weights.reactions ?? 0) > 0 ? .popular : .latest
         }
     }
@@ -356,6 +380,7 @@ final class FeedViewModel: ObservableObject {
     private func selectedRule() -> FeedRule? {
         switch selection {
         case .preset(let key): return feedPresetRule(preset: key.preset)
+        case .discover: return nil
         case .saved: return selectedSaved?.rule
         }
     }

@@ -1004,6 +1004,14 @@ const ChannelSubscribe: Component = () => {
     });
   }
 
+  /** Whether this view has already spent its one `channel-subscribe` token.
+   *  At most one registration per open: a fresh subscribe IS that
+   *  registration, and the re-sync below re-registers only a device that did
+   *  not register this time. Without it the 3 s catch-up poll re-registered
+   *  on every tick while waiting for the publisher's fanout, draining the
+   *  token allowance in about a minute. */
+  let registeredThisView = false;
+
   /** Drive the registration + catch-up dance. Idempotent — the server treats
    *  a re-register of the same pubkey as a no-op, and re-running the
    *  catch-up re-opens whatever the retained set currently is. A registration
@@ -1020,7 +1028,10 @@ const ChannelSubscribe: Component = () => {
         channelsState.subscriberKeysByChannel().has(params.id);
       const kp = await ensureKeypair();
       const pubHex = bytesToHex(kp.public);
-      if (!alreadyFollowing) await subscribe(params.id, pubHex);
+      if (!alreadyFollowing) {
+        registeredThisView = true;
+        await subscribe(params.id, pubHex);
+      }
       rememberSubscribed();
 
       setBootstrap("polling");
@@ -1082,9 +1093,11 @@ const ChannelSubscribe: Component = () => {
     }
 
     const map = channelsState.subscribedSeedsByChannel().get(params.id);
-    if (map === undefined || !map.has(epochView.epoch)) {
+    if ((map === undefined || !map.has(epochView.epoch)) && !registeredThisView) {
       // Missing the current epoch's seed — re-register so the next rotation
-      // fanout reseals us. Idempotent; a failure here is non-fatal.
+      // fanout reseals us. Idempotent; a failure here is non-fatal. Once per
+      // view: the token is spent whether or not the request lands.
+      registeredThisView = true;
       try {
         await subscribe(params.id, pubHex);
       } catch (err) {

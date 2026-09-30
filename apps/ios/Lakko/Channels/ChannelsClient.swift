@@ -516,6 +516,136 @@ public final class ChannelsClient {
         return view.epoch
     }
 
+    // MARK: - ADR-0059 — the directory (Discover)
+
+    /// Whether this account holds the OWNER key of `channelIdHex` (not a
+    /// co-publisher's): an owner-signed read of the subscriber list is
+    /// accepted only under the key registered at creation. `nil` when the
+    /// server could not answer (network, a 5xx).
+    public func probeChannelOwner(channelIdHex: String, accountIdentity: Identity) async -> Bool? {
+        struct Resp: Decodable { let subscribers: [String] }
+        let path = "/v1/channels/\(channelIdHex)/subscribers"
+        do {
+            let signer = try Self.ownerSigner(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
+            var request = URLRequest(url: try buildURL(endpoint: path))
+            request.httpMethod = "GET"
+            request.setValue(
+                signer.sign(method: "GET", path: path, query: "", body: Data()),
+                forHTTPHeaderField: channelOwnerProofHeaderName())
+            let _: Resp = try await execute(request: request)
+            return true
+        } catch let err as ChannelsApiError where err.status == 401 {
+            return false
+        } catch {
+            return nil
+        }
+    }
+
+    /// `PUT /v1/channels/:id/listing` — store or replace the channel's
+    /// listing (owner-signed). `listing` is the canonical
+    /// `composeChannelListing` bytes.
+    public func putListing(channelIdHex: String, accountIdentity: Identity, listing: Data) async throws {
+        try await ownerSignedWrite(
+            method: "PUT", path: "/v1/channels/\(channelIdHex)/listing",
+            channelIdHex: channelIdHex, accountIdentity: accountIdentity, body: listing)
+    }
+
+    /// `DELETE /v1/channels/:id/listing` — withdraw the listing
+    /// (owner-signed, idempotent).
+    public func deleteListing(channelIdHex: String, accountIdentity: Identity) async throws {
+        try await ownerSignedWrite(
+            method: "DELETE", path: "/v1/channels/\(channelIdHex)/listing",
+            channelIdHex: channelIdHex, accountIdentity: accountIdentity, body: Data())
+    }
+
+    private func ownerSignedWrite(
+        method: String, path: String, channelIdHex: String, accountIdentity: Identity, body: Data
+    ) async throws {
+        let signer = try Self.ownerSigner(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
+        var request = URLRequest(url: try buildURL(endpoint: path))
+        request.httpMethod = method
+        request.setValue(
+            signer.sign(method: method, path: path, query: "", body: body),
+            forHTTPHeaderField: channelOwnerProofHeaderName())
+        if !body.isEmpty {
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body
+        }
+        let (data, response) = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
+        guard let http = response as? HTTPURLResponse else {
+            throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
+        }
+        try Self.throwIfFailed(data: data, http: http, decoder: decoder)
+    }
+
+    private static func throwIfFailed(data: Data, http: HTTPURLResponse, decoder: JSONDecoder) throws {
+        guard !(200..<300).contains(http.statusCode) else { return }
+        if let body = try? decoder.decode(ChannelsErrEnvelope.self, from: data) {
+            throw ChannelsApiError(status: http.statusCode, code: body.code, detail: body.detail)
+        }
+        throw ChannelsApiError(
+            status: http.statusCode, code: "unknown",
+            detail: HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
+    }
+
+    /// An anonymous, cacheable directory read: no session, no token, on the
+    /// anonymous connection pool (the server answers every caller the same,
+    /// ADR-0059 section 5).
+    private func anonymousGet<R: Decodable>(endpoint: String) async throws -> R {
+        var request = URLRequest(url: try buildURL(endpoint: endpoint))
+        request.httpMethod = "GET"
+        let (data, response) = try await AntiCensorshipTransport.perform(
+            request, session: anonymousSession, config: .current)
+        guard let http = response as? HTTPURLResponse else {
+            throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
+        }
+        return try decode(data: data, http: http)
+    }
+
+    /// `GET /v1/directory/listing/:id` — one channel's listing, or `nil`
+    /// when it is not listed (404). Tells the server someone looked at this
+    /// channel, as any card view does.
+    func fetchListing(channelIdHex: String) async throws -> DirectoryItem? {
+        do {
+            let item: DirectoryItem = try await anonymousGet(endpoint: "/v1/directory/listing/\(channelIdHex)")
+            return item
+        } catch let err as ChannelsApiError where err.status == 404 {
+            return nil
+        }
+    }
+
+    /// `GET /v1/directory/bucket/:topic/:language` — the top listings of one
+    /// bucket. No session, no token.
+    func fetchBucket(topic: Int, language: String) async throws -> [DirectoryItem] {
+        struct Resp: Decodable { let items: [DirectoryItem]? }
+        let resp: Resp = try await anonymousGet(endpoint: "/v1/directory/bucket/\(topic)/\(language)")
+        return resp.items ?? []
+    }
+
+    /// `GET /v1/directory/search?q=` — one `directory-search` token; the
+    /// query is sent to the server (the UI says so).
+    func searchDirectory(query: String) async throws -> [DirectoryItem] {
+        struct Resp: Decodable { let items: [DirectoryItem]? }
+        var components = URLComponents()
+        components.queryItems = [URLQueryItem(name: "q", value: query)]
+        let encoded = (components.percentEncodedQuery ?? "").replacingOccurrences(of: "+", with: "%2B")
+        let url = try buildURL(endpoint: "/v1/directory/search?\(encoded)")
+        let anonymousSession = self.anonymousSession
+        let (data, http) = try await AnonTokenRoute.send(context: .directorySearch, tokens: tokens) { header in
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.setValue(header, forHTTPHeaderField: AnonTokenRoute.headerName)
+            let (data, response) = try await AntiCensorshipTransport.perform(
+                request, session: anonymousSession, config: .current)
+            guard let http = response as? HTTPURLResponse else {
+                throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
+            }
+            return (data, http)
+        }
+        let resp: Resp = try decode(data: data, http: http)
+        return resp.items ?? []
+    }
+
     // MARK: - Internals
 
     private func postJson<Body: Encodable, R: Decodable>(

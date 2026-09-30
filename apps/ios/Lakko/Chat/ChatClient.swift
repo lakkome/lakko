@@ -658,6 +658,24 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
+            // ADR-0059 section 6 — a member's shared channel list, before the
+            // chat parser for the same reason as the pin: the lossy-UTF-8
+            // fallback would render it as a bubble carrying the domain string
+            // and the channel names. Placed after the identity resolution: a
+            // list speaks only for its sender, filed under the ACCOUNT key the
+            // sender leaf names in the epoch it was sealed at (C-68). A domain
+            // match that fails its bounds is dropped (`list: nil`), never
+            // rendered — the web client's rule.
+            switch Self.sniffSharedChannels(data) {
+            case .none:
+                break
+            case .malformed:
+                return .sharedChannels(
+                    messageId: messageId, list: nil, senderKey: senderKey, createdAt: createdAt)
+            case .list(let list):
+                return .sharedChannels(
+                    messageId: messageId, list: list, senderKey: senderKey, createdAt: createdAt)
+            }
             // ADR-0048 §2 trigger 4 — sniff for a profile REQUEST ("introduce
             // yourselves") before the chat parser, for the same reason as the
             // beacon arm: the lossy-UTF-8 fallback would otherwise render it as
@@ -965,6 +983,40 @@ public final class ChatClient {
     /// `"lakko/pin/v1"`). Decides nothing on its own.
     private static let pinEnvelopeFirstByte: UInt8 = 0x6C
 
+    /// What ``sniffSharedChannels(_:)`` makes of an application plaintext.
+    enum SharedChannelsSniff: Equatable {
+        /// Not a shared-channels envelope: carry on to the chat parse.
+        case none
+        /// The domain matched but the envelope failed its bounds: dropped.
+        case malformed
+        case list(FfiSharedChannels)
+    }
+
+    /// ADR-0059 section 6 — classify an application plaintext as a
+    /// shared-channels list. The domain prefix decides whether the bytes are
+    /// meant as a list at all (a foreign plaintext carries on to the chat
+    /// parse); `decodeSharedChannelsEnvelope` is the verdict on one that is,
+    /// and a list it refuses is dropped, never rendered.
+    static func sniffSharedChannels(_ bytes: Data) -> SharedChannelsSniff {
+        guard bytes.first == sharedChannelsFirstByte, bytes.starts(with: sharedChannelsDomain) else {
+            return .none
+        }
+        guard let list = try? decodeSharedChannelsEnvelope(plaintext: bytes) else { return .malformed }
+        return .list(list)
+    }
+
+    /// `lakko/shared-channels/v1` plus its trailing NUL, built without a raw
+    /// NUL in this source.
+    private static let sharedChannelsDomain: Data = {
+        var d = Data("lakko/shared-channels/v1".utf8)
+        d.append(0x00)
+        return d
+    }()
+
+    /// First byte of the ADR-0059 domain separator (`'l'` of
+    /// `"lakko/shared-channels/v1"`). Decides nothing on its own.
+    private static let sharedChannelsFirstByte: UInt8 = 0x6C
+
     static func looksLikeCommitterBeacon(_ bytes: Data) -> Bool {
         guard bytes.count == committerBeaconLen,
               bytes.first == committerBeaconFirstByte
@@ -1160,6 +1212,18 @@ public enum IncomingChatEvent: Equatable {
         messageId: Int64,
         op: FfiPinOp,
         senderLeaf: UInt32?,
+        createdAt: String
+    )
+    /// ADR-0059 section 6 — the listed channels one member shares with this
+    /// group. Never a timeline bubble: the receive loop files it under
+    /// `senderKey` (the sender's ACCOUNT key resolved at receipt, C-68) in the
+    /// shared-channels store, strictly newer stamp per member, under the
+    /// per-group lock. `list == nil` when the domain matched but the envelope
+    /// failed its bounds; `senderKey == nil` when unattributable. Both dropped.
+    case sharedChannels(
+        messageId: Int64,
+        list: FfiSharedChannels?,
+        senderKey: MemberIdentity?,
         createdAt: String
     )
     /// ADR-0048 §2 trigger 4 — a member asked the group to introduce itself

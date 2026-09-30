@@ -14,16 +14,24 @@ import UIKit
 /// "Show N new" pill and pull to refresh, and the empty, loading and caught-up
 /// states. An item fully on screen for two seconds counts as seen.
 ///
+/// Discover (ADR-0059, UX spec section 6) is the fourth chip: channel
+/// suggestions instead of items (``DiscoverView``). A saved feed whose rule
+/// asks for suggestions ("rarely" / "sometimes") mixes the same cards in
+/// between its items (``DiscoverCards/mix(itemCount:cardCount:rate:)``).
+///
 /// Not yet here (as on web): the "New" divider, unpinning a preset, feed
-/// icons, the item menu, and Discover (ADR-0059).
+/// icons, and the item menu.
 struct FeedScreen: View {
     @ObservedObject var model: FeedViewModel
     /// Open a group at a message.
     let onOpenGroup: (_ groupIdHex: String, _ messageId: Int64) -> Void
     /// Open a channel.
     let onOpenChannel: (_ channelId: String) -> Void
-    /// Go to the conversation list (the empty state's button).
+    /// Go to the conversation list.
     let onGoToChats: () -> Void
+    /// ADR-0059 — open the subscribe screen for a channel a Discover card's
+    /// handle was verified to name.
+    let onOpenFoundChannel: (_ channelId: String, _ handle: String) -> Void
 
     static let scrollSpace = "feed-scroll"
     /// Within this many points of the top, new items show at once.
@@ -68,7 +76,10 @@ struct FeedScreen: View {
         .sheet(item: $model.importing) { request in
             FeedImportScreen(model: model, request: request)
         }
-        .onAppear { model.start() }
+        .onAppear {
+            model.start()
+            model.discover.onOpen = { card in onOpenFoundChannel(card.channelIdHex, card.handle) }
+        }
         .onDisappear { model.stop() }
     }
 
@@ -86,6 +97,9 @@ struct FeedScreen: View {
                     chip(key.label, selected: model.selection == .preset(key)) {
                         model.choose(.preset(key))
                     }
+                }
+                chip("Discover", selected: model.selection == .discover) {
+                    model.choose(.discover)
                 }
                 ForEach(model.saved) { saved in
                     chip(saved.rule.name, selected: model.selection == .saved(saved.id)) {
@@ -147,10 +161,14 @@ struct FeedScreen: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     topSentinel
-                    if !model.bannerDismissed && model.candidateCount > 0 {
-                        banner
+                    if model.selection == .discover {
+                        DiscoverView(model: model.discover)
+                    } else {
+                        if !model.bannerDismissed && model.candidateCount > 0 {
+                            banner
+                        }
+                        content(viewportHeight: outer.size.height)
                     }
-                    content(viewportHeight: outer.size.height)
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 24)
@@ -158,7 +176,7 @@ struct FeedScreen: View {
             .coordinateSpace(name: Self.scrollSpace)
             .refreshable { await model.refresh() }
             .overlay(alignment: .top) {
-                if model.newCount > 0 {
+                if model.selection != .discover && model.newCount > 0 {
                     Button {
                         model.showPending()
                     } label: {
@@ -206,8 +224,15 @@ struct FeedScreen: View {
             if items.isEmpty {
                 emptyState
             } else {
-                ForEach(items, id: \.key) { item in
+                ForEach(Array(items.enumerated()), id: \.element.key) { index, item in
                     itemView(item, viewportHeight: viewportHeight)
+                    // A saved feed that asks for suggestions shows a channel
+                    // card after some items (ADR-0059, UX spec 4.1 section 4).
+                    if model.suggestionRate != .never {
+                        MixedSuggestion(
+                            discover: model.discover, itemIndex: index, itemCount: items.count,
+                            rate: model.suggestionRate)
+                    }
                 }
                 Text("You're up to date.")
                     .font(.footnote)
@@ -233,7 +258,7 @@ struct FeedScreen: View {
             if model.sourceCount == 0 {
                 Text("Your feed fills up from your groups and channels.")
                     .multilineTextAlignment(.center)
-                Button("Go to chats", action: onGoToChats)
+                Button("Discover channels") { model.choose(.discover) }
                     .buttonStyle(.borderedProminent)
             } else if model.candidateCount == 0 {
                 Text("Nothing here yet. New messages from your groups and channels will show up here.")
@@ -437,6 +462,21 @@ private struct SeenWatcher: ViewModifier {
         } else {
             dwell?.cancel()
             dwell = nil
+        }
+    }
+}
+
+/// The suggestion card a mixing feed shows after one item, when there is one.
+private struct MixedSuggestion: View {
+    @ObservedObject var discover: DiscoverModel
+    let itemIndex: Int
+    let itemCount: Int
+    let rate: SuggestionRate
+
+    var body: some View {
+        let after = DiscoverCards.cardAfter(itemCount: itemCount, cardCount: discover.cards.count, rate: rate)
+        if let card = after[itemIndex], discover.cards.indices.contains(card) {
+            DiscoverCardView(card: discover.cards[card], model: discover)
         }
     }
 }

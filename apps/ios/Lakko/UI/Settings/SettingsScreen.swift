@@ -115,6 +115,11 @@ struct SettingsScreen: View {
                 row("Passkeys", systemImage: "person.badge.key") { onOpen(.passkeys) }
                 row("Devices", systemImage: "laptopcomputer.and.iphone") { onOpen(.devices) }
                 row("Recovery", systemImage: "lifepreserver") { onOpen(.recoveryFactors) }
+                // ADR-0059 section 6 — every group the "Share my channels"
+                // switch is on in (docs/ux/feed.md 6.3).
+                row("Channels I share", systemImage: "dot.radiowaves.left.and.right") {
+                    onOpen(.channelsIShare)
+                }
             }
 
             Section("Appearance") {

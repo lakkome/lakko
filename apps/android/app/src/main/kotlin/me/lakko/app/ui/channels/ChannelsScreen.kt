@@ -1140,6 +1140,7 @@ private fun SubscriberChannelView(
     val posts = postsByChannel[channelId] ?: emptyList()
 
     var bootstrap by remember(channelId) { mutableStateOf(SubscribeBootstrap.Registering) }
+    var subscribeFailure by remember(channelId) { mutableStateOf("Could not subscribe.") }
     var attempt by remember(channelId) { mutableIntStateOf(0) }
     val decodedByCursor = remember(channelId) { mutableStateMapOf<ULong, PostRender>() }
 
@@ -1157,6 +1158,14 @@ private fun SubscriberChannelView(
         )
         state.setSubscribedSeed(channelId, epoch, recovered)
     }
+
+    // Whether this open has already spent its one `channel-subscribe` token.
+    // At most one registration per open: a fresh subscribe IS that
+    // registration, and the re-sync in `catchUp` re-registers only a device
+    // that did not register this time. Without it the 3 s catch-up loop
+    // re-registered on every tick while waiting for the publisher's fanout,
+    // draining the token allowance in about a minute.
+    val registeredThisOpen = remember(channelId) { booleanArrayOf(false) }
 
     // ADR-0031 catch-up + re-sync: the retained set, the singular latest as a
     // fallback, and an idempotent re-subscribe when the current key is still
@@ -1196,7 +1205,9 @@ private fun SubscriberChannelView(
                     }
                 }
             }
-            if (state.subscribedSeeds(channelId)[currentEpoch] == null) {
+            if (state.subscribedSeeds(channelId)[currentEpoch] == null && !registeredThisOpen[0]) {
+                // Once per open: the token is spent whether or not it lands.
+                registeredThisOpen[0] = true
                 try {
                     client.subscribe(channelId, pubHex)
                 } catch (_: Throwable) {
@@ -1259,7 +1270,10 @@ private fun SubscriberChannelView(
                     state.setSubscriberKeys(channelId, it)
                 }
             val pubHex = ChannelsComposer.bytesToHex(kp.publicKey)
-            if (!alreadyFollowing) client.subscribe(channelId, pubHex)
+            if (!alreadyFollowing) {
+                registeredThisOpen[0] = true
+                client.subscribe(channelId, pubHex)
+            }
 
             if (state.subscribedSeeds(channelId).isNotEmpty()) {
                 bootstrap = SubscribeBootstrap.Active
@@ -1297,6 +1311,12 @@ private fun SubscriberChannelView(
             }
         } catch (e: Throwable) {
             Log.w(TAG, "subscribe failed", e)
+            // ADR-0059 section 4 — a used-up `channel-subscribe` allowance has
+            // its own line (docs/ux/feed.md section 7).
+            subscribeFailure = me.lakko.app.anon.anonTokenFailureCopy(
+                e,
+                me.lakko.app.anon.SUBSCRIBE_ALLOWANCE_USED_COPY,
+            ) ?: "Could not subscribe."
             bootstrap = SubscribeBootstrap.Failed
         }
     }
@@ -1311,7 +1331,7 @@ private fun SubscriberChannelView(
         SubscribeBootstrap.Failed -> {
             {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    ErrorLine("Could not subscribe.")
+                    ErrorLine(subscribeFailure)
                     TextButton(onClick = { attempt += 1 }) { Text("Try again") }
                 }
             }
@@ -1533,6 +1553,9 @@ public fun ChannelManageScreen(
         ) {
             openError?.let { ErrorLine(it) }
             channel?.let { ChannelDetailsCard(channel = it, state = state, client = client) }
+            // ADR-0059 / UX 6.4 — the owner lists the channel in Discover; a
+            // co-publisher sees the state only.
+            me.lakko.app.ui.discover.ListInDiscoverCard(channelId = channelId, state = state, client = client)
             SubscribersCard(channelId = channelId, state = state, client = client)
             CoPublishersCard(
                 channelId = channelId,
@@ -1629,6 +1652,19 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
                             updatedAtMs = System.currentTimeMillis().toULong(),
                         )
                         state.updateLocalMeta(channel.id, localName = trimmedName, localDescription = description.trim())
+                        // ADR-0059 — a listed channel's listing carries the name
+                        // and description too; editing them updates it (UX 6.4).
+                        val pub = state.publisher
+                        if (pub != null) {
+                            try {
+                                me.lakko.app.discover.DiscoverListing.refreshListingAfterEdit(state, client, pub, channel.id)
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                Log.w(TAG, "listing not refreshed after edit", e)
+                                error = "Saved. The Discover listing could not be updated; save again to retry."
+                            }
+                        }
                     } catch (e: uniffi.lakko_ffi_uniffi.FfiException.ChannelMeta) {
                         // The message opens with the frozen reason code; the
                         // human-readable half follows the ": ".

@@ -3139,6 +3139,14 @@ struct MembersSheet: View {
                 // role-disjoint controls is live, and the sentence explaining
                 // why the other is not — the section list says nothing about,
                 // and that is the whole of ADR-0045 UX §6.1. It stays here.
+                // ADR-0059 section 6 — share the listed channels this person
+                // follows with this group. Not a block of the shared info rule
+                // (`lakko-ui-rules`), as on web: shown in every group this
+                // device is still a member of.
+                if !viewModel.membershipHasEnded {
+                    ShareChannelsSection(
+                        hub: viewModel.sharedChannelsHub, groupIdHex: viewModel.groupIdHex)
+                }
                 switch viewModel.exitBlockState {
                 case .hidden:
                     EmptyView()

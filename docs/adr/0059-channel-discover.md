@@ -491,6 +491,89 @@ service envelopes.
     this topic are plain buttons), localised topic names, per-channel
     avatars.
 - **S4** iOS and Android, the same.
+  **S4 built on Android 2026-09-29 (`apps/android/.../discover/`,
+  `ui/discover/`), mirroring the web S3 states, flows and copy.
+  `:app:compileDebugKotlin` and `:app:testDebugUnitTest` (2353 tests, 0
+  failed, 2 skipped) ran in a scratch copy with the six unported sealed
+  invite-link call sites stubbed; no device or emulator run. Notes:**
+  - *Seams.* The pure rules (`Decoys.kt`, `Cards.kt`, `SharedChannels.kt`,
+    `DiscoverPrefs.kt`) are plain Kotlin ports of the web modules with the
+    same chosen weights and constants; the network and the core codec sit
+    behind `DiscoverBackend` so `DiscoverModel` runs on the host JVM. New
+    host tests: `DiscoverPureTest`, `SharedChannelsTest`,
+    `DiscoverRuntimeTest`, and a metadata v2 case in `ChannelMetaTest`.
+  - *Storage.* Discover's prefs and the shared-channels row are two sealed
+    files under the feed's Keystore key (`lakko-feed/discover-prefs`,
+    `discover-shared`), deleted by forget-device with the other per-account
+    stores.
+  - *Metadata v2.* `SharedChannelMeta`, `ChannelHandle` and the channel log
+    carry topic, language and `listed`; `ChannelMetaPublisher.post` keeps
+    what the device holds, so a rename or a post-rotation re-issue no longer
+    publishes `listed = false` for a listed channel (before this every
+    Android record was topic Other, language unset, unlisted).
+  - *Shared channels.* One mutex per account row serialises every
+    read-decide-write. A receive is launched from the poll rather than run
+    under the group lock, because a send holds the row mutex while the
+    control-message publish takes the group lock; the strictly-newer rule
+    makes launch order irrelevant. The re-send after a change of the followed
+    set is debounced 3 s and skipped while the channel list is not bound to
+    the signed-in account, so a list read before loading never withdraws
+    what was shared. Growth re-sends reuse the profile republish scheduler.
+    The background preview filter suppresses the envelope (kind 8).
+  - *Placement.* The switch is in the group members sheet above the exit
+    block (groups only, not after the membership ended), outside the
+    `lakko-ui-rules` info blocks as on web; Channels I share is a Settings
+    -> Security row opening its own screen. List in Discover is a card on
+    the manage screen; ownership is probed with an owner-signed subscriber
+    read as on web.
+  - *Also fixed:* `AnonTokenPoolTest.eachContextDrawsItsOwnBatchSize` had
+    failed since S2 (it listed only the five older contexts); a subscribe
+    refused for the used-up `channel-subscribe` allowance now shows the UX
+    line instead of "Could not subscribe.".
+  - *Unbuilt on Android:* the same three items as web (Hide this topic is a
+    plain button, English topic names, initials avatars); the Feed's "Go to
+    chats" empty-state button became "Discover channels", so `onGoToChats`
+    is now unused.
+  **S4 built on iOS 2026-09-29 (`apps/ios/Lakko/Discover/`,
+  `UI/Feed/DiscoverViews.swift`, `UI/Channels/ListInDiscoverPanel.swift`,
+  `UI/Chat/ShareChannelsViews.swift`), mirroring the web S3 states, flows and
+  copy. `xcodebuild build` of the Lakko scheme (app + NSE) and `xcodebuild
+  test -only-testing:LakkoTests` (2015 tests, 0 failures, 2 skipped) ran on
+  an iPhone Air simulator in a scratch copy with the pre-existing sealed
+  invite-link call sites stubbed (CallInviteComposer, ContactsRepository,
+  ChatRepository `GroupInviteMint`, CoPublisher) and
+  `InviteLinkShapeTests.swift` removed; no live run on a device or against
+  the test stack. `just build-ios-extension` was re-run so the NSE surface
+  carries the S1 shared-channels decode. Notes:**
+  - *Seams.* The pure rules (`DiscoverLogic.swift`: prefs codec, decoys,
+    cards, languages; `SharedChannels.swift`) are Swift ports of the web
+    modules with the same chosen weights and constants; new tests
+    `DiscoverTests` (24) plus a shared-channels arm in
+    `NseServiceEnvelopeTests`.
+  - *Storage.* Prefs and the shared-channels row are two sealed files under
+    `Application Support/lakko-discover/` with their own Keychain wrap key,
+    deleted by forget-device.
+  - *Metadata v2.* `SharedChannelMeta`, `ChannelHandle` and the persisted
+    channel log carry topic, language and `listed`; every composing path
+    (create, rename, the post-rotation re-issue, list / unlist) passes them
+    through, so a rename or re-issue keeps a listed channel listed.
+  - *Shared channels.* `SharedChannelsHub`, owned by `ChatRepository`, files a
+    member's list under the account key resolved at receipt on both receive
+    paths (foreground and the session poll share `consumeEvents`) under its
+    own per-group `GroupMlsLock`, never the commit chain; a domain match that
+    fails its bounds is dropped, a foreign plaintext falls through to the chat
+    parser. Growth re-sends reuse the pin re-send scheduler with the stored
+    list verbatim; a change of the followed set is re-sent debounced 3 s. The
+    NSE suppresses the envelope (kind 8), a domain match included.
+  - *Placement.* The switch is a section of the group members sheet above the
+    exit block while the membership lasts; Channels I share is a Settings ->
+    Security row opening its own screen; List in Discover is a card on the
+    manage screen, ownership probed with an owner-signed subscriber read. A
+    verified card opens the existing found-channel reader on the Feed stack.
+  - *Unbuilt on iOS:* localised topic names, per-channel avatars (initials);
+    Not interested and Hide this topic are buttons plus a context menu. The
+    Feed's empty-state button became "Discover channels", so `onGoToChats` is
+    unused.
 - **S5** `lakko-security`, docs reconcile, G-43 follow-up.
 
 ## Open questions

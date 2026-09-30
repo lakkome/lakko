@@ -301,6 +301,84 @@ public class ChannelsClient(
         }
     }
 
+    // -----------------------------------------------------------------
+    // ADR-0059 — the directory (Discover)
+    // -----------------------------------------------------------------
+
+    @Serializable
+    private data class DirectoryItems(val items: List<me.lakko.app.discover.DirectoryItemWire> = emptyList())
+
+    /** Whether [owner] is the channel's OWNER key (not a co-publisher's): an
+     *  owner-signed read of the subscriber list is accepted only under the key
+     *  registered at creation. `null` when the server could not answer. */
+    public suspend fun probeChannelOwner(channelIdHex: String, owner: ChannelOwnerSigner): Boolean? =
+        try {
+            listSubscribers(channelIdHex, owner)
+            true
+        } catch (e: ChannelsApiException) {
+            if (e.status == 401) false else null
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+
+    /** `PUT /v1/channels/:id/listing` — store or replace the listing
+     *  (owner-signed; [listing] is the canonical `composeChannelListing` bytes). */
+    public suspend fun putListing(channelIdHex: String, owner: ChannelOwnerSigner, listing: ByteArray) {
+        val path = "/v1/channels/$channelIdHex/listing"
+        val proof = owner.sign("PUT", path, "", listing)
+        val response: HttpResponse = client.request("$baseUrl$path") {
+            method = HttpMethod.Put
+            header(channelOwnerProofHeaderName(), proof)
+            contentType(ContentType.Application.OctetStream)
+            setBody(listing)
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "put listing")
+    }
+
+    /** `DELETE /v1/channels/:id/listing` — withdraw the listing (owner-signed,
+     *  idempotent). */
+    public suspend fun deleteListing(channelIdHex: String, owner: ChannelOwnerSigner) {
+        val path = "/v1/channels/$channelIdHex/listing"
+        val proof = owner.sign("DELETE", path, "", ByteArray(0))
+        val response: HttpResponse = client.request("$baseUrl$path") {
+            method = HttpMethod.Delete
+            header(channelOwnerProofHeaderName(), proof)
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "delete listing")
+    }
+
+    /** One channel's listing, or `null` when it is not listed (404). No
+     *  session, no token. */
+    public suspend fun fetchListing(channelIdHex: String): me.lakko.app.discover.DirectoryItemWire? {
+        val response: HttpResponse = anonClient.get("$baseUrl/v1/directory/listing/$channelIdHex")
+        if (response.status.value == 404) return null
+        if (!response.status.isSuccess()) throw decodeError(response, "fetch listing")
+        return response.body<me.lakko.app.discover.DirectoryItemWire>()
+    }
+
+    /** The top listings of one (topic, language) bucket. No session, no token. */
+    public suspend fun fetchBucket(topic: Int, language: String): List<me.lakko.app.discover.DirectoryItemWire> {
+        val response: HttpResponse = anonClient.get("$baseUrl/v1/directory/bucket/$topic/$language")
+        if (!response.status.isSuccess()) throw decodeError(response, "fetch bucket")
+        return response.body<DirectoryItems>().items
+    }
+
+    /** Search the directory: one `directory-search` token; the query is sent. */
+    public suspend fun searchDirectory(query: String): List<me.lakko.app.discover.DirectoryItemWire> {
+        val url = "$baseUrl/v1/directory/search"
+        val response: HttpResponse = anonTokens.sendWithToken(AnonTokenContext.DIRECTORY_SEARCH) { name, value ->
+            anonClient.request(url) {
+                method = HttpMethod.Get
+                header(name, value)
+                parameter("q", query)
+            }
+        }
+        if (!response.status.isSuccess()) throw decodeError(response, "search directory")
+        return response.body<DirectoryItems>().items
+    }
+
     /** `GET /v1/channels/:id/subscribers/:pk/envelope` —
      *  fetch the latest seed envelope. Returns `null` when
      *  registered but no envelope yet (server returns 404

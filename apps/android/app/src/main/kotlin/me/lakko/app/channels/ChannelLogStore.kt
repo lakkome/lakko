@@ -210,6 +210,9 @@ public fun channelsToReopen(
 
 private val channelLogJson = Json { ignoreUnknownKeys = true }
 
+/** ADR-0059 — an ISO 639 code of 2-3 lowercase letters, or "" (not set). */
+private val LANGUAGE_OR_EMPTY = Regex("^([a-z]{2,3})?$")
+
 @Serializable
 private data class StoredChannel(
     val id: String,
@@ -222,6 +225,10 @@ private data class StoredChannel(
     val sharedDescription: String = "",
     /** The record stamp as text; "" when no record has landed. */
     val sharedUpdatedAtMs: String = "",
+    /** ADR-0059 metadata v2; absent on rows written before it. */
+    val sharedTopic: Int = 0,
+    val sharedLanguage: String = "",
+    val sharedListed: Boolean = false,
 )
 
 @Serializable
@@ -254,6 +261,9 @@ internal fun encodeChannels(channels: List<ChannelHandle>): String =
                 sharedName = it.sharedName,
                 sharedDescription = it.sharedDescription,
                 sharedUpdatedAtMs = it.sharedUpdatedAtMs?.toString() ?: "",
+                sharedTopic = it.sharedTopic,
+                sharedLanguage = it.sharedLanguage,
+                sharedListed = it.sharedListed,
             )
         },
     )
@@ -276,6 +286,9 @@ internal fun decodeChannels(raw: String): List<ChannelHandle>? =
                 // A blank or unparseable stamp reads as "no record": the
                 // channel falls back to its handle until one lands.
                 sharedUpdatedAtMs = s.sharedUpdatedAtMs.toULongOrNull(),
+                sharedTopic = s.sharedTopic.takeIf { it in 0..255 } ?: 0,
+                sharedLanguage = s.sharedLanguage.takeIf { LANGUAGE_OR_EMPTY.matches(it) } ?: "",
+                sharedListed = s.sharedListed,
             )
         }
     } catch (_: Exception) {

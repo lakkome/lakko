@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Shield
@@ -86,6 +87,8 @@ public fun SettingsScreen(
     onOpenRecovery: () -> Unit,
     onOpenAntiCensorship: () -> Unit,
     onLogout: () -> Unit,
+    /** ADR-0059 section 6 — Security -> Channels I share. */
+    onOpenChannelsIShare: () -> Unit = {},
     onForgetDevice: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -165,6 +168,12 @@ public fun SettingsScreen(
                 Icons.Filled.Restore,
                 onOpenRecovery,
                 supporting = "Recovery phrase, authenticator, email or phone",
+            )
+            SettingsRow(
+                "Channels I share",
+                Icons.Filled.Share,
+                onOpenChannelsIShare,
+                supporting = "Groups that can see which channels you follow",
             )
 
             SectionLabel("Appearance")

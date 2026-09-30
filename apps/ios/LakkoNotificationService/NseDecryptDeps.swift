@@ -245,7 +245,9 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             decodesAsProfileRequest: Self.decodesAsProfileRequest,
             profileRequestEnvelopeLen: Self.profileRequestEnvelopeLength,
             decodesAsPin: Self.decodesAsPin,
-            pinEnvelopeLen: Self.pinEnvelopeLength
+            pinEnvelopeLen: Self.pinEnvelopeLength,
+            decodesAsSharedChannels: Self.decodesAsSharedChannels,
+            sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLengths
         ) {
             return nil
         }
@@ -406,6 +408,31 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     /// narrowing this filter.
     private static var pinEnvelopeLength: Int {
         Int(pinEnvelopeLen())
+    }
+
+    /// The ADR-0059 shared-channels filter: the slim FFI's
+    /// `decodeSharedChannelsEnvelope` (which returns no fields), plus the
+    /// domain prefix itself. A list that fails its bounds is still a list
+    /// the sender meant for the group, never a chat message, so a domain match
+    /// is suppressed as well, the web service worker's rule. READ-ONLY: the
+    /// NSE never stores a received list (C-59).
+    private static func decodesAsSharedChannels(_ bytes: Data) -> Bool {
+        if (try? decodeSharedChannelsEnvelope(plaintext: bytes)) != nil { return true }
+        return bytes.starts(with: sharedChannelsDomain)
+    }
+
+    /// `lakko/shared-channels/v1` plus its trailing NUL, built without a raw
+    /// NUL in this source.
+    private static let sharedChannelsDomain: Data = {
+        var d = Data("lakko/shared-channels/v1".utf8)
+        d.append(0x00)
+        return d
+    }()
+
+    /// The well-formed length range of a shared-channels list, from the slim
+    /// FFI so no wire number is hand-copied here.
+    private static var sharedChannelsEnvelopeLengths: ClosedRange<Int> {
+        Int(sharedChannelsEnvelopeMinLen())...Int(sharedChannelsEnvelopeMaxLen())
     }
 
     /// LOAD-BEARING: this does NOT persist — no `snapshotStorage()` /

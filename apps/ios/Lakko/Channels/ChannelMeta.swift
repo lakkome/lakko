@@ -17,11 +17,23 @@ public struct SharedChannelMeta: Equatable, Sendable {
     /// carries the stored value verbatim, never a fresh clock read, so it can
     /// never out-order a later edit.
     public let updatedAtMs: UInt64
+    /// ADR-0059 metadata v2 — the topic id (0 = Other), the ISO 639
+    /// language (empty = not set) and whether the owner listed the channel in
+    /// Discover. A rename keeps what the channel already said.
+    public let topic: UInt8
+    public let language: String
+    public let listed: Bool
 
-    public init(name: String, description: String, updatedAtMs: UInt64) {
+    public init(
+        name: String, description: String, updatedAtMs: UInt64,
+        topic: UInt8 = 0, language: String = "", listed: Bool = false
+    ) {
         self.name = name
         self.description = description
         self.updatedAtMs = updatedAtMs
+        self.topic = topic
+        self.language = language
+        self.listed = listed
     }
 }
 
@@ -57,7 +69,8 @@ public enum ChannelMetaRecord {
         case .meta:
             guard let meta = content.meta else { return .malformed }
             return .meta(SharedChannelMeta(
-                name: meta.name, description: meta.description, updatedAtMs: meta.updatedAtMs))
+                name: meta.name, description: meta.description, updatedAtMs: meta.updatedAtMs,
+                topic: meta.topic, language: meta.language, listed: meta.listed))
         case .malformed:
             return .malformed
         }
@@ -83,7 +96,8 @@ public enum ChannelMetaRecord {
         }
         let plaintext = try composeChannelMeta(
             meta: FfiChannelMeta(
-                name: meta.name, description: meta.description, updatedAtMs: meta.updatedAtMs))
+                name: meta.name, description: meta.description, updatedAtMs: meta.updatedAtMs,
+                topic: meta.topic, language: meta.language, listed: meta.listed))
         let epoch = state.epochByChannel[channelId] ?? 0
         let counter = state.nextCounter(channelId: channelId)
         let wire = try ChannelsComposer.compose(
@@ -100,13 +114,21 @@ public enum ChannelMetaRecord {
     /// A fresh record for an edit or the creation: the trimmed fields with a
     /// new stamp. `nil` when the name is empty after trimming (the UX copy for
     /// that is "A channel needs a name").
-    public static func fresh(name: String, description: String, nowMs: UInt64) -> SharedChannelMeta? {
+    ///
+    /// ADR-0059 — `keeping` carries the Discover fields over (topic,
+    /// language, `listed`) so a rename of a listed channel stays listed.
+    public static func fresh(
+        name: String, description: String, nowMs: UInt64, keeping: SharedChannelMeta? = nil
+    ) -> SharedChannelMeta? {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return nil }
         return SharedChannelMeta(
             name: trimmedName,
             description: description.trimmingCharacters(in: .whitespacesAndNewlines),
-            updatedAtMs: nowMs
+            updatedAtMs: nowMs,
+            topic: keeping?.topic ?? 0,
+            language: keeping?.language ?? "",
+            listed: keeping?.listed ?? false
         )
     }
 }

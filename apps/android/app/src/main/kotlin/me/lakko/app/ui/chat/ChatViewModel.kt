@@ -684,6 +684,47 @@ public class ChatViewModel(
     public val isGroupChat: Boolean
         get() = (repo.memberCount(groupIdHex) ?: 0) > 2
 
+    // --- ADR-0059 section 6: Share my channels with this group ---
+
+    /** Whether this conversation is a group (the switch is a group's). */
+    public fun isGroupConversation(context: android.content.Context): Boolean =
+        isGroupConversation(context, repo, groupIdHex)
+
+    /** The shared-channels row; the switch reads `groupIdHex in shareOn`. */
+    public val sharedChannelsRow: StateFlow<me.lakko.app.discover.SharedChannelsRow>
+        get() = repo.sharedChannels.row
+
+    private val mutableShareChannelsBusy = MutableStateFlow(false)
+    public val shareChannelsBusy: StateFlow<Boolean> = mutableShareChannelsBusy.asStateFlow()
+    private val mutableShareChannelsError = MutableStateFlow<String?>(null)
+    public val shareChannelsError: StateFlow<String?> = mutableShareChannelsError.asStateFlow()
+
+    /** Load the row for this account (the sheet calls it when shown). */
+    public fun openSharedChannels() {
+        viewModelScope.launch { runCatching { repo.sharedChannels.open() } }
+    }
+
+    /** Turn the switch on or off. It changes only once the send succeeded. */
+    public fun setShareChannels(on: Boolean) {
+        if (mutableShareChannelsBusy.value) return
+        mutableShareChannelsBusy.value = true
+        mutableShareChannelsError.value = null
+        viewModelScope.launch {
+            try {
+                repo.sharedChannels.setSharing(groupIdHex, on)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatViewModel", "share channels switch failed", cause)
+                mutableShareChannelsError.value = cause.message?.takeIf {
+                    it == "Sign in again." || it == "You are no longer in this group."
+                } ?: "Couldn't change this. Try again."
+            } finally {
+                mutableShareChannelsBusy.value = false
+            }
+        }
+    }
+
     // --- Group membership (A4) ---
 
     private val mutableMembers: MutableStateFlow<List<GroupMember>> =

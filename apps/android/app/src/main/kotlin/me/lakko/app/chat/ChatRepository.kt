@@ -1543,6 +1543,11 @@ public class ChatRepository(
         return members.firstOrNull { outboxB64(it.signaturePublicKey) != own }?.signaturePublicKey
     }
 
+    /** This PERSON's account key (base64), or `null` before bootstrap. ADR-0059:
+     *  the person's own shared list is not a suggestion to themselves. */
+    public fun ownPersonKeyB64(): MemberIdentity? =
+        canonicalIdentity.get()?.let { runCatching { ownPersonKeyOf(it) }.getOrNull() }
+
     /**
      * ADR-0023 — our own IDENTITY in [groupIdHex]: this device's signature key,
      * base64, resolved LIVE through the roster. `null` when there is no handle
@@ -3888,7 +3893,45 @@ public class ChatRepository(
             // ADR-0052 decision 3 — and the shared pins, verbatim with their
             // original stamps, on the same schedule.
             pinRepublish.onGrowth(groupIdHex)
+            // ADR-0059 section 6 — and this person's shared channel list,
+            // verbatim with its original stamp, where the switch is on.
+            sharedChannels.groupGrew(groupIdHex)
         }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0059 section 6 — channels shared inside a group
+    // -----------------------------------------------------------------
+
+    /**
+     * The "Share my channels" switches, the lists members shared, and their
+     * send / receive / growth re-send. The send is the audited control-message
+     * publish ([broadcastControlToGroup]); the receive is launched from the
+     * poll, never applied under the group lock.
+     */
+    public val sharedChannels: me.lakko.app.discover.SharedChannelsRepository by lazy {
+        me.lakko.app.discover.SharedChannelsRepository(
+            account = { currentAccountIdB64.get() },
+            broadcast = { groupIdHex, envelope ->
+                val identity = canonicalIdentity.get() ?: throw IllegalStateException("Sign in again.")
+                val record = groups[groupIdHex] ?: throw IllegalStateException("You are no longer in this group.")
+                withContext(mlsDispatcher) {
+                    broadcastControlToGroup(
+                        identity = identity,
+                        groupIdHex = groupIdHex,
+                        group = record.group,
+                        envelope = envelope,
+                    )
+                }
+            },
+            isLive = { groupIdHex ->
+                val record = groups[groupIdHex]
+                record != null && readIsActive { record.group.isActive() } != false
+            },
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            load = { me.lakko.app.discover.DiscoverStore.loadShared(applicationContext, it) },
+            save = { acct, row -> me.lakko.app.discover.DiscoverStore.saveShared(applicationContext, acct, row) },
+        )
     }
 
     // -----------------------------------------------------------------
@@ -4799,6 +4842,12 @@ public class ChatRepository(
                     // and the write are one serialized read-decide-write.
                     receivePin(record.group, groupIdHex, senderKey, op)
                 },
+                sharedChannelsSink = { senderKey, list ->
+                    // ADR-0059 section 6 — LAUNCHED onto the shared-channels
+                    // scope, never applied under this lock (see
+                    // SharedChannelsRepository on the lock order).
+                    sharedChannels.receive(groupIdHex, senderKey, list)
+                },
                 profileRequestSink = { senderKey ->
                     // ADR-0048 trigger 4 — inside the poll's provider critical
                     // section, where the own-identity read is safe; the answer
@@ -5454,6 +5503,9 @@ public class ChatRepository(
         currentAccountIdB64.set(null)
         canonicalIdentity.set(null)
         accountIdentity.getAndSet(null)?.close()
+        // ADR-0059 section 6 — the in-memory shared-channels row (the sealed
+        // file stays for the next sign-in unless forget-device deletes it).
+        sharedChannels.clear()
         mutableState.value = ChatRepositoryState()
     }
 
@@ -5505,6 +5557,9 @@ public class ChatRepository(
                 GroupNameStore.deleteAccount(applicationContext, accountIdB64)
                 // ADR-0052 decision 3 — and every pin, shared or personal.
                 PinStore.deleteAccount(applicationContext, accountIdB64)
+                // ADR-0059 — the Discover rows: picked topics, cached buckets,
+                // the share switches and the lists members shared.
+                me.lakko.app.discover.DiscoverStore.deleteAccount(applicationContext, accountIdB64)
                 // ADR-0048 trigger 4 — and when this device last asked each
                 // group for names: a fresh install asks again.
                 profileRequestStore.deleteAccount(accountIdB64)
@@ -6483,6 +6538,8 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0052 delete chat: pins", cause)
         }
+        // ADR-0059 section 6 — and the channel lists shared in it.
+        sharedChannels.forgetGroup(groupIdHex)
         // LAST, and only after everything above had its chance: dropping the
         // registry row is what makes the chat unreachable, so it must not
         // happen while a transcript is still behind it.
@@ -6971,6 +7028,9 @@ public class ChatRepository(
                             },
                             pinSink = { senderKey, op ->
                                 receivePin(record.group, groupIdHex, senderKey, op)
+                            },
+                            sharedChannelsSink = { senderKey, list ->
+                                sharedChannels.receive(groupIdHex, senderKey, list)
                             },
                             membershipProposalSink = { proposal, createdAt ->
                                 // The sweep's own apply pass consumes rows the
@@ -8171,6 +8231,7 @@ private class GroupRecord(
         groupNameSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupName) -> Unit)? = null,
         profileRequestSink: ((MemberIdentity?) -> Unit)? = null,
         pinSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiPinOp) -> Unit)? = null,
+        sharedChannelsSink: ((MemberIdentity?, me.lakko.app.discover.SharedList) -> Unit)? = null,
     ) {
         // ADR-0050 — a message this PERSON sent from another device arrives as an
         // incoming row (another leaf sealed it) but is ours: it renders on our
@@ -8266,6 +8327,14 @@ private class GroupRecord(
                     // accept.
                     val op = event.pin
                     if (op != null) pinSink?.invoke(event.senderKey, op)
+                }
+                is IncomingChatEvent.SharedChannels -> {
+                    // ADR-0059 section 6 — a member's shared channel list. Not
+                    // a timeline row and never persisted. A malformed envelope
+                    // (`list == null`) is consumed as a no-op; the sink files a
+                    // well-formed one under the sender key resolved at receipt.
+                    val list = event.list
+                    if (list != null) sharedChannelsSink?.invoke(event.senderKey, list)
                 }
                 is IncomingChatEvent.ProfileRequest -> {
                     // ADR-0048 trigger 4 — a member asking for everyone's

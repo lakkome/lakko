@@ -335,6 +335,36 @@ public final class ChatRepository: ObservableObject {
         )
     )
 
+    /// ADR-0059 section 6 — the channels members share inside a group and
+    /// this device's own "Share my channels" switches. Receives from both
+    /// receive paths, sends through the locked application path, re-sends on
+    /// growth. The shareable list is fed by the signed-in shell, which owns the
+    /// channel list.
+    public private(set) lazy var sharedChannels = SharedChannelsHub(
+        ports: SharedChannelsHub.Ports(
+            accountIdB64: { [weak self] in self?.currentAccountIdB64 },
+            send: { [weak self] groupIdHex, bytes in
+                guard let self else { return }
+                try await self.publishApplicationMessage(
+                    groupIdHex: groupIdHex, plaintextBytes: bytes)
+            },
+            canSend: { [weak self] groupIdHex in
+                guard let self, self.groups[groupIdHex] != nil else { return false }
+                return !membershipEnded(self.membershipStateNow(groupIdHex: groupIdHex))
+            },
+            nowMs: { Self.nowMs() }
+        )
+    )
+
+    /// This account's person key (base64), read off any live group's roster;
+    /// `nil` before a group exists. The shared-channels aggregation skips it.
+    public func ownPersonKeyB64() -> String? {
+        for record in groups.values {
+            if let own = AuthorIdentity.own(group: record.group) { return own }
+        }
+        return nil
+    }
+
     /// ADR-0051 §2 — the per-group serializing chain the name receive runs
     /// under (C-62 sub-invariant 5: the gate must read CURRENT stored state, and
     /// two envelopes from one poll batch must not both decide against the same
@@ -717,6 +747,8 @@ public final class ChatRepository: ObservableObject {
         groupNamePublisher.reset()
         // ADR-0052 — and for a scheduled shared-pin re-send.
         pinPublisher.reset()
+        // ADR-0059 — and the shared-channels row + its growth re-sends.
+        sharedChannels.reset()
         // The commit chain (``GroupMlsLock``) is deliberately NOT cleared. Dropping a tail does not
         // stop the section behind it — it only makes the next caller start
         // BESIDE that section, which is the race the chain exists to close.
@@ -1516,6 +1548,8 @@ public final class ChatRepository: ObservableObject {
         groupNamePublisher.noteGrowth(groupIdHex: groupIdHex)
         // ADR-0052 decision 3 — nor the epochs the shared pins were sent in.
         pinPublisher.noteGrowth(groupIdHex: groupIdHex)
+        // ADR-0059 section 6 — nor the channels this device shares there.
+        sharedChannels.noteGrowth(groupIdHex: groupIdHex)
     }
 
     /// ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/`
@@ -1801,6 +1835,8 @@ public final class ChatRepository: ObservableObject {
         // nothing.
         sharedPinStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         personalPinStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // ADR-0059 section 6 — the lists members shared there and the switch.
+        sharedChannels.forgetGroup(groupIdHex: groupIdHex)
         if groupCalls.removeValue(forKey: groupIdHex) != nil {
             groupCallStore.save(accountIdB64: accountIdB64, records: groupCalls)
         }
@@ -4028,6 +4064,12 @@ public final class ChatRepository: ObservableObject {
             // commit chain is held.
             pinSink: { [weak self] op, senderLeaf in
                 self?.receivePin(groupIdHex: groupIdHex, op: op, senderLeaf: senderLeaf)
+            },
+            // ADR-0059 section 6 — filed per member under the hub's own chain.
+            // Fire-and-forget (it only spawns a `Task`), so that chain is never
+            // awaited while the commit chain is held.
+            sharedChannelsSink: { [weak self] list, senderKey in
+                self?.sharedChannels.receive(groupIdHex: groupIdHex, list: list, senderKey: senderKey)
             }
         )
         // THE ORDERING RULE — persist first, advance the cursor second, and hold
@@ -5128,6 +5170,10 @@ public final class ChatRepository: ObservableObject {
                         pinSink: { [weak self] op, senderLeaf in
                             self?.receivePin(
                                 groupIdHex: groupIdHex, op: op, senderLeaf: senderLeaf)
+                        },
+                        sharedChannelsSink: { [weak self] list, senderKey in
+                            self?.sharedChannels.receive(
+                                groupIdHex: groupIdHex, list: list, senderKey: senderKey)
                         }
                     )
                     // Per row, and deliberately not deferred to the end of the
@@ -6861,7 +6907,8 @@ private final class GroupRecord {
         profileSink: ((ProfileClaim, MemberIdentity?) -> Void)? = nil,
         groupNameSink: ((String, UInt64, UInt32?) -> Void)? = nil,
         profileRequestSink: (() -> Void)? = nil,
-        pinSink: ((FfiPinOp, UInt32?) -> Void)? = nil
+        pinSink: ((FfiPinOp, UInt32?) -> Void)? = nil,
+        sharedChannelsSink: ((FfiSharedChannels, MemberIdentity?) -> Void)? = nil
     ) {
         for event in events {
             switch event {
@@ -7017,6 +7064,14 @@ private final class GroupRecord {
                 // someone with standing can pin for everyone; the stamp so the
                 // strictly-newer order can refuse a stale re-send.
                 pinSink?(op, senderLeaf)
+            case .sharedChannels(_, let list, let senderKey, _):
+                // ADR-0059 section 6 — a member's shared channel list. Not a
+                // timeline row: routed out with the ACCOUNT key resolved at
+                // receipt (C-68), the only key it may be filed under. A list
+                // that failed its bounds, or has no attributable sender, is
+                // dropped here.
+                guard let list, let senderKey else { continue }
+                sharedChannelsSink?(list, senderKey)
             }
         }
     }

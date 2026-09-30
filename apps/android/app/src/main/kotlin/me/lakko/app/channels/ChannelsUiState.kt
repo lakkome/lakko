@@ -340,6 +340,9 @@ public class ChannelsUiState(
                             sharedName = next.name,
                             sharedDescription = next.description,
                             sharedUpdatedAtMs = next.updatedAtMs,
+                            sharedTopic = next.topic,
+                            sharedLanguage = next.language,
+                            sharedListed = next.listed,
                         )
                     }
                 } else {
@@ -623,4 +626,11 @@ public data class ChannelHandle(
     /** ADR-0051 §4 — the record's publisher stamp; `null` when no record has
      *  landed. A re-issue carries this value verbatim. */
     public val sharedUpdatedAtMs: ULong? = null,
+    /** ADR-0059 metadata v2 — the topic id of that record (0 = Other). */
+    public val sharedTopic: Int = 0,
+    /** ADR-0059 metadata v2 — its ISO 639 language, "" when not set. */
+    public val sharedLanguage: String = "",
+    /** ADR-0059 metadata v2 — the owner listed the channel in Discover; what
+     *  lets a member share it in a group (section 6). */
+    public val sharedListed: Boolean = false,
 )

@@ -298,6 +298,87 @@ final class NseServiceEnvelopeTests: XCTestCase {
         return payload[9] == 0x01 || payload[9] == 0x02
     }
 
+    // MARK: - Kind 8: shared channels (ADR-0059 section 6)
+
+    /// `lakko/shared-channels/v1` plus its trailing NUL (no raw NUL here).
+    private static let sharedChannelsDomain: Data = {
+        var d = Data("lakko/shared-channels/v1".utf8)
+        d.append(0x00)
+        return d
+    }()
+
+    /// Stand-in for the slim FFI's `sharedChannelsEnvelopeMinLen()...MaxLen()`
+    /// (35...9795 — domain 25 + version 1 + stamp 8 + count 1, plus at most 32
+    /// entries of 16 + 1 + 32 + 1 + 255 bytes). The Rust test in
+    /// `crates/lakko-contacts/src/shared_channels.rs` pins both values.
+    static let sharedChannelsEnvelopeLens: ClosedRange<Int> = 35...9795
+
+    /// A well-formed list:
+    /// `domain(25) || version(1) || updated_at_ms(8 BE) || count(1) || entries`.
+    private func sharedChannelsEnvelope(channels: [(String, String)] = [("books", "Books")]) -> Data {
+        var out = Self.sharedChannelsDomain
+        out.append(0x01)
+        let stamp: UInt64 = 1_700_000_000_000
+        for shift in stride(from: 56, through: 0, by: -8) {
+            out.append(UInt8((stamp >> UInt64(shift)) & 0xFF))
+        }
+        out.append(UInt8(channels.count))
+        for (i, (handle, name)) in channels.enumerated() {
+            out.append(Data(repeating: UInt8(i + 1), count: 16))
+            out.append(UInt8(handle.utf8.count))
+            out.append(Data(handle.utf8))
+            out.append(UInt8(name.utf8.count))
+            out.append(Data(name.utf8))
+        }
+        return out
+    }
+
+    /// Test double for the NSE's shared-channels decoder: the domain prefix
+    /// (a domain match is suppressed whatever its bounds, the web rule).
+    private func decodesAsSharedChannels(_ bytes: Data) -> Bool {
+        bytes.starts(with: Self.sharedChannelsDomain)
+    }
+
+    private func isService(_ bytes: Data) -> Bool {
+        nseIsServiceEnvelope(
+            bytes,
+            decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+            decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+            committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+            decodesAsProfile: decodesAsProfile,
+            profileEnvelopeLens: Self.profileEnvelopeLens,
+            decodesAsGroupName: decodesAsGroupName,
+            groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
+            decodesAsProfileRequest: decodesAsProfileRequest,
+            profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+            decodesAsPin: decodesAsPin,
+            pinEnvelopeLen: Self.pinEnvelopeLen,
+            decodesAsSharedChannels: decodesAsSharedChannels,
+            sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens)
+    }
+
+    /// WITHOUT THE ARM a list reaches `parseBodyEnvelope` and the notification
+    /// body reads `lakko/shared-channels/v1` plus the channel names — for a
+    /// list and for the empty list a member sends when the switch goes off.
+    func testSharedChannelsListsAreServiceEnvelopes() {
+        let empty = sharedChannelsEnvelope(channels: [])
+        XCTAssertEqual(empty.count, Self.sharedChannelsEnvelopeLens.lowerBound)
+        for envelope in [empty, sharedChannelsEnvelope(), sharedChannelsEnvelope(channels: [("a_b", "A"), ("xyz", "Z")])] {
+            XCTAssertTrue(nseLooksLikeSharedChannels(envelope, envelopeLens: Self.sharedChannelsEnvelopeLens))
+            XCTAssertTrue(isService(envelope), "a shared-channels list must never be rendered")
+        }
+    }
+
+    /// The peek rejects a chat envelope, empty bytes and a too-short `l` run,
+    /// and a plain chat is not a service envelope.
+    func testSharedChannelsPreFilter() {
+        XCTAssertFalse(nseLooksLikeSharedChannels(chatEnvelope, envelopeLens: Self.sharedChannelsEnvelopeLens))
+        XCTAssertFalse(nseLooksLikeSharedChannels(Data(), envelopeLens: Self.sharedChannelsEnvelopeLens))
+        XCTAssertFalse(
+            nseLooksLikeSharedChannels(Data(repeating: 0x6C, count: 34), envelopeLens: Self.sharedChannelsEnvelopeLens))
+        XCTAssertFalse(isService(Data("lakko is great, see you at 5 o'clock sharp".utf8)))
+    }
+
     // MARK: - Kind 7: shared pin (ADR-0052 decision 3)
 
     /// WITHOUT THE ARM a pin reaches `parseBodyEnvelope` and the notification
@@ -317,7 +398,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsProfileRequest: decodesAsProfileRequest,
                     profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                     decodesAsPin: decodesAsPin,
-                    pinEnvelopeLen: Self.pinEnvelopeLen
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsSharedChannels: { _ in false },
+                    sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
                 ),
                 "a pin envelope must never be rendered"
             )
@@ -364,7 +447,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsProfileRequest: decodesAsProfileRequest,
                     profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                     decodesAsPin: decodesAsPin,
-                    pinEnvelopeLen: Self.pinEnvelopeLen
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsSharedChannels: { _ in false },
+                    sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
                 ))
         }
     }
@@ -399,7 +484,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
             ),
             "a profile request must never be rendered"
         )
@@ -440,7 +527,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsProfileRequest: decodesAsProfileRequest,
                     profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                     decodesAsPin: decodesAsPin,
-                    pinEnvelopeLen: Self.pinEnvelopeLen
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsSharedChannels: { _ in false },
+                    sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
                 ))
         }
     }
@@ -484,7 +573,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsProfileRequest: decodesAsProfileRequest,
                     profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                     decodesAsPin: decodesAsPin,
-                    pinEnvelopeLen: Self.pinEnvelopeLen
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsSharedChannels: { _ in false },
+                    sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
                 ),
                 "a group-name envelope of \(envelope.count) bytes must never be rendered"
             )
@@ -529,7 +620,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
             ))
     }
 
@@ -568,7 +661,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
             ),
             "a v2 push-routing-secret envelope must never be rendered"
         )
@@ -614,7 +709,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
             ),
             "the codec, not the peek, is the authority"
         )
@@ -641,7 +738,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
             )
         )
     }
@@ -671,7 +770,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsProfileRequest: decodesAsProfileRequest,
                     profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                     decodesAsPin: decodesAsPin,
-                    pinEnvelopeLen: Self.pinEnvelopeLen
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsSharedChannels: { _ in false },
+                    sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
                 ),
                 "call signaling must never be rendered"
             )
@@ -702,7 +803,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
             ),
             "a committer beacon must never be rendered"
         )
@@ -805,7 +908,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
             ),
             "the codec, not the peek, is the authority"
         )
@@ -827,7 +932,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
             )
         )
     }
@@ -863,7 +970,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsProfileRequest: decodesAsProfileRequest,
                     profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                     decodesAsPin: decodesAsPin,
-                    pinEnvelopeLen: Self.pinEnvelopeLen
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsSharedChannels: { _ in false },
+                    sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
                 ),
                 "a \(envelope.count)-byte profile must never be rendered"
             )
@@ -914,7 +1023,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
             ),
             "the codec, not the peek, is the authority"
         )
@@ -957,7 +1068,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
             ),
             "a chat envelope must still render"
         )
@@ -974,7 +1087,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
             ),
             "empty bytes are not a service envelope"
         )
@@ -1027,7 +1142,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: NseServiceEnvelopeTests.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: NseServiceEnvelopeTests.pinEnvelopeLen
+                pinEnvelopeLen: NseServiceEnvelopeTests.pinEnvelopeLen,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: NseServiceEnvelopeTests.sharedChannelsEnvelopeLens
             ) {
                 suppressed += 1
                 return nil

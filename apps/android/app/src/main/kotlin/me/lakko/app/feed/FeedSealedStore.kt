@@ -99,7 +99,9 @@ public object FeedSealedStore {
         postsVersion.update { it + 1 }
     }
 
-    private fun read(context: Context, dir: String, accountIdB64: String): String? {
+    /** Read a sealed file under [dir] (also used by the ADR-0059 Discover
+     *  store, which keeps its own directories under the same root and key). */
+    internal fun read(context: Context, dir: String, accountIdB64: String): String? {
         synchronized(lock) {
         val f = file(context, dir, accountIdB64)
         if (!f.exists()) return null
@@ -119,7 +121,8 @@ public object FeedSealedStore {
         }
     }
 
-    private fun write(context: Context, dir: String, accountIdB64: String, text: String): Boolean {
+    /** Seal and write [text] under [dir]; `false` on any failure. */
+    internal fun write(context: Context, dir: String, accountIdB64: String, text: String): Boolean {
         synchronized(lock) {
         try {
             val cipher = Cipher.getInstance(AES_GCM_NOPAD)
@@ -157,6 +160,11 @@ public object FeedSealedStore {
         val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
         kg.init(spec)
         return kg.generateKey()
+    }
+
+    /** Delete one sealed file under [dir]. */
+    internal fun delete(context: Context, dir: String, accountIdB64: String) {
+        synchronized(lock) { file(context, dir, accountIdB64).delete() }
     }
 
     private fun file(context: Context, dir: String, accountIdB64: String): File {

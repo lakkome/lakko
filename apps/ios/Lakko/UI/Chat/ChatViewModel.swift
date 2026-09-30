@@ -245,6 +245,10 @@ public final class ChatViewModel: ObservableObject {
     // MARK: - Wiring
 
     private let repository: ChatRepository
+
+    /// ADR-0059 section 6 — the shared-channels runtime, for the group-info
+    /// "Share my channels" switch.
+    var sharedChannelsHub: SharedChannelsHub { repository.sharedChannels }
     /// Supplies the current auth session token for minting the SFU
     /// call-admission JWT. Defaults to `{ nil }` (group calls then
     /// refuse, fail-closed); the composition root passes

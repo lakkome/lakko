@@ -76,4 +76,30 @@ class ChannelMetaTest {
         assertNull(decoded.sharedUpdatedAtMs)
         assertNull(decoded.sharedMeta())
     }
+
+    @Test
+    fun `metadata v2 rides the classification, the handle and the persisted list`() {
+        val v2 = classifiedPostOf(
+            FfiChannelPostContent(
+                FfiChannelPostKind.META,
+                null,
+                FfiChannelMeta("News", "Daily", 7uL, topic = 5u, language = "de", listed = true),
+                null,
+            ),
+        )
+        assertEquals(ClassifiedPost.Meta(SharedChannelMeta("News", "Daily", 7uL, 5, "de", true)), v2)
+        val row = ChannelHandle(
+            id = "04".repeat(16), localName = "D", localDescription = "", addedAtMs = 40uL, handle = "news",
+            sharedName = "News", sharedDescription = "Daily", sharedUpdatedAtMs = 7uL,
+            sharedTopic = 5, sharedLanguage = "de", sharedListed = true,
+        )
+        assertEquals(listOf(row), decodeChannels(encodeChannels(listOf(row))))
+        assertEquals(SharedChannelMeta("News", "Daily", 7uL, 5, "de", true), row.sharedMeta())
+        // A stored language outside the ISO shape reads as not set.
+        val odd = """[{"id":"${"05".repeat(16)}","localName":"E","localDescription":"","addedAtMs":"1","sharedLanguage":"English","sharedTopic":999}]"""
+        val decoded = decodeChannels(odd)!!.single()
+        assertEquals("", decoded.sharedLanguage)
+        assertEquals(0, decoded.sharedTopic)
+        assertEquals(false, decoded.sharedListed)
+    }
 }

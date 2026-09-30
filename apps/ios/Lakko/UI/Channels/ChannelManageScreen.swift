@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 import SwiftUI
 
 /// Manage (UX spec section 5.4): subscribers, co-publishers and access
@@ -20,7 +21,13 @@ struct ChannelManageScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                ChannelNamePanel(channelId: channelId, state: state, client: client)
+                ChannelNamePanel(
+                    channelId: channelId, state: state, client: client,
+                    accountIdentitySeed: accountIdentitySeed)
+                // ADR-0059 — the owner's listing switch (docs/ux/feed.md 6.4).
+                ListInDiscoverPanel(
+                    channelId: channelId, state: state, client: client,
+                    accountIdentitySeed: accountIdentitySeed)
                 SubscribersPanel(
                     channelId: channelId,
                     state: state,
@@ -58,6 +65,7 @@ private struct ChannelNamePanel: View {
     let channelId: String
     @ObservedObject var state: ChannelsUiState
     let client: ChannelsClient
+    let accountIdentitySeed: Data
 
     @State private var name: String = ""
     @State private var description: String = ""
@@ -133,9 +141,11 @@ private struct ChannelNamePanel: View {
         busy = true
         error = nil
         defer { busy = false }
+        // ADR-0059 — a rename keeps the channel's Discover fields.
         guard let meta = ChannelMetaRecord.fresh(
             name: name, description: description,
-            nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+            nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            keeping: channel?.sharedMeta)
         else {
             error = "A channel needs a name"
             return
@@ -147,6 +157,16 @@ private struct ChannelNamePanel: View {
             state.updateLocalMeta(
                 channelId: channelId, localName: meta.name, localDescription: meta.description)
             seededFrom = meta
+            // ADR-0059 — a listed channel's listing carries the name and
+            // description too; editing them updates it (UX spec 6.4).
+            if meta.listed, let identity = try? Identity.fromSeed(seed: accountIdentitySeed) {
+                do {
+                    try await ChannelListing.refreshAfterEdit(
+                        state: state, client: client, channelIdHex: channelId, identity: identity)
+                } catch {
+                    self.error = "Saved. The Discover listing could not be updated; save again to retry."
+                }
+            }
         } catch let err as LegacyChannelError {
             error = err.message
         } catch {

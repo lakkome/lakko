@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import SwiftUI
 
 /// `@main` entry point for the iOS / iPadOS app.
@@ -619,6 +620,8 @@ enum TabRoute: Hashable {
     case addDevice
     case recoveryFactors
     case antiCensorship
+    /// ADR-0059 section 6 — Settings -> Security -> Channels I share.
+    case channelsIShare
     /// Deep links (`/i/`, `/g/`, `/c/`), pushed over the current tab rather
     /// than replacing the app (UX spec section 3).
     case inviteLanding(slug: String)
@@ -673,7 +676,11 @@ private final class SessionModels: ObservableObject {
     /// ADR-0058 — the foreground channel-post sync and the Feed's model.
     let channelPostSync: ChannelPostSync
     let feedVM: FeedViewModel
+    /// ADR-0059 — Discover's model (owned here so the Feed's model and the
+    /// shared-channels wiring below read one instance).
+    let discoverModel: DiscoverModel
     private var chatModels: [String: ChatViewModel] = [:]
+    private var sharedChannelsWatch: AnyCancellable?
 
     init(services: AppServices, account: SessionAccount) {
         let accountIdB64 = account.accountIdB64
@@ -686,6 +693,43 @@ private final class SessionModels: ObservableObject {
         // keys are loaded before the first body evaluation.
         channelsState = ChannelsUiState(accountIdB64: accountIdB64)
         channelPostSync = ChannelPostSync(accountIdB64: accountIdB64, channels: channelsState)
+        let chatRepository = services.chatRepository
+        let channels = channelsState
+        let chatList = chatListVM
+        let contacts = services.contactsRepository
+        let hub = chatRepository.sharedChannels
+        // ADR-0059 section 6 — the listed channels this device follows, as the
+        // share rule reads them: subscribed (a subscriber key is held), listed
+        // by the channel's own metadata v2, under the handle it was found by.
+        hub.shareable = {
+            channels.channels.map { c in
+                SharedChannels.Shareable(
+                    channelIdHex: c.id,
+                    subscribed: channels.subscriberKeysByChannel[c.id] != nil,
+                    listed: c.sharedListed,
+                    handle: String(c.handle.trimmingCharacters(in: .whitespaces).drop(while: { $0 == "@" })),
+                    name: c.sharedMeta?.name ?? c.localName)
+            }
+        }
+        discoverModel = DiscoverModel(
+            accountIdB64: accountIdB64,
+            client: ChannelsClient(),
+            hub: hub,
+            deps: DiscoverModel.Deps(
+                liveGroups: {
+                    Set(chatRepository.state.threads
+                        .filter { !$0.membershipEnded && chatList.kind(of: $0.groupIdHex) == .group }
+                        .map(\.groupIdHex))
+                },
+                groupTitle: { chatList.title(groupIdHex: $0) },
+                contactName: { key in
+                    guard contacts.state.accepted.contains(where: { base64Encode($0.request.fromPubkey) == key })
+                    else { return nil }
+                    return ProfileDirectory.shared.resolve(signatureKeyB64: key)?.name
+                },
+                ownKeyB64: { chatRepository.ownPersonKeyB64() },
+                following: { Set(channels.channels.map(\.id)) },
+                resolveHandle: { try await ChannelDiscovery.resolveChannelHandle($0) }))
         feedVM = FeedViewModel(
             account: account,
             chatRepository: services.chatRepository,
@@ -693,7 +737,15 @@ private final class SessionModels: ObservableObject {
             channels: channelsState,
             postSync: channelPostSync,
             deviceGroupSync: services.deviceGroupSync,
-            contacts: services.contactsRepository)
+            contacts: services.contactsRepository,
+            discover: discoverModel)
+        // A change of the followed listed set (a subscribe, an unsubscribe, a
+        // channel becoming listed or unlisted): re-send to every group the
+        // switch is on in whose last list differs. Debounced, so a burst
+        // becomes one list (chosen, the web client's 3 s).
+        sharedChannelsWatch = channels.objectWillChange
+            .debounce(for: .seconds(3), scheduler: RunLoop.main)
+            .sink { _ in Task { @MainActor in await hub.resendChanged() } }
     }
 
     func chatViewModel(for groupIdHex: String, make: () -> ChatViewModel) -> ChatViewModel {
@@ -787,7 +839,10 @@ private struct SessionRoot: View, Equatable {
                         push(.chat(groupIdHex: groupIdHex), on: .feed)
                     },
                     onOpenChannel: { push(.channel(channelId: $0), on: .feed) },
-                    onGoToChats: { selectedTab = .chats }
+                    onGoToChats: { selectedTab = .chats },
+                    onOpenFoundChannel: { channelId, handle in
+                        push(.channelFound(channelId: channelId, handle: handle), on: .feed)
+                    }
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .feed) }
             }
@@ -1184,6 +1239,13 @@ private struct SessionRoot: View, Equatable {
             RecoveryFactorsScreen(authRepository: authRepository)
         case .antiCensorship:
             AntiCensorshipSettingsView(manager: AntiCensorshipManager.shared)
+        case .channelsIShare:
+            ChannelsIShareScreen(
+                hub: chatRepository.sharedChannels,
+                title: { groupIdHex in
+                    chatRepository.state.threads.contains { $0.groupIdHex == groupIdHex }
+                        ? chatListVM.title(groupIdHex: groupIdHex) : nil
+                })
         case .inviteLanding(let slug):
             InviteLandingScreen(
                 viewModel: InviteLandingViewModel(

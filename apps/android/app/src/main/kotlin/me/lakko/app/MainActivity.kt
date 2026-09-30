@@ -917,6 +917,34 @@ private fun SessionRoot(
         }
     }
 
+    // ADR-0059 section 6 — the channels this device can share in a group:
+    // subscribed, listed by their own metadata, with a handle. `null` while the
+    // channel list is not bound to the signed-in account, so a list read
+    // before loading never withdraws what was shared. Any change of the list,
+    // the subscriptions or a channel's metadata re-sends (debounced) to every
+    // group the switch is on in whose last list differs.
+    LaunchedEffect(channelsState, chatRepository) {
+        chatRepository.sharedChannels.shareable = shareable@{
+            val acct = chatRepository.currentAccountIdB64() ?: return@shareable null
+            if (channelsState.boundAccount != acct) return@shareable null
+            val subscribed = channelsState.subscriberKeysByChannel.value.keys
+            channelsState.channels.value.map { c ->
+                me.lakko.app.discover.ShareableChannel(
+                    channelIdHex = c.id,
+                    subscribed = c.id in subscribed,
+                    listed = c.sharedListed,
+                    handle = c.handle.takeIf { it.isNotEmpty() },
+                    name = c.sharedName.ifBlank { c.localName },
+                )
+            }
+        }
+        kotlinx.coroutines.flow.combine(
+            channelsState.channels,
+            channelsState.subscriberKeysByChannel,
+        ) { list, keys -> list to keys.keys }
+            .collect { chatRepository.sharedChannels.followedSetChanged() }
+    }
+
     // The app-level receive loop: every group long-polled while the app is in
     // the foreground, WHATEVER screen is showing. Call signaling (the 1x1 call
     // host), group-call records and the chat list's unread counts all come from
@@ -1310,6 +1338,12 @@ private fun SessionRoot(
                         },
                         onOpenChannel = { id -> navController.navigate(Routes.channel(id)) },
                         onGoToChats = { navController.navigateToTab(Routes.CHATS) },
+                        channelsClient = channelsClient,
+                        // ADR-0059 — a card whose handle was verified opens the
+                        // ordinary subscribe route under that handle.
+                        onSubscribeChannel = { id, handle ->
+                            navController.navigate(Routes.channelSubscribe(id, handle))
+                        },
                     )
                 }
                 composable(Routes.FEED_IMPORT) {
@@ -1558,6 +1592,7 @@ private fun SessionRoot(
                         onOpenDevices = { navController.navigate(Routes.DEVICES) },
                         onOpenRecovery = { navController.navigate(Routes.RECOVERY) },
                         onOpenAntiCensorship = { navController.navigate(Routes.ANTI_CENSORSHIP) },
+                        onOpenChannelsIShare = { navController.navigate(Routes.CHANNELS_I_SHARE) },
                         onLogout = logout,
                         onForgetDevice = forgetDevice,
                     )
@@ -1761,6 +1796,13 @@ private fun SessionRoot(
                         onBack = { navController.popBackStack() },
                     )
                 }
+                // ADR-0059 section 6 — Settings -> Security -> Channels I share.
+                composable(Routes.CHANNELS_I_SHARE) {
+                    me.lakko.app.ui.discover.ChannelsIShareScreen(
+                        chatRepository = chatRepository,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
                 composable(Routes.ANTI_CENSORSHIP) {
                     AntiCensorshipSettingsScreen(
                         manager = antiCensorship,
@@ -1866,6 +1908,7 @@ private object Routes {
     const val DEVICES_ADD = "settings/devices/add"
     const val RECOVERY = "settings/recovery"
     const val ANTI_CENSORSHIP = "settings/anti_censorship"
+    const val CHANNELS_I_SHARE = "settings/channels_i_share"
     /** The contact detail; `key` is the base64url signature key (URL-safe by construction). */
     const val CONTACT_DETAIL = "contact/{key}"
     fun contact(key: String): String = "contact/$key"

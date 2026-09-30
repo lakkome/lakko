@@ -1014,7 +1014,9 @@ public func nseIsServiceEnvelope(
     decodesAsProfileRequest: (Data) -> Bool,
     profileRequestEnvelopeLen: Int,
     decodesAsPin: (Data) -> Bool,
-    pinEnvelopeLen: Int
+    pinEnvelopeLen: Int,
+    decodesAsSharedChannels: (Data) -> Bool,
+    sharedChannelsEnvelopeLens: ClosedRange<Int>
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
     if nseLooksLikePushRoutingSecret(bytes), decodesAsPushRoutingSecret(bytes) { return true }
@@ -1035,7 +1037,33 @@ public func nseIsServiceEnvelope(
     if nseLooksLikePin(bytes, envelopeLen: pinEnvelopeLen), decodesAsPin(bytes) {
         return true
     }
+    if nseLooksLikeSharedChannels(bytes, envelopeLens: sharedChannelsEnvelopeLens),
+       decodesAsSharedChannels(bytes) {
+        return true
+    }
     return false
+}
+
+/// First byte of the ADR-0059 shared-channels domain separator
+/// `lakko/shared-channels/v1\0` — the same ASCII `l` as every other in-group
+/// envelope domain, kept as its own constant for the same reason as the
+/// others: retiring one wire format must not re-point another's peek.
+private let sharedChannelsEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for an ADR-0059 shared-channels list: a length inside the
+/// well-formed range plus the first domain byte. Variable length (up to 32
+/// channels of their own handle and name lengths), so the peek is a RANGE whose
+/// bounds arrive from the slim FFI (`sharedChannelsEnvelopeMinLen()` /
+/// `sharedChannelsEnvelopeMaxLen()`), never copied here: a stale upper bound
+/// fails in the dangerous direction (a long list would stop being suppressed
+/// and land in a notification as `lakko/shared-channels/v1` plus the channel
+/// names). The peek decides nothing; the injected decoder is the verdict.
+///
+/// ADR-0059 section 6 adds this eighth kind with the pin's treatment:
+/// recognised and suppressed, never stored (C-59). Which channels a person
+/// follows is not the extension's to learn: the slim decode returns no fields.
+public func nseLooksLikeSharedChannels(_ bytes: Data, envelopeLens: ClosedRange<Int>) -> Bool {
+    envelopeLens.contains(bytes.count) && bytes.first == sharedChannelsEnvelopeFirstByte
 }
 
 /// First byte of the frozen 25-byte ADR-0048 profile-request domain separator

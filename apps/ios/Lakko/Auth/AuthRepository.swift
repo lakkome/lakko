@@ -1277,6 +1277,10 @@ public final class AuthRepository: ObservableObject {
             // ADR-0058 — the decrypted channel posts and the saved feeds.
             ChannelPostLogStore().delete(accountIdB64: cached.accountIdB64)
             FeedStore().delete(accountIdB64: cached.accountIdB64)
+            // ADR-0059 — Discover: picked topics, decoys, cached buckets,
+            // not-interested channels, the share switches and the lists
+            // members shared.
+            DiscoverStore().delete(accountIdB64: cached.accountIdB64)
         }
         sessionStore.clear()
         // ADR-0054 S3 — the push unregister below spends a token; take it

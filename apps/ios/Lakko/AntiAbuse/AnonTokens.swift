@@ -118,6 +118,11 @@ public enum AnonTokenCopy {
     /// Search (a username or channel lookup) - allowance used up.
     public static let searchAllowanceUsed =
         "You have looked up a lot of people today. Try again tomorrow."
+    /// Following a channel (ADR-0059 section 4, `docs/ux/feed.md` section 7).
+    public static let subscribeAllowanceUsed =
+        "You've subscribed to a lot of channels today. Try again tomorrow."
+    /// A Discover search (`docs/ux/feed.md` section 7).
+    public static let searchLimited = "Too many searches. Try again in a minute."
     /// Invite link, group link, channel name - allowance used up.
     public static let allowanceUsed =
         "You have used today's allowance for this. Try again tomorrow."
