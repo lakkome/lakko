@@ -92,8 +92,24 @@ export function flushServiceEnvelopes(): Promise<void> {
 }
 
 /**
- * The current envelope of every kind, each with its own stored stamp - what
- * a device that admits a new device to the DeviceGroup sends it. Kinds not
+ * A device was just added to the DeviceGroup: send every kind again, through
+ * the sync runtime's own handle (the registered sender), so the new device
+ * takes the setting and the key versions. Never through a second handle of
+ * the same DeviceGroup: two handles sealing at the same sender generation
+ * reuse a key and nonce, and the receiver refuses the second as a reuse.
+ */
+export function resendServiceEnvelopes(): void {
+  for (const kind of KINDS) {
+    if (composers.has(kind)) {
+      generation += 1;
+      dirty.set(kind, generation);
+    }
+  }
+  void flushServiceEnvelopes();
+}
+
+/**
+ * The current envelope of every kind, each with its own stored stamp. Kinds not
  * loaded are left out. Never rejects.
  */
 export async function currentServiceEnvelopes(): Promise<Uint8Array[]> {

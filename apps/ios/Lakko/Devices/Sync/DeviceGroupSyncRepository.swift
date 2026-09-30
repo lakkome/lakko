@@ -971,6 +971,21 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 return
             }
             noteMembershipChange(before: before, group: ensured.group)
+            // ADR-0060 section 7 — a device was added: send it the setting and
+            // the reach-key versions (original stamps) through THIS handle,
+            // reloaded at the post-add epoch. Never from the pairing's own
+            // handle: two handles of one DeviceGroup sealing at the same
+            // sender generation reuse a key and nonce (seen live on web
+            // 2026-09-30, SecretReuseError on the new device).
+            let after = (try? ensured.group.devices()) ?? []
+            if after.count > before.count {
+                let envelopes = ReachCenter.shared.deviceEnvelopes(accountIdB64: accountIdB64)
+                Task { @MainActor [weak self] in
+                    for envelope in envelopes {
+                        await self?.sendServiceEnvelope(envelope)
+                    }
+                }
+            }
         } catch {
             NSLog("DeviceGroupSync reload failed: %@", error.localizedDescription)
         }

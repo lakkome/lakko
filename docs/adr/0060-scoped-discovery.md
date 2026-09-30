@@ -333,7 +333,13 @@ S4/S5): a DeviceGroup body `ServiceEnvelope { bytes envelope }` at field 20 of
 branch's), carrying a `lakko-contacts` envelope verbatim; the receiver
 dispatches it and keeps only Visibility and ReachState from it, ordered by
 their own stamps. A device that joins the DeviceGroup is sent the current
-Visibility and ReachState by the device that admits it. Visibility is ordered
+Visibility and ReachState by the device that admits it, through that device's
+DeviceGroup sync runtime after it reloads at the post-add epoch, never through
+the pairing flow's own handle of the same DeviceGroup: two handles sealing at
+one sender generation reuse a key and nonce (seen live 2026-09-30 after the
+merge with the chat-folders branch, where the sync runtime began reloading
+from the pairing's snapshot; the new device refused the second message as a
+secret reuse). Visibility is ordered
 by a strictly increasing stamp (the ADR-0044 lesson: a re-send carries its
 original stamp). ReachState is **merged, not replaced** (decided 2026-09-29,
 after the three clients had each written a different rule): a key version

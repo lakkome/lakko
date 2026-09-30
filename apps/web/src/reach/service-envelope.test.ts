@@ -27,6 +27,7 @@ import {
   flushServiceEnvelopes,
   markServiceEnvelopeDirty,
   registerServiceEnvelopeSender,
+  resendServiceEnvelopes,
   resetServiceEnvelopeOutbox,
   setServiceEnvelopeComposer,
 } from "./service-envelope-outbox";
@@ -338,5 +339,39 @@ describe("the outbox", () => {
     await flushServiceEnvelopes();
     expect(sent).toEqual([envelope]);
     unregister();
+  });
+});
+
+describe("handing the setting to a newly added device", () => {
+  it("sends every composed kind through the registered sender, and waits for one", async () => {
+    resetServiceEnvelopeOutbox();
+    const visibility = visibilityAt(7n, true);
+    const reach = reachStateAt(7n, 3);
+    setServiceEnvelopeComposer("visibility", async () => visibility);
+    setServiceEnvelopeComposer("reachState", async () => reach);
+
+    // The sync runtime is reloading its handle: the send is refused and the
+    // kinds stay pending instead of being sealed on another handle.
+    let ready = false;
+    const sent: Uint8Array[] = [];
+    const unregister = registerServiceEnvelopeSender(async (bytes) => {
+      if (!ready) throw new Error("DeviceGroupSyncProvider is not ready");
+      sent.push(bytes);
+    });
+    resendServiceEnvelopes();
+    await flushServiceEnvelopes();
+    expect(sent).toEqual([]);
+
+    // Reload done: the pending kinds go out, each exactly once.
+    ready = true;
+    await flushServiceEnvelopes();
+    expect(sent).toEqual([visibility, reach]);
+    await flushServiceEnvelopes();
+    expect(sent).toHaveLength(2);
+
+    unregister();
+    setServiceEnvelopeComposer("visibility", null);
+    setServiceEnvelopeComposer("reachState", null);
+    resetServiceEnvelopeOutbox();
   });
 });

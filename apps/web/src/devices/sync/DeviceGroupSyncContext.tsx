@@ -90,7 +90,10 @@ import { decodeJournalEntry, encodeJournalEntry } from "../journal-envelope";
 import { fetchDeviceAttestKey } from "../../auth/device-attest-key";
 import { mintHlc, observeHlc } from "./hlc";
 import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
-import { registerServiceEnvelopeSender } from "../../reach/service-envelope-outbox";
+import {
+  flushServiceEnvelopes,
+  registerServiceEnvelopeSender,
+} from "../../reach/service-envelope-outbox";
 import {
   groupIdHex,
   type DraftState,
@@ -477,7 +480,11 @@ export function DeviceGroupSyncProvider(props: {
     // version counters ride this DeviceGroup as `ServiceEnvelope` bodies.
     unregisterServiceSender?.();
     unregisterServiceSender = registerServiceEnvelopeSender(async (envelope) => {
-      if (group === null || identity === null) throw new Error("DeviceGroupSyncProvider is not ready");
+      // Checked before sealing: a handle being replaced must not advance its
+      // sender ratchet for a message that is never published.
+      if (group === null || identity === null || reloading || deviceRemoved()) {
+        throw new Error("DeviceGroupSyncProvider is not ready");
+      }
       await publishGroupMessage(group.createServiceEnvelopeMessage(identity, envelope, mintHlc()));
     });
 
@@ -557,6 +564,9 @@ export function DeviceGroupSyncProvider(props: {
       reloading = false;
     }
     void drainFolderOutbox();
+    // ADR-0060 section 7 - an envelope marked while the handle was being
+    // replaced (a pairing hands its setting over this way) goes now.
+    void flushServiceEnvelopes();
   }
 
   function teardown(): void {

@@ -350,6 +350,17 @@ public class ReachManager internal constructor(
         }
     }
 
+    /**
+     * A device was just admitted to the DeviceGroup: send it the envelopes in
+     * force here through [deviceSyncPublisher], the sync runtime's own
+     * DeviceGroup handle. Never through a second handle of the same
+     * DeviceGroup: two handles sealing at one sender generation reuse a key
+     * and nonce, and the receiver refuses the second as a reuse.
+     */
+    public fun resendToDevices() {
+        deviceSyncEnvelopes().forEach(::publishToDevices)
+    }
+
     /** The Visibility and ReachState envelopes in force here, verbatim with
      *  their original stamps: what this device sends a device it admits to
      *  the DeviceGroup (ADR-0060 §7). Empty for what was never set. */

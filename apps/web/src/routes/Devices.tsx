@@ -43,7 +43,6 @@ import {
   runScanFlow,
   type JoinSession,
 } from "../devices/orchestrator";
-import { currentServiceEnvelopes } from "../reach/service-envelope-outbox";
 import {
   listDevices,
   removeDeviceAt,
@@ -618,9 +617,6 @@ function ScanView(props: {
         accountIdB64: props.accountIdB64,
         deviceKey,
         ...(recovery !== undefined ? { recovery } : {}),
-        // ADR-0060 section 7: the new device starts with this account's
-        // "who can find me" setting and reach key versions.
-        serviceEnvelopes: await currentServiceEnvelopes(),
       });
       // ADR-0050 section 2.8 — admit the new device to every chat. Not
       // awaited: it waits for the device to land and publish its KeyPackage,

@@ -22,6 +22,7 @@
  * acknowledged transaction (scan happens, ack happens, done).
  */
 import { announceDeviceGroupChangedHere } from "./sync/growth";
+import { resendServiceEnvelopes } from "../reach/service-envelope-outbox";
 import { loadWasm } from "../wasm";
 import type {
   DeviceGroup as WasmDeviceGroup,
@@ -51,7 +52,6 @@ import {
   registerDeviceGroupEpochOrThrow,
 } from "./lifecycle";
 import { takeSigner } from "../ds/access";
-import { mintHlc } from "./sync/hlc";
 import {
   publishWelcome,
   pollForWelcome,
@@ -759,12 +759,6 @@ export async function runScanFlow(args: {
      *  closed over the live session token. */
     readonly deviceAuthorizeStart: () => Promise<string>;
   };
-  /** ADR-0060 section 7 - the account's current Visibility and ReachState
-   *  envelopes (`currentServiceEnvelopes()`), each with its ORIGINAL stamp.
-   *  Sent into the DeviceGroup right after the add commit, at the epoch the
-   *  new device joins at, so it starts with the account's setting and key
-   *  versions instead of its defaults. Best-effort. */
-  readonly serviceEnvelopes?: readonly Uint8Array[];
 }): Promise<ScanResult> {
   const decoded = await parsePairingQrPayload(
     args.scannedBytes,
@@ -861,27 +855,12 @@ export async function runScanFlow(args: {
     );
 
     // ADR-0060 section 7 - the setting and the key versions, for the device
-    // just admitted. Composed by the post-add group (the new device reads
-    // this epoch), proven under its key, and the advanced sender ratchet
-    // persisted after. The envelopes are sent as they are, never re-stamped.
-    // Best-effort: the new device otherwise gets them with the next change.
-    if (args.serviceEnvelopes !== undefined && args.serviceEnvelopes.length > 0) {
-      const signerN1 = takeSigner(() => ensured.group.dsAccessSigner(ensured.identity));
-      try {
-        for (const envelope of args.serviceEnvelopes) {
-          const wire = ensured.group.createServiceEnvelopeMessage(ensured.identity, envelope, mintHlc());
-          await ds.publishGroup(ensured.group.groupId(), encodeJournalEntry(wire, null), {
-            ...(signerN1 === null ? {} : { signer: signerN1 }),
-          });
-        }
-        await persistDeviceGroupSnapshot(ensured.identity, args.accountIdB64, args.deviceKey);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("setting hand-over to the new device failed", err instanceof Error ? err.message : "");
-      } finally {
-        signerN1?.free();
-      }
-    }
+    // just admitted, now that the commit is on the journal. Sent by the sync
+    // runtime through its own handle, reloaded from the snapshot persisted
+    // above: sealing them here, on this second handle of the same
+    // DeviceGroup, reused the sync handle's sender generations (seen live
+    // 2026-09-30, SecretReuseError on the new device).
+    resendServiceEnvelopes();
 
     // Phase 2a3d8-ui — best-effort history catch-up bundle.
     // Read the local message log, derive the post-add
