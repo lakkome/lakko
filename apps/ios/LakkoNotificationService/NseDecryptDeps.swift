@@ -29,8 +29,10 @@ import LakkoCoreExtension
 /// anywhere in this file.
 
 /// Builds the real, read-only ``NsePushDecryptDeps`` from the shared stores +
-/// the slim FFI. `resolveAccount` reverses the wake's group pseudonym to an
-/// account straight from ``KnownGroupsStore`` (the NSE has no live
+/// the slim FFI. `boundAccount` reads the `(device pseudonym, account)`
+/// binding the app wrote (``PushAccountBindingStore``) and is the only source
+/// of the account a wake is decrypted as; `accountKnowsGroup` checks that
+/// account's own ``KnownGroupsStore`` row (the NSE has no live
 /// `ChatRepository`); `openThrowawayGroup` reconstructs a FRESH throwaway
 /// `Identity` + `Group` — never the app's handles (the NSE is a separate
 /// process anyway); `dsFetch` is a slim `URLSession` GET (``NseDsFetch``, no
@@ -50,25 +52,38 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         self.session = session
     }
 
-    /// ADR-0042 Sprint 4 — the App-Group reverse-index read that turns the
-    /// wake's opaque `push_gid` hex back into the real `(account, group_id)`.
-    /// Reuses ``PushRoutingStore`` (compiled into the NSE target as a sibling
-    /// source, like the other shared stores): it is FFI-clean — Foundation +
-    /// CryptoKit only, no `LakkoCore` — and `lookupRoute` is a plain
-    /// shared-suite `UserDefaults` read (the Keychain-touching secret paths
-    /// exist on the store but are never called from the NSE), so the one
-    /// `me.lakko.push-route.v1.` key-shape definition is shared with the app
-    /// instead of duplicated here. READ-ONLY.
-    func lookupRoute(pushGidHex: String) -> (accountIdB64: String, groupIdHex: String)? {
-        pushRoutes.lookupRoute(pushGidHex: pushGidHex)
+    /// ADR-0042 (amended 2026-09-30) — the account the app bound this
+    /// device's push pseudonym to, when the wake's `d` equals that pseudonym.
+    /// The rule is ``PushAccountBinding/boundAccount(wakeDevicePseudonymHex:binding:)``,
+    /// shared with the app's VoIP handler; this only reads the App Group row
+    /// the app writes. READ-ONLY.
+    func boundAccount(wakeDevicePseudonymHex: String?) -> String? {
+        PushAccountBinding.boundAccount(
+            wakeDevicePseudonymHex: wakeDevicePseudonymHex,
+            binding: PushAccountBindingStore.live.current()
+        )
     }
 
-    func resolveAccount(groupHex: String) -> NseResolvedAccount? {
-        guard let accountIdB64 = knownGroups.findAccountForGroup(groupIdHex: groupHex),
-              let groupIdBytes = Self.hexToData(groupHex) else {
-            return nil
-        }
-        return NseResolvedAccount(accountIdB64: accountIdB64, groupIdBytes: groupIdBytes)
+    /// ADR-0042 Sprint 4 — the App-Group reverse-index read that turns the
+    /// wake's opaque `push_gid` hex back into the real `group_id`, for the
+    /// bound account only. Reuses ``PushRoutingStore`` (compiled into the NSE
+    /// target as a sibling source, like the other shared stores): it is
+    /// FFI-clean — Foundation + CryptoKit only, no `LakkoCore` — and
+    /// `lookupRoute` is a plain shared-suite `UserDefaults` read (the
+    /// Keychain-touching secret paths exist on the store but are never called
+    /// from the NSE), so the one key-shape definition is shared with the app
+    /// instead of duplicated here. READ-ONLY.
+    func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? {
+        pushRoutes.lookupRoute(accountIdB64: accountIdB64, pushGidHex: pushGidHex)
+    }
+
+    /// The legacy raw-group_id wake: does the BOUND account know the group?
+    /// Only that account's known-groups row is read; another account's is
+    /// never consulted. READ-ONLY.
+    func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool {
+        let needle = groupHex.lowercased()
+        return knownGroups.load(accountIdB64: accountIdB64)
+            .contains { $0.lowercased() == needle }
     }
 
     func loadIdentitySeed(accountIdB64: String) -> Data? {

@@ -17,7 +17,7 @@ import Foundation
 /// So the app WRITES the muted set into the App Group suite and the extension
 /// only ever READS it — the same asymmetry, the same suite and the same
 /// plaintext posture as ``CallPeerNameMirror`` and the ADR-0042 `push_gid`
-/// reverse index (``PushRoutingStore/lookupRoute(pushGidHex:)``), both of
+/// reverse index (``PushRoutingStore/lookupRoute(accountIdB64:pushGidHex:)``), both of
 /// which the extension already reads from this container.
 ///
 /// ## Which way it fails

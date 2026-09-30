@@ -93,21 +93,40 @@ class PushPreviewDecryptTest {
         var lastCursorGroupHex: String? = null
         var lastSeedZeroed = false
 
-        override fun lookupRoute(pushGidHex: String): Pair<String, String>? {
+        var lastLookupAccount: String? = null
+        var lastLegacyAccount: String? = null
+
+        /** Models the account-keyed store: [route] is `(owner, groupIdHex)`
+         *  and answers only a lookup for its owner. */
+        override fun lookupRoute(accountIdB64: String, pushGidHex: String): String? {
             lookupCount++
             lastLookupGid = pushGidHex
+            lastLookupAccount = accountIdB64
             if (routeThrows) throw RuntimeException("route lookup failure")
-            return route
+            return route?.takeIf { it.first == accountIdB64 }?.second
         }
 
-        override fun resolveAccount(groupHex: String): ResolvedPushAccount? {
+        /** Models the per-account known-groups set: [account] names the one
+         *  account that knows the wake's group. */
+        override fun accountKnowsGroup(accountIdB64: String, groupHex: String): Boolean {
             resolveCount++
-            return account
+            lastLegacyAccount = accountIdB64
+            return account?.accountIdB64 == accountIdB64
         }
 
-        override fun loadIdentitySeed(accountIdB64: String): ByteArray? = seed
+        val seedAskedFor = mutableListOf<String>()
+        val snapshotAskedFor = mutableListOf<String>()
+        val cursorAskedFor = mutableListOf<String>()
 
-        override fun loadSnapshot(accountIdB64: String): ByteArray? = snapshot
+        override fun loadIdentitySeed(accountIdB64: String): ByteArray? {
+            seedAskedFor += accountIdB64
+            return seed
+        }
+
+        override fun loadSnapshot(accountIdB64: String): ByteArray? {
+            snapshotAskedFor += accountIdB64
+            return snapshot
+        }
 
         override fun openThrowawayGroup(
             seed: ByteArray,
@@ -135,6 +154,7 @@ class PushPreviewDecryptTest {
         }
 
         override fun startCursor(accountIdB64: String, groupHex: String): Long? {
+            cursorAskedFor += accountIdB64
             lastCursorGroupHex = groupHex
             return cursor
         }
@@ -166,7 +186,7 @@ class PushPreviewDecryptTest {
             group = group,
             rows = listOf(row(10, 1), row(11, 2)),
         )
-        val preview = decryptPushPreview(PushWake(groupHex, pointer = 12), deps)
+        val preview = decryptPushPreview(PushWake(groupHex, pointer = 12, accountIdB64 = accountId), deps)
 
         assertEquals("Lakko", preview?.title)
         assertEquals("world", preview?.body) // newest-wins
@@ -189,7 +209,7 @@ class PushPreviewDecryptTest {
         val group = FakeThrowawayGroup(decode = { chat("hello") }, signer = signer)
         val deps = FakeDeps(account = okAccount(), group = group, rows = listOf(row(10, 1)))
 
-        val preview = decryptPushPreview(PushWake(groupHex, pointer = 11), deps)
+        val preview = decryptPushPreview(PushWake(groupHex, pointer = 11, accountIdB64 = accountId), deps)
 
         assertEquals("hello", preview?.body)
         assertSame(signer, deps.lastSigner)
@@ -202,7 +222,7 @@ class PushPreviewDecryptTest {
         val group = FakeThrowawayGroup(decode = { chat("hello") })
         val deps = FakeDeps(account = okAccount(), group = group, rows = listOf(row(10, 1)), dsThrows = true)
 
-        val preview = decryptPushPreview(PushWake(groupHex, pointer = 11), deps)
+        val preview = decryptPushPreview(PushWake(groupHex, pointer = 11, accountIdB64 = accountId), deps)
 
         assertEquals(null, preview)
         assertTrue("throwaway group must be closed", group.closed)
@@ -214,7 +234,7 @@ class PushPreviewDecryptTest {
         assertEquals(
             "Sent an attachment",
             decryptPushPreview(
-                PushWake(groupHex, 5),
+                PushWake(groupHex, 5, accountIdB64 = accountId),
                 FakeDeps(okAccount(), group = one, rows = listOf(row(5, 1))),
             )?.body,
         )
@@ -222,7 +242,7 @@ class PushPreviewDecryptTest {
         assertEquals(
             "Sent 3 attachments",
             decryptPushPreview(
-                PushWake(groupHex, 5),
+                PushWake(groupHex, 5, accountIdB64 = accountId),
                 FakeDeps(okAccount(), group = many, rows = listOf(row(5, 1))),
             )?.body,
         )
@@ -234,7 +254,7 @@ class PushPreviewDecryptTest {
         assertEquals(
             "edited body",
             decryptPushPreview(
-                PushWake(groupHex, 5),
+                PushWake(groupHex, 5, accountIdB64 = accountId),
                 FakeDeps(okAccount(), group = group, rows = listOf(row(5, 1))),
             )?.body,
         )
@@ -256,7 +276,7 @@ class PushPreviewDecryptTest {
             }
         })
         val preview = decryptPushPreview(
-            PushWake(groupHex, 12),
+            PushWake(groupHex, 12, accountIdB64 = accountId),
             FakeDeps(okAccount(), group = group, rows = listOf(row(10, 1), row(11, 2))),
         )
         assertEquals("hi", preview?.body)
@@ -272,7 +292,7 @@ class PushPreviewDecryptTest {
         )) {
             val group = FakeThrowawayGroup(decode = { ProcessedRow(kind, "", 0) })
             val preview = decryptPushPreview(
-                PushWake(groupHex, 5),
+                PushWake(groupHex, 5, accountIdB64 = accountId),
                 FakeDeps(okAccount(), group = group, rows = listOf(row(5, 1))),
             )
             assertNull("kind $kind must not produce a preview", preview)
@@ -285,7 +305,7 @@ class PushPreviewDecryptTest {
         val group = FakeThrowawayGroup(decode = { chat("", attachments = 0) })
         assertNull(
             decryptPushPreview(
-                PushWake(groupHex, 5),
+                PushWake(groupHex, 5, accountIdB64 = accountId),
                 FakeDeps(okAccount(), group = group, rows = listOf(row(5, 1))),
             ),
         )
@@ -299,37 +319,37 @@ class PushPreviewDecryptTest {
     fun `non-group wakes yield null`() = runTest {
         val deps = FakeDeps(okAccount())
         assertNull(decryptPushPreview(null, deps))
-        assertNull(decryptPushPreview(PushWake(null, 5), deps))
-        assertNull(decryptPushPreview(PushWake(groupHex, null), deps))
-        assertNull(decryptPushPreview(PushWake("abc", 5), deps)) // wrong length
-        assertNull(decryptPushPreview(PushWake("z".repeat(64), 5), deps)) // non-hex
+        assertNull(decryptPushPreview(PushWake(null, 5, accountIdB64 = accountId), deps))
+        assertNull(decryptPushPreview(PushWake(groupHex, null, accountIdB64 = accountId), deps))
+        assertNull(decryptPushPreview(PushWake("abc", 5, accountIdB64 = accountId), deps)) // wrong length
+        assertNull(decryptPushPreview(PushWake("z".repeat(64), 5, accountIdB64 = accountId), deps)) // non-hex
         assertEquals("no account lookup for a malformed wake", 0, deps.resolveCount)
     }
 
     @Test
     fun `unknown group yields null`() = runTest {
         val deps = FakeDeps(account = null)
-        assertNull(decryptPushPreview(PushWake(groupHex, 5), deps))
+        assertNull(decryptPushPreview(PushWake(groupHex, 5, accountIdB64 = accountId), deps))
     }
 
     @Test
     fun `missing seed yields null`() = runTest {
         val deps = FakeDeps(okAccount(), seed = null)
-        assertNull(decryptPushPreview(PushWake(groupHex, 5), deps))
+        assertNull(decryptPushPreview(PushWake(groupHex, 5, accountIdB64 = accountId), deps))
         assertEquals("no group open without a seed", 0, deps.openCount)
     }
 
     @Test
     fun `missing snapshot yields null`() = runTest {
         val deps = FakeDeps(okAccount(), snapshot = null)
-        assertNull(decryptPushPreview(PushWake(groupHex, 5), deps))
+        assertNull(decryptPushPreview(PushWake(groupHex, 5, accountIdB64 = accountId), deps))
         assertEquals("no group open without a snapshot", 0, deps.openCount)
     }
 
     @Test
     fun `non-member group (open returns null) yields null`() = runTest {
         val deps = FakeDeps(okAccount(), group = null)
-        assertNull(decryptPushPreview(PushWake(groupHex, 5), deps))
+        assertNull(decryptPushPreview(PushWake(groupHex, 5, accountIdB64 = accountId), deps))
         assertEquals(1, deps.openCount)
         assertEquals("no DS fetch when we are not a member", 0, deps.dsFetchCount)
     }
@@ -337,14 +357,14 @@ class PushPreviewDecryptTest {
     @Test
     fun `open throwing yields null`() = runTest {
         val deps = FakeDeps(okAccount(), openThrows = true)
-        assertNull(decryptPushPreview(PushWake(groupHex, 5), deps))
+        assertNull(decryptPushPreview(PushWake(groupHex, 5, accountIdB64 = accountId), deps))
     }
 
     @Test
     fun `DS fetch failure yields null and still closes the group`() = runTest {
         val group = FakeThrowawayGroup(decode = { chat("nope") })
         val deps = FakeDeps(okAccount(), group = group, dsThrows = true)
-        assertNull(decryptPushPreview(PushWake(groupHex, 5), deps))
+        assertNull(decryptPushPreview(PushWake(groupHex, 5, accountIdB64 = accountId), deps))
         assertTrue("group closed on DS failure", group.closed)
     }
 
@@ -358,7 +378,7 @@ class PushPreviewDecryptTest {
             throwOn = setOf(1),
         )
         val preview = decryptPushPreview(
-            PushWake(groupHex, 12),
+            PushWake(groupHex, 12, accountIdB64 = accountId),
             FakeDeps(okAccount(), group = group, rows = listOf(row(10, 1), row(11, 2))),
         )
         assertEquals("survivor", preview?.body)
@@ -369,7 +389,7 @@ class PushPreviewDecryptTest {
     fun `zero fetched rows yields null`() = runTest {
         val group = FakeThrowawayGroup(decode = { chat("x") })
         val deps = FakeDeps(okAccount(), group = group, rows = emptyList())
-        assertNull(decryptPushPreview(PushWake(groupHex, 5), deps))
+        assertNull(decryptPushPreview(PushWake(groupHex, 5, accountIdB64 = accountId), deps))
         assertTrue(group.closed)
     }
 
@@ -381,7 +401,7 @@ class PushPreviewDecryptTest {
     fun `no persisted cursor fetches from pointer minus one`() = runTest {
         val group = FakeThrowawayGroup(decode = { null })
         val deps = FakeDeps(okAccount(), group = group, cursor = null)
-        decryptPushPreview(PushWake(groupHex, pointer = 20), deps)
+        decryptPushPreview(PushWake(groupHex, pointer = 20, accountIdB64 = accountId), deps)
         assertEquals(19L, deps.lastAfterId)
     }
 
@@ -389,7 +409,7 @@ class PushPreviewDecryptTest {
     fun `a persisted cursor below the pointer is preferred`() = runTest {
         val group = FakeThrowawayGroup(decode = { null })
         val deps = FakeDeps(okAccount(), group = group, cursor = 5L)
-        decryptPushPreview(PushWake(groupHex, pointer = 20), deps)
+        decryptPushPreview(PushWake(groupHex, pointer = 20, accountIdB64 = accountId), deps)
         assertEquals("intervening commits replay from the app cursor", 5L, deps.lastAfterId)
     }
 
@@ -397,7 +417,7 @@ class PushPreviewDecryptTest {
     fun `a persisted cursor at or above the pointer is ignored`() = runTest {
         val group = FakeThrowawayGroup(decode = { null })
         val deps = FakeDeps(okAccount(), group = group, cursor = 25L)
-        decryptPushPreview(PushWake(groupHex, pointer = 20), deps)
+        decryptPushPreview(PushWake(groupHex, pointer = 20, accountIdB64 = accountId), deps)
         assertEquals("stale/ahead cursor ignored → pointer-1", 19L, deps.lastAfterId)
     }
 
@@ -405,7 +425,7 @@ class PushPreviewDecryptTest {
     fun `after is clamped to zero`() = runTest {
         val group = FakeThrowawayGroup(decode = { null })
         val deps = FakeDeps(okAccount(), group = group, cursor = null)
-        decryptPushPreview(PushWake(groupHex, pointer = 0), deps)
+        decryptPushPreview(PushWake(groupHex, pointer = 0, accountIdB64 = accountId), deps)
         assertEquals(0L, deps.lastAfterId)
     }
 
@@ -429,7 +449,7 @@ class PushPreviewDecryptTest {
             cursor = 4L,
             route = accountId to groupHex,
         )
-        val preview = decryptPushPreview(PushWake(pushGidHex, pointer = 11), deps)
+        val preview = decryptPushPreview(PushWake(pushGidHex, pointer = 11, accountIdB64 = accountId), deps)
 
         assertEquals("routed hello", preview?.body)
         // The route hit skipped the legacy path entirely...
@@ -458,7 +478,7 @@ class PushPreviewDecryptTest {
             rows = listOf(row(5, 1)),
             route = null, // miss
         )
-        val preview = decryptPushPreview(PushWake(groupHex, 6), deps)
+        val preview = decryptPushPreview(PushWake(groupHex, 6, accountIdB64 = accountId), deps)
 
         assertEquals("legacy", preview?.body)
         assertEquals(1, deps.lookupCount)
@@ -477,7 +497,7 @@ class PushPreviewDecryptTest {
         )
         assertEquals(
             "survived the store error",
-            decryptPushPreview(PushWake(groupHex, 6), deps)?.body,
+            decryptPushPreview(PushWake(groupHex, 6, accountIdB64 = accountId), deps)?.body,
         )
         assertEquals(1, deps.resolveCount)
     }
@@ -485,7 +505,7 @@ class PushPreviewDecryptTest {
     @Test
     fun `a route lookup error with no legacy match yields generic`() = runTest {
         val deps = FakeDeps(account = null, routeThrows = true)
-        assertNull(decryptPushPreview(PushWake(pushGidHex, 6), deps))
+        assertNull(decryptPushPreview(PushWake(pushGidHex, 6, accountIdB64 = accountId), deps))
         assertEquals("no group open on a dead end", 0, deps.openCount)
     }
 
@@ -501,16 +521,98 @@ class PushPreviewDecryptTest {
             assertEquals(
                 "malformed stored row '$badGroupIdHex' must fall back",
                 "legacy after bad row",
-                decryptPushPreview(PushWake(groupHex, 6), deps)?.body,
+                decryptPushPreview(PushWake(groupHex, 6, accountIdB64 = accountId), deps)?.body,
             )
             assertEquals(1, deps.resolveCount)
         }
     }
 
+    // -----------------------------------------------------------------
+    // ADR-0042, amended 2026-09-30: the wake is decrypted as the bound
+    // account ONLY — the route index and the legacy fallback are both
+    // consulted for that account, and nothing downstream picks another.
+    // -----------------------------------------------------------------
+
+    private val otherAccount = "other-acct=="
+
+    @Test
+    fun `the route lookup is keyed by the bound account`() = runTest {
+        val group = FakeThrowawayGroup(decode = { chat("mine") })
+        val deps = FakeDeps(
+            account = null,
+            group = group,
+            rows = listOf(row(10, 1)),
+            route = accountId to groupHex,
+        )
+        assertEquals(
+            "mine",
+            decryptPushPreview(PushWake(pushGidHex, 11, accountIdB64 = accountId), deps)?.body,
+        )
+        assertEquals(accountId, deps.lastLookupAccount)
+        assertEquals(listOf(accountId), deps.seedAskedFor)
+        assertEquals(listOf(accountId), deps.snapshotAskedFor)
+        assertEquals(listOf(accountId), deps.cursorAskedFor)
+    }
+
+    @Test
+    fun `another account's route row for the same push_gid is a miss`() = runTest {
+        // Two accounts in one group derive the same push_gid. The row the
+        // other account filed must never route this wake, and with the
+        // bound account knowing no such group the wake yields nothing.
+        val deps = FakeDeps(
+            account = null,
+            group = FakeThrowawayGroup(decode = { chat("the other account's text") }),
+            rows = listOf(row(10, 1)),
+            route = otherAccount to groupHex,
+        )
+        assertNull(decryptPushPreview(PushWake(pushGidHex, 11, accountIdB64 = accountId), deps))
+        assertEquals(accountId, deps.lastLookupAccount)
+        assertEquals("the fallback searched the bound account", accountId, deps.lastLegacyAccount)
+        assertEquals("nothing is opened for another account", 0, deps.openCount)
+        assertTrue(deps.seedAskedFor.isEmpty())
+        assertTrue(deps.snapshotAskedFor.isEmpty())
+    }
+
+    @Test
+    fun `the legacy fallback searches only the bound account's groups`() = runTest {
+        // Only the OTHER account knows the raw group id: the old scan took
+        // the first account that matched; now it is a stray wake.
+        val deps = FakeDeps(
+            account = ResolvedPushAccount(accountIdB64 = otherAccount, groupIdBytes = groupIdBytes),
+            group = FakeThrowawayGroup(decode = { chat("the other account's text") }),
+            rows = listOf(row(5, 1)),
+        )
+        assertNull(decryptPushPreview(PushWake(groupHex, 6, accountIdB64 = accountId), deps))
+        assertEquals(accountId, deps.lastLegacyAccount)
+        assertEquals(0, deps.openCount)
+    }
+
+    @Test
+    fun `the legacy fallback decrypts as the bound account when it knows the group`() = runTest {
+        val deps = FakeDeps(
+            account = okAccount(),
+            group = FakeThrowawayGroup(decode = { chat("legacy mine") }),
+            rows = listOf(row(5, 1)),
+        )
+        assertEquals(
+            "legacy mine",
+            decryptPushPreview(PushWake(groupHex, 6, accountIdB64 = accountId), deps)?.body,
+        )
+        assertEquals(listOf(accountId), deps.seedAskedFor)
+    }
+
+    @Test
+    fun `an empty bound account decrypts nothing`() = runTest {
+        val deps = FakeDeps(okAccount(), route = accountId to groupHex)
+        assertNull(decryptPushPreview(PushWake(groupHex, 5, accountIdB64 = ""), deps))
+        assertEquals(0, deps.lookupCount)
+        assertEquals(0, deps.resolveCount)
+    }
+
     @Test
     fun `a malformed wake never reaches the route lookup`() = runTest {
         val deps = FakeDeps(okAccount(), route = accountId to groupHex)
-        assertNull(decryptPushPreview(PushWake("abc", 5), deps))
+        assertNull(decryptPushPreview(PushWake("abc", 5, accountIdB64 = accountId), deps))
         assertEquals(0, deps.lookupCount)
     }
 
@@ -522,7 +624,7 @@ class PushPreviewDecryptTest {
     fun `a full happy-path run never persists and always discards`() = runTest {
         val group = FakeThrowawayGroup(decode = { chat("final") })
         val deps = FakeDeps(okAccount(), group = group, rows = listOf(row(9, 1)))
-        val preview = decryptPushPreview(PushWake(groupHex, 10), deps)
+        val preview = decryptPushPreview(PushWake(groupHex, 10, accountIdB64 = accountId), deps)
 
         assertEquals("final", preview?.body)
         // The throwaway is discarded exactly once...
@@ -747,7 +849,7 @@ class PushPreviewDecryptTest {
         )
         // Pre-fix this returned a preview whose body was the domain
         // string plus binary.
-        assertNull(decryptPushPreview(PushWake(groupHex, 11), deps))
+        assertNull(decryptPushPreview(PushWake(groupHex, 11, accountIdB64 = accountId), deps))
         assertTrue(group.closed)
     }
 
@@ -759,7 +861,7 @@ class PushPreviewDecryptTest {
             group = group,
             rows = listOf(rowOf(10, callSignalingPayload())),
         )
-        assertNull(decryptPushPreview(PushWake(groupHex, 11), deps))
+        assertNull(decryptPushPreview(PushWake(groupHex, 11, accountIdB64 = accountId), deps))
         assertTrue(group.closed)
     }
 
@@ -776,7 +878,7 @@ class PushPreviewDecryptTest {
                 textRow(11, "hello there"),
             ),
         )
-        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12), deps)?.body)
+        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
     }
 
     @Test
@@ -793,7 +895,7 @@ class PushPreviewDecryptTest {
                 rowOf(11, routingSecretEnvelope()),
             ),
         )
-        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12), deps)?.body)
+        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
     }
 
     @Test
@@ -807,7 +909,7 @@ class PushPreviewDecryptTest {
                 rowOf(11, callSignalingPayload()),
             ),
         )
-        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12), deps)?.body)
+        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
     }
 
     // -----------------------------------------------------------------
@@ -918,7 +1020,7 @@ class PushPreviewDecryptTest {
         )
         // Pre-fix this returned a preview whose body was the domain
         // string plus two control bytes.
-        assertNull(decryptPushPreview(PushWake(groupHex, 11), deps))
+        assertNull(decryptPushPreview(PushWake(groupHex, 11, accountIdB64 = accountId), deps))
         assertTrue(group.closed)
     }
 
@@ -933,7 +1035,7 @@ class PushPreviewDecryptTest {
                 textRow(11, "hello there"),
             ),
         )
-        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12), deps)?.body)
+        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
     }
 
     @Test
@@ -950,7 +1052,7 @@ class PushPreviewDecryptTest {
                 rowOf(11, committerBeacon()),
             ),
         )
-        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12), deps)?.body)
+        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps)?.body)
     }
 
     @Test
@@ -968,7 +1070,7 @@ class PushPreviewDecryptTest {
                 rowOf(13, committerBeacon()),
             ),
         )
-        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 14), deps)?.body)
+        assertEquals("hello there", decryptPushPreview(PushWake(groupHex, 14, accountIdB64 = accountId), deps)?.body)
     }
 
     @Test
@@ -982,7 +1084,7 @@ class PushPreviewDecryptTest {
                 rowOf(11, committerBeacon()),
             ),
         )
-        assertNull(decryptPushPreview(PushWake(groupHex, 12), deps))
+        assertNull(decryptPushPreview(PushWake(groupHex, 12, accountIdB64 = accountId), deps))
         assertTrue(group.closed)
     }
 }

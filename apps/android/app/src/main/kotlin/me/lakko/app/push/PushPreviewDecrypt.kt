@@ -75,8 +75,9 @@ private const val GROUP_HEX_LEN = 64
 
 /**
  * The GroupMessage wake hint, already decoded from the FCM `data`
- * payload (`{ v, d, g, p }`). Only `g` + `p` (DS pointer) are
- * load-bearing for the preview.
+ * payload (`{ v, d, g, p }`) and already through the wake gate
+ * ([wakeAccountFor]). Only `g` + `p` (DS pointer) are load-bearing for the
+ * preview; `d` has been spent on the gate, whose answer is [accountIdB64].
  */
 public data class PushWake(
     /** 64 lowercase-hex chars — post-ADR-0042 the opaque 32-byte
@@ -86,6 +87,11 @@ public data class PushWake(
     val groupHex: String?,
     /** DS message id of the message that triggered the wake, or `null`. */
     val pointer: Long?,
+    /** The signed-in account the wake is bound to ([wakeAccountFor]). The
+     *  ONLY account this wake is ever decrypted as (ADR-0042, amended
+     *  2026-09-30): the reverse map and the legacy fallback are consulted
+     *  for this account alone. */
+    val accountIdB64: String,
 )
 
 /** A locally-stored account that owns the wake's group. */
@@ -198,16 +204,17 @@ public interface ThrowawayGroup : AutoCloseable {
  * structural enforcement of the read-only-throwaway discipline.
  */
 public interface PushDecryptDeps {
-    /** ADR-0042 (Sprint 4): reverse-map an opaque wake `g` (the
-     *  lowercase-hex `push_gid`) to its owning
-     *  `(accountIdB64, groupIdHex)` via the plaintext reverse index
-     *  Sprint 3 populates ([PushRouteStore.lookup]), or `null` when
-     *  unknown. A READ — never a write. */
-    public fun lookupRoute(pushGidHex: String): Pair<String, String>?
+    /** ADR-0042: reverse-map an opaque wake `g` (the lowercase-hex
+     *  `push_gid`) to the `group_id` hex [accountIdB64] filed it under
+     *  ([PushRouteStore.lookup]), or `null` when this account has no such
+     *  row. Another account's row is never an answer. A READ — never a
+     *  write. */
+    public fun lookupRoute(accountIdB64: String, pushGidHex: String): String?
 
-    /** Match `groupHex` to a locally-stored account+group. `null` when
-     *  no account on this device knows the group (a stray wake). */
-    public fun resolveAccount(groupHex: String): ResolvedPushAccount?
+    /** Legacy (pre-ADR-0042) fallback: does [accountIdB64] know `groupHex`
+     *  as one of its own groups? Only the bound account's groups are
+     *  searched; a group only another account knows is a stray wake. */
+    public fun accountKnowsGroup(accountIdB64: String, groupHex: String): Boolean
 
     /** The seed the snapshot's identity is rebuilt from for `accountIdB64`,
      *  or `null`. Since ADR-0050 this is the per-device conversation seed
@@ -324,24 +331,27 @@ public suspend fun decryptPushWake(
     val groupHex = rawGroupHex.lowercase()
     if (groupHex.length != GROUP_HEX_LEN || !isLowerHex(groupHex)) return PushWakeOutcome.EMPTY
 
-    // 2. Resolve the wake's `g` to a locally-stored account + the REAL
-    //    DS group_id. ADR-0042 (Sprint 4): post-Sprint-3, notify sends
-    //    `g = hex(push_gid)` — an opaque routing id, NOT the group_id —
-    //    so FIRST reverse-resolve it via the plaintext route index; a
-    //    hit yields the owning account + the real group_id used for
-    //    everything downstream (snapshot, loadGroup, DS fetch, cursor).
-    //    A miss, a lookup error, or a malformed stored row FALLS BACK
-    //    to the legacy raw-group_id path (pre-ADR-0042 wakes), which
-    //    itself fails closed to `null` (→ generic) on a stray wake.
+    // 2. Resolve the wake's `g` to the REAL DS group_id, for the bound
+    //    account ONLY (ADR-0042, amended 2026-09-30 — the wake gate has
+    //    already decided which account this wake is; nothing below may
+    //    pick another). Post-ADR-0042 notify sends `g = hex(push_gid)`,
+    //    an opaque routing id, so FIRST reverse-resolve it via the
+    //    plaintext route index for `(bound account, push_gid)`; a hit
+    //    yields the real group_id used for everything downstream
+    //    (snapshot, loadGroup, DS fetch, cursor). A miss, a lookup error,
+    //    or a malformed stored row FALLS BACK to the legacy raw-group_id
+    //    path, which searches only the bound account's groups and fails
+    //    closed to `null` (-> generic) on a stray wake.
+    val accountIdB64 = wake.accountIdB64
+    if (accountIdB64.isEmpty()) return PushWakeOutcome.EMPTY
     var account: ResolvedPushAccount? = null
     var realGroupHex = groupHex
-    val route = try {
-        deps.lookupRoute(groupHex)
+    val routedHex = try {
+        deps.lookupRoute(accountIdB64, groupHex)?.lowercase()
     } catch (_: Throwable) {
         null
     }
-    if (route != null) {
-        val routedHex = route.second.lowercase()
+    if (routedHex != null) {
         val routedBytes =
             if (routedHex.length == GROUP_HEX_LEN && isLowerHex(routedHex)) {
                 hexToBytes(routedHex)
@@ -350,17 +360,23 @@ public suspend fun decryptPushWake(
             }
         if (routedBytes != null) {
             account = ResolvedPushAccount(
-                accountIdB64 = route.first,
+                accountIdB64 = accountIdB64,
                 groupIdBytes = routedBytes,
             )
             realGroupHex = routedHex
         }
     }
     if (account == null) {
-        // Legacy path: treat `g` as the raw group_id (also validates
-        // the wake's group is one we actually know — a stray wake →
-        // null).
-        account = deps.resolveAccount(groupHex) ?: return PushWakeOutcome.EMPTY
+        // Legacy path: treat `g` as the raw group_id of one of the bound
+        // account's own groups (a stray wake -> null).
+        val knows = try {
+            deps.accountKnowsGroup(accountIdB64, groupHex)
+        } catch (_: Throwable) {
+            false
+        }
+        if (!knows) return PushWakeOutcome.EMPTY
+        val bytes = hexToBytes(groupHex) ?: return PushWakeOutcome.EMPTY
+        account = ResolvedPushAccount(accountIdB64 = accountIdB64, groupIdBytes = bytes)
         realGroupHex = groupHex
     }
 

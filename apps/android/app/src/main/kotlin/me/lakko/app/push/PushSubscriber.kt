@@ -83,8 +83,17 @@ public class PushSubscriber(
      * Errors are logged via `android.util.Log.w(TAG, …)`. The
      * caller treats `null` as "push not available, fall back
      * to foreground polling".
+     *
+     * ADR-0042, amended 2026-09-30: once the pseudonym is registered for
+     * [accountIdB64] the pair is recorded in [PushWakeBindingStore], the
+     * binding the FCM service gates every wake on. [stillSignedIn] is asked
+     * right before that write, so a subscribe that outlived a Log out (which
+     * clears the binding first) does not re-create it.
      */
-    public suspend fun subscribe(): SubscribeResult? {
+    public suspend fun subscribe(
+        accountIdB64: String,
+        stillSignedIn: () -> Boolean = { true },
+    ): SubscribeResult? {
         val options = buildFirebaseOptionsOrNull() ?: run {
             Log.i(TAG, "FCM disabled (missing BuildConfig.FCM_* fields)")
             return null
@@ -135,6 +144,19 @@ public class PushSubscriber(
             return null
         }
 
+        if (!stillSignedIn()) {
+            Log.i(TAG, "signed out during push subscribe; no wake binding written")
+            return null
+        }
+        try {
+            PushWakeBindingStore(context).bind(pseudonym, accountIdB64)
+        } catch (cause: Throwable) {
+            // Without a binding every wake is dropped: push is unavailable,
+            // the same fallback as a failed register.
+            Log.w(TAG, "push wake binding write failed", cause)
+            return null
+        }
+
         return SubscribeResult(devicePseudonym = pseudonym, fcmToken = token)
     }
 
@@ -149,6 +171,11 @@ public class PushSubscriber(
      */
     public suspend fun unsubscribe(session: me.lakko.app.anon.AnonSession? = null) {
         val pseudonym = DevicePushId.peek(context)
+        // Drop the local pseudonym BEFORE the network leg, so a sign-in that
+        // starts while the unregister is in flight mints a fresh one instead
+        // of re-registering (and re-binding) the departing session's. The
+        // wake binding itself was cleared first by [PushSignOut].
+        DevicePushId.clear(context)
         if (pseudonym != null) {
             val unregisterClient = if (session != null) detachedClient(session) else client
             try {
@@ -165,12 +192,11 @@ public class PushSubscriber(
         // Firebase doesn't expose a `deleteToken()` in the
         // coroutine surface as cleanly as iOS's "stop calling
         // register" pattern; for 1.20d we drop the local
-        // pseudonym so the server row stops mapping to us, and
-        // leave the FCM token as a dangling no-op on Google's
+        // pseudonym (above) so the server row stops mapping to us,
+        // and leave the FCM token as a dangling no-op on Google's
         // side. A future polish item can wire
         // `FirebaseMessaging.deleteToken()` if the dangling
         // token shows up as a leak risk.
-        DevicePushId.clear(context)
     }
 
     // -----------------------------------------------------------------

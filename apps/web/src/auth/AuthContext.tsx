@@ -164,6 +164,7 @@ import { deleteCallLogRow } from "../calls/call-log-idb";
 import { clearOwnProfile } from "../profile/own-profile";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
+import { releaseWakeBinding } from "../push/wake-binding";
 import { anonTokens } from "../tokens/anon-token-pool";
 import {
   discoveryAccountLookup,
@@ -1164,7 +1165,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       accountIdB64: args.accountIdB64,
       sessionToken: args.sessionToken,
     });
-    void subscribeToPush().catch((err) => {
+    void subscribeToPush(args.accountIdB64).catch((err) => {
       // eslint-disable-next-line no-console
       console.warn("push subscribe failed", err);
     });
@@ -1648,7 +1649,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // a no-op when the build has no VAPID public key set or the
       // user denies the Notification permission prompt — fall
       // back to foreground polling without throwing.
-      void subscribeToPush().catch((err) => {
+      void subscribeToPush(accountIdB64).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn("push subscribe (signup) failed", err);
       });
@@ -3112,7 +3113,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // the new password changes the device key, but the
         // device push pseudonym persists in localStorage so
         // the server's existing token row simply gets re-keyed.
-        void subscribeToPush().catch((err) => {
+        void subscribeToPush(accountIdB64).catch((err) => {
           // eslint-disable-next-line no-console
           console.warn("push subscribe (recover) failed", err);
         });
@@ -3206,6 +3207,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       );
     },
     logout() {
+      // ADR-0042, "A wake is shown only for the signed-in account": the wake
+      // binding goes FIRST, so the service worker drops every wake from here
+      // on, and this account's notifications leave the screen with it.
+      void releaseWakeBinding();
       clearRestored();
       // Keep localStorage + IDB device key intact. Re-login on
       // this device remains cheap, and the device key stays
@@ -3269,6 +3274,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     async forgetDevice() {
+      // ADR-0042 — as in `logout`: the wake binding first, then this app's
+      // delivered notifications.
+      await releaseWakeBinding();
       clearRestored();
       const cached = loadPersisted();
       // ADR-0050 section 2.10 — take this device's KeyPackage out of the

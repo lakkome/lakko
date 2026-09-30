@@ -3,6 +3,7 @@
 
 import Foundation
 import LakkoCore
+import UserNotifications
 
 /// Single source of truth for "is the user authenticated on this
 /// device?".
@@ -172,6 +173,21 @@ public final class AuthRepository: ObservableObject {
     /// bound in this process. ``LoginHandleBindLedger/shared`` in the app.
     private let loginHandleBinds: LoginHandleBindLedger
 
+    /// ADR-0042 (amended 2026-09-30) — the `(device pseudonym, account)`
+    /// binding the background push paths gate every wake on. Log out and
+    /// Forget device clear it before anything else they do.
+    private let pushBinding: PushAccountBindingStore
+
+    /// Removes this app's delivered notifications. Log out and Forget device
+    /// call it, so nothing an account received stays on the lock screen after
+    /// it signs out. Injectable for tests.
+    private let removeDeliveredNotifications: () -> Void
+
+    /// The live `UNUserNotificationCenter` removal.
+    nonisolated static func removeAllDeliveredNotifications() {
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+    }
+
     public convenience init(
         sessionStore: SessionStore = SessionStore(),
         authClientFactory: @escaping () -> AuthClient = { AuthClient() },
@@ -194,7 +210,9 @@ public final class AuthRepository: ObservableObject {
         nowMs: () -> Int64,
         accountDirectory: AccountDirectory,
         loginHandleBinds: LoginHandleBindLedger = .shared,
-        restoreDirectory: DeviceRestoreDirectory = DiscoveryDeviceRestoreDirectory()
+        restoreDirectory: DeviceRestoreDirectory = DiscoveryDeviceRestoreDirectory(),
+        pushBinding: PushAccountBindingStore = .live,
+        removeDeliveredNotifications: @escaping () -> Void = AuthRepository.removeAllDeliveredNotifications
     ) {
         self.sessionStore = sessionStore
         self.authClientFactory = authClientFactory
@@ -202,6 +220,8 @@ public final class AuthRepository: ObservableObject {
         self.accountDirectory = accountDirectory
         self.restoreDirectory = restoreDirectory
         self.loginHandleBinds = loginHandleBinds
+        self.pushBinding = pushBinding
+        self.removeDeliveredNotifications = removeDeliveredNotifications
         rehydrate(nowMs: nowMs())
     }
 
@@ -489,7 +509,7 @@ public final class AuthRepository: ObservableObject {
         // 1.20c — best-effort push subscribe. Same posture as the
         // web side: errors are logged and swallowed; the user
         // lands in a working session even without push.
-        Task { await Self.subscribePushBestEffort(context: "signup") }
+        Task { await self.subscribePushBestEffort(context: "signup", accountIdB64: accountIdB64) }
         return SignupOutcome(recoveryPhrase: phrase)
     }
 
@@ -710,7 +730,7 @@ public final class AuthRepository: ObservableObject {
         )
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "login")
         // 1.20c — best-effort push subscribe.
-        Task { await Self.subscribePushBestEffort(context: "login") }
+        Task { await self.subscribePushBestEffort(context: "login", accountIdB64: accountIdB64) }
     }
 
     /// ADR-0054 S5 — re-`PUT` the login handle of `username` with
@@ -894,7 +914,7 @@ public final class AuthRepository: ObservableObject {
             sessionExpiresAtMs: assertion.sessionExpiresAtMs,
             username: cached.username
         )
-        Task { await Self.subscribePushBestEffort(context: "passkey-login") }
+        Task { await self.subscribePushBestEffort(context: "passkey-login", accountIdB64: cached.accountIdB64) }
     }
 
     /// Drive the full recover-from-mnemonic flow.
@@ -1181,7 +1201,7 @@ public final class AuthRepository: ObservableObject {
         )
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "recover")
         // 1.20c — best-effort push subscribe.
-        Task { await Self.subscribePushBestEffort(context: "recover") }
+        Task { await self.subscribePushBestEffort(context: "recover", accountIdB64: accountIdB64) }
     }
 
     /// Drop the in-memory session. Keeps ``SessionStore`` and the
@@ -1192,6 +1212,11 @@ public final class AuthRepository: ObservableObject {
     /// surfaced in ``AuthState/anon(cachedUsername:)`` so the next
     /// Login form pre-fills it.
     public func logout() {
+        // ADR-0042 (amended 2026-09-30) — FIRST: from here on no background
+        // wake is handled for this account, and nothing it already received
+        // stays on the lock screen.
+        pushBinding.clear()
+        removeDeliveredNotifications()
         let cached = sessionStore.load()
         // Drop the persisted session token so a relaunch after logout lands
         // logged out instead of silently restoring the session this call
@@ -1222,6 +1247,9 @@ public final class AuthRepository: ObservableObject {
     /// only way back into the account is via the recovery passphrase
     /// (``recover(mnemonicPhrase:newPassword:)``).
     public func forgetDevice() {
+        // ADR-0042 (amended 2026-09-30) — FIRST, as in ``logout()``.
+        pushBinding.clear()
+        removeDeliveredNotifications()
         if let cached = sessionStore.load() {
             DeviceKeyStore.deleteDeviceKey(accountIdB64: cached.accountIdB64)
             // Phase 2a1c — drop the cached recovery phrase too.
@@ -1322,16 +1350,34 @@ public final class AuthRepository: ObservableObject {
 
     // MARK: - Push integration helpers
 
-    /// 1.20c — fire ``PushSubscriber/subscribe()`` on the
-    /// MainActor with errors logged and swallowed. Called from
+    /// 1.20c — fire ``PushSubscriber/subscribe(accountIdB64:stillSignedIn:)``
+    /// on the MainActor with errors logged and swallowed. Called from
     /// signup / login / recover after the state flip so the
     /// user lands in a working session even when push fails.
-    @MainActor
-    private static func subscribePushBestEffort(context: String) async {
+    ///
+    /// ADR-0042 (amended 2026-09-30) — the pseudonym is registered for
+    /// `accountIdB64`, and bound to it only while that account is still the
+    /// one signed in when the subscribe gets there.
+    private func subscribePushBestEffort(context: String, accountIdB64: String) async {
         do {
-            _ = try await PushSubscriber.shared.subscribe()
+            _ = try await PushSubscriber.shared.subscribe(
+                accountIdB64: accountIdB64,
+                stillSignedIn: { [weak self] in self?.signedInAccountIdB64 == accountIdB64 }
+            )
         } catch {
             NSLog("push subscribe (\(context)) failed: \(error)")
+        }
+    }
+
+    /// The account the current state is signed in as, including the states
+    /// where ACCESS succeeded and identity is still being restored. `nil`
+    /// while logged out.
+    var signedInAccountIdB64: String? {
+        switch state {
+        case .session(let account), .needsRecoveryPhrase(let account), .saveFreshPhrase(let account):
+            return account.accountIdB64
+        case .loading, .anon:
+            return nil
         }
     }
 
@@ -2035,7 +2081,7 @@ public final class AuthRepository: ObservableObject {
                 sessionExpiresAtMs: sessionExpiresAtMs,
                 username: username
             )
-            Task { await Self.subscribePushBestEffort(context: pushContext) }
+            Task { await self.subscribePushBestEffort(context: pushContext, accountIdB64: accountIdB64) }
             return
         }
 

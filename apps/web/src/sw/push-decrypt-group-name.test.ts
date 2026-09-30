@@ -65,6 +65,7 @@ function deps(messages: unknown[]) {
   return {
     forbidden,
     deps: {
+      readWakeBinding: async () => ({ devicePseudonymHex: "dd".repeat(32), accountId: "acct" }),
       resolveAccount: async () => ({ accountId: "acct", groupIdBytes: GROUP_BYTES }),
       getDeviceKey: async () => ({}),
       getIdentitySeed: async () => new Uint8Array(64),
@@ -76,7 +77,7 @@ function deps(messages: unknown[]) {
   };
 }
 
-const wake = { deviceHex: null, groupHex: GROUP_HEX, pointer: 42 };
+const wake = { deviceHex: "dd".repeat(32), groupHex: GROUP_HEX, pointer: 42 };
 const groupName = (name = "Zed Unique Group") => realWasm.composeGroupNameEnvelope(name, 5n);
 
 describe("the background path never previews a group name", () => {

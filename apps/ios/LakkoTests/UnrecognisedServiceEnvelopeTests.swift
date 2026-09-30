@@ -146,9 +146,10 @@ final class UnrecognisedServiceEnvelopeTests: XCTestCase {
         let group: NseThrowawayGroup
         let rows: [NseFetchedRow]
 
-        func lookupRoute(pushGidHex: String) -> (accountIdB64: String, groupIdHex: String)? { nil }
-        func resolveAccount(groupHex: String) -> NseResolvedAccount? {
-            NseResolvedAccount(accountIdB64: "acct", groupIdBytes: Data(repeating: 0xAA, count: 32))
+        func boundAccount(wakeDevicePseudonymHex: String?) -> String? { "acct" }
+        func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? { nil }
+        func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool {
+            accountIdB64 == "acct"
         }
         func loadIdentitySeed(accountIdB64: String) -> Data? { Data(repeating: 1, count: 64) }
         func loadSnapshot(accountIdB64: String) -> Data? { Data(repeating: 2, count: 8) }

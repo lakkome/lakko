@@ -2557,6 +2557,10 @@ public class AuthRepository(
      * Login form pre-fills it.
      */
     public fun logout() {
+        // ADR-0042, amended 2026-09-30 — before anything else: drop the push
+        // wake binding (a wake that lands from here on is refused) and this
+        // app's delivered notifications.
+        me.lakko.app.push.PushSignOut.clearFirst(applicationContext)
         val cached = sessionStore.load()
         // Drop the persisted bearer token FIRST and synchronously. A relaunch
         // silently restores any session whose token is still on disk
@@ -2596,6 +2600,8 @@ public class AuthRepository(
      * passphrase (1.15d6 `/recover` flow).
      */
     public fun forgetDevice() {
+        // ADR-0042, amended 2026-09-30 — first, as in [logout].
+        me.lakko.app.push.PushSignOut.clearFirst(applicationContext)
         val cached = sessionStore.load()
         if (cached != null) {
             // The persisted bearer token goes too — a stale row would let a
@@ -3061,14 +3067,34 @@ public class AuthRepository(
      *  subscriber + here, never thrown past the auth flow —
      *  push failure must not block sign-in. */
     private fun subscribePushBestEffort(context: String) {
+        // ADR-0042, amended 2026-09-30 — the pseudonym is registered FOR the
+        // account signed in right now, and the wake binding names it. Read
+        // here, synchronously, so the account cannot change under the launch.
+        val accountIdB64 = signedInAccountIdB64() ?: run {
+            Log.w("lakko-auth", "push subscribe ($context) skipped: no signed-in account")
+            return
+        }
         pushScope.launch {
             try {
-                PushSubscriber(applicationContext).subscribe()
+                PushSubscriber(applicationContext).subscribe(
+                    accountIdB64 = accountIdB64,
+                    stillSignedIn = { signedInAccountIdB64() == accountIdB64 },
+                )
             } catch (cause: Throwable) {
                 Log.w("lakko-auth", "push subscribe ($context) failed", cause)
             }
         }
     }
+
+    /** The account of the current session, whichever post-ACCESS state it
+     *  is in, or `null` when signed out. */
+    private fun signedInAccountIdB64(): String? =
+        when (val state = mutableState.value) {
+            is AuthState.Session -> state.account.accountIdB64
+            is AuthState.NeedsRecoveryPhrase -> state.account.accountIdB64
+            is AuthState.SaveFreshPhrase -> state.account.accountIdB64
+            AuthState.Loading, is AuthState.Anon -> null
+        }
 
     /** 1.20d — Mirror of [subscribePushBestEffort] for the
      *  unregister path. */

@@ -34,12 +34,20 @@ import me.lakko.app.ds.DsClient
  *   * [onNewToken] — the FCM token rotated. Re-register with
  *     `push-gw` so the new token replaces the prior row.
  *     Idempotent server-side via the UPSERT in
- *     `services/push-gw/src/registry.rs`.
+ *     `services/push-gw/src/registry.rs`. Only while an account is
+ *     signed in ([shouldRegisterOnNewToken]): a signed-out device
+ *     registers nothing and mints no pseudonym.
  *
  *   * [onMessageReceived] — a wake arrived. The body shape is
  *     defined by
  *     `services/push-gw/src/providers/fcm.rs::WakeBody`:
  *     `{ v: "1", d: <device_hex>, g: <group_hex>?, p: <pointer>? }`
+ *     FIRST the wake gate (ADR-0042, amended 2026-09-30,
+ *     [wakeAccountFor]): the wake is handled only when a
+ *     [PushWakeBinding] exists and `d` is the bound pseudonym; anything
+ *     else posts NO notification. The account it is then handled as is
+ *     the bound one, for the decrypt, the mute flag, the caller name and
+ *     the tap deep link alike.
  *     When the app is NOT foregrounded and the wake is a
  *     GroupMessage (`g` + `p` present), the service does a
  *     READ-ONLY THROWAWAY MLS decrypt
@@ -80,10 +88,19 @@ public class LakkoMessagingService : FirebaseMessagingService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onNewToken(token: String) {
-        Log.i(TAG, "FCM token rotated; re-registering with push-gw")
         scope.launch {
             try {
-                val pseudonym = DevicePushId.getOrCreate(applicationContext)
+                // Only the pseudonym registered for the signed-in account is
+                // re-registered; with no binding (signed out) nothing is sent
+                // and no pseudonym is minted.
+                val binding = PushWakeBindingStore(applicationContext).load()
+                val pseudonym = DevicePushId.peek(applicationContext)
+                val storedHex = pseudonym?.let { PushClient.pseudonymHex(it) }
+                if (pseudonym == null || !shouldRegisterOnNewToken(binding, storedHex)) {
+                    Log.i(TAG, "FCM token rotated while signed out; not registering")
+                    return@launch
+                }
+                Log.i(TAG, "FCM token rotated; re-registering with push-gw")
                 PushClient().use { client ->
                     client.register(
                         devicePseudonym = pseudonym,
@@ -99,6 +116,20 @@ public class LakkoMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         val wake = parseWakeBody(message.data)
+        // ADR-0042, amended 2026-09-30 — the wake gate. A wake with no
+        // binding (no account signed in) or whose `d` is not the bound
+        // pseudonym belongs to no session this device holds: post nothing.
+        val binding = try {
+            PushWakeBindingStore(applicationContext).load()
+        } catch (cause: Throwable) {
+            Log.w(TAG, "push wake binding unreadable; dropping wake", cause)
+            null
+        }
+        val accountIdB64 = wakeAccountFor(wake?.deviceHex, binding)
+        if (wake == null || accountIdB64 == null) {
+            Log.i(TAG, "wake dropped: not addressed to the signed-in account")
+            return
+        }
         // Silent-push background decrypt (mirror of web sw.js):
         //   * Foreground → defer. The live poll loop does the durable
         //     processing + its own preview; a background decrypt here
@@ -108,16 +139,16 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         // `isAppForegrounded` fails toward `false` (background), so a
         // probe error never suppresses the real preview.
         val outcome: PushWakeOutcome? =
-            if (wake?.groupHex != null &&
+            if (wake.groupHex != null &&
                 wake.pointer != null &&
                 !isAppForegrounded(applicationContext)
             ) {
-                backgroundPreviewBlocking(wake)
+                backgroundPreviewBlocking(wake, accountIdB64)
             } else {
                 null
             }
         if (outcome != null && handledAsCall(outcome)) return
-        showWakeNotification(wake, outcome?.preview)
+        showWakeNotification(wake, accountIdB64, outcome?.preview)
     }
 
     /**
@@ -163,14 +194,18 @@ public class LakkoMessagingService : FirebaseMessagingService() {
      * keeps us well inside the FMS window; a timeout or ANY failure
      * degrades to the generic notification (returns `null`).
      */
-    private fun backgroundPreviewBlocking(wake: WakeBody): PushWakeOutcome? {
+    private fun backgroundPreviewBlocking(wake: WakeBody, accountIdB64: String): PushWakeOutcome? {
         return try {
             runBlocking {
                 withTimeoutOrNull(BACKGROUND_DECRYPT_BUDGET_MS) {
                     DsClient().use { ds ->
                         val deps = buildBackgroundDecryptDeps(applicationContext, ds)
                         decryptPushWake(
-                            PushWake(groupHex = wake.groupHex, pointer = wake.pointer),
+                            PushWake(
+                                groupHex = wake.groupHex,
+                                pointer = wake.pointer,
+                                accountIdB64 = accountIdB64,
+                            ),
                             deps,
                             nowMs = System.currentTimeMillis(),
                             // The ring window from its one home
@@ -191,7 +226,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
     // Notification rendering
     // -----------------------------------------------------------------
 
-    private fun showWakeNotification(wake: WakeBody?, preview: PushPreview?) {
+    private fun showWakeNotification(wake: WakeBody, accountIdB64: String, preview: PushPreview?) {
         ensureNotificationChannel(applicationContext)
 
         // Click intent: launch MainActivity with the wake hint
@@ -209,10 +244,10 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         // notification id, and the PendingIntent request code below all
         // deliberately stay on the raw `push_gid` — it is stable per group,
         // so the existing grouping/replace semantics are already correct.
-        val tapGroupHex = wake?.groupHex?.let { pushGidHex ->
+        val tapGroupHex = wake.groupHex?.let { pushGidHex ->
             resolveTapGroupHex(pushGidHex) { hex ->
                 try {
-                    PushRouteStore(applicationContext).lookup(hex)?.groupIdHex
+                    PushRouteStore(applicationContext).lookup(accountIdB64, hex)
                 } catch (cause: Throwable) {
                     Log.w(TAG, "push route lookup failed; tap keeps the raw push_gid", cause)
                     null
@@ -225,13 +260,13 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             if (tapGroupHex != null) {
                 putExtra(EXTRA_WAKE_GROUP, tapGroupHex)
             }
-            if (wake?.pointer != null) {
+            if (wake.pointer != null) {
                 putExtra(EXTRA_WAKE_POINTER, wake.pointer)
             }
         }
         val pendingIntent = PendingIntent.getActivity(
             applicationContext,
-            wake?.groupHex?.hashCode() ?: 0,
+            wake.groupHex?.hashCode() ?: 0,
             clickIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -253,7 +288,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             // Tag-replace by group so a burst within the same
             // chat collapses into one OS notification — matches
             // the Web + iOS posture.
-            .setGroup(wake?.groupHex ?: "lakko-default")
+            .setGroup(wake.groupHex ?: "lakko-default")
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
 
@@ -261,7 +296,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         // Per-group notification id — same hash trick as the
         // PendingIntent request code. Stable id means a fresh
         // wake on the same thread replaces the prior banner.
-        val id = wake?.groupHex?.hashCode() ?: 0
+        val id = wake.groupHex?.hashCode() ?: 0
         try {
             manager.notify(id, builder.build())
         } catch (cause: SecurityException) {

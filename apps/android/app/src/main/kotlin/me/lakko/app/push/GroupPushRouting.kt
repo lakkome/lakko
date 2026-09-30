@@ -2174,13 +2174,16 @@ public interface PushRoutingPorts {
     public suspend fun unsubscribeFromPushGid(pushGid: ByteArray)
 
     /**
-     * ADR-0043 — delete the `pushGid -> (account, group)` reverse-index row
-     * for a SUPERSEDED id.
+     * ADR-0043 — delete THIS account's `(account, pushGid) -> group`
+     * reverse-index row for a SUPERSEDED id.
      *
      * The stores age asymmetrically: the secret row is keyed
      * `(account, group)` and is OVERWRITTEN in place by a rotation, while
-     * the reverse index is keyed by the `push_gid` itself and is only ever
-     * ADDED to — so without this every rotation leaks one dead entry.
+     * the reverse index is keyed by `(account, push_gid)` and is only ever
+     * ADDED to — so without this every rotation leaks one dead entry. The
+     * delete is scoped to the ports' account (ADR-0042, amended
+     * 2026-09-30): another account on the device that shares the group
+     * keeps its own row.
      */
     public fun deleteRoute(pushGid: ByteArray)
 
@@ -2267,7 +2270,7 @@ public class NativePushRoutingPorts(
             distributed,
             mintEpoch,
         )
-        routeStore.put(PushClient.pseudonymHex(pushGid), accountIdB64, groupIdHex)
+        routeStore.put(accountIdB64, PushClient.pseudonymHex(pushGid), groupIdHex)
     }
 
     override fun markDistributed(groupIdHex: String) {
@@ -2287,7 +2290,7 @@ public class NativePushRoutingPorts(
     }
 
     override fun deleteRoute(pushGid: ByteArray) {
-        routeStore.remove(PushClient.pseudonymHex(pushGid))
+        routeStore.remove(accountIdB64, PushClient.pseudonymHex(pushGid))
     }
 
     override suspend fun broadcast(envelope: ByteArray) {

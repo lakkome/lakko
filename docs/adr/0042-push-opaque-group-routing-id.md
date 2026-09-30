@@ -203,6 +203,34 @@ Recommended placement: a new module beside `media_state.rs` in `lakko-contacts`
   (`NsePushDecrypt.swift:297` / `sw-push-decrypt.js:227` /
   `PushPreviewDecrypt.kt:262`).
 
+### A wake is shown only for the signed-in account (amended 2026-09-30)
+
+The maintainer's rule: a device has at most one active account, and a client
+never shows another account's push. The recon that preceded it found that no
+background path (web service worker, iOS NSE, Android FCM service) checked
+which account was signed in: each decrypted as the account the reverse-map row
+named, the row was keyed by `push_gid` alone (the last account to write it
+won, and two accounts in one group derive the same id), Log out left that
+account's keys and snapshot on disk, so a signed-out account could still
+produce a notification with message text. push-gw's `/push/unregister` removed
+the token and never the group subscriptions, so they kept waking the device
+forever. Every wake already carries `d`, the device pseudonym that
+subscribed; it is minted at each sign-in and cleared at Log out, so it names
+the sign-in session, and no client read it.
+
+- **Server.** `/push/unregister` deletes the device's group subscriptions in
+  the same transaction when it removes the device's LAST token (iOS removes
+  APNs and VoIP one at a time).
+- **Binding.** At subscribe the client records `(device pseudonym, account)`
+  where its background path can read it; Log out and Forget device clear it
+  first.
+- **Wake.** Handled only when its `d` equals the bound pseudonym, decrypted
+  only as the bound account, the reverse map looked up for that account
+  alone. Anything else shows no content (iOS, which must display an alert for
+  a mutable-content push without the filtering entitlement, shows the generic
+  line).
+- **Log out** also removes delivered notifications.
+
 ### Rotation policy (V1)
 
 Distribute the secret at group creation + to each new joiner; **do NOT rotate on

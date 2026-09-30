@@ -1171,6 +1171,11 @@ private fun SessionRoot(
     val showTabs = currentRoute in Routes.TOP_LEVEL
 
     val logout = {
+        // ADR-0042, amended 2026-09-30 — the push wake binding and the
+        // delivered notifications go FIRST, before anything else sign-out
+        // does (AuthRepository.logout repeats it, idempotently, for the
+        // callers that reach it directly).
+        me.lakko.app.push.PushSignOut.clearFirst(appContext)
         me.lakko.app.calls.AppCallHost.reset()
         contactsRepository.clear()
         // In-memory only, like chat.clear(): the persisted channel log and
@@ -1180,6 +1185,8 @@ private fun SessionRoot(
         authRepository.logout()
     }
     val forgetDevice = {
+        // ADR-0042, amended 2026-09-30 — first, as in logout above.
+        me.lakko.app.push.PushSignOut.clearFirst(appContext)
         me.lakko.app.calls.AppCallHost.reset()
         // The account's contact list and identity pins and the invite-link
         // secrets this device kept (UX 5.3) go with it; read before clear()

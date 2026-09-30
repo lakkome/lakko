@@ -60,6 +60,13 @@ extension AppServices {
     /// account's other devices retire this device's leaves when their
     /// scheduled check sees the row gone.
     func forgetThisDevice() {
+        // ADR-0042 (amended 2026-09-30) — FIRST, before the rest of the wipe
+        // (some of which waits on the network): no background wake is handled
+        // for this account from here on, and nothing it received stays on the
+        // lock screen. ``AuthRepository/forgetDevice()`` repeats both at its
+        // own start for its other callers.
+        PushAccountBindingStore.live.clear()
+        AuthRepository.removeAllDeliveredNotifications()
         // This device's calls go with the device. The transcript rows in each
         // conversation are the message log's to wipe, not this index's.
         CallHistoryStore.shared.clear()

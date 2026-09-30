@@ -458,7 +458,8 @@ export function subscribeGroupUnderPushGidBestEffort(
 
 /**
  * ADR-0043 — retire a SUPERSEDED `push_gid`: drop this device's push-gw
- * subscription under it, then delete its reverse-index row.
+ * subscription under it, then delete `accountId`'s reverse-index row for it
+ * (another account on this browser in the same group keeps its own row).
  *
  * Called on BOTH sides of a rotation with the OLD secret — by the rotator
  * after it re-arms under the new id, and by every remaining member when the
@@ -481,7 +482,10 @@ export function subscribeGroupUnderPushGidBestEffort(
  * id, so a failure here must not unwind the rotation. The cost of a failed
  * unsubscribe is a stale row that nothing notifies again.
  */
-export async function retireOldPushGid(oldSecret: Uint8Array): Promise<void> {
+export async function retireOldPushGid(
+  accountId: string,
+  oldSecret: Uint8Array,
+): Promise<void> {
   let oldGid: Uint8Array;
   let oldGidHex: string;
   try {
@@ -506,7 +510,7 @@ export async function retireOldPushGid(oldSecret: Uint8Array): Promise<void> {
     console.warn("push_gid unsubscribe failed", err);
   }
   try {
-    await deleteRoute(oldGidHex);
+    await deleteRoute(accountId, oldGidHex);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("push-routing stale route delete failed", err);
@@ -1205,7 +1209,7 @@ export function receivePushRoutingSecretGated(
       // taken BEFORE the persist above — the `secrets` row is overwritten in
       // place, so after the write the old bytes are unrecoverable.
       if (storedSecret !== null && !bytesEqual(storedSecret, secret)) {
-        await retireOldPushGid(storedSecret);
+        await retireOldPushGid(accountId, storedSecret);
       }
     } catch (err) {
       // Best-effort, exactly as before the gate — never throw out of the
@@ -2027,7 +2031,7 @@ export function rotatePushRoutingSecret(
 
       // (7)+(8) — retire the OLD id: unsubscribe this device's row, drop the
       // stale reverse-index entry.
-      await retireOldPushGid(oldSecret);
+      await retireOldPushGid(accountId, oldSecret);
       return "rotated";
     },
   );

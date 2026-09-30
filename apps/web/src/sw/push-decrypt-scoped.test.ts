@@ -69,6 +69,7 @@ function deps(messages: unknown[], withDispatcher = true) {
   return {
     forbidden,
     deps: {
+      readWakeBinding: async () => ({ devicePseudonymHex: "dd".repeat(32), accountId: "acct" }),
       resolveAccount: async () => ({ accountId: "acct", groupIdBytes: GROUP_BYTES }),
       getDeviceKey: async () => ({}),
       getIdentitySeed: async () => new Uint8Array(64),
@@ -80,7 +81,7 @@ function deps(messages: unknown[], withDispatcher = true) {
   };
 }
 
-const wake = { deviceHex: null, groupHex: GROUP_HEX, pointer: 42 };
+const wake = { deviceHex: "dd".repeat(32), groupHex: GROUP_HEX, pointer: 42 };
 
 function committerDelegation(): Uint8Array {
   const added = realWasm.reachVerifyingKey(new Uint8Array(32).fill(9));

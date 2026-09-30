@@ -4390,7 +4390,7 @@ function ChatView(props: {
           // No secret means nothing was ever subscribed under a `push_gid` for
           // this group, so there is nothing to retire — done, not failed, so
           // the claim stands.
-          if (secret !== null) await retireOldPushGid(secret);
+          if (secret !== null) await retireOldPushGid(accountId, secret);
         } catch (err) {
           // Released so the next re-run retries it.
           releaseTeardownStep(teardownDone, "retire-push-subscription");

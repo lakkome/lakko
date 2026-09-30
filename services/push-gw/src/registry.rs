@@ -155,31 +155,61 @@ pub(crate) struct UnregisterResponse {
 }
 
 /// `POST /push/unregister` — drop a push token. Idempotent.
+///
+/// When the device holds no token after the delete, its group
+/// subscriptions go in the same transaction: a device that unregistered its
+/// last token has signed out, and a subscription left behind would keep
+/// waking it for the groups of the account that signed out (the rows were
+/// never removed before, and the pseudonym is minted anew at the next
+/// sign-in, so nothing else would ever delete them). A device keeping
+/// another provider's token (iOS unregisters APNs and VoIP one at a time)
+/// keeps its subscriptions until the last one goes.
 pub(crate) async fn unregister(
     State(state): State<AppState>,
     Json(payload): Json<UnregisterRequest>,
 ) -> Result<Json<UnregisterResponse>, (StatusCode, String)> {
     let device = decode_device(&payload.device_pseudonym)?;
     let provider_db = payload.provider.as_db();
-
-    let result = sqlx::query("DELETE FROM push_tokens WHERE device_id = ? AND provider = ?")
-        .bind(&device[..])
-        .bind(provider_db)
-        .execute(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "delete push_tokens");
+    let db_error = |what: &'static str| {
+        move |e: sqlx::Error| {
+            tracing::error!(error = %e, what, "unregister");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal db error".to_string(),
             )
-        })?;
+        }
+    };
+
+    let mut tx = state.db.begin().await.map_err(db_error("begin"))?;
+    let result = sqlx::query("DELETE FROM push_tokens WHERE device_id = ? AND provider = ?")
+        .bind(&device[..])
+        .bind(provider_db)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error("delete push_tokens"))?;
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_tokens WHERE device_id = ?")
+        .bind(&device[..])
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_error("count push_tokens"))?;
+    let dropped_groups = if remaining == 0 {
+        sqlx::query("DELETE FROM push_group_subscriptions WHERE device_id = ?")
+            .bind(&device[..])
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error("delete push_group_subscriptions"))?
+            .rows_affected()
+    } else {
+        0
+    };
+    tx.commit().await.map_err(db_error("commit"))?;
 
     let removed = result.rows_affected() > 0;
-    if removed {
+    if removed || dropped_groups > 0 {
         tracing::info!(
             provider = payload.provider.as_str(),
             device_prefix = %hex::encode(&device[..4]),
+            dropped_groups,
             "push token unregistered",
         );
     }
@@ -299,6 +329,95 @@ pub(crate) async fn group_unsubscribe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Gated on `LAKKO_PUSH_GW_TEST_DATABASE_URL` (skipped without it): the
+    /// group subscriptions of a device go with its LAST token, not before.
+    #[tokio::test]
+    async fn the_last_unregistered_token_takes_the_group_subscriptions_with_it() {
+        use crate::provider::ProviderKind;
+        use std::collections::HashMap;
+
+        let Ok(url) = std::env::var("LAKKO_PUSH_GW_TEST_DATABASE_URL") else {
+            eprintln!("skipping: LAKKO_PUSH_GW_TEST_DATABASE_URL unset");
+            return;
+        };
+        let db = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect test db");
+        crate::MIGRATIONS.run(&db).await.expect("migrate");
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_be_bytes();
+        let mut device = [0xe1u8; 32];
+        device[..16].copy_from_slice(&stamp);
+        let mut gid = [0x5bu8; 32];
+        gid[..16].copy_from_slice(&stamp);
+        for kind in [ProviderKind::Fcm, ProviderKind::Apns] {
+            sqlx::query("INSERT INTO push_tokens (device_id, provider, token) VALUES (?, ?, ?)")
+                .bind(&device[..])
+                .bind(kind.as_db())
+                .bind(&b"test-token"[..])
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO push_group_subscriptions (device_id, group_id) VALUES (?, ?)")
+            .bind(&device[..])
+            .bind(&gid[..])
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let state = AppState {
+            anon_tokens: lakko_anon_token_server::TokenVerifier::new(db.clone(), None),
+            db: db.clone(),
+            providers: std::sync::Arc::new(HashMap::new()),
+            internal_secret: None,
+        };
+        let subscriptions = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM push_group_subscriptions WHERE device_id = ?",
+            )
+            .bind(&device[..])
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        let request = |kind: ProviderKind| {
+            Json(UnregisterRequest {
+                device_pseudonym: hex::encode(device),
+                provider: kind,
+            })
+        };
+
+        let first = unregister(State(state.clone()), request(ProviderKind::Fcm)).await;
+        let after_first = subscriptions().await;
+        let second = unregister(State(state.clone()), request(ProviderKind::Apns)).await;
+        let after_second = subscriptions().await;
+
+        sqlx::query("DELETE FROM push_group_subscriptions WHERE device_id = ?")
+            .bind(&device[..])
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM push_tokens WHERE device_id = ?")
+            .bind(&device[..])
+            .execute(&db)
+            .await
+            .unwrap();
+
+        assert!(first.is_ok() && second.is_ok());
+        assert_eq!(
+            after_first, 1,
+            "another provider's token keeps the subscriptions"
+        );
+        assert_eq!(after_second, 0, "the last token takes them with it");
+    }
 
     #[test]
     fn decode_device_validates_format() {

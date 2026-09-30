@@ -28,11 +28,12 @@
  * The SW hands us a lowercase-hex 32-byte id that is EITHER:
  *
  *   * the REAL DS `group_id` — the SW reverse-resolved the wake's
- *     opaque `push_gid` through the `lakko-push-routing`/`routes`
- *     index (`sw.js::resolveTapGroupHex`), or the wake was a legacy
- *     pre-ADR-0042 raw-group_id one; or
- *   * the raw `push_gid` itself, when that reverse lookup missed
- *     (route never provisioned on this device, wiped storage, …).
+ *     opaque `push_gid` for the bound account through the
+ *     `lakko-push-routing`/`account_routes` index (`sw.js::admitWake`),
+ *     or the wake was a legacy pre-ADR-0042 raw-group_id one; or
+ *   * the raw `push_gid` itself, from a notification shown by an older
+ *     worker build (since 2026-09-30 the worker shows nothing for a wake
+ *     it cannot resolve for the bound account).
  *
  * A `push_gid` is `keyed-BLAKE3(secret, …)` — algebraically unrelated
  * to any `group_id` — so the second case simply never matches a group

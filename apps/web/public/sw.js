@@ -46,9 +46,16 @@
  *     `services/push-gw/src/providers/webpush.rs::WakeBody`). Post-
  *     ADR-0042 `g` is the OPAQUE `push_gid`; BOTH the decrypt path and
  *     the notification-TAP deep-link reverse-map it to the real group_id
- *     via the `lakko-push-routing`/`routes` IDB index (legacy raw-
- *     group_id wakes still resolve directly, and any miss keeps the raw
- *     `g` so behavior is unchanged for them).
+ *     via the `lakko-push-routing`/`account_routes` IDB index, for the
+ *     BOUND account only (legacy raw-group_id wakes resolve among that
+ *     account's own known groups).
+ *   * ADR-0042, "A wake is shown only for the signed-in account": a wake is
+ *     handled only when the `lakko-push-routing`/`wake_binding` row exists
+ *     and the wake's `d` equals the pseudonym it names, and only as that
+ *     row's account; its `g` must name one of that account's groups. A wake
+ *     that fails any of this is dropped whole: no message to open tabs, no
+ *     notification. (A browser may then show its own "updated in the
+ *     background" notice; that names no account and carries no content.)
  *   * When a Lakko tab is open + visible, the SW just postMessages the
  *     wake and shows a notification — the visible app drives the real
  *     preview + refresh itself.
@@ -75,7 +82,8 @@
  *
  * All READS, in `readonly` transactions, opened without a version so
  * the worker can never trigger a schema change (C-59 / ADR-0041):
- * `lakko-push-routing`/`routes`, `lakko-mls`/`snapshots`,
+ * `lakko-push-routing`/`wake_binding` and `/account_routes`,
+ * `lakko-mls`/`snapshots`,
  * `lakko-auth`/`device_keys`, `lakko-account-identity-seed`/`seeds`,
  * `lakko-message-log`/`logs`, `lakko-profiles`/`rows` and
  * `lakko-device-sync`/`rows`. There is NO write path anywhere in this
@@ -285,6 +293,17 @@ self.addEventListener("push", (event) => {
  * Click-through: `notificationclick` (below) opens the right route.
  */
 async function handlePush(wake) {
+  // (0) The gate. Nothing below runs for a wake that is not the bound
+  //     account's: no postMessage (the open app belongs to the signed-in
+  //     account), no decrypt, no notification.
+  let admission = null;
+  try {
+    admission = await admitWake(wake);
+  } catch {
+    admission = null;
+  }
+  if (admission === null) return;
+
   // (a) Notify open tabs + detect whether one is visible.
   let hasVisibleTab = false;
   try {
@@ -313,16 +332,15 @@ async function handlePush(wake) {
     }
   }
 
-  // (c) Reverse-map the opaque `push_gid` to the REAL group_id for the
-  //     TAP deep-link (ADR-0042). Resolved HERE rather than inside
-  //     `notificationclick` on purpose: the click handler must reach
-  //     `clients.openWindow` with as few awaits as possible so the
-  //     notification's user activation survives. A miss leaves the
-  //     payload untouched, so the legacy path stays byte-for-byte.
-  //     Note this deliberately does NOT touch `tag` below — `push_gid`
-  //     is stable per group, so the existing grouping is already right.
-  const tapGroupHex =
-    wake?.groupHex != null ? await resolveTapGroupHex(wake.groupHex) : null;
+  // (c) The REAL group_id for the TAP deep-link (ADR-0042), already
+  //     resolved by the gate for the bound account. Resolved at push time
+  //     rather than inside `notificationclick` on purpose: the click
+  //     handler must reach `clients.openWindow` with as few awaits as
+  //     possible so the notification's user activation survives. `null`
+  //     only for a wake that names no group. Note this deliberately does
+  //     NOT touch `tag` below — `push_gid` is stable per group, so the
+  //     existing grouping is already right.
+  const tapGroupHex = admission.groupHex;
 
   // (c2) A call the decrypt classified: ring, or take a ring down. Handled
   //      before the message path because a call is neither a message nor a
@@ -425,30 +443,130 @@ async function handleCallNotice(call) {
 }
 
 /**
- * ADR-0042 — reverse-map a wake's opaque `push_gid` (`g`) to the REAL
- * DS `group_id`, lowercase-hex, for the notification-TAP deep-link.
+ * ADR-0042, "A wake is shown only for the signed-in account" — decide
+ * whether a wake is handled at all, and as whom.
  *
- * Reads the SAME plaintext `lakko-push-routing`/`routes` reverse index
- * the background decrypt consults (see `buildDecryptDeps.lookupRoute`
- * and `src/push/group-routing-store.ts`): `push_gid` is a one-way
- * derivation and `group_id` is a public DS routing address, so the row
- * needs no device key — which is exactly why the SW can read it here.
- * READ-ONLY, like every other SW touch of app storage.
+ * Returns `{ accountId, groupHex }` — `groupHex` the REAL DS group id
+ * (lowercase hex) of one of the bound account's groups, or `null` for a
+ * wake that names no group (a device wake) — or `null` when the wake must be
+ * dropped:
  *
- * Returns `null` on ANY miss — a legacy pre-ADR-0042 raw-group_id wake,
- * a group whose route was never provisioned, a malformed row, or an IDB
- * failure. The caller then leaves the tap payload on the raw `g`, i.e.
- * exactly today's behavior. NEVER throws: a rejection here would
- * propagate out of the `push` handler and drop the notification.
+ *   * no binding row (no account signed in for push on this browser);
+ *   * the wake's `d` is not the bound device pseudonym;
+ *   * its `g` names none of the bound account's groups: neither the
+ *     account-scoped reverse map nor that account's own known groups.
+ *
+ * A pure mirror of `wakeBoundAccount` + `resolveWakeTarget` in
+ * `public/sw-push-decrypt.js` (which the tests pin), kept inline so a CLASSIC
+ * service worker — which cannot `import()` that module — applies the same
+ * rule. The two must stay in step. READ-ONLY. Never throws.
  */
-async function resolveTapGroupHex(pushGidHex) {
+async function admitWake(wake) {
+  if (wake === null || wake === undefined) return null;
+  let binding = null;
   try {
-    const row = await idbGet("lakko-push-routing", "routes", pushGidHex);
-    if (row === undefined || typeof row.groupIdB64 !== "string") return null;
-    return bytesToHex(base64Decode(row.groupIdB64));
+    binding = await readWakeBinding();
   } catch {
+    binding = null;
+  }
+  if (binding === null || typeof binding.accountId !== "string") return null;
+  const bound = normalisedPseudonymHex(binding.devicePseudonymHex);
+  const presented = normalisedPseudonymHex(wake.deviceHex);
+  if (bound === null || presented === null || bound !== presented) return null;
+  const accountId = binding.accountId;
+  if (typeof wake.groupHex !== "string") return { accountId, groupHex: null };
+  const wakeHex = wake.groupHex.toLowerCase();
+  let route = null;
+  try {
+    route = await lookupRouteFor(accountId, wakeHex);
+  } catch {
+    route = null;
+  }
+  if (route !== null) {
+    try {
+      const bytes = base64Decode(route.groupIdB64);
+      if (bytes.length === 32) return { accountId, groupHex: bytesToHex(bytes) };
+    } catch {
+      // A malformed row falls through to the legacy read below.
+    }
+  }
+  let legacy = null;
+  try {
+    legacy = await resolveAccountFor(accountId, wakeHex);
+  } catch {
+    legacy = null;
+  }
+  if (legacy === null) return null;
+  return { accountId, groupHex: wakeHex };
+}
+
+/** The `wake_binding` row, or `null`. READ-ONLY. */
+async function readWakeBinding() {
+  const row = await idbGet("lakko-push-routing", "wake_binding", "current");
+  if (
+    row === undefined ||
+    typeof row.devicePseudonymHex !== "string" ||
+    typeof row.accountId !== "string"
+  ) {
     return null;
   }
+  return { devicePseudonymHex: row.devicePseudonymHex, accountId: row.accountId };
+}
+
+/**
+ * `(account, push_gid) → { accountId, groupIdB64 }` from the plaintext
+ * `account_routes` index, or `null`. The row key is built exactly as
+ * `routeRowKey` in `src/push/group-routing-store.ts` builds it; a row naming
+ * another account is a miss. READ-ONLY.
+ */
+async function lookupRouteFor(accountId, pushGidHex) {
+  const row = await idbGet(
+    "lakko-push-routing",
+    "account_routes",
+    routeRowKey(accountId, pushGidHex),
+  );
+  if (
+    row === undefined ||
+    row.accountId !== accountId ||
+    typeof row.groupIdB64 !== "string"
+  ) {
+    return null;
+  }
+  return { accountId: row.accountId, groupIdB64: row.groupIdB64 };
+}
+
+/** Mirror of `routeRowKey` in `src/push/group-routing-store.ts`. */
+function routeRowKey(accountId, pushGidHex) {
+  return `${accountId}\0${pushGidHex.toLowerCase()}`;
+}
+
+/**
+ * LEGACY — does the bound account itself know `groupHex` as a raw group
+ * id? Reads ONLY that account's snapshot row (`knownGroupIds` is stored
+ * unencrypted), never another account's. READ-ONLY.
+ */
+async function resolveAccountFor(accountId, groupHex) {
+  const row = await idbGet("lakko-mls", "snapshots", accountId);
+  const known = Array.isArray(row?.knownGroupIds) ? row.knownGroupIds : [];
+  for (const kg of known) {
+    let bytes;
+    try {
+      bytes = base64Decode(kg);
+    } catch {
+      continue;
+    }
+    if (bytesToHex(bytes) === groupHex) {
+      return { accountId, groupIdBytes: bytes };
+    }
+  }
+  return null;
+}
+
+/** A 64-char hex pseudonym, lowercased, or `null`. */
+function normalisedPseudonymHex(s) {
+  if (typeof s !== "string" || s.length !== 64) return null;
+  const lower = s.toLowerCase();
+  return /^[0-9a-f]{64}$/.test(lower) ? lower : null;
 }
 
 // ----- background decrypt (1.21) -------------------------------
@@ -552,47 +670,20 @@ function buildDecryptDeps(wasm, core) {
         return null;
       }
     },
-    // ADR-0042 Sprint 4 — reverse-map an opaque `push_gid` wake `g`
-    // back to the owning `(accountId, base64 group_id)`. The `routes`
-    // store is PLAINTEXT by design (push_gid is a one-way derivation;
-    // group_id is a public DS routing address — see
-    // `src/push/group-routing-store.ts`) precisely so this read needs
-    // no device key. READ-ONLY: the SW never writes push-routing state.
-    // `null` on a miss → the core falls back to the legacy raw-group_id
-    // path; a throw is treated as a miss by the core (fail-closed).
-    lookupRoute: async (pushGidHex) => {
-      const row = await idbGet("lakko-push-routing", "routes", pushGidHex);
-      if (
-        row === undefined ||
-        typeof row.accountId !== "string" ||
-        typeof row.groupIdB64 !== "string"
-      ) {
-        return null;
-      }
-      return { accountId: row.accountId, groupIdB64: row.groupIdB64 };
-    },
-    // Which locally-stored account owns this group? `knownGroupIds` is
-    // stored UNENCRYPTED (public group_id routing addresses), so this
-    // needs no device key. Also validates the wake's group is known.
-    // LEGACY fallback — runs only when the route lookup misses.
-    resolveAccount: async (groupHex) => {
-      const rows = await idbGetAll("lakko-mls", "snapshots");
-      for (const row of rows) {
-        const known = Array.isArray(row?.knownGroupIds) ? row.knownGroupIds : [];
-        for (const kg of known) {
-          let bytes;
-          try {
-            bytes = base64Decode(kg);
-          } catch {
-            continue;
-          }
-          if (bytesToHex(bytes) === groupHex) {
-            return { accountId: row.accountId, groupIdBytes: bytes };
-          }
-        }
-      }
-      return null;
-    },
+    // ADR-0042 (amended 2026-09-30) — the binding the core's gate reads.
+    readWakeBinding,
+    // ADR-0042 — reverse-map `(bound account, opaque push_gid)` back to
+    // the base64 group_id. The `account_routes` store is PLAINTEXT by
+    // design (push_gid is a one-way derivation; group_id is a public DS
+    // routing address — see `src/push/group-routing-store.ts`) precisely
+    // so this read needs no device key. READ-ONLY: the SW never writes
+    // push-routing state. `null` on a miss → the core falls back to the
+    // legacy raw-group_id read; a throw is treated as a miss by the core.
+    lookupRoute: lookupRouteFor,
+    // LEGACY fallback — does the BOUND account know `g` as a raw group id?
+    // `knownGroupIds` is stored UNENCRYPTED, so this needs no device key.
+    // Never searches another account's snapshot.
+    resolveAccount: resolveAccountFor,
     // `docs/ux/calls.md` section 2.1 — is this conversation muted? READ-ONLY:
     // the encrypted cross-device sync row the app wrote
     // (`src/devices/sync/sync-state-idb.ts`), unwrapped under the same device
@@ -735,21 +826,6 @@ async function idbGet(name, store, key) {
       const req = tx.objectStore(store).get(key);
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error ?? new Error("idb get failed"));
-    });
-  } finally {
-    db.close();
-  }
-}
-
-async function idbGetAll(name, store) {
-  const db = await idbOpen(name);
-  try {
-    if (!db.objectStoreNames.contains(store)) return [];
-    return await new Promise((resolve, reject) => {
-      const tx = db.transaction(store, "readonly");
-      const req = tx.objectStore(store).getAll();
-      req.onsuccess = () => resolve(req.result ?? []);
-      req.onerror = () => reject(req.error ?? new Error("idb getAll failed"));
     });
   } finally {
     db.close();

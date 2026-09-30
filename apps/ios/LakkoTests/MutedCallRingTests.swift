@@ -218,44 +218,110 @@ final class MutedCallRingTests: XCTestCase {
 
     // MARK: - The CallKit report
 
-    /// The VoIP path's only new decision. It is made from the wake alone, at
+    /// The pseudonym this device registered, and the binding that names the
+    /// signed-in account for it (ADR-0042, amended 2026-09-30).
+    private let device = String(repeating: "d", count: 64)
+    private var binding: PushAccountBinding {
+        PushAccountBinding(devicePseudonymHex: device, accountIdB64: acct)
+    }
+
+    private func wake(_ group: String?, d: String? = nil) -> VoipWakePayload {
+        VoipWakePayload(groupHex: group, pointer: 7, isCallWake: true, devicePseudonymHex: d ?? device)
+    }
+
+    private func decide(_ wake: VoipWakePayload, binding: PushAccountBinding?) -> VoipWakeDecision {
+        VoipPushRegistrar.decide(
+            wake, binding: binding, routes: PushRoutingStore(defaults: defaults), defaults: defaults)
+    }
+
+    /// The VoIP path's mute decision. It is made from the wake alone, at
     /// report time, because that is all iOS gives this path before it demands
     /// a call be reported.
     func testTheVoipWakeIsSilentOnlyForAMutedConversation() {
         let group = String(repeating: "a", count: 64)
+        let otherGroup = String(repeating: "b", count: 64)
         ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: [group], defaults: defaults)
 
-        XCTAssertTrue(VoipPushRegistrar.wakeIsMuted(
-            VoipWakePayload(groupHex: group, pointer: 7, isCallWake: true),
-            signedInAccountIdB64: acct, defaults: defaults))
-        XCTAssertFalse(VoipPushRegistrar.wakeIsMuted(
-            VoipWakePayload(groupHex: String(repeating: "b", count: 64), pointer: 7, isCallWake: true),
-            signedInAccountIdB64: acct, defaults: defaults))
-        // Another account's mute never silences this one's call.
-        XCTAssertFalse(VoipPushRegistrar.wakeIsMuted(
-            VoipWakePayload(groupHex: group, pointer: 7, isCallWake: true),
-            signedInAccountIdB64: other, defaults: defaults))
+        XCTAssertEqual(
+            decide(wake(group), binding: binding),
+            .silent(VoipWakeTarget(accountIdB64: acct, groupIdHex: group)))
+        XCTAssertEqual(
+            decide(wake(otherGroup), binding: binding),
+            .ring(VoipWakeTarget(accountIdB64: acct, groupIdHex: otherGroup)))
+    }
+
+    /// Another account's mute never silences this one's call: the mute flag
+    /// read is the BOUND account's.
+    func testAnotherAccountsMuteNeverSilencesTheBoundAccount() {
+        let group = String(repeating: "a", count: 64)
+        ConversationMuteMirror.replaceAll(accountIdB64: other, mutedGroupIdsHex: [group], defaults: defaults)
+        XCTAssertEqual(
+            decide(wake(group), binding: binding),
+            .ring(VoipWakeTarget(accountIdB64: acct, groupIdHex: group)))
     }
 
     /// A wake that names no conversation rings. There is nothing to look up,
     /// and a VoIP push that quietly goes nowhere is a call the person never
     /// hears about — worse than an unwanted ring in every case.
     func testAWakeWithNoGroupRings() {
-        XCTAssertFalse(VoipPushRegistrar.wakeIsMuted(
-            VoipWakePayload(groupHex: nil, pointer: nil, isCallWake: true),
-            defaults: defaults))
+        XCTAssertEqual(decide(wake(nil), binding: binding), .ring(nil))
     }
 
     /// And so does one whose conversation this device has no mirror row for —
     /// the fresh-install and unprovisioned-suite case, on the path where being
     /// wrong is most expensive.
     func testAWakeForAnUnmirroredConversationRings() {
-        XCTAssertFalse(VoipPushRegistrar.wakeIsMuted(
-            VoipWakePayload(groupHex: "cc33", pointer: 1, isCallWake: true),
-            defaults: defaults))
-        XCTAssertFalse(VoipPushRegistrar.wakeIsMuted(
-            VoipWakePayload(groupHex: "cc33", pointer: 1, isCallWake: true),
-            defaults: nil))
+        XCTAssertEqual(
+            decide(wake("cc33"), binding: binding),
+            .ring(VoipWakeTarget(accountIdB64: acct, groupIdHex: "cc33")))
+        XCTAssertEqual(
+            VoipPushRegistrar.decide(
+                wake("cc33"), binding: binding, routes: PushRoutingStore(defaults: defaults), defaults: nil),
+            .ring(VoipWakeTarget(accountIdB64: acct, groupIdHex: "cc33")))
+    }
+
+    // MARK: - Only the signed-in account (ADR-0042, amended 2026-09-30)
+
+    /// Signed out: no binding. The call is reported (Apple's rule) and ended
+    /// at once, nameless, and nothing is fetched.
+    func testWithNoBindingTheWakeIsRefused() {
+        XCTAssertEqual(decide(wake(String(repeating: "a", count: 64)), binding: nil), .refuse)
+        XCTAssertEqual(decide(wake(nil), binding: nil), .refuse)
+    }
+
+    /// A wake sent to another sign-in session's pseudonym, or with no `d`.
+    func testAWakeForAnotherPseudonymIsRefused() {
+        let group = String(repeating: "a", count: 64)
+        XCTAssertEqual(decide(wake(group, d: String(repeating: "e", count: 64)), binding: binding), .refuse)
+        XCTAssertEqual(
+            decide(VoipWakePayload(groupHex: group, pointer: 7, isCallWake: true), binding: binding),
+            .refuse)
+    }
+
+    /// The reverse index is read for the bound account: a row another account
+    /// filed under the same `push_gid` is a miss, and the wake falls back to
+    /// its raw `g` for the bound account.
+    func testTheRouteIsReadForTheBoundAccountOnly() {
+        let pushGid = String(repeating: "f", count: 64)
+        let mine = String(repeating: "1", count: 64)
+        let theirs = String(repeating: "2", count: 64)
+        let routes = PushRoutingStore(defaults: defaults)
+        let secret = Data(repeating: 0x33, count: 32)
+        routes.putRouting(
+            accountIdB64: other, groupIdHex: theirs, secret: secret, pushGidHex: pushGid,
+            distributed: true, mintEpoch: 0)
+        XCTAssertEqual(
+            decide(wake(pushGid), binding: binding),
+            .ring(VoipWakeTarget(accountIdB64: acct, groupIdHex: pushGid)),
+            "another account's row is a miss")
+
+        routes.putRouting(
+            accountIdB64: acct, groupIdHex: mine, secret: secret, pushGidHex: pushGid,
+            distributed: true, mintEpoch: 0)
+        ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: [mine], defaults: defaults)
+        XCTAssertEqual(
+            decide(wake(pushGid), binding: binding),
+            .silent(VoipWakeTarget(accountIdB64: acct, groupIdHex: mine)))
     }
 
     // MARK: - The extension's copy of the rule

@@ -140,12 +140,22 @@ function ringVerdict(wasm, muted, offerAgeMs) {
 
 /**
  * @typedef {object} PushWake
- * @property {string | null} deviceHex   Device pseudonym (unused here — routing only).
+ * @property {string | null} deviceHex   Device pseudonym that subscribed (`d`). The
+ *   wake gate ({@link wakeBoundAccount}) handles a wake only when it equals the
+ *   pseudonym bound to the signed-in account.
  * @property {string | null} groupHex    64 lowercase-hex chars. Post-ADR-0042
  *   (Sprint 3) this is the OPAQUE 32-byte `push_gid`; a legacy wake carries
  *   the raw 32-byte group_id. Either way the shape is identical — the
  *   `lookupRoute` reverse-map (Sprint 4) disambiguates.
  * @property {number | null} pointer     DS message id of the message that triggered the wake.
+ */
+
+/**
+ * The `(device pseudonym, account)` pair the app recorded when it registered
+ * this browser for push (`src/push/group-routing-store.ts`, `wake_binding`).
+ * @typedef {object} WakeBinding
+ * @property {string} devicePseudonymHex  64 hex chars.
+ * @property {string} accountId           base64(account_id).
  */
 
 /**
@@ -249,15 +259,20 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * the test wires spies and asserts zero calls.
  *
  * @typedef {object} DecryptPushDeps
- * @property {(pushGidHex: string) => Promise<{ accountId: string, groupIdB64: string } | null>} [lookupRoute]
- *   ADR-0042 Sprint 4 — READ-ONLY reverse-map of an opaque `push_gid`
- *   (lowercase hex) to the owning `(accountId, base64 group_id)` via the
- *   plaintext `lakko-push-routing`/`routes` IDB index. `null` on a miss
- *   (legacy wake / not-yet-provisioned group). Optional so older deps
- *   objects keep working; any throw is treated as a miss (fail-closed).
- * @property {(groupHex: string) => Promise<ResolvedAccount | null>} resolveAccount
- *   Match `groupHex` to a locally-stored account+group (returns null if none).
- *   The LEGACY fallback path — runs only when `lookupRoute` misses.
+ * @property {() => Promise<WakeBinding | null>} [readWakeBinding]
+ *   READ-ONLY: the binding row. ABSENT or `null` means no account is signed in
+ *   for push on this browser, and no wake is decrypted — the gate
+ *   ({@link wakeBoundAccount}) fails closed. Any throw reads as `null`.
+ * @property {(accountId: string, pushGidHex: string) => Promise<{ accountId: string, groupIdB64: string } | null>} [lookupRoute]
+ *   ADR-0042 — READ-ONLY reverse-map of `(bound account, opaque push_gid)`
+ *   (lowercase hex) to the base64 group_id via the plaintext
+ *   `lakko-push-routing`/`account_routes` IDB index. `null` on a miss; a row
+ *   naming another account is a miss. Optional so older deps objects keep
+ *   working; any throw is treated as a miss (fail-closed).
+ * @property {(accountId: string, groupHex: string) => Promise<ResolvedAccount | null>} resolveAccount
+ *   Match `groupHex` to a group the BOUND account knows (returns null if
+ *   none). The LEGACY fallback path — runs only when `lookupRoute` misses,
+ *   and never searches another account's groups.
  * @property {(accountId: string) => Promise<any | null>} getDeviceKey
  *   The non-extractable AES-GCM device root CryptoKey, or null.
  * @property {(accountId: string, deviceKey: any) => Promise<Uint8Array | null>} getIdentitySeed
@@ -348,6 +363,89 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * @param {DecryptPushDeps} deps
  * @returns {Promise<PushPreview | null>}
  */
+/**
+ * The wake gate (ADR-0042, "A wake is shown only for the signed-in
+ * account"): the account a wake may be handled as, or `null`.
+ *
+ * A wake is handled only when a binding exists and the wake's `d` equals
+ * the bound device pseudonym (case-insensitive hex, both 64 chars). The
+ * pseudonym is minted per sign-in and the binding is cleared first at Log
+ * out and Forget device, so a wake for a signed-out account, or for another
+ * account that once used this browser, never passes. The account used is
+ * always the binding's, never a route row's or a scan's.
+ *
+ * Pure; exported for `public/sw.js` (which mirrors it inline so a classic
+ * worker applies the same rule) and the tests. The two must stay in step.
+ *
+ * @param {PushWake | null | undefined} wake
+ * @param {WakeBinding | null | undefined} binding
+ * @returns {string | null}
+ */
+export function wakeBoundAccount(wake, binding) {
+  if (wake === null || wake === undefined || binding === null || binding === undefined) {
+    return null;
+  }
+  if (typeof binding.accountId !== "string" || binding.accountId.length === 0) return null;
+  const bound = normalisedPseudonymHex(binding.devicePseudonymHex);
+  const presented = normalisedPseudonymHex(wake.deviceHex);
+  if (bound === null || presented === null || bound !== presented) return null;
+  return binding.accountId;
+}
+
+/**
+ * Resolve a wake's `g` to a group of the BOUND account, or `null` when it
+ * names none of its groups. First the account-scoped reverse map (an opaque
+ * `push_gid`), then the legacy read of `g` as a raw group id among the
+ * account's own known groups. Another account's route row, or another
+ * account's group, is a miss.
+ *
+ * Exported for `public/sw.js`, which mirrors the same two reads inline so a
+ * classic service worker (no dynamic import) applies the same rule; the two
+ * must stay in step.
+ *
+ * @param {string} wakeHex  64 lowercase hex chars.
+ * @param {string} accountId  the bound account.
+ * @param {Pick<DecryptPushDeps, "lookupRoute" | "resolveAccount">} deps
+ * @returns {Promise<{ groupIdBytes: Uint8Array, groupHex: string } | null>}
+ */
+export async function resolveWakeTarget(wakeHex, accountId, deps) {
+  if (typeof deps.lookupRoute === "function") {
+    let route = null;
+    try {
+      route = await deps.lookupRoute(accountId, wakeHex);
+    } catch {
+      route = null; // lookup error → legacy path → nothing at worst
+    }
+    if (
+      route !== null &&
+      route !== undefined &&
+      route.accountId === accountId &&
+      typeof route.groupIdB64 === "string"
+    ) {
+      const bytes = base64DecodeQuietly(route.groupIdB64);
+      if (bytes !== null && bytes.length === 32) {
+        return { groupIdBytes: bytes, groupHex: bytesToHex(bytes) };
+      }
+      // A malformed route row falls through to the legacy path below.
+    }
+  }
+  let account = null;
+  try {
+    account = await deps.resolveAccount(accountId, wakeHex);
+  } catch {
+    account = null;
+  }
+  if (
+    account === null ||
+    account === undefined ||
+    account.accountId !== accountId ||
+    !(account.groupIdBytes instanceof Uint8Array)
+  ) {
+    return null;
+  }
+  return { groupIdBytes: account.groupIdBytes, groupHex: wakeHex };
+}
+
 export async function decryptPushPreview(wake, deps) {
   // 1. Only GroupMessage wakes carry a group + pointer. A Wakeup /
   //    MailboxMessage wake (no groupHex / no pointer) is not handled in
@@ -376,41 +474,24 @@ export async function decryptPushPreview(wake, deps) {
   //    treat-`g`-as-group_id path, and ANY lookup error degrades the
   //    same way (fail-closed: worst case is the generic notification).
   //    The lookup is a READ; this path never writes push-routing state.
-  let accountId = null;
-  let groupIdBytes = null;
-  let groupHex = wakeHex; // becomes the REAL group hex on a route hit
-  if (typeof deps.lookupRoute === "function") {
-    let route = null;
+  //
+  //    ADR-0042 (amended 2026-09-30): ONLY as the bound account. The gate
+  //    runs first; the reverse map and the legacy scan are asked about that
+  //    account alone.
+  let binding = null;
+  if (typeof deps.readWakeBinding === "function") {
     try {
-      route = await deps.lookupRoute(wakeHex);
+      binding = await deps.readWakeBinding();
     } catch {
-      route = null; // lookup error → legacy path → generic at worst
-    }
-    if (
-      route !== null &&
-      route !== undefined &&
-      typeof route.accountId === "string" &&
-      typeof route.groupIdB64 === "string"
-    ) {
-      const bytes = base64DecodeQuietly(route.groupIdB64);
-      if (bytes !== null && bytes.length === 32) {
-        accountId = route.accountId;
-        groupIdBytes = bytes;
-        groupHex = bytesToHex(bytes);
-      }
-      // A malformed route row falls through to the legacy path below.
+      binding = null;
     }
   }
-
-  //    Legacy fallback: treat `g` as the raw group_id hex. (Also
-  //    validates it is a group we actually know — a stray wake → null.)
-  if (accountId === null) {
-    const account = await deps.resolveAccount(wakeHex);
-    if (account === null || account === undefined) return null;
-    accountId = account.accountId;
-    groupIdBytes = account.groupIdBytes;
-    groupHex = wakeHex;
-  }
+  const accountId = wakeBoundAccount(wake, binding);
+  if (accountId === null) return null;
+  const target = await resolveWakeTarget(wakeHex, accountId, deps);
+  if (target === null) return null;
+  const groupIdBytes = target.groupIdBytes;
+  const groupHex = target.groupHex;
 
   // 3. The device root key (a non-extractable CryptoKey handle usable
   //    for AES-GCM decrypt without extraction). No key → can't unwrap
@@ -1380,6 +1461,17 @@ function bytesToBase64(bytes) {
 }
 
 /** `true` when every char of `s` is a lowercase hex digit. */
+/**
+ * A 64-char hex pseudonym, lowercased, or `null` for anything else.
+ * @param {unknown} s
+ * @returns {string | null}
+ */
+function normalisedPseudonymHex(s) {
+  if (typeof s !== "string" || s.length !== 64) return null;
+  const lower = s.toLowerCase();
+  return isHex(lower) ? lower : null;
+}
+
 function isHex(s) {
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);

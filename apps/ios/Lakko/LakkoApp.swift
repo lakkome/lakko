@@ -164,16 +164,16 @@ struct LakkoApp: App {
         // This is the other half: fetch the journal row the wake points at, so
         // the offer arrives on the ordinary receive path and the system screen
         // is corrected with the real caller and call kind.
-        VoipPushRegistrar.shared.onWake = { [weak chat] wake in
-            guard let chat, let wakeGroupHex = wake.groupHex else { return }
-            // The wake's `g` is the ADR-0042 opaque routing id; the DS journal
-            // is keyed on the real group id. A miss falls back to reading `g`
-            // as a group id, exactly as the notification extension does.
-            let groupIdHex = PushRoutingStore()
-                .lookupRoute(pushGidHex: wakeGroupHex.lowercased())?.groupIdHex
-                ?? wakeGroupHex.lowercased()
+        VoipPushRegistrar.shared.onWake = { [weak chat] target in
+            // The registrar has already checked the wake against the account
+            // binding (ADR-0042, amended 2026-09-30) and reverse-mapped its
+            // opaque `push_gid` for that account. The chat repository serves
+            // the signed-in session; a target for any other account is not
+            // polled.
+            guard let chat,
+                  AcceptedContactsStore.boundAccountIdB64 == target.accountIdB64 else { return }
             Task { @MainActor [weak chat] in
-                try? await chat?.pollGroup(groupIdHex: groupIdHex, waitSecs: 0)
+                try? await chat?.pollGroup(groupIdHex: target.groupIdHex, waitSecs: 0)
             }
         }
         self._chatRepository = StateObject(wrappedValue: chat)

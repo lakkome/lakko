@@ -183,15 +183,18 @@ afterEach(() => {
 import {
   clearAllGroupRouting,
   clearGroupRoutingForAccount,
+  clearWakeBinding,
   deleteRoute,
   getGroupRoutingRecord,
   getGroupRoutingSecret,
   getGroupRoutingState,
+  getWakeBinding,
   hasGroupRoutingSecret,
   lookupPushRoute,
   markGroupRoutingDistributed,
   markGroupRoutingPending,
   putGroupRouting,
+  putWakeBinding,
 } from "./group-routing-store";
 
 async function makeDeviceKey(): Promise<CryptoKey> {
@@ -264,14 +267,16 @@ describe("group-routing-store — round-trip", () => {
       deviceKey,
     );
 
-    const route = await lookupPushRoute(PUSH_GID_HEX);
+    const route = await lookupPushRoute(ACCT, PUSH_GID_HEX);
     expect(route).not.toBeNull();
     expect(route?.accountId).toBe(ACCT);
     expect(route?.groupIdB64).toBe(GROUP);
-    // The reverse index is keyed by push_gid, NOT the group_id.
+    // The reverse index is keyed by (account, push_gid), NOT the group_id.
     expect(route?.pushGidHex).toBe(PUSH_GID_HEX);
 
-    expect(await lookupPushRoute("deadbeef")).toBeNull();
+    expect(await lookupPushRoute(ACCT, "deadbeef")).toBeNull();
+    // Another account asking for the same push_gid misses.
+    expect(await lookupPushRoute("b3RoZXI=", PUSH_GID_HEX)).toBeNull();
   });
 
   it("deleteRoute retires ONE reverse-index row and leaves the secret intact", async () => {
@@ -305,18 +310,18 @@ describe("group-routing-store — round-trip", () => {
       deviceKey,
     );
 
-    await deleteRoute(PUSH_GID_HEX);
+    await deleteRoute(ACCT, PUSH_GID_HEX);
 
-    expect(await lookupPushRoute(PUSH_GID_HEX)).toBeNull();
+    expect(await lookupPushRoute(ACCT, PUSH_GID_HEX)).toBeNull();
     // Scoped to the one key: the other group's route survives ...
-    expect(await lookupPushRoute(OTHER_GID_HEX)).not.toBeNull();
+    expect(await lookupPushRoute(ACCT, OTHER_GID_HEX)).not.toBeNull();
     // ... and no secret is touched, so a delete can never strand a group by
     // dropping the material a live push_gid is derived from.
     expect(await hasGroupRoutingSecret(ACCT, GROUP)).toBe(true);
   });
 
   it("deleteRoute on an absent row is a no-op", async () => {
-    await expect(deleteRoute("deadbeef")).resolves.toBeUndefined();
+    await expect(deleteRoute(ACCT, "deadbeef")).resolves.toBeUndefined();
   });
 
   it("clearAllGroupRouting wipes secrets + the reverse index", async () => {
@@ -336,7 +341,7 @@ describe("group-routing-store — round-trip", () => {
     await clearAllGroupRouting();
 
     expect(await hasGroupRoutingSecret(ACCT, GROUP)).toBe(false);
-    expect(await lookupPushRoute(PUSH_GID_HEX)).toBeNull();
+    expect(await lookupPushRoute(ACCT, PUSH_GID_HEX)).toBeNull();
   });
 
   it("clearGroupRoutingForAccount wipes only the forgotten account's rows", async () => {
@@ -370,11 +375,83 @@ describe("group-routing-store — round-trip", () => {
     await clearGroupRoutingForAccount(ACCT);
 
     expect(await hasGroupRoutingSecret(ACCT, GROUP)).toBe(false);
-    expect(await lookupPushRoute(PUSH_GID_HEX)).toBeNull();
+    expect(await lookupPushRoute(ACCT, PUSH_GID_HEX)).toBeNull();
     expect(await hasGroupRoutingSecret(OTHER_ACCT, GROUP)).toBe(true);
-    expect(await lookupPushRoute(OTHER_GID_HEX)).toEqual(
+    expect(await lookupPushRoute(OTHER_ACCT, OTHER_GID_HEX)).toEqual(
       expect.objectContaining({ accountId: OTHER_ACCT, groupIdB64: GROUP }),
     );
+  });
+});
+
+describe("group-routing-store — two accounts in one group (ADR-0042, 2026-09-30)", () => {
+  // Two accounts on one browser in the same group derive the SAME push_gid.
+  // Keyed by push_gid alone, the last writer took the row and a wake could be
+  // decrypted as the wrong account; keyed by (account, push_gid), each has its
+  // own row.
+  const OTHER_ACCT = "b3RoZXItYWNjb3VudC0wMDAwMA==";
+  async function putFor(accountId: string, deviceKey: CryptoKey): Promise<void> {
+    await putGroupRouting(
+      {
+        accountId,
+        groupIdB64: GROUP,
+        secret: new Uint8Array(32).fill(5),
+        pushGidHex: PUSH_GID_HEX,
+        distributed: true,
+        mintEpoch: 0n,
+      },
+      deviceKey,
+    );
+  }
+
+  it("each account resolves its own row for the shared push_gid", async () => {
+    const deviceKey = await makeDeviceKey();
+    await putFor(ACCT, deviceKey);
+    await putFor(OTHER_ACCT, deviceKey);
+    expect((await lookupPushRoute(ACCT, PUSH_GID_HEX))?.accountId).toBe(ACCT);
+    expect((await lookupPushRoute(OTHER_ACCT, PUSH_GID_HEX))?.accountId).toBe(
+      OTHER_ACCT,
+    );
+  });
+
+  it("deleteRoute removes only the named account's row", async () => {
+    const deviceKey = await makeDeviceKey();
+    await putFor(ACCT, deviceKey);
+    await putFor(OTHER_ACCT, deviceKey);
+    await deleteRoute(ACCT, PUSH_GID_HEX);
+    expect(await lookupPushRoute(ACCT, PUSH_GID_HEX)).toBeNull();
+    expect(await lookupPushRoute(OTHER_ACCT, PUSH_GID_HEX)).not.toBeNull();
+  });
+
+  it("the lookup is case-insensitive on the push_gid hex", async () => {
+    const deviceKey = await makeDeviceKey();
+    await putFor(ACCT, deviceKey);
+    expect(
+      await lookupPushRoute(ACCT, PUSH_GID_HEX.toUpperCase()),
+    ).not.toBeNull();
+  });
+});
+
+describe("group-routing-store — the wake binding", () => {
+  const DEV_HEX = "ab".repeat(32);
+
+  it("absent until written; put replaces; clear removes", async () => {
+    expect(await getWakeBinding()).toBeNull();
+    await putWakeBinding({ devicePseudonymHex: DEV_HEX.toUpperCase(), accountId: ACCT });
+    expect(await getWakeBinding()).toEqual({ devicePseudonymHex: DEV_HEX, accountId: ACCT });
+    await putWakeBinding({ devicePseudonymHex: "cd".repeat(32), accountId: "b3RoZXI=" });
+    expect(await getWakeBinding()).toEqual({
+      devicePseudonymHex: "cd".repeat(32),
+      accountId: "b3RoZXI=",
+    });
+    await clearWakeBinding();
+    expect(await getWakeBinding()).toBeNull();
+  });
+
+  it("clearAllGroupRouting and clearGroupRoutingForAccount leave the binding alone", async () => {
+    await putWakeBinding({ devicePseudonymHex: DEV_HEX, accountId: ACCT });
+    await clearGroupRoutingForAccount(ACCT);
+    await clearAllGroupRouting();
+    expect(await getWakeBinding()).not.toBeNull();
   });
 });
 
@@ -482,7 +559,7 @@ describe("group-routing-store — the durable `distributed` flag", () => {
     await markGroupRoutingPending(ACCT, GROUP);
     expect(await getGroupRoutingState(ACCT, GROUP)).toBe("absent");
     expect(await hasGroupRoutingSecret(ACCT, GROUP)).toBe(false);
-    expect(await lookupPushRoute(PUSH_GID_HEX)).toBeNull();
+    expect(await lookupPushRoute(ACCT, PUSH_GID_HEX)).toBeNull();
   });
 
   it("markGroupRoutingPending downgrades a LEGACY (flag-less) row too", async () => {

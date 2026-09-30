@@ -79,6 +79,8 @@ vi.mock("./group-routing-store", () => ({
         `${args.accountId}\0${args.groupIdB64}`,
         args.mintEpoch,
       );
+      // Keyed by push_gid here for the assertions below; the mocked delete
+      // honours the account, as the real (account, push_gid) key does.
       h.routes.set(args.pushGidHex, {
         accountId: args.accountId,
         groupIdB64: args.groupIdB64,
@@ -124,8 +126,10 @@ vi.mock("./group-routing-store", () => ({
   ),
   // ADR-0043 — the per-gid reverse-index delete. A no-op on an absent row,
   // exactly like the real IndexedDB `delete`.
-  deleteRoute: vi.fn(async (pushGidHex: string) => {
-    h.routes.delete(pushGidHex);
+  deleteRoute: vi.fn(async (accountId: string, pushGidHex: string) => {
+    if (h.routes.get(pushGidHex)?.accountId === accountId) {
+      h.routes.delete(pushGidHex);
+    }
   }),
 }));
 
@@ -1614,7 +1618,7 @@ describe("rotatePushRoutingSecret (ADR-0043)", () => {
     // without the delete every rotation grows the map by a dead row.
     expect(h.routes.has(newGidHex)).toBe(true);
     expect(h.routes.has(oldGidHex)).toBe(false);
-    expect(vi.mocked(deleteRoute)).toHaveBeenCalledWith(oldGidHex);
+    expect(vi.mocked(deleteRoute)).toHaveBeenCalledWith(ACCT, oldGidHex);
   });
 
   it("an ADMIN may rotate too (ADR-0043 ratified option (b))", async () => {
@@ -2392,7 +2396,7 @@ describe("the F-A replay, end to end (G-36 residual 9)", () => {
     // ... no second teardown fired (the retire is what made F-A permanent) ...
     expect(unsubscribeGroup).toHaveBeenCalledTimes(1);
     expect(vi.mocked(deleteRoute)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(deleteRoute)).not.toHaveBeenCalledWith(gidLive);
+    expect(vi.mocked(deleteRoute)).not.toHaveBeenCalledWith(ACCT, gidLive);
     // ... and nothing was persisted for the refused envelope.
     expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
   });

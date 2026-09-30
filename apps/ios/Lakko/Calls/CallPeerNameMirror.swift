@@ -19,7 +19,7 @@ import Foundation
 /// So the app WRITES a minimal `group -> display name` mirror into the App
 /// Group suite and the NSE only ever READS it. The same asymmetry, the same
 /// suite and the same plaintext posture as the ADR-0042 `push_gid` reverse
-/// index (``PushRoutingStore/lookupRoute(pushGidHex:)``), which is already read
+/// index (``PushRoutingStore/lookupRoute(accountIdB64:pushGidHex:)``), which is already read
 /// by the NSE from this suite.
 ///
 /// ## What it costs

@@ -169,7 +169,7 @@ import Security
 ///     re-subscribes at its tail;
 ///   * an **unsubscribe** timeout is swallowed, exactly as an unreachable
 ///     push-gw is, leaving a stale push-gw row that nothing ever notifies
-///     again — already the documented cost in ``retireOldPushGid(oldSecret:)``.
+///     again — already the documented cost in ``retireOldPushGid(accountIdB64:oldSecret:)``.
 ///
 /// A rotation therefore occupies the row for at most three deadlines instead
 /// of forever, and every expiry leaves it in a state a later trigger repairs.
@@ -339,7 +339,7 @@ public final class PushGroupRouting {
     ///   not reentrant, so that would deadlock. The leaf helpers the sections
     ///   DO call — ``persistSecret(accountIdB64:groupIdHex:secret:distributed:mintEpoch:)``,
     ///   ``subscribeUnderPushGidBestEffort(accountIdB64:groupIdHex:)``,
-    ///   ``retireOldPushGid(oldSecret:)``, ``pushGid(accountIdB64:groupIdHex:)``
+    ///   ``retireOldPushGid(accountIdB64:oldSecret:)``, ``pushGid(accountIdB64:groupIdHex:)``
     ///   — are deliberately lock-FREE for exactly this reason, and must stay
     ///   that way. The injected `subscribe` / `unsubscribe` seams and the
     ///   `broadcast` closure reach `PushClient` and `ChatClient` respectively,
@@ -659,12 +659,11 @@ public final class PushGroupRouting {
         return Self.derivePushGid(secret: secret)
     }
 
-    /// Reverse-map a `push_gid` (lowercase hex) to `(account, group_id)`.
-    /// Exposed for the Sprint-4 NSE decrypt reverse-map (Sprint 3 only
-    /// POPULATES this via ``persistSecret``).
-    public func lookupRoute(pushGidHex: String)
-        -> (accountIdB64: String, groupIdHex: String)? {
-        store.lookupRoute(pushGidHex: pushGidHex)
+    /// Reverse-map a `push_gid` (lowercase hex) to the `group_id` it routes
+    /// for `accountIdB64`. Another account's row for the same `push_gid` is a
+    /// miss (ADR-0042, amended 2026-09-30).
+    public func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? {
+        store.lookupRoute(accountIdB64: accountIdB64, pushGidHex: pushGidHex)
     }
 
     // MARK: - Subscribe / receive / redistribute
@@ -699,7 +698,7 @@ public final class PushGroupRouting {
     /// ADR-0045 UX §6.2.8 item 5 — retire this device's OWN subscription for a
     /// group whose membership has ended.
     ///
-    /// The THIRD caller of ``retireOldPushGid(oldSecret:)``, and the one
+    /// The THIRD caller of ``retireOldPushGid(accountIdB64:oldSecret:)``, and the one
     /// ADR-0043 said could not exist: it recorded an evicted member's push-gw
     /// row as *"never deleted — nobody else can delete it and no client has
     /// 'you were removed' handling"*, so the row went **inert** rather than
@@ -730,7 +729,7 @@ public final class PushGroupRouting {
                   let secret = self.store.getSecret(
                     accountIdB64: accountIdB64, groupIdHex: groupIdHex)
             else { return false }
-            await self.retireOldPushGid(oldSecret: secret)
+            await self.retireOldPushGid(accountIdB64: accountIdB64, oldSecret: secret)
             return true
         }
     }
@@ -758,7 +757,7 @@ public final class PushGroupRouting {
     /// Best-effort and never throws: the caller has ALREADY switched to the
     /// new id, so a failure here must not unwind the rotation. The cost of a
     /// failed unsubscribe is a stale row that nothing notifies again.
-    public func retireOldPushGid(oldSecret: Data) async {
+    public func retireOldPushGid(accountIdB64: String, oldSecret: Data) async {
         guard let oldGid = Self.derivePushGid(secret: oldSecret) else {
             NSLog("push-routing old push_gid derivation failed")
             return
@@ -777,7 +776,7 @@ public final class PushGroupRouting {
             // that nothing notifies again, not a broken group.
             NSLog("push_gid unsubscribe failed: \(error)")
         }
-        store.removeRoute(pushGidHex: Self.hex(oldGid))
+        store.removeRoute(accountIdB64: accountIdB64, pushGidHex: Self.hex(oldGid))
     }
 
     /// RECEIVE side — a member got the distribution envelope: run the
@@ -800,7 +799,7 @@ public final class PushGroupRouting {
     /// **ADR-0043 — the receiving half of a rotation.** When the accepted
     /// secret CHANGES the one this device held, the id it was subscribed
     /// under is now dead, so the old `push_gid` is retired here too
-    /// (``retireOldPushGid(oldSecret:)``). Every member tears down its OWN
+    /// (``retireOldPushGid(accountIdB64:oldSecret:)``). Every member tears down its OWN
     /// push-gw row because no client can delete anyone else's; skip this and
     /// each rotation leaves one dead row PER MEMBER. The old secret is read
     /// from the `stored` snapshot taken BEFORE the persist below — the secret
@@ -970,7 +969,7 @@ public final class PushGroupRouting {
             NSLog(
                 "push-routing secret ROTATED by a peer (retiring the old push_gid; "
                     + "authority \(resolved.authority.diagnosticTag))")
-            await retireOldPushGid(oldSecret: superseded)
+            await retireOldPushGid(accountIdB64: accountIdB64, oldSecret: superseded)
         }
     }
 
@@ -981,7 +980,7 @@ public final class PushGroupRouting {
     /// The two `accept*` cases both persist + (re-)subscribe; the three
     /// `reject*` cases drop the envelope entirely — no persist, no
     /// subscribe, and (the one that carries the security value) no
-    /// ``retireOldPushGid(oldSecret:)``.
+    /// ``retireOldPushGid(accountIdB64:oldSecret:)``.
     public enum SecretVerdict: Equatable {
         /// A CHANGED (or first-ever) secret that cleared BOTH the ADR-0042 /
         /// ADR-0043 authority gate and the ADR-0044 order.
@@ -1894,7 +1893,7 @@ public final class PushGroupRouting {
     ///      broadcast strands the whole group: the rotator alone on the new
     ///      id, everyone else on the old one, nobody notifying either;
     ///   6. subscribe under the NEW id, then 7./8. retire the OLD one
-    ///      (``retireOldPushGid(oldSecret:)``) — in that order, so the device
+    ///      (``retireOldPushGid(accountIdB64:oldSecret:)``) — in that order, so the device
     ///      is never unsubscribed from both at once.
     ///
     /// Rotation NEVER mints a first secret: with no secret held this is a
@@ -2002,7 +2001,7 @@ public final class PushGroupRouting {
 
         // (7)+(8) — retire the OLD id: unsubscribe this device's row, drop
         // the stale reverse-index entry.
-        await retireOldPushGid(oldSecret: oldSecret)
+        await retireOldPushGid(accountIdB64: accountIdB64, oldSecret: oldSecret)
         return .rotated
     }
 

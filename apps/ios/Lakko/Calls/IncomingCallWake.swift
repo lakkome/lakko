@@ -143,11 +143,21 @@ public struct VoipWakePayload: Equatable {
     public let pointer: Int64?
     /// `true` when the gateway marked this a call wake (`k == "c"`).
     public let isCallWake: Bool
+    /// Hex of the device pseudonym the wake was sent to (`d`), or `nil`. The
+    /// wake is acted on only when it equals the pseudonym bound to the
+    /// signed-in account (``PushAccountBinding``, ADR-0042 amended 2026-09-30).
+    public let devicePseudonymHex: String?
 
-    public init(groupHex: String?, pointer: Int64?, isCallWake: Bool) {
+    public init(
+        groupHex: String?,
+        pointer: Int64?,
+        isCallWake: Bool,
+        devicePseudonymHex: String? = nil
+    ) {
         self.groupHex = groupHex
         self.pointer = pointer
         self.isCallWake = isCallWake
+        self.devicePseudonymHex = devicePseudonymHex
     }
 
     /// Decode a `PKPushPayload` / `UNNotificationContent` `userInfo` dictionary.
@@ -167,7 +177,8 @@ public struct VoipWakePayload: Equatable {
         return VoipWakePayload(
             groupHex: groupHex,
             pointer: pointer,
-            isCallWake: (userInfo["k"] as? String) == "c"
+            isCallWake: (userInfo["k"] as? String) == "c",
+            devicePseudonymHex: (userInfo["d"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         )
     }
 }

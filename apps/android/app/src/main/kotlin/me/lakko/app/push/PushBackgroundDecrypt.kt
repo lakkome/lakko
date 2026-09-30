@@ -97,21 +97,26 @@ internal fun buildBackgroundDecryptDeps(
             }
         }
     return object : PushDecryptDeps {
-        override fun lookupRoute(pushGidHex: String): Pair<String, String>? =
+        override fun lookupRoute(accountIdB64: String, pushGidHex: String): String? =
             try {
-                // ADR-0042 (Sprint 4): the plaintext reverse index
-                // Sprint 3 populates — a READ, deliberately without
-                // the device key (the FMS runs in the background).
-                pushRoutes.lookup(pushGidHex)?.let { it.accountIdB64 to it.groupIdHex }
+                // ADR-0042: the plaintext reverse index, for the bound
+                // account only — a READ, deliberately without the device
+                // key (the FMS runs in the background).
+                pushRoutes.lookup(accountIdB64, pushGidHex)
             } catch (_: Throwable) {
                 null
             }
 
-        override fun resolveAccount(groupHex: String): ResolvedPushAccount? {
-            val accountIdB64 = knownGroups.findAccountForGroup(groupHex) ?: return null
-            val groupIdBytes = hexToBytes(groupHex) ?: return null
-            return ResolvedPushAccount(accountIdB64 = accountIdB64, groupIdBytes = groupIdBytes)
-        }
+        // Legacy fallback, searching only the bound account's groups (the
+        // first-match scan over every account is gone: ADR-0042, amended
+        // 2026-09-30).
+        override fun accountKnowsGroup(accountIdB64: String, groupHex: String): Boolean =
+            try {
+                val needle = groupHex.lowercase()
+                knownGroups.load(accountIdB64).any { it.lowercase() == needle }
+            } catch (_: Throwable) {
+                false
+            }
 
         // ADR-0050 — the MLS snapshot is written under this device's
         // conversation identity (the per-install DEVICE seed, bound to the
@@ -458,18 +463,4 @@ private val committerBeaconEnvelopeLenCached: Int by lazy {
     } catch (_: Throwable) {
         0
     }
-}
-
-/** Decode a lowercase hex string into bytes. Returns `null` on any
- *  malformed input (odd length, non-hex chars). */
-private fun hexToBytes(hex: String): ByteArray? {
-    if (hex.length % 2 != 0) return null
-    val out = ByteArray(hex.length / 2)
-    for (i in out.indices) {
-        val hi = Character.digit(hex[i * 2], 16)
-        val lo = Character.digit(hex[i * 2 + 1], 16)
-        if (hi < 0 || lo < 0) return null
-        out[i] = ((hi shl 4) or lo).toByte()
-    }
-    return out
 }
