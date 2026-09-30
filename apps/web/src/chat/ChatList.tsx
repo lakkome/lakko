@@ -39,6 +39,7 @@ import { createConversationRows } from "./conversation-rows";
 import { uiRules } from "./ui-rules";
 import { formatListTime } from "./list-time";
 import { rowMatchesQuery } from "./list-preview";
+import { showsEmptyState } from "./list-empty-state";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
@@ -431,18 +432,19 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           </Show>
         </div>
       </div>
-      <Show when={orderedRows().length > 0}>
-        <label class="lk-search lk-pane-search">
-          <Icon name="search" size={16} />
-          <input
-            type="search"
-            placeholder="Search"
-            aria-label={`Search ${copy().title.toLowerCase()}`}
-            value={query()}
-            onInput={(e) => setQuery(e.currentTarget.value)}
-          />
-        </label>
-      </Show>
+      {/* `docs/ux/navigation.md` section 4 - the field is there with an
+          empty list too: finding the first person to talk to is what a new
+          account needs it for. */}
+      <label class="lk-search lk-pane-search">
+        <Icon name="search" size={16} />
+        <input
+          type="search"
+          placeholder="Search"
+          aria-label={`Search ${copy().title.toLowerCase()}`}
+          value={query()}
+          onInput={(e) => setQuery(e.currentTarget.value)}
+        />
+      </label>
       {/* `docs/ux/chat-folders.md` section 2: the folder bar, once one folder
           exists. Hidden while searching - a search covers everything. */}
       <Show when={folders().length > 0 && !searching() && orderedRows().length > 0}>
@@ -453,8 +455,11 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           onMenu={(id, x, y) => setTabMenu({ id, x, y })}
         />
       </Show>
+      {/* The empty state stands only while nothing is typed; once something
+          is, it gives way to what the search finds, the people half
+          included (`docs/ux/who-can-find-me.md` section 6.1). */}
       <Show
-        when={orderedRows().length > 0}
+        when={!showsEmptyState(orderedRows().length, query())}
         fallback={
           <div class="lk-empty">
             <Icon name="chat" size={40} strokeWidth={1.4} />

@@ -184,7 +184,7 @@ public final class ContactsViewModel: ObservableObject {
                 )
             } catch let err as ContactsError {
                 sending = false
-                sendError = userFacing(err)
+                sendError = Self.userFacing(err)
             } catch {
                 sending = false
                 sendError = (error as? LocalizedError)?.errorDescription
@@ -429,7 +429,7 @@ public final class ContactsViewModel: ObservableObject {
                 await loadActiveInvites()
             } catch let err as ContactsError {
                 generatingInvite = false
-                inviteError = userFacing(err)
+                inviteError = Self.userFacing(err)
             } catch {
                 generatingInvite = false
                 inviteError = (error as? LocalizedError)?.errorDescription
@@ -446,7 +446,7 @@ public final class ContactsViewModel: ObservableObject {
             do {
                 _ = try await repository.revokeInviteLink(blobId: blobId)
             } catch let err as ContactsError {
-                inviteError = userFacing(err)
+                inviteError = Self.userFacing(err)
             } catch {
                 inviteError = (error as? LocalizedError)?.errorDescription
                     ?? "Revoke failed."
@@ -498,7 +498,7 @@ public final class ContactsViewModel: ObservableObject {
             }
             activeInvitesLoaded = true
         } catch let err as ContactsError {
-            activeInvitesError = userFacing(err)
+            activeInvitesError = Self.userFacing(err)
         } catch {
             activeInvitesError = (error as? LocalizedError)?.errorDescription
                 ?? "Could not load invites."
@@ -525,7 +525,7 @@ public final class ContactsViewModel: ObservableObject {
                 _ = try await repository.revokeInviteLink(blobId: blobId)
                 activeInvites = activeInvites.filter { $0.blobIdSlug != slug }
             } catch let err as ContactsError {
-                activeInvitesError = userFacing(err)
+                activeInvitesError = Self.userFacing(err)
             } catch {
                 activeInvitesError = (error as? LocalizedError)?.errorDescription
                     ?? "Revoke failed."
@@ -535,10 +535,15 @@ public final class ContactsViewModel: ObservableObject {
 
     // MARK: - Error mapping
 
-    private func userFacing(_ err: ContactsError) -> String {
+    /// The copy for a contacts error. `static` and internal so the copy is
+    /// pinned in a unit test.
+    static func userFacing(_ err: ContactsError) -> String {
         switch err {
-        case .usernameUnknown(let normalised):
-            return "@\(normalised) is not registered on Lakko."
+        case .usernameUnknown:
+            // `docs/ux/who-can-find-me.md` section 6.1, "Not found": the same
+            // answer whether the name is unregistered or its owner does not
+            // let this person find them (ADR-0060). Never claim which.
+            return "No one found. Check the spelling, or ask them for an invite link."
         case .noIdentityBundle:
             return "That account has no identity bundle yet — ask them to open the app once."
         case .wrapped(let cause):

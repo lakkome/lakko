@@ -240,4 +240,17 @@ final class ContactsPresentationTests: XCTestCase {
         XCTAssertEqual(DeviceRowPresentation.title(isSelf: true, position: 1), "This device")
         XCTAssertEqual(DeviceRowPresentation.title(isSelf: false, position: 3), "Device 3")
     }
+
+    // MARK: - Add by username
+
+    /// `docs/ux/who-can-find-me.md` section 6.1, "Not found": a name that does
+    /// not resolve never tells the searcher whether the account exists
+    /// (ADR-0060), and never echoes the name back as "not registered".
+    @MainActor
+    func testUsernameNotFoundNeverClaimsTheAccountIsUnregistered() {
+        let copy = ContactsViewModel.userFacing(.usernameUnknown("anna"))
+        XCTAssertEqual(copy, "No one found. Check the spelling, or ask them for an invite link.")
+        XCTAssertFalse(copy.contains("registered"))
+        XCTAssertFalse(copy.contains("anna"))
+    }
 }

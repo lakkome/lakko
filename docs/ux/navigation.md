@@ -155,6 +155,14 @@ already know.
 search bar above the list on Android - the same field where each platform
 puts one.
 
+**Also with an empty list (2026-09-30).** The field is there before the
+first conversation exists: finding the first person to talk to is exactly
+what a new account needs it for. With nothing typed the empty state shows as
+before (its sentence and its New button); once something is typed the empty
+state gives way to what the search finds, the people half included
+([`who-can-find-me.md`](who-can-find-me.md) section 6.1). The folder bar
+stays hidden with an empty list.
+
 The LOCAL half is settled and built: fuzzy over the titles and previews of
 what this device already holds. **How the whole field should present itself
 once it covers messages as well is still open** - that part is deferred.

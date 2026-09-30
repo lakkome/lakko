@@ -176,6 +176,11 @@ States:
 | Network failure | "Couldn't search. Check your connection and try again." Never "not found": telling someone their friend does not exist because the connection dropped is the worst thing this can do. |
 | Request refused | The person changed their setting after you found them: "Couldn't send the request. They may have changed who can find them." |
 
+The same Not found sentence answers **Add by username** in Contacts when the
+name does not resolve (2026-09-30: it said "No account is registered as
+@name", which claims a fact the searcher must not learn - the account may
+exist and not let them find it).
+
 ### 6.2 In a group or a channel
 
 A member row shows the member's name as today. What changes is what you can

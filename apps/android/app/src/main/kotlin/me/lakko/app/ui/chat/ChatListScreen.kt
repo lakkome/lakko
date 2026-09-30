@@ -103,6 +103,7 @@ import me.lakko.app.chat.findByName
 import me.lakko.app.chat.findByNameMessage
 import me.lakko.app.chat.findByNameRowLabel
 import me.lakko.app.chat.orderConversationRows
+import me.lakko.app.chat.showsEmptyConversationState
 import me.lakko.app.chat.toRowKind
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.devices.sync.FlagsState
@@ -235,7 +236,9 @@ public fun ChatListScreen(
         deviceGroupSync?.let { FolderActions(it, repository) }
     }
     val searching = query.isNotBlank()
-    val showBar = folders.isNotEmpty() && !searching
+    // docs/ux/navigation.md section 4 / chat-folders.md — no folder bar over an
+    // empty list (the web client never showed one), and none while searching.
+    val showBar = folders.isNotEmpty() && !searching && rows.isNotEmpty()
 
     // Section 2.5 — the tab last selected on THIS device, not synced; a folder
     // deleted since (on any device) opens All chats.
@@ -387,8 +390,12 @@ public fun ChatListScreen(
                     }
                     // The empty state's button opens the SAME menu the compose
                     // button does, not a different set of choices in a
-                    // different place.
-                    rows.isEmpty() && !showBar -> EmptyPanel(onStart = { createMenuOpen = true })
+                    // different place. Only while nothing is typed: with an
+                    // empty list a search still reaches the people half below
+                    // (docs/ux/navigation.md section 4, "Also with an empty
+                    // list").
+                    showsEmptyConversationState(rows.isEmpty(), query) && !showBar ->
+                        EmptyPanel(onStart = { createMenuOpen = true })
                     // UX who-can-find-me 6.1 — the people half of the search
                     // field replaces the plain lookup row when it is wired.
                     searching && visible.isEmpty() && peopleSearch != null -> Column(
