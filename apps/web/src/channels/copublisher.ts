@@ -78,6 +78,7 @@ import {
   appointCoPublisher,
   fetchEpoch,
   listSubscribers,
+  rememberPublisherRole,
   rotateChannel,
   type RotateBatchEntry,
 } from "./api";
@@ -527,7 +528,11 @@ export async function pollForCoPublishWelcome(
   // (now-joined) group, derives the shared content-key seed, and reuses the
   // persisted per-device signing seed (or mints one) so this device can
   // publish.
-  return await freshPublisherKeys(identity, channelIdHex, existingSigningSeed);
+  const keys = await freshPublisherKeys(identity, channelIdHex, existingSigningSeed);
+  // ADR-0059 section 9: this account publishes here as a co-publisher, so
+  // its writes are signed with the co-publisher key from the first one.
+  await rememberPublisherRole(channelIdHex, identity, "copublisher");
+  return keys;
 }
 
 /**
@@ -569,7 +574,7 @@ async function resealSubscribers(
       envelope_b64: base64Encode(envelope),
     });
   }
-  await rotateChannel(channelIdHex, batch, apiBase);
+  await rotateChannel(channelIdHex, batch, identity, apiBase);
 }
 
 // ---------------------------------------------------------

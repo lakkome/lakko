@@ -50,10 +50,12 @@ export function SubscribersPanel(props: {
   /** Manual Retry for one subscriber whose envelope did not land. */
   async function deliverTo(pubkeyHex: string): Promise<void> {
     if (busyPk() !== null) return;
+    const identity = props.identity;
+    if (identity === null) return;
     setBusyPk(pubkeyHex);
     setError(null);
     try {
-      await admitSubscriber(props.channelIdHex, pubkeyHex);
+      await admitSubscriber(props.channelIdHex, pubkeyHex, identity);
     } catch (err) {
       setError(
         apiError.is(err)

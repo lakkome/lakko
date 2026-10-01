@@ -10,6 +10,7 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.request.header
 import io.ktor.client.request.request
 import io.ktor.http.HttpMethod
+import io.ktor.http.content.ByteArrayContent
 import me.lakko.app.anon.AnonTokenContext
 import me.lakko.app.anon.AnonTokenSource
 import me.lakko.app.anon.AnonTokens
@@ -20,8 +21,6 @@ import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.channelOwnerProofHeaderName
 import uniffi.lakko_ffi_uniffi.channelOwnerSigner
 import uniffi.lakko_ffi_uniffi.channelCopublisherPath
-import uniffi.lakko_ffi_uniffi.channelCopublisherProofHeaderName
-import uniffi.lakko_ffi_uniffi.channelCopublisherSigner
 import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
@@ -63,6 +62,9 @@ public class ChannelsClient(
     anonEngine: HttpClientEngine? = null,
     /** Where subscribe draws its `channel-subscribe` token. */
     private val anonTokens: AnonTokenSource = AnonTokens.shared,
+    /** The publisher role per (account, channel) the signed writes use
+     *  (ADR-0059 section 9). Production: the process-wide cache. */
+    private val publisherRoles: ChannelPublisherRoles = ChannelPublisherRoles.shared,
 ) : AutoCloseable {
 
     private val jsonCodec = Json {
@@ -110,6 +112,7 @@ public class ChannelsClient(
         if (!response.status.isSuccess()) {
             throw decodeError(response, "create channel")
         }
+        publisherRoles.remember(ownerHex, ChannelPublisherRole.OWNER)
         return response.body<CreateResp>().channel_id
     }
 
@@ -130,20 +133,24 @@ public class ChannelsClient(
         val next_after: ULong,
     )
 
-    /** `POST /v1/channels/:id/posts` — publish opaque ChannelPost bytes. */
+    /** `POST /v1/channels/:id/posts` — publish opaque ChannelPost bytes,
+     *  signed with this account's publisher role (ADR-0059 section 9) over
+     *  exactly those bytes. A refused proof throws [ChannelsApiException]
+     *  with code [PUBLISHER_REFUSED]. */
     public suspend fun publishPost(
         channelIdHex: String,
         payload: ByteArray,
+        proofs: ChannelPublisherProofs,
     ): PostView {
-        val response: HttpResponse = client.post(
-            "$baseUrl/v1/channels/$channelIdHex/posts"
-        ) {
-            contentType(ContentType.Application.OctetStream)
-            setBody(payload)
-        }
-        if (!response.status.isSuccess()) {
-            throw decodeError(response, "publish post")
-        }
+        val response = sendAsPublisher(
+            proofs,
+            HttpMethod.Post,
+            "/v1/channels/$channelIdHex/posts",
+            "",
+            payload,
+            ContentType.Application.OctetStream,
+            "publish post",
+        )
         val body = response.body<PostJson>()
         return PostView(body.cursor, body.server_ts_ms, body.payload_b64)
     }
@@ -249,31 +256,32 @@ public class ChannelsClient(
     }
 
     /** The subscriber list for a publisher of the channel, owner or
-     *  co-publisher: first owner-signed; when the server refuses that (this
-     *  account is not the owner), once more signed with this account's
-     *  co-publisher key, which the owner appointed after approving it
-     *  (ADR-0059 section 1, co-publisher keys). Not appointed yet: the 401
-     *  stands. */
+     *  co-publisher, signed with the role this account holds (ADR-0059
+     *  sections 4 and 9): see [sendAsPublisher]. A co-publisher the owner has
+     *  not appointed yet gets the 401. */
+    public suspend fun listSubscribersAsPublisher(
+        channelIdHex: String,
+        proofs: ChannelPublisherProofs,
+    ): List<String> {
+        val response = sendAsPublisher(
+            proofs,
+            HttpMethod.Get,
+            "/v1/channels/$channelIdHex/subscribers",
+            "",
+            ByteArray(0),
+            null,
+            "list subscribers",
+        )
+        return response.body<SubscribersResp>().subscribers
+    }
+
+    /** [listSubscribersAsPublisher] with the signers derived from
+     *  [accountIdentity] for this call. */
     public suspend fun listSubscribersAsPublisher(
         channelIdHex: String,
         accountIdentity: Identity,
-    ): List<String> {
-        try {
-            return ownerSigner(accountIdentity, channelIdHex).use { listSubscribers(channelIdHex, it) }
-        } catch (e: ChannelsApiException) {
-            if (e.status != 401) throw e
-        }
-        val path = "/v1/channels/$channelIdHex/subscribers"
-        val proof = channelCopublisherSigner(accountIdentity, channelIdBytes(channelIdHex)).use {
-            it.sign("GET", path, "", ByteArray(0))
-        }
-        val response: HttpResponse = client.get("$baseUrl$path") {
-            header(channelCopublisherProofHeaderName(), proof)
-        }
-        if (!response.status.isSuccess()) {
-            throw decodeError(response, "list subscribers")
-        }
-        return response.body<SubscribersResp>().subscribers
+    ): List<String> = ChannelPublisherSigners.derive(accountIdentity, channelIdHex).use {
+        listSubscribersAsPublisher(channelIdHex, it)
     }
 
     /** `PUT` (appoint) / `DELETE` (revoke) `/v1/channels/:id/copublishers/:key`
@@ -460,23 +468,28 @@ public class ChannelsClient(
      *  as `?epoch=`; the server files the envelope at that
      *  epoch and prunes the subscriber to its highest N. Absent
      *  (null) → the server files at its current epoch (the
-     *  backward-compatible shape). */
+     *  backward-compatible shape).
+     *
+     *  Publisher-signed (ADR-0059 section 9) over the path, the
+     *  `epoch=N` query and the envelope bytes. */
     public suspend fun deliverEnvelope(
         channelIdHex: String,
         subscriberPubkeyHex: String,
         envelope: ByteArray,
+        proofs: ChannelPublisherProofs,
         epoch: Int? = null,
     ) {
-        val response: HttpResponse = client.post(
-            "$baseUrl/v1/channels/$channelIdHex/subscribers/$subscriberPubkeyHex/envelope"
-        ) {
-            contentType(ContentType.Application.OctetStream)
-            if (epoch != null) parameter("epoch", epoch.toString())
-            setBody(envelope)
-        }
-        if (!response.status.isSuccess()) {
-            throw decodeError(response, "deliver envelope")
-        }
+        // The query is part of what the proof covers: built once, signed and
+        // sent as is.
+        sendAsPublisher(
+            proofs,
+            HttpMethod.Post,
+            "/v1/channels/$channelIdHex/subscribers/$subscriberPubkeyHex/envelope",
+            if (epoch != null) "epoch=$epoch" else "",
+            envelope,
+            ContentType.Application.OctetStream,
+            "deliver envelope",
+        )
     }
 
     /** G4-2-rotation-timer-android — atomic batch rotation
@@ -499,18 +512,18 @@ public class ChannelsClient(
     public suspend fun rotateChannel(
         channelIdHex: String,
         envelopes: List<RotateBatchEntry>,
+        proofs: ChannelPublisherProofs,
     ): UInt {
-        val response: HttpResponse = client.post(
-            "$baseUrl/v1/channels/$channelIdHex/rotate"
-        ) {
-            contentType(ContentType.Application.Json)
-            setBody(RotateRequest(envelopes))
-        }
-        if (!response.status.isSuccess()) {
-            throw decodeError(response, "rotate channel")
-        }
-        val view = response.body<EpochView>()
-        return view.epoch
+        val response = sendAsPublisher(
+            proofs,
+            HttpMethod.Post,
+            "/v1/channels/$channelIdHex/rotate",
+            "",
+            jsonBytes(jsonCodec.encodeToString(RotateRequest.serializer(), RotateRequest(envelopes))),
+            ContentType.Application.Json,
+            "rotate channel",
+        )
+        return response.body<EpochView>().epoch
     }
 
     /** ADR-0030 Sprint D2 — staged-rotation PREPARE phase.
@@ -537,16 +550,22 @@ public class ChannelsClient(
         channelIdHex: String,
         targetEpoch: UInt,
         envelopes: List<RotateBatchEntry>,
+        proofs: ChannelPublisherProofs,
     ) {
-        val response: HttpResponse = client.post(
-            "$baseUrl/v1/channels/$channelIdHex/rotate/stage"
-        ) {
-            contentType(ContentType.Application.Json)
-            setBody(StageRotateRequest(targetEpoch, envelopes))
-        }
-        if (!response.status.isSuccess()) {
-            throw decodeError(response, "stage rotation")
-        }
+        sendAsPublisher(
+            proofs,
+            HttpMethod.Post,
+            "/v1/channels/$channelIdHex/rotate/stage",
+            "",
+            jsonBytes(
+                jsonCodec.encodeToString(
+                    StageRotateRequest.serializer(),
+                    StageRotateRequest(targetEpoch, envelopes),
+                ),
+            ),
+            ContentType.Application.Json,
+            "stage rotation",
+        )
     }
 
     /** ADR-0030 Sprint D2 — staged-rotation COMMIT phase, the
@@ -564,16 +583,19 @@ public class ChannelsClient(
     public suspend fun commitRotation(
         channelIdHex: String,
         targetEpoch: UInt,
+        proofs: ChannelPublisherProofs,
     ): UInt {
-        val response: HttpResponse = client.post(
-            "$baseUrl/v1/channels/$channelIdHex/rotate/commit"
-        ) {
-            contentType(ContentType.Application.Json)
-            setBody(CommitRotateRequest(targetEpoch))
-        }
-        if (!response.status.isSuccess()) {
-            throw decodeError(response, "commit rotation")
-        }
+        val response = sendAsPublisher(
+            proofs,
+            HttpMethod.Post,
+            "/v1/channels/$channelIdHex/rotate/commit",
+            "",
+            jsonBytes(
+                jsonCodec.encodeToString(CommitRotateRequest.serializer(), CommitRotateRequest(targetEpoch)),
+            ),
+            ContentType.Application.Json,
+            "commit rotation",
+        )
         return response.body<EpochView>().epoch
     }
 
@@ -591,6 +613,67 @@ public class ChannelsClient(
 
     @Serializable
     private data class EpochView(val epoch: UInt)
+
+    // -----------------------------------------------------------------
+    // ADR-0059 section 9 — publisher-signed requests
+    // -----------------------------------------------------------------
+
+    /** UTF-8 bytes of a JSON body serialized once: these exact bytes are
+     *  both signed and sent. */
+    private fun jsonBytes(json: String): ByteArray = json.toByteArray(Charsets.UTF_8)
+
+    /**
+     * Send one publisher-signed request and return the successful response;
+     * a refusal throws [ChannelsApiException].
+     *
+     * [path] is the service path (`/v1/channels/...`), which is what the
+     * proof covers; the URL is [baseUrl] (which may carry the `/channels`
+     * prefix nginx strips) + [path] + `?`[query]. [body] is sent byte for
+     * byte as signed. Every attempt signs afresh (single-use nonces).
+     *
+     * With the role cached: signed once; a 401 forgets the role and
+     * surfaces. With the role unknown: owner proof first, and on a 401 the
+     * co-publisher proof; whichever is accepted is remembered.
+     */
+    internal suspend fun sendAsPublisher(
+        proofs: ChannelPublisherProofs,
+        method: HttpMethod,
+        path: String,
+        query: String,
+        body: ByteArray,
+        bodyType: ContentType?,
+        action: String,
+    ): HttpResponse {
+        val url = if (query.isEmpty()) "$baseUrl$path" else "$baseUrl$path?$query"
+        suspend fun attempt(role: ChannelPublisherRole): HttpResponse {
+            val (name, value) = proofs.proofHeader(role, method.value, path, query, body)
+            return client.request(url) {
+                this.method = method
+                header(name, value)
+                if (bodyType != null) setBody(ByteArrayContent(body, bodyType))
+            }
+        }
+        val key = proofs.roleKey
+        val known = publisherRoles[key]
+        if (known != null) {
+            val response = attempt(known)
+            if (response.status.isSuccess()) return response
+            if (response.status.value == 401) publisherRoles.forget(key)
+            throw decodeError(response, action)
+        }
+        val asOwner = attempt(ChannelPublisherRole.OWNER)
+        if (asOwner.status.isSuccess()) {
+            publisherRoles.remember(key, ChannelPublisherRole.OWNER)
+            return asOwner
+        }
+        if (asOwner.status.value != 401) throw decodeError(asOwner, action)
+        val asCopublisher = attempt(ChannelPublisherRole.COPUBLISHER)
+        if (asCopublisher.status.isSuccess()) {
+            publisherRoles.remember(key, ChannelPublisherRole.COPUBLISHER)
+            return asCopublisher
+        }
+        throw decodeError(asCopublisher, action)
+    }
 
     // -----------------------------------------------------------------
     // Error envelope decoder

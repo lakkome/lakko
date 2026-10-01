@@ -4387,7 +4387,7 @@ metadata and a write of garbage, and a forward from a one-to-one should carry no
 (ADR-0052 amendment).
 
 
-### G-43: `services/channels` authorises no publisher operation - anyone who knows a `channel_id` can rotate, deliver envelopes and read the subscriber list - **OPEN (recorded 2026-09-28 while designing [ADR-0059](../adr/0059-channel-discover.md))**
+### G-43: `services/channels` authorised no publisher operation - anyone who knew a `channel_id` could rotate, deliver envelopes and read the subscriber list - **CLOSED in code 2026-10-01 ([ADR-0059](../adr/0059-channel-discover.md) section 9); not walked live** (recorded 2026-09-28 while designing ADR-0059)
 
 **What the code does.** `create_channel` takes only `{channel_id}` and registers no key;
 publishing a post, `POST /rotate`, `/rotate/stage`, `/rotate/commit`, delivering a seed
@@ -4409,3 +4409,20 @@ public to anyone who resolves the channel's handle.
 it for the directory, the subscriber list and a token-gated subscribe. Gating publish,
 rotate and deliver on the same key (plus co-publisher keys the owner registers) is the
 remaining change and is not part of ADR-0059.
+
+**Closed (2026-10-01, ADR-0059 section 9).** `POST .../posts`, `POST .../rotate`,
+`POST .../rotate/stage`, `POST .../rotate/commit` and `POST .../subscribers/<key>/envelope`
+now go through `require_publisher` (`services/channels/src/owner_auth.rs`) before the body
+is parsed: an owner proof, or a proof by a co-publisher key the owner appointed, over the
+method, the service path, the query and the exact body bytes, inside the 120 s window,
+nonce consumed once; every refusal is `401 owner-proof-required`. An unknown channel now
+answers `401` instead of `404`. Web, iOS and Android sign all five writes and the subscriber
+list with the role the device holds for the channel (an in-memory cache: owner on create,
+co-publisher on a completed join, otherwise the first key the server accepts). Verified:
+`services/channels` integration tests (42, including a refusal matrix per route: no proof,
+foreign key, unappointed co-publisher, body mismatch, replay) and unit tests (72); the 6
+SQL-store tests skipped without `LAKKO_CHANNELS_TEST_DATABASE_URL`; web vitest for channels and
+discover (170); Android and iOS unit tests in scratch copies (this worktree does not compile
+natively until the sealed-invite-link bindings are ported). Not exercised against a deployed
+server. What remains open is the reads: posts, envelopes and the epoch stay readable by
+`channel_id`, which is acceptable because posts and envelopes are sealed.

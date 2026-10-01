@@ -386,10 +386,15 @@ public enum CoPublisher {
             }
         }
         guard joined else { return nil }
-        return try ChannelsComposer.freshPublisherKeys(
+        let keys = try ChannelsComposer.freshPublisherKeys(
             identity: identity,
             channelIdHex: channelIdHex,
             existingSigningSeed: existingSigningSeed)
+        // ADR-0059 section 9: this account publishes here as a co-publisher,
+        // so its writes are signed with the co-publisher key from the first one.
+        try? ChannelsClient.rememberPublisherRole(
+            channelIdHex: channelIdHex, accountIdentity: identity, role: .copublisher)
+        return keys
     }
 
     /// Bound on the mailbox pages one Welcome look-up reads.
@@ -436,7 +441,8 @@ public enum CoPublisher {
                 )
             )
         }
-        _ = try await channelsClient.rotateChannel(channelIdHex: channelIdHex, envelopes: batch)
+        _ = try await channelsClient.rotateChannel(
+            channelIdHex: channelIdHex, envelopes: batch, accountIdentity: identity)
     }
 
     // MARK: - helpers

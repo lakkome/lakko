@@ -185,10 +185,40 @@ service envelopes.
 ### 8. Out of scope, stated
 
 - Closing G-43 for publish / rotate / deliver: same owner key, separate
-  change, needed anyway.
+  change, needed anyway. Built 2026-10-01, see section 9.
 - Post previews before subscribing (the maintainer chose E2EE).
 - Reactions to channel posts.
 - Private information retrieval for buckets.
+
+### 9. Closing G-43 (amendment, 2026-10-01)
+
+Every write a publisher makes now carries the proof section 1 introduced:
+`POST .../posts`, `POST .../rotate`, `POST .../rotate/stage`,
+`POST .../rotate/commit` and `POST .../subscribers/<key>/envelope` go
+through `require_publisher` (`services/channels/src/owner_auth.rs`), the
+gate the subscriber list already used: an owner proof, or a co-publisher
+proof by a key the owner appointed, over the method, the routed path, the
+query and the exact body bytes, inside the 120 s window, with a nonce that
+is consumed once. Every refusal is the same `401 owner-proof-required`.
+
+- Co-publishers are accepted on all five, because a co-publisher posts,
+  runs the rotation cron and lets subscribers in exactly as the owner does.
+  A co-publisher whose key the owner has not appointed yet is refused until
+  it is.
+- The proof binds the body, so a stage chunk is hashed in full; nothing is
+  parsed before the gate passes.
+- The client signs with the role it holds for the channel: the owner key if
+  it created the channel, its co-publisher key otherwise, so a large stage
+  chunk is not uploaded twice to find out.
+- Reads stay open: posts and envelopes are sealed, and the epoch is public.
+  `POST .../subscribers` is the token-gated subscribe of section 4.
+- What this closes: an unauthorised rotation or staged commit, an envelope
+  filed by someone who does not hold the seed, and junk posts that every
+  reader had to fetch and drop. Post authenticity is unchanged: readers
+  still verify each post's signature.
+- No migration: the owner key and the co-publisher table already exist
+  (migrations `0005`, `0007`), and a channel without an owner key is
+  refused (there is no production data).
 
 ## Alternatives
 

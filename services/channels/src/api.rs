@@ -8,7 +8,7 @@
 //! | Method | Path | Gate | Purpose |
 //! |---|---|---|---|
 //! | `POST` | `/v1/channels` | none | Register a channel: `{channel_id, owner_pubkey_hex}`. The owner key is fixed at creation. |
-//! | `POST` | `/v1/channels/:id/posts` | none (G-43) | Publish an opaque ChannelPost. |
+//! | `POST` | `/v1/channels/:id/posts` | publisher proof | Publish an opaque ChannelPost. |
 //! | `GET`  | `/v1/channels/:id/posts?after=&limit=` | none | Cursor-paginated fetch. |
 //! | `POST` | `/v1/channels/:id/subscribers` | one `channel-subscribe` token | Register a subscriber key. |
 //! | `GET`  | `/v1/channels/:id/subscribers` | owner proof | The subscriber keys (the publisher reseals to them). |
@@ -18,8 +18,16 @@
 //! | `GET`  | `/v1/directory/listing/:id` | none | One listing. |
 //! | `GET`  | `/v1/directory/search?q=` | one `directory-search` token | Top 24 matches; the query is never logged. |
 //!
-//! Envelope delivery, rotation and the epoch routes are unchanged and, like
-//! publishing, still unauthenticated (G-43, out of scope of ADR-0059).
+//! | `POST` | `/v1/channels/:id/subscribers/:pk/envelope` | publisher proof | File one seed envelope. |
+//! | `POST` | `/v1/channels/:id/rotate` | publisher proof | Atomic batch delivery + epoch bump. |
+//! | `POST` | `/v1/channels/:id/rotate/stage` | publisher proof | Stage a chunk of the next epoch (ADR-0030). |
+//! | `POST` | `/v1/channels/:id/rotate/commit` | publisher proof | Promote the staged epoch (ADR-0030). |
+//!
+//! "Publisher proof" is [`require_publisher`]: an owner proof, or a proof by
+//! a co-publisher key the owner appointed, over the method, the routed path,
+//! the query and the exact body bytes (ADR-0059 section 9, closing G-43).
+//! The gate runs before the body is parsed. The reads (posts, envelopes,
+//! epoch) stay open: what they serve is sealed or public.
 //! Moderation is not here: it is served on the internal listener
 //! ([`crate::internal`]).
 //!
@@ -35,8 +43,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    body::Bytes,
-    extract::{Path, Query, State},
+    body::{Body, Bytes},
+    extract::{FromRequest, Path, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     response::{IntoResponse, Json, Response},
     routing::{get, post, put},
@@ -448,6 +456,9 @@ async fn create_channel(
 async fn publish_post(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
@@ -457,6 +468,9 @@ async fn publish_post(
         )
             .into_response();
     };
+    if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &body).await {
+        return refused;
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -665,6 +679,9 @@ async fn deliver_envelope(
     State(state): State<Arc<AppState>>,
     Path((channel_id, pubkey_hex)): Path<(String, String)>,
     Query(q): Query<DeliverEnvelopeQuery>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
@@ -684,6 +701,9 @@ async fn deliver_envelope(
         )
             .into_response();
     };
+    if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &body).await {
+        return refused;
+    }
     match state
         .store
         .deliver_envelope(channel, sub, q.epoch, body.to_vec(), EXPECTED_ENVELOPE_LEN)
@@ -914,7 +934,10 @@ async fn fetch_epoch(
 async fn rotate_channel(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,
-    Json(req): Json<RotateRequest>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
@@ -922,6 +945,13 @@ async fn rotate_channel(
             Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
+    };
+    if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &body).await {
+        return refused;
+    }
+    let req: RotateRequest = match parse_json_body(&headers, body).await {
+        Ok(r) => r,
+        Err(rejected) => return rejected,
     };
 
     // Validate + decode every entry BEFORE asking the
@@ -1028,7 +1058,10 @@ fn decode_rotate_batch(
 async fn rotate_stage(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,
-    Json(req): Json<StageRotateRequest>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
@@ -1036,6 +1069,13 @@ async fn rotate_stage(
             Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
+    };
+    if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &body).await {
+        return refused;
+    }
+    let req: StageRotateRequest = match parse_json_body(&headers, body).await {
+        Ok(r) => r,
+        Err(rejected) => return rejected,
     };
 
     // Bound the chunk BEFORE decoding — a single request must
@@ -1119,7 +1159,10 @@ async fn rotate_stage(
 async fn rotate_commit(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,
-    Json(req): Json<CommitRotateRequest>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
@@ -1127,6 +1170,13 @@ async fn rotate_commit(
             Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response();
+    };
+    if let Err(refused) = require_publisher(&state, channel, &method, &uri, &headers, &body).await {
+        return refused;
+    }
+    let req: CommitRotateRequest = match parse_json_body(&headers, body).await {
+        Ok(r) => r,
+        Err(rejected) => return rejected,
     };
     match state.store.commit_rotation(channel, req.target_epoch).await {
         Ok(epoch) => (StatusCode::OK, Json(EpochView { epoch })).into_response(),
@@ -1149,6 +1199,25 @@ async fn rotate_commit(
         )
             .into_response(),
     }
+}
+
+/// Parse a JSON body the gate has already accepted, with the same
+/// `Content-Type` check and the same rejection responses as the `Json`
+/// extractor the handler used before it had to hash the raw bytes (a
+/// missing JSON content type is 415, a syntax error 400, a shape error
+/// 422).
+async fn parse_json_body<T: serde::de::DeserializeOwned>(
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Result<T, Response> {
+    let mut req = Request::new(Body::from(body));
+    if let Some(ct) = headers.get(header::CONTENT_TYPE) {
+        req.headers_mut().insert(header::CONTENT_TYPE, ct.clone());
+    }
+    Json::<T>::from_request(req, &())
+        .await
+        .map(|Json(v)| v)
+        .map_err(IntoResponse::into_response)
 }
 
 fn bad_channel_id() -> Response {

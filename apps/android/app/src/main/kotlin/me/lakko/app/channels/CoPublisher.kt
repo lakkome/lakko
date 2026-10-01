@@ -449,6 +449,9 @@ public object CoPublisher {
             }
         }
         if (!joined) return null
+        // ADR-0059 section 9 — this account now publishes as a co-publisher;
+        // its signed writes go out once under that key.
+        ChannelPublisherRoles.rememberFor(identity, channelIdHex, ChannelPublisherRole.COPUBLISHER)
         return ChannelsComposer.freshPublisherKeys(
             identity, channelIdHex, existingSigningSeed)
     }
@@ -475,7 +478,22 @@ public object CoPublisher {
             throw CoPublisherException.UnexpectedServerEpoch(currentEpoch)
         }
         val newServerEpoch = currentEpoch + 1u
-        val subscribers = channelsClient.listSubscribersAsPublisher(channelIdHex, identity)
+        // ADR-0059 section 9: the list and the rotate are signed with this
+        // account's publisher role, derived once for both.
+        ChannelPublisherSigners.derive(identity, channelIdHex).use { proofs ->
+            resealWith(channelsClient, proofs, channelIdBytes, newServerEpoch, newSeed, channelIdHex)
+        }
+    }
+
+    private suspend fun resealWith(
+        channelsClient: ChannelsClient,
+        proofs: ChannelPublisherProofs,
+        channelIdBytes: ByteArray,
+        newServerEpoch: UInt,
+        newSeed: ByteArray,
+        channelIdHex: String,
+    ) {
+        val subscribers = channelsClient.listSubscribersAsPublisher(channelIdHex, proofs)
         val batch = ArrayList<RotateBatchEntry>(subscribers.size)
         for (subscriberHex in subscribers) {
             val subscriberBytes = hexToBytes(subscriberHex)
@@ -493,7 +511,7 @@ public object CoPublisher {
                 ),
             )
         }
-        channelsClient.rotateChannel(channelIdHex, batch)
+        channelsClient.rotateChannel(channelIdHex, batch, proofs)
     }
 
     // -----------------------------------------------------------------

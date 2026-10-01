@@ -133,14 +133,17 @@ struct SubscribersPanel: View {
         error = nil
         defer { busyPk = nil }
         do {
-            try await admission.admit(channelId: channelId, pubkeyHex: pubkeyHex, state: state)
+            let identity = try Identity.fromSeed(seed: accountIdentitySeed)
+            try await admission.admit(
+                channelId: channelId, pubkeyHex: pubkeyHex, state: state, accountIdentity: identity)
         } catch SubscriberAdmission.AdmissionError.noKeys {
             error = "This device cannot grant access here."
         } catch SubscriberAdmission.AdmissionError.badKey {
             error = "Could not grant access to this subscriber."
         } catch {
             NSLog("Channels: grant access failed: %@", String(describing: error))
-            self.error = "Could not grant access. Try again."
+            self.error = ChannelsApiError.publisherRefusal(error).map { "Could not grant access. \($0)" }
+                ?? "Could not grant access. Try again."
         }
     }
 

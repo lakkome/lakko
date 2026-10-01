@@ -54,6 +54,7 @@ vi.mock("./api", () => ({
   fetchEpoch: (...a: unknown[]) => fetchEpoch(...(a as [])),
   listSubscribers: (...a: unknown[]) => listSubscribers(...(a as [])),
   rotateChannel: (...a: unknown[]) => rotateChannel(...(a as [])),
+  rememberPublisherRole: async () => {},
 }));
 
 import { approveCoPublisher, pollCoPublisherJournal } from "./copublisher";

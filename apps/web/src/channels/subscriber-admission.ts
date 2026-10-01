@@ -68,16 +68,21 @@ async function currentEpoch(channelIdHex: string): Promise<number> {
   return view.epoch;
 }
 
-/** Seal and deliver the current seed to one key. Throws on failure after
- *  recording it, so a manual Retry can word the error. */
-export async function admitSubscriber(channelIdHex: string, pubkeyHex: string): Promise<void> {
+/** Seal and deliver the current seed to one key, signed with this account's
+ *  publisher role (ADR-0059 section 9). Throws on failure after recording
+ *  it, so a manual Retry can word the error. */
+export async function admitSubscriber(
+  channelIdHex: string,
+  pubkeyHex: string,
+  identity: WasmIdentity,
+): Promise<void> {
   const keys = channelsState.keysByChannel().get(channelIdHex);
   if (keys === undefined) throw new Error("This device cannot post to this channel.");
   const epoch = await currentEpoch(channelIdHex);
   try {
     const wire = await sealSubscriberSeedEnvelope(hexToBytes(pubkeyHex), channelIdHex, epoch, keys.seed);
     // ADR-0031: filed under the epoch it was sealed for.
-    await deliverEnvelope(channelIdHex, pubkeyHex, wire, undefined, epoch);
+    await deliverEnvelope(channelIdHex, pubkeyHex, wire, identity, undefined, epoch);
     update(channelIdHex, (a) => ({
       ...a,
       status: new Map(a.status).set(pubkeyHex, { epoch, status: "ready" }),
@@ -112,7 +117,7 @@ export async function admitNewSubscribers(channelIdHex: string, identity: WasmId
       const st = (admissions().get(channelIdHex) ?? EMPTY).status.get(pk);
       if (st !== undefined && st.status === "ready" && st.epoch === epoch) continue;
       try {
-        await admitSubscriber(channelIdHex, pk);
+        await admitSubscriber(channelIdHex, pk, identity);
       } catch (err) {
         // Recorded as failed; the next pass tries again.
         // eslint-disable-next-line no-console

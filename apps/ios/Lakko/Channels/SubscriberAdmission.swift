@@ -102,7 +102,9 @@ final class SubscriberAdmission: ObservableObject {
 
     /// Seal and deliver the current seed to one key. Records the outcome and
     /// rethrows a failure, so a manual retry can word the error.
-    func admit(channelId: String, pubkeyHex: String, state: ChannelsUiState) async throws {
+    func admit(
+        channelId: String, pubkeyHex: String, state: ChannelsUiState, accountIdentity: Identity
+    ) async throws {
         guard let keys = state.keysByChannel[channelId] else { throw AdmissionError.noKeys }
         let epoch = try await currentEpoch(channelId: channelId, state: state)
         do {
@@ -118,7 +120,8 @@ final class SubscriberAdmission: ObservableObject {
                 channelIdHex: channelId,
                 subscriberPubkeyHex: pubkeyHex,
                 envelope: wire,
-                epoch: epoch
+                epoch: epoch,
+                accountIdentity: accountIdentity
             )
             record(channelId: channelId, pubkeyHex: pubkeyHex, entry: Entry(epoch: epoch, status: .ready))
         } catch {
@@ -156,7 +159,7 @@ final class SubscriberAdmission: ObservableObject {
             if let entry = byChannel[channelId]?.status[pk],
                entry.status == .ready, entry.epoch == epoch { continue }
             do {
-                try await admit(channelId: channelId, pubkeyHex: pk, state: state)
+                try await admit(channelId: channelId, pubkeyHex: pk, state: state, accountIdentity: identity)
             } catch {
                 NSLog("[channels] letting a subscriber in failed")
             }

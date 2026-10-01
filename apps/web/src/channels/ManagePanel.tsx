@@ -92,12 +92,18 @@ function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Elem
       setError(CHANNEL_NEEDS_NAME);
       return;
     }
+    const id = chats.accountIdentity();
+    if (id === null) {
+      setError("Sign in again to save changes to this channel.");
+      return;
+    }
     setBusy(true);
     try {
-      const meta = await publishChannelMeta(props.channelIdHex, {
-        name: name(),
-        description: description(),
-      });
+      const meta = await publishChannelMeta(
+        props.channelIdHex,
+        { name: name(), description: description() },
+        id,
+      );
       // The local fields follow, so a device that never reads its own posts
       // back still titles the row the same way.
       channelsActions.updateLocalMeta(props.channelIdHex, {
@@ -109,13 +115,10 @@ function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Elem
       setNotice("Saved. Subscribers see the new name with their next posts.");
       // ADR-0059 — a listed channel's listing carries the name and
       // description too; editing them updates it (UX spec 6.4).
-      const id = chats.accountIdentity();
-      if (id !== null) {
-        try {
-          await refreshListingAfterEdit(props.channelIdHex, id);
-        } catch {
-          setNotice("Saved. The Discover listing could not be updated; save again to retry.");
-        }
+      try {
+        await refreshListingAfterEdit(props.channelIdHex, id);
+      } catch {
+        setNotice("Saved. The Discover listing could not be updated; save again to retry.");
       }
     } catch (err) {
       const code = channelMetaErrorCode(err);

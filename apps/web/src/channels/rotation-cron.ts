@@ -234,6 +234,7 @@ export async function runRotationOnce(
     ctx.channelIdHex,
     newServerEpoch,
     batch,
+    ctx.identity,
     ctx.apiBase,
   );
 
@@ -274,6 +275,7 @@ export async function stageAndCommitRotation(
   channelIdHex: string,
   targetEpoch: number,
   batch: ReadonlyArray<RotateBatchEntry>,
+  identity: Identity,
   apiBase?: string,
 ): Promise<ChannelEpoch> {
   for (let i = 0; i < batch.length; i += MAX_STAGE_CHUNK_ENTRIES) {
@@ -281,9 +283,9 @@ export async function stageAndCommitRotation(
     // Sequential await — a chunk failure aborts here and the
     // caller's `saveState` never runs, so no partial rotation is
     // committed (commit below is never reached).
-    await stageRotation(channelIdHex, targetEpoch, chunk, apiBase);
+    await stageRotation(channelIdHex, targetEpoch, chunk, identity, apiBase);
   }
-  return commitRotation(channelIdHex, targetEpoch, apiBase);
+  return commitRotation(channelIdHex, targetEpoch, identity, apiBase);
 }
 
 /** Handle returned by `startRotationCron` — call `.stop()`

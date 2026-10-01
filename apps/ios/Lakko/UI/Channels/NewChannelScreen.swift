@@ -159,7 +159,8 @@ struct NewChannelScreen: View {
                 nowMs: UInt64(Date().timeIntervalSince1970 * 1000)) {
                 do {
                     try await ChannelMetaRecord.post(
-                        state: state, client: client, channelId: id, meta: meta)
+                        state: state, client: client, channelId: id, meta: meta,
+                        accountIdentity: identity)
                 } catch {
                     NSLog("Channels: metadata record post failed: %@", String(describing: error))
                 }

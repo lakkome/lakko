@@ -155,7 +155,8 @@ final class RotationPanelModel: ObservableObject {
             refreshStatus()
         } catch {
             NSLog("Channels: manual rotation failed: %@", String(describing: error))
-            self.error = "Could not refresh access. Try again."
+            self.error = ChannelsApiError.publisherRefusal(error).map { "Could not refresh access. \($0)" }
+                ?? "Could not refresh access. Try again."
         }
     }
 
@@ -231,7 +232,8 @@ final class RotationPanelModel: ObservableObject {
         Task { @MainActor in
             do {
                 try await ChannelMetaRecord.post(
-                    state: state, client: client, channelId: channelId, meta: record)
+                    state: state, client: client, channelId: channelId, meta: record,
+                    accountIdentity: identity)
             } catch {
                 NSLog("Channels: post-rotation metadata re-issue failed: %@", String(describing: error))
             }

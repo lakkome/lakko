@@ -110,7 +110,8 @@ enum ChannelListing {
         guard let meta = metaWith(
             state: state, channelIdHex: channelIdHex, topic: topic, language: language, listed: true)
         else { return }
-        try await ChannelMetaRecord.post(state: state, client: client, channelId: channelIdHex, meta: meta)
+        try await ChannelMetaRecord.post(
+            state: state, client: client, channelId: channelIdHex, meta: meta, accountIdentity: identity)
     }
 
     /// Withdraw the listing and tell subscribers the channel is no longer
@@ -122,7 +123,8 @@ enum ChannelListing {
         guard let meta = metaWith(
             state: state, channelIdHex: channelIdHex, topic: nil, language: nil, listed: false)
         else { return }
-        try await ChannelMetaRecord.post(state: state, client: client, channelId: channelIdHex, meta: meta)
+        try await ChannelMetaRecord.post(
+            state: state, client: client, channelId: channelIdHex, meta: meta, accountIdentity: identity)
     }
 
     /// After a rename (ADR-0051 edit) of a listed channel: re-put the listing

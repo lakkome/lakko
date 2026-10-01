@@ -24,7 +24,7 @@
  */
 
 import type { PostDecode } from "./PostCard";
-import { composePost } from "./composer";
+import { composePost, type WasmIdentity } from "./composer";
 import { publishPost } from "./api";
 import type { ChannelSharedMeta } from "./channel-log-codec";
 import { channelsActions, channelsState } from "../state/channels-state";
@@ -136,6 +136,7 @@ export async function publishChannelMeta(
     readonly language?: string;
     readonly listed?: boolean;
   },
+  identity: WasmIdentity,
   stampMs: bigint = BigInt(Date.now()),
 ): Promise<ChannelSharedMeta> {
   const keys = channelsState.keysByChannel().get(channelIdHex);
@@ -157,7 +158,7 @@ export async function publishChannelMeta(
   const epoch = channelsState.epochByChannel().get(channelIdHex) ?? 0;
   const counter = channelsActions.nextCounter(channelIdHex);
   const wire = await composePost(keys, channelIdHex, epoch, counter, plaintext);
-  await publishPost(channelIdHex, wire);
+  await publishPost(channelIdHex, wire, identity);
   const meta: ChannelSharedMeta = { name, description, updatedAtMs: stampMs, topic, language, listed };
   channelsActions.setSharedMeta(channelIdHex, meta);
   return meta;
@@ -171,17 +172,21 @@ export async function publishChannelMeta(
  * neither posts nothing (`false`). Throws what {@link publishChannelMeta}
  * throws; the rotation caller logs and moves on.
  */
-export async function republishChannelMeta(channelIdHex: string): Promise<boolean> {
+export async function republishChannelMeta(
+  channelIdHex: string,
+  identity: WasmIdentity,
+): Promise<boolean> {
   const held = channelsState.metaByChannel().get(channelIdHex);
   if (held !== undefined) {
-    await publishChannelMeta(channelIdHex, held, held.updatedAtMs);
+    await publishChannelMeta(channelIdHex, held, identity, held.updatedAtMs);
     return true;
   }
   const local = channelsState.channels().find((c) => c.id === channelIdHex);
   if (local === undefined || local.localName.trim().length === 0) return false;
-  await publishChannelMeta(channelIdHex, {
-    name: local.localName,
-    description: local.localDescription,
-  });
+  await publishChannelMeta(
+    channelIdHex,
+    { name: local.localName, description: local.localDescription },
+    identity,
+  );
   return true;
 }

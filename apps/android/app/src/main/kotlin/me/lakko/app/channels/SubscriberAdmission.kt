@@ -214,7 +214,11 @@ private class ChannelsPort(
             epochId = epoch,
             seed = keys.seed,
         )
-        client.deliverEnvelope(channelIdHex, pubkeyHex, wire, epoch = epoch.toInt())
+        val pub = state.publisher ?: throw IllegalStateException("channel publisher identity not available")
+        // ADR-0059 section 9: signed with this account's publisher role.
+        ChannelPublisherSigners.derive(pub, channelIdHex).use {
+            client.deliverEnvelope(channelIdHex, pubkeyHex, wire, it, epoch = epoch.toInt())
+        }
     }
 
     private fun hexToBytes(hex: String): ByteArray {

@@ -479,7 +479,7 @@ const NewChannel: Component = () => {
       // either way; a failed post is logged and the next Save or rotation
       // re-issues it.
       try {
-        await publishChannelMeta(id, { name: name(), description: description() });
+        await publishChannelMeta(id, { name: name(), description: description() }, identity);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("channel metadata record not posted at creation", err);
@@ -762,6 +762,7 @@ const JoinCoPublisher: Component = () => {
 
 const ChannelView: Component = () => {
   const params = useParams<{ id: string }>();
+  const chats = useChats();
   const navigate = useNavigate();
   const [publishBusy, setPublishBusy] = createSignal(false);
   const [publishError, setPublishError] = createSignal<string | null>(null);
@@ -806,13 +807,18 @@ const ChannelView: Component = () => {
       setPublishError("This device cannot post to this channel.");
       return;
     }
+    const identity = chats.accountIdentity();
+    if (identity === null) {
+      setPublishError("Sign in again to post to this channel.");
+      return;
+    }
     setPublishBusy(true);
     setPublishError(null);
     try {
       const epoch = channelsState.epochByChannel().get(params.id) ?? 0;
       const counter = channelsActions.nextCounter(params.id);
       const wire = await composePost(keys, params.id, epoch, counter, utf8Encode(text));
-      await publishPost(params.id, wire);
+      await publishPost(params.id, wire, identity);
       setComposeText("");
       // The author's own post goes into the feed now, not at the next sync.
       requestChannelPostSync();

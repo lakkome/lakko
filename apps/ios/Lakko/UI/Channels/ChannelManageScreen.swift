@@ -151,7 +151,9 @@ private struct ChannelNamePanel: View {
             return
         }
         do {
-            try await ChannelMetaRecord.post(state: state, client: client, channelId: channelId, meta: meta)
+            let identity = try Identity.fromSeed(seed: accountIdentitySeed)
+            try await ChannelMetaRecord.post(
+                state: state, client: client, channelId: channelId, meta: meta, accountIdentity: identity)
             // Keep the local copy aligned so a device that never reads its own
             // record back (the publisher) still titles from what it sent.
             state.updateLocalMeta(
@@ -159,7 +161,7 @@ private struct ChannelNamePanel: View {
             seededFrom = meta
             // ADR-0059 — a listed channel's listing carries the name and
             // description too; editing them updates it (UX spec 6.4).
-            if meta.listed, let identity = try? Identity.fromSeed(seed: accountIdentitySeed) {
+            if meta.listed {
                 do {
                     try await ChannelListing.refreshAfterEdit(
                         state: state, client: client, channelIdHex: channelId, identity: identity)
@@ -171,7 +173,8 @@ private struct ChannelNamePanel: View {
             error = err.message
         } catch {
             NSLog("Channels: metadata record post failed: %@", String(describing: error))
-            self.error = "Could not save. Check your connection and try again."
+            self.error = ChannelsApiError.publisherRefusal(error).map { "Could not save. \($0)" }
+                ?? "Could not save. Check your connection and try again."
         }
     }
 }

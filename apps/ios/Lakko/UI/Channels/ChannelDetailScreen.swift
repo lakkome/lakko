@@ -383,14 +383,16 @@ private struct ChannelOwnerView: View {
                 messageCounter: counter,
                 plaintext: Data(text.utf8)
             )
-            _ = try await client.publishPost(channelIdHex: channelId, payload: wire)
+            let identity = try Identity.fromSeed(seed: accountIdentitySeed)
+            _ = try await client.publishPost(channelIdHex: channelId, payload: wire, accountIdentity: identity)
             composeText = ""
             // The author's own post goes into the feed now, not at the next sync.
             ChannelPostSync.requestSync()
             await refresh()
         } catch {
             NSLog("Channels: publish failed: %@", String(describing: error))
-            publishError = "Could not publish."
+            publishError = ChannelsApiError.publisherRefusal(error).map { "Could not publish. \($0)" }
+                ?? "Could not publish."
         }
     }
 

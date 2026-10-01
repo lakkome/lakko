@@ -9,14 +9,14 @@
  * server-side contract:
  *
  *   POST /v1/channels                       (with the owner key, ADR-0059)
- *   POST /v1/channels/:id/posts             (publish)
+ *   POST /v1/channels/:id/posts             (publish; publisher-signed, ADR-0059 section 9)
  *   GET  /v1/channels/:id/posts?after=&limit=
  *   POST /v1/channels/:id/subscribers       (register; one channel-subscribe token)
  *   GET  /v1/channels/:id/subscribers       (list, for fan-out; owner- or co-publisher-signed)
  *   PUT/DELETE /v1/channels/:id/copublishers/:key (appoint / revoke; owner-signed)
- *   POST /v1/channels/:id/subscribers/:pk/envelope
+ *   POST /v1/channels/:id/subscribers/:pk/envelope (publisher-signed)
  *   GET  /v1/channels/:id/subscribers/:pk/envelope
- *   POST /v1/channels/:id/rotate
+ *   POST /v1/channels/:id/rotate            (publisher-signed; also rotate/stage, rotate/commit)
  *   GET  /v1/channels/:id/epoch
  *
  * The web client treats every response body as JSON and
@@ -118,11 +118,18 @@ export const apiError = { is: isChannelApiError };
  *  connection that never produced a JSON envelope. */
 export const CHANNELS_UNREACHABLE = "channels-unreachable";
 
+/** The one code the server answers every refused publisher proof with
+ *  (`services/channels/src/owner_auth.rs`), whichever step failed. */
+export const PUBLISHER_REFUSED = "owner-proof-required";
+
 /** One sentence for the user about a channels error: what happened, not the
  *  wire code. The code stays available on the error for callers that branch. */
 export function channelErrorText(err: ChannelApiError): string {
   if (err.code === CHANNELS_UNREACHABLE) {
     return "The channels service is not reachable right now. Try again in a moment.";
+  }
+  if (err.code === PUBLISHER_REFUSED) {
+    return "This device is not allowed to publish to this channel yet. A co-publisher can publish once the owner's device has finished adding it.";
   }
   if (err.detail.length > 0) return err.detail;
   return `The server refused the request (${err.code}).`;
@@ -223,6 +230,161 @@ function bytesToHexLower(bytes: Uint8Array): string {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0059 section 9 - publisher-signed writes
+// ---------------------------------------------------------------------------
+
+/** What this account is to a channel it publishes to: the owner (it created
+ *  the channel and derives the key registered for it) or a co-publisher the
+ *  owner appointed. */
+export type PublisherRole = "owner" | "copublisher";
+
+/** The role per (account, channel), keyed on the owner verifying key the
+ *  account derives for the channel - unique to that pair, so a second account
+ *  in the same tab never reuses another's answer. In memory only: nothing
+ *  persisted says which role a device holds, so it is learned once per
+ *  session (from creation, a co-publisher join, or the first signed request)
+ *  and a large stage chunk is never uploaded twice to find out. */
+const roleByOwnerKey = new Map<string, PublisherRole>();
+
+async function roleKey(accountIdentity: Identity, channelIdHex: string): Promise<string> {
+  const signer = await ownerSigner(accountIdentity, channelIdHex);
+  try {
+    return bytesToHexLower(signer.verifyingKey());
+  } finally {
+    signer.free();
+  }
+}
+
+/** Record the role this account holds for `channelIdHex` (on creation, or
+ *  once a co-publisher join completed), so the next signed request goes out
+ *  once under the right key. */
+export async function rememberPublisherRole(
+  channelIdHex: string,
+  accountIdentity: Identity,
+  role: PublisherRole,
+): Promise<void> {
+  roleByOwnerKey.set(await roleKey(accountIdentity, channelIdHex), role);
+}
+
+/** The cached role, or `undefined` when this session has not learned it. */
+export async function cachedPublisherRole(
+  channelIdHex: string,
+  accountIdentity: Identity,
+): Promise<PublisherRole | undefined> {
+  return roleByOwnerKey.get(await roleKey(accountIdentity, channelIdHex));
+}
+
+/** Drop every cached role (tests; sign-out). */
+export function forgetPublisherRoles(): void {
+  roleByOwnerKey.clear();
+}
+
+/** The proof header for one request under `role`. `path` is the service path
+ *  (never the `/api/channels` prefix nginx strips), `query` the exact query
+ *  string sent without `?`, `body` the exact bytes sent. */
+async function publisherProofHeader(
+  role: PublisherRole,
+  accountIdentity: Identity,
+  channelIdHex: string,
+  method: string,
+  path: string,
+  query: string,
+  body: Uint8Array,
+): Promise<Record<string, string>> {
+  const wasm = await loadWasm();
+  if (role === "owner") {
+    const signer = await ownerSigner(accountIdentity, channelIdHex);
+    try {
+      return { [wasm.channelOwnerProofHeaderName()]: signer.sign(method, path, query, body) };
+    } finally {
+      signer.free();
+    }
+  }
+  const signer = wasm.channelCoPublisherSigner(accountIdentity, hexToBytesStrict(channelIdHex));
+  try {
+    return { [wasm.channelCoPublisherProofHeaderName()]: signer.sign(method, path, query, body) };
+  } finally {
+    signer.free();
+  }
+}
+
+/** A request body as the exact bytes signed: a fresh `ArrayBuffer` copy, so
+ *  the type narrows from `ArrayBufferLike` and what `fetch` sends is byte for
+ *  byte what the proof covers. */
+function exactBody(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+/** Send one publisher-signed request (ADR-0059 section 9) and return the
+ *  successful response; a refusal throws the `ChannelApiError`.
+ *
+ *  With the role known, the request is signed once under it; a 401 then
+ *  forgets the role, so the next call re-learns it, and surfaces. With the
+ *  role unknown: the owner proof first, and on a 401 the co-publisher proof;
+ *  whichever is accepted is remembered. */
+async function sendAsPublisher(
+  accountIdentity: Identity,
+  channelIdHex: string,
+  req: {
+    readonly method: string;
+    readonly path: string;
+    readonly query: string;
+    readonly body: Uint8Array;
+    readonly contentType?: string;
+  },
+  base: string,
+): Promise<Response> {
+  const key = await roleKey(accountIdentity, channelIdHex);
+  const url = `${base}${req.path}${req.query.length > 0 ? `?${req.query}` : ""}`;
+  const attempt = async (role: PublisherRole): Promise<Response> => {
+    const proof = await publisherProofHeader(
+      role,
+      accountIdentity,
+      channelIdHex,
+      req.method,
+      req.path,
+      req.query,
+      req.body,
+    );
+    const headers: Record<string, string> = { ...proof };
+    if (req.contentType !== undefined) headers["content-type"] = req.contentType;
+    const init: RequestInit = { method: req.method, headers };
+    if (req.method !== "GET" && req.method !== "HEAD") init.body = exactBody(req.body);
+    return fetch(url, init);
+  };
+
+  const known = roleByOwnerKey.get(key);
+  if (known !== undefined) {
+    const resp = await attempt(known);
+    if (resp.ok) return resp;
+    if (resp.status === 401) roleByOwnerKey.delete(key);
+    throw await parseError(resp);
+  }
+  const asOwner = await attempt("owner");
+  if (asOwner.ok) {
+    roleByOwnerKey.set(key, "owner");
+    return asOwner;
+  }
+  if (asOwner.status !== 401) throw await parseError(asOwner);
+  const asCopublisher = await attempt("copublisher");
+  if (asCopublisher.ok) {
+    roleByOwnerKey.set(key, "copublisher");
+    return asCopublisher;
+  }
+  throw await parseError(asCopublisher);
+}
+
+/** Parse a successful publisher response as JSON (same rules as
+ *  `fetchJson`). */
+async function jsonOf<T>(resp: Response): Promise<T> {
+  if (resp.status === 204) return undefined as T;
+  if (!isJsonResponse(resp)) throw unreachable(resp.status);
+  return (await resp.json()) as T;
+}
+
+const utf8 = new TextEncoder();
+
 /** Create a fresh channel under the owner key the account identity derives
  *  for it. Idempotent on the server side for the same key; another key for
  *  an existing id is refused with 409 `channel-exists`. */
@@ -239,38 +401,38 @@ export async function createChannel(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ channel_id: channelIdHex, owner_pubkey_hex: ownerPubkeyHex }),
   });
+  roleByOwnerKey.set(ownerPubkeyHex, "owner");
   return { channelId: body.channel_id };
 }
 
 /** Publish an opaque ChannelPost. The body MUST be the
  *  output of `lakko_channels::ChannelPost::to_bytes()` on
- *  the Rust side — the server stores it byte-identical. */
+ *  the Rust side — the server stores it byte-identical.
+ *  Signed with this account's publisher role for the
+ *  channel (ADR-0059 section 9) over exactly those bytes. */
 export async function publishPost(
   channelIdHex: string,
   payload: Uint8Array,
+  accountIdentity: Identity,
   base: string = DEFAULT_BASE,
 ): Promise<ChannelPostView> {
-  // Wrap the typed array in a Blob — fetch's `body` field
-  // accepts `BodyInit`, which includes `Blob` but not
-  // `Uint8Array<ArrayBufferLike>` directly on every TS
-  // lib config. Same byte content reaches the network
-  // either way.
-  const body = await fetchJson<{
+  const resp = await sendAsPublisher(
+    accountIdentity,
+    channelIdHex,
+    {
+      method: "POST",
+      path: `/v1/channels/${channelIdHex}/posts`,
+      query: "",
+      body: payload,
+      contentType: "application/octet-stream",
+    },
+    base,
+  );
+  const body = await jsonOf<{
     cursor: number;
     server_ts_ms: number;
     payload_b64: string;
-  }>(`${base}/v1/channels/${channelIdHex}/posts`, {
-    method: "POST",
-    headers: { "content-type": "application/octet-stream" },
-    // Copy through a fresh ArrayBuffer slice so the TS
-    // type narrows from `ArrayBufferLike` (which permits
-    // `SharedArrayBuffer`) to the plain `ArrayBuffer`
-    // the Blob constructor expects.
-    body: new Blob(
-      [payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength) as ArrayBuffer],
-      { type: "application/octet-stream" },
-    ),
-  });
+  }>(resp);
   return {
     cursor: body.cursor,
     serverTsMs: body.server_ts_ms,
@@ -352,36 +514,25 @@ export async function subscribe(
 }
 
 /** List subscribers — used by a publisher to fan out HPKE seed envelopes.
- *  Signed (ADR-0059 section 4) over the service path (never the
- *  `/api/channels` prefix nginx strips): first with the owner key
- *  `accountIdentity` derives for this channel; when the server refuses that
- *  (this account is a co-publisher, not the owner), once more with this
- *  account's co-publisher key, which the owner appointed after approving it
- *  (ADR-0059 section 1, co-publisher keys). A co-publisher the owner has not
- *  appointed yet still gets the 401. */
+ *  Signed (ADR-0059 sections 4 and 9) with the role this account holds for
+ *  the channel: the owner key when it created it, its co-publisher key (which
+ *  the owner appointed after approving it) otherwise. With the role not yet
+ *  learned this session, the owner proof goes first and a 401 is retried
+ *  once with the co-publisher proof; the accepted role is remembered for
+ *  every later signed request. A co-publisher the owner has not appointed
+ *  yet still gets the 401. */
 export async function listSubscribers(
   channelIdHex: string,
   accountIdentity: Identity,
   base: string = DEFAULT_BASE,
 ): Promise<ChannelSubscribers> {
-  const path = `/v1/channels/${channelIdHex}/subscribers`;
-  const wasm = await loadWasm();
-  const signer = await ownerSigner(accountIdentity, channelIdHex);
-  const proof = signer.sign("GET", path, "", new Uint8Array());
-  signer.free();
-  try {
-    return await fetchJson<ChannelSubscribers>(`${base}${path}`, {
-      headers: { [wasm.channelOwnerProofHeaderName()]: proof },
-    });
-  } catch (err) {
-    if (!isChannelApiError(err) || err.status !== 401) throw err;
-  }
-  const copub = wasm.channelCoPublisherSigner(accountIdentity, hexToBytesStrict(channelIdHex));
-  const copubProof = copub.sign("GET", path, "", new Uint8Array());
-  copub.free();
-  return fetchJson<ChannelSubscribers>(`${base}${path}`, {
-    headers: { [wasm.channelCoPublisherProofHeaderName()]: copubProof },
-  });
+  const resp = await sendAsPublisher(
+    accountIdentity,
+    channelIdHex,
+    { method: "GET", path: `/v1/channels/${channelIdHex}/subscribers`, query: "", body: new Uint8Array() },
+    base,
+  );
+  return jsonOf<ChannelSubscribers>(resp);
 }
 
 /** Appoint (`PUT`) or revoke (`DELETE`) a co-publisher key for a channel
@@ -515,33 +666,26 @@ export async function deliverEnvelope(
   channelIdHex: string,
   subscriberPubkeyHex: string,
   envelope: Uint8Array,
+  accountIdentity: Identity,
   base: string = DEFAULT_BASE,
   epoch?: number,
 ): Promise<void> {
-  const query = epoch !== undefined ? `?epoch=${epoch}` : "";
-  const url = `${base}/v1/channels/${channelIdHex}/subscribers/${subscriberPubkeyHex}/envelope${query}`;
   // Octet-stream body so the server reads raw `Bytes` —
-  // matches `services/channels::api::deliver_envelope`. Same
-  // buffer-slice pattern as `publishPost` to narrow
-  // `ArrayBufferLike` (which permits `SharedArrayBuffer`)
-  // down to the plain `ArrayBuffer` the Blob constructor
-  // expects.
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/octet-stream" },
-    body: new Blob(
-      [
-        envelope.buffer.slice(
-          envelope.byteOffset,
-          envelope.byteOffset + envelope.byteLength,
-        ) as ArrayBuffer,
-      ],
-      { type: "application/octet-stream" },
-    ),
-  });
-  if (!resp.ok) {
-    throw await parseError(resp);
-  }
+  // matches `services/channels::api::deliver_envelope`. The
+  // query is part of what the proof covers, so it is built
+  // once and both signed and sent.
+  await sendAsPublisher(
+    accountIdentity,
+    channelIdHex,
+    {
+      method: "POST",
+      path: `/v1/channels/${channelIdHex}/subscribers/${subscriberPubkeyHex}/envelope`,
+      query: epoch !== undefined ? `epoch=${epoch}` : "",
+      body: envelope,
+      contentType: "application/octet-stream",
+    },
+    base,
+  );
 }
 
 /** G4-2-rotation-timer — one entry in the rotation batch the
@@ -574,18 +718,22 @@ export interface RotateBatchEntry {
 export async function rotateChannel(
   channelIdHex: string,
   envelopes: ReadonlyArray<RotateBatchEntry>,
+  accountIdentity: Identity,
   base: string = DEFAULT_BASE,
 ): Promise<ChannelEpoch> {
-  const url = `${base}/v1/channels/${channelIdHex}/rotate`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ envelopes }),
-  });
-  if (!resp.ok) {
-    throw await parseError(resp);
-  }
-  return (await resp.json()) as ChannelEpoch;
+  const resp = await sendAsPublisher(
+    accountIdentity,
+    channelIdHex,
+    {
+      method: "POST",
+      path: `/v1/channels/${channelIdHex}/rotate`,
+      query: "",
+      body: utf8.encode(JSON.stringify({ envelopes })),
+      contentType: "application/json",
+    },
+    base,
+  );
+  return jsonOf<ChannelEpoch>(resp);
 }
 
 /** ADR-0030 — maximum entries a single `POST /rotate/stage`
@@ -630,18 +778,22 @@ export async function stageRotation(
   channelIdHex: string,
   targetEpoch: number,
   envelopes: ReadonlyArray<RotateBatchEntry>,
+  accountIdentity: Identity,
   base: string = DEFAULT_BASE,
 ): Promise<StageResult> {
-  const url = `${base}/v1/channels/${channelIdHex}/rotate/stage`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ target_epoch: targetEpoch, envelopes }),
-  });
-  if (!resp.ok) {
-    throw await parseError(resp);
-  }
-  const body = (await resp.json()) as { target_epoch: number; staged: number };
+  const resp = await sendAsPublisher(
+    accountIdentity,
+    channelIdHex,
+    {
+      method: "POST",
+      path: `/v1/channels/${channelIdHex}/rotate/stage`,
+      query: "",
+      body: utf8.encode(JSON.stringify({ target_epoch: targetEpoch, envelopes })),
+      contentType: "application/json",
+    },
+    base,
+  );
+  const body = await jsonOf<{ target_epoch: number; staged: number }>(resp);
   return { targetEpoch: body.target_epoch, staged: body.staged };
 }
 
@@ -659,18 +811,22 @@ export async function stageRotation(
 export async function commitRotation(
   channelIdHex: string,
   targetEpoch: number,
+  accountIdentity: Identity,
   base: string = DEFAULT_BASE,
 ): Promise<ChannelEpoch> {
-  const url = `${base}/v1/channels/${channelIdHex}/rotate/commit`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ target_epoch: targetEpoch }),
-  });
-  if (!resp.ok) {
-    throw await parseError(resp);
-  }
-  return (await resp.json()) as ChannelEpoch;
+  const resp = await sendAsPublisher(
+    accountIdentity,
+    channelIdHex,
+    {
+      method: "POST",
+      path: `/v1/channels/${channelIdHex}/rotate/commit`,
+      query: "",
+      body: utf8.encode(JSON.stringify({ target_epoch: targetEpoch })),
+      contentType: "application/json",
+    },
+    base,
+  );
+  return jsonOf<ChannelEpoch>(resp);
 }
 
 // ---------------------------------------------------------------------------
@@ -700,6 +856,9 @@ export async function probeChannelOwner(
   accountIdentity: Identity,
   base: string = DEFAULT_BASE,
 ): Promise<boolean | null> {
+  const key = await roleKey(accountIdentity, channelIdHex);
+  const known = roleByOwnerKey.get(key);
+  if (known !== undefined) return known === "owner";
   const path = `/v1/channels/${channelIdHex}/subscribers`;
   const wasm = await loadWasm();
   const signer = await ownerSigner(accountIdentity, channelIdHex);
@@ -709,6 +868,7 @@ export async function probeChannelOwner(
     await fetchJson<ChannelSubscribers>(`${base}${path}`, {
       headers: { [wasm.channelOwnerProofHeaderName()]: proof },
     });
+    roleByOwnerKey.set(key, "owner");
     return true;
   } catch (err) {
     if (isChannelApiError(err) && err.status === 401) return false;

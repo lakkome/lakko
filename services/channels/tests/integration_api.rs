@@ -108,6 +108,43 @@ fn owner_proof_for(
         .encode()
 }
 
+/// The channel id hex in a `/v1/channels/<id>/...` path, when it is one.
+fn channel_of(path: &str) -> Option<String> {
+    let hex_id = path.split('/').nth(3)?;
+    (hex_id.len() == 32 && hex::decode(hex_id).is_ok()).then(|| hex_id.to_owned())
+}
+
+/// Send a request signed by the channel owner over its exact method, path,
+/// query and body bytes (ADR-0059 section 9: every publisher write is
+/// signed).
+trait OwnerSend {
+    async fn owner_send(self) -> reqwest::Result<reqwest::Response>;
+}
+
+impl OwnerSend for reqwest::RequestBuilder {
+    async fn owner_send(self) -> reqwest::Result<reqwest::Response> {
+        let (client, req) = self.build_split();
+        let mut req = req?;
+        if let Some(channel_hex) = channel_of(req.url().path()) {
+            let body = req
+                .body()
+                .and_then(reqwest::Body::as_bytes)
+                .unwrap_or(&[])
+                .to_vec();
+            let proof = owner_proof_for(
+                &channel_hex,
+                req.method().as_str(),
+                req.url().path(),
+                req.url().query().unwrap_or(""),
+                &body,
+            );
+            req.headers_mut()
+                .insert(OWNER_PROOF_HEADER_NAME, proof.parse().unwrap());
+        }
+        client.execute(req).await
+    }
+}
+
 fn test_config() -> Config {
     Config {
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -175,7 +212,7 @@ async fn create_channel_then_publish_then_fetch() {
             .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts"))
             .header("content-type", "application/octet-stream")
             .body(vec![n, n, n])
-            .send()
+            .owner_send()
             .await
             .unwrap();
         assert_eq!(resp.status(), 201, "publish {n} should be 201");
@@ -212,18 +249,20 @@ async fn create_channel_then_publish_then_fetch() {
 }
 
 #[tokio::test]
-async fn publish_to_unknown_channel_is_404() {
+async fn publish_to_unknown_channel_is_refused() {
+    // An unknown channel has no owner key, so even a well-formed proof is
+    // refused with the single gate response (ADR-0059 section 9).
     let addr = spawn().await;
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts"))
         .body(vec![1, 2, 3])
-        .send()
+        .owner_send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.status(), 401);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["code"].as_str().unwrap(), "unknown-channel");
+    assert_eq!(body["code"].as_str().unwrap(), "owner-proof-required");
 }
 
 #[tokio::test]
@@ -239,7 +278,7 @@ async fn publish_empty_post_is_400() {
     let resp = client
         .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts"))
         .body(Vec::<u8>::new())
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
@@ -283,7 +322,7 @@ async fn fetch_respects_limit() {
         client
             .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts"))
             .body(vec![i])
-            .send()
+            .owner_send()
             .await
             .unwrap();
     }
@@ -373,7 +412,7 @@ async fn subscribe_then_list_then_deliver_then_fetch() {
             "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope"
         ))
         .body(envelope.clone())
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 204);
@@ -416,7 +455,7 @@ async fn deliver_envelope_with_wrong_length_is_400() {
             "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope"
         ))
         .body(vec![0u8; 79]) // off by one
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
@@ -440,7 +479,7 @@ async fn deliver_to_unsubscribed_pubkey_is_404() {
             "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope"
         ))
         .body(vec![0u8; 80])
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
@@ -547,7 +586,7 @@ async fn rotate_bumps_epoch_and_delivers_envelopes() {
                 { "subscriber_id": SUB_HEX_B, "envelope_b64": bob_envelope_b64 },
             ]
         }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -594,7 +633,7 @@ async fn rotate_aborts_on_wrong_envelope_length() {
                 { "subscriber_id": SUB_HEX, "envelope_b64": short_env },
             ]
         }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
@@ -630,7 +669,7 @@ async fn rotate_rejects_unsubscribed_recipient() {
                 { "subscriber_id": SUB_HEX, "envelope_b64": env_b64 },
             ]
         }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 409);
@@ -651,7 +690,7 @@ async fn rotate_empty_batch_still_bumps_epoch() {
     let resp = client
         .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/rotate"))
         .json(&json!({ "envelopes": [] }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     let body: serde_json::Value = resp.json().await.unwrap();
@@ -670,7 +709,7 @@ async fn rotate_rejects_bad_envelope_b64() {
                 { "subscriber_id": SUB_HEX, "envelope_b64": "!!!not-base64!!!" },
             ]
         }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
@@ -692,7 +731,7 @@ async fn payload_round_trips_byte_identical() {
     client
         .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts"))
         .body(payload.clone())
-        .send()
+        .owner_send()
         .await
         .unwrap();
     let resp = client
@@ -749,7 +788,7 @@ async fn stage_then_commit_end_to_end() {
                 { "subscriber_id": SUB_HEX, "envelope_b64": URL_SAFE_NO_PAD.encode(&alice) },
             ]
         }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -777,7 +816,7 @@ async fn stage_then_commit_end_to_end() {
                 { "subscriber_id": SUB_HEX_B, "envelope_b64": URL_SAFE_NO_PAD.encode(&bob) },
             ]
         }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -788,7 +827,7 @@ async fn stage_then_commit_end_to_end() {
             "http://{addr}/v1/channels/{CHANNEL_HEX}/rotate/commit"
         ))
         .json(&json!({ "target_epoch": 1 }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -812,7 +851,7 @@ async fn staged_envelope_is_not_served_before_commit() {
             "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope"
         ))
         .body(old.clone())
-        .send()
+        .owner_send()
         .await
         .unwrap();
     // Stage a NEW envelope for epoch 1 but do not commit.
@@ -826,7 +865,7 @@ async fn staged_envelope_is_not_served_before_commit() {
                 { "subscriber_id": SUB_HEX, "envelope_b64": URL_SAFE_NO_PAD.encode(vec![0x22u8; 80]) },
             ]
         }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     // The read path still returns the OLD envelope.
@@ -852,7 +891,7 @@ async fn stage_with_wrong_target_epoch_is_409() {
                 { "subscriber_id": SUB_HEX, "envelope_b64": URL_SAFE_NO_PAD.encode(vec![0u8; 80]) },
             ]
         }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 409);
@@ -871,7 +910,7 @@ async fn commit_with_wrong_target_epoch_is_409() {
             "http://{addr}/v1/channels/{CHANNEL_HEX}/rotate/commit"
         ))
         .json(&json!({ "target_epoch": 2 }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 409);
@@ -903,7 +942,7 @@ async fn stage_chunk_over_cap_is_413() {
             "http://{addr}/v1/channels/{CHANNEL_HEX}/rotate/stage"
         ))
         .json(&json!({ "target_epoch": 1, "envelopes": envelopes }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 413);
@@ -932,7 +971,7 @@ async fn stage_to_unsubscribed_recipient_is_409() {
                 { "subscriber_id": SUB_HEX, "envelope_b64": URL_SAFE_NO_PAD.encode(vec![0u8; 80]) },
             ]
         }))
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 409);
@@ -976,7 +1015,7 @@ async fn rotate_sub_n_times(client: &reqwest::Client, addr: SocketAddr, rotation
                     { "subscriber_id": SUB_HEX, "envelope_b64": URL_SAFE_NO_PAD.encode(&env) },
                 ]
             }))
-            .send()
+            .owner_send()
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
@@ -1070,7 +1109,7 @@ async fn deliver_with_explicit_epoch_files_there() {
         client
             .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/rotate"))
             .json(&json!({ "envelopes": [] }))
-            .send()
+            .owner_send()
             .await
             .unwrap();
     }
@@ -1081,7 +1120,7 @@ async fn deliver_with_explicit_epoch_files_there() {
             "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope?epoch=2"
         ))
         .body(env.clone())
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 204);
@@ -1114,7 +1153,7 @@ async fn deliver_with_future_epoch_is_409() {
             "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope?epoch=99"
         ))
         .body(vec![0u8; 80])
-        .send()
+        .owner_send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 409);
@@ -1811,4 +1850,294 @@ async fn appointments_are_bounded_and_refuse_a_bad_key() {
     let resp = appoint(&client, addr, CHANNEL_HEX, &key_hex, reqwest::Method::PUT).await;
     assert_eq!(resp.status(), 409);
     assert_eq!(code_of(resp).await, "too-many-copublishers");
+}
+
+// ---------------------------------------------------------
+// ADR-0059 section 9 - every publisher write is signed (G-43)
+// ---------------------------------------------------------
+
+/// One publisher write: its path (no query), query, JSON or raw body.
+struct Write {
+    path: String,
+    query: &'static str,
+    body: Vec<u8>,
+    json: bool,
+}
+
+impl Write {
+    fn url(&self, addr: SocketAddr) -> String {
+        if self.query.is_empty() {
+            format!("http://{addr}{}", self.path)
+        } else {
+            format!("http://{addr}{}?{}", self.path, self.query)
+        }
+    }
+
+    fn proof_over(&self, body: &[u8]) -> String {
+        owner_proof("POST", &self.path, self.query, body)
+    }
+
+    async fn send(
+        &self,
+        client: &reqwest::Client,
+        addr: SocketAddr,
+        header: Option<(&str, String)>,
+    ) -> reqwest::Response {
+        let mut rb = client.post(self.url(addr)).body(self.body.clone());
+        rb = rb.header(
+            "content-type",
+            if self.json {
+                "application/json"
+            } else {
+                "application/octet-stream"
+            },
+        );
+        if let Some((name, value)) = header {
+            rb = rb.header(name, value);
+        }
+        rb.send().await.unwrap()
+    }
+}
+
+fn copub_proof_over(write: &Write, seed: &[u8; 32]) -> String {
+    let req = OwnerRequest {
+        method: "POST",
+        canonical_path: &write.path,
+        query: write.query,
+        body: &write.body,
+    };
+    copub_signer_for(CHANNEL_HEX, seed)
+        .sign_at(&req, now_ms(), fresh_nonce())
+        .encode()
+}
+
+fn rotate_body(epoch_byte: u8) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "envelopes": [{
+            "subscriber_id": SUB_HEX,
+            "envelope_b64": URL_SAFE_NO_PAD.encode([epoch_byte; 80]),
+        }],
+    }))
+    .unwrap()
+}
+
+fn stage_body(target_epoch: u32) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "target_epoch": target_epoch,
+        "envelopes": [{
+            "subscriber_id": SUB_HEX,
+            "envelope_b64": URL_SAFE_NO_PAD.encode([0xa5u8; 80]),
+        }],
+    }))
+    .unwrap()
+}
+
+fn commit_body(target_epoch: u32) -> Vec<u8> {
+    serde_json::to_vec(&json!({ "target_epoch": target_epoch })).unwrap()
+}
+
+/// Run the refusals, then the owner's accepted call, on one write. The
+/// write must succeed with `ok` exactly once.
+async fn check_gate(client: &reqwest::Client, addr: SocketAddr, write: &Write, ok: u16) {
+    let refused = |resp: reqwest::Response| async move {
+        assert_eq!(resp.status(), 401);
+        assert_eq!(code_of(resp).await, "owner-proof-required");
+    };
+    // No proof.
+    refused(write.send(client, addr, None).await).await;
+    // An owner-shaped proof by another account's key.
+    let other_req = OwnerRequest {
+        method: "POST",
+        canonical_path: &write.path,
+        query: write.query,
+        body: &write.body,
+    };
+    let other_id: [u8; 16] = hex::decode(CHANNEL_HEX).unwrap().try_into().unwrap();
+    let stranger = ChannelOwnerSigner::from_account_seed(&[0x77; 32], &other_id)
+        .sign_at(&other_req, now_ms(), fresh_nonce())
+        .encode();
+    refused(
+        write
+            .send(client, addr, Some((OWNER_PROOF_HEADER_NAME, stranger)))
+            .await,
+    )
+    .await;
+    // A co-publisher proof by a key the owner never appointed.
+    refused(
+        write
+            .send(
+                client,
+                addr,
+                Some((
+                    COPUBLISHER_PROOF_HEADER_NAME,
+                    copub_proof_over(write, &[0x78; 32]),
+                )),
+            )
+            .await,
+    )
+    .await;
+    // The owner's key over a different body.
+    let mut other_body = write.body.clone();
+    other_body.push(b' ');
+    refused(
+        write
+            .send(
+                client,
+                addr,
+                Some((OWNER_PROOF_HEADER_NAME, write.proof_over(&other_body))),
+            )
+            .await,
+    )
+    .await;
+    // The owner's proof over this request is accepted once ...
+    let proof = write.proof_over(&write.body);
+    let resp = write
+        .send(client, addr, Some((OWNER_PROOF_HEADER_NAME, proof.clone())))
+        .await;
+    assert_eq!(resp.status(), ok, "owner write to {} accepted", write.path);
+    // ... and refused when replayed.
+    refused(
+        write
+            .send(client, addr, Some((OWNER_PROOF_HEADER_NAME, proof)))
+            .await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn every_publisher_write_needs_a_proof_by_the_owner_or_an_appointed_copublisher() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_one_sub(&client, addr).await;
+    let base = format!("/v1/channels/{CHANNEL_HEX}");
+    let posts = Write {
+        path: format!("{base}/posts"),
+        query: "",
+        body: vec![1, 2, 3],
+        json: false,
+    };
+    let deliver = Write {
+        path: format!("{base}/subscribers/{SUB_HEX}/envelope"),
+        query: "epoch=0",
+        body: vec![7; 80],
+        json: false,
+    };
+    let rotate = Write {
+        path: format!("{base}/rotate"),
+        query: "",
+        body: rotate_body(1),
+        json: true,
+    };
+    let stage = Write {
+        path: format!("{base}/rotate/stage"),
+        query: "",
+        body: stage_body(2),
+        json: true,
+    };
+    let commit = Write {
+        path: format!("{base}/rotate/commit"),
+        query: "",
+        body: commit_body(2),
+        json: true,
+    };
+    check_gate(&client, addr, &posts, 201).await;
+    check_gate(&client, addr, &deliver, 204).await;
+    check_gate(&client, addr, &rotate, 200).await; // epoch 0 -> 1
+    check_gate(&client, addr, &stage, 200).await;
+    check_gate(&client, addr, &commit, 200).await; // epoch 1 -> 2
+
+    // Nothing a refused request carried was applied: one post, epoch 2.
+    let resp = client
+        .get(format!("http://{addr}{base}/posts?after=0"))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["posts"].as_array().unwrap().len(), 1);
+    let resp = client
+        .get(format!("http://{addr}{base}/epoch"))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["epoch"].as_u64().unwrap(), 2);
+
+    // An appointed co-publisher is accepted on all five.
+    let key_hex = hex::encode(
+        copub_signer_for(CHANNEL_HEX, &COPUB_SEED)
+            .verifying_key()
+            .to_bytes(),
+    );
+    let resp = appoint(&client, addr, CHANNEL_HEX, &key_hex, reqwest::Method::PUT).await;
+    assert_eq!(resp.status(), 204);
+    let deliver = Write {
+        query: "epoch=2",
+        ..deliver
+    };
+    let rotate = Write {
+        body: rotate_body(3),
+        ..rotate
+    };
+    let stage = Write {
+        body: stage_body(4),
+        ..stage
+    };
+    let commit = Write {
+        body: commit_body(4),
+        ..commit
+    };
+    for (write, ok) in [
+        (&posts, 201),
+        (&deliver, 204),
+        (&rotate, 200), // 2 -> 3
+        (&stage, 200),
+        (&commit, 200), // 3 -> 4
+    ] {
+        let proof = copub_proof_over(write, &COPUB_SEED);
+        let resp = write
+            .send(&client, addr, Some((COPUBLISHER_PROOF_HEADER_NAME, proof)))
+            .await;
+        assert_eq!(resp.status(), ok, "co-publisher write to {}", write.path);
+    }
+}
+
+#[tokio::test]
+async fn a_bad_body_still_answers_as_before_once_the_proof_passes() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_one_sub(&client, addr).await;
+    let path = format!("/v1/channels/{CHANNEL_HEX}/rotate/stage");
+    let url = format!("http://{addr}{path}");
+    // A JSON syntax error is 400, a shape error 422, a missing JSON content
+    // type 415: what the `Json` extractor answered before the gate.
+    for (body, ct, status) in [
+        (&b"{not json"[..], Some("application/json"), 400u16),
+        (
+            &br#"{"target_epoch": "x"}"#[..],
+            Some("application/json"),
+            422,
+        ),
+        (&br#"{"target_epoch": 1, "envelopes": []}"#[..], None, 415),
+    ] {
+        let mut rb = client
+            .post(&url)
+            .header(
+                OWNER_PROOF_HEADER_NAME,
+                owner_proof("POST", &path, "", body),
+            )
+            .body(body.to_vec());
+        if let Some(ct) = ct {
+            rb = rb.header("content-type", ct);
+        }
+        assert_eq!(rb.send().await.unwrap().status(), status);
+    }
+    // A bad channel id is a 400 before any proof is looked at.
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/zzzz/rotate"))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert_eq!(code_of(resp).await, "bad-channel-id");
 }

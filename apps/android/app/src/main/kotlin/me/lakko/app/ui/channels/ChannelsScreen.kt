@@ -93,6 +93,8 @@ import me.lakko.app.channels.ChannelKeyStore
 import me.lakko.app.channels.ChannelPublisherIdentity
 import me.lakko.app.channels.ChannelPublisherKeyStore
 import me.lakko.app.channels.ChannelPublisherKeys
+import me.lakko.app.channels.ChannelPublisherSigners
+import me.lakko.app.channels.channelPublishErrorText
 import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsComposerException
@@ -708,7 +710,12 @@ private fun OwnerChannelView(
                             messageCounter = counter,
                             plaintext = text.toByteArray(Charsets.UTF_8),
                         )
-                        client.publishPost(channelId, wire)
+                        val pub = state.publisher
+                            ?: throw IllegalStateException("channel publisher identity not available")
+                        // ADR-0059 section 9: signed with this account's role.
+                        ChannelPublisherSigners.derive(pub, channelId).use {
+                            client.publishPost(channelId, wire, it)
+                        }
                         composeText = ""
                         // The author's own post goes into the feed now, not
                         // at the next sync (ADR-0058).
@@ -716,7 +723,7 @@ private fun OwnerChannelView(
                         refresh()
                     } catch (e: Throwable) {
                         Log.w(TAG, "publish failed", e)
-                        publishError = "Could not publish. Retry."
+                        publishError = channelPublishErrorText(e, "Could not publish. Retry.")
                     } finally {
                         publishBusy = false
                     }
@@ -1621,7 +1628,7 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
                             ?.takeIf { it.isNotEmpty() } ?: "The name or description is not allowed."
                     } catch (e: Throwable) {
                         Log.w(TAG, "channel record not posted", e)
-                        error = "Could not save. Retry."
+                        error = channelPublishErrorText(e, "Could not save. Retry.")
                     } finally {
                         busy = false
                     }

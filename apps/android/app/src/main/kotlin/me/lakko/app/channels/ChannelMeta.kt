@@ -152,7 +152,11 @@ public object ChannelMetaPublisher {
             messageCounter = counter,
             plaintext = plaintext,
         )
-        client.publishPost(channelId, wire)
+        val publisher = state.publisher
+            ?: throw IllegalStateException("channel publisher identity not available")
+        // ADR-0059 section 9: the record is a post, signed with this
+        // account's publisher role for the channel.
+        ChannelPublisherSigners.derive(publisher, channelId).use { client.publishPost(channelId, wire, it) }
         state.adoptSharedMeta(
             channelId,
             SharedChannelMeta(

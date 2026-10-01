@@ -54,11 +54,35 @@ public final class ChannelsClient {
     private let tokens: AnonTokenSource
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    /// How a request on the session reaches the server (the anti-censorship
+    /// tunnel when armed). A seam so tests can see the exact request sent.
+    private let transport: ChannelsTransport
+    /// ADR-0059 section 9 — the publisher role per (account, channel).
+    let roles: ChannelPublisherRoleCache
 
-    public init(
+    public convenience init(
         baseURL: String = ChannelsClient.defaultBaseURL,
         session: URLSession = .shared,
         tokens: AnonTokenSource = AnonTokenPool.shared
+    ) {
+        self.init(
+            baseURL: baseURL,
+            session: session,
+            tokens: tokens,
+            roles: .shared,
+            transport: { request in
+                try await AntiCensorshipTransport.perform(request, session: session, config: .current)
+            }
+        )
+    }
+
+    /// The full initializer: tests pass their own transport and role cache.
+    init(
+        baseURL: String,
+        session: URLSession = .shared,
+        tokens: AnonTokenSource = AnonTokenPool.shared,
+        roles: ChannelPublisherRoleCache,
+        transport: @escaping ChannelsTransport
     ) {
         self.baseURL = baseURL
         self.session = session
@@ -66,6 +90,8 @@ public final class ChannelsClient {
         self.tokens = tokens
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
+        self.roles = roles
+        self.transport = transport
     }
 
     /// The owner signer of `channelIdHex` for the account identity
@@ -81,7 +107,20 @@ public final class ChannelsClient {
         return try channelOwnerSigner(accountIdentity: accountIdentity, channelId: id)
     }
 
-    private static func hexToData(_ hex: String) -> Data? {
+    /// Record the role this account holds for `channelIdHex` (on creation,
+    /// or once a co-publisher join completed), so its next signed request
+    /// goes out once under the right key (ADR-0059 section 9).
+    public static func rememberPublisherRole(
+        channelIdHex: String,
+        accountIdentity: Identity,
+        role: ChannelPublisherRole
+    ) throws {
+        let key = try IdentityPublisherSigning(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
+            .roleKey()
+        ChannelPublisherRoleCache.shared.set(role, forKey: key)
+    }
+
+    static func hexToData(_ hex: String) -> Data? {
         guard hex.count % 2 == 0 else { return nil }
         var out = Data(capacity: hex.count / 2)
         var index = hex.startIndex
@@ -109,25 +148,32 @@ public final class ChannelsClient {
             endpoint: "/v1/channels",
             body: Req(channel_id: channelIdHex, owner_pubkey_hex: ownerHex)
         )
+        roles.set(.owner, forKey: ownerHex)
         return resp.channel_id
     }
 
     // MARK: - Posts
 
     /// `POST /v1/channels/:id/posts` — publish opaque
-    /// ChannelPost bytes.
+    /// ChannelPost bytes, signed with this account's publisher role for the
+    /// channel (ADR-0059 section 9) over exactly those bytes.
     public func publishPost(
         channelIdHex: String,
-        payload: Data
+        payload: Data,
+        accountIdentity: Identity
     ) async throws -> PostView {
         struct Resp: Decodable {
             let cursor: UInt64
             let server_ts_ms: UInt64
             let payload_b64: String
         }
-        let resp: Resp = try await postOctet(
-            endpoint: "/v1/channels/\(channelIdHex)/posts",
-            payload: payload
+        let resp: Resp = try await sendAsPublisher(
+            signing: IdentityPublisherSigning(accountIdentity: accountIdentity, channelIdHex: channelIdHex),
+            method: "POST",
+            path: "/v1/channels/\(channelIdHex)/posts",
+            query: "",
+            body: payload,
+            contentType: "application/octet-stream"
         )
         return PostView(
             cursor: resp.cursor,
@@ -217,40 +263,27 @@ public final class ChannelsClient {
 
     /// `GET /v1/channels/:id/subscribers` — list registered
     /// subscriber pubkey-hex strings. Used by the publisher
-    /// to fan out HPKE-sealed seed envelopes. Owner-signed (ADR-0059
-    /// section 4) with the key `accountIdentity` derives for the channel,
-    /// over the service path (never the `/channels` prefix nginx strips).
-    ///
-    /// When the server refuses the owner proof (this account is a
-    /// co-publisher, not the owner), the read is retried once with this
-    /// account's co-publisher key, which the owner appointed after approving
-    /// it (ADR-0059 section 1, co-publisher keys). Not appointed yet: the 401
-    /// stands.
+    /// to fan out HPKE-sealed seed envelopes. Signed (ADR-0059 sections 4
+    /// and 9) with the role this account holds for the channel: the owner
+    /// key when it created it, its co-publisher key (which the owner
+    /// appointed after approving it) otherwise. With the role not yet
+    /// learned this session, the owner proof goes first and a 401 is retried
+    /// once with the co-publisher proof; the accepted role is remembered for
+    /// every later signed request. Not appointed yet: the 401 stands.
     public func listSubscribers(
         channelIdHex: String,
         accountIdentity: Identity
     ) async throws -> [String] {
         struct Resp: Decodable { let subscribers: [String] }
-        let path = "/v1/channels/\(channelIdHex)/subscribers"
-        let signer = try Self.ownerSigner(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
-        let proof = signer.sign(method: "GET", path: path, query: "", body: Data())
-        var request = URLRequest(url: try buildURL(endpoint: path))
-        request.httpMethod = "GET"
-        request.setValue(proof, forHTTPHeaderField: channelOwnerProofHeaderName())
-        do {
-            let resp: Resp = try await execute(request: request)
-            return resp.subscribers
-        } catch let err as ChannelsApiError where err.status == 401 {
-            guard let id = Self.hexToData(channelIdHex), id.count == 16 else { throw err }
-            let copub = try channelCopublisherSigner(accountIdentity: accountIdentity, channelId: id)
-            var retry = URLRequest(url: try buildURL(endpoint: path))
-            retry.httpMethod = "GET"
-            retry.setValue(
-                copub.sign(method: "GET", path: path, query: "", body: Data()),
-                forHTTPHeaderField: channelCopublisherProofHeaderName())
-            let resp: Resp = try await execute(request: retry)
-            return resp.subscribers
-        }
+        let resp: Resp = try await sendAsPublisher(
+            signing: IdentityPublisherSigning(accountIdentity: accountIdentity, channelIdHex: channelIdHex),
+            method: "GET",
+            path: "/v1/channels/\(channelIdHex)/subscribers",
+            query: "",
+            body: Data(),
+            contentType: nil
+        )
+        return resp.subscribers
     }
 
     /// `PUT` (appoint) / `DELETE` (revoke)
@@ -376,41 +409,19 @@ public final class ChannelsClient {
         channelIdHex: String,
         subscriberPubkeyHex: String,
         envelope: Data,
-        epoch: UInt32? = nil
+        epoch: UInt32? = nil,
+        accountIdentity: Identity
     ) async throws {
-        var endpoint =
-            "/v1/channels/\(channelIdHex)/subscribers/\(subscriberPubkeyHex)/envelope"
-        if let epoch {
-            endpoint += "?epoch=\(epoch)"
-        }
-        let url = try buildURL(endpoint: endpoint)
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        request.httpBody = envelope
-        let (data, response) = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
-        guard let http = response as? HTTPURLResponse else {
-            throw ChannelsApiError(
-                status: -1,
-                code: "no-http-response",
-                detail: "non-HTTP response"
-            )
-        }
-        if !(200..<300).contains(http.statusCode) {
-            struct ErrEnvelope: Decodable { let code: String; let detail: String }
-            if let body = try? decoder.decode(ErrEnvelope.self, from: data) {
-                throw ChannelsApiError(
-                    status: http.statusCode,
-                    code: body.code,
-                    detail: body.detail
-                )
-            }
-            throw ChannelsApiError(
-                status: http.statusCode,
-                code: "unknown",
-                detail: HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
-            )
-        }
+        // Publisher-signed (ADR-0059 section 9). The query is part of what
+        // the proof covers, so it is built once and both signed and sent.
+        let _: EmptyResponse = try await sendAsPublisher(
+            signing: IdentityPublisherSigning(accountIdentity: accountIdentity, channelIdHex: channelIdHex),
+            method: "POST",
+            path: "/v1/channels/\(channelIdHex)/subscribers/\(subscriberPubkeyHex)/envelope",
+            query: epoch.map { "epoch=\($0)" } ?? "",
+            body: envelope,
+            contentType: "application/octet-stream"
+        )
     }
 
     /// G4-2-rotation-timer-ios — atomic batch rotation
@@ -432,14 +443,18 @@ public final class ChannelsClient {
     /// - `bad-subscriber-id`  (400) — wrong pubkey-hex shape
     public func rotateChannel(
         channelIdHex: String,
-        envelopes: [RotateBatchEntry]
+        envelopes: [RotateBatchEntry],
+        accountIdentity: Identity
     ) async throws -> UInt32 {
         struct Body: Encodable { let envelopes: [RotateBatchEntry] }
         struct EpochView: Decodable { let epoch: UInt32 }
-        let body = Body(envelopes: envelopes)
-        let view: EpochView = try await postJson(
-            endpoint: "/v1/channels/\(channelIdHex)/rotate",
-            body: body
+        let view: EpochView = try await sendAsPublisher(
+            signing: IdentityPublisherSigning(accountIdentity: accountIdentity, channelIdHex: channelIdHex),
+            method: "POST",
+            path: "/v1/channels/\(channelIdHex)/rotate",
+            query: "",
+            body: try encoder.encode(Body(envelopes: envelopes)),
+            contentType: "application/json"
         )
         return view.epoch
     }
@@ -472,7 +487,8 @@ public final class ChannelsClient {
     public func stageRotation(
         channelIdHex: String,
         targetEpoch: UInt32,
-        batch: [RotateBatchEntry]
+        batch: [RotateBatchEntry],
+        accountIdentity: Identity
     ) async throws -> Int {
         struct Body: Encodable {
             let target_epoch: UInt32
@@ -482,9 +498,13 @@ public final class ChannelsClient {
             let target_epoch: UInt32
             let staged: Int
         }
-        let view: StageView = try await postJson(
-            endpoint: "/v1/channels/\(channelIdHex)/rotate/stage",
-            body: Body(target_epoch: targetEpoch, envelopes: batch)
+        let view: StageView = try await sendAsPublisher(
+            signing: IdentityPublisherSigning(accountIdentity: accountIdentity, channelIdHex: channelIdHex),
+            method: "POST",
+            path: "/v1/channels/\(channelIdHex)/rotate/stage",
+            query: "",
+            body: try encoder.encode(Body(target_epoch: targetEpoch, envelopes: batch)),
+            contentType: "application/json"
         )
         return view.staged
     }
@@ -505,13 +525,18 @@ public final class ChannelsClient {
     /// - `bad-channel-id`     (400) — wrong channel-id shape
     public func commitRotation(
         channelIdHex: String,
-        targetEpoch: UInt32
+        targetEpoch: UInt32,
+        accountIdentity: Identity
     ) async throws -> UInt32 {
         struct Body: Encodable { let target_epoch: UInt32 }
         struct EpochView: Decodable { let epoch: UInt32 }
-        let view: EpochView = try await postJson(
-            endpoint: "/v1/channels/\(channelIdHex)/rotate/commit",
-            body: Body(target_epoch: targetEpoch)
+        let view: EpochView = try await sendAsPublisher(
+            signing: IdentityPublisherSigning(accountIdentity: accountIdentity, channelIdHex: channelIdHex),
+            method: "POST",
+            path: "/v1/channels/\(channelIdHex)/rotate/commit",
+            query: "",
+            body: try encoder.encode(Body(target_epoch: targetEpoch)),
+            contentType: "application/json"
         )
         return view.epoch
     }
@@ -525,6 +550,9 @@ public final class ChannelsClient {
     public func probeChannelOwner(channelIdHex: String, accountIdentity: Identity) async -> Bool? {
         struct Resp: Decodable { let subscribers: [String] }
         let path = "/v1/channels/\(channelIdHex)/subscribers"
+        let roleKey = try? IdentityPublisherSigning(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
+            .roleKey()
+        if let roleKey, let known = roles.role(forKey: roleKey) { return known == .owner }
         do {
             let signer = try Self.ownerSigner(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
             var request = URLRequest(url: try buildURL(endpoint: path))
@@ -533,6 +561,7 @@ public final class ChannelsClient {
                 signer.sign(method: "GET", path: path, query: "", body: Data()),
                 forHTTPHeaderField: channelOwnerProofHeaderName())
             let _: Resp = try await execute(request: request)
+            if let roleKey { roles.set(.owner, forKey: roleKey) }
             return true
         } catch let err as ChannelsApiError where err.status == 401 {
             return false
@@ -660,16 +689,76 @@ public final class ChannelsClient {
         return try await execute(request: request)
     }
 
-    private func postOctet<R: Decodable>(
-        endpoint: String,
-        payload: Data
-    ) async throws -> R {
-        let url = try buildURL(endpoint: endpoint)
+    /// One publisher-signed request (ADR-0059 section 9) as it goes on the
+    /// wire: `path` is the service path (never the `/channels` prefix nginx
+    /// strips on `api.lakko.me`), `query` the exact query without `?`, `body`
+    /// the exact bytes. The proof is computed over those same three, so what
+    /// is signed is what is sent.
+    static func publisherRequest(
+        baseURL: String,
+        method: String,
+        path: String,
+        query: String,
+        body: Data,
+        contentType: String?,
+        proof: (name: String, value: String)
+    ) throws -> URLRequest {
+        let endpoint = path + (query.isEmpty ? "" : "?" + query)
+        guard let url = URL(string: baseURL + endpoint) else {
+            throw ChannelsApiError(
+                status: -1, code: "bad-url",
+                detail: "invalid baseURL '\(baseURL)' or endpoint '\(endpoint)'")
+        }
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        request.httpBody = payload
-        return try await execute(request: request)
+        request.httpMethod = method
+        request.setValue(proof.value, forHTTPHeaderField: proof.name)
+        if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
+        if method != "GET" && method != "HEAD" { request.httpBody = body }
+        return request
+    }
+
+    /// Send one publisher-signed request and decode the success; a refusal
+    /// throws the `ChannelsApiError`.
+    ///
+    /// With the role known, the request is signed once under it; a 401 then
+    /// forgets the role, so the next call re-learns it, and surfaces. With
+    /// the role unknown: the owner proof first and, on a 401, the
+    /// co-publisher proof; whichever is accepted is remembered. Every attempt
+    /// carries a fresh proof (each nonce is single use on the server).
+    func sendAsPublisher<R: Decodable>(
+        signing: ChannelPublisherSigning,
+        method: String,
+        path: String,
+        query: String,
+        body: Data,
+        contentType: String?
+    ) async throws -> R {
+        let key = try signing.roleKey()
+        func attempt(_ role: ChannelPublisherRole) async throws -> (Data, HTTPURLResponse) {
+            let proof = try signing.proof(role: role, method: method, path: path, query: query, body: body)
+            let request = try Self.publisherRequest(
+                baseURL: baseURL, method: method, path: path, query: query,
+                body: body, contentType: contentType, proof: proof)
+            let (data, response) = try await transport(request)
+            guard let http = response as? HTTPURLResponse else {
+                throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
+            }
+            return (data, http)
+        }
+        if let known = roles.role(forKey: key) {
+            let (data, http) = try await attempt(known)
+            if http.statusCode == 401 { roles.clear(key: key) }
+            return try decode(data: data, http: http)
+        }
+        let (ownerData, ownerHttp) = try await attempt(.owner)
+        if (200..<300).contains(ownerHttp.statusCode) {
+            roles.set(.owner, forKey: key)
+            return try decode(data: ownerData, http: ownerHttp)
+        }
+        if ownerHttp.statusCode != 401 { return try decode(data: ownerData, http: ownerHttp) }
+        let (data, http) = try await attempt(.copublisher)
+        if (200..<300).contains(http.statusCode) { roles.set(.copublisher, forKey: key) }
+        return try decode(data: data, http: http)
     }
 
     private func getJson<R: Decodable>(endpoint: String) async throws -> R {
@@ -680,7 +769,7 @@ public final class ChannelsClient {
     }
 
     private func execute<R: Decodable>(request: URLRequest) async throws -> R {
-        let (data, response) = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
+        let (data, response) = try await transport(request)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(
                 status: -1,
@@ -711,6 +800,7 @@ public final class ChannelsClient {
                 detail: HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
             )
         }
+        if R.self == EmptyResponse.self, let empty = EmptyResponse() as? R { return empty }
         return try decoder.decode(R.self, from: data)
     }
 
@@ -723,6 +813,95 @@ public final class ChannelsClient {
             )
         }
         return url
+    }
+}
+
+// MARK: - ADR-0059 section 9 — publisher-signed writes
+
+/// How a channels request reaches the server; the client's seam for tests.
+typealias ChannelsTransport = (URLRequest) async throws -> (Data, URLResponse)
+
+/// A success with no body the caller reads (the envelope delivery).
+struct EmptyResponse: Decodable {}
+
+/// What this account is to a channel it publishes to: the owner (it created
+/// the channel and derives the key registered for it) or a co-publisher the
+/// owner appointed.
+public enum ChannelPublisherRole: Equatable, Sendable {
+    case owner
+    case copublisher
+}
+
+/// The role per (account, channel), keyed on the owner verifying key the
+/// account derives for the channel — unique to that pair, so another account
+/// on the device never reuses this one's answer. In memory only: nothing
+/// persisted says which role a device holds, so it is learned once per
+/// session (from creation, a co-publisher join, or the first signed request)
+/// and a large stage chunk is never uploaded twice to find out.
+final class ChannelPublisherRoleCache: @unchecked Sendable {
+    static let shared = ChannelPublisherRoleCache()
+
+    private let lock = NSLock()
+    private var roles: [String: ChannelPublisherRole] = [:]
+
+    func role(forKey key: String) -> ChannelPublisherRole? {
+        lock.lock(); defer { lock.unlock() }
+        return roles[key]
+    }
+
+    func set(_ role: ChannelPublisherRole, forKey key: String) {
+        lock.lock(); defer { lock.unlock() }
+        roles[key] = role
+    }
+
+    func clear(key: String) {
+        lock.lock(); defer { lock.unlock() }
+        roles[key] = nil
+    }
+
+    func clearAll() {
+        lock.lock(); defer { lock.unlock() }
+        roles.removeAll()
+    }
+}
+
+/// Produces the proof header for one publisher-signed request and the key
+/// the role cache files this (account, channel) under.
+protocol ChannelPublisherSigning {
+    func roleKey() throws -> String
+    func proof(
+        role: ChannelPublisherRole, method: String, path: String, query: String, body: Data
+    ) throws -> (name: String, value: String)
+}
+
+/// The production signing: the owner key or the co-publisher key the
+/// account identity derives for the channel (ADR-0059 section 1).
+struct IdentityPublisherSigning: ChannelPublisherSigning {
+    let accountIdentity: Identity
+    let channelIdHex: String
+
+    func roleKey() throws -> String {
+        let signer = try ChannelsClient.ownerSigner(accountIdentity: accountIdentity, channelIdHex: channelIdHex)
+        return signer.verifyingKey().map { String(format: "%02x", $0) }.joined()
+    }
+
+    func proof(
+        role: ChannelPublisherRole, method: String, path: String, query: String, body: Data
+    ) throws -> (name: String, value: String) {
+        switch role {
+        case .owner:
+            let signer = try ChannelsClient.ownerSigner(
+                accountIdentity: accountIdentity, channelIdHex: channelIdHex)
+            return (channelOwnerProofHeaderName(),
+                    signer.sign(method: method, path: path, query: query, body: body))
+        case .copublisher:
+            guard let id = ChannelsClient.hexToData(channelIdHex), id.count == 16 else {
+                throw ChannelsApiError(status: -1, code: "bad-channel-id", detail: "channel id is not 32 hex chars")
+            }
+            let signer = try channelCopublisherSigner(accountIdentity: accountIdentity, channelId: id)
+            return (channelCopublisherProofHeaderName(),
+                    signer.sign(method: method, path: path, query: query, body: body))
+        }
     }
 }
 
@@ -751,6 +930,20 @@ public struct ChannelsApiError: Error, Equatable, Sendable {
     public let status: Int
     public let code: String
     public let detail: String
+
+    /// The one code the server answers every refused publisher proof with
+    /// (`services/channels/src/owner_auth.rs`), whichever step failed.
+    public static let publisherRefusedCode = "owner-proof-required"
+
+    /// What the user reads when a publisher-signed write is refused.
+    public static let publisherRefusedText =
+        "This device is not allowed to publish to this channel yet. A co-publisher can publish once the owner's device has finished adding it."
+
+    /// The refused-publisher sentence when `error` is that refusal, else nil.
+    public static func publisherRefusal(_ error: Error) -> String? {
+        guard let api = error as? ChannelsApiError, api.code == publisherRefusedCode else { return nil }
+        return publisherRefusedText
+    }
 }
 
 /// Internal decode target for the `{code, detail}` JSON the

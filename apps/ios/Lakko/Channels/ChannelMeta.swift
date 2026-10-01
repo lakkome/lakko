@@ -89,7 +89,8 @@ public enum ChannelMetaRecord {
         state: ChannelsUiState,
         client: ChannelsClient,
         channelId: String,
-        meta: SharedChannelMeta
+        meta: SharedChannelMeta,
+        accountIdentity: Identity
     ) async throws {
         guard let keys = state.keysByChannel[channelId] else {
             throw ChannelMetaError.notAPublisher
@@ -107,7 +108,7 @@ public enum ChannelMetaRecord {
             messageCounter: counter,
             plaintext: plaintext
         )
-        _ = try await client.publishPost(channelIdHex: channelId, payload: wire)
+        _ = try await client.publishPost(channelIdHex: channelId, payload: wire, accountIdentity: accountIdentity)
         state.recordSharedMeta(channelId: channelId, meta: meta)
     }
 

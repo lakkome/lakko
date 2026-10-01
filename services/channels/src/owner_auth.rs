@@ -25,8 +25,9 @@
 //!
 //! ## Co-publishers
 //!
-//! A route the rotation fanout needs (today only the subscriber list) goes
-//! through [`require_publisher`] instead, which also accepts an
+//! A route a publisher calls (the subscriber list, publishing a post,
+//! delivering an envelope, rotate, rotate/stage, rotate/commit: ADR-0059
+//! section 9, closing G-43) goes through [`require_publisher`] instead, which also accepts an
 //! `x-lakko-channel-copublisher-proof` signed by a co-publisher key the owner
 //! appointed (`PUT /v1/channels/<id>/copublishers/<key>`). The header names
 //! its key, so the gate looks up that one key: it must be appointed for the

@@ -187,9 +187,21 @@ public class RotationCron(
         val newServerEpoch = currentEpoch + 1u
 
         // 3. Walk the subscriber list + seal new envelopes.
-        //    Owner-signed, or co-publisher-signed when this account is a
-        //    co-publisher the owner appointed (ADR-0059 section 1).
-        val subscribers = channelsClient.listSubscribersAsPublisher(channelIdHex, identity)
+        //    Every publisher request below is signed (ADR-0059 section 9)
+        //    with the role this account holds, learned once and cached.
+        return ChannelPublisherSigners.derive(identity, channelIdHex).use { proofs ->
+            fanOut(proofs, channelIdBytes, newServerEpoch, newSeed, nowMs)
+        }
+    }
+
+    private suspend fun fanOut(
+        proofs: ChannelPublisherProofs,
+        channelIdBytes: ByteArray,
+        newServerEpoch: UInt,
+        newSeed: ByteArray,
+        nowMs: ULong,
+    ): OnceResult {
+        val subscribers = channelsClient.listSubscribersAsPublisher(channelIdHex, proofs)
         val batch = ArrayList<RotateBatchEntry>(subscribers.size)
         for (subscriberHex in subscribers) {
             val subscriberBytes = hexToBytes(subscriberHex)
@@ -233,10 +245,11 @@ public class RotationCron(
                 channelIdHex,
                 newServerEpoch,
                 batch.subList(chunkStart, chunkEnd),
+                proofs,
             )
             chunkStart = chunkEnd
         }
-        val committedEpoch = channelsClient.commitRotation(channelIdHex, newServerEpoch)
+        val committedEpoch = channelsClient.commitRotation(channelIdHex, newServerEpoch, proofs)
 
         // 5. Stamp the new state + persist.
         val newState = channelRotationStateAfterRotation(nowMs)

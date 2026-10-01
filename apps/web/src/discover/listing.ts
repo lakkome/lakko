@@ -114,20 +114,22 @@ export async function listChannel(
   const stored = await listedStamp(channelIdHex).catch(() => null);
   await putCurrentListing(channelIdHex, identity, topic, language, stored);
   const src = listingSource(channelIdHex);
-  await publishChannelMeta(channelIdHex, {
-    name: src.name,
-    description: src.description,
-    topic,
-    language,
-    listed: true,
-  });
+  await publishChannelMeta(
+    channelIdHex,
+    { name: src.name, description: src.description, topic, language, listed: true },
+    identity,
+  );
 }
 
 /** Withdraw the listing and tell subscribers the channel is no longer listed. */
 export async function unlistChannel(channelIdHex: string, identity: Identity): Promise<void> {
   await deleteListing(channelIdHex, identity);
   const src = listingSource(channelIdHex);
-  await publishChannelMeta(channelIdHex, { name: src.name, description: src.description, listed: false });
+  await publishChannelMeta(
+    channelIdHex,
+    { name: src.name, description: src.description, listed: false },
+    identity,
+  );
 }
 
 /** After a rename (ADR-0051 edit) of a listed channel: re-put the listing so
