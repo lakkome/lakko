@@ -2592,8 +2592,8 @@
       "comment": "Shown over a photo that failed to load."
     },
     "chat.photo.load_failed_retry": {
-      "text": "Couldn't load photo, tap to retry",
-      "comment": "Accessible name of a photo in a message that failed to load."
+      "text": "Couldn't load photo. Try again.",
+      "comment": "Accessible name of a photo in a message that failed to load; activating it retries. Used on web, iOS and Android, so it must not say tap or click."
     },
     "chat.photo.loading": {
       "text": "Photo, loading",
@@ -2751,9 +2751,13 @@
       "text": "No camera found",
       "comment": "Short notice: a video message cannot be recorded because there is no camera."
     },
+    "chat.record.open_app_settings": {
+      "text": "Open app settings",
+      "comment": "Android: button on a camera or microphone permission card or dialog; opens Lakko's app info page in the Android system settings, where permissions are granted."
+    },
     "chat.record.open_settings": {
       "text": "Open Settings",
-      "comment": "Button on the permission card: opens the system settings for this app."
+      "comment": "iOS: button on a camera or microphone permission card; opens Lakko's page in the iOS Settings app. Use the name of the Settings app on iOS."
     },
     "chat.record.pause": {
       "text": "Pause recording",
@@ -2836,16 +2840,16 @@
       "comment": "Shown on the recording bar when a video message is recorded and waiting to be sent."
     },
     "chat.record.video_tooltip": {
-      "text": "Record video message: hold to record, tap to switch to voice",
-      "comment": "Tooltip of the record button in video mode."
+      "text": "Record video message: hold to record, click to switch to voice",
+      "comment": "Web: mouse-hover tooltip of the record button in video mode. Holding the button records; a click switches to voice messages."
     },
     "chat.record.voice": {
       "text": "Record voice message",
       "comment": "Accessible name of the record button in voice mode."
     },
     "chat.record.voice_tooltip": {
-      "text": "Record voice message: hold to record, tap to switch to video",
-      "comment": "Tooltip of the record button in voice mode."
+      "text": "Record voice message: hold to record, click to switch to video",
+      "comment": "Web: mouse-hover tooltip of the record button in voice mode. Holding the button records; a click switches to video messages."
     },
     "chat.refusal.add_not_admin": {
       "text": "Only the group owner or an admin can add members.",
@@ -3147,8 +3151,8 @@
       "comment": "Shown over a video that failed to load."
     },
     "chat.video.load_failed_retry": {
-      "text": "Couldn't load video, tap to retry",
-      "comment": "Accessible name of a video in a message that failed to load."
+      "text": "Couldn't load video. Try again.",
+      "comment": "Accessible name of a video in a message that failed to load; activating it retries. Used on web, iOS and Android, so it must not say tap or click."
     },
     "chat.video.loading": {
       "text": "Loading video, {size}",
@@ -3186,13 +3190,17 @@
       "text": "Video message poster",
       "comment": "Screen-reader label of the still picture shown on a video message before it plays."
     },
+    "chat.video_note.sound_on": {
+      "text": "Turn on sound",
+      "comment": "Web: corner label on a round video message playing without sound; activating it plays the sound. Must not say tap or click (mouse and touch both reach it)."
+    },
     "chat.video_note.tap_mute": {
       "text": "Tap to mute",
       "comment": "Hint over a recorded video message being previewed with sound."
     },
     "chat.video_note.tap_sound": {
       "text": "Tap for sound",
-      "comment": "Corner label on a round video message playing without sound."
+      "comment": "iOS: corner label on a round video message playing without sound; tapping it turns the sound on. chat.video_note.sound_on is the web wording."
     },
     "chat.voice.change_speed": {
       "text": "Change playback speed",
@@ -4262,7 +4270,11 @@
     },
     "devices.scan.error.camera_denied": {
       "text": "Lakko cannot use the camera. Allow camera access in Settings, then try again.",
-      "comment": "Camera access for scanning a pairing code was refused or failed."
+      "comment": "iOS and Android: camera access for scanning a pairing code was refused or failed. 'Settings' is the system settings app. devices.scan.error.camera_denied_browser is the web wording."
+    },
+    "devices.scan.error.camera_denied_browser": {
+      "text": "Lakko cannot use the camera. Allow camera access in your browser's site settings, then try again.",
+      "comment": "Web: camera access for scanning a pairing code was refused by the browser or failed."
     },
     "devices.scan.error.camera_failed": {
       "text": "The camera could not start. Try again.",
@@ -4957,6 +4969,18 @@
     "invite.uses.up_to": {
       "text": "{count, plural, one {up to # use} other {up to # uses}}",
       "comment": "Contact invite page, value of \"Uses allowed\"."
+    },
+    "ios.permission.camera": {
+      "text": "Lakko uses the camera to scan QR codes from devices you want to link to your account, to capture video for in-call streams, and to record video messages you choose to send. Everything the camera captures is end-to-end encrypted on your device before it is sent.",
+      "comment": "iOS system permission prompt for camera access (Info.plist usage description). iOS shows it in its own alert, in the language iOS uses for Lakko, the first time Lakko asks. It must say why Lakko needs the access. No placeholders."
+    },
+    "ios.permission.microphone": {
+      "text": "Lakko uses the microphone for end-to-end-encrypted calls and to record voice messages and video messages you choose to send. The mic is only on while you are in a call or recording a message, and everything it captures is encrypted on your device before it is sent.",
+      "comment": "iOS system permission prompt for microphone access (Info.plist usage description). iOS shows it in its own alert, in the language iOS uses for Lakko, the first time Lakko asks. It must say why Lakko needs the access. No placeholders."
+    },
+    "ios.permission.photo_library_add": {
+      "text": "Lakko saves photos and videos to your library only when you choose Save.",
+      "comment": "iOS system permission prompt for photo library (add only) access (Info.plist usage description). iOS shows it in its own alert, in the language iOS uses for Lakko, the first time Lakko asks. It must say why Lakko needs the access. No placeholders."
     },
     "language.name.ar": {
       "text": "Arabic",
@@ -6095,11 +6119,11 @@
     },
     "settings.passkeys.lede": {
       "text": "Sign in with Touch ID, Face ID or a security key instead of your password. Your recovery phrase always works too.",
-      "comment": "Text under the Passkeys heading."
+      "comment": "iOS: text at the top of the Passkeys page. Names Apple's Touch ID and Face ID; settings.passkeys.lede_device is the wording for web and Android."
     },
     "settings.passkeys.lede_device": {
       "text": "Sign in with your fingerprint, face or screen lock, or a security key, instead of your password. Your recovery phrase always works too.",
-      "comment": "Text at the top of the Passkeys page on a phone (Android); settings.passkeys.lede names Apple's Touch ID and Face ID."
+      "comment": "Web and Android: text at the top of the Passkeys page. Platform-neutral on purpose (the web runs on any system): fingerprint, face, screen lock or a hardware security key. settings.passkeys.lede is the iOS wording with Touch ID and Face ID."
     },
     "settings.passkeys.name.label": {
       "text": "Passkey name",
@@ -6107,7 +6131,11 @@
     },
     "settings.passkeys.name.placeholder": {
       "text": "Name this passkey (e.g. MacBook Touch ID)",
-      "comment": "Placeholder of the field that names a new passkey."
+      "comment": "iOS: placeholder of the field that names a new passkey; the example is an Apple device. settings.passkeys.name.placeholder_device is the web wording."
+    },
+    "settings.passkeys.name.placeholder_device": {
+      "text": "Name this passkey (e.g. Work laptop)",
+      "comment": "Web: placeholder of the field that names a new passkey. The example must not name a brand or an operating system, since the web runs on any of them; settings.passkeys.name.placeholder is the iOS wording."
     },
     "settings.passkeys.remove.body": {
       "text": "The device that owns the matching private key will no longer be able to sign in with it. This cannot be undone.",

@@ -209,7 +209,7 @@ export default function PasskeysSection(): JSX.Element {
   return (
     <section class="lk-card">
       <h2>{t("settings.passkeys.title")}</h2>
-      <p class="lk-card-desc">{t("settings.passkeys.lede")}</p>
+      <p class="lk-card-desc">{t("settings.passkeys.lede_device")}</p>
 
       <Show
         when={SUPPORTED}
@@ -260,7 +260,7 @@ export default function PasskeysSection(): JSX.Element {
           <form onSubmit={onAdd} class="lk-actions" style={{ "flex-wrap": "nowrap" }}>
             <input
               type="text"
-              placeholder={t("settings.passkeys.name.placeholder")}
+              placeholder={t("settings.passkeys.name.placeholder_device")}
               aria-label={t("settings.passkeys.name.label")}
               value={nickname()}
               onInput={(e) => setNickname(e.currentTarget.value)}

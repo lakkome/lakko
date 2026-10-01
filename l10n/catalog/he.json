@@ -2543,7 +2543,7 @@
       "status": "machine"
     },
     "chat.photo.load_failed_retry": {
-      "text": "לא ניתן היה לטעון את התמונה, הקישו כדי לנסות שוב",
+      "text": "לא ניתן היה לטעון את התמונה. אפשר לנסות שוב.",
       "status": "machine"
     },
     "chat.photo.loading": {
@@ -2702,6 +2702,10 @@
       "text": "לא נמצאה מצלמה",
       "status": "machine"
     },
+    "chat.record.open_app_settings": {
+      "text": "פתיחת הגדרות האפליקציה",
+      "status": "machine"
+    },
     "chat.record.open_settings": {
       "text": "פתיחת ההגדרות",
       "status": "machine"
@@ -2787,7 +2791,7 @@
       "status": "machine"
     },
     "chat.record.video_tooltip": {
-      "text": "הקלטת הודעת וידאו: לחיצה ארוכה להקלטה, הקשה למעבר לקול",
+      "text": "הודעת וידאו: יש ללחוץ ולהחזיק כדי להקליט, וללחוץ כדי לעבור להודעה קולית",
       "status": "machine"
     },
     "chat.record.voice": {
@@ -2795,7 +2799,7 @@
       "status": "machine"
     },
     "chat.record.voice_tooltip": {
-      "text": "הקלטת הודעה קולית: לחיצה ארוכה להקלטה, הקשה למעבר לווידאו",
+      "text": "הודעה קולית: יש ללחוץ ולהחזיק כדי להקליט, וללחוץ כדי לעבור להודעת וידאו",
       "status": "machine"
     },
     "chat.refusal.add_not_admin": {
@@ -3095,7 +3099,7 @@
       "status": "machine"
     },
     "chat.video.load_failed_retry": {
-      "text": "לא ניתן היה לטעון את הסרטון, הקישו כדי לנסות שוב",
+      "text": "לא ניתן היה לטעון את הסרטון. אפשר לנסות שוב.",
       "status": "machine"
     },
     "chat.video.loading": {
@@ -3132,6 +3136,10 @@
     },
     "chat.video_note.poster": {
       "text": "תמונת תצוגה של הודעת הווידאו",
+      "status": "machine"
+    },
+    "chat.video_note.sound_on": {
+      "text": "הפעלת הקול",
       "status": "machine"
     },
     "chat.video_note.tap_mute": {
@@ -4170,6 +4178,10 @@
       "text": "ל-Lakko אין גישה למצלמה. אפשרו גישה למצלמה בהגדרות ונסו שוב.",
       "status": "machine"
     },
+    "devices.scan.error.camera_denied_browser": {
+      "text": "ל-Lakko אין גישה למצלמה. יש לאפשר גישה למצלמה בהגדרות האתר בדפדפן ולנסות שוב.",
+      "status": "machine"
+    },
     "devices.scan.error.camera_failed": {
       "text": "לא ניתן היה להפעיל את המצלמה. נסו שוב.",
       "status": "machine"
@@ -4848,6 +4860,18 @@
     },
     "invite.uses.up_to": {
       "text": "{count, plural, one {עד שימוש אחד} two {עד שני שימושים} other {עד # שימושים}}",
+      "status": "machine"
+    },
+    "ios.permission.camera": {
+      "text": "Lakko משתמשת במצלמה כדי לסרוק קודי QR ממכשירים שברצונך לקשר לחשבון, כדי לשדר וידאו בשיחות וכדי להקליט הודעות וידאו שבחרת לשלוח. כל מה שהמצלמה קולטת מוצפן מקצה לקצה במכשיר שלך לפני השליחה.",
+      "status": "machine"
+    },
+    "ios.permission.microphone": {
+      "text": "Lakko משתמשת במיקרופון לשיחות עם הצפנה מקצה לקצה ולהקלטת הודעות קוליות והודעות וידאו שבחרת לשלוח. המיקרופון פועל רק במהלך שיחה או הקלטת הודעה, וכל מה שהוא קולט מוצפן במכשיר שלך לפני השליחה.",
+      "status": "machine"
+    },
+    "ios.permission.photo_library_add": {
+      "text": "Lakko שומרת תמונות וסרטונים בספרייה שלך רק כשבוחרים „שמירה”.",
       "status": "machine"
     },
     "language.name.ar": {
@@ -5920,6 +5944,10 @@
     },
     "settings.passkeys.name.placeholder": {
       "text": "תנו שם למפתח הגישה (למשל MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder_device": {
+      "text": "שם למפתח הגישה הזה (למשל: מחשב נייד לעבודה)",
       "status": "machine"
     },
     "settings.passkeys.remove.body": {

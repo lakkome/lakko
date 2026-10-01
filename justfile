@@ -183,11 +183,15 @@ l10n-check:
     cargo run -q -p lakko-l10n-tool -- android-locales --out "$out/locales_config.xml" >/dev/null
     diff -q "$out/locales_config.xml" apps/android/app/src/main/res/xml/locales_config.xml >/dev/null \
         || { echo "stale: locales_config.xml (run just l10n-compile)"; rm -rf "$out"; exit 1; }
+    cargo run -q -p lakko-l10n-tool -- ios-infoplist --out "$out/InfoPlist" >/dev/null
+    diff -r -q "$out/InfoPlist" apps/ios/Lakko/Resources/InfoPlist >/dev/null \
+        || { echo "stale: apps/ios/Lakko/Resources/InfoPlist (run just l10n-compile)"; rm -rf "$out"; exit 1; }
     rm -rf "$out"
     echo "compiled catalogs up to date"
 
 # ADR-0061: compile l10n/catalog into what each client embeds (source.json
-# + one compiled <lang>.json per translation). The outputs are committed so
+# + one compiled <lang>.json per translation, Android's locales_config.xml,
+# iOS InfoPlist.strings for the permission prompts). The outputs are committed so
 # Xcode, Gradle and Vite need no Rust step; run this after every catalog
 # edit (l10n-check fails when the committed outputs are stale).
 l10n-compile:
@@ -202,6 +206,10 @@ l10n-compile:
     done
     rm -rf "$out"
     cargo run -q -p lakko-l10n-tool -- android-locales --out apps/android/app/src/main/res/xml/locales_config.xml >/dev/null
+    # iOS permission prompts: one <lproj>.lproj/InfoPlist.strings per language,
+    # picked up by XcodeGen as a localized variant group.
+    rm -rf apps/ios/Lakko/Resources/InfoPlist
+    cargo run -q -p lakko-l10n-tool -- ios-infoplist --out apps/ios/Lakko/Resources/InfoPlist >/dev/null
     echo "l10n compiled into the web, iOS and Android resources"
 
 # Audit-pack drift gate — every numbered invariant in

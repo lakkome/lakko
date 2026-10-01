@@ -2543,7 +2543,7 @@
       "status": "machine"
     },
     "chat.photo.load_failed_retry": {
-      "text": "Não foi possível carregar a foto, toque para tentar novamente",
+      "text": "Não foi possível carregar a foto. Tente de novo.",
       "status": "machine"
     },
     "chat.photo.loading": {
@@ -2702,6 +2702,10 @@
       "text": "Nenhuma câmera encontrada",
       "status": "machine"
     },
+    "chat.record.open_app_settings": {
+      "text": "Abrir configurações do app",
+      "status": "machine"
+    },
     "chat.record.open_settings": {
       "text": "Abrir Ajustes",
       "status": "machine"
@@ -2787,7 +2791,7 @@
       "status": "machine"
     },
     "chat.record.video_tooltip": {
-      "text": "Gravar mensagem de vídeo: segure para gravar, toque para mudar para voz",
+      "text": "Mensagem de vídeo: segure para gravar, clique para mudar para voz",
       "status": "machine"
     },
     "chat.record.voice": {
@@ -2795,7 +2799,7 @@
       "status": "machine"
     },
     "chat.record.voice_tooltip": {
-      "text": "Gravar mensagem de voz: segure para gravar, toque para mudar para vídeo",
+      "text": "Mensagem de voz: segure para gravar, clique para mudar para vídeo",
       "status": "machine"
     },
     "chat.refusal.add_not_admin": {
@@ -3095,7 +3099,7 @@
       "status": "machine"
     },
     "chat.video.load_failed_retry": {
-      "text": "Não foi possível carregar o vídeo, toque para tentar novamente",
+      "text": "Não foi possível carregar o vídeo. Tente de novo.",
       "status": "machine"
     },
     "chat.video.loading": {
@@ -3132,6 +3136,10 @@
     },
     "chat.video_note.poster": {
       "text": "Capa da mensagem de vídeo",
+      "status": "machine"
+    },
+    "chat.video_note.sound_on": {
+      "text": "Ativar som",
       "status": "machine"
     },
     "chat.video_note.tap_mute": {
@@ -4170,6 +4178,10 @@
       "text": "O Lakko não pode usar a câmera. Permita o acesso à câmera em Configurações e tente novamente.",
       "status": "machine"
     },
+    "devices.scan.error.camera_denied_browser": {
+      "text": "O Lakko não consegue usar a câmera. Permita o acesso à câmera nas configurações do site no seu navegador e tente de novo.",
+      "status": "machine"
+    },
     "devices.scan.error.camera_failed": {
       "text": "Não foi possível iniciar a câmera. Tente novamente.",
       "status": "machine"
@@ -4848,6 +4860,18 @@
     },
     "invite.uses.up_to": {
       "text": "{count, plural, one {até # uso} other {até # usos}}",
+      "status": "machine"
+    },
+    "ios.permission.camera": {
+      "text": "O Lakko usa a câmera para ler QR codes de dispositivos que você quer vincular à sua conta, para enviar vídeo nas chamadas e para gravar as mensagens de vídeo que você decidir enviar. Tudo o que a câmera captura é criptografado de ponta a ponta no seu dispositivo antes do envio.",
+      "status": "machine"
+    },
+    "ios.permission.microphone": {
+      "text": "O Lakko usa o microfone para chamadas com criptografia de ponta a ponta e para gravar as mensagens de voz e de vídeo que você decidir enviar. O microfone só fica ligado durante uma chamada ou enquanto você grava uma mensagem, e tudo o que ele capta é criptografado no seu dispositivo antes do envio.",
+      "status": "machine"
+    },
+    "ios.permission.photo_library_add": {
+      "text": "O Lakko salva fotos e vídeos na sua biblioteca apenas quando você escolhe Salvar.",
       "status": "machine"
     },
     "language.name.ar": {
@@ -5920,6 +5944,10 @@
     },
     "settings.passkeys.name.placeholder": {
       "text": "Dê um nome a esta chave de acesso (ex.: MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder_device": {
+      "text": "Nome desta chave de acesso (ex.: notebook do trabalho)",
       "status": "machine"
     },
     "settings.passkeys.remove.body": {

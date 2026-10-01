@@ -14,6 +14,10 @@
 //! - `android-locales` — write Android's `res/xml/locales_config.xml` from
 //!   the supported-language table, so the per-app language list in system
 //!   Settings can never drift from `lakko_l10n::supported_languages`.
+//! - `ios-infoplist` — write `<lproj>.lproj/InfoPlist.strings` for English and
+//!   every supported language: the iOS permission prompts (`NS*UsageDescription`),
+//!   which the system shows itself and so cannot go through the in-app
+//!   catalog. A language without a translation of a prompt gets the English.
 //! - `keygen` / `sign` — the offline translation-publisher key and the
 //!   signed bundle. The key is dedicated: not the ADR-0038 release key.
 //!
@@ -35,7 +39,7 @@ use lakko_crypto::signing::SigningKey;
 use lakko_l10n::bundle::{bundle_payload, AcceptancePolicy};
 use lakko_l10n::catalog::{compiled_messages, CompileReport};
 use lakko_l10n::{
-    accept_bundle, compile_translation, sign_bundle, supported_languages, SourceCatalog,
+    accept_bundle, compile_translation, sign_bundle, supported_languages, Message, SourceCatalog,
     SOURCE_LANGUAGE,
 };
 
@@ -51,6 +55,7 @@ usage:
   lakko-l10n check   [--dir <catalog dir>]
   lakko-l10n compile [--dir <catalog dir>] --out <dir>
   lakko-l10n android-locales --out <locales_config.xml>
+  lakko-l10n ios-infoplist [--dir <catalog dir>] --out <dir of .lproj folders>
   lakko-l10n keygen  [--out <seedfile>]
   lakko-l10n sign    --payload <bundle-payload.json> --version <N> --min-release <N>
                      [--key <seedfile>] [--out <path>]";
@@ -76,6 +81,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "check" => cmd_check(rest),
         "compile" => cmd_compile(rest),
         "android-locales" => cmd_android_locales(rest),
+        "ios-infoplist" => cmd_ios_infoplist(rest),
         "keygen" => cmd_keygen(rest),
         "sign" => cmd_sign(rest),
         "-h" | "--help" | "help" => {
@@ -227,6 +233,154 @@ fn android_locales_config() -> String {
     xml
 }
 
+/// The iOS Info.plist keys the system shows in its own permission alerts,
+/// each with the catalog key that carries its text. Order is the order in
+/// the written file.
+const IOS_INFOPLIST_KEYS: &[(&str, &str)] = &[
+    ("NSCameraUsageDescription", "ios.permission.camera"),
+    ("NSMicrophoneUsageDescription", "ios.permission.microphone"),
+    (
+        "NSPhotoLibraryAddUsageDescription",
+        "ios.permission.photo_library_add",
+    ),
+];
+
+fn cmd_ios_infoplist(args: &[String]) -> Result<(), String> {
+    let flags = parse_flags(args)?;
+    reject_unknown(&flags, &["dir", "out"])?;
+    let dir = PathBuf::from(flag(&flags, "dir").unwrap_or(DEFAULT_DIR));
+    let out = PathBuf::from(flag(&flags, "out").ok_or("missing required flag --out")?);
+    let loaded = load(&dir)?;
+
+    let mut english: BTreeMap<String, String> = BTreeMap::new();
+    for (_, key) in IOS_INFOPLIST_KEYS {
+        let message = loaded
+            .source
+            .messages()
+            .get(*key)
+            .ok_or_else(|| format!("source catalog has no `{key}`"))?;
+        english.insert((*key).to_string(), plain(key, &message.text)?);
+    }
+    let mut translated: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for (code, compiled, _) in &loaded.translations {
+        let (_, strings) = compiled_messages(compiled).map_err(|e| e.to_string())?;
+        translated.insert(code.clone(), strings);
+    }
+
+    let mut written = 0usize;
+    for language in supported_languages() {
+        let lproj = apple_lproj(language.code)?;
+        let mut entries = Vec::new();
+        for (plist_key, key) in IOS_INFOPLIST_KEYS {
+            let text = match translated
+                .get(language.code)
+                .and_then(|strings| strings.get(*key))
+            {
+                Some(text) => plain(key, text)?,
+                None => english.get(*key).cloned().unwrap_or_default(),
+            };
+            entries.push((*plist_key, text));
+        }
+        let folder = out.join(format!("{lproj}.lproj"));
+        fs::create_dir_all(&folder)
+            .map_err(|e| format!("cannot create `{}`: {e}", folder.display()))?;
+        write(
+            &folder.join("InfoPlist.strings"),
+            infoplist_strings(language.code, &entries).as_bytes(),
+        )?;
+        written += 1;
+    }
+    println!(
+        "wrote {written} InfoPlist.strings files into {}",
+        out.display()
+    );
+    Ok(())
+}
+
+/// The plain text of a catalog message; a permission prompt takes no
+/// arguments, since iOS shows the string as it is.
+fn plain(key: &str, text: &str) -> Result<String, String> {
+    Message::parse(text)
+        .map_err(|e| format!("`{key}`: {e}"))?
+        .plain_text()
+        .ok_or_else(|| format!("`{key}` is shown by iOS itself and must not take arguments"))
+}
+
+/// The `.lproj` folder name Apple uses for one of Lakko's language codes.
+/// Listed explicitly so a new language in the table is a decision here, not
+/// a silent guess.
+fn apple_lproj(code: &str) -> Result<&'static str, String> {
+    Ok(match code {
+        "en" => "en",
+        "ar" => "ar",
+        "es" => "es",
+        "fa" => "fa",
+        "he" => "he",
+        "hi" => "hi",
+        "pt-BR" => "pt-BR",
+        "ru" => "ru",
+        "tr" => "tr",
+        "uk" => "uk",
+        "zh-Hans" => "zh-Hans",
+        other => {
+            return Err(format!(
+                "no Apple .lproj name known for `{other}`; add it to apple_lproj"
+            ))
+        },
+    })
+}
+
+/// One `InfoPlist.strings` file (UTF-8, which Xcode accepts).
+fn infoplist_strings(code: &str, entries: &[(&str, String)]) -> String {
+    let mut out = format!(
+        "/*\n\
+         \x20 SPDX-License-Identifier: AGPL-3.0-or-later\n\
+         \x20 SPDX-FileCopyrightText: 2026 Lakko Contributors\n\
+         \n\
+         \x20 ADR-0061: iOS permission prompts, language `{code}`. Generated by\n\
+         \x20 `just l10n-compile` from l10n/catalog; do not edit by hand.\n\
+         */\n"
+    );
+    for (key, text) in entries {
+        out.push('\n');
+        out.push('"');
+        out.push_str(&escape_strings(key));
+        out.push_str("\" = \"");
+        out.push_str(&escape_strings(text));
+        out.push_str("\";\n");
+    }
+    out
+}
+
+/// Escape a value for the old-style `.strings` syntax: a backslash, a double
+/// quote and the control characters, which would otherwise end the string
+/// or break the file.
+fn escape_strings(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                for unit in c.encode_utf16(&mut [0u16; 2]) {
+                    out.push_str("\\U");
+                    for shift in [12u16, 8, 4, 0] {
+                        let nibble = u32::from((*unit >> shift) & 0xF);
+                        out.push(
+                            char::from_digit(nibble, 16).map_or('0', |d| d.to_ascii_uppercase()),
+                        );
+                    }
+                }
+            },
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn cmd_keygen(args: &[String]) -> Result<(), String> {
     let flags = parse_flags(args)?;
     reject_unknown(&flags, &["out"])?;
@@ -373,4 +527,34 @@ fn reject_unknown(flags: &[(String, String)], allowed: &[&str]) -> Result<(), St
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{escape_strings, infoplist_strings};
+
+    #[test]
+    fn strings_escaping_keeps_the_file_well_formed() {
+        assert_eq!(escape_strings("plain"), "plain");
+        assert_eq!(escape_strings(r#"say "hi""#), r#"say \"hi\""#);
+        assert_eq!(escape_strings(r"a\b"), r"a\\b");
+        assert_eq!(escape_strings("a\nb\tc\rd"), r"a\nb\tc\rd");
+        assert_eq!(escape_strings("\u{1}"), r"\U0001");
+        // Apostrophes and non-ASCII text pass through; the file is UTF-8.
+        assert_eq!(
+            escape_strings("Lakko's камера カメラ"),
+            "Lakko's камера カメラ"
+        );
+    }
+
+    #[test]
+    fn strings_file_has_one_line_per_key() {
+        let file = infoplist_strings(
+            "ru",
+            &[("NSCameraUsageDescription", "Камера \"для\" QR".to_string())],
+        );
+        assert!(file.starts_with("/*\n"));
+        assert!(file.contains("SPDX-License-Identifier: AGPL-3.0-or-later"));
+        assert!(file.ends_with("\n\"NSCameraUsageDescription\" = \"Камера \\\"для\\\" QR\";\n"));
+    }
 }

@@ -38,6 +38,9 @@ options:
   # whatever order the filesystem reports.
   groupSortPosition: top
   generateEmptyDirectories: true
+  # ADR-0061: English is the development language; the localized
+  # `Lakko/Resources/InfoPlist/<lproj>.lproj` folders add the other regions.
+  developmentLanguage: en
 
 # Per-build-configuration deployment endpoints. Every target inherits these
 # build settings; the Info.plist blocks below expand them into keys the
@@ -244,11 +247,32 @@ targets:
         # (nothing else depends on it).
         NSUserActivityTypes:
           - INStartCallIntent
+        # ADR-0061: the interface languages Lakko ships (the
+        # `lakko_l10n::supported_languages` table). Declaring them makes iOS
+        # offer Settings > Lakko > Language and pick the matching
+        # `InfoPlist.strings` for the permission prompts below.
+        CFBundleLocalizations:
+          - en
+          - ar
+          - es
+          - fa
+          - he
+          - hi
+          - pt-BR
+          - ru
+          - tr
+          - uk
+          - zh-Hans
         # Phase 2a3b3-ui — camera access for the add-device QR
         # scanner + G3-1 video calls. Apple's permission dialog
         # surfaces this string verbatim; keep the wording
         # aligned with what the user sees in the Devices → "Add
         # a device" screen.
+        # ADR-0061: the three usage descriptions below are the English base.
+        # Their text lives in l10n/catalog (`ios.permission.*`) and reaches
+        # every language through Lakko/Resources/InfoPlist/<lproj>.lproj/
+        # InfoPlist.strings (`just l10n-compile`); change the catalog and
+        # these together.
         NSCameraUsageDescription: >-
           Lakko uses the camera to scan QR codes from devices
           you want to link to your account, to capture video for

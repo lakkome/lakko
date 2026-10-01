@@ -2543,7 +2543,7 @@
       "status": "machine"
     },
     "chat.photo.load_failed_retry": {
-      "text": "Fotoğraf yüklenemedi, tekrar denemek için dokunun",
+      "text": "Fotoğraf yüklenemedi. Tekrar dene.",
       "status": "machine"
     },
     "chat.photo.loading": {
@@ -2702,6 +2702,10 @@
       "text": "Kamera bulunamadı",
       "status": "machine"
     },
+    "chat.record.open_app_settings": {
+      "text": "Uygulama ayarlarını aç",
+      "status": "machine"
+    },
     "chat.record.open_settings": {
       "text": "Ayarları aç",
       "status": "machine"
@@ -2787,7 +2791,7 @@
       "status": "machine"
     },
     "chat.record.video_tooltip": {
-      "text": "Görüntülü not kaydet: kaydetmek için basılı tutun, sese geçmek için dokunun",
+      "text": "Görüntülü mesaj: kaydetmek için basılı tut, sesliye geçmek için tıkla",
       "status": "machine"
     },
     "chat.record.voice": {
@@ -2795,7 +2799,7 @@
       "status": "machine"
     },
     "chat.record.voice_tooltip": {
-      "text": "Sesli mesaj kaydet: kaydetmek için basılı tutun, görüntüye geçmek için dokunun",
+      "text": "Sesli mesaj: kaydetmek için basılı tut, görüntülüye geçmek için tıkla",
       "status": "machine"
     },
     "chat.refusal.add_not_admin": {
@@ -3095,7 +3099,7 @@
       "status": "machine"
     },
     "chat.video.load_failed_retry": {
-      "text": "Video yüklenemedi, tekrar denemek için dokunun",
+      "text": "Video yüklenemedi. Tekrar dene.",
       "status": "machine"
     },
     "chat.video.loading": {
@@ -3132,6 +3136,10 @@
     },
     "chat.video_note.poster": {
       "text": "Görüntülü not kapağı",
+      "status": "machine"
+    },
+    "chat.video_note.sound_on": {
+      "text": "Sesi aç",
       "status": "machine"
     },
     "chat.video_note.tap_mute": {
@@ -4170,6 +4178,10 @@
       "text": "Lakko kamerayı kullanamıyor. Ayarlar bölümünden kamera erişimine izin verin ve tekrar deneyin.",
       "status": "machine"
     },
+    "devices.scan.error.camera_denied_browser": {
+      "text": "Lakko kamerayı kullanamıyor. Tarayıcının site ayarlarından kamera erişimine izin ver ve tekrar dene.",
+      "status": "machine"
+    },
     "devices.scan.error.camera_failed": {
       "text": "Kamera başlatılamadı. Tekrar deneyin.",
       "status": "machine"
@@ -4848,6 +4860,18 @@
     },
     "invite.uses.up_to": {
       "text": "{count, plural, one {en fazla # kullanım} other {en fazla # kullanım}}",
+      "status": "machine"
+    },
+    "ios.permission.camera": {
+      "text": "Lakko kamerayı, hesabına bağlamak istediğin cihazların QR kodlarını taramak, aramalarda görüntü göndermek ve göndermeyi seçtiğin görüntülü mesajları kaydetmek için kullanır. Kameranın yakaladığı her şey gönderilmeden önce cihazında uçtan uca şifrelenir.",
+      "status": "machine"
+    },
+    "ios.permission.microphone": {
+      "text": "Lakko mikrofonu uçtan uca şifreli aramalar ve göndermeyi seçtiğin sesli ve görüntülü mesajları kaydetmek için kullanır. Mikrofon yalnızca bir aramadayken veya mesaj kaydederken açıktır ve yakaladığı her şey gönderilmeden önce cihazında şifrelenir.",
+      "status": "machine"
+    },
+    "ios.permission.photo_library_add": {
+      "text": "Lakko fotoğraf ve videoları yalnızca Kaydet'i seçtiğinde arşivine kaydeder.",
       "status": "machine"
     },
     "language.name.ar": {
@@ -5920,6 +5944,10 @@
     },
     "settings.passkeys.name.placeholder": {
       "text": "Bu geçiş anahtarına ad verin (ör. MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder_device": {
+      "text": "Bu geçiş anahtarına ad ver (ör. İş dizüstü bilgisayarı)",
       "status": "machine"
     },
     "settings.passkeys.remove.body": {

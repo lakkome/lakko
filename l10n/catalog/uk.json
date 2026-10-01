@@ -2543,7 +2543,7 @@
       "status": "machine"
     },
     "chat.photo.load_failed_retry": {
-      "text": "Не вдалося завантажити фото, торкніться, щоб повторити",
+      "text": "Не вдалося завантажити фото. Спробуйте ще раз.",
       "status": "machine"
     },
     "chat.photo.loading": {
@@ -2702,6 +2702,10 @@
       "text": "Камеру не знайдено",
       "status": "machine"
     },
+    "chat.record.open_app_settings": {
+      "text": "Відкрити налаштування застосунку",
+      "status": "machine"
+    },
     "chat.record.open_settings": {
       "text": "Відкрити налаштування",
       "status": "machine"
@@ -2787,7 +2791,7 @@
       "status": "machine"
     },
     "chat.record.video_tooltip": {
-      "text": "Записати відеоповідомлення: утримуйте для запису, торкніться, щоб перейти на голос",
+      "text": "Відеоповідомлення: утримуйте для запису, натисніть, щоб перейти на голосове",
       "status": "machine"
     },
     "chat.record.voice": {
@@ -2795,7 +2799,7 @@
       "status": "machine"
     },
     "chat.record.voice_tooltip": {
-      "text": "Записати голосове повідомлення: утримуйте для запису, торкніться, щоб перейти на відео",
+      "text": "Голосове повідомлення: утримуйте для запису, натисніть, щоб перейти на відео",
       "status": "machine"
     },
     "chat.refusal.add_not_admin": {
@@ -3095,7 +3099,7 @@
       "status": "machine"
     },
     "chat.video.load_failed_retry": {
-      "text": "Не вдалося завантажити відео, торкніться, щоб повторити",
+      "text": "Не вдалося завантажити відео. Спробуйте ще раз.",
       "status": "machine"
     },
     "chat.video.loading": {
@@ -3132,6 +3136,10 @@
     },
     "chat.video_note.poster": {
       "text": "Обкладинка відеоповідомлення",
+      "status": "machine"
+    },
+    "chat.video_note.sound_on": {
+      "text": "Увімкнути звук",
       "status": "machine"
     },
     "chat.video_note.tap_mute": {
@@ -4170,6 +4178,10 @@
       "text": "Lakko не може використовувати камеру. Дозвольте доступ до камери в налаштуваннях і спробуйте ще раз.",
       "status": "machine"
     },
+    "devices.scan.error.camera_denied_browser": {
+      "text": "Lakko не може використовувати камеру. Дозвольте доступ до камери в налаштуваннях сайту в браузері й спробуйте знову.",
+      "status": "machine"
+    },
     "devices.scan.error.camera_failed": {
       "text": "Не вдалося увімкнути камеру. Спробуйте ще раз.",
       "status": "machine"
@@ -4848,6 +4860,18 @@
     },
     "invite.uses.up_to": {
       "text": "{count, plural, one {до # використання} few {до # використань} many {до # використань} other {до # використання}}",
+      "status": "machine"
+    },
+    "ios.permission.camera": {
+      "text": "Lakko використовує камеру, щоб сканувати QR-коди пристроїв, які ви хочете прив'язати до облікового запису, передавати відео у дзвінках і записувати відеоповідомлення, які ви вирішили надіслати. Усе, що знімає камера, шифрується наскрізним шифруванням на вашому пристрої перед надсиланням.",
+      "status": "machine"
+    },
+    "ios.permission.microphone": {
+      "text": "Lakko використовує мікрофон для дзвінків із наскрізним шифруванням і для запису голосових та відеоповідомлень, які ви вирішили надіслати. Мікрофон увімкнено лише під час дзвінка або запису повідомлення, і все, що він записує, шифрується на вашому пристрої перед надсиланням.",
+      "status": "machine"
+    },
+    "ios.permission.photo_library_add": {
+      "text": "Lakko зберігає фото й відео у вашу медіатеку, лише коли ви натискаєте «Зберегти».",
       "status": "machine"
     },
     "language.name.ar": {
@@ -5920,6 +5944,10 @@
     },
     "settings.passkeys.name.placeholder": {
       "text": "Назвіть ключ доступу (напр., MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder_device": {
+      "text": "Назва ключа доступу (наприклад, робочий ноутбук)",
       "status": "machine"
     },
     "settings.passkeys.remove.body": {

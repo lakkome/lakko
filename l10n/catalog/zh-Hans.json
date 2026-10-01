@@ -2543,7 +2543,7 @@
       "status": "machine"
     },
     "chat.photo.load_failed_retry": {
-      "text": "无法加载照片，轻点重试",
+      "text": "无法加载照片。请重试。",
       "status": "machine"
     },
     "chat.photo.loading": {
@@ -2702,6 +2702,10 @@
       "text": "未找到摄像头",
       "status": "machine"
     },
+    "chat.record.open_app_settings": {
+      "text": "打开应用设置",
+      "status": "machine"
+    },
     "chat.record.open_settings": {
       "text": "打开设置",
       "status": "machine"
@@ -2787,7 +2791,7 @@
       "status": "machine"
     },
     "chat.record.video_tooltip": {
-      "text": "录制视频消息：按住录制，轻点切换到语音",
+      "text": "视频消息：按住录制，点击切换为语音",
       "status": "machine"
     },
     "chat.record.voice": {
@@ -2795,7 +2799,7 @@
       "status": "machine"
     },
     "chat.record.voice_tooltip": {
-      "text": "录制语音消息：按住录制，轻点切换到视频",
+      "text": "语音消息：按住录制，点击切换为视频",
       "status": "machine"
     },
     "chat.refusal.add_not_admin": {
@@ -3095,7 +3099,7 @@
       "status": "machine"
     },
     "chat.video.load_failed_retry": {
-      "text": "无法加载视频，轻点重试",
+      "text": "无法加载视频。请重试。",
       "status": "machine"
     },
     "chat.video.loading": {
@@ -3132,6 +3136,10 @@
     },
     "chat.video_note.poster": {
       "text": "视频消息封面",
+      "status": "machine"
+    },
+    "chat.video_note.sound_on": {
+      "text": "打开声音",
       "status": "machine"
     },
     "chat.video_note.tap_mute": {
@@ -4170,6 +4178,10 @@
       "text": "Lakko 无法使用相机。请在“设置”中允许访问相机，然后重试。",
       "status": "machine"
     },
+    "devices.scan.error.camera_denied_browser": {
+      "text": "Lakko 无法使用摄像头。请在浏览器的网站设置中允许访问摄像头，然后重试。",
+      "status": "machine"
+    },
     "devices.scan.error.camera_failed": {
       "text": "相机无法启动。请重试。",
       "status": "machine"
@@ -4848,6 +4860,18 @@
     },
     "invite.uses.up_to": {
       "text": "{count, plural, other {最多 # 次}}",
+      "status": "machine"
+    },
+    "ios.permission.camera": {
+      "text": "Lakko 使用摄像头扫描你要关联到账户的设备上的二维码、在通话中传输视频，以及录制你选择发送的视频消息。摄像头捕获的所有内容在发送前都会在你的设备上进行端到端加密。",
+      "status": "machine"
+    },
+    "ios.permission.microphone": {
+      "text": "Lakko 使用麦克风进行端到端加密通话，以及录制你选择发送的语音和视频消息。麦克风只在通话中或录制消息时开启，它捕获的所有内容在发送前都会在你的设备上加密。",
+      "status": "machine"
+    },
+    "ios.permission.photo_library_add": {
+      "text": "只有在你选择“保存”时，Lakko 才会将照片和视频保存到你的图库。",
       "status": "machine"
     },
     "language.name.ar": {
@@ -5920,6 +5944,10 @@
     },
     "settings.passkeys.name.placeholder": {
       "text": "为此通行密钥命名（例如 MacBook Touch ID）",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder_device": {
+      "text": "为此通行密钥命名（例如：工作笔记本）",
       "status": "machine"
     },
     "settings.passkeys.remove.body": {

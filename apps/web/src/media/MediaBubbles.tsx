@@ -740,7 +740,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
             </Show>
           }
         >
-          <span class="lakko-vn-corner">{t("chat.video_note.tap_sound")}</span>
+          <span class="lakko-vn-corner">{t("chat.video_note.sound_on")}</span>
         </Show>
       </button>
       <Show when={status() === "error"}>

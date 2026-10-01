@@ -94,6 +94,17 @@ The auth-screen language button opens the same list as a sheet / dialog.
   is reflected in Lakko. iOS: the system per-app language (Settings >
   Lakko > Language) is also honoured; a choice made inside Lakko
   overrides it for Lakko only.
+- **iOS permission prompts are the exception.** The camera, microphone
+  and photo-library prompts are shown by iOS, not by Lakko, in the
+  language iOS uses for Lakko: Settings > Lakko > Language if set, else
+  the system language. A language chosen only inside Lakko does not reach
+  them; the prompt text itself is translated (ADR-0061).
+- **Platform words.** A string names the platform's own controls: on
+  iOS "Open Settings" and Touch ID / Face ID, on Android "Open app
+  settings" and fingerprint / face / screen lock, on the web the
+  browser's site settings, "click" for mouse-only hints, and no brand or
+  operating system in examples. A string shared by every platform says
+  neither tap nor click.
 
 ## 5. What gets translated and what never does
 

@@ -2543,7 +2543,7 @@
       "status": "machine"
     },
     "chat.photo.load_failed_retry": {
-      "text": "بارگیری عکس ممکن نشد، برای تلاش دوباره ضربه بزنید",
+      "text": "عکس بارگذاری نشد. دوباره امتحان کنید.",
       "status": "machine"
     },
     "chat.photo.loading": {
@@ -2702,6 +2702,10 @@
       "text": "دوربینی پیدا نشد",
       "status": "machine"
     },
+    "chat.record.open_app_settings": {
+      "text": "باز کردن تنظیمات برنامه",
+      "status": "machine"
+    },
     "chat.record.open_settings": {
       "text": "باز کردن تنظیمات",
       "status": "machine"
@@ -2787,7 +2791,7 @@
       "status": "machine"
     },
     "chat.record.video_tooltip": {
-      "text": "ضبط یادداشت ویدیویی: برای ضبط نگه دارید، برای رفتن به صدا ضربه بزنید",
+      "text": "پیام ویدیویی: برای ضبط نگه دارید، برای رفتن به پیام صوتی کلیک کنید",
       "status": "machine"
     },
     "chat.record.voice": {
@@ -2795,7 +2799,7 @@
       "status": "machine"
     },
     "chat.record.voice_tooltip": {
-      "text": "ضبط پیام صوتی: برای ضبط نگه دارید، برای رفتن به ویدیو ضربه بزنید",
+      "text": "پیام صوتی: برای ضبط نگه دارید، برای رفتن به پیام ویدیویی کلیک کنید",
       "status": "machine"
     },
     "chat.refusal.add_not_admin": {
@@ -3095,7 +3099,7 @@
       "status": "machine"
     },
     "chat.video.load_failed_retry": {
-      "text": "بارگیری ویدیو ممکن نشد، برای تلاش دوباره ضربه بزنید",
+      "text": "ویدیو بارگذاری نشد. دوباره امتحان کنید.",
       "status": "machine"
     },
     "chat.video.loading": {
@@ -3132,6 +3136,10 @@
     },
     "chat.video_note.poster": {
       "text": "تصویر پیش‌نمایش یادداشت ویدیویی",
+      "status": "machine"
+    },
+    "chat.video_note.sound_on": {
+      "text": "روشن کردن صدا",
       "status": "machine"
     },
     "chat.video_note.tap_mute": {
@@ -4170,6 +4178,10 @@
       "text": "Lakko نمی‌تواند از دوربین استفاده کند. در تنظیمات اجازه دسترسی به دوربین را بدهید و دوباره تلاش کنید.",
       "status": "machine"
     },
+    "devices.scan.error.camera_denied_browser": {
+      "text": "Lakko نمی‌تواند از دوربین استفاده کند. در تنظیمات سایت مرورگرتان دسترسی به دوربین را مجاز کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
     "devices.scan.error.camera_failed": {
       "text": "دوربین راه‌اندازی نشد. دوباره تلاش کنید.",
       "status": "machine"
@@ -4848,6 +4860,18 @@
     },
     "invite.uses.up_to": {
       "text": "{count, plural, one {حداکثر # بار} other {حداکثر # بار}}",
+      "status": "machine"
+    },
+    "ios.permission.camera": {
+      "text": "Lakko از دوربین برای اسکن کدهای QR دستگاه‌هایی که می‌خواهید به حسابتان پیوند دهید، ارسال ویدیو در تماس‌ها و ضبط پیام‌های ویدیویی‌ای که ارسالشان را انتخاب می‌کنید استفاده می‌کند. هر چه دوربین ضبط کند، پیش از ارسال روی دستگاه شما رمزگذاری سرتاسری می‌شود.",
+      "status": "machine"
+    },
+    "ios.permission.microphone": {
+      "text": "Lakko از میکروفون برای تماس‌های با رمزگذاری سرتاسری و ضبط پیام‌های صوتی و ویدیویی‌ای که ارسالشان را انتخاب می‌کنید استفاده می‌کند. میکروفون فقط هنگام تماس یا ضبط پیام روشن است و هر چه ضبط کند، پیش از ارسال روی دستگاه شما رمزگذاری می‌شود.",
+      "status": "machine"
+    },
+    "ios.permission.photo_library_add": {
+      "text": "Lakko عکس‌ها و ویدیوها را فقط وقتی «ذخیره» را انتخاب کنید در کتابخانه‌تان ذخیره می‌کند.",
       "status": "machine"
     },
     "language.name.ar": {
@@ -5920,6 +5944,10 @@
     },
     "settings.passkeys.name.placeholder": {
       "text": "برای این کلید عبور نام بگذارید (مثلاً MacBook Touch ID)",
+      "status": "machine"
+    },
+    "settings.passkeys.name.placeholder_device": {
+      "text": "برای این کلید عبور نام بگذارید (مثلاً لپ‌تاپ کاری)",
       "status": "machine"
     },
     "settings.passkeys.remove.body": {

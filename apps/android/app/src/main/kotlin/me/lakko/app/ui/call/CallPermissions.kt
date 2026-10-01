@@ -191,7 +191,7 @@ private fun CallPermissionDialogs(gate: CallPermissionGate, context: Context) {
                 TextButton(onClick = {
                     gate.denial = null
                     openAppSettings(context)
-                }) { Text(t("chat.record.open_settings")) }
+                }) { Text(t("chat.record.open_app_settings")) }
             },
             dismissButton = {
                 TextButton(onClick = { gate.denial = null }) { Text(t("common.not_now")) }
@@ -208,7 +208,7 @@ private fun CallPermissionDialogs(gate: CallPermissionGate, context: Context) {
                     TextButton(onClick = {
                         gate.denial = null
                         openAppSettings(context)
-                    }) { Text(t("chat.record.open_settings")) }
+                    }) { Text(t("chat.record.open_app_settings")) }
                     TextButton(onClick = {
                         gate.denial = null
                         denial.onAudioOnly()

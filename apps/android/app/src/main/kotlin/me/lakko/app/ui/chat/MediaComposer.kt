@@ -1268,7 +1268,7 @@ internal fun MediaDeniedCard(kind: CaptureKind, onDismiss: () -> Unit) {
                 TextButton(onClick = {
                     openAppSettings(context)
                     onDismiss()
-                }) { Text(t("chat.record.open_settings")) }
+                }) { Text(t("chat.record.open_app_settings")) }
             }
         }
     }

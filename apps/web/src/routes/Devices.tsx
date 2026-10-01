@@ -73,7 +73,7 @@ function cameraFailure(err: unknown): () => string {
   console.warn("[devices] camera failed", err);
   const name = err instanceof DOMException ? err.name : "";
   if (name === "NotAllowedError" || name === "SecurityError") {
-    return () => t("devices.scan.error.camera_denied");
+    return () => t("devices.scan.error.camera_denied_browser");
   }
   if (name === "NotFoundError" || name === "OverconstrainedError") {
     return () => t("devices.scan.error.no_camera");
