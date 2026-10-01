@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Unit tests for the per-channel publish-counter persistence
+ * Unit tests for the per-(account, channel) publish-counter persistence
  * (`publish-counter-store.ts`) — the store that keeps the channel-post
- * AEAD `(key, nonce)` unique across a page reload. Runs under the
+ * AEAD `(key, nonce)` unique across a page reload, and keeps one
+ * account's floor away from another account on the same browser. Runs under the
  * default vitest `node` environment (no `localStorage`); a minimal
  * in-memory shim is installed per test so the store's
  * `typeof localStorage` guard sees a real backend.
@@ -42,14 +43,17 @@ class MemoryStorage {
 beforeEach(() => {
   (globalThis as unknown as { localStorage: Storage }).localStorage =
     new MemoryStorage() as unknown as Storage;
+  bindContactsAccount(ACCOUNT_A);
 });
 
 afterEach(() => {
+  bindContactsAccount(null);
   delete (globalThis as unknown as { localStorage?: Storage }).localStorage;
 });
 
+import { bindContactsAccount } from "../contacts/local-store";
 import {
-  clearAllCounters,
+  clearPublishCountersForAccount,
   issueAndAdvance,
   loadAllCounters,
   loadCounter,
@@ -59,7 +63,12 @@ import {
 
 const CH = "00112233445566778899aabbccddeeff";
 const OTHER = "ffffffffffffffffffffffffffffffff";
-const KEY = "lakko.channels.publish-counter.v1." + CH;
+// Standard base64 account ids, as `AuthState` carries them (`+`, `/`, `=`
+// included on purpose: the row key must survive them).
+const ACCOUNT_A = "AAECAwQFBgcICQoLDA0ODw==";
+const ACCOUNT_B = "+/+/+/+/+/+/+/+/+/+/+w==";
+const KEY = `lakko.channels.publish-counter.v2.${ACCOUNT_A}.${CH}`;
+const RETIRED_KEY = "lakko.channels.publish-counter.v1." + CH;
 
 describe("publish-counter-store: persist / load", () => {
   it("returns null before anything is persisted", () => {
@@ -124,7 +133,7 @@ describe("publish-counter-store: loadAllCounters", () => {
 
   it("skips a corrupt prefixed entry instead of failing the whole load", () => {
     saveCounter(CH, 5n);
-    localStorage.setItem("lakko.channels.publish-counter.v1." + OTHER, "junk");
+    localStorage.setItem(`lakko.channels.publish-counter.v2.${ACCOUNT_A}.${OTHER}`, "junk");
     const all = loadAllCounters();
     expect(all.get(CH)).toBe(5n);
     expect(all.has(OTHER)).toBe(false);
@@ -212,14 +221,79 @@ describe("publish-counter-store: reload regression (the bug this closes)", () =>
   });
 });
 
-describe("publish-counter-store: clearAllCounters (full-wipe only)", () => {
-  it("removes only prefixed keys, leaving unrelated storage intact", () => {
-    saveCounter(CH, 3n);
-    saveCounter(OTHER, 9n);
-    localStorage.setItem("lakko.channels.subscriber-keys.v1", "[]");
-    clearAllCounters();
+describe("publish-counter-store: per account", () => {
+  it("files the row under the account and the channel", () => {
+    saveCounter(CH, 4n);
+    expect(localStorage.getItem(KEY)).toBe("4");
+  });
+
+  it("keeps two accounts' counters for one channel apart", () => {
+    saveCounter(CH, 7n, ACCOUNT_A);
+    saveCounter(CH, 3n, ACCOUNT_B);
+    expect(loadCounter(CH, ACCOUNT_A)).toBe(7n);
+    expect(loadCounter(CH, ACCOUNT_B)).toBe(3n);
+    expect(loadAllCounters(ACCOUNT_A).get(CH)).toBe(7n);
+    expect(loadAllCounters(ACCOUNT_B).get(CH)).toBe(3n);
+  });
+
+  it("account B never starts from account A's floor", () => {
+    let inMem: bigint | undefined;
+    for (let i = 0; i < 5; i += 1) inMem = issueAndAdvance(inMem, CH).advanced;
+    expect(loadCounter(CH)).toBe(5n);
+
+    bindContactsAccount(ACCOUNT_B);
     expect(loadCounter(CH)).toBeNull();
-    expect(loadCounter(OTHER)).toBeNull();
+    expect(loadAllCounters().size).toBe(0);
+    expect(seedCounter(undefined, CH)).toBe(0n);
+    const first = issueAndAdvance(undefined, CH);
+    expect(first.value).toBe(0n);
+    // A's floor is untouched by B's post.
+    expect(loadCounter(CH, ACCOUNT_A)).toBe(5n);
+  });
+
+  it("an id that prefixes another account's id never reads that account's rows", () => {
+    const shorter = "AAEC";
+    const longer = "AAECAw==";
+    saveCounter(CH, 9n, longer);
+    expect(loadAllCounters(shorter).size).toBe(0);
+    expect(loadCounter(CH, shorter)).toBeNull();
+  });
+
+  it("never reads the retired device-wide v1 row", () => {
+    localStorage.setItem(RETIRED_KEY, "99");
+    expect(loadCounter(CH)).toBeNull();
+    expect(loadAllCounters().size).toBe(0);
+    expect(issueAndAdvance(undefined, CH).value).toBe(0n);
+  });
+
+  it("with no account: nothing is read, a save is a no-op, nothing is issued", () => {
+    saveCounter(CH, 6n);
+    bindContactsAccount(null);
+    expect(loadCounter(CH)).toBeNull();
+    expect(loadAllCounters().size).toBe(0);
+    const before = (localStorage as unknown as MemoryStorage).length;
+    saveCounter(OTHER, 2n);
+    expect((localStorage as unknown as MemoryStorage).length).toBe(before);
+    expect(() => issueAndAdvance(undefined, CH)).toThrow();
+    // The account's floor did not move.
+    expect(loadCounter(CH, ACCOUNT_A)).toBe(6n);
+  });
+});
+
+describe("publish-counter-store: clearPublishCountersForAccount (Forget device / Delete account)", () => {
+  it("removes only the wiped account's counters and the retired rows", () => {
+    saveCounter(CH, 3n, ACCOUNT_A);
+    saveCounter(OTHER, 9n, ACCOUNT_A);
+    saveCounter(CH, 4n, ACCOUNT_B);
+    localStorage.setItem(RETIRED_KEY, "42");
+    localStorage.setItem("lakko.channels.subscriber-keys.v1", "[]");
+
+    clearPublishCountersForAccount(ACCOUNT_A);
+
+    expect(loadCounter(CH, ACCOUNT_A)).toBeNull();
+    expect(loadCounter(OTHER, ACCOUNT_A)).toBeNull();
+    expect(loadCounter(CH, ACCOUNT_B)).toBe(4n);
+    expect(localStorage.getItem(RETIRED_KEY)).toBeNull();
     expect(localStorage.getItem("lakko.channels.subscriber-keys.v1")).toBe("[]");
   });
 });

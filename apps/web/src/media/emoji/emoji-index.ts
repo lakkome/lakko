@@ -3,13 +3,14 @@
 
 /**
  * ADR-0047 §3 / UX spec §4 — the emoji picker's data model, search, the
- * per-device Recent row and skin-tone defaults, and the one-grapheme check a
- * reaction must pass before it is sent.
+ * Recent row and skin-tone defaults, and the one-grapheme check a reaction
+ * must pass before it is sent.
  *
  * The dataset is `emoji-data.json`, generated offline from pinned Unicode
  * sources by `scripts/gen-emoji-data.mjs` and bundled with the app: nothing
  * here touches the network.
  */
+import { boundContactsAccount } from "../../contacts/local-store";
 
 /** Row shape written by the generator: `[emoji, name, "kw|kw", group]`,
  *  optionally followed by the five single-tone variants. */
@@ -117,14 +118,26 @@ export function searchEmoji(
   return scored.slice(0, Math.max(0, limit)).map((s) => s.entry);
 }
 
-// ----- per-device preferences --------------------------------------------
+// ----- per-account preferences -------------------------------------------
+//
+// The Recent row and the skin-tone choices are the signed-in account's data
+// (2026-10-01), stored in `localStorage` under the account: the trailing
+// `owner` argument, otherwise the account bound through `bindContactsAccount`
+// (`contacts/local-store.ts`). With no account a read is empty and a write is
+// a no-op. Log out keeps them for the account's next sign-in; Forget device
+// and Delete account drop them ({@link clearEmojiPrefsForAccount}). They stay
+// on this browser only: nothing syncs them to the account's other devices.
 
 /** §4 — the Recent row holds up to this many. */
 export const MAX_RECENT = 24;
-export const RECENT_STORAGE_KEY = "lakko.emoji.recent";
-export const TONES_STORAGE_KEY = "lakko.emoji.tones";
+/** `<prefix><accountIdB64>` holds one account's Recent row. */
+export const RECENT_KEY_PREFIX = "lakko.emoji.recent:";
+/** `<prefix><accountIdB64>` holds one account's tone choices. */
+export const TONES_KEY_PREFIX = "lakko.emoji.tones:";
+/** The retired device-wide rows. Never read; dropped by Forget device. */
+export const RETIRED_EMOJI_KEYS = ["lakko.emoji.recent", "lakko.emoji.tones"] as const;
 
-export type KeyValueStore = Pick<Storage, "getItem" | "setItem">;
+export type KeyValueStore = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 function defaultStore(): KeyValueStore | null {
   try {
@@ -132,6 +145,11 @@ function defaultStore(): KeyValueStore | null {
   } catch {
     return null;
   }
+}
+
+function accountOf(owner: string | undefined): string | null {
+  const account = owner ?? boundContactsAccount();
+  return account === null || account.length === 0 ? null : account;
 }
 
 /** Move `emoji` to the front, de-duplicated, capped at `max`. */
@@ -143,10 +161,16 @@ export function pushRecent(
   return [emoji, ...list.filter((e) => e !== emoji)].slice(0, Math.max(0, max));
 }
 
-export function loadRecent(store: KeyValueStore | null = defaultStore()): string[] {
-  if (store === null) return [];
+/** The Recent row of `owner` (default: the signed-in account); empty with no
+ *  account. */
+export function loadRecent(
+  store: KeyValueStore | null = defaultStore(),
+  owner?: string,
+): string[] {
+  const account = accountOf(owner);
+  if (store === null || account === null) return [];
   try {
-    const parsed: unknown = JSON.parse(store.getItem(RECENT_STORAGE_KEY) ?? "[]");
+    const parsed: unknown = JSON.parse(store.getItem(RECENT_KEY_PREFIX + account) ?? "[]");
     if (!Array.isArray(parsed)) return [];
     return parsed
       .filter((e): e is string => typeof e === "string" && isSingleEmojiGrapheme(e))
@@ -156,22 +180,35 @@ export function loadRecent(store: KeyValueStore | null = defaultStore()): string
   }
 }
 
-export function saveRecent(list: readonly string[], store: KeyValueStore | null = defaultStore()): void {
-  if (store === null) return;
+/** Store the Recent row of `owner` (default: the signed-in account); a no-op
+ *  with no account. */
+export function saveRecent(
+  list: readonly string[],
+  store: KeyValueStore | null = defaultStore(),
+  owner?: string,
+): void {
+  const account = accountOf(owner);
+  if (store === null || account === null) return;
   try {
-    store.setItem(RECENT_STORAGE_KEY, JSON.stringify(list.slice(0, MAX_RECENT)));
+    store.setItem(RECENT_KEY_PREFIX + account, JSON.stringify(list.slice(0, MAX_RECENT)));
   } catch {
     // Storage full or blocked: the Recent row is a convenience.
   }
 }
 
-/** Base emoji → the tone variant chosen for it on this device. */
+/** Base emoji → the tone variant chosen for it by this account. */
 export type TonePrefs = Readonly<Record<string, string>>;
 
-export function loadTonePrefs(store: KeyValueStore | null = defaultStore()): TonePrefs {
-  if (store === null) return {};
+/** The tone choices of `owner` (default: the signed-in account); empty with
+ *  no account. */
+export function loadTonePrefs(
+  store: KeyValueStore | null = defaultStore(),
+  owner?: string,
+): TonePrefs {
+  const account = accountOf(owner);
+  if (store === null || account === null) return {};
   try {
-    const parsed: unknown = JSON.parse(store.getItem(TONES_STORAGE_KEY) ?? "{}");
+    const parsed: unknown = JSON.parse(store.getItem(TONES_KEY_PREFIX + account) ?? "{}");
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const out: Record<string, string> = {};
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
@@ -195,16 +232,36 @@ export function withTonePref(prefs: TonePrefs, entry: EmojiEntry, variant: strin
   return next;
 }
 
-export function saveTonePrefs(prefs: TonePrefs, store: KeyValueStore | null = defaultStore()): void {
-  if (store === null) return;
+/** Store the tone choices of `owner` (default: the signed-in account); a
+ *  no-op with no account. */
+export function saveTonePrefs(
+  prefs: TonePrefs,
+  store: KeyValueStore | null = defaultStore(),
+  owner?: string,
+): void {
+  const account = accountOf(owner);
+  if (store === null || account === null) return;
   try {
-    store.setItem(TONES_STORAGE_KEY, JSON.stringify(prefs));
+    store.setItem(TONES_KEY_PREFIX + account, JSON.stringify(prefs));
   } catch {
     // A convenience, as above.
   }
 }
 
-/** What the grid shows (and inserts) for `entry` on this device. */
+/** Drop `accountIdB64`'s Recent row and tone choices, and the retired
+ *  device-wide rows (Forget device, Delete account). Another account's rows
+ *  stay. */
+export function clearEmojiPrefsForAccount(
+  accountIdB64: string,
+  store: KeyValueStore | null = defaultStore(),
+): void {
+  if (store === null || accountIdB64.length === 0) return;
+  store.removeItem(RECENT_KEY_PREFIX + accountIdB64);
+  store.removeItem(TONES_KEY_PREFIX + accountIdB64);
+  for (const key of RETIRED_EMOJI_KEYS) store.removeItem(key);
+}
+
+/** What the grid shows (and inserts) for `entry` under `prefs`. */
 export function displayEmoji(entry: EmojiEntry, prefs: TonePrefs): string {
   const pref = prefs[entry.emoji];
   return pref !== undefined && (entry.tones ?? []).includes(pref) ? pref : entry.emoji;

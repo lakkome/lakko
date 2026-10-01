@@ -118,7 +118,10 @@ public final class AuthRepository: ObservableObject {
     /// Every change is mirrored into ``AmbientSessionToken`` (the bearer
     /// source a few repositories read) and into ``AnonTokenPool/shared``
     /// (ADR-0054 S3): the pool draws anonymous tokens with this session and
-    /// is cleared on logout and on an account switch. It also binds the
+    /// holds the bound account's only; logout and an account switch drop
+    /// them from memory and keep them stored for that account's next
+    /// sign-in (Forget device / Delete account delete them through
+    /// ``AccountLocalDataWipe``). It also binds the
     /// account the contact list and its identity pins are read for
     /// (``AcceptedContactsStore``, ``PeerPinStore``): no session, no contacts.
     @Published public private(set) var identitySecrets: IdentitySecrets? {
@@ -394,6 +397,8 @@ public final class AuthRepository: ObservableObject {
                 binder: authClientFactory()
             )
         } catch {
+            // The account never lands on this device: nothing it drew stays.
+            AnonTokenPool.shared.forget(accountKey: base64Encode(result.accountId))
             AnonTokenPool.shared.configure(
                 accountKey: identitySecrets.map { base64Encode($0.accountId) },
                 sessionToken: identitySecrets?.sessionToken)

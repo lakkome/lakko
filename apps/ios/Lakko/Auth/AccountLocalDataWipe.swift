@@ -21,11 +21,12 @@ import Security
 ///   * every device-wide key that holds this account's data: the retired v1
 ///     rows the per-account stores replaced, the unclaimed-founding marks of
 ///     the account's own journals, the selected folder tab, the add-device
-///     answer log, decrypted media in the temporary directory and the
-///     account export file.
+///     answer log, the old device-wide recent emoji and skin tones,
+///     decrypted media in the temporary directory and the account export
+///     file.
 ///
 /// What stays: other accounts' data, and genuine device settings (theme,
-/// media preferences, recent emoji, the anti-censorship switch, update-check
+/// media preferences, the anti-censorship switch, update-check
 /// bookkeeping, the KT-log root floor, the per-installation wrap keys and the
 /// push device pseudonym, which the push unsubscribe handles).
 ///
@@ -124,12 +125,10 @@ enum AccountLocalDataWipe {
             InviteLinkSecretStore.shared.clear(accountIdB64: accountIdB64)
         }
         step("anon-tokens") {
-            // An empty save deletes the `(account, context)` item; tokens of
-            // any other account stay.
-            let tokens = KeychainAnonTokenStore()
-            for context in AnonTokenContext.allCases {
-                tokens.save(accountKey: accountIdB64, context: context, tokens: [])
-            }
+            // This account's stored tokens; any other account's stay. The
+            // pool stops writing for this account too, so the token the
+            // session's push unregister spends cannot put the rows back.
+            AnonTokenPool.shared.forget(accountKey: accountIdB64)
         }
         step("reach") { ReachCenter.shared.forget(accountIdB64: accountIdB64) }
 
@@ -218,6 +217,7 @@ enum AccountLocalDataWipe {
         step("call-peer-names") { CallPeerNameMirror.clear(accountIdB64: accountIdB64) }
         step("conversation-mutes") { ConversationMuteMirror.clear(accountIdB64: accountIdB64) }
         step("media-played") { MediaPrefs().clearPlayed(accountIdB64: accountIdB64) }
+        step("emoji-recents-and-tones") { EmojiIndex.clear(accountIdB64: accountIdB64, standard) }
 
         // 8. Device-wide keys and files holding this account's data.
         step("selected-folder-tab") { standard.removeObject(forKey: selectedFolderTabKey) }

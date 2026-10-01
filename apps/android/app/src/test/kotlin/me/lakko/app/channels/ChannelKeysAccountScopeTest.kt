@@ -17,7 +17,8 @@ import org.robolectric.RuntimeEnvironment
 
 /**
  * The channel subscriber keypairs, publisher signing seeds and publish
- * counters belong to the account (2026-09-30: they lived under one
+ * counters belong to the account; Forget device removes a counter only
+ * together with the signing seed it guards (2026-09-30: they lived under one
  * device-wide row each, so a second account on the same phone reused the
  * first account's subscriber keypair — the publisher would see one key for
  * two accounts — and could sign under its publisher seed). Robolectric for a
@@ -29,6 +30,12 @@ class ChannelKeysAccountScopeTest {
     private val a = "CgoKCgoKCgoKCgoKCgoKCg=="
     private val b = "CwsLCwsLCwsLCwsLCwsLCw=="
     private val chan = "12".repeat(16)
+
+    private fun counterRow(acct: String) =
+        ChannelsUiState.accountKey(ChannelsUiState.PUBLISHER_COUNTERS_PREF_KEY, acct)
+
+    private fun seedRow(acct: String) =
+        ChannelsUiState.accountKey(ChannelsUiState.PUBLISHER_SIGNING_SEEDS_PREF_KEY, acct)
 
     private fun state(): ChannelsUiState {
         val context = RuntimeEnvironment.getApplication()
@@ -78,6 +85,9 @@ class ChannelKeysAccountScopeTest {
         s.bind(b, ByteArray(64))
         s.setSubscriberKeys(chan, subscriberKeys)
         s.setKeys(chan, publisherKeys)
+        assertEquals(0uL, s.nextCounter(chan))
+        assertEquals(1uL, s.nextCounter(chan))
+        assertEquals(2uL, s.nextCounter(chan))
 
         s.unbind()
         assertTrue(s.subscriberKeysByChannel.value.isEmpty())
@@ -93,17 +103,61 @@ class ChannelKeysAccountScopeTest {
             logStore = null,
             accountIdB64 = a,
         )
+        val publisherPrefs = context.getSharedPreferences("test-publisher", Context.MODE_PRIVATE)
+        assertFalse(publisherPrefs.contains(counterRow(a)))
+        assertFalse(publisherPrefs.contains(seedRow(a)))
         val again = state()
         again.bind(a, ByteArray(64))
         assertFalse(again.subscriberKeysByChannel.value.containsKey(chan))
         assertNull(again.persistedPublisherSigningSeed(chan))
-        // The nonce floor is kept, like removeChannel keeps it.
-        assertEquals(1uL, again.nextCounter(chan))
+        // The counter went with the signing seed: the next post signs under a
+        // new sender key, so restarting from 0 cannot repeat a (key, nonce).
+        assertTrue(again.counterByChannel.value.isEmpty())
+        assertEquals(0uL, again.nextCounter(chan))
 
         val stillB = state()
         stillB.bind(b, ByteArray(64))
         assertTrue(stillB.subscriberKeysByChannel.value.containsKey(chan))
         assertArrayEquals(publisherKeys.signingKeySeed, stillB.persistedPublisherSigningSeed(chan))
+        assertEquals(3uL, stillB.nextCounter(chan))
+    }
+
+    @Test
+    fun `log out keeps the publish counter for the next sign-in`() = runBlocking {
+        val s = state()
+        s.bind(a, ByteArray(64))
+        s.setKeys(chan, publisherKeys)
+        assertEquals(0uL, s.nextCounter(chan))
+        assertEquals(1uL, s.nextCounter(chan))
+
+        s.unbind()
+        assertTrue(s.counterByChannel.value.isEmpty())
+        val context = RuntimeEnvironment.getApplication()
+        assertTrue(context.getSharedPreferences("test-publisher", Context.MODE_PRIVATE).contains(counterRow(a)))
+
+        s.bind(a, ByteArray(64))
+        assertArrayEquals(publisherKeys.signingKeySeed, s.persistedPublisherSigningSeed(chan))
+        assertEquals(2uL, s.nextCounter(chan))
+    }
+
+    @Test
+    fun `removing a channel keeps its publish counter`() = runBlocking {
+        val s = state()
+        s.bind(a, ByteArray(64))
+        s.addChannel(ChannelHandle(id = chan, localName = "News", localDescription = "", addedAtMs = 1uL))
+        s.setKeys(chan, publisherKeys)
+        assertEquals(0uL, s.nextCounter(chan))
+        assertEquals(1uL, s.nextCounter(chan))
+
+        s.removeChannel(chan)
+        assertEquals(2uL, s.counterByChannel.value[chan])
+
+        // At rest too: a relaunch restores the floor, and re-installing keys
+        // for the channel never rewinds it.
+        val relaunched = state()
+        relaunched.bind(a, ByteArray(64))
+        relaunched.setKeys(chan, publisherKeys)
+        assertEquals(2uL, relaunched.nextCounter(chan))
     }
 
     @Test

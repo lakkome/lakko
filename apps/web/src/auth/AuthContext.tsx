@@ -724,8 +724,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
    * Install (or drop) the session everywhere a request draws on it: the
    * discovery client's bearer header and the anonymous-token pool (ADR-0054
    * S3), which draws its tokens WITH this session and spends them without
-   * it. A different account clears the pool; `null` stops drawing but keeps
-   * what is held until the sign-out has spent its push unregister.
+   * it. A different account swaps the pool to that account's own tokens;
+   * `null` stops drawing but keeps what is held until the sign-out has spent
+   * its push unregister.
    */
   function installSessionToken(token: string | null): void {
     discovery.setSessionToken(token);
@@ -2397,7 +2398,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         attachSession: (token) => anonTokens.setSessionToken(token),
         dropSession: () => {
           installSessionToken(null);
-          anonTokens.clear();
+          // The account's tokens stay stored for its next sign-in.
+          anonTokens.unbind();
         },
         lookup: discoveryAccountLookup(discovery),
         land: landDeviceRestore,
@@ -3189,14 +3191,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // eslint-disable-next-line no-console
         console.warn("push unsubscribe (logout) failed", err);
       });
-      // ADR-0054 S3: the token pool is cleared on logout, once the push
-      // unregister above has spent its token (bounded, so a hung request
-      // cannot keep tokens alive). A sign-in in the meantime installs a new
-      // session, and `clearIfNoSession` then leaves that one alone.
+      // ADR-0054 S3: the token pool lets go of the account on logout, once
+      // the push unregister above has spent its token (bounded, so a hung
+      // request cannot keep the pool bound). Only memory is dropped: the
+      // account's stored tokens stay for its next sign-in (2026-10-01). A
+      // sign-in in the meantime installs a new session, and
+      // `unbindIfNoSession` then leaves that one alone.
       void Promise.race([
         unsubscribed,
         new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
-      ]).finally(() => anonTokens.clearIfNoSession());
+      ]).finally(() => anonTokens.unbindIfNoSession());
       chats.clear();
       setIdentityAlert(null);
       setState({
@@ -3280,8 +3284,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       // Phase 1.5b: drop the bearer token.
       installSessionToken(null);
-      // ADR-0054 S3: nothing of this account's token pool survives.
-      anonTokens.clear();
+      // ADR-0054 S3: nothing of this account's token pool survives. The wipe
+      // removed its stored rows; the push unregister above may have spent a
+      // token and written the rest back, so delete this account's rows again
+      // (after that write) and drop the pool's memory. Another account's
+      // stored tokens stay.
+      if (wipeTarget !== null) anonTokens.forgetAccount(wipeTarget);
+      else anonTokens.unbind();
       setState({ kind: "anon" });
     },
   };

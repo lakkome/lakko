@@ -42,6 +42,8 @@ import { selectTab } from "../chat/folders/selected-tab";
 import { observeMembers } from "../profile/membership-baseline";
 import { recordProfileRequest } from "../profile/profile-request";
 import { recordGrantSignature } from "../profile/grant-signatures";
+import { saveRecent, saveTonePrefs } from "../media/emoji/emoji-index";
+import { saveCounter } from "../channels/publish-counter-store";
 
 // Two accounts. A's bytes give `+` and `/` in standard base64, so its
 // base64url form differs and both forms are searched for.
@@ -163,7 +165,10 @@ function seedAccount(acct: string, acctUrl: string): void {
   writeKnockCursor(G, 7, acct);
   saveKnownGroupIds([G], acct);
   put(`lakko.channels.rotation-state.v2.${acct}.c0ffee`, "{}");
+  saveCounter("c0ffee", 42n, acct);
   put(`lakko/publisher-group-unclaimed/v2/${acct}/c0ffee`, "1");
+  saveRecent(["\u{1F600}"], local, acct);
+  saveTonePrefs({ "\u{1F44B}": "\u{1F44B}\u{1F3FF}" }, local, acct);
   session.setItem(`lakko:group-calls:${acct}:${G}`, "[]");
 }
 
@@ -172,11 +177,8 @@ function seedDeviceSettings(): void {
   local.setItem("lakko.theme", "dark");
   local.setItem("lakko.transparency.last-seen-root.v1", "{\"size\":3}");
   local.setItem("lakko.push.device.v1", "cHNldWRv");
-  local.setItem("lakko.channels.publish-counter.v1.c0ffee", "42");
   local.setItem("lakko.composer.recordMode", "voice");
   local.setItem("lakko.media.autoplayVideoNotes", "1");
-  local.setItem("lakko.emoji.recent", "[]");
-  local.setItem("lakko.emoji.tones", "{}");
   local.setItem("lakko.gif.privacyNoteDismissed", "1");
 }
 
@@ -190,7 +192,10 @@ function seedRetired(acct: string): string[] {
     [`lakko.ds.knock-cursor.v1:${G}`, "3"],
     ["lakko.pairing.known-groups.v1", JSON.stringify([G])],
     ["lakko.channels.rotation-state.v1.c0ffee", "{}"],
+    ["lakko.channels.publish-counter.v1.c0ffee", "42"],
     ["lakko/publisher-group-unclaimed/v1/c0ffee", "1"],
+    ["lakko.emoji.recent", JSON.stringify(["\u{1F600}"])],
+    ["lakko.emoji.tones", "{}"],
   ];
   for (const [k, v] of rows) local.setItem(k, v);
   return rows.map(([k]) => k);
@@ -254,11 +259,8 @@ describe("wipeAccountLocalData", () => {
       "lakko.theme",
       "lakko.transparency.last-seen-root.v1",
       "lakko.push.device.v1",
-      "lakko.channels.publish-counter.v1.c0ffee",
       "lakko.composer.recordMode",
       "lakko.media.autoplayVideoNotes",
-      "lakko.emoji.recent",
-      "lakko.emoji.tones",
       "lakko.gif.privacyNoteDismissed",
     ]) {
       expect(local.getItem(k), k).not.toBeNull();
@@ -304,7 +306,16 @@ describe("wipeAccountLocalData", () => {
       expect(/^[\x20-\x7e]*$/.test(line), line).toBe(true);
       expect(namesA(line), line).toBe(false);
     }
-    const localLeft = local.entries().filter(([k, v]) => namesA(`${k} ${v}`));
+    // The one exception: the channel publish counter goes only after the
+    // channel log holding the signing seeds it guards is deleted, so with
+    // that delete failed it stays (a counter removed beside a surviving
+    // seed could rewind under it).
+    expect(report.failed).toContain("channel-log");
+    const counterRow = `lakko.channels.publish-counter.v2.${A}.c0ffee`;
+    expect(local.getItem(counterRow)).toBe("42");
+    const localLeft = local
+      .entries()
+      .filter(([k, v]) => k !== counterRow && namesA(`${k} ${v}`));
     expect(localLeft).toEqual([]);
     expect(session.entries().filter(([k]) => namesA(k))).toEqual([]);
   });
@@ -398,8 +409,11 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.ds.knock-cursor.v2:": "account",
   "lakko.pairing.known-groups.v2.": "account",
   "lakko.channels.rotation-state.v2.": "account",
+  "lakko.channels.publish-counter.v2.": "account",
   "lakko/publisher-group-unclaimed/v2/": "account",
   "lakko:group-calls:": "account",
+  "lakko.emoji.recent:": "account",
+  "lakko.emoji.tones:": "account",
   // retired device-wide rows
   "lakko.contacts.v1": "retired",
   "lakko.contacts.v2": "retired",
@@ -408,16 +422,16 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.ds.knock-cursor.v1:": "retired",
   "lakko.pairing.known-groups.v1": "retired",
   "lakko.channels.rotation-state.v1.": "retired",
+  "lakko.channels.publish-counter.v1.": "retired",
   "lakko/publisher-group-unclaimed/v1/": "retired",
+  "lakko.emoji.recent": "retired",
+  "lakko.emoji.tones": "retired",
   // device settings (see the module doc of wipe-account.ts)
   "lakko.theme": "device",
   "lakko.transparency.last-seen-root.v1": "device",
   "lakko.push.device.v1": "device",
-  "lakko.channels.publish-counter.v1.": "device",
   "lakko.composer.recordMode": "device",
   "lakko.media.autoplayVideoNotes": "device",
-  "lakko.emoji.recent": "device",
-  "lakko.emoji.tones": "device",
   // sessionStorage, tab-wide, holds no account id ("device" / "phrase")
   "lakko.restored-identity": "device",
   // not storage names

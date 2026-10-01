@@ -88,18 +88,22 @@ public class ChannelsUiState(
             "lakko.channels.publisher-signing-seeds.v1"
 
         /** Storage key for the per-channel publish **counter**
-         *  persistence. The AEAD key+nonce for each post is
+         *  persistence. The AEAD key and nonce for each post are
          *  HKDF-derived from `(seed, channel_id, epoch_id,
-         *  sender_pubkey, message_counter)` and the content
-         *  `seed` is STABLE across a relaunch (re-derived from
-         *  the persisted MLS PublisherGroup exporter). An
-         *  in-memory-only counter therefore restarts at 0 on
-         *  relaunch WITHIN the same epoch + seed and reuses the
-         *  same `(key, nonce)` on a new plaintext — catastrophic
-         *  ChaCha20 keystream reuse. Persisting the counter at
-         *  rest (alongside the signing seed) makes it
-         *  forever-monotone; `epoch_id` is in the HKDF, so no
-         *  per-epoch reset is needed. */
+         *  sender_pubkey)`, the nonce also from the message
+         *  counter, and both the content `seed` (re-derived from
+         *  the persisted MLS PublisherGroup exporter) and the
+         *  sender key (the persisted signing seed) are STABLE
+         *  across a relaunch. An in-memory-only counter therefore
+         *  restarts at 0 on relaunch WITHIN the same epoch + seed
+         *  + sender key and reuses the same `(key, nonce)` on a
+         *  new plaintext — catastrophic ChaCha20 keystream reuse.
+         *  Persisting the counter at rest, per account, beside the
+         *  signing seeds makes it monotone for as long as that
+         *  signing key exists; `epoch_id` is in the HKDF, so no
+         *  per-epoch reset is needed. The row is removed only
+         *  together with the account's signing seeds
+         *  ([deleteAccountRows]). */
         public const val PUBLISHER_COUNTERS_PREF_KEY: String =
             "lakko.channels.publisher-counters.v1"
 
@@ -115,19 +119,29 @@ public class ChannelsUiState(
             baseKey + ":" + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
 
         /**
-         * Forget device: delete [accountIdB64]'s persisted channel log (list,
-         * subscribed seeds, rotation state), subscriber keypairs and publisher
-         * signing seeds, and the retired device-wide rows of builds before
-         * 2026-09-30. Other accounts' rows stay. The one production caller is
+         * Forget device / Delete account: delete [accountIdB64]'s persisted
+         * channel log (list, subscribed seeds, rotation state), subscriber
+         * keypairs, publisher signing seeds and publish counters, and the
+         * retired device-wide rows of builds before 2026-09-30. Other
+         * accounts' rows stay. The one production caller is
          * [me.lakko.app.account.AccountLocalWipe]; the session state itself
          * is dropped by [unbind].
          *
-         * The account's publish counters are deliberately KEPT, as
-         * [removeChannel] keeps them: a counter is a forever-monotone nonce
-         * floor, not content or key material, and keeping it can never cause
-         * a `(key, nonce)` repeat, whereas deleting it is safe only as long as
-         * no restored PublisherGroup can bring the same seed back at the same
-         * epoch.
+         * Why the counter goes WITH the signing seeds, and only with them: a
+         * post's AEAD key and nonce both derive from
+         * `(seed, channel_id, epoch_id, sender_pubkey)` and the nonce also
+         * from the counter (`lakko-channels` `derive_key_and_nonce`). The
+         * sender key is random per device and channel
+         * (`SigningKey::generate`), never derived from the recovery phrase
+         * and never carried in a backup, a pairing bundle or DeviceGroup
+         * sync, so once its seed is deleted here it is unrecoverable: the
+         * next post on this channel signs under a NEW sender key, whose
+         * `(key, nonce)` space is disjoint, and a counter restarting from 0
+         * cannot collide. The one dangerous shape is a counter rewinding
+         * while the SAME signing seed is still stored, which is why
+         * [removeChannel] and [unbind] keep the counter, and why nothing may
+         * delete the counter row without deleting the account's signing
+         * seeds in the same edit.
          */
         public fun deleteAccountRows(
             prefs: SharedPreferences?,
@@ -142,6 +156,7 @@ public class ChannelsUiState(
                 ?.apply()
             publisherPrefs?.edit()
                 ?.remove(accountKey(PUBLISHER_SIGNING_SEEDS_PREF_KEY, accountIdB64))
+                ?.remove(accountKey(PUBLISHER_COUNTERS_PREF_KEY, accountIdB64))
                 ?.remove(PUBLISHER_SIGNING_SEEDS_PREF_KEY)
                 ?.remove(PUBLISHER_COUNTERS_PREF_KEY)
                 ?.apply()

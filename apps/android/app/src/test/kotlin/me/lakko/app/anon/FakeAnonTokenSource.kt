@@ -13,7 +13,7 @@ class FakeAnonTokenSource(
 ) : AnonTokenSource {
     val taken = mutableListOf<AnonTokenContext>()
     val detached = mutableListOf<Pair<AnonSession, AnonTokenContext>>()
-    var cleared = 0
+    var released = 0
     private var next = 1
 
     override suspend fun take(context: AnonTokenContext): PooledAnonToken {
@@ -28,7 +28,7 @@ class FakeAnonTokenSource(
         return PooledAnonToken(context, epoch = 1, headerValue = "tok-${next++}")
     }
 
-    override fun clear() {
-        cleared++
+    override fun releaseSession() {
+        released++
     }
 }

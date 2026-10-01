@@ -4,12 +4,18 @@
 /**
  * ADR-0054 S5 — the anonymous-token pool survives a relaunch: tokens are
  * written through to the store, loaded when a session is installed (dead
- * epochs dropped on load), and wiped wherever the pool clears. Batch sizes
- * follow how often each action happens.
+ * epochs dropped on load), kept per account (Log out and an account switch
+ * leave every account's rows; forgetting an account removes only its own).
+ * Batch sizes follow how often each action happens.
  */
 import { describe, expect, it } from "vitest";
 
-import { LOW_WATER, REFILL_BATCH, type AnonTokenContext } from "./anon-token-pool";
+import {
+  AnonTokenUnavailableError,
+  LOW_WATER,
+  REFILL_BATCH,
+  type AnonTokenContext,
+} from "./anon-token-pool";
 import { memoryAnonTokenStore } from "./anon-token-store";
 import { fakeTokenPool } from "./anon-token-test-doubles";
 
@@ -82,39 +88,99 @@ describe("the pool survives a relaunch", () => {
   });
 });
 
-describe("clearing wipes the store too", () => {
-  it("logout (clearIfNoSession after the sign-out) empties the store", async () => {
+describe("the stored tokens belong to the account", () => {
+  const OTHER = "QU5PVEhFUg";
+  const OTHER_SESSION = `v1.${OTHER}.0.tag`;
+  const rowsOf = (store: ReturnType<typeof memoryAnonTokenStore>, account: string): string[] =>
+    [...store.rows.keys()].filter((k) => k.startsWith(`${account}\u0000`));
+
+  it("two accounts' tokens coexist in the store", async () => {
     const store = memoryAnonTokenStore();
     const { pool } = fakeTokenPool({ store });
     await pool.take("discovery-lookup");
+    pool.setSessionToken(OTHER_SESSION);
+    await pool.take("push-register");
     await pool.whenPersisted();
-    expect(store.rows.size).toBe(1);
+    expect(rowsOf(store, ACCOUNT)).toEqual([`${ACCOUNT}\u0000discovery-lookup`]);
+    expect(rowsOf(store, OTHER)).toEqual([`${OTHER}\u0000push-register`]);
+  });
+
+  it("logout keeps the account's tokens, and its next sign-in loads them", async () => {
+    const store = memoryAnonTokenStore();
+    const { pool, issuer } = fakeTokenPool({ store });
+    expect((await pool.take("discovery-lookup")).headerValue).toBe("tok-1");
     pool.setSessionToken(null);
-    pool.clearIfNoSession();
+    pool.unbindIfNoSession();
+    expect(pool.size("discovery-lookup")).toBe(0);
     await pool.whenPersisted();
-    expect(store.rows.size).toBe(0);
-    // A relaunch after the logout has nothing to hand out.
-    const again = fakeTokenPool({ store, session: null });
-    await expect(again.pool.take("discovery-lookup")).rejects.toThrow();
+    expect(store.rows.get(`${ACCOUNT}\u0000discovery-lookup`)).toHaveLength(
+      REFILL_BATCH["discovery-lookup"] - 1,
+    );
+    // The same account signs in again, on this pool and after a relaunch.
+    pool.setSessionToken(`v1.${ACCOUNT}.1.tag`);
+    expect((await pool.take("discovery-lookup")).headerValue).toBe("tok-2");
+    await pool.whenPersisted();
+    const relaunch = fakeTokenPool({ store });
+    expect((await relaunch.pool.take("discovery-lookup")).headerValue).toBe("tok-3");
+    expect(issuances(issuer)).toHaveLength(1);
+    expect(issuances(relaunch.issuer)).toHaveLength(0);
   });
 
-  it("an account switch empties the store", async () => {
+  it("signing in as another account never yields the first account's tokens", async () => {
     const store = memoryAnonTokenStore();
-    const { pool } = fakeTokenPool({ store });
-    await pool.take("discovery-lookup");
+    const { pool, issuer } = fakeTokenPool({ store });
+    await pool.take("discovery-lookup"); // tok-1, tok-2.. tok-8 held for ACCOUNT
     await pool.whenPersisted();
-    pool.setSessionToken("v1.QU5PVEhFUg.0.tag");
-    await pool.whenPersisted();
-    expect([...store.rows.keys()].some((k) => k.startsWith(`${ACCOUNT}\u0000`))).toBe(false);
+    pool.setSessionToken(OTHER_SESSION);
+    await pool.ready();
+    expect(pool.size("discovery-lookup")).toBe(0);
+    const theirs = await pool.take("discovery-lookup");
+    // Drawn fresh for OTHER (the fake issuer numbers tokens per batch).
+    expect(issuances(issuer)).toHaveLength(2);
+    const ours = store.rows.get(`${ACCOUNT}\u0000discovery-lookup`)?.map((t) => t.headerValue) ?? [];
+    expect(ours).not.toContain(theirs.headerValue);
+    // ACCOUNT's rows are untouched by the switch.
+    expect(ours).toHaveLength(REFILL_BATCH["discovery-lookup"] - 1);
   });
 
-  it("a write queued before the clear does not resurrect the tokens", async () => {
+  it("a write queued before an account switch lands under its own account", async () => {
     const store = memoryAnonTokenStore();
     const { pool } = fakeTokenPool({ store });
-    await pool.take("invite-consume");
-    pool.clear(); // the take's write is still queued
+    await pool.take("invite-consume"); // its write is still queued
+    pool.setSessionToken(OTHER_SESSION);
     await pool.whenPersisted();
-    expect(store.rows.size).toBe(0);
+    expect(store.rows.get(`${ACCOUNT}\u0000invite-consume`)).toHaveLength(
+      REFILL_BATCH["invite-consume"] - 1,
+    );
+    expect(rowsOf(store, OTHER)).toEqual([]);
+  });
+
+  it("a take that started before an account switch fails instead of taking the new account's token", async () => {
+    const store = memoryAnonTokenStore();
+    await store.save(OTHER, "ds-knock", [{ epoch: String(EPOCH), headerValue: "theirs" }]);
+    const { pool, issuer } = fakeTokenPool({ store });
+    await pool.ready();
+    const pending = pool.take("ds-knock").catch((e: unknown) => e);
+    pool.setSessionToken(OTHER_SESSION);
+    const outcome = await pending;
+    expect(outcome).toBeInstanceOf(AnonTokenUnavailableError);
+    await pool.ready();
+    expect(pool.size("ds-knock")).toBe(1);
+    expect(issuances(issuer)).toHaveLength(0);
+  });
+
+  it("forgetAccount removes only that account's rows, after the writes queued before it", async () => {
+    const store = memoryAnonTokenStore();
+    await store.save(OTHER, "ds-knock", [{ epoch: String(EPOCH), headerValue: "theirs" }]);
+    const { pool } = fakeTokenPool({ store });
+    await pool.take("invite-consume"); // the take's write is still queued
+    // "QUNDT1VOVA" is base64url of the bytes "ACCOUNT"; the wipe names the
+    // account in standard base64.
+    pool.forgetAccount("QUNDT1VOVA==");
+    await pool.whenPersisted();
+    expect(rowsOf(store, ACCOUNT)).toEqual([]);
+    expect(store.rows.get(`${OTHER}\u0000ds-knock`)?.map((t) => t.headerValue)).toEqual(["theirs"]);
+    expect(pool.size("invite-consume")).toBe(0);
   });
 });
 

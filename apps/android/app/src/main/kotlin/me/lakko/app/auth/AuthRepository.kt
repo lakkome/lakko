@@ -247,8 +247,9 @@ public class AuthRepository(
         // ADR-0054 S3 - the anonymous-token pool draws its batches WITH this
         // session (the tokens it hands out carry nothing about the account).
         // Keyed on the account, so a switch never reuses another account's
-        // tokens; logout and forget-device clear it. S5: the pool persists
-        // under noBackupFilesDir between launches.
+        // tokens. S5: each account's pool persists under noBackupFilesDir
+        // between launches and across a logout (account data, 2026-10-01);
+        // the forget-device wipe removes that account's only.
         me.lakko.app.anon.AnonTokens.installStore(
             me.lakko.app.anon.FileAnonTokenStore.under(applicationContext.noBackupFilesDir),
         )
@@ -2578,7 +2579,9 @@ public class AuthRepository(
         // token, drawn with THIS session after the live one is gone.
         val departingSession = currentAnonSession()
         clearIdentitySecrets()
-        me.lakko.app.anon.AnonTokens.clear()
+        // The account's tokens stay on disk for its next sign-in; only the
+        // memory goes (the unregister draws its token from disk).
+        me.lakko.app.anon.AnonTokens.releaseSession()
         // ADR-0017: drop any parked fresh-device fail-safe context
         // (a NeedsRecoveryPhrase user who backed out via Sign out).
         clearPendingRecovery()
@@ -2619,7 +2622,9 @@ public class AuthRepository(
         // token, drawn with THIS session after the live one is gone.
         val departingSession = currentAnonSession()
         clearIdentitySecrets()
-        me.lakko.app.anon.AnonTokens.clear()
+        // The wipe above removed this account's tokens; this drops only what
+        // memory still holds (nothing on disk, no other account's tokens).
+        me.lakko.app.anon.AnonTokens.releaseSession()
         // ADR-0017: drop any parked fresh-device fail-safe context.
         clearPendingRecovery()
         mutableState.value = AuthState.Anon()

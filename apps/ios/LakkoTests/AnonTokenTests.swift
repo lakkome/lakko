@@ -324,8 +324,8 @@ final class InMemoryAnonTokenStore: AnonTokenStore, @unchecked Sendable {
         }
     }
 
-    func delete(exceptAccountKey: String?) {
-        lock.withLock { rows = rows.filter { $0.key == exceptAccountKey } }
+    func delete(accountKey: String) {
+        lock.withLock { rows[accountKey] = nil }
     }
 }
 
@@ -368,29 +368,95 @@ final class AnonTokenPersistenceTests: XCTestCase {
         XCTAssertEqual(pool.takeIfAvailable(.dsKnock)?.headerValue, "previous")
     }
 
-    func testLogoutAndAnAccountSwitchClearTheStore() async throws {
+    func testLogoutAndAnAccountSwitchKeepEveryAccountsTokens() async throws {
         let store = InMemoryAnonTokenStore()
-        let pool = AnonTokenPool(issuer: FakeIssuer(), store: store)
+        let issuer = FakeIssuer()
+        let pool = AnonTokenPool(issuer: issuer, store: store)
         pool.configure(accountKey: "A", sessionToken: "s1")
         _ = try await pool.take(.discoveryLookup)
-        XCTAssertNotNil(store.snapshot["A"])
+        let aStored = try XCTUnwrap(store.snapshot["A"]?[.discoveryLookup])
 
         pool.configure(accountKey: "B", sessionToken: "s2")
-        XCTAssertNil(store.snapshot["A"], "account switch")
-        _ = try await pool.take(.inviteConsume)
-        XCTAssertNotNil(store.snapshot["B"])
+        XCTAssertEqual(store.snapshot["A"]?[.discoveryLookup], aStored, "account switch keeps A's")
+        XCTAssertEqual(pool.count(.discoveryLookup), 0, "B never sees A's tokens")
+        let bToken = try await pool.take(.discoveryLookup)
+        XCTAssertFalse(aStored.map(\.headerValue).contains(bToken.headerValue))
+        XCTAssertEqual(issuer.calls.last?.sessionToken, "s2")
+        let bStored = try XCTUnwrap(store.snapshot["B"]?[.discoveryLookup])
 
         pool.clear()
-        XCTAssertTrue(store.snapshot.isEmpty, "logout")
+        XCTAssertEqual(pool.count(.discoveryLookup), 0, "logout drops memory")
+        XCTAssertEqual(store.snapshot["A"]?[.discoveryLookup], aStored, "logout keeps A's")
+        XCTAssertEqual(store.snapshot["B"]?[.discoveryLookup], bStored, "logout keeps B's")
+
+        // The next sign-in of A loads A's own, and nothing of B's.
+        let callsBefore = issuer.calls.count
+        pool.configure(accountKey: "A", sessionToken: "s3")
+        XCTAssertEqual(pool.count(.discoveryLookup), aStored.count)
+        let next = try await pool.take(.discoveryLookup)
+        XCTAssertEqual(next.headerValue, aStored.first?.headerValue)
+        XCTAssertFalse(bStored.map(\.headerValue).contains(next.headerValue))
+        XCTAssertEqual(issuer.calls.count, callsBefore, "no new issuance for A")
     }
 
-    func testBindingToAnAccountDeletesWhatAnotherAccountLeft() {
+    func testBindingToAnAccountLeavesAnotherAccountsTokensAndNeverYieldsThem() {
         let store = InMemoryAnonTokenStore()
         let epoch = AnonTokenPool(issuer: FakeIssuer()).currentEpoch()
         store.put("OTHER", .dsKnock, [AnonToken(context: "ds-knock", epoch: epoch, headerValue: "x")])
         let pool = AnonTokenPool(issuer: FakeIssuer(), store: store)
         pool.configure(accountKey: "A", sessionToken: "s1")
-        XCTAssertNil(store.snapshot["OTHER"])
+        XCTAssertNotNil(store.snapshot["OTHER"])
+        XCTAssertNil(pool.takeIfAvailable(.dsKnock))
+    }
+
+    func testForgetDeletesOnlyThatAccountAndNothingIsWrittenBack() async throws {
+        let store = InMemoryAnonTokenStore()
+        let pool = AnonTokenPool(issuer: FakeIssuer(), store: store)
+        pool.configure(accountKey: "B", sessionToken: "s0")
+        _ = try await pool.take(.dsKnock)
+        pool.configure(accountKey: "A", sessionToken: "s1")
+        _ = try await pool.take(.pushRegister)
+        let bStored = store.snapshot["B"]
+        XCTAssertNotNil(store.snapshot["A"])
+
+        // Forget device for A while A is still bound (the wipe runs before
+        // the session ends).
+        pool.forget(accountKey: "A")
+        XCTAssertNil(store.snapshot["A"])
+        // The session's push unregister still spends one from memory, and
+        // that spend does not put A's rows back.
+        XCTAssertNotNil(pool.takeIfAvailable(.pushRegister))
+        XCTAssertNil(store.snapshot["A"], "no write-back after forget")
+        pool.clear()
+        XCTAssertNil(store.snapshot["A"])
+        XCTAssertEqual(store.snapshot["B"], bStored, "another account's tokens stay")
+
+        // A new sign-in of A starts empty and is persisted again.
+        pool.configure(accountKey: "A", sessionToken: "s2")
+        XCTAssertEqual(pool.count(.pushRegister), 0)
+        _ = try await pool.take(.pushRegister)
+        XCTAssertNotNil(store.snapshot["A"])
+    }
+
+    func testAWaitingTakeIsNeverServedFromTheNextAccount() async throws {
+        let store = InMemoryAnonTokenStore()
+        let epoch = AnonTokenPool(issuer: FakeIssuer()).currentEpoch()
+        store.put("B", .dsKnock, [AnonToken(context: "ds-knock", epoch: epoch, headerValue: "b-token")])
+        let pool = AnonTokenPool(issuer: FakeIssuer(hang: true), store: store, waitSeconds: 0.5)
+        pool.configure(accountKey: "A", sessionToken: "s1")
+
+        let pending = Task { try await pool.take(.dsKnock) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        pool.configure(accountKey: "B", sessionToken: "s2")
+        XCTAssertEqual(pool.count(.dsKnock), 1)
+
+        do {
+            let token = try await pending.value
+            XCTFail("a request started under A got \(token.headerValue)")
+        } catch let error as AnonTokenUnavailable {
+            XCTAssertEqual(error, .noSession)
+        }
+        XCTAssertEqual(pool.count(.dsKnock), 1, "B's token is still B's")
     }
 
     func testALaunchThatLandsLoggedOutKeepsTheStore() {
@@ -407,7 +473,10 @@ final class AnonTokenPersistenceTests: XCTestCase {
     /// The Keychain store round-trips, is per (account, context), and deletes.
     func testTheKeychainStoreRoundTrips() {
         let store = KeychainAnonTokenStore(service: "me.lakko.anon-tokens.test.\(UUID().uuidString)")
-        defer { store.delete(exceptAccountKey: nil) }
+        defer {
+            store.delete(accountKey: "QQ+/==")
+            store.delete(accountKey: "other")
+        }
         let tokens = [
             AnonToken(context: "ds-knock", epoch: 9, headerValue: "h1"),
             AnonToken(context: "ds-knock", epoch: 10, headerValue: "h2"),
@@ -421,7 +490,7 @@ final class AnonTokenPersistenceTests: XCTestCase {
         store.save(accountKey: "QQ+/==", context: .dsKnock, tokens: [tokens[1]])
         XCTAssertEqual(store.load(accountKey: "QQ+/==")[.dsKnock], [tokens[1]])
 
-        store.delete(exceptAccountKey: "QQ+/==")
+        store.delete(accountKey: "other")
         XCTAssertTrue(store.load(accountKey: "other").isEmpty)
         XCTAssertEqual(store.load(accountKey: "QQ+/==")[.dsKnock], [tokens[1]])
 

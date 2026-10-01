@@ -9,11 +9,15 @@
 import { describe, expect, it } from "vitest";
 
 import raw from "./emoji-data.json";
+import { bindContactsAccount } from "../../contacts/local-store";
 import {
   MAX_EMOJI_BYTES,
   MAX_RECENT,
-  RECENT_STORAGE_KEY,
+  RECENT_KEY_PREFIX,
+  RETIRED_EMOJI_KEYS,
+  TONES_KEY_PREFIX,
   buildDataset,
+  clearEmojiPrefsForAccount,
   displayEmoji,
   isSingleEmojiGrapheme,
   loadRecent,
@@ -23,6 +27,7 @@ import {
   saveTonePrefs,
   searchEmoji,
   withTonePref,
+  type EmojiEntry,
   type KeyValueStore,
 } from "./emoji-index";
 
@@ -36,8 +41,14 @@ function memoryStore(): KeyValueStore & { data: Map<string, string> } {
     setItem: (k, v) => {
       data.set(k, v);
     },
+    removeItem: (k) => {
+      data.delete(k);
+    },
   };
 }
+
+const ACCOUNT_A = "QUFBQUFBQUFBQUFBQUFBQQ==";
+const ACCOUNT_B = "QkJCQkJCQkJCQkJCQkJCQg==";
 
 describe("dataset", () => {
   it("loads every group and resolves tone variants to their base", () => {
@@ -89,13 +100,74 @@ describe("recent", () => {
 
   it("round-trips through storage and ignores anything that is not an emoji", () => {
     const store = memoryStore();
-    saveRecent(["\u{1F600}", "\u{1F44D}"], store);
-    expect(loadRecent(store)).toEqual(["\u{1F600}", "\u{1F44D}"]);
-    store.data.set(RECENT_STORAGE_KEY, JSON.stringify(["ok?", "\u{1F600}", 5]));
-    expect(loadRecent(store)).toEqual(["\u{1F600}"]);
-    store.data.set(RECENT_STORAGE_KEY, "{not json");
+    saveRecent(["\u{1F600}", "\u{1F44D}"], store, ACCOUNT_A);
+    expect(loadRecent(store, ACCOUNT_A)).toEqual(["\u{1F600}", "\u{1F44D}"]);
+    store.data.set(RECENT_KEY_PREFIX + ACCOUNT_A, JSON.stringify(["ok?", "\u{1F600}", 5]));
+    expect(loadRecent(store, ACCOUNT_A)).toEqual(["\u{1F600}"]);
+    store.data.set(RECENT_KEY_PREFIX + ACCOUNT_A, "{not json");
+    expect(loadRecent(store, ACCOUNT_A)).toEqual([]);
+    expect(loadRecent(null, ACCOUNT_A)).toEqual([]);
+  });
+});
+
+describe("recents and tones belong to the account", () => {
+  const wave = (): EmojiEntry => dataset.byEmoji.get("\u{1F44B}")!;
+
+  it("two accounts keep separate recents and tones", () => {
+    const store = memoryStore();
+    const w = wave();
+    saveRecent(["\u{1F600}"], store, ACCOUNT_A);
+    saveRecent(["\u{1F44D}"], store, ACCOUNT_B);
+    saveTonePrefs(withTonePref({}, w, w.tones![0]!), store, ACCOUNT_A);
+    saveTonePrefs(withTonePref({}, w, w.tones![4]!), store, ACCOUNT_B);
+    expect(loadRecent(store, ACCOUNT_A)).toEqual(["\u{1F600}"]);
+    expect(loadRecent(store, ACCOUNT_B)).toEqual(["\u{1F44D}"]);
+    expect(displayEmoji(w, loadTonePrefs(store, ACCOUNT_A))).toBe(w.tones![0]);
+    expect(displayEmoji(w, loadTonePrefs(store, ACCOUNT_B))).toBe(w.tones![4]);
+  });
+
+  it("the default owner is the signed-in account", () => {
+    const store = memoryStore();
+    try {
+      bindContactsAccount(ACCOUNT_A);
+      saveRecent(["\u{1F600}"], store);
+      bindContactsAccount(ACCOUNT_B);
+      expect(loadRecent(store)).toEqual([]);
+      saveRecent(["\u{1F44D}"], store);
+      bindContactsAccount(ACCOUNT_A);
+      expect(loadRecent(store)).toEqual(["\u{1F600}"]);
+    } finally {
+      bindContactsAccount(null);
+    }
+  });
+
+  it("with no account a read is empty and a write is a no-op", () => {
+    const store = memoryStore();
+    bindContactsAccount(null);
+    // A row left under the retired device-wide key is never read.
+    store.data.set(RETIRED_EMOJI_KEYS[0], JSON.stringify(["\u{1F600}"]));
+    store.data.set(RETIRED_EMOJI_KEYS[1], JSON.stringify({ "\u{1F44B}": wave().tones![1] }));
     expect(loadRecent(store)).toEqual([]);
-    expect(loadRecent(null)).toEqual([]);
+    expect(loadTonePrefs(store)).toEqual({});
+    const before = new Map(store.data);
+    saveRecent(["\u{1F44D}"], store);
+    saveTonePrefs({ "\u{1F44B}": wave().tones![2]! }, store);
+    expect(store.data).toEqual(before);
+  });
+
+  it("the wipe removes only the wiped account's rows and the retired rows", () => {
+    const store = memoryStore();
+    saveRecent(["\u{1F600}"], store, ACCOUNT_A);
+    saveRecent(["\u{1F44D}"], store, ACCOUNT_B);
+    saveTonePrefs({ "\u{1F44B}": wave().tones![0]! }, store, ACCOUNT_A);
+    saveTonePrefs({ "\u{1F44B}": wave().tones![4]! }, store, ACCOUNT_B);
+    for (const key of RETIRED_EMOJI_KEYS) store.data.set(key, "[]");
+    clearEmojiPrefsForAccount(ACCOUNT_A, store);
+    expect(store.data.has(RECENT_KEY_PREFIX + ACCOUNT_A)).toBe(false);
+    expect(store.data.has(TONES_KEY_PREFIX + ACCOUNT_A)).toBe(false);
+    for (const key of RETIRED_EMOJI_KEYS) expect(store.data.has(key)).toBe(false);
+    expect(loadRecent(store, ACCOUNT_B)).toEqual(["\u{1F44D}"]);
+    expect(displayEmoji(wave(), loadTonePrefs(store, ACCOUNT_B))).toBe(wave().tones![4]);
   });
 });
 
@@ -106,8 +178,8 @@ describe("skin tones", () => {
     let prefs = withTonePref({}, wave, dark);
     expect(displayEmoji(wave, prefs)).toBe(dark);
     const store = memoryStore();
-    saveTonePrefs(prefs, store);
-    expect(displayEmoji(wave, loadTonePrefs(store))).toBe(dark);
+    saveTonePrefs(prefs, store, ACCOUNT_A);
+    expect(displayEmoji(wave, loadTonePrefs(store, ACCOUNT_A))).toBe(dark);
     prefs = withTonePref(prefs, wave, wave.emoji);
     expect(displayEmoji(wave, prefs)).toBe(wave.emoji);
   });

@@ -18,9 +18,9 @@ public protocol AnonTokenStore: AnyObject, Sendable {
     /// Replace what is stored for `(accountKey, context)` with `tokens`; an
     /// empty list removes the row.
     func save(accountKey: String, context: AnonTokenContext, tokens: [AnonToken])
-    /// Delete every stored token except those of `exceptAccountKey`; `nil`
-    /// deletes them all.
-    func delete(exceptAccountKey: String?)
+    /// Delete every token stored for `accountKey` (Forget device, Delete
+    /// account). Other accounts' tokens stay.
+    func delete(accountKey: String)
 }
 
 /// The production store: one Keychain item per (account, context).
@@ -104,15 +104,11 @@ public final class KeychainAnonTokenStore: AnonTokenStore, @unchecked Sendable {
         }
     }
 
-    public func delete(exceptAccountKey: String?) {
-        guard let keep = exceptAccountKey else {
-            let query: [CFString: Any] = [
-                kSecClass: kSecClassGenericPassword,
-                kSecAttrService: service,
-            ]
-            _ = SecItemDelete(query as CFDictionary)
-            return
+    public func delete(accountKey: String) {
+        for context in AnonTokenContext.allCases {
+            deleteItem(Self.itemAccount(accountKey, context))
         }
+        // Rows of a context this build no longer knows.
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
@@ -123,10 +119,10 @@ public final class KeychainAnonTokenStore: AnonTokenStore, @unchecked Sendable {
         guard SecItemCopyMatching(query as CFDictionary, &items) == errSecSuccess,
               let rows = items as? [[String: Any]]
         else { return }
-        let prefix = keep + "|"
+        let prefix = accountKey + "|"
         for row in rows {
             guard let account = row[kSecAttrAccount as String] as? String else { continue }
-            if !account.hasPrefix(prefix) { deleteItem(account) }
+            if account.hasPrefix(prefix) { deleteItem(account) }
         }
     }
 
