@@ -4,7 +4,7 @@
 import Foundation
 
 /// ADR-0047 §3 / UX spec §4 — the emoji picker's data model, search, the
-/// per-device Recent row and skin-tone defaults, and the one-grapheme check a
+/// per-account Recent row and skin-tone defaults, and the one-grapheme check a
 /// reaction must pass before it is sent. Mirror of
 /// `apps/web/src/media/emoji/emoji-index.ts`.
 ///
@@ -125,33 +125,67 @@ public enum EmojiIndex {
         return scored.prefix(max(0, limit)).map(\.entry)
     }
 
-    // MARK: - Per-device preferences
+    // MARK: - Per-account preferences
 
     /// §4 — the Recent row holds up to this many.
     public static let maxRecent = 24
+    /// The device-wide keys used before the Recent row and the tone choices
+    /// were per account (2026-10-01). Never read; removed by
+    /// ``clear(accountIdB64:_:)``.
     public static let recentKey = "lakko.emoji.recent"
     public static let tonesKey = "lakko.emoji.tones"
+
+    /// Where `accountIdB64`'s Recent row lives.
+    public static func recentKey(accountIdB64: String) -> String { recentKey + "." + accountIdB64 }
+
+    /// Where `accountIdB64`'s skin-tone choices live.
+    public static func tonesKey(accountIdB64: String) -> String { tonesKey + "." + accountIdB64 }
 
     /// Move `emoji` to the front, de-duplicated, capped at `max`.
     public static func pushRecent(_ list: [String], _ emoji: String, max: Int = maxRecent) -> [String] {
         Array(([emoji] + list.filter { $0 != emoji }).prefix(Swift.max(0, max)))
     }
 
-    public static func loadRecent(_ defaults: UserDefaults = .standard) -> [String] {
-        let stored = defaults.stringArray(forKey: recentKey) ?? []
+    /// The Recent row of `accountIdB64` (account data, maintainer rule
+    /// 2026-09-30): empty with no account.
+    public static func loadRecent(_ defaults: UserDefaults = .standard, accountIdB64: String?) -> [String] {
+        guard let accountIdB64 else { return [] }
+        let stored = defaults.stringArray(forKey: recentKey(accountIdB64: accountIdB64)) ?? []
         return Array(stored.filter(isSingleEmojiGrapheme).prefix(maxRecent))
     }
 
-    public static func saveRecent(_ list: [String], _ defaults: UserDefaults = .standard) {
-        defaults.set(Array(list.prefix(maxRecent)), forKey: recentKey)
+    /// Persist `accountIdB64`'s Recent row; a no-op with no account.
+    public static func saveRecent(
+        _ list: [String], _ defaults: UserDefaults = .standard, accountIdB64: String?
+    ) {
+        guard let accountIdB64 else { return }
+        defaults.set(Array(list.prefix(maxRecent)), forKey: recentKey(accountIdB64: accountIdB64))
     }
 
-    public static func loadTonePrefs(_ defaults: UserDefaults = .standard) -> [String: String] {
-        (defaults.dictionary(forKey: tonesKey) ?? [:]).compactMapValues { $0 as? String }
+    /// The skin-tone choices of `accountIdB64`: none with no account.
+    public static func loadTonePrefs(
+        _ defaults: UserDefaults = .standard, accountIdB64: String?
+    ) -> [String: String] {
+        guard let accountIdB64 else { return [:] }
+        return (defaults.dictionary(forKey: tonesKey(accountIdB64: accountIdB64)) ?? [:])
+            .compactMapValues { $0 as? String }
     }
 
-    public static func saveTonePrefs(_ prefs: [String: String], _ defaults: UserDefaults = .standard) {
-        defaults.set(prefs, forKey: tonesKey)
+    /// Persist `accountIdB64`'s skin-tone choices; a no-op with no account.
+    public static func saveTonePrefs(
+        _ prefs: [String: String], _ defaults: UserDefaults = .standard, accountIdB64: String?
+    ) {
+        guard let accountIdB64 else { return }
+        defaults.set(prefs, forKey: tonesKey(accountIdB64: accountIdB64))
+    }
+
+    /// Forget device / Delete account: drop `accountIdB64`'s Recent row and
+    /// tone choices, and the old device-wide ones. Other accounts' stay.
+    public static func clear(accountIdB64: String, _ defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: recentKey(accountIdB64: accountIdB64))
+        defaults.removeObject(forKey: tonesKey(accountIdB64: accountIdB64))
+        defaults.removeObject(forKey: recentKey)
+        defaults.removeObject(forKey: tonesKey)
     }
 
     /// Record `variant` as the default for `entry`. Choosing the base emoji
@@ -170,7 +204,7 @@ public enum EmojiIndex {
         return next
     }
 
-    /// What the grid shows (and inserts) for `entry` on this device.
+    /// What the grid shows (and inserts) for `entry` for this account.
     public static func displayEmoji(_ entry: EmojiEntry, prefs: [String: String]) -> String {
         if let pref = prefs[entry.emoji], (entry.tones ?? []).contains(pref) { return pref }
         return entry.emoji

@@ -19,7 +19,8 @@ import LakkoCore
 /// The walk finds anything keyed or valued by the account id. Three things it
 /// cannot see by name are asserted directly: the unclaimed-founding marks
 /// (keyed by journal id, derived from the account), and the device-wide
-/// folder tab, add-device answer log and temporary decrypted media.
+/// folder tab, add-device answer log, old recent emoji and tones and
+/// temporary decrypted media.
 @MainActor
 final class AccountLocalDataWipeTests: XCTestCase {
 
@@ -168,6 +169,9 @@ final class AccountLocalDataWipeTests: XCTestCase {
         let defaults = UserDefaults.standard
         defaults.set("00ff", forKey: AccountLocalDataWipe.selectedFolderTabKey)
         DeviceLinkAnswerLimit().record()
+        // The recent emoji and tones from before they were per account.
+        defaults.set(["\u{1F600}"], forKey: EmojiIndex.recentKey)
+        defaults.set(["\u{1F44B}": "\u{1F44B}\u{1F3FF}"], forKey: EmojiIndex.tonesKey)
         let fm = FileManager.default
         let chatMedia = MediaTempFiles.defaultParent.appendingPathComponent("wipe-test/blob/voice.m4a")
         let shared = fm.temporaryDirectory
@@ -185,6 +189,8 @@ final class AccountLocalDataWipeTests: XCTestCase {
         XCTAssertNil(defaults.object(forKey: AccountLocalDataWipe.selectedFolderTabKey))
         XCTAssertNil(defaults.object(forKey: DeviceLinkAnswerLimit.defaultKey))
         XCTAssertTrue(DeviceLinkAnswerLimit().canAnswer())
+        XCTAssertNil(defaults.object(forKey: EmojiIndex.recentKey))
+        XCTAssertNil(defaults.object(forKey: EmojiIndex.tonesKey))
         XCTAssertFalse(fm.fileExists(atPath: chatMedia.path))
         XCTAssertFalse(fm.fileExists(atPath: shared.path))
         XCTAssertFalse(fm.fileExists(atPath: export.path))
@@ -288,6 +294,8 @@ final class AccountLocalDataWipeTests: XCTestCase {
         StateBundle.saveKnownGroupIds(["abc"], accountIdB64: x)
         CoPublishedJournals(defaults: standard, accountIdB64: { x }).mark(journalIdHex: "ab")
         MediaPrefs(defaults: standard, accountIdB64: { x }).markPlayed("played")
+        EmojiIndex.saveRecent(["\u{1F600}"], standard, accountIdB64: x)
+        EmojiIndex.saveTonePrefs(["\u{1F44B}": "\u{1F44B}\u{1F3FF}"], standard, accountIdB64: x)
         ChannelRotationStateStore.save(
             accountIdB64: x, channelId: channelHex, state: channelRotationStateAfterRotation(nowMs: 1))
         PendingSyncTracker(accountIdB64: x).markFailed()

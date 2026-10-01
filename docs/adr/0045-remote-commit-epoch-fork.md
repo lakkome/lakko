@@ -2212,7 +2212,12 @@ The recon was honest about Option C's limits; B's deserve the same treatment.
    re-proposes.**~~ **Three things have changed under this item and they pull in
    different directions, so it is worth separating them:**
    - **Still unbuilt:** the UX spec §7 *superseded* case — a silent, automatic
-     re-request of a proposal the sweep dropped. No client has it.
+     re-request of a proposal the sweep dropped. No client has it. **Now required
+     (2026-10-01)** by [ADR-0050](0050-per-device-conversation-leaves.md) section
+     2.5a, under which a plain-member leader sweeps only device admissions and
+     every other pending proposal is dropped by its merge; the rules it is built
+     to (trigger on an observed commit, re-derive from intent, stop by state) are
+     recorded there.
    - **No longer silent (`46c7aa4`):** an author now learns that a request of theirs
      left the pending set without its effect landing — the `Not applied (n)` surface,
      with a user-driven repair. It is scoped to **adds**, and that is a rule rather

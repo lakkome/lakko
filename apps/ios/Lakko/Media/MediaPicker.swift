@@ -78,9 +78,26 @@ struct EmojiTab: View {
     let onPick: (String) -> Void
 
     private let dataset = EmojiDataset.bundled
+    /// The account the Recent row and the tone choices belong to, read when
+    /// the picker opens. Nothing is written once another account (or none) is
+    /// signed in.
+    private let accountIdB64: String?
     @State private var query = ""
-    @State private var recent: [String] = EmojiIndex.loadRecent()
-    @State private var tones: [String: String] = EmojiIndex.loadTonePrefs()
+    @State private var recent: [String]
+    @State private var tones: [String: String]
+
+    init(onPick: @escaping (String) -> Void) {
+        self.onPick = onPick
+        let account = AcceptedContactsStore.boundAccountIdB64
+        accountIdB64 = account
+        _recent = State(initialValue: EmojiIndex.loadRecent(accountIdB64: account))
+        _tones = State(initialValue: EmojiIndex.loadTonePrefs(accountIdB64: account))
+    }
+
+    /// `accountIdB64` while it is still the signed-in account.
+    private var writableAccount: String? {
+        AcceptedContactsStore.boundAccountIdB64 == accountIdB64 ? accountIdB64 : nil
+    }
 
     private static let groupIcons = [
         "face.smiling", "hand.raised", "leaf", "fork.knife", "car",
@@ -184,7 +201,7 @@ struct EmojiTab: View {
     private func pick(_ emoji: String) {
         guard EmojiIndex.isSingleEmojiGrapheme(emoji) else { return }
         recent = EmojiIndex.pushRecent(recent, emoji)
-        EmojiIndex.saveRecent(recent)
+        EmojiIndex.saveRecent(recent, accountIdB64: writableAccount)
         onPick(emoji)
     }
 
@@ -198,12 +215,12 @@ struct EmojiTab: View {
         .accessibilityLabel(entry.name)
         .contextMenu {
             // UX spec §4 — long-press shows the tone variants; the chosen one
-            // becomes this emoji's default on this device.
+            // becomes this emoji's default for this account.
             if let tones = entry.tones {
                 ForEach([entry.emoji] + tones, id: \.self) { variant in
                     Button(variant) {
                         self.tones = EmojiIndex.withTonePref(self.tones, entry: entry, variant: variant)
-                        EmojiIndex.saveTonePrefs(self.tones)
+                        EmojiIndex.saveTonePrefs(self.tones, accountIdB64: writableAccount)
                         pick(variant)
                     }
                 }

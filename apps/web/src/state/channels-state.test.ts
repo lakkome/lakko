@@ -178,3 +178,155 @@ describe("channels-state hydration", () => {
     expect(mod.channelsState.hydrated()).toBe(true);
   });
 });
+
+describe("channels-state publish counters are account data", () => {
+  const ACCOUNT_A = "AAECAwQFBgcICQoLDA0ODw==";
+  const ACCOUNT_B = "+/+/+/+/+/+/+/+/+/+/+w==";
+  const rowOf = (account: string): string =>
+    `lakko.channels.publish-counter.v2.${account}.${CH}`;
+  const KEYS = { seed: new Uint8Array(32).fill(3), signingKeySeed: new Uint8Array(32).fill(4) };
+
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  /** A fresh module graph, with `account` signed in and hydrated. */
+  async function signIn(
+    mod: typeof import("./channels-state"),
+    contacts: typeof import("../contacts/local-store"),
+    account: string,
+  ): Promise<void> {
+    contacts.bindContactsAccount(account);
+    await mod.hydrateChannelsState({
+      accountIdB64: account,
+      deviceKey: DEVICE_KEY,
+      identity: fakeIdentity() as never,
+    });
+  }
+
+  async function signOut(
+    mod: typeof import("./channels-state"),
+    contacts: typeof import("../contacts/local-store"),
+  ): Promise<void> {
+    await mod.clearChannelsSession();
+    contacts.bindContactsAccount(null);
+  }
+
+  it("two accounts keep separate counters, and B never starts from A's floor", async () => {
+    const storage = stubLocalStorage({ [rowOf(ACCOUNT_A)]: "5", [rowOf(ACCOUNT_B)]: "2" });
+    const mod = await import("./channels-state");
+    const contacts = await import("../contacts/local-store");
+
+    await signIn(mod, contacts, ACCOUNT_A);
+    expect(mod.channelsState.counterByChannel().get(CH)).toBe(5n);
+    mod.channelsActions.setKeys(CH, KEYS);
+    expect(mod.channelsActions.nextCounter(CH)).toBe(5n);
+
+    await signOut(mod, contacts);
+    expect(mod.channelsState.counterByChannel().size).toBe(0);
+
+    await signIn(mod, contacts, ACCOUNT_B);
+    expect(mod.channelsState.counterByChannel().get(CH)).toBe(2n);
+    mod.channelsActions.setKeys(CH, KEYS);
+    expect(mod.channelsActions.nextCounter(CH)).toBe(2n);
+
+    expect(storage.get(rowOf(ACCOUNT_A))).toBe("6");
+    expect(storage.get(rowOf(ACCOUNT_B))).toBe("3");
+  });
+
+  it("an account with no counters starts at 0 after another account posted", async () => {
+    stubLocalStorage({});
+    const mod = await import("./channels-state");
+    const contacts = await import("../contacts/local-store");
+
+    await signIn(mod, contacts, ACCOUNT_A);
+    mod.channelsActions.setKeys(CH, KEYS);
+    for (let i = 0; i < 4; i += 1) mod.channelsActions.nextCounter(CH);
+    await signOut(mod, contacts);
+
+    await signIn(mod, contacts, ACCOUNT_B);
+    expect(mod.channelsState.counterByChannel().size).toBe(0);
+    mod.channelsActions.setKeys(CH, KEYS);
+    expect(mod.channelsActions.nextCounter(CH)).toBe(0n);
+  });
+
+  it("Log out keeps the account's counter for its next sign-in", async () => {
+    const storage = stubLocalStorage({});
+    const mod = await import("./channels-state");
+    const contacts = await import("../contacts/local-store");
+
+    await signIn(mod, contacts, ACCOUNT_A);
+    mod.channelsActions.setKeys(CH, KEYS);
+    for (let i = 0; i < 3; i += 1) mod.channelsActions.nextCounter(CH);
+    await signOut(mod, contacts);
+    expect(storage.get(rowOf(ACCOUNT_A))).toBe("3");
+
+    await signIn(mod, contacts, ACCOUNT_A);
+    mod.channelsActions.setKeys(CH, KEYS);
+    expect(mod.channelsActions.nextCounter(CH)).toBe(3n);
+  });
+
+  it("un-follow keeps the persisted counter, and a re-follow resumes it", async () => {
+    const storage = stubLocalStorage({});
+    const mod = await import("./channels-state");
+    const contacts = await import("../contacts/local-store");
+
+    await signIn(mod, contacts, ACCOUNT_A);
+    mod.channelsActions.setKeys(CH, KEYS);
+    mod.channelsActions.nextCounter(CH);
+    mod.channelsActions.nextCounter(CH);
+    mod.channelsActions.removeChannel(CH);
+    expect(mod.channelsState.counterByChannel().has(CH)).toBe(false);
+    expect(storage.get(rowOf(ACCOUNT_A))).toBe("2");
+
+    mod.channelsActions.setKeys(CH, KEYS);
+    expect(mod.channelsActions.nextCounter(CH)).toBe(2n);
+  });
+
+  it("a hydration whose session ended loads no counters into the next session", async () => {
+    stubLocalStorage({ [rowOf(ACCOUNT_A)]: "5" });
+    const mod = await import("./channels-state");
+    const contacts = await import("../contacts/local-store");
+    contacts.bindContactsAccount(ACCOUNT_B);
+    await mod.hydrateChannelsState({
+      accountIdB64: ACCOUNT_A,
+      deviceKey: DEVICE_KEY,
+      identity: fakeIdentity() as never,
+      isCurrent: () => false,
+    });
+    expect(mod.channelsState.counterByChannel().size).toBe(0);
+    expect(mod.channelsState.channels()).toEqual([]);
+  });
+
+  it("the wipe removes only the wiped account's counters, after the channel log", async () => {
+    const storage = stubLocalStorage({
+      [rowOf(ACCOUNT_A)]: "5",
+      [rowOf(ACCOUNT_B)]: "2",
+      [`lakko.channels.publish-counter.v1.${CH}`]: "7",
+    });
+    const { FakeIndexedDb } = await import("../test/fake-storage");
+    vi.stubGlobal("indexedDB", new FakeIndexedDb());
+    const mod = await import("./channels-state");
+
+    await mod.wipeChannelsForAccount(ACCOUNT_A);
+
+    expect(storage.has(rowOf(ACCOUNT_A))).toBe(false);
+    expect(storage.has(`lakko.channels.publish-counter.v1.${CH}`)).toBe(false);
+    expect(storage.get(rowOf(ACCOUNT_B))).toBe("2");
+  });
+
+  it("the wipe keeps the counters when the channel log delete fails", async () => {
+    // No IndexedDB in node: the delete of the row holding the signing seeds
+    // rejects, so the counters that guard those seeds must stay.
+    const storage = stubLocalStorage({ [rowOf(ACCOUNT_A)]: "5" });
+    const mod = await import("./channels-state");
+
+    await expect(mod.wipeChannelsForAccount(ACCOUNT_A)).rejects.toBeDefined();
+    expect(storage.get(rowOf(ACCOUNT_A))).toBe("5");
+  });
+});

@@ -24,17 +24,14 @@
  *
  * Left on purpose, and why:
  *
- * - `lakko.channels.publish-counter.v1.<channelIdHex>`: keyed by channel,
- *   naming no account, and a publish counter must never rewind (a rewound
- *   counter under a seed recovered later reuses an AEAD nonce). A counter
- *   that is too high is always safe.
  * - `lakko.transparency.last-seen-root.v1`: the device's KT-log root floor.
  * - `lakko.push.device.v1`: the device push pseudonym; `unsubscribeFromPush`
  *   in `forgetDevice` handles it.
  * - `lakko-push-routing` / `wake_binding`: device-wide, released by
  *   `releaseWakeBinding` before this runs.
- * - theme, language, media and emoji preferences, the GIF privacy note:
- *   device settings.
+ * - theme, language and media preferences, the GIF privacy note: device
+ *   settings. (The emoji Recent row and tone choices are account data since
+ *   2026-10-01 and go with the `emoji-prefs` step.)
  * - the app-shell cache of the service worker: code, no account data.
  */
 import { base64Decode, base64UrlEncodeNoPad } from "./account-id";
@@ -89,12 +86,13 @@ import { deleteFloor } from "../backup/floor-store";
 import { clearAutoBackupState } from "../backup/auto-backup";
 import { clearGroupRoutingForAccount } from "../push/group-routing-store";
 import { deleteAnonTokensForAccount } from "../tokens/anon-token-store";
+import { clearEmojiPrefsForAccount } from "../media/emoji/emoji-index";
 
 /**
  * Retired device-wide `localStorage` rows that may still hold the wiped
  * account's data and that no per-account clear owns. (The retired rows of
- * the contacts, knock-cursor, known-groups, rotation-state and founding
- * stores are dropped by those stores' own clears above.)
+ * the contacts, knock-cursor, known-groups, rotation-state, founding and
+ * emoji-preference stores are dropped by those stores' own clears above.)
  */
 const RETIRED_DEVICE_WIDE_KEYS = [
   // ADR-0060 section 6: the device mailbox cursor, closed and no longer read.
@@ -146,6 +144,10 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "mls-snapshot", run: () => deleteMlsSnapshot(accountIdB64) },
     { name: "commit-outbox", run: () => deleteOutboxForAccount(accountIdB64) },
     { name: "message-log", run: () => deleteMessageLog(accountIdB64) },
+    // The channel log (it holds the publisher signing seeds) and then the
+    // account's channel publish counters, plus the retired device-wide
+    // counter rows: a counter goes only with the key it protects, so it is
+    // removed inside this step, after the log delete succeeded.
     { name: "channel-log", run: () => wipeChannelsForAccount(accountIdB64) },
     { name: "profiles", run: () => deleteProfileRow(accountIdB64) },
     { name: "group-names", run: () => deleteGroupNameRow(accountIdB64) },
@@ -199,6 +201,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "known-group-ids", run: () => clearKnownGroupIds(accountIdB64) },
     { name: "channel-rotation", run: () => clearRotationStatesForAccount(accountIdB64) },
     { name: "unconfirmed-foundings", run: () => clearUnconfirmedFoundingsForAccount(accountIdB64) },
+    { name: "emoji-prefs", run: () => clearEmojiPrefsForAccount(accountIdB64) },
     {
       name: "retired-device-wide",
       run: () => {

@@ -18,8 +18,15 @@ import java.util.concurrent.Executors
  *   * the composer's record mode, mic or camera (UX spec §1, "remembered per
  *     device");
  *   * "Autoplay video notes", default OFF (§3 — autoplay downloads media);
- *   * the GIF privacy note's "Got it" (§5, "remembered per device");
- *   * the emoji Recent row and per-emoji skin-tone defaults (§4).
+ *   * the GIF privacy note's "Got it" (§5, "remembered per device").
+ *
+ * The emoji Recent row and the per-emoji skin-tone defaults (§4) are account
+ * data (maintainer decision, 2026-10-01): they live in the same preferences
+ * file under keys that carry the signed-in account (the account bound in
+ * [me.lakko.app.contacts.AcceptedContactsStore], the binding the played marks
+ * below use). With no account bound both read empty and a write is a no-op.
+ * The device-wide `emoji.recent` / `emoji.tones` rows of builds before
+ * 2026-10-01 are never read; [forgetEmojiOnDevice] removes them.
  *
  * The local-only "played" marks (§8) are kept in a file under
  * `noBackupFilesDir` instead, so a cloud backup never carries them to another
@@ -56,16 +63,28 @@ public class MediaPrefs internal constructor(context: Context) {
             prefs.edit().putBoolean(KEY_GIF_NOTE, value).apply()
         }
 
+    /** The signed-in account's Recent row; empty with no account bound, and
+     *  a write with none is dropped. */
     public var recentEmoji: List<String>
-        get() = decodeRecent(prefs.getString(KEY_RECENT, null))
+        get() {
+            val account = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64 ?: return emptyList()
+            return decodeRecent(prefs.getString(recentKey(account), null))
+        }
         set(value) {
-            prefs.edit().putString(KEY_RECENT, encodeRecent(value)).apply()
+            val account = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64 ?: return
+            prefs.edit().putString(recentKey(account), encodeRecent(value)).apply()
         }
 
+    /** The signed-in account's skin-tone defaults; empty with no account
+     *  bound, and a write with none is dropped. */
     public var tonePrefs: TonePrefs
-        get() = decodeTonePrefs(prefs.getString(KEY_TONES, null))
+        get() {
+            val account = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64 ?: return emptyMap()
+            return decodeTonePrefs(prefs.getString(tonesKey(account), null))
+        }
         set(value) {
-            prefs.edit().putString(KEY_TONES, encodeTonePrefs(value)).apply()
+            val account = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64 ?: return
+            prefs.edit().putString(tonesKey(account), encodeTonePrefs(value)).apply()
         }
 
     /** The played sets loaded so far, per account; each seeded from disk on
@@ -155,8 +174,17 @@ public class MediaPrefs internal constructor(context: Context) {
         private const val KEY_MODE = "composer.recordMode"
         private const val KEY_AUTOPLAY = "media.autoplayVideoNotes"
         private const val KEY_GIF_NOTE = "gif.privacyNoteDismissed"
-        private const val KEY_RECENT = "emoji.recent"
-        private const val KEY_TONES = "emoji.tones"
+        /** The device-wide rows of builds before 2026-10-01, never read. */
+        private const val RETIRED_KEY_RECENT = "emoji.recent"
+        private const val RETIRED_KEY_TONES = "emoji.tones"
+
+        /** One account's Recent row: `emoji.recent:<account, standard base64>`. */
+        internal fun recentKey(accountIdB64: String): String =
+            "$RETIRED_KEY_RECENT:" + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+
+        /** One account's tone defaults: `emoji.tones:<account, standard base64>`. */
+        internal fun tonesKey(accountIdB64: String): String =
+            "$RETIRED_KEY_TONES:" + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
         private const val MODE_VOICE = "voice"
         private const val MODE_VIDEO = "video_note"
 
@@ -170,8 +198,8 @@ public class MediaPrefs internal constructor(context: Context) {
         /**
          * Forget device: drop [accountIdB64]'s played marks from the live
          * instance, if one was made, and from disk either way (with the
-         * retired device-wide file). The preferences file holds device
-         * settings only and stays. The one caller is
+         * retired device-wide file). The recent emoji and tones in the
+         * preferences file go through [forgetEmojiOnDevice]. The one caller is
          * [me.lakko.app.account.AccountLocalWipe].
          */
         public fun forgetAccountOnDevice(context: Context, accountIdB64: String) {
@@ -179,6 +207,21 @@ public class MediaPrefs internal constructor(context: Context) {
             val root = context.applicationContext.noBackupFilesDir
             File(File(root, PLAYED_DIR), playedFileName(accountIdB64)).delete()
             File(root, RETIRED_PLAYED_FILE).delete()
+        }
+
+        /**
+         * Forget device: drop [accountIdB64]'s recent emoji and tone defaults,
+         * and the retired device-wide rows (they may hold this account's
+         * choices). Other accounts' rows and the device settings in the same
+         * file stay. The one caller is [me.lakko.app.account.AccountLocalWipe].
+         */
+        public fun forgetEmojiOnDevice(context: Context, accountIdB64: String) {
+            context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .remove(recentKey(accountIdB64))
+                .remove(tonesKey(accountIdB64))
+                .remove(RETIRED_KEY_RECENT)
+                .remove(RETIRED_KEY_TONES)
+                .commit()
         }
     }
 }

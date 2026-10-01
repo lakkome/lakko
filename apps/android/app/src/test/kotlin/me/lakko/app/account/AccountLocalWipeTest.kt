@@ -6,10 +6,17 @@ package me.lakko.app.account
 import android.content.Context
 import java.io.File
 import java.util.Base64
+import kotlinx.coroutines.runBlocking
+import me.lakko.app.anon.AnonTokenContext
+import me.lakko.app.anon.FileAnonTokenStore
+import me.lakko.app.anon.PersistedAnonPool
+import me.lakko.app.anon.PooledAnonToken
 import me.lakko.app.auth.PersistedSession
 import me.lakko.app.auth.SessionStore
 import me.lakko.app.calls.GroupCallRecordRow
 import me.lakko.app.calls.SharedPreferencesGroupCallStore
+import me.lakko.app.channels.ChannelPublisherKeys
+import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.channels.CoPublishedJournals
 import me.lakko.app.chat.CommitOutboxStore
 import me.lakko.app.chat.ConversationKind
@@ -70,9 +77,13 @@ import org.robolectric.RuntimeEnvironment
  * Not reachable here: the stores behind `EncryptedSharedPreferences` (session
  * token, identity seeds, export key, recovery phrase, backup floor, push
  * routing secrets, journal ownership, reach, identity pins, invite-link
- * secrets, channel log + keys, call history) need the Android Keystore, which
- * Robolectric does not provide. Their steps are asserted to be the only ones
- * that fail, which also proves a failing store never stops the rest.
+ * secrets, channel log + subscriber keys, call history) need the Android
+ * Keystore, which Robolectric does not provide. Their steps are asserted to be
+ * the only ones that fail, which also proves a failing store never stops the
+ * rest. The one exception is the channel publisher store (signing seeds and
+ * publish counters): its step is built over plain preferences here
+ * ([AccountLocalWipe.channelPublisherKeysStep]) so the walk sees that the
+ * account's counter goes together with its signing seeds.
  */
 @RunWith(RobolectricTestRunner::class)
 class AccountLocalWipeTest {
@@ -106,7 +117,7 @@ class AccountLocalWipeTest {
         // The session is over before the wipe runs (MainActivity stops the
         // runtimes first).
         AcceptedContactsStore.unbind()
-        val failed = AccountLocalWipe.wipeAccountLocalData(context, a)
+        val failed = AccountLocalWipe.runSteps(context, a, stepsWithPlainChannelPublisherPrefs())
 
         // Exactly the Keystore-backed stores fail here, and their failure
         // stopped none of the others.
@@ -141,6 +152,7 @@ class AccountLocalWipeTest {
             assertFalse("retired $prefs/$key survived", context.getSharedPreferences(prefs, Context.MODE_PRIVATE).contains(key))
         }
         assertFalse("retired played file survived", File(context.noBackupFilesDir, "lakko-media-played.txt").exists())
+        assertFalse("retired token pool survived", File(context.noBackupFilesDir, "lakko-anon-tokens/pool.json").exists())
         // Plaintext caches go.
         for (dir in listOf("chat-media", "chat-media-outbox", "shared-attachments")) {
             assertFalse("cache $dir survived", File(context.cacheDir, dir).exists())
@@ -148,6 +160,26 @@ class AccountLocalWipeTest {
         // Genuine device settings stay.
         assertEquals("dark", context.getSharedPreferences("lakko-appearance", Context.MODE_PRIVATE).getString("theme", null))
         assertTrue(context.getSharedPreferences("lakko.notifications", Context.MODE_PRIVATE).getBoolean("asked", false))
+        assertEquals(
+            "video_note",
+            context.getSharedPreferences("lakko-media-prefs", Context.MODE_PRIVATE).getString("composer.recordMode", null),
+        )
+        // The other account's recent emoji and tokens stay readable.
+        AcceptedContactsStore.bind(rawB)
+        assertEquals(listOf("\uD83D\uDE00"), MediaPrefs(context).recentEmoji)
+        AcceptedContactsStore.unbind()
+        assertEquals(1, FileAnonTokenStore.under(context.noBackupFilesDir).load(b)!!.tokens.size)
+        assertEquals(null, FileAnonTokenStore.under(context.noBackupFilesDir).load(a))
+        // The other account's channel publisher key and its counter floor
+        // stay together; the wiped account's both went.
+        val publisherPrefs = context.getSharedPreferences(CHANNEL_PUBLISHER_PREFS, Context.MODE_PRIVATE)
+        for (row in listOf(ChannelsUiState.PUBLISHER_COUNTERS_PREF_KEY, ChannelsUiState.PUBLISHER_SIGNING_SEEDS_PREF_KEY)) {
+            assertTrue("$row of the other account", publisherPrefs.contains(ChannelsUiState.accountKey(row, b)))
+            assertFalse("$row of the wiped account", publisherPrefs.contains(ChannelsUiState.accountKey(row, a)))
+        }
+        val channelsB = ChannelsUiState(publisherPrefs = publisherPrefs)
+        runBlocking { channelsB.bind(b, ByteArray(64)) }
+        assertEquals(1uL, channelsB.nextCounter(CHANNEL))
     }
 
     @Test
@@ -186,6 +218,16 @@ class AccountLocalWipeTest {
     }
 
     // ---------------------------------------------------------------------
+
+    /** The production steps, with the channel publisher step opening plain
+     *  preferences instead of the Keystore-backed store. */
+    private fun stepsWithPlainChannelPublisherPrefs(): List<AccountLocalWipe.Step> {
+        val plain = AccountLocalWipe.channelPublisherKeysStep { ctx ->
+            ctx.getSharedPreferences(CHANNEL_PUBLISHER_PREFS, Context.MODE_PRIVATE)
+        }
+        check(AccountLocalWipe.steps.count { it.name == plain.name } == 1)
+        return AccountLocalWipe.steps.map { if (it.name == plain.name) plain else it }
+    }
 
     private fun seed(raw: ByteArray, acct: String, marker: String) {
         // Shared preferences, through each store's own write path.
@@ -226,7 +268,24 @@ class AccountLocalWipeTest {
         ConversationKindStore.set(context, group, ConversationKind.Group)
         GroupPresentationStore.markCreatedAsGroup(context, group)
         FolderTabPrefs.save(context, "ee".repeat(8))
+        MediaPrefs(context).apply {
+            recentEmoji = listOf("\uD83D\uDE00")
+            tonePrefs = mapOf("\uD83D\uDC4D" to "\uD83D\uDC4D\uD83C\uDFFD")
+        }
         AcceptedContactsStore.unbind()
+        // A channel this account publishes to: its signing seed and the
+        // publish counter guarding it (one post sent).
+        ChannelsUiState(
+            publisherPrefs = context.getSharedPreferences(CHANNEL_PUBLISHER_PREFS, Context.MODE_PRIVATE),
+        ).apply {
+            runBlocking { bind(acct, ByteArray(64)) }
+            setKeys(CHANNEL, ChannelPublisherKeys(seed = ByteArray(32) { 3 }, signingKeySeed = ByteArray(32) { 4 }))
+            nextCounter(CHANNEL)
+        }
+        // The account's anonymous-token pool (account data since 2026-10-01).
+        FileAnonTokenStore.under(context.noBackupFilesDir).save(
+            PersistedAnonPool(acct, listOf(PooledAnonToken(AnonTokenContext.DS_KNOCK, 1, "tok-$marker"))),
+        )
 
         // Files: the Keystore-wrapped envelopes are opaque bytes on disk, so
         // raw files at the stores' paths stand in for them.
@@ -258,7 +317,8 @@ class AccountLocalWipeTest {
             context.getSharedPreferences(prefs, Context.MODE_PRIVATE).edit().putString(key, "retired").commit()
         }
         File(context.noBackupFilesDir, "lakko-media-played.txt").writeText("voice-0")
-        // The one token pool, filled by the session that is ending (A).
+        // The retired device-wide token pool of builds before 2026-10-01,
+        // last filled by A.
         File(context.noBackupFilesDir, "lakko-anon-tokens/pool.json").apply { parentFile?.mkdirs() }
             .writeText("""{"v":1,"owner":"$a","tokens":[]}""")
         PushWakeBindingStore(context).bind(ByteArray(32) { 0x0A }, a)
@@ -269,6 +329,8 @@ class AccountLocalWipeTest {
         // Genuine device settings.
         context.getSharedPreferences("lakko-appearance", Context.MODE_PRIVATE).edit().putString("theme", "dark").commit()
         context.getSharedPreferences("lakko.notifications", Context.MODE_PRIVATE).edit().putBoolean("asked", true).commit()
+        context.getSharedPreferences("lakko-media-prefs", Context.MODE_PRIVATE).edit()
+            .putString("composer.recordMode", "video_note").commit()
     }
 
     private fun request() = IncomingContactRequest(
@@ -325,10 +387,15 @@ class AccountLocalWipeTest {
     private fun allPrefsNames(): Set<String> {
         val onDisk = File(context.applicationInfo.dataDir, "shared_prefs").listFiles().orEmpty()
             .map { it.name.removeSuffix(".xml") }
-        return onDisk.toSet() + ALL_PLAIN_PREFS
+        return onDisk.toSet() + ALL_PLAIN_PREFS + CHANNEL_PUBLISHER_PREFS
     }
 
     private companion object {
+        /** Plain stand-in for the Keystore-backed channel publisher store. */
+        const val CHANNEL_PUBLISHER_PREFS = "test-channel-publisher-keys"
+
+        val CHANNEL = "12".repeat(16)
+
         /** Every plain `SharedPreferences` file the app writes (the inventory
          *  of 2026-09-30), device settings included. */
         val ALL_PLAIN_PREFS = setOf(
@@ -351,12 +418,13 @@ class AccountLocalWipeTest {
             "lakko-pins", "lakko-read-watermarks", "lakko-group-calls", "lakko-peer-profiles", "lakko-own-profile",
             "lakko-profile-requests", "lakko-accepted-contacts", "lakko-contacts-inbox", "me.lakko.ds.co-published",
             "me.lakko.push-routing.v2", "me.lakko.push-routing.v1", "lakko-device-sync-pending",
-            "lakko-conversation-kind", "lakko-group-presentation", "lakko-chat-folders",
+            "lakko-conversation-kind", "lakko-group-presentation", "lakko-chat-folders", "lakko-media-prefs",
+            CHANNEL_PUBLISHER_PREFS,
         )
 
-        /** Eight Keystore-envelope files, one played-marks file and one
-         *  commit-outbox entry per account. */
-        const val FILES_SEEDED_PER_ACCOUNT = 10
+        /** Eight Keystore-envelope files, one played-marks file, one
+         *  commit-outbox entry and one anonymous-token pool per account. */
+        const val FILES_SEEDED_PER_ACCOUNT = 11
 
         /** Device-wide rows of builds before 2026-09-30, never read. */
         val RETIRED_ROWS = listOf(
@@ -370,6 +438,8 @@ class AccountLocalWipeTest {
             "lakko-peer-profiles" to "profiles.v1",
             "lakko-peer-profiles" to "verifications.v1",
             "lakko-device-link" to "answered-at-v1",
+            "lakko-media-prefs" to "emoji.recent",
+            "lakko-media-prefs" to "emoji.tones",
         )
 
         /**
@@ -382,7 +452,7 @@ class AccountLocalWipeTest {
         val KEYSTORE_BACKED_STEPS = setOf(
             "push-routing-secrets", "session-token", "account-identity-seed", "device-identity-seed", "export-key",
             "recovery-phrase", "backup-floor", "journal-ownership", "reach", "identity-pins",
-            "channel-log-and-keys", "channel-publisher-keys",
+            "channel-log-and-keys",
         )
     }
 }

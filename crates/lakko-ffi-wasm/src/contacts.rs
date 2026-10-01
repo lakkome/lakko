@@ -2462,8 +2462,10 @@ impl BeaconObservation {
     ///
     /// `rank` is the committer rank the observer **re-derived** for this
     /// beacon's MLS-authenticated sender — `Group.committerRank(signatureKey)`
-    /// — or `undefined` when that sender is not a candidate at all (a plain
-    /// member, or a leaf that no longer resolves).
+    /// — or `undefined` when that sender is not a candidate at all (a
+    /// non-acting leaf of its account, or a leaf that no longer resolves).
+    /// Since ADR-0050 section 2.5a a plain member's acting leaf IS ranked,
+    /// after the admins, because it beacons while it holds a device admission.
     ///
     /// **Derive it at the moment the verdict is taken, never at the moment the
     /// beacon arrived.** A rank is a *position* in the role table's canonical

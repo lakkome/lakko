@@ -18,14 +18,23 @@ import LakkoCore
 /// * A token is live while `anonTokenIsLive(token.epoch, currentEpoch)`; the
 ///   current epoch is `anonTokenEpochAt(now, window)` corrected by the
 ///   issuer's `current_epoch` whenever it disagrees.
-/// * Cleared on logout and on an account switch (``configure(accountKey:sessionToken:)``).
+/// * Per account (maintainer rule, 2026-09-30): the in-memory tokens are the
+///   bound account's only. An account switch drops them from memory and
+///   loads the new account's own; logout drops them from memory only.
+///   (``configure(accountKey:sessionToken:)``)
 /// * Persisted per (account, context) between launches (ADR-0054 S5) through
 ///   an ``AnonTokenStore`` (the Keychain in production, this device only):
 ///   loaded when the pool is bound to an account, dead-epoch tokens dropped
-///   on load, every change written back, and the stored tokens deleted
-///   exactly when the in-memory ones are (logout, account switch, forget
-///   device). Tokens are anonymous bearer credentials: never logged, never
-///   backed up, never synced.
+///   on load, every change written back. Logout and an account switch keep
+///   every account's stored tokens for that account's next sign-in; only
+///   ``forget(accountKey:)`` (Forget device, Delete account, through
+///   ``AccountLocalDataWipe``) deletes them, and only that account's.
+///   Tokens are anonymous bearer credentials: never logged, never backed up,
+///   never synced.
+/// * A token drawn for one account is never handed to a request made under
+///   another: every refill and every waiting ``take(_:)`` is tied to the
+///   binding it started under, and is dropped or refused if the binding
+///   changed meanwhile.
 ///
 /// A lock-guarded class rather than an actor so ``takeIfAvailable(_:)`` and
 /// ``configure(accountKey:sessionToken:)`` are synchronous: logout takes the
@@ -49,6 +58,9 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
 
     private let lock = NSLock()
     private var accountKey: String?
+    /// Set by ``forget(accountKey:)`` for the bound account: nothing more is
+    /// written to the store until the next binding.
+    private var forgotten = false
     private var sessionToken: String?
     private var generation = 0
     private var stock: [AnonTokenContext: [AnonToken]] = [:]
@@ -77,17 +89,16 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
     // MARK: - Session
 
     /// Bind the pool to a session. A different `accountKey` (including `nil`,
-    /// logout) drops every token and every refill in flight, in memory and in
-    /// the store; the same account with a fresh session token keeps its
-    /// tokens. Binding to an account loads what the store kept for it (a
-    /// relaunch), minus the tokens whose epoch is no longer live, and deletes
-    /// anything stored for any other account.
+    /// logout) drops every in-memory token and every refill in flight; the
+    /// store keeps them for that account's next sign-in. The same account
+    /// with a fresh session token keeps its tokens. Binding to an account
+    /// loads what the store kept for it, minus the tokens whose epoch is no
+    /// longer live; other accounts' stored tokens are left alone.
     public func configure(accountKey: String?, sessionToken: String?) {
         lock.lock()
         defer { lock.unlock() }
         let token = (sessionToken?.isEmpty ?? true) ? nil : sessionToken
         if accountKey != self.accountKey || accountKey == nil {
-            let previous = self.accountKey
             generation += 1
             for task in refills.values { task.cancel() }
             refills = [:]
@@ -95,29 +106,43 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
             lastFailure = [:]
             quotaUntil = [:]
             epochCorrection = 0
+            forgotten = false
             self.accountKey = accountKey
-            if let store {
-                if let accountKey {
-                    store.delete(exceptAccountKey: accountKey)
-                    stock = store.load(accountKey: accountKey)
-                    for context in AnonTokenContext.allCases {
-                        let before = stock[context]?.count ?? 0
-                        pruneLocked(context)
-                        if (stock[context]?.count ?? 0) != before { persistLocked(context) }
-                    }
-                } else if previous != nil {
-                    // Logout / forget device: the stored tokens go with the
-                    // in-memory ones.
-                    store.delete(exceptAccountKey: nil)
+            if let store, let accountKey {
+                stock = store.load(accountKey: accountKey)
+                for context in AnonTokenContext.allCases {
+                    let before = stock[context]?.count ?? 0
+                    pruneLocked(context)
+                    if (stock[context]?.count ?? 0) != before { persistLocked(context) }
                 }
             }
         }
         self.sessionToken = accountKey == nil ? nil : token
     }
 
-    /// Drop everything (logout).
+    /// Unbind (logout): drop the in-memory tokens. The stored ones stay for
+    /// the account's next sign-in.
     public func clear() {
         configure(accountKey: nil, sessionToken: nil)
+    }
+
+    /// Forget device / Delete account: delete every token stored for
+    /// `accountKey`, and no other account's.
+    ///
+    /// When the pool is bound to `accountKey`, its in-memory tokens stay until
+    /// the session is unbound (the push unregister that ends the session
+    /// spends one), but nothing is written to the store for that binding
+    /// again, so the deleted rows never come back.
+    public func forget(accountKey: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        if self.accountKey == accountKey {
+            forgotten = true
+            for task in refills.values { task.cancel() }
+            refills = [:]
+            generation += 1
+        }
+        store?.delete(accountKey: accountKey)
     }
 
     /// How many live tokens `context` holds (tests, diagnostics).
@@ -139,16 +164,27 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
     }
 
     public func take(_ context: AnonTokenContext) async throws -> AnonToken {
-        if let token = popAndTopUp(context) { return token }
+        let binding = lock.withLock { generation }
+        if let token = popAndTopUp(context, binding: binding) { return token }
         let task = try startRefill(context)
         await Self.wait(for: task, atMost: waitSeconds)
-        if let token = popAndTopUp(context) { return token }
-        let failure = lock.withLock { lastFailure[context] }
+        if let token = popAndTopUp(context, binding: binding) { return token }
+        let failure: AnonTokenUnavailable? = lock.withLock {
+            // The account changed while this request waited: its tokens are
+            // another account's now, and so is any failure.
+            generation == binding ? lastFailure[context] : AnonTokenUnavailable.noSession
+        }
         throw failure ?? AnonTokenUnavailable.timedOut
     }
 
-    private func popAndTopUp(_ context: AnonTokenContext) -> AnonToken? {
+    /// A token for the binding `binding` names, or `nil` once the pool has
+    /// been rebound (another account's tokens are never handed out here).
+    private func popAndTopUp(_ context: AnonTokenContext, binding: Int) -> AnonToken? {
         lock.lock()
+        guard generation == binding else {
+            lock.unlock()
+            return nil
+        }
         let token = popLocked(context)
         let low = (stock[context]?.count ?? 0) < context.lowWater
         lock.unlock()
@@ -299,7 +335,7 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
 
     /// Write `context`'s tokens for the bound account to the store.
     private func persistLocked(_ context: AnonTokenContext) {
-        guard let store, let accountKey else { return }
+        guard let store, let accountKey, !forgotten else { return }
         store.save(accountKey: accountKey, context: context, tokens: stock[context] ?? [])
     }
 

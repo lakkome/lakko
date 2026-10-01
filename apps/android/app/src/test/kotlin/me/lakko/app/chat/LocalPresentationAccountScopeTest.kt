@@ -22,7 +22,7 @@ import org.robolectric.RuntimeEnvironment
 /**
  * The local presentation facts about an account's conversations — the
  * persisted Chats/Groups kind, the created-as-group flag, the selected folder
- * tab and the played marks — belong to the signed-in account (2026-09-30:
+ * tab, the played marks and the recent emoji and skin tones — belong to the signed-in account (2026-09-30:
  * they were keyed on the group, folder or blob id alone, so a second account
  * on the same phone that shared a conversation inherited them, and forget
  * device left them behind). Each follows the account bound in
@@ -123,6 +123,54 @@ class LocalPresentationAccountScopeTest {
         AcceptedContactsStore.bind(accountB)
         assertTrue(reopened.played.isPlayed("blob2"))
         assertFalse(reopened.played.isPlayed("blob3"))
+    }
+
+    @Test
+    fun `recent emoji and skin tones are per account`() {
+        val context = RuntimeEnvironment.getApplication()
+        val prefs = MediaPrefs(context)
+        val grin = "\uD83D\uDE00"
+        val thumbs = "\uD83D\uDC4D"
+        val thumbsMedium = "\uD83D\uDC4D\uD83C\uDFFD"
+        val heart = "\u2764\uFE0F"
+
+        // No account: empty, and a write is dropped.
+        assertEquals(emptyList<String>(), prefs.recentEmoji)
+        prefs.recentEmoji = listOf(heart)
+        prefs.tonePrefs = mapOf(thumbs to thumbsMedium)
+        assertEquals(emptyList<String>(), prefs.recentEmoji)
+        assertEquals(emptyMap<String, String>(), prefs.tonePrefs)
+
+        AcceptedContactsStore.bind(accountA)
+        assertEquals(emptyList<String>(), prefs.recentEmoji)
+        prefs.recentEmoji = listOf(grin)
+        prefs.tonePrefs = mapOf(thumbs to thumbsMedium)
+
+        AcceptedContactsStore.bind(accountB)
+        assertEquals(emptyList<String>(), prefs.recentEmoji)
+        assertEquals(emptyMap<String, String>(), prefs.tonePrefs)
+        prefs.recentEmoji = listOf(heart)
+
+        AcceptedContactsStore.unbind()
+        assertEquals(emptyList<String>(), prefs.recentEmoji)
+
+        AcceptedContactsStore.bind(accountA)
+        assertEquals(listOf(grin), MediaPrefs(context).recentEmoji)
+        assertEquals(mapOf(thumbs to thumbsMedium), prefs.tonePrefs)
+
+        // The device-wide rows of older builds are never read, and the wipe
+        // removes them with the wiped account's rows only.
+        context.getSharedPreferences("lakko-media-prefs", android.content.Context.MODE_PRIVATE).edit()
+            .putString("emoji.recent", "[\"$heart\"]").commit()
+        assertEquals(listOf(grin), prefs.recentEmoji)
+        MediaPrefs.forgetEmojiOnDevice(context, aB64)
+        assertEquals(emptyList<String>(), prefs.recentEmoji)
+        assertEquals(emptyMap<String, String>(), prefs.tonePrefs)
+        assertFalse(
+            context.getSharedPreferences("lakko-media-prefs", android.content.Context.MODE_PRIVATE).contains("emoji.recent"),
+        )
+        AcceptedContactsStore.bind(accountB)
+        assertEquals(listOf(heart), prefs.recentEmoji)
     }
 
     @Test

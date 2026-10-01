@@ -17,8 +17,8 @@ import java.io.File
  * store no longer reads is removed with it, since it may still hold this
  * account's data. Other accounts' rows stay, and so do genuine device
  * settings: the theme (`lakko-appearance`), the media preferences
- * (`lakko-media-prefs`: record mode, autoplay, the GIF note, recent emoji and
- * tones), the KT-log root floor (`lakko-transparency-root`), the
+ * (`lakko-media-prefs`: record mode, autoplay, the GIF note; the recent emoji
+ * and tone rows in the same file are per account and go), the KT-log root floor (`lakko-transparency-root`), the
  * notification-permission prompt marker, the anti-censorship and release
  * checker preferences, the push device pseudonym (`lakko-push`, handled by the
  * push unsubscribe) and the Keystore wrap keys shared by every account.
@@ -97,11 +97,12 @@ public object AccountLocalWipe {
             me.lakko.app.auth.DeviceIdentityStore.deleteDeviceIdentitySeed(ctx, acct)
         },
         Step("export-key") { ctx, acct -> me.lakko.app.auth.ExportKeyStore.deleteExportKey(ctx, acct) },
-        // One pool per device, owned by the session that filled it (the one
-        // ending now): the in-memory pool and its file both go.
-        Step("anon-token-pool") { ctx, _ ->
-            me.lakko.app.anon.AnonTokens.clear()
-            me.lakko.app.anon.FileAnonTokenStore.under(ctx.noBackupFilesDir).clear()
+        // One pool per account (ADR-0054, account data since 2026-10-01): this
+        // account's tokens, in memory and on disk, go; other accounts' stay.
+        // `under` also removes the retired device-wide `pool.json`.
+        Step("anon-token-pool") { ctx, acct ->
+            me.lakko.app.anon.AnonTokens.forgetAccount(acct)
+            me.lakko.app.anon.FileAnonTokenStore.under(ctx.noBackupFilesDir).delete(acct)
         },
 
         // ---- backup ---------------------------------------------------------
@@ -155,6 +156,7 @@ public object AccountLocalWipe {
         },
         Step("folder-tab") { ctx, acct -> me.lakko.app.ui.chat.FolderTabPrefs.deleteAccount(ctx, acct) },
         Step("played-media-marks") { ctx, acct -> me.lakko.app.media.MediaPrefs.forgetAccountOnDevice(ctx, acct) },
+        Step("recent-emoji") { ctx, acct -> me.lakko.app.media.MediaPrefs.forgetEmojiOnDevice(ctx, acct) },
 
         // ---- calls ----------------------------------------------------------
         Step("group-calls") { ctx, acct ->
@@ -200,14 +202,10 @@ public object AccountLocalWipe {
                 accountIdB64 = acct,
             )
         },
-        Step("channel-publisher-keys") { ctx, acct ->
-            me.lakko.app.channels.ChannelsUiState.deleteAccountRows(
-                prefs = null,
-                publisherPrefs = me.lakko.app.channels.ChannelPublisherKeyStore.encryptedPrefs(ctx),
-                logStore = null,
-                accountIdB64 = acct,
-            )
-        },
+        // The publisher signing seeds AND the publish counters: a counter goes
+        // only together with the signing key it guards (see
+        // ChannelsUiState.deleteAccountRows).
+        channelPublisherKeysStep { ctx -> me.lakko.app.channels.ChannelPublisherKeyStore.encryptedPrefs(ctx) },
 
         // ---- plaintext caches -----------------------------------------------
         // Device-wide directories, not keyed by account, that hold decrypted
@@ -229,6 +227,20 @@ public object AccountLocalWipe {
         // sidecar, or a store added later whose deletion was not listed above.
         Step("no-backup-files-sweep") { ctx, acct -> sweepFilesNamedBy(ctx.noBackupFilesDir, acct) },
     )
+
+    /** The `channel-publisher-keys` step over the preferences [publisherPrefs]
+     *  opens. Production passes the Keystore-backed store; the JVM tests,
+     *  which have no Android Keystore, pass plain preferences to observe
+     *  which rows the step removes. */
+    internal fun channelPublisherKeysStep(publisherPrefs: (Context) -> android.content.SharedPreferences): Step =
+        Step("channel-publisher-keys") { ctx, acct ->
+            me.lakko.app.channels.ChannelsUiState.deleteAccountRows(
+                prefs = null,
+                publisherPrefs = publisherPrefs(ctx),
+                logStore = null,
+                accountIdB64 = acct,
+            )
+        }
 
     /** The spellings of [accountIdB64] a file name can carry. */
     internal fun fileNameStems(accountIdB64: String): Set<String> {
