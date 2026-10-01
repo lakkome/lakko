@@ -2591,106 +2591,29 @@ public class AuthRepository(
     }
 
     /**
-     * Drop the in-memory session **and** the on-device material.
+     * Drop the in-memory session **and** every piece of the account's local
+     * data on this device.
      *
-     * Mirror of the web's `forgetDevice` semantics. Distinct from
-     * [logout]: this wipes both the [SessionStore] record and the
-     * Keystore-wrapped device key envelope. After `forgetDevice`
-     * the only way back into the account is via the recovery
-     * passphrase (1.15d6 `/recover` flow).
+     * Forget device and Delete account both end here (through the one
+     * orchestration in `MainActivity`, which stops the chat, contacts,
+     * channels and device-sync runtimes first so nothing writes a store back).
+     * The on-device wipe itself is [me.lakko.app.account.AccountLocalWipe]:
+     * the one list of per-account stores, push binding and notifications
+     * first. Distinct from [logout], which keeps all of it for the account's
+     * next sign-in. After this the only way back into the account is the
+     * recovery phrase or another device.
      */
     public fun forgetDevice() {
-        // ADR-0042, amended 2026-09-30 — first, as in [logout].
+        // ADR-0042, amended 2026-09-30 — first, as in [logout] (the wipe
+        // repeats it as its first step; idempotent).
         me.lakko.app.push.PushSignOut.clearFirst(applicationContext)
-        val cached = sessionStore.load()
-        if (cached != null) {
-            // The persisted bearer token goes too — a stale row would let a
-            // later cold start re-attach to this account's session.
-            deletePersistedSessionTokenBestEffort(cached.accountIdB64, "forgetDevice")
-            try {
-                deviceKeyStore.deleteDeviceKey(applicationContext, cached.accountIdB64)
-            } catch (_: Throwable) {
-                // Best-effort wipe; SessionStore.clear() below is
-                // still worth running.
-            }
-            // Phase 2a1c — drop the cached recovery phrase. The
-            // EncryptedSharedPreferences row is independent of
-            // the device key envelope above, so we wipe it
-            // explicitly. Best-effort.
-            try {
-                me.lakko.app.backup.PhraseStore.deletePhrase(
-                    applicationContext,
-                    cached.accountIdB64,
-                )
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // ADR-0037 (G-11) — drop the backup-head version floor. Its
-            // EncryptedSharedPreferences row is independent of the phrase / key
-            // above; a stale floor would confuse a future signup on the same
-            // accountId. Best-effort.
-            try {
-                me.lakko.app.backup.FloorStore.deleteFloor(
-                    applicationContext,
-                    cached.accountIdB64,
-                )
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // Phase 2a2c2 — drop the cached export key too. Same
-            // clean-wipe rationale as the phrase + device-key
-            // rows above.
-            try {
-                ExportKeyStore.deleteExportKey(
-                    applicationContext,
-                    cached.accountIdB64,
-                )
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // Phase 2a3b0 — drop the cached DeviceIdentity
-            // seed. The leaf in the user's DeviceGroup that
-            // this seed signed for is orphaned; sibling
-            // devices clean it up via 2a3c's remove-device
-            // flow.
-            try {
-                DeviceIdentityStore.deleteDeviceIdentitySeed(
-                    applicationContext,
-                    cached.accountIdB64,
-                )
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // ADR-0017 — drop the cached AccountIdentity (phrase)
-            // seed. It is the highest-sensitivity on-device secret;
-            // a stale row would confuse a future signup on the same
-            // accountId. After this wipe the only way back into the
-            // account is the recovery phrase (or a paired device).
-            try {
-                AccountIdentitySeedStore.deleteAccountIdentitySeed(
-                    applicationContext,
-                    cached.accountIdB64,
-                )
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // Phase 2a3b4 — drop the per-account DeviceGroup
-            // snapshot envelope. Without the snapshot the local
-            // OpenMLS provider has no DeviceGroup state to
-            // restore, mirroring the iOS / web `forgetDevice`
-            // surface. The Keystore wrap key under
-            // `DeviceGroupSnapshotStore.WRAP_KEY_ALIAS` is
-            // shared across accounts so we leave it intact;
-            // only the per-account envelope file is removed.
-            try {
-                me.lakko.app.devices.DeviceGroupSnapshotStore.deleteSnapshot(
-                    applicationContext,
-                    cached.accountIdB64,
-                )
-            } catch (_: Throwable) {
-                // best-effort
-            }
+        val accountIdB64 = identitySecrets.value?.let { base64Encode(it.accountId) }
+            ?: sessionStore.load()?.accountIdB64
+        if (accountIdB64 != null) {
+            me.lakko.app.account.AccountLocalWipe.wipeAccountLocalData(applicationContext, accountIdB64)
         }
+        // The signed-in pointer goes whatever account it names: this device is
+        // no longer signed in to anything.
         sessionStore.clear()
         // ADR-0054 - the push unregister below spends one push-register
         // token, drawn with THIS session after the live one is gone.

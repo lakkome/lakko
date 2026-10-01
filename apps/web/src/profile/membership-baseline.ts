@@ -118,3 +118,21 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   for (const k of a) if (!b.has(k)) return false;
   return true;
 }
+
+/** Drop every member-baseline row of one account (Forget device, Delete account).
+ *  Another account's rows on this browser are its own. Never throws. */
+export function clearMemberBaselinesForAccount(accountIdB64: string): void {
+  try {
+    const store = globalThis.localStorage;
+    if (store === undefined) return;
+    const prefix = `${STORE_PREFIX}.${accountIdB64}.`;
+    const victims: string[] = [];
+    for (let i = 0; i < store.length; i += 1) {
+      const k = store.key(i);
+      if (k !== null && k.startsWith(prefix)) victims.push(k);
+    }
+    for (const k of victims) store.removeItem(k);
+  } catch {
+    /* storage blocked: nothing was stored either */
+  }
+}

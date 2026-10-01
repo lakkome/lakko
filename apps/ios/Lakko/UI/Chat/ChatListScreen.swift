@@ -102,7 +102,9 @@ public struct ChatListScreen: View {
     // MARK: Chat folders (`docs/ux/chat-folders.md`)
 
     /// The tab last selected on THIS device (section 2.5): a folder id in hex,
-    /// or empty for All chats. Never synced.
+    /// or empty for All chats. Never synced. A folder id of the signed-in
+    /// account under a device-wide key, so Forget device and Delete account
+    /// remove it (``AccountLocalDataWipe/selectedFolderTabKey``).
     @AppStorage("lakko.chatFolders.selectedTab") private var storedTab: String = ""
     /// The editor sheet, when open.
     @State private var editor: FolderEditorRequest?

@@ -84,7 +84,15 @@ class ChannelKeysAccountScopeTest {
         s.bind(a, ByteArray(64))
         assertTrue(s.subscriberKeysByChannel.value.containsKey(chan))
 
-        s.forgetAccount()
+        // Forget device: the session ends, then the account's rows go.
+        s.unbind()
+        val context = RuntimeEnvironment.getApplication()
+        ChannelsUiState.deleteAccountRows(
+            prefs = context.getSharedPreferences("test-subscriber", Context.MODE_PRIVATE),
+            publisherPrefs = context.getSharedPreferences("test-publisher", Context.MODE_PRIVATE),
+            logStore = null,
+            accountIdB64 = a,
+        )
         val again = state()
         again.bind(a, ByteArray(64))
         assertFalse(again.subscriberKeysByChannel.value.containsKey(chan))

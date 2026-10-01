@@ -154,7 +154,6 @@ public fun rememberChannelsUiState(): ChannelsUiState {
             publisherPrefs = ChannelPublisherKeyStore.encryptedPrefs(context),
             logStore = SharedPreferencesChannelLogStore(subscriberPrefs),
             publisher = ChannelPublisherIdentity.onDevice(context),
-            coPublishedMarks = CoPublishedJournals.onDevice(context),
         )
     }
 }

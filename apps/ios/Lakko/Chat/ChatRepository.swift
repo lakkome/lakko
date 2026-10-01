@@ -14,7 +14,7 @@ import LakkoCore
 ///
 /// **Owns the canonical ``Identity``** for the current session —
 /// built once via ``bootstrap(secrets:)`` from the OPAQUE export
-/// key, kept alive until ``clear()`` / ``forgetDevice()``. Every
+/// key, kept alive until ``clear()``. Every
 /// chat operation threads this same handle through ``ChatClient``
 /// so MLS state mutations accumulate on a single OpenMLS provider.
 /// Throwaway `Identity.fromSeed` per op (the simpler shape that
@@ -51,9 +51,10 @@ import LakkoCore
 ///     drops the in-memory state but keeps the on-disk snapshot
 ///     envelope intact, so the next login on this device picks up
 ///     where we left off.
-///   * ``forgetDevice()`` is called by
-///     ``AuthRepository/forgetDevice()`` — additionally wipes the
-///     on-disk snapshot envelope.
+///   * Forget device and Delete account call ``clear()`` too, from
+///     ``AppServices/wipeAccountLocalData(accountIdB64:)``; the on-disk
+///     stores are then removed by ``AccountLocalDataWipe``, which holds the
+///     one list of them.
 @MainActor
 public final class ChatRepository: ObservableObject {
 
@@ -704,7 +705,7 @@ public final class ChatRepository: ObservableObject {
     }
 
     /// Clear the in-memory state for the current session. Keeps
-    /// the on-disk MLS snapshot intact — ``forgetDevice()`` is
+    /// the on-disk MLS snapshot intact — ``AccountLocalDataWipe`` is
     /// the full-wipe path.
     public func clear() {
         wipeInMemoryState()
@@ -712,62 +713,6 @@ public final class ChatRepository: ObservableObject {
         canonicalIdentity = nil
         accountIdentity = nil
         state = ChatRepositoryState()
-    }
-
-    /// Full wipe: clear in-memory state + delete the on-disk
-    /// snapshot envelope.
-    public func forgetDevice() {
-        let accountIdB64 = currentAccountIdB64
-        clear()
-        if let accountIdB64 = accountIdB64 {
-            snapshotStore.deleteSnapshot(accountIdB64: accountIdB64)
-            snapshotLeafKeyStore.clear(accountIdB64: accountIdB64)
-            knownGroupsStore.clear(accountIdB64: accountIdB64)
-            conversationKindStore.clear(accountIdB64: accountIdB64)
-            // ADR-0048 — when this device last asked each group for names.
-            profileRequestStore.clear(accountIdB64: accountIdB64)
-            // ADR-0024 — who read what, in which group.
-            readWatermarkStore.clear(accountIdB64: accountIdB64)
-            // Which calls were running in which chat.
-            groupCallStore.clear(accountIdB64: accountIdB64)
-            DeviceReadmissionMemory.clearForAccount(accountIdB64: accountIdB64)
-            // ADR-0040 (G-35) — drop any pending-commit outbox entries for the
-            // account alongside the snapshot they were paired with, so a wiped
-            // device leaves no stale commit to be swept later.
-            commitOutbox.deleteOutboxForAccount(accountIdB64: accountIdB64)
-            // ADR-0042 — wipe the push-routing secrets + the `push_gid`
-            // reverse index so a forgotten device leaves no routing residue.
-            pushRouting.clear(accountIdB64: accountIdB64)
-            // ADR-0057 — this account's registrar seeds + appointment ledger.
-            registrarSeeds.clear(accountIdB64: accountIdB64)
-            // ADR-0045 — a forgotten device must leave no beacon observations
-            // (they name who was running the app) and no pending-request
-            // timings behind for a later session to fold.
-            beaconStore.clearForAccount(accountIdB64: accountIdB64)
-            pendingRequestStore.clearForAccount(accountIdB64: accountIdB64)
-            unappliedRequestStore.clearForAccount(accountIdB64: accountIdB64)
-            // ADR-0045 UX §6.1.9 — and no memory of who owned which group. It
-            // is a public role-table key rather than a secret, but a forgotten
-            // device that kept it would greet the next session with a
-            // "{name} made you the owner" notice about a change it never saw.
-            lastObservedOwnerStore.clearForAccount(accountIdB64: accountIdB64)
-            // ADR-0045 UX §6.2.3 — and no memory of having asked to leave. It
-            // follows the same discipline as the three above, and it is the
-            // ONLY thing besides `Delete this chat` that discards the record:
-            // it is deliberately never pruned with the pending sweep, so an
-            // account reset has to take it explicitly.
-            leaveRequestStore.clearForAccount(accountIdB64: accountIdB64)
-            // ADR-0048 — the names of the people this account talked to, the
-            // username verdicts, and its own profile.
-            ProfileDirectory.shared.forget(accountIdB64: accountIdB64)
-            ReachCenter.shared.forget(accountIdB64: accountIdB64)
-            // Phase 2a3f1 — drop the plaintext message log too.
-            // The Keychain wrap key is shared across accounts
-            // (per-installation, not per-account) so we leave
-            // it intact; only the per-account envelope file
-            // gets removed.
-            messageLogStore.deleteLog(accountIdB64: accountIdB64)
-        }
     }
 
     private func wipeInMemoryState() {

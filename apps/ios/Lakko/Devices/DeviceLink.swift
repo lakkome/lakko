@@ -214,7 +214,11 @@ public final class DeviceLinkAnswerLimit {
     private let defaults: UserDefaults
     private let key: String
 
-    public init(defaults: UserDefaults = .standard, key: String = "me.lakko.device-link.answers.v1") {
+    /// Where the answers are kept: device-wide, and removed with the account
+    /// by ``AccountLocalDataWipe``.
+    public static let defaultKey = "me.lakko.device-link.answers.v1"
+
+    public init(defaults: UserDefaults = .standard, key: String = DeviceLinkAnswerLimit.defaultKey) {
         self.defaults = defaults
         self.key = key
     }

@@ -1239,93 +1239,26 @@ public final class AuthRepository: ObservableObject {
         Task { await PushSubscriber.shared.unsubscribe(prepaidToken: unregisterToken) }
     }
 
-    /// Drop the in-memory session **and** the on-device material.
+    /// The session half of Forget device and Delete account: end the session
+    /// on this device after ``AccountLocalDataWipe`` has removed the account's
+    /// local data. It removes no store itself — calling it alone would leave
+    /// every one behind, which is how Delete account used to leave the chats
+    /// on disk — so its only caller is
+    /// ``AppServices/wipeAccountLocalData(accountIdB64:)``.
     ///
-    /// Mirror of the web's `forgetDevice` semantics. Distinct from
-    /// ``logout()``: this wipes both the ``SessionStore`` record and
-    /// the Keychain-stored device key. After `forgetDevice` the
-    /// only way back into the account is via the recovery passphrase
-    /// (``recover(mnemonicPhrase:newPassword:)``).
-    public func forgetDevice() {
-        // ADR-0042 (amended 2026-09-30) — FIRST, as in ``logout()``.
+    /// Distinct from ``logout()``, which keeps the account's data for its
+    /// next sign-in: this drops the session record too, so the login screen
+    /// comes up with no cached username, and after it the only way back into
+    /// the account is the recovery phrase (or another device).
+    public func endSessionAfterLocalWipe() {
+        // ADR-0042 (amended 2026-09-30) — FIRST, as in ``logout()``. The wipe
+        // has already done both; repeated so the order holds on its own.
         pushBinding.clear()
         removeDeliveredNotifications()
         if let cached = sessionStore.load() {
-            DeviceKeyStore.deleteDeviceKey(accountIdB64: cached.accountIdB64)
-            // Phase 2a1c — drop the cached recovery phrase too.
-            // Best-effort; a Keychain failure here is logged and
-            // ignored (the row is unreadable without the device
-            // key just wiped, but the clean wipe matches
-            // `forgetDevice`'s "leave nothing per-account behind"
-            // contract).
-            try? PhraseStore().deletePhrase(accountIdB64: cached.accountIdB64)
-            // ADR-0037 (G-11) — drop the backup-head version floor. Same
-            // clean-wipe rationale; the next recover starts from the
-            // zero-anchor freshness-window path.
-            BackupFloorStore.deleteFloor(accountIdB64: cached.accountIdB64)
-            // `docs/ux/client-redesign.md` section 5.3 — the `/i/` link
-            // secrets this device kept for the account. Same clean-wipe
-            // rationale.
-            InviteLinkSecretStore.shared.clear(accountIdB64: cached.accountIdB64)
-            // Phase 2a2c2 — drop the cached export key too. Same
-            // clean-wipe rationale.
-            ExportKeyStore.deleteExportKey(accountIdB64: cached.accountIdB64)
-            // The persisted session token (relaunch restore input). Same
-            // clean-wipe rationale.
+            // The persisted session token (relaunch restore input), through
+            // the injected persistence so a test observes it.
             persistence.deleteSessionToken(accountIdB64: cached.accountIdB64)
-            // ADR-0017 — drop the cached AccountIdentity (phrase) seed.
-            // It is the highest-sensitivity on-device secret. After this
-            // wipe the only way back into the account is the recovery
-            // phrase (or a paired device). Same clean-wipe rationale as
-            // the export-key / device-key rows.
-            AccountIdentitySeedStore.deleteAccountIdentitySeed(
-                accountIdB64: cached.accountIdB64
-            )
-            // Phase 2a3b0 — drop the cached DeviceIdentity
-            // seed. The leaf in the user's DeviceGroup that
-            // this seed signed for is orphaned; sibling
-            // devices clean it up via 2a3c's remove-device
-            // flow.
-            DeviceIdentityStore.deleteDeviceIdentitySeed(
-                accountIdB64: cached.accountIdB64
-            )
-            // Phase 2a3b3 — drop the cached DeviceGroup MLS
-            // snapshot. Same clean-wipe rationale as the
-            // identity-seed / phrase / device-key rows above.
-            DeviceGroupSnapshotStore().deleteSnapshot(
-                accountIdB64: cached.accountIdB64
-            )
-            // ADR-0048 — the account's own profile, the profiles received from
-            // the people it talked to, and the username verdicts. Same
-            // clean-wipe rationale.
-            ProfileDirectory.shared.forget(accountIdB64: cached.accountIdB64)
-            ReachCenter.shared.forget(accountIdB64: cached.accountIdB64)
-            // The account's stranger-inbox cursor + pending requests. Same
-            // clean-wipe rationale; the live `ContactsRepository` unbinds on
-            // the `identitySecrets = nil` below, so nothing re-writes the row.
-            ContactsInboxStore().clear(accountIdB64: cached.accountIdB64)
-            // The account's accepted contacts (with their local renames) and
-            // the identity pins kept for them. Logout keeps both for the next
-            // sign-in of the same account; forget-device is what drops them.
-            AcceptedContactsStore.clear(accountIdB64: cached.accountIdB64)
-            PeerPinStore.clear(ownerAccountIdB64: cached.accountIdB64)
-            // The account's channels: the channel list + subscriber-side
-            // recovered content seeds, and (per account since 2026-09-30) the
-            // three channel Keychain blobs — publisher seeds, publish
-            // counters, subscriber keypairs — plus the rotation state. Same
-            // clean-wipe rationale; other accounts' channels stay.
-            ChannelsUiState.forget(accountIdB64: cached.accountIdB64)
-            // The rest of the account data that used to sit under device-wide
-            // keys and is now filed per account (2026-09-30): the lock-screen
-            // name mirror and the muted set the call paths read, the pairing's
-            // known group ids, the channels this account co-publishes, and the
-            // played marks on its voice messages and video notes. Logout keeps
-            // them; forget-device is what drops them.
-            CallPeerNameMirror.clear(accountIdB64: cached.accountIdB64)
-            ConversationMuteMirror.clear(accountIdB64: cached.accountIdB64)
-            StateBundle.clearKnownGroupIds(accountIdB64: cached.accountIdB64)
-            CoPublishedJournals.shared.clear(accountIdB64: cached.accountIdB64)
-            MediaPrefs().clearPlayed(accountIdB64: cached.accountIdB64)
         }
         sessionStore.clear()
         // ADR-0054 S3 — the push unregister below spends a token; take it

@@ -132,14 +132,12 @@ import me.lakko.app.updates.UpdateBannerDecision
  *     `auth.logout()`. Order matters: drop ephemeral state
  *     BEFORE flipping the auth state, so the AnonRoot doesn't
  *     briefly observe a Session-side flow.
- *   * Forget device → `contacts.clear()` → `chat.forgetDevice()`
- *     → `auth.forgetDevice()` — same order, but
- *     `chat.forgetDevice()` additionally wipes the on-disk
- *     snapshot envelope under the current accountId before
- *     [AuthRepository.forgetDevice] clears the
- *     [me.lakko.app.auth.SessionStore] marker. (If we cleared
- *     the SessionStore first, ChatRepository would lose the
- *     accountId reference and skip the deleteSnapshot.)
+ *   * Forget device and Delete account → the in-memory runtimes
+ *     stop (`contacts.clear()`, channels, `chat.forgetDevice()`,
+ *     device sync) → `auth.forgetDevice()`, which runs the one
+ *     on-device wipe ([me.lakko.app.account.AccountLocalWipe]:
+ *     every per-account store) and ends the session. Log out keeps
+ *     the account's local data for its next sign-in.
  */
 class MainActivity : ComponentActivity() {
 
@@ -1184,22 +1182,22 @@ private fun SessionRoot(
         chatRepository.clear()
         authRepository.logout()
     }
+    // Forget device and Delete account (PasskeysViewModel, after the server
+    // erasure) both run THIS, and the removed-device screen's one button too.
+    // Order: the push binding and delivered notifications first; then every
+    // runtime that could write a store back is stopped (calls, contacts,
+    // channels, chat, device sync) — chat first taking this device's
+    // KeyPackage out of the directory while the session is still readable;
+    // last, auth.forgetDevice() runs the one on-device wipe
+    // (AccountLocalWipe: every per-account store) and ends the session.
     val forgetDevice = {
         // ADR-0042, amended 2026-09-30 — first, as in logout above.
         me.lakko.app.push.PushSignOut.clearFirst(appContext)
         me.lakko.app.calls.AppCallHost.reset()
-        // The account's contact list and identity pins and the invite-link
-        // secrets this device kept (UX 5.3) go with it; read before clear()
-        // drops the session binding. Log out above keeps the contact list for
-        // the next login of the same account.
-        contactsRepository.forgetDevice()
         contactsRepository.clear()
-        // The account's channel log + publisher provider snapshot go with the
-        // device, like the chat snapshot below.
-        channelsState.forgetAccount()
-        // chat.forgetDevice() BEFORE auth.forgetDevice() — see the file-level
-        // docstring for the ordering rationale.
+        channelsState.unbind()
         chatRepository.forgetDevice()
+        deviceGroupSync.clear()
         authRepository.forgetDevice()
     }
 
@@ -1771,7 +1769,10 @@ private fun SessionRoot(
                 composable(Routes.PASSKEYS) {
                     val passkeysVm: me.lakko.app.webauthn.PasskeysViewModel = viewModel(
                         factory = singletonViewModelFactory {
-                            me.lakko.app.webauthn.PasskeysViewModel(repo = authRepository)
+                            me.lakko.app.webauthn.PasskeysViewModel(
+                                repo = authRepository,
+                                onAccountDeleted = forgetDevice,
+                            )
                         },
                     )
                     me.lakko.app.webauthn.PasskeysScreen(

@@ -58,10 +58,24 @@ internal class PendingSyncFlag(initial: Boolean, private val persist: (Boolean) 
     var pending: Boolean = initial
         private set
 
+    /** Set by [detach]; guarded by this object's monitor. */
+    private var detached: Boolean = false
+
     private fun raise() {
         if (pending) return
         pending = true
-        persist(true)
+        if (!detached) persist(true)
+    }
+
+    /**
+     * The account this flag belongs to was signed out: from now on nothing is
+     * handed to [persist], so a publish that fails after the teardown never
+     * writes the row back (Forget device deletes it right after). The row
+     * already on disk stays for the account's next sign-in.
+     */
+    @Synchronized
+    fun detach() {
+        detached = true
     }
 
     /** The catch-up publish went out whole. A flush that started before a
@@ -71,7 +85,7 @@ internal class PendingSyncFlag(initial: Boolean, private val persist: (Boolean) 
     fun onFlushed(startedAtGeneration: Long) {
         if (!pending || startedAtGeneration != generation) return
         pending = false
-        persist(false)
+        if (!detached) persist(false)
     }
 
     /** Bumped on every failure, so a flush can tell whether a failure landed

@@ -27,6 +27,9 @@ public final class MediaSessionCache {
     private let images = NSCache<NSString, UIImage>()
     private var inflight: [String: Task<Data, Error>] = [:]
     private var videoFiles: [String: URL] = [:]
+    /// Bumped by ``purge()``, so a download that started before it does not
+    /// put its bytes back into the cache when it lands.
+    private var generation = 0
 
     nonisolated static let videoDirectory = MediaTempFiles.defaultParent
         .appendingPathComponent("session-video", isDirectory: true)
@@ -80,10 +83,11 @@ public final class MediaSessionCache {
         if let task = inflight[key] { return try await task.value }
         let task = Task { try await work() }
         inflight[key] = task
-        defer { inflight.removeValue(forKey: key) }
+        let startedIn = generation
+        defer { if startedIn == generation { inflight.removeValue(forKey: key) } }
         do {
             let bytes = try await task.value
-            store(bytes, key: key)
+            if startedIn == generation { store(bytes, key: key) }
             return bytes
         } catch {
             Self.log.warning("media download failed")
@@ -98,10 +102,11 @@ public final class MediaSessionCache {
     public func displayImage(key: String, bytes: Data, maxPixel: Int) async -> UIImage? {
         let cacheKey = "\(key)@\(maxPixel)" as NSString
         if let hit = images.object(forKey: cacheKey) { return hit }
+        let startedIn = generation
         let image = await Task.detached(priority: .userInitiated) {
             Self.downsample(bytes, maxPixel: maxPixel)
         }.value
-        if let image, let cg = image.cgImage {
+        if startedIn == generation, let image, let cg = image.cgImage {
             images.setObject(image, forKey: cacheKey, cost: cg.bytesPerRow * cg.height)
         }
         return image
@@ -122,6 +127,19 @@ public final class MediaSessionCache {
             return nil
         }
         return UIImage(cgImage: cg)
+    }
+
+    /// Forget device / Delete account (``AccountLocalDataWipe``): drop every
+    /// decrypted byte and image held for the session, and forget the video
+    /// files (the wipe removes their folder with the rest of the media temp
+    /// directory). A download or decode still in flight finishes into its caller only.
+    public func purge() {
+        generation += 1
+        data.removeAllObjects()
+        images.removeAllObjects()
+        for task in inflight.values { task.cancel() }
+        inflight.removeAll()
+        videoFiles.removeAll()
     }
 
     // MARK: - Video files

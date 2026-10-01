@@ -169,10 +169,10 @@ public class ReachManager internal constructor(
     }
 
     /** Forget the session (sign-out, forget device). The stored document stays
-     *  with the account unless [forget] is set. */
-    public fun clear(forget: Boolean = false) {
+     *  with the account; forget device deletes it through
+     *  [me.lakko.app.account.AccountLocalWipe]. */
+    public fun clear() {
         val old = binding.getAndSet(null)
-        if (forget && old != null) store.delete(old.accountIdB64)
         old?.accountSeed?.fill(0)
         pendingDeviceSync.clear()
         doc = ReachDoc()

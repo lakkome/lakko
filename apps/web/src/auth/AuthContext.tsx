@@ -62,6 +62,8 @@ import {
 } from "solid-js";
 
 import { AuthClient } from "./client";
+import { loadPersistedAccount, savePersistedAccount } from "./persisted-account";
+import { wipeAccountLocalData } from "./wipe-account";
 import type { ContactKind } from "./wire";
 import { base64Decode, base64Encode } from "./account-id";
 import { resolveRecoverUsername } from "./recover-resolution";
@@ -83,26 +85,23 @@ import {
   deriveDeviceRootKey,
   deriveDeviceRootKeyFromIdentitySeed,
 } from "./device-key";
-import { deleteDeviceKey, getDeviceKey, putDeviceKey } from "./key-store";
+import { getDeviceKey, putDeviceKey } from "./key-store";
 import {
   deleteSessionToken,
   getSessionToken,
   putSessionToken,
 } from "./session-token-store";
 import {
-  deleteExportKey,
   getExportKey,
   putExportKey,
 } from "./export-key-store";
 import {
-  deleteDeviceIdentitySeed,
   ensureDeviceIdentitySeed,
   getDeviceBinding,
   putDeviceBinding,
 } from "./device-identity-store";
 import {
   ACCOUNT_IDENTITY_SEED_LENGTH,
-  deleteAccountIdentitySeed,
   getAccountIdentitySeed,
   putAccountIdentitySeed,
 } from "./account-identity-seed-store";
@@ -117,18 +116,9 @@ import {
 import { loadWasm, type Wasm } from "../wasm";
 import { accountKey as transparencyAccountKey } from "../transparency/account-key";
 import { DiscoveryClient } from "../discovery/client";
-import {
-  bindContactsAccount,
-  clearAccountContacts,
-} from "../contacts/local-store";
+import { bindContactsAccount } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
 import { deleteMlsSnapshot, saveMlsSnapshot } from "../chat/mls-store";
-import { clearGroupRoutingForAccount } from "../push/group-routing-store";
-import { clearKnockCursorsForAccount } from "../chat/knock-cursor";
-import { clearInboxForAccount } from "../contacts/inbox-store";
-import { clearKnownGroupIds } from "../devices/state-bundle";
-import { clearRotationStatesForAccount } from "../channels/rotation-state-store";
-import { clearUnconfirmedFoundingsForAccount } from "../channels/composer";
 import { deleteOutboxForAccount } from "../chat/commit-outbox";
 // ADR-0045 — the pending-request observation store follows the outbox's
 // hygiene: a prior session's request ages must never be read by a later one.
@@ -146,22 +136,7 @@ import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 // ADR-0045 S4b — the same hygiene for the committer-beacon observation
 // store: a stale beacon carried across a recover / forgetDevice would let
 // this device defer to a candidate it has no current evidence about.
-import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
-import { deleteMessageLog } from "../chat/message-log-store";
-import { wipeChannelsForAccount } from "../state/channels-state";
-import { clearConversationKinds } from "../chat/conversation-kind-store";
-import { deleteProfileRow } from "../profile/profile-idb";
-import { deleteGroupNameRow } from "../chat/group-name-idb";
-import { deleteReachRows } from "../reach/reach-store";
-import { deletePendingRootSeedRow, deleteRegistrarSeedRow } from "../ds/registrar-seed-idb";
-import { clearRootHeldAll } from "../ds/root-held";
-import { clearAppointmentRecords } from "../ds/appointments";
-import { clearOwedHandovers } from "../ds/root-handover";
-import { deletePinRow } from "../chat/pin-idb";
-import { deleteReadWatermarkRow } from "../chat/read-watermark-idb";
-import { deleteCallLogRow } from "../calls/call-log-idb";
-import { clearOwnProfile } from "../profile/own-profile";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
 import { releaseWakeBinding } from "../push/wake-binding";
@@ -172,8 +147,7 @@ import {
 } from "./device-restore-name-check";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
 import { startAutoBackup } from "../backup/auto-backup-driver";
-import { clearAutoBackupState } from "../backup/auto-backup";
-import { deletePhrase, getPhrase, putPhrase } from "../backup/phrase-store";
+import { getPhrase, putPhrase } from "../backup/phrase-store";
 import { clearRestored, markRestored } from "./restore-marker";
 import {
   ensureWordVaultEnrolled,
@@ -191,7 +165,6 @@ import {
   isSignupPhraseOwed,
   markSignupPhraseOwed,
 } from "./phrase-gate";
-import { deleteFloor } from "../backup/floor-store";
 import { restoreFromServerBackupFromPhraseString } from "../backup/restore";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
@@ -677,50 +650,8 @@ export interface IdentityAlert {
   readonly kind: "published-identity-changed";
 }
 
-const STORAGE_KEY = "lakko.auth.v1";
-
-interface PersistedSession {
-  /** Schema marker — bump if the storage shape changes so old
-   *  rows are recognised and dropped instead of mis-parsed. */
-  v: 1;
-  accountIdB64: string;
-  username: string;
-}
-
-function loadPersisted(): PersistedSession | null {
-  // SSR-safety: AuthProvider runs in the browser, but a defensive
-  // check costs us nothing.
-  if (typeof localStorage === "undefined") return null;
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (raw === null) return null;
-  try {
-    const parsed = JSON.parse(raw) as Partial<PersistedSession>;
-    if (
-      parsed.v === 1 &&
-      typeof parsed.accountIdB64 === "string" &&
-      typeof parsed.username === "string"
-    ) {
-      return {
-        v: 1,
-        accountIdB64: parsed.accountIdB64,
-        username: parsed.username,
-      };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function savePersisted(record: PersistedSession): void {
-  if (typeof localStorage === "undefined") return;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(record));
-}
-
-function clearPersisted(): void {
-  if (typeof localStorage === "undefined") return;
-  localStorage.removeItem(STORAGE_KEY);
-}
+const loadPersisted = loadPersistedAccount;
+const savePersisted = savePersistedAccount;
 
 /** Encode a UTF-8 string into bytes — `password` enters
  *  OPAQUE-PAKE as raw bytes. */
@@ -3279,6 +3210,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       await releaseWakeBinding();
       clearRestored();
       const cached = loadPersisted();
+      const current = state();
+      const sessionAccountIdB64 =
+        current.kind === "session" ? current.account.accountId : null;
       // ADR-0050 section 2.10 — take this device's KeyPackage out of the
       // directory BEFORE the wipe, while the bearer token still exists: the
       // account's other devices retire this device's leaves from every chat
@@ -3297,230 +3231,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           }
         }
       }
-      if (cached !== null) clearRemovedDevicesForAccount(cached.accountIdB64);
       // The device-key-wrapped phrase cache is wiped below, so an owed phrase
-      // can no longer be shown on this device; drop the marker and the copy.
+      // can no longer be shown on this device; drop the in-memory copy (the
+      // stored marker goes with the wipe).
       setSignupPhrase(null);
-      if (cached !== null) {
-        clearSignupPhraseOwed(
-          typeof localStorage === "undefined" ? undefined : localStorage,
-          cached.accountIdB64,
-        );
+      // 2026-09-30 — every piece of this account's local data, in ONE list
+      // (`wipe-account.ts`), shared with Delete account. Best effort per
+      // store; a failing store is logged there and never stops the others.
+      // Another account's data on this browser is its own.
+      const wipeTarget = cached?.accountIdB64 ?? sessionAccountIdB64;
+      if (wipeTarget !== null) {
+        await wipeAccountLocalData(wipeTarget);
       }
-      // Order matters: clear the IDB key BEFORE clearing the
-      // localStorage marker. If we crash between, an IDB key
-      // without a localStorage marker is harmless on next mount;
-      // a localStorage marker without an IDB key would loop
-      // through the broken-restore path forever.
-      if (cached !== null) {
-        try {
-          await deleteDeviceKey(cached.accountIdB64);
-        } catch {
-          // Ignore — best-effort wipe; localStorage clear below
-          // is still worth running.
-        }
-        // 1.16e6c1: drop the encrypted MLS snapshot for this
-        // account. After `deleteDeviceKey` above the snapshot
-        // is unreadable anyway (the wrapping AES-256-GCM key is
-        // gone), but leaving the row behind means a later
-        // signup on the same accountId would surface stale
-        // ciphertext on hydration — clean wipe is the
-        // contract `forgetDevice` advertises.
-        try {
-          await deleteMlsSnapshot(cached.accountIdB64);
-        } catch {
-          // Ignore — same best-effort policy as above.
-        }
-        // ADR-0040 (G-35) — wipe the pending-commit outbox for this account so a
-        // future signup on the same accountId never sweeps a stale entry.
-        try {
-          await deleteOutboxForAccount(cached.accountIdB64);
-          clearObservationsForAccount(cached.accountIdB64);
-          clearUnappliedForAccount(cached.accountIdB64);
-          clearBeaconObservationsForAccount(cached.accountIdB64);
-          clearLastObservedOwnerForAccount(cached.accountIdB64);
-          // ADR-0045 UX §6.2.3 — see the recover path above.
-          clearLeaveRequestedForAccount(cached.accountIdB64);
-        } catch {
-          // Ignore — same best-effort policy as above.
-        }
-        // Phase 2a3f1-web — drop the plaintext message log
-        // too. Same wipe-on-forgetDevice rationale as the MLS
-        // snapshot: the encryption key (device root key) just
-        // got wiped, so the ciphertext is already unreadable;
-        // a stale IDB row would confuse a future signup on
-        // the same account_id.
-        try {
-          await deleteMessageLog(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // The encrypted channel log (channel list, subscriber keys + seeds,
-        // publisher signing seeds, the PublisherGroup provider snapshot):
-        // same rationale as the message log. The in-memory channel state
-        // goes with it; the publish counters stay (see the function's doc).
-        try {
-          await wipeChannelsForAccount(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // The per-conversation chat / group split goes with the account.
-        clearConversationKinds(cached.accountIdB64);
-        // ADR-0048 — drop the encrypted received-profile row and this
-        // device's own profile name for the account. Same leave-nothing-behind
-        // contract as the message log.
-        try {
-          await deleteProfileRow(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        clearOwnProfile(cached.accountIdB64);
-        // ADR-0051 — the encrypted shared-group-name row, same contract.
-        try {
-          await deleteGroupNameRow(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // ADR-0057 — the encrypted registrar-seed row and the owner's
-        // appointment records, same contract.
-        try {
-          await deleteRegistrarSeedRow(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        try {
-          await deletePendingRootSeedRow(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        clearAppointmentRecords(cached.accountIdB64);
-        clearOwedHandovers(cached.accountIdB64);
-        clearRootHeldAll(cached.accountIdB64);
-        // ADR-0052 decision 3 — the encrypted pin row, same contract.
-        try {
-          await deletePinRow(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // ADR-0060 — the encrypted reach rows (this device's reach book, the
-        // grants others handed us, the setting, the kept introductions and the
-        // publication state), same contract. Never throws.
-        await deleteReachRows(cached.accountIdB64);
-        // ADR-0024 — the encrypted read-watermark row, same contract.
-        try {
-          await deleteReadWatermarkRow(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // docs/ux/calls.md section 6 — the encrypted call-log row. Who this
-        // device called, when, and for how long is exactly as revealing as the
-        // messages, so it leaves with them.
-        try {
-          await deleteCallLogRow(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // Phase 1.13c: drop the persisted session token too. The
-        // ciphertext is unreadable without the device key just
-        // wiped, but a stale row would confuse the rehydrate
-        // probe on a future signup with the same accountId.
-        try {
-          await deleteSessionToken(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // Phase 2a1c: drop the cached recovery phrase. Wrapped
-        // under the same device-root key that's now gone, so
-        // the ciphertext is already undecryptable — but a stale
-        // row would confuse a future bootstrap on the same
-        // accountId. Clean wipe matches `forgetDevice`'s
-        // "leave nothing per-account behind" contract.
-        try {
-          await deletePhrase(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // ADR-0037: drop the cached backup-head version floor. Wrapped under
-        // the same device-root key that's now gone, so a stale row would
-        // confuse a future returning-client restore on the same accountId.
-        try {
-          await deleteFloor(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // The auto-backup bookkeeping is per-account and keyed on the same id,
-        // so a later signin on this device would otherwise inherit a
-        // `lastUploadAtMs` that throttles the first backup of a new session
-        // and a group key describing groups it no longer has.
-        clearAutoBackupState(cached.accountIdB64);
-        // ADR-0042: wipe this account's push-routing secrets + the push_gid
-        // reverse-index rows that name it. The secret is wrapped under the
-        // device-root key just wiped, but a stale reverse-index row
-        // (plaintext push_gid → group_id) would leave push-routing residue
-        // behind. Another account's rows on this browser are its own.
-        try {
-          await clearGroupRoutingForAccount(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // Per-account localStorage rows keyed by the account since
-        // 2026-09-30 (they were device-wide): the admin's knock-queue
-        // cursors, the pairing bundle's known group ids, the channel
-        // rotation schedules and the unconfirmed-founding markers. Each
-        // clear also drops that store's retired device-wide rows.
-        clearKnockCursorsForAccount(cached.accountIdB64);
-        clearKnownGroupIds(cached.accountIdB64);
-        clearRotationStatesForAccount(cached.accountIdB64);
-        clearUnconfirmedFoundingsForAccount(cached.accountIdB64);
-        // The stranger-inbox cursor + pending list: kept by Log out (a
-        // re-login must not re-poll requests already declined), dropped here.
-        clearInboxForAccount(cached.accountIdB64);
-        // Phase 2a2c2: drop the cached export key. Same posture
-        // as the snapshot / session-token rows above — leaving
-        // ciphertext behind is safe (the wrap key is gone) but a
-        // future signup on the same accountId would trip over
-        // the stale row.
-        try {
-          await deleteExportKey(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // Phase 2a3b0: drop the cached DeviceIdentity seed.
-        // The leaf in the user's DeviceGroup that this seed
-        // signed for is orphaned by this wipe — other devices
-        // will see it as unreachable until 2a3c's
-        // remove-device flow runs from a sibling device.
-        try {
-          await deleteDeviceIdentitySeed(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // ADR-0017: drop the cached AccountIdentity (phrase) seed.
-        // It is the highest-sensitivity on-device secret; the
-        // ciphertext is unreadable once the device key is gone, but
-        // a stale row would confuse a future signup on the same
-        // accountId. After this wipe the only way back into the
-        // account is the recovery phrase (or a paired device).
-        try {
-          await deleteAccountIdentitySeed(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-        // Phase 2a3b2-bootstrap: drop the cached DeviceGroup
-        // MLS snapshot. Ciphertext is unreadable without the
-        // device key just wiped, but a stale row would
-        // confuse a future signup on the same accountId.
-        try {
-          await deleteDeviceGroupSnapshot(cached.accountIdB64);
-        } catch {
-          // best-effort
-        }
-      }
-      clearPersisted();
-      // 1.16d3d: drop this account's contacts too — "forget device"
-      // should leave nothing of this account behind on this browser.
-      // Another account's contacts on the same browser are its own.
-      clearAccountContacts(cached?.accountIdB64);
       // 1.20b: full wipe of push state too — unsubscribe on the
       // browser side, drop the push pseudonym from localStorage,
       // tell `push-gw` to drop the token. Awaited because

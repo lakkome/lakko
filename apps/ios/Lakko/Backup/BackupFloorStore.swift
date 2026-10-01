@@ -141,7 +141,7 @@ public enum BackupFloorStore {
     }
 
     /// Erase the floor for `accountIdB64`. No-op when absent — used by
-    /// ``AuthRepository/forgetDevice`` cleanup alongside the phrase / seed wipes.
+    /// ``AccountLocalDataWipe`` cleanup alongside the phrase / seed wipes.
     public static func deleteFloor(accountIdB64: String) {
         deleteIgnoringMissing(accountIdB64: accountIdB64)
     }

@@ -578,6 +578,12 @@ public final class JournalFoundingMarks {
         (defaults.stringArray(forKey: Self.key) ?? []).contains(journalIdHex)
     }
 
+    /// Every marked journal id (``AccountLocalDataWipe`` drops the ones of the
+    /// account it wipes).
+    public func all() -> [String] {
+        defaults.stringArray(forKey: Self.key) ?? []
+    }
+
     public func clear(journalIdHex: String) {
         let rest = (defaults.stringArray(forKey: Self.key) ?? []).filter { $0 != journalIdHex }
         defaults.set(rest, forKey: Self.key)

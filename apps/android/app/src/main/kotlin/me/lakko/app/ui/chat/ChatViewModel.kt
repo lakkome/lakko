@@ -3290,7 +3290,7 @@ public class ChatViewModel(
 
         /** Finished takes waiting to be read by their upload (see
          *  [sendRecordedTake]). */
-        private const val MEDIA_OUTBOX_DIR: String = "chat-media-outbox"
+        internal const val MEDIA_OUTBOX_DIR: String = "chat-media-outbox"
     }
 
     /** VM-local composer + transient flags. Persistent timeline

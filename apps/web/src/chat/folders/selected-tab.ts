@@ -59,3 +59,17 @@ export function selectTab(accountId: string | null, tab: string): void {
     // A browser that refuses storage keeps the tab for this page only.
   }
 }
+
+/** Forget the stored tab of `accountId` (Forget device, Delete account). The
+ *  signal goes back to All chats when that account was the one loaded. */
+export function clearSelectedTab(accountId: string): void {
+  try {
+    globalThis.localStorage?.removeItem(KEY_PREFIX + accountId);
+  } catch {
+    // Storage blocked: nothing was stored either.
+  }
+  if (loadedFor === accountId) {
+    loadedFor = null;
+    setSelected(ALL_CHATS);
+  }
+}

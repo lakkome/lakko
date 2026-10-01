@@ -179,11 +179,14 @@ private const val JOURNAL_REPAIR_MAX_POLLS: Int = 20
  *     in-memory state but keeps the on-disk snapshot envelope
  *     intact, so the next login on this device picks up
  *     where we left off.
- *   * [forgetDevice] is called by `AuthRepository.forgetDevice`
- *     — additionally wipes the on-disk snapshot envelope; the
- *     only way back into the conversation history is from
- *     other devices' epochs forward (via MLS commits) once
- *     they catch up to this device's absence.
+ *   * [forgetDevice] is called by the Forget device / Delete
+ *     account orchestration in `MainActivity`, before
+ *     `AuthRepository.forgetDevice` runs the one on-device wipe
+ *     ([me.lakko.app.account.AccountLocalWipe]) that deletes the
+ *     snapshot envelope and every other chat store; the only way
+ *     back into the conversation history is from other devices'
+ *     epochs forward (via MLS commits) once they catch up to this
+ *     device's absence.
  *
  * 1.15f4b adds the Compose ChatScreen + ChatViewModel on top of
  * this; 1.15f4c wires `ContactsRepository.acceptContactRequest`
@@ -6088,13 +6091,14 @@ public class ChatRepository(
     }
 
     /**
-     * Full wipe: clear in-memory state + delete the on-disk
-     * snapshot envelope. Called from
-     * `AuthRepository.forgetDevice`.
+     * Forget device / Delete account, the chat half: take this device's
+     * KeyPackage out of the directory, then clear the in-memory state like
+     * [clear] does. Nothing on disk is touched here: every per-account store
+     * this repository writes is removed by
+     * [me.lakko.app.account.AccountLocalWipe], which `AuthRepository.forgetDevice`
+     * runs after this. Call it BEFORE that (it reads the live session).
      */
     public fun forgetDevice() {
-        val accountIdB64 = currentAccountIdB64.get()
-        val rawAccountId = keyPackageAccount.get()?.accountId
         // ADR-0050 section 2.10 — take this device's KeyPackage out of the
         // directory, with the values captured before the wipe below: the
         // account's other devices retire this device's leaves from every chat
@@ -6119,156 +6123,8 @@ public class ChatRepository(
                 }
             }
         }
-        if (accountIdB64 != null) {
-            DeviceReadmission.clearForAccount(applicationContext, accountIdB64)
-        }
-        // ADR-0060 — the grants this device holds and its reach bookkeeping
-        // go with the device.
-        introductionTicker?.cancel()
-        introductionTicker = null
-        me.lakko.app.reach.ReachManager.peek()?.clear(forget = true)
         clear()
-        // ADR-0048 — the names learned on this device and this account's own
-        // profile go with the device.
-        try {
-            if (accountIdB64 != null) profileDirectory.forgetAccount(accountIdB64)
-            if (rawAccountId != null) {
-                me.lakko.app.profile.OwnProfileStore.delete(applicationContext, rawAccountId)
-            }
-            // ADR-0051 — the shared group names held for this account go too.
-            if (accountIdB64 != null) {
-                GroupNameStore.deleteAccount(applicationContext, accountIdB64)
-                // ADR-0052 decision 3 — and every pin, shared or personal.
-                PinStore.deleteAccount(applicationContext, accountIdB64)
-                // ADR-0048 trigger 4 — and when this device last asked each
-                // group for names: a fresh install asks again.
-                profileRequestStore.deleteAccount(accountIdB64)
-                // ADR-0024 — and the persisted read watermarks.
-                readWatermarkStore.deleteAccount(accountIdB64)
-                // And the persisted group-call records.
-                groupCallStore.deleteAccount(accountIdB64)
-                // docs/ux/navigation.md section 5 — and the cross-conversation
-                // call index. Who this device called and when goes with the
-                // device, exactly as the transcripts holding the same calls do.
-                me.lakko.app.calls.CallHistoryStore.clear(applicationContext, accountIdB64)
-            }
-        } catch (_: Throwable) {
-            // best-effort
-        }
-        if (accountIdB64 != null) {
-            try {
-                snapshotStore.deleteSnapshot(applicationContext, accountIdB64)
-            } catch (_: Throwable) {
-                // Best-effort wipe; the user has already
-                // forgotten the device, missing snapshot
-                // delete is non-fatal.
-            }
-            try {
-                knownGroupsStore.clear(accountIdB64)
-            } catch (_: Throwable) {
-                // Best-effort wipe — same posture as
-                // snapshotStore.deleteSnapshot above.
-            }
-            // The account's local presentation facts go with the device too:
-            // the pairing known-group ids and restored marker, the persisted
-            // conversation kinds, the created-as-group flags, the selected
-            // folder tab and the played marks. Other accounts' stay.
-            try {
-                me.lakko.app.devices.StateBundle.forgetAccount(applicationContext, accountIdB64)
-                ConversationKindStore.deleteAccount(applicationContext, accountIdB64)
-                me.lakko.app.ui.chat.GroupPresentationStore.deleteAccount(applicationContext, accountIdB64)
-                me.lakko.app.ui.chat.FolderTabPrefs.deleteAccount(applicationContext, accountIdB64)
-                me.lakko.app.media.MediaPrefs.get(applicationContext).forgetAccount(accountIdB64)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // Phase 2a3f1 — drop the plaintext message log
-            // too. The Keystore wrap key is shared across
-            // accounts so we leave it intact; only the
-            // per-account envelope file gets removed.
-            try {
-                MessageLogStore.deleteLog(applicationContext, accountIdB64)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // ADR-0040 (G-35) — purge the durable pending-commit
-            // outbox so a prior session's un-acked commits never
-            // get swept into a later one on this device.
-            try {
-                CommitOutboxStore.deleteForAccount(applicationContext, accountIdB64)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // ADR-0045 — drop the committer-beacon observations and the
-            // pending-request observations. Neither is key material, but a
-            // stale observation would make a later session defer to a candidate
-            // it never actually heard from, and a stale request observation
-            // would age a request that no longer exists. Same per-account reset
-            // discipline as the outbox above.
-            try {
-                beaconObservations.clearForAccount(accountIdB64)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            try {
-                SharedPrefsPendingRequestStore(applicationContext).clearForAccount(accountIdB64)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // ADR-0045 S7 residual 1 — the `Not applied` rows follow the same
-            // hygiene: they name a signature key from a session being discarded.
-            try {
-                SharedPrefsUnappliedRequestStore(applicationContext)
-                    .clearForAccount(accountIdB64)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // ADR-0045 §6.1.10 — and the last-observed-owner memory. A stale
-            // entry would make the NEXT account on this device read a role-table
-            // reading it never took as a change, and announce a promotion it did
-            // not witness — the one thing the §6.1.9 fail-open rule exists to
-            // prevent.
-            try {
-                lastObservedOwnerStore.clearForAccount(accountIdB64)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // ADR-0045 UX §6.2.3 — and the durable `leaveRequestedAt` records.
-            // They follow the same per-account reset discipline as the stores
-            // above; they are never pruned with the pending sweep (they have to
-            // outlive it, by construction), so this and `Delete this chat` are
-            // the only two things that discard them.
-            try {
-                leaveRecords.clearForAccount(accountIdB64)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            lastBeaconAtMs.clear()
-            // ADR-0042 — wipe the push-routing secrets + the push_gid reverse
-            // index. The secret is encrypted at rest, but a stale reverse-index
-            // row (plaintext push_gid -> group_id) would leave push-routing
-            // residue behind — full per-account reset, mirroring the web
-            // `clearAllGroupRouting` on forgetDevice.
-            try {
-                PushRoutingSecretStore.clearForAccount(applicationContext, accountIdB64)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            try {
-                pushRouteStore.clearForAccount(accountIdB64)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // ADR-0057 — the registrar seeds (signing secrets), the owner's
-            // appointment record and the owed root handovers leave with the
-            // device.
-            resetRootHandoverState()
-            try {
-                journalOwnershipStore.clearForAccount(accountIdB64)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-        }
+        lastBeaconAtMs.clear()
     }
 
     override fun close() {

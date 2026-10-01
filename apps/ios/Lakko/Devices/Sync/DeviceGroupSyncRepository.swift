@@ -22,8 +22,9 @@ import LakkoCore
 ///     or bootstraps a founder leaf, kicks off the poll loop.
 ///   * [`clear`] — cancels the poll loop, drops the handle,
 ///     clears every reactive map. Called from
-///     ``AuthRepository/logout`` /
-///     ``AuthRepository/forgetDevice``.
+///     ``AuthRepository/logout`` and from
+///     ``AppServices/wipeAccountLocalData(accountIdB64:)``, which then
+///     removes the persisted state (``AccountLocalDataWipe``).
 ///
 /// The poll loop runs in a single `Task` cancelled on `clear`;
 /// the send paths await on the main actor.
@@ -228,7 +229,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         // drafts on every logout, since the restored DeviceGroup snapshot has
         // already consumed the journal rows a re-login would re-poll. A
         // debounced write still in flight is flushed rather than dropped.
-        // ``forget(accountIdB64:)`` is what deletes them.
+        // ``AccountLocalDataWipe`` is what deletes them.
         if let closing = activeAccountIdB64, persistTask != nil, !deviceRemoved {
             SyncedStateStore.save(syncedState, accountIdB64: closing)
         }
@@ -241,15 +242,6 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         syncedState = SyncedState()
         pending = nil
         refreshDerived()
-    }
-
-    /// Forget-device: tear the runtime down and delete what this device keeps
-    /// for `accountIdB64` — the folded synced state and its pending-sync flag.
-    /// Other accounts' state is untouched.
-    public func forget(accountIdB64: String) {
-        clear()
-        SyncedStateStore.delete(accountIdB64: accountIdB64)
-        PendingSyncTracker(accountIdB64: accountIdB64).clear()
     }
 
     /// Publish the muted set into the App Group container

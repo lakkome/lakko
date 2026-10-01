@@ -64,9 +64,6 @@ public class ChannelsUiState(
     /** The shared, snapshotted publisher identity every owner-side MLS call
      *  runs on; `null` disables the publisher half (tests). */
     public val publisher: ChannelPublisherIdentity? = null,
-    /** The ADR-0057 co-published marks, whose rows for the account go on
-     *  [forgetAccount]; `null` (tests) skips that. */
-    private val coPublishedMarks: SharedPreferencesCoPublishedJournalMarks? = null,
 ) {
 
     public companion object {
@@ -112,10 +109,43 @@ public class ChannelsUiState(
          * and publish counters are the account's, not the device's; until
          * 2026-09-30 each lived under the bare [baseKey], shared by every
          * account signed in on the phone. The bare rows are never read;
-         * [forgetAccount] removes them.
+         * [deleteAccountRows] removes them.
          */
         public fun accountKey(baseKey: String, accountIdB64: String): String =
             baseKey + ":" + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+
+        /**
+         * Forget device: delete [accountIdB64]'s persisted channel log (list,
+         * subscribed seeds, rotation state), subscriber keypairs and publisher
+         * signing seeds, and the retired device-wide rows of builds before
+         * 2026-09-30. Other accounts' rows stay. The one production caller is
+         * [me.lakko.app.account.AccountLocalWipe]; the session state itself
+         * is dropped by [unbind].
+         *
+         * The account's publish counters are deliberately KEPT, as
+         * [removeChannel] keeps them: a counter is a forever-monotone nonce
+         * floor, not content or key material, and keeping it can never cause
+         * a `(key, nonce)` repeat, whereas deleting it is safe only as long as
+         * no restored PublisherGroup can bring the same seed back at the same
+         * epoch.
+         */
+        public fun deleteAccountRows(
+            prefs: SharedPreferences?,
+            publisherPrefs: SharedPreferences?,
+            logStore: ChannelLogStore?,
+            accountIdB64: String,
+        ) {
+            logStore?.delete(accountIdB64)
+            prefs?.edit()
+                ?.remove(accountKey(SUBSCRIBER_KEYS_PREF_KEY, accountIdB64))
+                ?.remove(SUBSCRIBER_KEYS_PREF_KEY)
+                ?.apply()
+            publisherPrefs?.edit()
+                ?.remove(accountKey(PUBLISHER_SIGNING_SEEDS_PREF_KEY, accountIdB64))
+                ?.remove(PUBLISHER_SIGNING_SEEDS_PREF_KEY)
+                ?.remove(PUBLISHER_COUNTERS_PREF_KEY)
+                ?.apply()
+        }
 
         /** Per channel, the higher of two counter floors (a counter never
          *  moves backwards, whichever side held it). */
@@ -288,44 +318,6 @@ public class ChannelsUiState(
         _subscriberKeysByChannel.value = emptyMap()
         publisherSigningSeedByChannel = emptyMap()
         _counterByChannel.value = emptyMap()
-    }
-
-    /**
-     * [unbind] AND delete the bound account's persisted channel log,
-     * publisher provider snapshot, subscriber keypairs and publisher signing
-     * seeds. Forget device. Other accounts' rows stay.
-     *
-     * The account's publish counters are deliberately KEPT, as
-     * [removeChannel] keeps them: a counter is a forever-monotone nonce floor,
-     * not key material, and keeping it can never cause a `(key, nonce)`
-     * repeat, whereas deleting it is safe only as long as the signing seed
-     * and the PublisherGroup go with it.
-     */
-    public fun forgetAccount() {
-        val acct = boundAccountIdB64
-        publisher?.forget()
-        if (acct != null) {
-            try {
-                logStore?.delete(acct)
-            } catch (e: Throwable) {
-                Log.w(TAG, "channel log not deleted", e)
-            }
-            coPublishedMarks?.deleteAccount(acct)
-            try {
-                prefs?.edit()
-                    ?.remove(accountKey(SUBSCRIBER_KEYS_PREF_KEY, acct))
-                    ?.remove(SUBSCRIBER_KEYS_PREF_KEY)
-                    ?.apply()
-                publisherPrefs?.edit()
-                    ?.remove(accountKey(PUBLISHER_SIGNING_SEEDS_PREF_KEY, acct))
-                    ?.remove(PUBLISHER_SIGNING_SEEDS_PREF_KEY)
-                    ?.remove(PUBLISHER_COUNTERS_PREF_KEY)
-                    ?.apply()
-            } catch (e: Throwable) {
-                Log.w(TAG, "channel keys not deleted", e)
-            }
-        }
-        unbind()
     }
 
     /** The persisted rotation heartbeat state for [channelId], or `null`

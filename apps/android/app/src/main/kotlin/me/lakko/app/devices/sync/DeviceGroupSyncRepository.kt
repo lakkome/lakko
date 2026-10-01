@@ -14,7 +14,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
@@ -68,8 +67,12 @@ import uniffi.lakko_ffi_uniffi.shouldSendSnapshot
  *     or bootstraps a founder leaf, kicks off the poll loop
  *     on the repository's [scope].
  *   * [clear] — cancels the poll loop coroutine, drops the
- *     handle, clears every reactive map. Called from
- *     `AuthRepository.logout` / `AuthRepository.forgetDevice`.
+ *     handle, clears every reactive map. Called on Log out and
+ *     before Forget device / Delete account. It KEEPS the
+ *     account's persisted folded state and its pending flag
+ *     (writing out a change still waiting out its debounce);
+ *     only [deleteAccountRows], from the account wipe, removes
+ *     them.
  */
 public class DeviceGroupSyncRepository(
     private val applicationContext: Context,
@@ -167,11 +170,35 @@ public class DeviceGroupSyncRepository(
 
     @Volatile private var pendingFlag: PendingSyncFlag? = null
 
-    /** The debounced snapshot writer, cancelled with the poll loop. */
-    @Volatile private var persistJob: Job? = null
-
     /** How long a change waits before the snapshot is rewritten. */
     private val SYNC_STATE_PERSIST_DEBOUNCE_MS: Long = 500
+
+    /**
+     * The debounced snapshot writer ([startSyncStatePersistence]). Stopped
+     * with the poll loop; the stop writes a change still waiting out its
+     * debounce, so a teardown never loses one.
+     */
+    private val syncStatePersistence: SyncStatePersistence = SyncStatePersistence(
+        scope = scope,
+        versions = stateVersion,
+        debounceMs = SYNC_STATE_PERSIST_DEBOUNCE_MS,
+        encode = { currentSyncedStateBytes() },
+        write = { accountIdB64, bytes ->
+            DeviceGroupSnapshotStore.putSnapshot(
+                context = applicationContext,
+                accountIdB64 = accountIdB64,
+                snapshotBytes = bytes,
+                dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
+            )
+        },
+        onChanged = { accountIdB64 ->
+            me.lakko.app.backup.AutoBackupStore.markDirty(
+                applicationContext,
+                accountIdB64,
+                System.currentTimeMillis(),
+            )
+        },
+    )
 
     // ------------------------------------------------------------
     // Public API
@@ -364,22 +391,18 @@ public class DeviceGroupSyncRepository(
     /**
      * Tear down. Cancels the poll loop, closes the FFI
      * handles, clears every reactive map. Idempotent.
+     *
+     * Log out keeps the account's local data for its next sign-in, and this
+     * state cannot be rebuilt from the journal (the restored DeviceGroup
+     * snapshot has already consumed the rows that built it), so the persisted
+     * folded state and the pending flag STAY: a change still waiting out its
+     * debounce is written first, and nothing is written for the account after
+     * this returns. The state is per-account, so the next account to sign in
+     * on this device never reads it. Forget device and Delete account remove
+     * both through [me.lakko.app.account.AccountLocalWipe] after this.
      */
     public fun clear() {
         cancelPollAndDropHandles()
-        // Forget the snapshot too. Logout and forget-this-device both come
-        // through here, and a draft left behind for the next account to sign
-        // in on this device is the one piece of this state that reads as a
-        // message.
-        activeAccountIdB64.get()?.let { closing ->
-            runCatching {
-                DeviceGroupSnapshotStore.deleteSnapshot(
-                    context = applicationContext,
-                    accountIdB64 = closing,
-                    dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
-                )
-            }
-        }
         activeAccountIdB64.set(null)
         activeAccountId.set(null)
         forkRepairedFor = null
@@ -411,8 +434,7 @@ public class DeviceGroupSyncRepository(
             Log.w(LOG_TAG, "this device was removed from the account; sync stopped")
         }
         mutableDeviceRemoved.value = true
-        persistJob?.cancel()
-        persistJob = null
+        syncStatePersistence.stopAndFlush()
         pollJob?.cancel()
         pollJob = null
     }
@@ -428,33 +450,7 @@ public class DeviceGroupSyncRepository(
      * section 5.2); the backup's own throttle bounds how often that uploads.
      */
     private fun startSyncStatePersistence(accountIdB64: String) {
-        persistJob?.cancel()
-        persistJob = scope.launch {
-            stateVersion
-                .debounce(SYNC_STATE_PERSIST_DEBOUNCE_MS)
-                .collect { version ->
-                    val blob = currentSyncedStateBytes() ?: return@collect
-                    runCatching {
-                        DeviceGroupSnapshotStore.putSnapshot(
-                            context = applicationContext,
-                            accountIdB64 = accountIdB64,
-                            snapshotBytes = blob,
-                            dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
-                        )
-                    }.onFailure { Log.w(LOG_TAG, "device-sync snapshot persist failed", it) }
-                    // The first emission writes back what bootstrap read; it
-                    // is not a change worth a backup.
-                    if (version > 0L) {
-                        runCatching {
-                            me.lakko.app.backup.AutoBackupStore.markDirty(
-                                applicationContext,
-                                accountIdB64,
-                                System.currentTimeMillis(),
-                            )
-                        }
-                    }
-                }
-        }
+        syncStatePersistence.start(accountIdB64)
     }
 
     /** The folded state's persistence bytes, or `null` before bootstrap.
@@ -1125,8 +1121,13 @@ public class DeviceGroupSyncRepository(
     }
 
     private fun cancelPollAndDropHandles() {
-        persistJob?.cancel()
-        persistJob = null
+        // Write a change still waiting out its debounce, then let the account
+        // go: the state is kept for the next sign-in, never written after.
+        syncStatePersistence.stopAndFlush()
+        // The same for the pending flag: a publish still in flight may fail
+        // after this, and must not write the row back (Forget device deletes
+        // it right after this teardown).
+        pendingFlag?.detach()
         pollJob?.cancel()
         pollJob = null
         // Drop wasm handle references. We don't `.close()` them
@@ -1146,11 +1147,37 @@ public class DeviceGroupSyncRepository(
         DsSignerRegistry.shared.clearOwner(DeviceGroupJournalAccess.REGISTRY_OWNER)
     }
 
+    /** Test seam: bind [accountIdB64] as the running account without opening
+     *  a DeviceGroup (which needs the native core and the Keystore), so a
+     *  JVM test can drive [clear] against real on-disk rows. */
+    internal fun bindAccountForTest(accountIdB64: String) {
+        activeAccountIdB64.set(accountIdB64)
+        syncStatePersistence.start(accountIdB64)
+    }
+
     public companion object {
         private const val LOG_TAG = "DeviceGroupSync"
 
         /** Per-account "a write is waiting" flag. Not secret: a boolean. */
-        private const val PENDING_PREFS = "lakko-device-sync-pending"
+        internal const val PENDING_PREFS = "lakko-device-sync-pending"
+
+        /**
+         * Forget device: delete [accountIdB64]'s persisted folded state (the
+         * synced drafts, flags, read cursors, order and folders) and its
+         * "a write is waiting" flag. Other accounts' rows stay. The one caller
+         * is [me.lakko.app.account.AccountLocalWipe].
+         */
+        public fun deleteAccountRows(context: Context, accountIdB64: String) {
+            DeviceGroupSnapshotStore.deleteSnapshot(
+                context = context,
+                accountIdB64 = accountIdB64,
+                dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
+            )
+            context.applicationContext.getSharedPreferences(PENDING_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .remove(accountIdB64)
+                .apply()
+        }
 
         /**
          * The repository of the signed-in session, for the one caller that

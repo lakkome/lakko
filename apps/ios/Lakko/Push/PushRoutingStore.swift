@@ -420,7 +420,7 @@ public final class PushRoutingStore {
     }
 
     /// Wipe every push-routing secret + reverse-index entry for
-    /// `accountIdB64`. Called from ``ChatRepository/forgetDevice()`` so a
+    /// `accountIdB64`. Called from ``AccountLocalDataWipe`` so a
     /// device wipe leaves no push-routing residue (mirror of the web
     /// `clearAllGroupRouting`). Both keyspaces are keyed by account first,
     /// so a prefix match removes exactly this account's rows.

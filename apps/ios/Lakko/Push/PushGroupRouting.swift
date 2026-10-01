@@ -2125,7 +2125,7 @@ public final class PushGroupRouting {
     // MARK: - Store passthrough
 
     /// Wipe every push-routing secret + reverse-index entry for the
-    /// account. Called from ``ChatRepository/forgetDevice()``.
+    /// account. Called from ``AccountLocalDataWipe``.
     public func clear(accountIdB64: String) {
         store.clear(accountIdB64: accountIdB64)
     }

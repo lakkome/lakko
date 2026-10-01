@@ -1,0 +1,325 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+import XCTest
+import LakkoCore
+@testable import Lakko
+
+/// Forget device and Delete account leave nothing of the account behind
+/// (maintainer rule, 2026-09-30), tested by inventory rather than by listing.
+///
+/// Every account-scoped store is seeded for two accounts through the real
+/// stores (real `UserDefaults.standard` and App Group suite, real Keychain,
+/// real files), ``AccountLocalDataWipe`` runs for one, and then the stores are
+/// WALKED: every `UserDefaults` key and value, every Keychain generic
+/// password, every file name under Application Support and the App Group
+/// container. Nothing may still name the wiped account; the other account's
+/// items must be exactly what they were.
+///
+/// The walk finds anything keyed or valued by the account id. Three things it
+/// cannot see by name are asserted directly: the unclaimed-founding marks
+/// (keyed by journal id, derived from the account), and the device-wide
+/// folder tab, add-device answer log and temporary decrypted media.
+@MainActor
+final class AccountLocalDataWipeTests: XCTestCase {
+
+    /// Bytes chosen so the base64 form carries both `/` and `+`, which the
+    /// file stores rewrite (`/` -> `_`).
+    private let accountIdA = Data([
+        0xFF, 0xFF, 0xFF, 0xFB, 0xEF, 0xBE, 0x5A, 0x11,
+        0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xA1,
+    ])
+    private let accountIdB = Data([
+        0x0B, 0x1B, 0x2B, 0x3B, 0x4B, 0x5B, 0x6B, 0x7B,
+        0x8B, 0x9B, 0xAB, 0xBB, 0xCB, 0xDB, 0xEB, 0xB2,
+    ])
+    private var a: String { base64Encode(accountIdA) }
+    private var b: String { base64Encode(accountIdB) }
+
+    private let channelA = Data(repeating: 0xCA, count: 16)
+    private let channelB = Data(repeating: 0xCB, count: 16)
+
+    // Device-wide values this test touches, restored afterwards.
+    private var savedSession: PersistedSession?
+    private var savedBinding: PushAccountBinding?
+    private var savedFolderTab: Any?
+    private var savedAnswers: Any?
+    private var savedMarks: [String] = []
+
+    override func setUp() async throws {
+        try await super.setUp()
+        savedSession = SessionStore().load()
+        savedBinding = PushAccountBindingStore.live.current()
+        savedFolderTab = UserDefaults.standard.object(forKey: AccountLocalDataWipe.selectedFolderTabKey)
+        savedAnswers = UserDefaults.standard.object(forKey: DeviceLinkAnswerLimit.defaultKey)
+        savedMarks = JournalFoundingMarks.shared.all()
+        wipeQuietly(a)
+        wipeQuietly(b)
+    }
+
+    override func tearDown() async throws {
+        wipeQuietly(a)
+        wipeQuietly(b)
+        if let savedSession { SessionStore().save(savedSession) }
+        if let savedBinding, let pseudonym = CoPublisher.hexToData(savedBinding.devicePseudonymHex) {
+            PushAccountBindingStore.live.bind(devicePseudonym: pseudonym, accountIdB64: savedBinding.accountIdB64)
+        }
+        UserDefaults.standard.set(savedFolderTab, forKey: AccountLocalDataWipe.selectedFolderTabKey)
+        UserDefaults.standard.set(savedAnswers, forKey: DeviceLinkAnswerLimit.defaultKey)
+        for mark in savedMarks { JournalFoundingMarks.shared.mark(journalIdHex: mark) }
+        try await super.tearDown()
+    }
+
+    // MARK: - The inventory
+
+    func testWipeRemovesEveryItemNamingTheAccountAndKeepsTheOther() throws {
+        try seed(accountId: accountIdA, channelId: channelA)
+        try seed(accountId: accountIdB, channelId: channelB)
+        // The signed-in account's device-wide rows.
+        SessionStore().save(PersistedSession(accountIdB64: a, username: "alice"))
+        PushAccountBindingStore.live.bind(devicePseudonym: Data(repeating: 0x11, count: 32), accountIdB64: a)
+
+        let beforeA = AccountDataInventory.remaining(accountIdB64: a)
+        let beforeB = AccountDataInventory.remaining(accountIdB64: b)
+        let perPlace = Dictionary(grouping: beforeA, by: { $0.place }).mapValues(\.count)
+        NSLog("[account-wipe-test] seeded for the wiped account: total %d, %@",
+              beforeA.count,
+              perPlace.map { "\($0.key.rawValue)=\($0.value)" }.sorted().joined(separator: " "))
+        // The walk reaches every kind of store the seed wrote to.
+        XCTAssertGreaterThanOrEqual(perPlace[.standardDefaults] ?? 0, 20)
+        XCTAssertGreaterThanOrEqual(perPlace[.keychain] ?? 0, 10)
+        if SharedStorage.sharedDefaults() != nil {
+            XCTAssertGreaterThan(perPlace[.sharedDefaults] ?? 0, 3)
+        }
+        if SharedStorage.containerURL() != nil {
+            XCTAssertGreaterThan(perPlace[.appGroupContainer] ?? 0, 2)
+        }
+        XCTAssertGreaterThan(perPlace[.applicationSupport] ?? 0, 2)
+
+        var removals = 0
+        let report = AccountLocalDataWipe.wipe(accountIdB64: a, removeDeliveredNotifications: { removals += 1 })
+
+        XCTAssertEqual(report.failedSteps, [])
+        XCTAssertEqual(report.leftovers, [], "every store naming the account is wiped")
+        XCTAssertEqual(AccountDataInventory.remaining(accountIdB64: a), [])
+        XCTAssertEqual(removals, 1)
+        XCTAssertNil(SessionStore().load(), "the session record named the wiped account")
+        XCTAssertNil(PushAccountBindingStore.live.current(), "the binding named the wiped account")
+
+        // The other account's data is exactly what it was.
+        XCTAssertEqual(Set(AccountDataInventory.remaining(accountIdB64: b)), Set(beforeB))
+        XCTAssertFalse(beforeB.isEmpty)
+        NSLog("[account-wipe-test] other account kept: %d item(s)", beforeB.count)
+    }
+
+    /// The walk is what makes the list checkable: a store the wipe does not
+    /// know about is reported, in every place it can be, rather than passing
+    /// silently.
+    func testAStoreTheWipeDoesNotKnowIsReportedAsLeftover() throws {
+        let unknownKey = "lakko.test-unknown-store.v1.\(a)"
+        UserDefaults.standard.set(Data([1]), forKey: unknownKey)
+        SharedStorage.sharedDefaults()?.set(["x": a], forKey: "lakko.test-unknown-store.v1")
+        defer {
+            UserDefaults.standard.removeObject(forKey: unknownKey)
+            SharedStorage.sharedDefaults()?.removeObject(forKey: "lakko.test-unknown-store.v1")
+        }
+        let appSupport = try FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let unknownFile = appSupport.appendingPathComponent(
+            "lakko-test-unknown/\(a.replacingOccurrences(of: "/", with: "_")).bin")
+        try FileManager.default.createDirectory(
+            at: unknownFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([1]).write(to: unknownFile)
+        defer { try? FileManager.default.removeItem(at: unknownFile.deletingLastPathComponent()) }
+
+        let report = AccountLocalDataWipe.wipe(accountIdB64: a, removeDeliveredNotifications: {})
+
+        let places = Set(report.leftovers.map(\.place))
+        XCTAssertTrue(report.leftovers.contains(AccountDataInventory.Item(place: .standardDefaults, name: unknownKey)))
+        XCTAssertTrue(places.contains(.applicationSupport))
+        if SharedStorage.sharedDefaults() != nil {
+            XCTAssertTrue(places.contains(.sharedDefaults), "a value naming the account is found too")
+        }
+    }
+
+    // MARK: - What the walk cannot see by name
+
+    func testFoundingMarksOfTheAccountsOwnJournalsGoAndOthersStay() throws {
+        try seed(accountId: accountIdA, channelId: channelA)
+        try seed(accountId: accountIdB, channelId: channelB)
+        let deviceGroupA = DsClient.pseudonymHex(try deviceGroupIdFor(accountId: accountIdA))
+        let deviceGroupB = DsClient.pseudonymHex(try deviceGroupIdFor(accountId: accountIdB))
+        let channelGroupA = DsClient.pseudonymHex(try publisherGroupId(channelA))
+        let channelGroupB = DsClient.pseudonymHex(try publisherGroupId(channelB))
+        for mark in [deviceGroupA, deviceGroupB, channelGroupA, channelGroupB] {
+            JournalFoundingMarks.shared.mark(journalIdHex: mark)
+        }
+
+        AccountLocalDataWipe.wipe(accountIdB64: a, removeDeliveredNotifications: {})
+
+        let marks = JournalFoundingMarks.shared
+        XCTAssertFalse(marks.isMarked(journalIdHex: deviceGroupA))
+        XCTAssertFalse(marks.isMarked(journalIdHex: channelGroupA))
+        XCTAssertTrue(marks.isMarked(journalIdHex: deviceGroupB))
+        XCTAssertTrue(marks.isMarked(journalIdHex: channelGroupB))
+    }
+
+    func testDeviceWideKeysAndDecryptedMediaHoldingTheAccountsDataGo() throws {
+        let defaults = UserDefaults.standard
+        defaults.set("00ff", forKey: AccountLocalDataWipe.selectedFolderTabKey)
+        DeviceLinkAnswerLimit().record()
+        let fm = FileManager.default
+        let chatMedia = MediaTempFiles.defaultParent.appendingPathComponent("wipe-test/blob/voice.m4a")
+        let shared = fm.temporaryDirectory
+            .appendingPathComponent(AccountLocalDataWipe.sharedAttachmentsDirectoryName)
+            .appendingPathComponent("wipe-test/photo.jpg")
+        let export = fm.temporaryDirectory.appendingPathComponent(AccountLocalDataWipe.accountExportFileName)
+        for url in [chatMedia, shared, export] {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data([1, 2, 3]).write(to: url)
+        }
+
+        let report = AccountLocalDataWipe.wipe(accountIdB64: a, removeDeliveredNotifications: {})
+
+        XCTAssertEqual(report.failedSteps, [])
+        XCTAssertNil(defaults.object(forKey: AccountLocalDataWipe.selectedFolderTabKey))
+        XCTAssertNil(defaults.object(forKey: DeviceLinkAnswerLimit.defaultKey))
+        XCTAssertTrue(DeviceLinkAnswerLimit().canAnswer())
+        XCTAssertFalse(fm.fileExists(atPath: chatMedia.path))
+        XCTAssertFalse(fm.fileExists(atPath: shared.path))
+        XCTAssertFalse(fm.fileExists(atPath: export.path))
+    }
+
+    func testDeviceSettingsStay() {
+        let defaults = UserDefaults.standard
+        let keys = [
+            AppearanceSetting.storageKey, MediaPrefs.autoplayKey, MediaPrefs.recordModeKey,
+            MediaPrefs.gifNoteKey,
+        ]
+        let saved = keys.map { defaults.object(forKey: $0) }
+        defer { for (key, value) in zip(keys, saved) { defaults.set(value, forKey: key) } }
+        defaults.set("dark", forKey: AppearanceSetting.storageKey)
+        defaults.set(true, forKey: MediaPrefs.autoplayKey)
+        defaults.set("videoNote", forKey: MediaPrefs.recordModeKey)
+        defaults.set(true, forKey: MediaPrefs.gifNoteKey)
+
+        AccountLocalDataWipe.wipe(accountIdB64: a, removeDeliveredNotifications: {})
+
+        XCTAssertEqual(defaults.string(forKey: AppearanceSetting.storageKey), "dark")
+        XCTAssertTrue(defaults.bool(forKey: MediaPrefs.autoplayKey))
+        XCTAssertEqual(defaults.string(forKey: MediaPrefs.recordModeKey), "videoNote")
+        XCTAssertTrue(defaults.bool(forKey: MediaPrefs.gifNoteKey))
+    }
+
+    // MARK: - Seeding
+
+    /// Write one account's rows into every account-scoped store, through each
+    /// store's own API where it has a simple one.
+    private func seed(accountId: Data, channelId: Data) throws {
+        let x = base64Encode(accountId)
+        let group = "aa" + DsClient.pseudonymHex(accountId)
+        let standard = UserDefaults.standard
+        let channelHex = ChannelsComposer.bytesToHex(channelId)
+
+        // Keychain.
+        try SessionTokenStore.putSessionToken(
+            accountIdB64: x, token: PersistedSessionToken(sessionToken: "tok", sessionExpiresAtMs: 1))
+        try DeviceKeyStore.putDeviceKey(accountIdB64: x, rootKey: Data(repeating: 1, count: deviceRootKeyLength))
+        try PhraseStore().putPhrase(accountIdB64: x, phraseBytes: Data("abandon ability".utf8))
+        try BackupFloorStore.putFloor(
+            accountIdB64: x, floor: BackupFloor(version: 1, envelopeHash: Data(repeating: 2, count: 32)))
+        try ExportKeyStore.putExportKey(
+            accountIdB64: x, exportKey: Data(repeating: 3, count: ExportKeyStore.exportKeyLength))
+        try AccountIdentitySeedStore.putAccountIdentitySeed(
+            accountIdB64: x, seed: Data(repeating: 4, count: AccountIdentitySeedStore.seedLength))
+        try DeviceIdentityStore.putDeviceIdentitySeed(
+            accountIdB64: x, seed: Data(repeating: 5, count: DeviceIdentityStore.seedLength))
+        try DeviceIdentityStore.putDeviceBinding(accountIdB64: x, binding: Data([6, 6]))
+        InviteLinkSecretStore.shared.put(accountIdB64: x, slug: "slug", secret: Data(repeating: 7, count: 12))
+        KeychainAnonTokenStore().save(
+            accountKey: x, context: .pushRegister,
+            tokens: [AnonToken(context: AnonTokenContext.pushRegister.rawValue, epoch: 1, headerValue: "h")])
+        KeychainReachPersistence().save(ReachRecord(), accountIdB64: x)
+        ChannelPublisherKeyStore.save(Data([1]), accountIdB64: x)
+        ChannelPublishCounterStore.save(Data([1]), accountIdB64: x)
+        ChannelSubscriberKeyStore.save(Data([1]), accountIdB64: x)
+
+        // Files.
+        IdentitySnapshotStore().putSnapshot(accountIdB64: x, blob: Data([1, 2]))
+        MessageLogStore().putLog(accountIdB64: x, payload: MessageLogPayload(groups: [:]))
+        ChannelLogStore().put(
+            accountIdB64: x,
+            payload: ChannelLogPayload(
+                channels: [PersistedChannel(
+                    id: channelHex, localName: "c", localDescription: "", addedAtMs: 1, handle: "h")],
+                subscribedSeeds: []))
+        DeviceGroupSnapshotStore().putSnapshot(accountIdB64: x, blob: Data([1, 2]))
+        SyncedStateStore.save(SyncedState(), accountIdB64: x)
+        try CommitOutboxStore().putNewDurable(
+            accountIdB64: x,
+            entry: NewCommitEntry(id: "c1", groupId: group, targetEpoch: "1", commitB64: "AA=="))
+        let calls = SealedCallHistoryBacking()
+        calls.save(accountIdB64: x, data: Data("[]".utf8))
+        calls.save(accountIdB64: CallHistoryStore.backfillMarkerKey(x), data: Data([1]))
+
+        // UserDefaults, through the stores.
+        SnapshotLeafKeyStore().save(accountIdB64: x, leafKeyB64: "leaf")
+        KnownGroupsStore().add(accountIdB64: x, groupIdHex: group)
+        ConversationKindStore().record(accountIdB64: x, groupIdHex: group, kind: .group)
+        GroupNameStore().record(
+            accountIdB64: x, groupIdHex: group, value: StoredGroupName(name: "n", updatedAtMs: 1))
+        SharedPinStore().record(
+            accountIdB64: x, groupIdHex: group, messageId: 1, value: StoredSharedPin(pinned: true, updatedAtMs: 1))
+        PersonalPinStore().set(accountIdB64: x, groupIdHex: group, messageId: 1, pinnedAtMs: 1)
+        ProfileRequestStore().record(accountIdB64: x, groupIdHex: group, atMs: 1)
+        DeviceReadmissionMemory.recordRemoved(
+            accountIdB64: x, groupIdHex: group, before: ["l1"], after: [])
+        PushRoutingStore().putRouting(
+            accountIdB64: x, groupIdHex: group, secret: Data(repeating: 8, count: 32),
+            pushGidHex: String(repeating: "ab", count: 32), distributed: true, mintEpoch: 1)
+        RegistrarSeedStore().put(
+            accountIdB64: x, groupIdHex: group, seed: Data(repeating: 9, count: 32), rank: .member)
+        BeaconObservationStore().record(accountIdB64: x, groupIdB64: "g", senderKeyB64: "s", atMs: 1)
+        PendingRequestStore().record(accountIdB64: x, groupIdB64: "g", key: "k", atMs: 1, own: true)
+        LastObservedOwnerStore().remember(accountIdB64: x, groupIdB64: "g", ownerKeyB64: "o")
+        LeaveRequestStore().remember(accountIdB64: x, groupIdB64: "g", atMs: 1)
+        try ProfileDirectory.shared.setOwnDisplayName("Name", accountIdB64: x)
+        ContactsInboxStore().save(PersistedContactsInbox.empty, accountIdB64: x)
+        StateBundle.saveKnownGroupIds(["abc"], accountIdB64: x)
+        CoPublishedJournals(defaults: standard, accountIdB64: { x }).mark(journalIdHex: "ab")
+        MediaPrefs(defaults: standard, accountIdB64: { x }).markPlayed("played")
+        ChannelRotationStateStore.save(
+            accountIdB64: x, channelId: channelHex, state: channelRotationStateAfterRotation(nowMs: 1))
+        PendingSyncTracker(accountIdB64: x).markFailed()
+        AutoBackupStore.save(accountIdB64: x, state: .clean)
+
+        // UserDefaults, raw: stores whose writers take a live model (a group
+        // call record, a member identity, a contact), under the keys the
+        // stores themselves read.
+        standard.set(Data("{}".utf8), forKey: "group_calls.\(x)")
+        standard.set([group: ["s": NSNumber(value: 1)]], forKey: "read_watermarks.\(x)")
+        standard.set(["k": ["v": false]], forKey: "lakko.unapplied-requests.v1.\(x).g")
+        standard.set(Data("[]".utf8), forKey: "lakko.contacts.accepted.v2.\(x)")
+        standard.set(Data("{}".utf8), forKey: "me.lakko.contacts.pins.v2.\(x)")
+        standard.set(Data("{}".utf8), forKey: "lakko.profiles.received.v1.\(x)")
+        standard.set(3, forKey: "\(AccountLocalDataWipe.knockCursorPrefix)\(x).\(group)")
+
+        // App Group suite.
+        CallPeerNameMirror.mirror(accountIdB64: x, groupIdHex: group, name: "Peer")
+        ConversationMuteMirror.replaceAll(accountIdB64: x, mutedGroupIdsHex: [group])
+        SharedStorage.sharedDefaults()?.set(
+            [x, group], forKey: AccountLocalDataWipe.legacyPushRoutePrefix + "gid-" + group)
+    }
+
+    /// `b"lakko/pubgrp/v2/" || channel_id`, checked against the core's own
+    /// inverse so the test cannot drift from the derivation.
+    private func publisherGroupId(_ channelId: Data) throws -> Data {
+        let groupId = Data("lakko/pubgrp/v2/".utf8) + channelId
+        XCTAssertEqual(channelIdFromPublisherGroupId(groupId: groupId), channelId)
+        return groupId
+    }
+
+    private func wipeQuietly(_ accountIdB64: String) {
+        AccountLocalDataWipe.wipe(accountIdB64: accountIdB64, removeDeliveredNotifications: {})
+    }
+}

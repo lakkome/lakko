@@ -110,7 +110,7 @@ public fun DeviceLinkRequestHost(
                 // ADR-0050 section 2.8 — admit the new device to every chat.
                 chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
             },
-            limit = deviceLinkAnswerLimit(context),
+            limit = deviceLinkAnswerLimit(context, account.accountIdB64),
         )
     }
 

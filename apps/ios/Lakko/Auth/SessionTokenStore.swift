@@ -40,7 +40,7 @@ import Security
 ///     token, so there is no reason to widen this item's read scope.
 ///
 /// Deleted on ``AuthRepository/logout()`` (so a relaunch after logout
-/// lands logged out) and on ``AuthRepository/forgetDevice()``.
+/// lands logged out) and on ``AccountLocalDataWipe``.
 ///
 /// ## Persistence layout
 ///

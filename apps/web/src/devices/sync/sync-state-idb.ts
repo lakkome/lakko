@@ -29,6 +29,23 @@ const DB_VERSION = 1;
 const STORE = "rows";
 const IV_LEN = 12;
 
+/**
+ * Per-account count of {@link deleteSyncState} calls in this page. A write
+ * captured before a delete must not land after it: Forget device and Delete
+ * account delete the row while the sync runtime may still hold a debounced
+ * write for the account, and that write would put the row back (encrypted
+ * under a key the same wipe removed, but still filed under the account id).
+ * A caller reads {@link syncStateGeneration} when it captures the state and
+ * passes it to {@link saveSyncState}, which drops the write if a delete came
+ * in between.
+ */
+const generations = new Map<string, number>();
+
+/** The current delete generation of one account's row (see above). */
+export function syncStateGeneration(accountId: string): number {
+  return generations.get(accountId) ?? 0;
+}
+
 interface PersistedRow {
   accountId: string;
   ciphertext: Uint8Array;
@@ -116,17 +133,27 @@ export async function loadSyncState(
   }
 }
 
-/** Replace one account's snapshot. */
+/**
+ * Replace one account's snapshot. With `onlyIfGeneration`, the write is
+ * dropped when the row was deleted since that generation was read. The check
+ * and the `put` transaction are made in the same synchronous step, and a
+ * delete bumps the generation before it opens its own transaction, so a
+ * delete issued after the check always runs after the put.
+ */
 export async function saveSyncState(
   accountId: string,
   deviceKey: CryptoKey | null,
   state: SyncStateRow,
+  onlyIfGeneration?: number,
 ): Promise<void> {
   if (deviceKey === null) return;
   const plain = new TextEncoder().encode(encodeSyncState(state));
   const ciphertext = await encryptBlob(deviceKey, plain);
   const db = await openDb();
   try {
+    if (onlyIfGeneration !== undefined && syncStateGeneration(accountId) !== onlyIfGeneration) {
+      return;
+    }
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put({ accountId, ciphertext } satisfies PersistedRow);
     await awaitTx(tx);
@@ -135,8 +162,14 @@ export async function saveSyncState(
   }
 }
 
-/** Forget one account's snapshot, for logout and forget-this-device. */
+/**
+ * Forget one account's snapshot. Called by the account wipe only (Forget
+ * device, Delete account): Log out keeps the row for the next sign-in, since
+ * the restored DeviceGroup has already consumed the journal rows that built
+ * it.
+ */
 export async function deleteSyncState(accountId: string): Promise<void> {
+  generations.set(accountId, syncStateGeneration(accountId) + 1);
   const db = await openDb();
   try {
     const tx = db.transaction(STORE, "readwrite");

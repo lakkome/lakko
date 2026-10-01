@@ -166,6 +166,20 @@ public class MediaPrefs internal constructor(context: Context) {
             instance ?: synchronized(this) {
                 instance ?: MediaPrefs(context.applicationContext).also { instance = it }
             }
+
+        /**
+         * Forget device: drop [accountIdB64]'s played marks from the live
+         * instance, if one was made, and from disk either way (with the
+         * retired device-wide file). The preferences file holds device
+         * settings only and stays. The one caller is
+         * [me.lakko.app.account.AccountLocalWipe].
+         */
+        public fun forgetAccountOnDevice(context: Context, accountIdB64: String) {
+            instance?.forgetAccount(accountIdB64)
+            val root = context.applicationContext.noBackupFilesDir
+            File(File(root, PLAYED_DIR), playedFileName(accountIdB64)).delete()
+            File(root, RETIRED_PLAYED_FILE).delete()
+        }
     }
 }
 

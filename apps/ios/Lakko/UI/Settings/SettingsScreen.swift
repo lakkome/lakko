@@ -27,14 +27,16 @@ struct SettingsScreen: View {
         authRepository: AuthRepository,
         onOpen: @escaping (TabRoute) -> Void,
         onLogout: @escaping () -> Void,
-        onForgetDevice: @escaping () -> Void
+        onForgetDevice: @escaping () -> Void,
+        onAccountDeleted: @escaping (String) -> Void
     ) {
         self.account = account
         self.onOpen = onOpen
         self.onLogout = onLogout
         self.onForgetDevice = onForgetDevice
         self._accountDeletion = StateObject(
-            wrappedValue: PasskeysViewModel(authRepository: authRepository))
+            wrappedValue: PasskeysViewModel(
+                authRepository: authRepository, wipeAfterDeletion: onAccountDeleted))
     }
     /// ADR-0047 / UX spec section 3 — "Autoplay video notes", default OFF:
     /// autoplay downloads media, so it is the user's choice, per device.

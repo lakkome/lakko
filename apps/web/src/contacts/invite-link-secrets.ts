@@ -25,6 +25,7 @@ const PREFIX = "lakko/invite-link-secrets/v1/";
 export interface SecretStorage {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
 }
 
 function defaultStorage(): SecretStorage | null {
@@ -77,4 +78,19 @@ export function inviteLinkSecretFor(
   storage: SecretStorage | null = defaultStorage(),
 ): string | null {
   return read(storage, accountKey)[blobIdSlug] ?? null;
+}
+
+/** Drop every link secret this device keeps for the account (Forget device,
+ *  Delete account). Best effort. */
+export function clearInviteLinkSecrets(
+  accountKey: string,
+  storage: SecretStorage | null = defaultStorage(),
+): void {
+  if (storage === null) return;
+  try {
+    if (storage.removeItem !== undefined) storage.removeItem(PREFIX + accountKey);
+    else storage.setItem(PREFIX + accountKey, "{}");
+  } catch {
+    /* storage blocked: nothing was kept either */
+  }
 }

@@ -214,6 +214,21 @@ public class ProfileDirectory internal constructor(
         @Volatile
         private var instance: ProfileDirectory? = null
 
+        /**
+         * Forget device: [forgetAccount] on the live directory, if one was
+         * made, and [accountIdB64]'s rows on disk either way (with the retired
+         * device-wide rows). The one caller is
+         * [me.lakko.app.account.AccountLocalWipe].
+         */
+        public fun forgetAccountOnDevice(context: Context, accountIdB64: String) {
+            instance?.forgetAccount(accountIdB64)
+            val app = context.applicationContext
+            val persistence = SharedPrefsProfilePersistence(app)
+            persistence.saveProfiles(accountIdB64, emptyMap())
+            persistence.saveVerifications(accountIdB64, emptyMap())
+            SharedPrefsProfilePersistence.deleteRetiredGlobalRows(app)
+        }
+
         /** The process-wide directory, created on first use. */
         public fun get(context: Context): ProfileDirectory {
             instance?.let { return it }

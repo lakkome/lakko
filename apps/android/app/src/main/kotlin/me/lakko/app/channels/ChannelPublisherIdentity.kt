@@ -57,7 +57,6 @@ import uniffi.lakko_ffi_uniffi.Identity
 public class ChannelPublisherIdentity(
     private val loadSnapshot: (accountIdB64: String) -> ByteArray?,
     private val saveSnapshot: (accountIdB64: String, snapshot: ByteArray) -> Unit,
-    private val deleteSnapshot: (accountIdB64: String) -> Unit,
 ) {
     public companion object {
         private const val TAG = "ChannelPublisherIdentity"
@@ -72,8 +71,14 @@ public class ChannelPublisherIdentity(
             return ChannelPublisherIdentity(
                 loadSnapshot = { acct -> IdentitySnapshotStore.getSnapshot(app, acct + SNAPSHOT_SCOPE_SUFFIX) },
                 saveSnapshot = { acct, bytes -> IdentitySnapshotStore.putSnapshot(app, acct + SNAPSHOT_SCOPE_SUFFIX, bytes) },
-                deleteSnapshot = { acct -> IdentitySnapshotStore.deleteSnapshot(app, acct + SNAPSHOT_SCOPE_SUFFIX) },
             )
+        }
+
+        /** Forget device: delete [accountIdB64]'s on-device provider snapshot.
+         *  The one caller is [me.lakko.app.account.AccountLocalWipe]; the
+         *  in-memory identity is closed by [unbind]. */
+        public fun deleteOnDeviceSnapshot(context: Context, accountIdB64: String) {
+            IdentitySnapshotStore.deleteSnapshot(context.applicationContext, accountIdB64 + SNAPSHOT_SCOPE_SUFFIX)
         }
     }
 
@@ -162,19 +167,6 @@ public class ChannelPublisherIdentity(
         identity?.close()
         identity = null
         boundAccountIdB64 = null
-    }
-
-    /** Close the identity AND delete its snapshot. Forget device. */
-    public fun forget() {
-        val acct = boundAccountIdB64
-        unbind()
-        if (acct != null) {
-            try {
-                deleteSnapshot(acct)
-            } catch (e: Throwable) {
-                Log.w(TAG, "channel provider snapshot not deleted", e)
-            }
-        }
     }
 
     private fun persistLocked(id: Identity) {

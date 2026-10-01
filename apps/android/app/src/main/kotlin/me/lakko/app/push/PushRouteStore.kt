@@ -85,9 +85,10 @@ public class PushRouteStore(context: Context) {
     }
 
     /**
-     * Drop every reverse-index row owned by [accountIdB64]. Called
-     * from `ChatRepository.forgetDevice`. A row for another account on
-     * the same device is left intact.
+     * Drop every reverse-index row owned by [accountIdB64], and the rows of
+     * the retired v1 file that name it (value `"<accountIdB64> <groupIdHex>"`,
+     * never read). Called from [me.lakko.app.account.AccountLocalWipe]. A row
+     * for another account on the same device is left intact.
      */
     public fun clearForAccount(accountIdB64: String) {
         val prefix = accountIdB64 + SEPARATOR
@@ -96,11 +97,24 @@ public class PushRouteStore(context: Context) {
             if (key.startsWith(prefix)) editor.remove(key)
         }
         editor.apply()
+        val retired = retiredPrefs
+        val retiredEditor = retired.edit()
+        for ((key, value) in retired.all) {
+            if ((value as? String)?.startsWith(prefix) == true) retiredEditor.remove(key)
+        }
+        retiredEditor.apply()
     }
+
+    private val retiredPrefs: SharedPreferences =
+        context.applicationContext.getSharedPreferences(RETIRED_PREFS_NAME, Context.MODE_PRIVATE)
 
     public companion object {
         /** Shared prefs file name — the FMS opens this by name. */
         public const val PREFS_NAME: String = "me.lakko.push-routing.v2"
+
+        /** The v1 file (keyed by `push_gid` alone), never read since
+         *  2026-09-30. */
+        public const val RETIRED_PREFS_NAME: String = "me.lakko.push-routing.v1"
 
         /** Key field separator. Neither base64 nor hex contains a space. */
         private const val SEPARATOR: String = " "

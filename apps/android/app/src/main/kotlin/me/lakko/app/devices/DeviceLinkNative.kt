@@ -82,14 +82,27 @@ public class FfiDeviceLinkResponder(requestId: ByteArray, ownLoginHandle: ByteAr
         }
 }
 
-/** The per-device answer limit, persisted in shared preferences (a list of
- *  answer timestamps; not secret). */
-public fun deviceLinkAnswerLimit(context: Context): DeviceLinkAnswerLimit {
+/** The answer limit of [accountIdB64] on this device, persisted in shared
+ *  preferences (a list of answer timestamps; not secret). Kept per account,
+ *  like the web client's answer log: the times record when this account
+ *  approved sign-ins, so a second account on the phone neither inherits nor
+ *  spends them, and forget device removes them ([forgetDeviceLinkAnswers]). */
+public fun deviceLinkAnswerLimit(context: Context, accountIdB64: String): DeviceLinkAnswerLimit {
     val prefs = context.applicationContext.getSharedPreferences(ANSWER_LIMIT_PREFS, Context.MODE_PRIVATE)
+    val key = answerLimitKey(accountIdB64)
     return DeviceLinkAnswerLimit(
-        load = { decodeAnswerTimes(prefs.getString(ANSWER_LIMIT_KEY, null)) },
-        save = { times -> prefs.edit().putString(ANSWER_LIMIT_KEY, encodeAnswerTimes(times)).apply() },
+        load = { decodeAnswerTimes(prefs.getString(key, null)) },
+        save = { times -> prefs.edit().putString(key, encodeAnswerTimes(times)).apply() },
     )
+}
+
+/** Forget device: drop [accountIdB64]'s answer times and the retired
+ *  device-wide row of builds before 2026-09-30. Other accounts' stay. */
+public fun forgetDeviceLinkAnswers(context: Context, accountIdB64: String) {
+    context.applicationContext.getSharedPreferences(ANSWER_LIMIT_PREFS, Context.MODE_PRIVATE).edit()
+        .remove(answerLimitKey(accountIdB64))
+        .remove(RETIRED_ANSWER_LIMIT_KEY)
+        .apply()
 }
 
 /** `1,2,3` -> times; malformed entries skipped. */
@@ -99,5 +112,11 @@ public fun decodeAnswerTimes(text: String?): List<Long> =
 /** Times -> `1,2,3`. */
 public fun encodeAnswerTimes(times: List<Long>): String = times.joinToString(",")
 
+private fun answerLimitKey(accountIdB64: String): String =
+    ANSWER_LIMIT_KEY_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+
 private const val ANSWER_LIMIT_PREFS = "lakko-device-link"
-private const val ANSWER_LIMIT_KEY = "answered-at-v1"
+private const val ANSWER_LIMIT_KEY_PREFIX = "answered-at-v2:"
+
+/** The device-wide row of builds before 2026-09-30. Never read. */
+private const val RETIRED_ANSWER_LIMIT_KEY = "answered-at-v1"

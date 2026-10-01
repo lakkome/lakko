@@ -50,6 +50,7 @@ import {
   createEffect,
   createSignal,
   onCleanup,
+  untrack,
   useContext,
   type Accessor,
   type JSX,
@@ -58,7 +59,8 @@ import {
 import { useAuth } from "../../auth/AuthContext";
 import { ensureDeviceIdentitySeed } from "../../auth/device-identity-store";
 import { getDeviceKey } from "../../auth/key-store";
-import { deleteSyncState, loadSyncState, saveSyncState } from "./sync-state-idb";
+import { loadSyncState, saveSyncState, syncStateGeneration } from "./sync-state-idb";
+import { SyncStatePersister, type CapturedSyncState } from "./sync-state-persister";
 import { DsClient, DsHttpError, DsNetworkError } from "../../ds/client";
 import { dsAccess, takeSigner } from "../../ds/access";
 import { loadWasm } from "../../wasm";
@@ -250,6 +252,25 @@ export function DeviceGroupSyncProvider(props: {
    *  handle on this device, nothing is sent from the stale one. */
   let reloading = false;
   let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Writes the stored row, debounced; flushed by `teardown` so Log out keeps
+   *  the last edit (see `sync-state-persister.ts`). */
+  const persister = new SyncStatePersister({
+    debounceMs: SYNC_PERSIST_DEBOUNCE_MS,
+    save: async (account, captured) => {
+      const deviceKey = await getDeviceKey(account);
+      await saveSyncState(account, deviceKey, captured.row, captured.generation);
+    },
+    onError: (err) => {
+      // Best-effort: the in-memory state stays good and the next change
+      // rewrites the row.
+      // eslint-disable-next-line no-console
+      console.warn("device-sync state persist failed", err);
+    },
+  });
+  /** The row's delete generation when this runtime bound the account. A wipe
+   *  since then (Forget device, Delete account) bumps it, and nothing captured
+   *  under the old binding is written. */
+  let boundSyncGeneration: number | null = null;
   let outboxTimer: ReturnType<typeof setTimeout> | null = null;
   let draining = false;
   /** ADR-0060 section 7 - unregisters this provider as the carrier of the
@@ -448,6 +469,10 @@ export function DeviceGroupSyncProvider(props: {
     // it are never read again. The stored state is a head start, not an
     // authority: the poll folds newer rows on top by stamp.
     const wasm = await loadWasm();
+    // A write the previous session flushed on Log out may still be in flight;
+    // read after it, so a sign-in right after a sign-out finds the last edit.
+    await persister.idle();
+    boundSyncGeneration = syncStateGeneration(accountIdB64);
     let restored: Awaited<ReturnType<typeof loadSyncState>> = null;
     try {
       restored = await loadSyncState(accountIdB64, deviceKey);
@@ -518,8 +543,7 @@ export function DeviceGroupSyncProvider(props: {
     snapshotTimer = null;
     if (outboxTimer !== null) clearTimeout(outboxTimer);
     outboxTimer = null;
-    if (persistTimer !== null) clearTimeout(persistTimer);
-    persistTimer = null;
+    persister.cancel();
   }
 
   /**
@@ -570,6 +594,14 @@ export function DeviceGroupSyncProvider(props: {
   }
 
   function teardown(): void {
+    // Log out keeps the stored row (and the folder edits it holds that have
+    // not been sent): the restored DeviceGroup has already consumed the
+    // journal rows that built it, so a row dropped here is gone for good. A
+    // change still waiting for its debounce is written now, captured before
+    // the fold is freed below; nothing is captured once the account is
+    // unbound. Forget device and Delete account remove the row through the
+    // account wipe (`auth/wipe-account.ts`).
+    void persister.flush();
     unregisterServiceSender?.();
     unregisterServiceSender = null;
     if (pollAbort !== null) {
@@ -605,8 +637,8 @@ export function DeviceGroupSyncProvider(props: {
       }
       synced = null;
     }
-    const closing = activeAccountIdB64;
     activeAccountIdB64 = null;
+    boundSyncGeneration = null;
     ownDeviceGroupId = null;
     accountIdBytesActive = null;
     ownPublishedIds.clear();
@@ -618,46 +650,26 @@ export function DeviceGroupSyncProvider(props: {
     setOrder(null);
     setFolders([]);
     setOutbox([]);
-    // Forget the stored row too. Logout and forget-this-device both come
-    // through here, and a draft left behind for the next account to sign in
-    // on this browser is the one piece of this state that reads as a message.
-    if (closing !== null) {
-      void deleteSyncState(closing).catch((err: unknown) => {
-        // eslint-disable-next-line no-console
-        console.warn("device-sync state delete failed", err);
-      });
-    }
   }
 
   // Write the row whenever the fold or the outbox moves - a local set or a
   // sibling's row folded by the poll. Debounced because a draft changes on a
   // keystroke.
-  let persistTimer: ReturnType<typeof setTimeout> | null = null;
   createEffect(() => {
     stateVersion();
-    const pending = outbox();
+    outbox();
     const account = activeAccountIdB64;
     if (account === null || synced === null || deviceRemoved()) return;
-    if (persistTimer !== null) clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => {
-      persistTimer = null;
-      void (async () => {
-        try {
-          if (synced === null || activeAccountIdB64 !== account || deviceRemoved()) return;
-          const bytes = synced.toBytes();
-          const deviceKey = await getDeviceKey(account);
-          await saveSyncState(account, deviceKey, { synced: bytes, pending });
-        } catch (err) {
-          // Best-effort: the in-memory state stays good and the next change
-          // rewrites the row.
-          // eslint-disable-next-line no-console
-          console.warn("device-sync state persist failed", err);
-        }
-      })();
-    }, SYNC_PERSIST_DEBOUNCE_MS);
-  });
-  onCleanup(() => {
-    if (persistTimer !== null) clearTimeout(persistTimer);
+    // The capture reads the newest fold and outbox when the write runs. It
+    // may run inside `teardown`, which an effect calls, so it reads untracked.
+    const capture = (): CapturedSyncState | null =>
+      untrack(() => {
+        const generation = boundSyncGeneration;
+        if (synced === null || activeAccountIdB64 !== account || deviceRemoved()) return null;
+        if (generation === null || syncStateGeneration(account) !== generation) return null;
+        return { row: { synced: synced.toBytes(), pending: outbox() }, generation };
+      });
+    persister.schedule(account, capture);
   });
 
   // ----- Growth re-send (ADR-0058 section 5.1) -------------------

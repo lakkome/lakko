@@ -46,6 +46,10 @@ import me.lakko.app.devices.DeviceRemoval
  */
 public class PasskeysViewModel(
     private val repo: AuthRepository,
+    /** Run once the server-side erasure succeeded: the app's Forget device
+     *  orchestration (MainActivity), so Delete account leaves exactly what
+     *  Forget device leaves: nothing of the account on this device. */
+    private val onAccountDeleted: () -> Unit,
     private val client: WebauthnClient = WebauthnClient(),
     private val registration: WebauthnRegistration = WebauthnRegistration(),
 ) : ViewModel() {
@@ -267,7 +271,8 @@ public class PasskeysViewModel(
      * A3 (GDPR erasure) — delete the whole account across services + wipe this
      * device. Auth `DELETE /account` (on a 403, the account has a passkey, so
      * run the action ceremony bound to this account + retry once, fail-closed)
-     * -> best-effort discovery purge -> local `forgetDevice` wipe + sign-out.
+     * -> best-effort discovery purge -> [onAccountDeleted], the same local
+     * wipe + sign-out Forget device runs.
      */
     public fun deleteAccount(context: Context) {
         rebindSession()
@@ -303,8 +308,9 @@ public class PasskeysViewModel(
                 } catch (_: Throwable) {
                     // best-effort
                 }
-                // Local wipe + full sign-out on this device.
-                repo.forgetDevice()
+                // Local wipe + full sign-out on this device: the same path
+                // Forget device takes (every per-account store, push first).
+                onAccountDeleted()
             } catch (e: WebauthnUserCancelledError) {
                 mutableState.update {
                     it.copy(

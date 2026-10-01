@@ -46,7 +46,8 @@ class InboxSurvivesLogoutTest {
 
     @Test
     fun `log out keeps the inbox and forget device drops only that account's`() {
-        val store = InMemoryContactsInboxStore()
+        val context = RuntimeEnvironment.getApplication()
+        val store = SharedPreferencesContactsInboxStore(context)
         store.saveCursor(aB64, 42L)
         store.savePending(aB64, listOf(request(1)))
         store.saveCursor(bB64, 7L)
@@ -70,9 +71,9 @@ class InboxSurvivesLogoutTest {
         assertEquals(42L, repo.state.value.cursor)
         assertEquals(listOf(1L), repo.state.value.pending.map { it.messageId })
 
-        // Forget device.
-        repo.forgetDevice()
+        // Forget device: the session ends, then the one on-device wipe runs.
         repo.clear()
+        me.lakko.app.account.AccountLocalWipe.wipeAccountLocalData(context, aB64)
         assertEquals(0L, store.load(aB64).cursor)
         assertTrue(store.load(aB64).pending.isEmpty())
         assertEquals(7L, store.load(bB64).cursor)

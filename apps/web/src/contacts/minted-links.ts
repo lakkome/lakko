@@ -179,3 +179,23 @@ export async function forgetMintedLink(
     /* nothing kept, nothing to forget */
   }
 }
+
+/** Forget every link this device minted for the account (Forget device,
+ *  Delete account). Throws when the store cannot be opened; the caller logs. */
+export async function deleteMintedLinksForAccount(accountIdB64: string): Promise<void> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(STORE, "readwrite");
+    const store = tx.objectStore(STORE);
+    const prefix = `${accountIdB64}|`;
+    const req = store.getAll();
+    req.onsuccess = (): void => {
+      for (const row of (req.result ?? []) as PersistedRow[]) {
+        if (typeof row.key === "string" && row.key.startsWith(prefix)) store.delete(row.key);
+      }
+    };
+    await awaitTx(tx);
+  } finally {
+    db.close();
+  }
+}

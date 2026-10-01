@@ -170,7 +170,7 @@ public enum AccountIdentitySeedStore {
 
     /// Erase the cached AccountIdentity seed for `accountIdB64` from
     /// **both** the shared access group and the old app-private item.
-    /// No-op when absent. Called from ``AuthRepository/forgetDevice`` — a
+    /// No-op when absent. Called from ``AccountLocalDataWipe`` — a
     /// deliberate full wipe (distinct from the never-delete-old migration
     /// posture), so the crown-jewel seed is not left behind.
     public static func deleteAccountIdentitySeed(accountIdB64: String) {

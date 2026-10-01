@@ -190,13 +190,26 @@ export function recordAnswer(store: AnswerLogStore, now: number): void {
   store.save([...answersInWindow(store.load(), now), now]);
 }
 
+function answerLogKey(accountId: string): string {
+  return `lakko/device-link/answers/v1/${accountId}`;
+}
+
+/** Drop the account's answer log (Forget device, Delete account). */
+export function clearDeviceLinkAnswers(accountId: string): void {
+  try {
+    globalThis.localStorage?.removeItem(answerLogKey(accountId));
+  } catch {
+    // Storage blocked: nothing was stored either.
+  }
+}
+
 /**
  * The answer log in `localStorage`, per account on this browser (the
  * browser is the device). Every access is guarded: with storage blocked the
  * log reads empty and the server still enforces one exchange per request.
  */
 export function localStorageAnswerLog(accountId: string): AnswerLogStore {
-  const key = `lakko/device-link/answers/v1/${accountId}`;
+  const key = answerLogKey(accountId);
   return {
     load(): number[] {
       try {

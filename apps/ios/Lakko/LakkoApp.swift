@@ -581,7 +581,7 @@ struct AppRoot: View, Equatable {
                 // muted set (``ConversationMuteMirror``) are per account since
                 // 2026-09-30, so they stay for the next sign-in of the same
                 // account and can never reach another; forget-device removes
-                // the account's rows (``AuthRepository/forgetDevice()``).
+                // the account's rows (``AccountLocalDataWipe``).
                 CallKitProvider.shared.endAll()
                 CallKitCallRegistry.shared.reset()
             }
@@ -942,7 +942,8 @@ private struct SessionRoot: View, Equatable {
                     authRepository: authRepository,
                     onOpen: { settingsPath.append($0) },
                     onLogout: authRepository.logout,
-                    onForgetDevice: forgetDevice
+                    onForgetDevice: forgetDevice,
+                    onAccountDeleted: { services.wipeAccountLocalData(accountIdB64: $0) }
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .settings) }
             }
@@ -1319,7 +1320,9 @@ private struct SessionRoot: View, Equatable {
             )
         case .passkeys:
             PasskeysView(
-                viewModel: PasskeysViewModel(authRepository: authRepository)
+                viewModel: PasskeysViewModel(
+                    authRepository: authRepository,
+                    wipeAfterDeletion: { services.wipeAccountLocalData(accountIdB64: $0) })
             )
         case .devices:
             DevicesScreen(

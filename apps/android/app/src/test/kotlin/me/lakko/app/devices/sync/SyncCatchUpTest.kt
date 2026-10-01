@@ -86,6 +86,20 @@ class SyncCatchUpTest {
     }
 
     @Test
+    fun a_detached_flag_never_writes_its_row_again() {
+        val persisted = mutableListOf<Boolean>()
+        val flag = PendingSyncFlag(initial = false) { persisted += it }
+        flag.recordFailure()
+        flag.detach()
+        // A publish that was in flight at sign-out fails, another succeeds:
+        // neither reaches the row the teardown left (or the wipe removed).
+        val started = flag.generation
+        flag.onFlushed(started)
+        flag.recordFailure()
+        assertEquals(listOf(true), persisted)
+    }
+
+    @Test
     fun the_hlc_never_mints_at_or_below_a_restored_stamp() {
         val ahead = (System.currentTimeMillis().toULong() + 60_000uL) * 1000uL + 5uL
         Hlc.advancePast(ahead)

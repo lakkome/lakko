@@ -67,6 +67,7 @@ import { reachSession, reachSessionSignal, reachVersionsTick } from "../reach/re
 import { foldProfileGrants } from "../reach/grant-intake";
 import { ScopedDiscoveryClient, usernameCertKey } from "../reach/scoped-discovery";
 import { visibilitySetting } from "../reach/visibility-store";
+import { grantSignatureOf, recordGrantSignature } from "./grant-signatures";
 import { applyHeldServiceEnvelopes } from "../reach/service-envelope-intake";
 import {
   bindOwnProfileSync,
@@ -647,28 +648,3 @@ export function isOneToOne(group: Parameters<typeof rosterOf>[0]): boolean {
   return people.size === 2;
 }
 
-/** ADR-0060 — the grant signature last published per conversation, by
- *  account (versions only: `member:3|group:1`). */
-const GRANT_SIGNATURE_KEY = "lakko.reach.profile-grants.v1.";
-
-function grantSignatureOf(account: string, groupIdB64: string): string | null {
-  try {
-    const raw = globalThis.localStorage?.getItem(`${GRANT_SIGNATURE_KEY}${account}`);
-    const map = raw === null || raw === undefined ? {} : (JSON.parse(raw) as Record<string, string>);
-    return typeof map[groupIdB64] === "string" ? map[groupIdB64] : null;
-  } catch {
-    return null;
-  }
-}
-
-function recordGrantSignature(account: string, groupIdB64: string, signature: string): void {
-  try {
-    const key = `${GRANT_SIGNATURE_KEY}${account}`;
-    const raw = globalThis.localStorage?.getItem(key);
-    const map = raw === null || raw === undefined ? {} : (JSON.parse(raw) as Record<string, string>);
-    map[groupIdB64] = signature;
-    globalThis.localStorage?.setItem(key, JSON.stringify(map));
-  } catch {
-    /* storage unavailable: the profile is republished next session */
-  }
-}

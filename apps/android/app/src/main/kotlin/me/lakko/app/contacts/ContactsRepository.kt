@@ -1478,35 +1478,13 @@ public class ContactsRepository(
         }.toMap()
     }
 
-    /** Forget-device: the account's contact list, the identity pins it
-     *  holds, the stranger-inbox cursor and pending requests, and the
-     *  invite-link secrets this device kept leave with it; other accounts'
-     *  data stays. Call BEFORE [clear] (it reads the session). */
-    public fun forgetDevice() {
-        val accountB64 = boundAccountB64
-            ?: authRepo.identitySecrets.value?.let { base64Encode(it.accountId) }
-            ?: return
-        inviteSecretStore.clearForAccount(accountB64)
-        // The inbox cursor + pending list are per account; only forgetting
-        // the device drops them (log out keeps them, so a declined request
-        // stays declined after the next login).
-        inboxStore?.delete(accountB64)
-        appCtx?.let { ctx ->
-            AcceptedContactsStore.delete(ctx, accountB64)
-            try {
-                PeerPinStore.deleteForOwner(ctx, accountB64)
-            } catch (cause: Throwable) {
-                Log.w(TAG, "forgetDevice: pin wipe failed: ${cause.javaClass.simpleName}")
-            }
-        }
-    }
-
     /** Clear the in-memory state and unbind the account. Called when the
      *  session ends (log out and forget device alike). Nothing persisted is
      *  written or deleted here: the accepted list and the stranger-inbox
      *  cursor + pending list stay for the next login of the SAME account
      *  (a request declined before logging out stays declined) — only
-     *  [forgetDevice] deletes them. The sent log does not persist. */
+     *  forget device deletes them ([me.lakko.app.account.AccountLocalWipe]).
+     *  The sent log does not persist. */
     public fun clear() {
         synchronized(bindLock) {
             boundAccountB64 = null

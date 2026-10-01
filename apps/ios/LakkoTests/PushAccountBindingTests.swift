@@ -192,7 +192,7 @@ final class PushAccountBindingTests: XCTestCase {
         XCTAssertNil(repo.signedInAccountIdB64)
     }
 
-    func testForgetDeviceClearsTheBindingFirstAndRemovesDeliveredNotifications() {
+    func testEndSessionAfterWipeClearsTheBindingFirstAndRemovesDeliveredNotifications() {
         let store = PushAccountBindingStore(defaults: defaults)
         store.bind(devicePseudonym: pseudonym, accountIdB64: accountA)
         let persistence = FakePersistence()
@@ -208,7 +208,7 @@ final class PushAccountBindingTests: XCTestCase {
             markerAtRemoval = sessionStore.load()
         }
 
-        repo.forgetDevice()
+        repo.endSessionAfterLocalWipe()
 
         XCTAssertNil(store.current())
         XCTAssertEqual(removals, 1)
