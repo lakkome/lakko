@@ -130,6 +130,9 @@ struct CollapsedCallBar: View {
         .accessibilityLabel(
             CallBarPresentation.spokenLabel(
                 name: label, status: status, encrypted: encrypted, cameraSending: cameraSending))
+        // The spoken sentence above is in the interface language; the UI
+        // tests find the strip by this handle instead.
+        .accessibilityIdentifier("collapsed-call-bar")
     }
 
     private static func elapsedMs(since start: Date, at now: Date) -> UInt64 {
