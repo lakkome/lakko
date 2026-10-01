@@ -48,11 +48,13 @@ struct FolderBar: View {
     let onEditFolders: () -> Void
     let onDelete: (FolderView) -> Void
 
+    @ObservedObject private var l10n = Localization.shared
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 20) {
-                    tab(id: "", name: "All chats", count: 0, folder: nil)
+                    tab(id: "", name: l10n.t("folders.all_chats"), count: 0, folder: nil)
                     ForEach(folders, id: \.folderId) { folder in
                         let id = ChatFolders.hex(folder.folderId)
                         tab(id: id, name: folder.meta.name, count: counts[id] ?? 0, folder: folder)
@@ -107,27 +109,27 @@ struct FolderBar: View {
     private func menu(folder: FolderView?, count: Int) -> some View {
         if let folder {
             Button { onEdit(folder) } label: {
-                Label("Edit folder", systemImage: "pencil")
+                Label(l10n.t("folders.edit"), systemImage: "pencil")
             }
             if count > 0 {
                 Button { onMarkAllRead(folder) } label: {
-                    Label("Mark all as read", systemImage: "checkmark.message")
+                    Label(l10n.t("folders.mark_all_read"), systemImage: "checkmark.message")
                 }
             }
             Button(action: onReorder) {
-                Label("Reorder folders", systemImage: "arrow.up.arrow.down")
+                Label(l10n.t("folders.reorder"), systemImage: "arrow.up.arrow.down")
             }
             Button(role: .destructive) { onDelete(folder) } label: {
-                Label("Delete folder", systemImage: "trash")
+                Label(l10n.t("folders.delete"), systemImage: "trash")
             }
         } else {
             if anyUnread {
                 Button { onMarkAllRead(nil) } label: {
-                    Label("Mark all as read", systemImage: "checkmark.message")
+                    Label(l10n.t("folders.mark_all_read"), systemImage: "checkmark.message")
                 }
             }
             Button(action: onEditFolders) {
-                Label("Edit folders", systemImage: "folder")
+                Label(l10n.t("folders.edit_all"), systemImage: "folder")
             }
         }
     }
@@ -150,6 +152,7 @@ struct FolderEditorScreen: View {
     @State private var picker: PickerMode?
     @State private var confirmingDiscard = false
     @State private var confirmingDelete = false
+    @ObservedObject private var l10n = Localization.shared
 
     enum PickerMode: String, Identifiable {
         case include
@@ -194,7 +197,7 @@ struct FolderEditorScreen: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Folder name", text: $draft.name)
+                    TextField(l10n.t("folders.editor.name_placeholder"), text: $draft.name)
                         .onChange(of: draft.name) { _, new in
                             let clamped = ChatFolders.clampName(new)
                             if clamped != new { draft.name = clamped }
@@ -202,14 +205,14 @@ struct FolderEditorScreen: View {
                 }
 
                 Section {
-                    kindRow("One-to-one chats", bit: ChatFolders.Include.oneToOne)
-                    kindRow("Groups", bit: ChatFolders.Include.groups)
-                    kindRow("Channels", bit: ChatFolders.Include.channels)
+                    kindRow(l10n.t("folders.editor.kind.one_to_one"), bit: ChatFolders.Include.oneToOne)
+                    kindRow(l10n.t("folders.editor.kind.groups"), bit: ChatFolders.Include.groups)
+                    kindRow(l10n.t("folders.editor.kind.channels"), bit: ChatFolders.Include.channels)
                     handRows(\.included)
-                    Button("Add chats") { picker = .include }
+                    Button(l10n.t("folders.editor.add_chats")) { picker = .include }
                 } header: {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Included")
+                        Text(l10n.t("folders.editor.included"))
                         if draft.hasRule {
                             Text(ChatFolders.chatCountLabel(matchCount))
                                 .textCase(nil)
@@ -219,59 +222,59 @@ struct FolderEditorScreen: View {
                     }
                 }
 
-                Section("Excluded") {
-                    flagRow("Muted", bit: ChatFolders.Exclude.muted)
-                    flagRow("Read", bit: ChatFolders.Exclude.read)
-                    flagRow("Archived", bit: ChatFolders.Exclude.archived)
+                Section(l10n.t("folders.editor.excluded")) {
+                    flagRow(l10n.t("folders.editor.exclude.muted"), bit: ChatFolders.Exclude.muted)
+                    flagRow(l10n.t("folders.editor.exclude.read"), bit: ChatFolders.Exclude.read)
+                    flagRow(l10n.t("folders.editor.exclude.archived"), bit: ChatFolders.Exclude.archived)
                     handRows(\.excluded)
-                    Button("Exclude chats") { picker = .exclude }
+                    Button(l10n.t("folders.editor.exclude_chats")) { picker = .exclude }
                 }
 
                 if request.folder != nil {
                     Section {
-                        Button("Delete folder", role: .destructive) { confirmingDelete = true }
+                        Button(l10n.t("folders.delete"), role: .destructive) { confirmingDelete = true }
                     }
                 }
 
                 if atFolderLimit {
                     Section {
-                        Text("You can have up to 20 folders.")
+                        Text(ChatFolders.folderLimitLine)
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                 }
             }
-            .navigationTitle(request.folder == nil ? "New folder" : "Edit folder")
+            .navigationTitle(l10n.t(request.folder == nil ? "folders.new" : "folders.edit"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
+                    Button(l10n.t("common.cancel")) {
                         if dirty { confirmingDiscard = true } else { dismiss() }
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save", action: save)
+                    Button(l10n.t("common.save"), action: save)
                         .disabled(!draft.canSave || atFolderLimit)
                 }
             }
             .interactiveDismissDisabled(dirty)
             .confirmationDialog(
-                "Discard changes?", isPresented: $confirmingDiscard, titleVisibility: .visible
+                l10n.t("folders.editor.discard.title"), isPresented: $confirmingDiscard, titleVisibility: .visible
             ) {
-                Button("Discard", role: .destructive) { dismiss() }
-                Button("Keep editing", role: .cancel) {}
+                Button(l10n.t("folders.editor.discard.confirm"), role: .destructive) { dismiss() }
+                Button(l10n.t("folders.editor.discard.keep"), role: .cancel) {}
             }
             .alert(
-                "Delete folder \u{201C}\(request.folder?.meta.name ?? "")\u{201D}?",
+                l10n.t("folders.delete_confirm.title", texts: ["name": request.folder?.meta.name ?? ""]),
                 isPresented: $confirmingDelete
             ) {
-                Button("Cancel", role: .cancel) {}
-                Button("Delete", role: .destructive) {
+                Button(l10n.t("common.cancel"), role: .cancel) {}
+                Button(l10n.t("common.delete"), role: .destructive) {
                     if let folder = request.folder { onDelete(folder) }
                     dismiss()
                 }
             } message: {
-                Text("The chats in it stay in All chats.")
+                Text(l10n.t("folders.delete_confirm.body"))
             }
             .sheet(item: $picker) { mode in
                 pickerSheet(for: mode)
@@ -308,7 +311,7 @@ struct FolderEditorScreen: View {
             .contentShape(Rectangle())
         }
         .accessibilityAddTraits(isOn ? [.isToggle, .isSelected] : .isToggle)
-        .accessibilityValue(isOn ? "On" : "Off")
+        .accessibilityValue(l10n.t(isOn ? "common.on" : "common.off"))
     }
 
     /// The chats set by hand, each a compact row with a remove control. A
@@ -332,7 +335,7 @@ struct FolderEditorScreen: View {
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Remove \(row.title)")
+                    .accessibilityLabel(l10n.t("folders.editor.remove_chat_a11y", texts: ["name": row.title]))
                 }
             }
         }
@@ -350,13 +353,12 @@ struct FolderEditorScreen: View {
         let unresolved = current.filter { byId[ChatFolders.rowId($0)] == nil }
         let limit = mode == .include ? ChatFolders.maxHandAdded : ChatFolders.maxHandExcluded
         return FolderChatPicker(
-            title: mode == .include ? "Add chats" : "Exclude chats",
+            titleKey: mode == .include ? "folders.editor.add_chats" : "folders.editor.exclude_chats",
             rows: request.rows,
             selected: Set(current.map(ChatFolders.rowId)),
             capacity: max(0, limit - unresolved.count),
-            limitLine: mode == .include
-                ? "A folder can hold up to 200 chats added one by one. Use the kind toggles for more."
-                : "A folder can hold up to 200 chats excluded one by one. Use the kind toggles for more."
+            limitKey: mode == .include ? "folders.picker.limit_include" : "folders.picker.limit_exclude",
+            limitCount: limit
         ) { chosen in
             var refs = unresolved
             for id in chosen.sorted() {
@@ -385,29 +387,36 @@ struct FolderEditorScreen: View {
 // MARK: - The chat picker (section 3.3)
 
 struct FolderChatPicker: View {
-    let title: String
+    /// The catalog key of the sheet title.
+    let titleKey: String
     let rows: [ConversationListRow]
     /// How many rows may be checked at once.
     let capacity: Int
-    let limitLine: String
+    /// The catalog key of the line shown at the limit, a plural over
+    /// `limitCount` (the hand-set maximum, never a digit in the text).
+    let limitKey: String
+    let limitCount: Int
     let onDone: (Set<String>) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var l10n = Localization.shared
     @State private var selected: Set<String>
     @State private var search = ""
 
     init(
-        title: String,
+        titleKey: String,
         rows: [ConversationListRow],
         selected: Set<String>,
         capacity: Int,
-        limitLine: String,
+        limitKey: String,
+        limitCount: Int,
         onDone: @escaping (Set<String>) -> Void
     ) {
-        self.title = title
+        self.titleKey = titleKey
         self.rows = rows
         self.capacity = capacity
-        self.limitLine = limitLine
+        self.limitKey = limitKey
+        self.limitCount = limitCount
         self.onDone = onDone
         _selected = State(initialValue: selected)
     }
@@ -418,7 +427,7 @@ struct FolderChatPicker: View {
         NavigationStack {
             List {
                 if atLimit {
-                    Text(limitLine)
+                    Text(l10n.t(limitKey, counts: ["count": UInt64(limitCount)]))
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
@@ -443,15 +452,15 @@ struct FolderChatPicker: View {
                 }
             }
             .listStyle(.plain)
-            .searchable(text: $search, prompt: "Search")
-            .navigationTitle(title)
+            .searchable(text: $search, prompt: l10n.t("chats.search.placeholder"))
+            .navigationTitle(l10n.t(titleKey))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(l10n.t("common.cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
+                    Button(l10n.t("common.done")) {
                         onDone(selected)
                         dismiss()
                     }
@@ -472,6 +481,7 @@ struct ChatFoldersSettingsScreen: View {
 
     @State private var editMode: EditMode
     @State private var editor: FolderEditorRequest?
+    @ObservedObject private var l10n = Localization.shared
 
     init(startInReorder: Bool, viewModel: ChatListViewModel, channels: ChannelsUiState) {
         self.startInReorder = startInReorder
@@ -495,7 +505,7 @@ struct ChatFoldersSettingsScreen: View {
         List {
             if sync.pendingSync {
                 Section {
-                    Text("Changes will reach your other devices when this device is back online.")
+                    Text(l10n.t("folders.settings.pending_sync"))
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
@@ -503,15 +513,12 @@ struct ChatFoldersSettingsScreen: View {
 
             if folders.isEmpty {
                 Section {
-                    Text(
-                        "Group your chats the way you think about them. "
-                            + "Folders appear on all your devices."
-                    )
+                    Text(l10n.t("folders.settings.intro"))
                     .foregroundStyle(Color.lakkoTextMuted)
                 }
             } else {
-                Section("Your folders") {
-                    Text("All chats")
+                Section(l10n.t("folders.settings.yours")) {
+                    Text(l10n.t("folders.all_chats"))
                         .foregroundStyle(Color.lakkoText)
                         .moveDisabled(true)
                     ForEach(folders, id: \.folderId) { folder in
@@ -538,17 +545,17 @@ struct ChatFoldersSettingsScreen: View {
                 Button {
                     editor = FolderEditorRequest(folder: nil, rows: all)
                 } label: {
-                    Label("New folder", systemImage: "folder.badge.plus")
+                    Label(l10n.t("folders.new"), systemImage: "folder.badge.plus")
                 }
                 .disabled(atLimit)
             } footer: {
                 if atLimit {
-                    Text("You can have up to 20 folders.")
+                    Text(ChatFolders.folderLimitLine)
                 }
             }
 
             if !missing.isEmpty {
-                Section("Suggested") {
+                Section(l10n.t("folders.suggested.title")) {
                     ForEach(missing) { preset in
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
@@ -559,7 +566,9 @@ struct ChatFoldersSettingsScreen: View {
                                     .foregroundStyle(Color.lakkoTextMuted)
                             }
                             Spacer()
-                            Button("Add") { add(preset) }
+                            Button(l10n.t("folders.suggested.add")) { add(preset) }
+                                .accessibilityLabel(
+                                    l10n.t("folders.suggested.add_a11y", texts: ["name": preset.name]))
                                 .buttonStyle(.bordered)
                                 .disabled(atLimit)
                         }
@@ -568,7 +577,7 @@ struct ChatFoldersSettingsScreen: View {
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Chat folders")
+        .navigationTitle(l10n.t("settings.section.folders"))
         .toolbar {
             if !folders.isEmpty {
                 ToolbarItem(placement: .navigationBarTrailing) { EditButton() }

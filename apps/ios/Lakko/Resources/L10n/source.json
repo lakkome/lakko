@@ -1342,6 +1342,50 @@
       "text": "Manage channel",
       "comment": "Card title in channel info and the channel's manage screen; also the accessible name of the manage button."
     },
+    "channels.members.back_a11y": {
+      "text": "Back to channel info",
+      "comment": "Accessible name of the back button on a channel's member list."
+    },
+    "channels.members.empty": {
+      "text": "No members have shared a card yet.",
+      "comment": "Shown in a channel's member list when no subscriber has shared a member card."
+    },
+    "channels.members.error.load": {
+      "text": "Could not load the members. Check your connection and try again.",
+      "comment": "Error when a channel's member list could not be loaded; a Try again button follows."
+    },
+    "channels.members.heading": {
+      "text": "Members ({count})",
+      "comment": "Title of a channel's member list; {count} is how many members are listed."
+    },
+    "channels.members.info_sub": {
+      "text": "Who reads this channel and shared a card.",
+      "comment": "Line under Members in channel info. A card is the encrypted name card a subscriber chose to share with the channel."
+    },
+    "channels.members.loading": {
+      "text": "Loading members...",
+      "comment": "Shown while a channel's member list loads."
+    },
+    "channels.members.title": {
+      "text": "Members",
+      "comment": "Row in channel info that opens the channel's member list, and that list's title while it loads. Members are subscribers who shared a member card."
+    },
+    "channels.members.truncated": {
+      "text": "Showing the first members only.",
+      "comment": "Line under a channel's member list when the list was cut at its limit."
+    },
+    "channels.members.unnamed": {
+      "text": "Member",
+      "comment": "Name shown in a channel's member list for a member whose card carries no name."
+    },
+    "channels.members.unreadable": {
+      "text": "{count, plural, one {# member shared a card under an older key this device does not hold.} other {# members shared cards under an older key this device does not hold.}}",
+      "comment": "Line under a channel's member list for cards this device cannot open: they were encrypted under a channel key from before this device subscribed."
+    },
+    "channels.members.you": {
+      "text": "You",
+      "comment": "The reader's own row in a channel's member list."
+    },
     "channels.meta.desc": {
       "text": "The name and description reach every subscriber, encrypted. The server never reads them.",
       "comment": "Description of the channel details card on the manage screen.",
@@ -3478,6 +3522,10 @@
       "text": "Session not ready.",
       "comment": "An action was tried before the signed-in session finished loading."
     },
+    "common.error.starting_up": {
+      "text": "Lakko is still starting up. Try again in a moment.",
+      "comment": "Error when an action is tried before the app has finished loading the account's keys."
+    },
     "common.error.too_many_attempts": {
       "text": "Too many attempts. Wait a moment, then try again.",
       "comment": "The server is limiting attempts for a short time. Never means the account is locked or the input was wrong."
@@ -3922,20 +3970,55 @@
       "text": "Request sent to {name}. It waits under Sent until they accept.",
       "comment": "Shown after a contact request was sent. {name} is the recipient's @username, with the @. \"Sent\" is the name of the section in the contacts list (contacts.list.sent)."
     },
-    "device_link.compare_hint": {
-      "text": "Make sure the other device shows the same code.",
-      "comment": "Instruction under the comparison code on the new device.",
+    "device_link.code.enter_six_digits": {
+      "text": "Enter the six digits your other device shows.",
+      "comment": "Error under the code field when what was typed is not six digits."
+    },
+    "device_link.code.expired": {
+      "text": "This request expired. Start again.",
+      "comment": "Shown on the new device when the sign-in request was not answered in time."
+    },
+    "device_link.code.field_a11y": {
+      "text": "Code from your other device",
+      "comment": "Accessible name of the six-digit code field on the new device."
+    },
+    "device_link.code.intro": {
+      "text": "Open Lakko in a browser or on your phone where you are already signed in. It will show a six-digit code. Enter it here.",
+      "comment": "Instructions above the code field on the new device: the code comes from the person's own signed-in device.",
       "security_critical": true
     },
-    "device_link.comparison_code": {
-      "text": "Comparison code",
-      "comment": "Label over the code the person compares between the two devices.",
+    "device_link.code.intro_native": {
+      "text": "Open Lakko on a device that is already signed in. It will show a six-digit code. Enter it here.",
+      "comment": "Native (iOS, Android) instructions above the code field on the new device; the code comes from the person's own signed-in device. The web says 'in a browser or on your phone' instead.",
       "security_critical": true
     },
-    "device_link.confirm_there": {
-      "text": "Open Lakko on a device that is already signed in and confirm this sign-in there.",
-      "comment": "Instruction on the new device while it waits for another device to confirm.",
-      "security_critical": true
+    "device_link.code.restoring": {
+      "text": "Restoring...",
+      "comment": "Shown on the new device after the signed-in device confirmed the code, while the account is carried across."
+    },
+    "device_link.code.start_again": {
+      "text": "Start again",
+      "comment": "Button on the new device after a wrong code, a decline or an expiry: sends a new sign-in request."
+    },
+    "device_link.code.title": {
+      "text": "Confirm on another device",
+      "comment": "Heading of the iOS and Android panel on a new device where the person types the code their signed-in device shows."
+    },
+    "device_link.code.unreachable": {
+      "text": "Could not reach Lakko. Check your connection, then start again.",
+      "comment": "Shown on the new device when the request or the code could not be sent."
+    },
+    "device_link.code.use_instead": {
+      "text": "Confirm on another device instead",
+      "comment": "Link under the QR code on a new device (iOS, Android): go back to typing the code a signed-in device shows."
+    },
+    "device_link.code.waiting": {
+      "text": "Waiting for your other device...",
+      "comment": "Under the disabled code field until the signed-in device has answered."
+    },
+    "device_link.code.wrong": {
+      "text": "That code does not match. Start again and enter the code your other device shows.",
+      "comment": "Shown on the new device after a wrong code: each request allows one try."
     },
     "device_link.error.ask_unavailable": {
       "text": "Asking your other device is not available right now; the QR code still works.",
@@ -3993,10 +4076,6 @@
       "comment": "The new device asked to join a different account.",
       "security_critical": true
     },
-    "device_link.qr.hide": {
-      "text": "Hide the QR code",
-      "comment": "Button that hides the QR code again."
-    },
     "device_link.qr.intro": {
       "text": "Show this code to a device that still has your account. It adds this device and transfers your identity end-to-end encrypted, with no phrase to type.",
       "comment": "Line above the pairing code shown on a new device.",
@@ -4023,24 +4102,9 @@
       "text": "Adding the device...",
       "comment": "Busy label while the new device is added."
     },
-    "device_link.request.body": {
-      "text": "A new device is asking to join your account. It shows a code.",
-      "comment": "Text of the prompt on a signed-in device when a new device asks to join.",
-      "security_critical": true
-    },
-    "device_link.request.code_label": {
-      "text": "Code on the new device",
-      "comment": "Label over the code the new device shows.",
-      "security_critical": true
-    },
-    "device_link.request.confirm": {
-      "text": "Yes, add it",
-      "comment": "Button that lets a new device into the account.",
-      "security_critical": true
-    },
-    "device_link.request.confirm_only_if": {
-      "text": "Confirm only if the new device shows exactly this code.",
-      "comment": "Instruction: compare the code before confirming.",
+    "device_link.request.code_a11y": {
+      "text": "Sign-in code",
+      "comment": "Accessible name of the six-digit code shown in the sign-in request dialog.",
       "security_critical": true
     },
     "device_link.request.decline": {
@@ -4053,6 +4117,11 @@
       "comment": "Shown after the request was refused.",
       "security_critical": true
     },
+    "device_link.request.enter_code": {
+      "text": "Enter this code on the new device:",
+      "comment": "Line above the six-digit code shown on the signed-in device; the person types it on the new device.",
+      "security_critical": true
+    },
     "device_link.request.error.generic": {
       "text": "Could not add the device. Try again.",
       "comment": "Adding the new device failed for a reason with no more specific message."
@@ -4061,9 +4130,46 @@
       "text": "No device key on this browser. Sign in again.",
       "comment": "This browser lost its device key; signing in again fixes it."
     },
+    "device_link.request.handled_elsewhere": {
+      "text": "This sign-in request was handled on another device.",
+      "comment": "Short notice on a signed-in device when another device of the same account answered the request first."
+    },
+    "device_link.request.heading": {
+      "text": "New sign-in request",
+      "comment": "Title of the dialog on a signed-in device when a new device asks to join the account by the six-digit code.",
+      "security_critical": true
+    },
+    "device_link.request.never_share": {
+      "text": "Never read this code to anyone. Lakko will never ask for it.",
+      "comment": "Warning under the six-digit sign-in code: whoever types it gets into the account.",
+      "security_critical": true
+    },
+    "device_link.request.not_recorded": {
+      "text": "Could not reach Lakko to finish adding the device. Nothing was added. Try again from the new device.",
+      "comment": "Shown on the signed-in device when the outcome could not be sent to the server, so nothing was paired."
+    },
+    "device_link.request.someone_signing_in": {
+      "text": "Someone is signing in to your account on a new device.",
+      "comment": "First line of the sign-in request dialog, before the person says whether it is them. Followed by the question Is this you?",
+      "security_critical": true
+    },
     "device_link.request.title": {
       "text": "Is this you?",
       "comment": "Title of the prompt on a signed-in device when a new device asks to join.",
+      "security_critical": true
+    },
+    "device_link.request.too_many": {
+      "text": "Too many sign-in requests today. Use a QR code, or try again tomorrow.",
+      "comment": "Shown on the signed-in device when it already answered the day's maximum of sign-in requests; the request was declined."
+    },
+    "device_link.request.wrong_code": {
+      "text": "The code did not match. Nothing was added.",
+      "comment": "Short notice on the signed-in device when the new device typed a wrong code: no device joined.",
+      "security_critical": true
+    },
+    "device_link.request.yes_its_me": {
+      "text": "Yes, it's me",
+      "comment": "Button in the sign-in request dialog: the person confirms they are the one signing in. Only then does this device show a code to type on the new device.",
       "security_critical": true
     },
     "device_link.restored": {
@@ -4123,6 +4229,21 @@
     "devices.pairing.qr_description": {
       "text": "Pairing QR code",
       "comment": "Accessible name of the QR code a device shows so another device can link to it."
+    },
+    "devices.removed.body": {
+      "text": "It was removed from your account on another device. New messages no longer reach it. Sign out, then sign in again if you want to use it.",
+      "comment": "Body of the This device was removed screen.",
+      "security_critical": true
+    },
+    "devices.removed.sign_out": {
+      "text": "Sign out",
+      "comment": "Only button of the This device was removed screen: removes the account's data from this device and goes to the sign-in screen.",
+      "security_critical": true
+    },
+    "devices.removed.title": {
+      "text": "This device was removed",
+      "comment": "Title of the full-screen state shown once another device of the account removed this one.",
+      "security_critical": true
     },
     "devices.scan.confirm.body": {
       "text": "This gives the scanned device full access to your account: your messages, your contacts and your identity. Continue only if the code is on your own new device.",
@@ -4191,6 +4312,226 @@
     "ds.clock_skew": {
       "text": "Check this device's date and time.",
       "comment": "Shown when the server refused a request because this device's clock is wrong."
+    },
+    "folders.add_to_folder": {
+      "text": "Add to folder",
+      "comment": "Item in a conversation's menu that opens the list of chat folders to put it in. Also the accessible name of that list."
+    },
+    "folders.all_chats": {
+      "text": "All chats",
+      "comment": "Name of the fixed first tab of the folder bar: the whole conversation list, every chat. Also the first row in Settings > Chat folders."
+    },
+    "folders.bar_a11y": {
+      "text": "Folders",
+      "comment": "Accessible name of the strip of folder tabs above the conversation list."
+    },
+    "folders.chat_count": {
+      "text": "{count, plural, one {# chat} other {# chats}}",
+      "comment": "How many conversations a folder holds, under its name in Settings > Chat folders and live in the folder editor."
+    },
+    "folders.delete": {
+      "text": "Delete folder",
+      "comment": "Menu item and button that deletes a chat folder after a confirmation. The chats stay in All chats."
+    },
+    "folders.delete_confirm.body": {
+      "text": "The chats in it stay in All chats.",
+      "comment": "Body of the confirmation before deleting a chat folder: deleting a folder deletes no chat."
+    },
+    "folders.delete_confirm.title": {
+      "text": "Delete folder \"{name}\"?",
+      "comment": "Title of the confirmation before deleting a chat folder. {name} is the folder name the person chose."
+    },
+    "folders.edit": {
+      "text": "Edit folder",
+      "comment": "Menu item and button that opens the folder editor for one folder; also the editor's title for an existing folder."
+    },
+    "folders.edit_all": {
+      "text": "Edit folders",
+      "comment": "Item in the All chats tab menu that opens Settings > Chat folders."
+    },
+    "folders.editor.add_chats": {
+      "text": "Add chats",
+      "comment": "Button in the folder editor that opens a chat picker to add chats one by one; also the picker's title."
+    },
+    "folders.editor.discard.confirm": {
+      "text": "Discard",
+      "comment": "Button that closes the folder editor and drops the unsaved changes."
+    },
+    "folders.editor.discard.keep": {
+      "text": "Keep editing",
+      "comment": "Button that keeps the folder editor open with its unsaved changes."
+    },
+    "folders.editor.discard.title": {
+      "text": "Discard changes?",
+      "comment": "Title of the confirmation when closing the folder editor with unsaved changes."
+    },
+    "folders.editor.error.save": {
+      "text": "The folder could not be saved. Try again.",
+      "comment": "Error in the folder editor when saving failed."
+    },
+    "folders.editor.exclude.archived": {
+      "text": "Archived",
+      "comment": "Switch under Excluded in the folder editor: leave out archived chats."
+    },
+    "folders.editor.exclude.muted": {
+      "text": "Muted",
+      "comment": "Switch under Excluded in the folder editor: leave out muted chats."
+    },
+    "folders.editor.exclude.read": {
+      "text": "Read",
+      "comment": "Switch under Excluded in the folder editor: leave out chats with nothing unread. Adjective, as in already read."
+    },
+    "folders.editor.exclude_chats": {
+      "text": "Exclude chats",
+      "comment": "Button in the folder editor that opens a chat picker to leave chats out one by one; also the picker's title."
+    },
+    "folders.editor.excluded": {
+      "text": "Excluded",
+      "comment": "Heading of the part of the folder editor that says which chats the folder leaves out."
+    },
+    "folders.editor.included": {
+      "text": "Included",
+      "comment": "Heading of the part of the folder editor that says which chats the folder holds."
+    },
+    "folders.editor.kind.channels": {
+      "text": "Channels",
+      "comment": "Switch in the folder editor: the folder holds every channel the person follows."
+    },
+    "folders.editor.kind.groups": {
+      "text": "Groups",
+      "comment": "Switch in the folder editor: the folder holds every group chat."
+    },
+    "folders.editor.kind.one_to_one": {
+      "text": "One-to-one chats",
+      "comment": "Switch in the folder editor: the folder holds every one-to-one chat."
+    },
+    "folders.editor.name_placeholder": {
+      "text": "Folder name",
+      "comment": "Placeholder and accessible name of the name field in the folder editor."
+    },
+    "folders.editor.remove_chat_a11y": {
+      "text": "Remove {name}",
+      "comment": "Accessible name of the button that takes one hand-picked chat out of the folder editor's list. {name} is the chat's title."
+    },
+    "folders.empty": {
+      "text": "Nothing here right now",
+      "comment": "Shown inside a folder tab when no chat matches it at the moment. Followed by an Edit folder button."
+    },
+    "folders.in_folder_a11y": {
+      "text": "In this folder",
+      "comment": "Spoken label of the checkmark beside a folder the chat is already in, in the second step of a conversation's Add to folder menu (Android)."
+    },
+    "folders.limit": {
+      "text": "You can have up to {count, plural, one {# folder} other {# folders}}.",
+      "comment": "Note shown when the person already has the maximum number of chat folders and New folder is disabled."
+    },
+    "folders.mark_all_read": {
+      "text": "Mark all as read",
+      "comment": "Item in a folder tab's menu that marks every chat in that tab as read."
+    },
+    "folders.new": {
+      "text": "New folder",
+      "comment": "Button in Settings > Chat folders that opens an empty folder editor, and the editor's title for a new folder."
+    },
+    "folders.new_ellipsis": {
+      "text": "New folder...",
+      "comment": "Last item of the Add to folder list: opens the folder editor with this chat already added."
+    },
+    "folders.picker.limit_exclude": {
+      "text": "A folder can hold up to {count, plural, one {# chat} other {# chats}} excluded one by one. Use the kind toggles for more.",
+      "comment": "Note in the chat picker of the folder editor when the hand-excluded limit is reached."
+    },
+    "folders.picker.limit_include": {
+      "text": "A folder can hold up to {count, plural, one {# chat} other {# chats}} added one by one. Use the kind toggles for more.",
+      "comment": "Note in the chat picker of the folder editor when the hand-added limit is reached. The kind toggles are the One-to-one chats / Groups / Channels switches."
+    },
+    "folders.pin_limit": {
+      "text": "You can pin up to {count, plural, one {# chat} other {# chats}} in a folder.",
+      "comment": "Note under Pin in a conversation's menu inside a folder when the folder already has the maximum number of pinned chats."
+    },
+    "folders.remove_from_folder": {
+      "text": "Remove from folder",
+      "comment": "Item in a conversation's menu inside a folder: takes the chat out of that folder only; it stays in All chats."
+    },
+    "folders.reorder": {
+      "text": "Reorder folders",
+      "comment": "Item in a folder tab's menu that opens Settings > Chat folders to change the folder order."
+    },
+    "folders.settings.drag_hint": {
+      "text": "Drag to reorder",
+      "comment": "Tooltip of the drag handle on a folder row in Settings > Chat folders."
+    },
+    "folders.settings.intro": {
+      "text": "Group your chats the way you think about them. Folders appear on all your devices.",
+      "comment": "Introduction in Settings > Chat folders when the person has no folder yet."
+    },
+    "folders.settings.more_a11y": {
+      "text": "More for {name}",
+      "comment": "Accessible name of the menu button on a folder row in Settings > Chat folders. {name} is the folder name."
+    },
+    "folders.settings.move_down": {
+      "text": "Move down",
+      "comment": "Menu item on a folder row in Settings > Chat folders: moves the folder one place later in the bar."
+    },
+    "folders.settings.move_up": {
+      "text": "Move up",
+      "comment": "Menu item on a folder row in Settings > Chat folders: moves the folder one place earlier in the bar."
+    },
+    "folders.settings.pending_sync": {
+      "text": "Changes will reach your other devices when this device is back online.",
+      "comment": "Quiet line in Settings > Chat folders while a folder change made here has not yet reached the account's other devices."
+    },
+    "folders.settings.yours": {
+      "text": "Your folders",
+      "comment": "Heading of the person's folder list in Settings > Chat folders."
+    },
+    "folders.suggested.add": {
+      "text": "Add",
+      "comment": "Button on a suggested folder in Settings > Chat folders that creates it as is."
+    },
+    "folders.suggested.add_a11y": {
+      "text": "Add {name}",
+      "comment": "Accessible name of the Add button on a suggested folder. {name} is the suggested folder's name, for example Unread."
+    },
+    "folders.suggested.channels.description": {
+      "text": "Channels you follow",
+      "comment": "Description of the suggested Channels folder."
+    },
+    "folders.suggested.channels.name": {
+      "text": "Channels",
+      "comment": "Name of a suggested chat folder holding the channels the person follows. Becomes the folder's name when added."
+    },
+    "folders.suggested.groups.description": {
+      "text": "Group chats",
+      "comment": "Description of the suggested Groups folder."
+    },
+    "folders.suggested.groups.name": {
+      "text": "Groups",
+      "comment": "Name of a suggested chat folder holding the group chats. Becomes the folder's name when added."
+    },
+    "folders.suggested.personal.description": {
+      "text": "One-to-one chats",
+      "comment": "Description of the suggested Personal folder."
+    },
+    "folders.suggested.personal.name": {
+      "text": "Personal",
+      "comment": "Name of a suggested chat folder holding the one-to-one chats. Becomes the folder's name when added."
+    },
+    "folders.suggested.title": {
+      "text": "Suggested",
+      "comment": "Heading of the ready-made folders offered in Settings > Chat folders."
+    },
+    "folders.suggested.unread.description": {
+      "text": "Chats with new messages",
+      "comment": "Description of the suggested Unread folder."
+    },
+    "folders.suggested.unread.name": {
+      "text": "Unread",
+      "comment": "Name of a suggested chat folder holding the chats with unread messages. Becomes the folder's name when added; the person can rename it."
+    },
+    "folders.tab_a11y": {
+      "text": "{name}, {count, plural, one {# unread chat} other {# unread chats}}",
+      "comment": "Accessible name of a folder tab that has unread chats. {name} is the folder name the person chose; the count is conversations with anything unread, not messages."
     },
     "group.join.needs_account": {
       "text": "You need an account to ask to join. Create one, or log in.",
@@ -4545,6 +4886,14 @@
       "text": "Active invite links",
       "comment": "Accessible name of the list of the person's invite links."
     },
+    "invite.links.made_elsewhere": {
+      "text": "Made on another device",
+      "comment": "Fact on an invite link in the list, after its creation date and uses: the link was created on another of the person's devices, so this device cannot show or copy it."
+    },
+    "invite.links.made_elsewhere_hint": {
+      "text": "Created on another device. Copy it there, or revoke it here.",
+      "comment": "Shown in place of the link text for an invite link made on another device: only that device holds the secret part of the link."
+    },
     "invite.links.never_expires": {
       "text": "Never expires",
       "comment": "One of the facts under a link in your list of invite links."
@@ -4804,8 +5153,8 @@
       "comment": "Shown after a code was requested by phone. Deliberately does not confirm the number is on the account."
     },
     "recovery.device.intro": {
-      "text": "Enter your username, then confirm on a device that is still logged in and compare the code it shows. Nothing is sent that Lakko's servers can read. No camera needed; a QR code is there if you prefer.",
-      "comment": "Instructions of the another-device recovery.",
+      "text": "Enter your username, then open Lakko on a device that is still logged in and type the code it shows. Nothing is sent that Lakko's servers can read. No camera needed; a QR code is there if you prefer.",
+      "comment": "Line at the top of recovery from another device (signed out): the signed-in device shows a code that the person types here.",
       "security_critical": true
     },
     "recovery.device.intro_qr": {
@@ -5175,8 +5524,8 @@
       "security_critical": true
     },
     "restore_identity.device_intro": {
-      "text": "A device that is still logged in shows a prompt; confirm it there and compare the code. The transfer is end-to-end encrypted; Lakko's servers cannot read it. No camera needed; a QR code is there if you prefer.",
-      "comment": "Instructions of the another-device restore.",
+      "text": "A device that is still logged in shows a six-digit code; type it here. The transfer is end-to-end encrypted; Lakko's servers cannot read it. No camera needed; a QR code is there if you prefer.",
+      "comment": "Line on the restore-identity screen when Another device is chosen: the signed-in device shows a code that the person types here.",
       "security_critical": true
     },
     "restore_identity.error.bad_saved_account": {
@@ -5273,6 +5622,46 @@
       "text": "Restore your identity",
       "comment": "Title of the screen that asks for the identity on a new device.",
       "security_critical": true
+    },
+    "search.people.add_contact": {
+      "text": "Add contact",
+      "comment": "Button on a person found by search: opens a short form to send them a contact request."
+    },
+    "search.people.add_contact_title": {
+      "text": "Add {name}",
+      "comment": "Title of the dialog that sends a contact request to a person found by Search people (Android). {name} is the person's display name."
+    },
+    "search.people.channel_result": {
+      "text": "Channel {handle}",
+      "comment": "A channel found by the Chats search. {handle} is the channel's public handle, starting with @."
+    },
+    "search.people.failed": {
+      "text": "Couldn't search. Check your connection and try again.",
+      "comment": "Shown when Search people could not reach the server. Must never suggest the person does not exist."
+    },
+    "search.people.heading": {
+      "text": "People",
+      "comment": "Heading of the people found in the Chats search, above conversations matched by name."
+    },
+    "search.people.not_found": {
+      "text": "No one found. Check the spelling, or ask them for an invite link.",
+      "comment": "Shown when Search people found nobody. Must read the same whether the person does not exist or does not let the searcher find them."
+    },
+    "search.people.request_refused": {
+      "text": "Couldn't send the request. They may have changed who can find them.",
+      "comment": "Shown when a contact request to a person found by search was refused because they changed who can find them since."
+    },
+    "search.people.search": {
+      "text": "Search people",
+      "comment": "Row at the end of the Chats search results that asks Lakko's servers for people by username or name."
+    },
+    "search.people.searching_a11y": {
+      "text": "Searching",
+      "comment": "Accessible name of the spinner on the Search people row while the search runs."
+    },
+    "search.people.send_request": {
+      "text": "Send request",
+      "comment": "Button that sends a contact request to a person found by search."
     },
     "security.identity_changed.body": {
       "text": "If that was you, on another device, dismiss this. If it was not, verify your safety numbers with your contacts and change your password and passkeys.",
@@ -5928,6 +6317,10 @@
       "text": "Data",
       "comment": "Settings section: backup and storage."
     },
+    "settings.section.folders": {
+      "text": "Chat folders",
+      "comment": "Settings section where the person creates, edits, orders and deletes chat folders; also its page title."
+    },
     "settings.section.media": {
       "text": "Media",
       "comment": "Settings section: camera, microphone and media options."
@@ -5939,6 +6332,10 @@
     "settings.section.notifications": {
       "text": "Notifications",
       "comment": "Settings section: notifications."
+    },
+    "settings.section.privacy": {
+      "text": "Privacy",
+      "comment": "Settings section that holds Who can find me. Also the link text in sentences that send the person there."
     },
     "settings.section.profile": {
       "text": "Profile",
@@ -6002,6 +6399,14 @@
       "text": "Username: {message}",
       "comment": "Spoken by the screen reader for the reason under a username field. {message} is the reason, like 'At least 3 characters'."
     },
+    "username.error.bind_limited_later": {
+      "text": "You have changed your username too often. Try again later.",
+      "comment": "Error when the server refuses a username change because the person changed it too often and the wait is over an hour or unknown."
+    },
+    "username.error.bind_limited_minutes": {
+      "text": "You have changed your username too often. Try again in {minutes, plural, one {# minute} other {# minutes}}.",
+      "comment": "Error when the server refuses a username change because the person changed it too often; {minutes} is the wait, rounded up."
+    },
     "username.error.empty": {
       "text": "Enter a username",
       "comment": "Shown under the username field when it is empty."
@@ -6025,6 +6430,146 @@
     "username.hint.shown_as": {
       "text": "Shown as {username}",
       "comment": "Hint under a username field when the name is typed in another form (for example with capitals); {username} is how it will show, with @, like @alice."
+    },
+    "who_can_find_me.applying_a11y": {
+      "text": "Applying",
+      "comment": "Accessible name of the small spinner beside Who can find me while a change is being applied."
+    },
+    "who_can_find_me.contacts_of_contacts": {
+      "text": "Contacts of my contacts",
+      "comment": "Switch under Some people: people the person's contacts have added can find them.",
+      "security_critical": true
+    },
+    "who_can_find_me.contacts_of_contacts_helper": {
+      "text": "People your contacts have added.",
+      "comment": "Line under the Contacts of my contacts switch.",
+      "security_critical": true
+    },
+    "who_can_find_me.contacts_of_contacts_spreading": {
+      "text": "Contacts of your contacts can find you once your contacts next open Lakko.",
+      "comment": "Line under Contacts of my contacts right after it is turned on: the change travels through the contacts' devices, so it is not in effect at once.",
+      "security_critical": true
+    },
+    "who_can_find_me.groups": {
+      "text": "Members of my groups and channels",
+      "comment": "Switch under Some people: people in the person's groups and channels can find them.",
+      "security_critical": true
+    },
+    "who_can_find_me.groups.all": {
+      "text": "All groups and channels",
+      "comment": "Choice under Members of my groups and channels: every group and channel counts.",
+      "security_critical": true
+    },
+    "who_can_find_me.groups.chosen": {
+      "text": "Only the ones I choose",
+      "comment": "Choice under Members of my groups and channels: only the groups and channels switched on in the list count. Also the title of that list.",
+      "security_critical": true
+    },
+    "who_can_find_me.groups_all_helper": {
+      "text": "Everyone in the groups and channels you're in.",
+      "comment": "Line under Members of my groups and channels when All groups and channels is chosen.",
+      "security_critical": true
+    },
+    "who_can_find_me.groups_chosen_helper": {
+      "text": "Only the ones you choose ({chosen} of {total}).",
+      "comment": "Line under Members of my groups and channels when only chosen ones count. {chosen} is how many are on, {total} how many groups and channels the person is in.",
+      "security_critical": true
+    },
+    "who_can_find_me.lede": {
+      "text": "Whoever can find you by username or name can ask to be your contact.",
+      "comment": "First sentence under Who can find me: what being findable allows.",
+      "security_critical": true
+    },
+    "who_can_find_me.lede_link": {
+      "text": "People with your invite link or QR code can always reach you.",
+      "comment": "Second sentence under Who can find me: the invite link works whatever is chosen.",
+      "security_critical": true
+    },
+    "who_can_find_me.list.channels": {
+      "text": "Channels",
+      "comment": "Heading of the channels part of the Who can find me list."
+    },
+    "who_can_find_me.list.choose": {
+      "text": "Choose groups and channels",
+      "comment": "iOS row under 'Only the ones I choose' in Settings > Privacy > Who can find me; opens the list of groups and channels to switch on one by one."
+    },
+    "who_can_find_me.list.empty": {
+      "text": "You're not in any groups or channels yet.",
+      "comment": "Shown in the list of groups and channels for Who can find me when the person is in none."
+    },
+    "who_can_find_me.list.groups": {
+      "text": "Groups",
+      "comment": "Heading of the groups part of the Who can find me list."
+    },
+    "who_can_find_me.list.no_match": {
+      "text": "No groups or channels match.",
+      "comment": "Shown in the Who can find me list when the search matches nothing."
+    },
+    "who_can_find_me.list.search": {
+      "text": "Search groups and channels",
+      "comment": "Placeholder and accessible name of the search field in the Who can find me list."
+    },
+    "who_can_find_me.members_can_find_me": {
+      "text": "Members can find me",
+      "comment": "Switch in group and channel info: the members of this group or channel can find the person by username or name.",
+      "security_critical": true
+    },
+    "who_can_find_me.members_excluded_notice": {
+      "text": "Now only the groups and channels you choose. Change in {privacy}.",
+      "comment": "Shown once after turning off Members can find me while all groups and channels counted: the setting switched to chosen ones. {privacy} is a link to Settings > Privacy and reads Privacy.",
+      "security_critical": true
+    },
+    "who_can_find_me.mode.everyone": {
+      "text": "Everyone",
+      "comment": "Option of Who can find me: anyone can find the person by username or name.",
+      "security_critical": true
+    },
+    "who_can_find_me.mode.everyone_helper": {
+      "text": "Anyone can find you by your username or name.",
+      "comment": "Line under the Everyone option of Who can find me.",
+      "security_critical": true
+    },
+    "who_can_find_me.mode.nobody": {
+      "text": "Nobody",
+      "comment": "Option of Who can find me: no one can find the person by username or name.",
+      "security_critical": true
+    },
+    "who_can_find_me.mode.nobody_helper": {
+      "text": "Only people with your invite link or QR code can reach you.",
+      "comment": "Line under the Nobody option of Who can find me.",
+      "security_critical": true
+    },
+    "who_can_find_me.mode.some": {
+      "text": "Some people",
+      "comment": "Option of Who can find me: only the people picked by the two switches under it.",
+      "security_critical": true
+    },
+    "who_can_find_me.signup_after_create": {
+      "text": "It opens once your account is created.",
+      "comment": "Shown at signup in place of the Change link after the person tapped it: Settings > Privacy opens right after the account is created."
+    },
+    "who_can_find_me.signup_change": {
+      "text": "Change",
+      "comment": "Link after the Who can find me line at signup that opens Settings > Privacy."
+    },
+    "who_can_find_me.signup_line": {
+      "text": "Contacts of your contacts and people in your groups and channels can find you. You can change this in Settings > Privacy.",
+      "comment": "Line on the signup screen describing the default of Who can find me. A Change link follows.",
+      "security_critical": true
+    },
+    "who_can_find_me.status.failed": {
+      "text": "Couldn't update who can find you. Try again.",
+      "comment": "Status line on Who can find me when applying a change failed; a Retry button follows.",
+      "security_critical": true
+    },
+    "who_can_find_me.status.offline": {
+      "text": "Will apply when you're back online.",
+      "comment": "Status line on Who can find me when a change was made offline."
+    },
+    "who_can_find_me.title": {
+      "text": "Who can find me",
+      "comment": "Title of the Settings > Privacy screen that decides who can find the person by username or name and ask to be their contact.",
+      "security_critical": true
     }
   }
 }

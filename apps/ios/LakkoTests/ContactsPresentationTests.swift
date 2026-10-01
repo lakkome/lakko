@@ -169,7 +169,7 @@ final class ContactsPresentationTests: XCTestCase {
     func testARowWithoutASecretShowsTheCreatedElsewhereLine() {
         XCTAssertEqual(
             InviteLinkRows.createdElsewhereCopy,
-            "Created on another device. Copy it there, or revoke it here.")
+            Localization.text("invite.links.made_elsewhere_hint"))
     }
 
     /// The per-account secret map: kept, read back through a fresh store (a
@@ -261,7 +261,7 @@ final class ContactsPresentationTests: XCTestCase {
     @MainActor
     func testUsernameNotFoundNeverClaimsTheAccountIsUnregistered() {
         let copy = ContactsViewModel.userFacing(.usernameUnknown("anna"))
-        XCTAssertEqual(copy, "No one found. Check the spelling, or ask them for an invite link.")
+        XCTAssertEqual(copy, Localization.text("search.people.not_found"))
         XCTAssertFalse(copy.contains("registered"))
         XCTAssertFalse(copy.contains("anna"))
     }

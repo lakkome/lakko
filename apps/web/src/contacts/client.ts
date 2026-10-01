@@ -3974,7 +3974,7 @@ export class ContactsClient {
     // out. Closed once the group is joined (`closeRepliesTo(groupIdHex)`).
     const session = reachSession();
     if (session === null) {
-      throw ContactsError.wrap(new Error("Lakko is still starting up. Try again in a moment."));
+      throw ContactsError.wrap(new KeyedError("common.error.starting_up"));
     }
     let replyGrant: import("../../wasm/lakko_ffi_wasm").ReachGrant;
     try {

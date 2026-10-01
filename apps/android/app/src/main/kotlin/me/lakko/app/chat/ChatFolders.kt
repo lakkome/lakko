@@ -3,6 +3,7 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.ConversationRow as SharedConversationRow
 import uniffi.lakko_ffi_uniffi.FolderChangeSet
 import uniffi.lakko_ffi_uniffi.FolderConversationKind
@@ -484,10 +485,14 @@ public fun pinChanges(
 // Suggested folders (UX spec 4)
 // ---------------------------------------------------------------------------
 
-/** One suggestion. */
+/**
+ * One suggestion. Its name and description render in the interface language
+ * (ADR-0061); adding one stores the name in the language of that moment as
+ * the folder's own name, which from then on is the person's text.
+ */
 public data class FolderSuggestion(
-    val name: String,
-    val description: String,
+    val name: UiText,
+    val description: UiText,
     val includeKinds: UInt,
     val excludeFlags: UInt,
 )
@@ -498,14 +503,29 @@ public data class FolderSuggestion(
  */
 public val FOLDER_SUGGESTIONS: List<FolderSuggestion> = listOf(
     FolderSuggestion(
-        "Unread",
-        "Chats with new messages",
+        UiText("folders.suggested.unread.name"),
+        UiText("folders.suggested.unread.description"),
         IncludeKind.ONE_TO_ONE or IncludeKind.GROUPS or IncludeKind.CHANNELS,
         ExcludeFlag.READ,
     ),
-    FolderSuggestion("Personal", "One-to-one chats", IncludeKind.ONE_TO_ONE, 0u),
-    FolderSuggestion("Groups", "Group chats", IncludeKind.GROUPS, 0u),
-    FolderSuggestion("Channels", "Channels you follow", IncludeKind.CHANNELS, 0u),
+    FolderSuggestion(
+        UiText("folders.suggested.personal.name"),
+        UiText("folders.suggested.personal.description"),
+        IncludeKind.ONE_TO_ONE,
+        0u,
+    ),
+    FolderSuggestion(
+        UiText("folders.suggested.groups.name"),
+        UiText("folders.suggested.groups.description"),
+        IncludeKind.GROUPS,
+        0u,
+    ),
+    FolderSuggestion(
+        UiText("folders.suggested.channels.name"),
+        UiText("folders.suggested.channels.description"),
+        IncludeKind.CHANNELS,
+        0u,
+    ),
 )
 
 /** Suggestions the person does not already have, compared by rule: same
@@ -528,7 +548,7 @@ public fun suggestionChanges(
     stamp: StampSource,
 ): FolderChangeSet =
     changeSet(
-        metas = listOf(FolderMetaRegister(stamp(), folderId, s.name, s.includeKinds, s.excludeFlags)),
+        metas = listOf(FolderMetaRegister(stamp(), folderId, s.name.render(), s.includeKinds, s.excludeFlags)),
         order = appendToOrder(listedFolderIds, folderId, stamp),
     )
 

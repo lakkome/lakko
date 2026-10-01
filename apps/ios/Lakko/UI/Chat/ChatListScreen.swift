@@ -145,7 +145,7 @@ public struct ChatListScreen: View {
                     onDelete: { folder in deleteFolder(folder) })
             }
             .alert(
-                deleting.map { "Delete folder \u{201C}\($0.meta.name)\u{201D}?" } ?? "",
+                deleting.map { l10n.t("folders.delete_confirm.title", texts: ["name": $0.meta.name]) } ?? "",
                 isPresented: Binding(
                     get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                 presenting: deleting
@@ -153,7 +153,7 @@ public struct ChatListScreen: View {
                 Button(l10n.t("common.cancel"), role: .cancel) { deleting = nil }
                 Button(l10n.t("common.delete"), role: .destructive) { deleteFolder(folder) }
             } message: { _ in
-                Text("The chats in it stay in All chats.")
+                Text(l10n.t("folders.delete_confirm.body"))
             }
             .navigationTitle(l10n.t("nav.chats"))
             .navigationBarTitleDisplayMode(.large)
@@ -411,9 +411,9 @@ public struct ChatListScreen: View {
     /// same whatever the folder's rule is.
     private func folderEmptyState(_ folder: FolderView) -> some View {
         VStack(spacing: 12) {
-            Text("Nothing here right now")
+            Text(l10n.t("folders.empty"))
                 .foregroundStyle(Color.lakkoTextMuted)
-            Button("Edit folder") {
+            Button(l10n.t("folders.edit")) {
                 editor = FolderEditorRequest(folder: folder, rows: allRows)
             }
             .buttonStyle(.bordered)
@@ -460,7 +460,7 @@ public struct ChatListScreen: View {
                 editor = FolderEditorRequest(
                     folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
             } label: {
-                Label("Add to folder", systemImage: "folder.badge.plus")
+                Label(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus")
             }
         } else {
             Menu {
@@ -480,23 +480,23 @@ public struct ChatListScreen: View {
                             && ChatFolders.handAddLimitReached(f))
                 }
                 Divider()
-                Button("New folder...") {
+                Button(l10n.t("folders.new_ellipsis")) {
                     editor = FolderEditorRequest(
                         folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
                 }
                 .disabled(folders.count >= ChatFolders.maxFolders)
                 if folders.count >= ChatFolders.maxFolders {
-                    Text("You can have up to 20 folders.")
+                    Text(ChatFolders.folderLimitLine)
                 }
             } label: {
-                Label("Add to folder", systemImage: "folder.badge.plus")
+                Label(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus")
             }
         }
         if let folder {
             Button {
                 Task { await toggleMembership(folder: folder, row: row) }
             } label: {
-                Label("Remove from folder", systemImage: "folder.badge.minus")
+                Label(l10n.t("folders.remove_from_folder"), systemImage: "folder.badge.minus")
             }
         }
     }
@@ -698,12 +698,12 @@ public struct ChatListScreen: View {
             Button {
                 Task { await toggleFolderPin(folder: folder, row: row) }
             } label: {
-                Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                Label(l10n.t(pinned ? "chats.action.unpin" : "chats.action.pin"), systemImage: pinned ? "pin.slash" : "pin")
             }
             .tint(Color.lakkoAccent)
             .disabled(atLimit)
             if atLimit && inMenu {
-                Text("You can pin up to 10 chats in a folder.")
+                Text(ChatFolders.pinLimitLine)
             }
         } else if row.kind != .channel {
             Button {

@@ -1306,6 +1306,50 @@
       "text": "Управление каналом",
       "status": "machine"
     },
+    "channels.members.back_a11y": {
+      "text": "Назад к сведениям о канале",
+      "status": "machine"
+    },
+    "channels.members.empty": {
+      "text": "Пока никто из участников не поделился карточкой.",
+      "status": "machine"
+    },
+    "channels.members.error.load": {
+      "text": "Не удалось загрузить участников. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "channels.members.heading": {
+      "text": "Участники ({count})",
+      "status": "machine"
+    },
+    "channels.members.info_sub": {
+      "text": "Кто читает этот канал и поделился карточкой.",
+      "status": "machine"
+    },
+    "channels.members.loading": {
+      "text": "Загрузка участников...",
+      "status": "machine"
+    },
+    "channels.members.title": {
+      "text": "Участники",
+      "status": "machine"
+    },
+    "channels.members.truncated": {
+      "text": "Показаны только первые участники.",
+      "status": "machine"
+    },
+    "channels.members.unnamed": {
+      "text": "Участник",
+      "status": "machine"
+    },
+    "channels.members.unreadable": {
+      "text": "{count, plural, one {# участник поделился карточкой, зашифрованной старым ключом, которого нет на этом устройстве.} few {# участника поделились карточками, зашифрованными старым ключом, которого нет на этом устройстве.} many {# участников поделились карточками, зашифрованными старым ключом, которого нет на этом устройстве.} other {# участника поделились карточками, зашифрованными старым ключом, которого нет на этом устройстве.}}",
+      "status": "machine"
+    },
+    "channels.members.you": {
+      "text": "Вы",
+      "status": "machine"
+    },
     "channels.meta.desc": {
       "text": "Название и описание доходят до всех подписчиков в зашифрованном виде. Сервер никогда их не читает.",
       "status": "machine"
@@ -3426,6 +3470,10 @@
       "text": "Сеанс ещё не готов.",
       "status": "machine"
     },
+    "common.error.starting_up": {
+      "text": "Lakko ещё запускается. Попробуйте чуть позже.",
+      "status": "machine"
+    },
     "common.error.too_many_attempts": {
       "text": "Слишком много попыток. Подождите немного и попробуйте ещё раз.",
       "status": "machine"
@@ -3854,16 +3902,52 @@
       "text": "Запрос отправлен: {name}. Он будет в разделе «Отправленные», пока его не примут.",
       "status": "machine"
     },
-    "device_link.compare_hint": {
-      "text": "Убедитесь, что на другом устройстве показан такой же код.",
+    "device_link.code.enter_six_digits": {
+      "text": "Введите шесть цифр, которые показывает другое устройство.",
       "status": "machine"
     },
-    "device_link.comparison_code": {
-      "text": "Код для сверки",
+    "device_link.code.expired": {
+      "text": "Срок действия запроса истёк. Начните заново.",
       "status": "machine"
     },
-    "device_link.confirm_there": {
-      "text": "Откройте Lakko на устройстве, где вы уже вошли, и подтвердите этот вход там.",
+    "device_link.code.field_a11y": {
+      "text": "Код с другого устройства",
+      "status": "machine"
+    },
+    "device_link.code.intro": {
+      "text": "Откройте Lakko в браузере или на телефоне, где вы уже вошли. Там появится шестизначный код. Введите его здесь.",
+      "status": "machine"
+    },
+    "device_link.code.intro_native": {
+      "text": "Откройте Lakko на устройстве, где вы уже вошли в аккаунт. Оно покажет шестизначный код. Введите его здесь.",
+      "status": "machine"
+    },
+    "device_link.code.restoring": {
+      "text": "Восстановление...",
+      "status": "machine"
+    },
+    "device_link.code.start_again": {
+      "text": "Начать заново",
+      "status": "machine"
+    },
+    "device_link.code.title": {
+      "text": "Подтвердить на другом устройстве",
+      "status": "machine"
+    },
+    "device_link.code.unreachable": {
+      "text": "Не удалось связаться с Lakko. Проверьте подключение и начните заново.",
+      "status": "machine"
+    },
+    "device_link.code.use_instead": {
+      "text": "Подтвердить на другом устройстве",
+      "status": "machine"
+    },
+    "device_link.code.waiting": {
+      "text": "Ждём ответа другого устройства...",
+      "status": "machine"
+    },
+    "device_link.code.wrong": {
+      "text": "Код не совпадает. Начните заново и введите код, который показывает другое устройство.",
       "status": "machine"
     },
     "device_link.error.ask_unavailable": {
@@ -3918,10 +4002,6 @@
       "text": "Этот код для другого аккаунта. Проверьте, что на новом устройстве указано то же имя пользователя, что и здесь.",
       "status": "machine"
     },
-    "device_link.qr.hide": {
-      "text": "Скрыть QR-код",
-      "status": "machine"
-    },
     "device_link.qr.intro": {
       "text": "Покажите этот код устройству, на котором есть ваш аккаунт. Оно добавит это устройство и передаст ключи аккаунта со сквозным шифрованием — вводить фразу не нужно.",
       "status": "machine"
@@ -3946,20 +4026,8 @@
       "text": "Добавляем устройство...",
       "status": "machine"
     },
-    "device_link.request.body": {
-      "text": "Новое устройство просит доступ к вашему аккаунту. На нём показан код.",
-      "status": "machine"
-    },
-    "device_link.request.code_label": {
-      "text": "Код на новом устройстве",
-      "status": "machine"
-    },
-    "device_link.request.confirm": {
-      "text": "Да, добавить",
-      "status": "machine"
-    },
-    "device_link.request.confirm_only_if": {
-      "text": "Подтверждайте, только если на новом устройстве показан именно этот код.",
+    "device_link.request.code_a11y": {
+      "text": "Код для входа",
       "status": "machine"
     },
     "device_link.request.decline": {
@@ -3970,6 +4038,10 @@
       "text": "Отклонено. Если это повторяется, смените пароль.",
       "status": "machine"
     },
+    "device_link.request.enter_code": {
+      "text": "Введите этот код на новом устройстве:",
+      "status": "machine"
+    },
     "device_link.request.error.generic": {
       "text": "Не удалось добавить устройство. Попробуйте ещё раз.",
       "status": "machine"
@@ -3978,8 +4050,40 @@
       "text": "В этом браузере нет ключа устройства. Войдите снова.",
       "status": "machine"
     },
+    "device_link.request.handled_elsewhere": {
+      "text": "Этот запрос на вход обработан на другом устройстве.",
+      "status": "machine"
+    },
+    "device_link.request.heading": {
+      "text": "Новый запрос на вход",
+      "status": "machine"
+    },
+    "device_link.request.never_share": {
+      "text": "Никому не сообщайте этот код. Lakko никогда его не попросит.",
+      "status": "machine"
+    },
+    "device_link.request.not_recorded": {
+      "text": "Не удалось связаться с Lakko, чтобы завершить добавление устройства. Ничего не добавлено. Попробуйте ещё раз с нового устройства.",
+      "status": "machine"
+    },
+    "device_link.request.someone_signing_in": {
+      "text": "Кто-то входит в ваш аккаунт на новом устройстве.",
+      "status": "machine"
+    },
     "device_link.request.title": {
       "text": "Это вы?",
+      "status": "machine"
+    },
+    "device_link.request.too_many": {
+      "text": "Сегодня было слишком много запросов на вход. Используйте QR-код или попробуйте завтра.",
+      "status": "machine"
+    },
+    "device_link.request.wrong_code": {
+      "text": "Код не совпал. Ничего не добавлено.",
+      "status": "machine"
+    },
+    "device_link.request.yes_its_me": {
+      "text": "Да, это я",
       "status": "machine"
     },
     "device_link.restored": {
@@ -4036,6 +4140,18 @@
     },
     "devices.pairing.qr_description": {
       "text": "QR-код для привязки",
+      "status": "machine"
+    },
+    "devices.removed.body": {
+      "text": "Его удалили из вашего аккаунта на другом устройстве. Новые сообщения сюда больше не приходят. Выйдите, а затем войдите снова, если хотите им пользоваться.",
+      "status": "machine"
+    },
+    "devices.removed.sign_out": {
+      "text": "Выйти",
+      "status": "machine"
+    },
+    "devices.removed.title": {
+      "text": "Это устройство удалено",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -4100,6 +4216,226 @@
     },
     "ds.clock_skew": {
       "text": "Проверьте дату и время на этом устройстве.",
+      "status": "machine"
+    },
+    "folders.add_to_folder": {
+      "text": "Добавить в папку",
+      "status": "machine"
+    },
+    "folders.all_chats": {
+      "text": "Все чаты",
+      "status": "machine"
+    },
+    "folders.bar_a11y": {
+      "text": "Папки",
+      "status": "machine"
+    },
+    "folders.chat_count": {
+      "text": "{count, plural, one {# чат} few {# чата} many {# чатов} other {# чата}}",
+      "status": "machine"
+    },
+    "folders.delete": {
+      "text": "Удалить папку",
+      "status": "machine"
+    },
+    "folders.delete_confirm.body": {
+      "text": "Чаты из неё останутся в разделе «Все чаты».",
+      "status": "machine"
+    },
+    "folders.delete_confirm.title": {
+      "text": "Удалить папку «{name}»?",
+      "status": "machine"
+    },
+    "folders.edit": {
+      "text": "Изменить папку",
+      "status": "machine"
+    },
+    "folders.edit_all": {
+      "text": "Изменить папки",
+      "status": "machine"
+    },
+    "folders.editor.add_chats": {
+      "text": "Добавить чаты",
+      "status": "machine"
+    },
+    "folders.editor.discard.confirm": {
+      "text": "Не сохранять",
+      "status": "machine"
+    },
+    "folders.editor.discard.keep": {
+      "text": "Продолжить редактирование",
+      "status": "machine"
+    },
+    "folders.editor.discard.title": {
+      "text": "Отменить изменения?",
+      "status": "machine"
+    },
+    "folders.editor.error.save": {
+      "text": "Не удалось сохранить папку. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "folders.editor.exclude.archived": {
+      "text": "Архивные",
+      "status": "machine"
+    },
+    "folders.editor.exclude.muted": {
+      "text": "Без звука",
+      "status": "machine"
+    },
+    "folders.editor.exclude.read": {
+      "text": "Прочитанные",
+      "status": "machine"
+    },
+    "folders.editor.exclude_chats": {
+      "text": "Исключить чаты",
+      "status": "machine"
+    },
+    "folders.editor.excluded": {
+      "text": "Исключённые",
+      "status": "machine"
+    },
+    "folders.editor.included": {
+      "text": "Включённые",
+      "status": "machine"
+    },
+    "folders.editor.kind.channels": {
+      "text": "Каналы",
+      "status": "machine"
+    },
+    "folders.editor.kind.groups": {
+      "text": "Группы",
+      "status": "machine"
+    },
+    "folders.editor.kind.one_to_one": {
+      "text": "Личные чаты",
+      "status": "machine"
+    },
+    "folders.editor.name_placeholder": {
+      "text": "Название папки",
+      "status": "machine"
+    },
+    "folders.editor.remove_chat_a11y": {
+      "text": "Убрать «{name}»",
+      "status": "machine"
+    },
+    "folders.empty": {
+      "text": "Здесь пока ничего нет",
+      "status": "machine"
+    },
+    "folders.in_folder_a11y": {
+      "text": "В этой папке",
+      "status": "machine"
+    },
+    "folders.limit": {
+      "text": "Можно создать не более {count, plural, one {# папки} few {# папок} many {# папок} other {# папки}}.",
+      "status": "machine"
+    },
+    "folders.mark_all_read": {
+      "text": "Отметить все как прочитанные",
+      "status": "machine"
+    },
+    "folders.new": {
+      "text": "Новая папка",
+      "status": "machine"
+    },
+    "folders.new_ellipsis": {
+      "text": "Новая папка...",
+      "status": "machine"
+    },
+    "folders.picker.limit_exclude": {
+      "text": "По одному в папке можно исключить не более {count, plural, one {# чата} few {# чатов} many {# чатов} other {# чата}}. Чтобы охватить больше, используйте переключатели типов чатов.",
+      "status": "machine"
+    },
+    "folders.picker.limit_include": {
+      "text": "По одному в папку можно добавить не более {count, plural, one {# чата} few {# чатов} many {# чатов} other {# чата}}. Чтобы охватить больше, используйте переключатели типов чатов.",
+      "status": "machine"
+    },
+    "folders.pin_limit": {
+      "text": "В папке можно закрепить не более {count, plural, one {# чата} few {# чатов} many {# чатов} other {# чата}}.",
+      "status": "machine"
+    },
+    "folders.remove_from_folder": {
+      "text": "Убрать из папки",
+      "status": "machine"
+    },
+    "folders.reorder": {
+      "text": "Изменить порядок папок",
+      "status": "machine"
+    },
+    "folders.settings.drag_hint": {
+      "text": "Перетащите, чтобы изменить порядок",
+      "status": "machine"
+    },
+    "folders.settings.intro": {
+      "text": "Группируйте чаты так, как вам удобно. Папки появятся на всех ваших устройствах.",
+      "status": "machine"
+    },
+    "folders.settings.more_a11y": {
+      "text": "Действия с папкой «{name}»",
+      "status": "machine"
+    },
+    "folders.settings.move_down": {
+      "text": "Переместить ниже",
+      "status": "machine"
+    },
+    "folders.settings.move_up": {
+      "text": "Переместить выше",
+      "status": "machine"
+    },
+    "folders.settings.pending_sync": {
+      "text": "Изменения попадут на другие ваши устройства, когда это устройство снова будет в сети.",
+      "status": "machine"
+    },
+    "folders.settings.yours": {
+      "text": "Ваши папки",
+      "status": "machine"
+    },
+    "folders.suggested.add": {
+      "text": "Добавить",
+      "status": "machine"
+    },
+    "folders.suggested.add_a11y": {
+      "text": "Добавить «{name}»",
+      "status": "machine"
+    },
+    "folders.suggested.channels.description": {
+      "text": "Каналы, на которые вы подписаны",
+      "status": "machine"
+    },
+    "folders.suggested.channels.name": {
+      "text": "Каналы",
+      "status": "machine"
+    },
+    "folders.suggested.groups.description": {
+      "text": "Групповые чаты",
+      "status": "machine"
+    },
+    "folders.suggested.groups.name": {
+      "text": "Группы",
+      "status": "machine"
+    },
+    "folders.suggested.personal.description": {
+      "text": "Личные чаты",
+      "status": "machine"
+    },
+    "folders.suggested.personal.name": {
+      "text": "Личные",
+      "status": "machine"
+    },
+    "folders.suggested.title": {
+      "text": "Рекомендуемые",
+      "status": "machine"
+    },
+    "folders.suggested.unread.description": {
+      "text": "Чаты с новыми сообщениями",
+      "status": "machine"
+    },
+    "folders.suggested.unread.name": {
+      "text": "Непрочитанные",
+      "status": "machine"
+    },
+    "folders.tab_a11y": {
+      "text": "{name}, {count, plural, one {# непрочитанный чат} few {# непрочитанных чата} many {# непрочитанных чатов} other {# непрочитанного чата}}",
       "status": "machine"
     },
     "group.join.needs_account": {
@@ -4442,6 +4778,14 @@
       "text": "Активные ссылки-приглашения",
       "status": "machine"
     },
+    "invite.links.made_elsewhere": {
+      "text": "Создана на другом устройстве",
+      "status": "machine"
+    },
+    "invite.links.made_elsewhere_hint": {
+      "text": "Создана на другом устройстве. Скопируйте её там или отзовите здесь.",
+      "status": "machine"
+    },
     "invite.links.never_expires": {
       "text": "Бессрочная",
       "status": "machine"
@@ -4699,7 +5043,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "Введите имя пользователя, затем подтвердите вход на устройстве, где вы ещё вошли, и сверьте показанный код. Серверы Lakko не получают ничего, что могли бы прочитать. Камера не нужна; при желании можно использовать QR-код.",
+      "text": "Введите имя пользователя, затем откройте Lakko на устройстве, где вы ещё не вышли из аккаунта, и введите код, который оно покажет. Ничего, что могут прочитать серверы Lakko, не передаётся. Камера не нужна; при желании можно использовать QR-код.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -5035,7 +5379,7 @@
       "status": "machine"
     },
     "restore_identity.device_intro": {
-      "text": "На устройстве, где вы ещё вошли, появится запрос; подтвердите его там и сверьте код. Передача защищена сквозным шифрованием; серверы Lakko не могут её прочитать. Камера не нужна; при желании можно использовать QR-код.",
+      "text": "Устройство, на котором вы ещё не вышли из аккаунта, покажет шестизначный код; введите его здесь. Передача защищена сквозным шифрованием; серверы Lakko не могут её прочитать. Камера не нужна; при желании можно использовать QR-код.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -5120,6 +5464,46 @@
     },
     "restore_identity.title": {
       "text": "Восстановите ключи аккаунта",
+      "status": "machine"
+    },
+    "search.people.add_contact": {
+      "text": "Добавить в контакты",
+      "status": "machine"
+    },
+    "search.people.add_contact_title": {
+      "text": "Добавить: {name}",
+      "status": "machine"
+    },
+    "search.people.channel_result": {
+      "text": "Канал {handle}",
+      "status": "machine"
+    },
+    "search.people.failed": {
+      "text": "Не удалось выполнить поиск. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "search.people.heading": {
+      "text": "Люди",
+      "status": "machine"
+    },
+    "search.people.not_found": {
+      "text": "Никого не найдено. Проверьте написание или попросите у человека ссылку-приглашение.",
+      "status": "machine"
+    },
+    "search.people.request_refused": {
+      "text": "Не удалось отправить запрос. Возможно, этот человек изменил, кто может его найти.",
+      "status": "machine"
+    },
+    "search.people.search": {
+      "text": "Найти людей",
+      "status": "machine"
+    },
+    "search.people.searching_a11y": {
+      "text": "Идёт поиск",
+      "status": "machine"
+    },
+    "search.people.send_request": {
+      "text": "Отправить запрос",
       "status": "machine"
     },
     "security.identity_changed.body": {
@@ -5734,6 +6118,10 @@
       "text": "Данные",
       "status": "machine"
     },
+    "settings.section.folders": {
+      "text": "Папки с чатами",
+      "status": "machine"
+    },
     "settings.section.media": {
       "text": "Медиа",
       "status": "machine"
@@ -5744,6 +6132,10 @@
     },
     "settings.section.notifications": {
       "text": "Уведомления",
+      "status": "machine"
+    },
+    "settings.section.privacy": {
+      "text": "Конфиденциальность",
       "status": "machine"
     },
     "settings.section.profile": {
@@ -5806,6 +6198,14 @@
       "text": "Имя пользователя: {message}",
       "status": "machine"
     },
+    "username.error.bind_limited_later": {
+      "text": "Вы слишком часто меняли имя пользователя. Попробуйте позже.",
+      "status": "machine"
+    },
+    "username.error.bind_limited_minutes": {
+      "text": "Вы слишком часто меняли имя пользователя. Попробуйте через {minutes, plural, one {# минуту} few {# минуты} many {# минут} other {# минуты}}.",
+      "status": "machine"
+    },
     "username.error.empty": {
       "text": "Введите имя пользователя",
       "status": "machine"
@@ -5828,6 +6228,126 @@
     },
     "username.hint.shown_as": {
       "text": "Будет показано как {username}",
+      "status": "machine"
+    },
+    "who_can_find_me.applying_a11y": {
+      "text": "Применение",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts": {
+      "text": "Контакты моих контактов",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_helper": {
+      "text": "Люди, которых добавили ваши контакты.",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_spreading": {
+      "text": "Контакты ваших контактов смогут найти вас, когда ваши контакты в следующий раз откроют Lakko.",
+      "status": "machine"
+    },
+    "who_can_find_me.groups": {
+      "text": "Участники моих групп и каналов",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.all": {
+      "text": "Все группы и каналы",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.chosen": {
+      "text": "Только выбранные мной",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_all_helper": {
+      "text": "Все, кто состоит в тех же группах и каналах, что и вы.",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_chosen_helper": {
+      "text": "Только выбранные вами ({chosen} из {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.lede": {
+      "text": "Любой, кто может найти вас по имени пользователя или по имени, может отправить вам запрос в контакты.",
+      "status": "machine"
+    },
+    "who_can_find_me.lede_link": {
+      "text": "Люди с вашей ссылкой-приглашением или QR-кодом всегда могут с вами связаться.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.channels": {
+      "text": "Каналы",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose": {
+      "text": "Выберите группы и каналы",
+      "status": "machine"
+    },
+    "who_can_find_me.list.empty": {
+      "text": "Вы пока не состоите ни в одной группе или канале.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.groups": {
+      "text": "Группы",
+      "status": "machine"
+    },
+    "who_can_find_me.list.no_match": {
+      "text": "Подходящих групп и каналов нет.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.search": {
+      "text": "Поиск групп и каналов",
+      "status": "machine"
+    },
+    "who_can_find_me.members_can_find_me": {
+      "text": "Участники могут найти меня",
+      "status": "machine"
+    },
+    "who_can_find_me.members_excluded_notice": {
+      "text": "Теперь только выбранные вами группы и каналы. Изменить можно в разделе {privacy}.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone": {
+      "text": "Все",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone_helper": {
+      "text": "Кто угодно может найти вас по имени пользователя или по имени.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody": {
+      "text": "Никто",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody_helper": {
+      "text": "Связаться с вами могут только люди с вашей ссылкой-приглашением или QR-кодом.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.some": {
+      "text": "Некоторые люди",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_after_create": {
+      "text": "Откроется сразу после создания аккаунта.",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_change": {
+      "text": "Изменить",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_line": {
+      "text": "Вас могут найти контакты ваших контактов и люди из ваших групп и каналов. Это можно изменить в разделе «Настройки» > «Конфиденциальность».",
+      "status": "machine"
+    },
+    "who_can_find_me.status.failed": {
+      "text": "Не удалось изменить, кто может вас найти. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "who_can_find_me.status.offline": {
+      "text": "Изменения применятся, когда вы снова будете в сети.",
+      "status": "machine"
+    },
+    "who_can_find_me.title": {
+      "text": "Кто может меня найти",
       "status": "machine"
     }
   }

@@ -63,6 +63,7 @@ import me.lakko.app.chat.refOf
 import me.lakko.app.chat.rowIdOf
 import me.lakko.app.chat.rowsMatching
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
+import me.lakko.app.l10n.t
 import uniffi.lakko_ffi_uniffi.FolderConversationRef
 
 /**
@@ -135,10 +136,10 @@ public fun FolderEditorScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (original == null) "New folder" else "Edit folder") },
+                title = { Text(if (original == null) t("folders.new") else t("folders.edit")) },
                 navigationIcon = {
                     IconButton(onClick = leave) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
                 actions = {
@@ -152,7 +153,7 @@ public fun FolderEditorScreen(
                                 if (ok) finish()
                             }
                         },
-                    ) { Text("Save") }
+                    ) { Text(t("common.save")) }
                 },
             )
         },
@@ -174,29 +175,29 @@ public fun FolderEditorScreen(
                             draft = draft.copy(name = clean)
                         }
                     },
-                    placeholder = { Text("Folder name") },
+                    placeholder = { Text(t("folders.editor.name_placeholder")) },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                 )
                 if (atFolderLimit) {
-                    HelperLine("You can have up to 20 folders.")
+                    HelperLine(t("folders.limit", emptyMap(), mapOf("count" to FolderLimits.MAX_FOLDERS.toULong())))
                 }
             }
 
-            item { SectionHeader("Included") }
+            item { SectionHeader(t("folders.editor.included")) }
             if (hasRule) {
                 item { HelperLine(chatsCount(matchCount)) }
             }
             item {
-                KindToggle("One-to-one chats", draft.includeKinds and IncludeKind.ONE_TO_ONE != 0u) {
+                KindToggle(t("folders.editor.kind.one_to_one"), draft.includeKinds and IncludeKind.ONE_TO_ONE != 0u) {
                     draft = draft.copy(includeKinds = draft.includeKinds xor IncludeKind.ONE_TO_ONE)
                 }
-                KindToggle("Groups", draft.includeKinds and IncludeKind.GROUPS != 0u) {
+                KindToggle(t("folders.editor.kind.groups"), draft.includeKinds and IncludeKind.GROUPS != 0u) {
                     draft = draft.copy(includeKinds = draft.includeKinds xor IncludeKind.GROUPS)
                 }
-                KindToggle("Channels", draft.includeKinds and IncludeKind.CHANNELS != 0u) {
+                KindToggle(t("folders.editor.kind.channels"), draft.includeKinds and IncludeKind.CHANNELS != 0u) {
                     draft = draft.copy(includeKinds = draft.includeKinds xor IncludeKind.CHANNELS)
                 }
             }
@@ -205,17 +206,17 @@ public fun FolderEditorScreen(
                     draft = draft.copy(included = draft.included.filter { rowIdOf(it) != row.id })
                 }
             }
-            item { ActionRow("Add chats") { picking = FolderPickMode.Include } }
+            item { ActionRow(t("folders.editor.add_chats")) { picking = FolderPickMode.Include } }
 
-            item { SectionHeader("Excluded") }
+            item { SectionHeader(t("folders.editor.excluded")) }
             item {
-                KindToggle("Muted", draft.excludeFlags and ExcludeFlag.MUTED != 0u) {
+                KindToggle(t("folders.editor.exclude.muted"), draft.excludeFlags and ExcludeFlag.MUTED != 0u) {
                     draft = draft.copy(excludeFlags = draft.excludeFlags xor ExcludeFlag.MUTED)
                 }
-                KindToggle("Read", draft.excludeFlags and ExcludeFlag.READ != 0u) {
+                KindToggle(t("folders.editor.exclude.read"), draft.excludeFlags and ExcludeFlag.READ != 0u) {
                     draft = draft.copy(excludeFlags = draft.excludeFlags xor ExcludeFlag.READ)
                 }
-                KindToggle("Archived", draft.excludeFlags and ExcludeFlag.ARCHIVED != 0u) {
+                KindToggle(t("folders.editor.exclude.archived"), draft.excludeFlags and ExcludeFlag.ARCHIVED != 0u) {
                     draft = draft.copy(excludeFlags = draft.excludeFlags xor ExcludeFlag.ARCHIVED)
                 }
             }
@@ -224,14 +225,14 @@ public fun FolderEditorScreen(
                     draft = draft.copy(excluded = draft.excluded.filter { rowIdOf(it) != row.id })
                 }
             }
-            item { ActionRow("Exclude chats") { picking = FolderPickMode.Exclude } }
+            item { ActionRow(t("folders.editor.exclude_chats")) { picking = FolderPickMode.Exclude } }
 
             if (original != null) {
                 item {
                     Spacer(Modifier.height(24.dp))
                     HorizontalDivider()
                     Text(
-                        "Delete folder",
+                        t("folders.delete"),
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodyLarge,
                         modifier = Modifier
@@ -247,11 +248,11 @@ public fun FolderEditorScreen(
     picking?.let { mode ->
         val current = if (mode == FolderPickMode.Include) draft.included else draft.excluded
         ChatPicker(
-            title = if (mode == FolderPickMode.Include) "Add chats" else "Exclude chats",
+            title = if (mode == FolderPickMode.Include) t("folders.editor.add_chats") else t("folders.editor.exclude_chats"),
             limitLine = if (mode == FolderPickMode.Include) {
-                "A folder can hold up to 200 chats added one by one. Use the kind toggles for more."
+                t("folders.picker.limit_include", emptyMap(), mapOf("count" to FolderLimits.MAX_HAND.toULong()))
             } else {
-                "A folder can hold up to 200 chats excluded one by one. Use the kind toggles for more."
+                t("folders.picker.limit_exclude", emptyMap(), mapOf("count" to FolderLimits.MAX_HAND.toULong()))
             },
             rows = pickable,
             initiallyChecked = current.map(::rowIdOf).toSet(),
@@ -268,12 +269,12 @@ public fun FolderEditorScreen(
     if (confirmingDiscard) {
         AlertDialog(
             onDismissRequest = { confirmingDiscard = false },
-            title = { Text("Discard changes?") },
+            title = { Text(t("folders.editor.discard.title")) },
             confirmButton = {
-                TextButton(onClick = { confirmingDiscard = false; finish() }) { Text("Discard") }
+                TextButton(onClick = { confirmingDiscard = false; finish() }) { Text(t("folders.editor.discard.confirm")) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmingDiscard = false }) { Text("Keep editing") }
+                TextButton(onClick = { confirmingDiscard = false }) { Text(t("folders.editor.discard.keep")) }
             },
         )
     }
@@ -325,7 +326,9 @@ private fun resolvedRows(refs: List<FolderConversationRef>, rows: List<Conversat
     return refs.mapNotNull { byId[rowIdOf(it)] }.distinctBy { it.id }
 }
 
-internal fun chatsCount(n: Int): String = if (n == 1) "1 chat" else "$n chats"
+/** "3 chats": how many conversations a folder's rule matches. */
+@Composable
+internal fun chatsCount(n: Int): String = t("folders.chat_count", emptyMap(), mapOf("count" to n.coerceAtLeast(0).toULong()))
 
 private fun isValidFolderNameSafely(name: String): Boolean = try {
     uniffi.lakko_ffi_uniffi.isValidFolderName(name)
@@ -373,7 +376,7 @@ private fun HandRow(row: ConversationListRow, onRemove: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         ConversationRowBody(row = row, modifier = Modifier.weight(1f))
         IconButton(onClick = onRemove) {
-            Icon(Icons.Filled.Close, contentDescription = "Remove ${row.title}")
+            Icon(Icons.Filled.Close, contentDescription = t("folders.editor.remove_chat_a11y", mapOf("name" to row.title)))
         }
         Spacer(Modifier.width(4.dp))
     }
@@ -426,11 +429,11 @@ private fun ChatPicker(
                     title = { Text(title) },
                     navigationIcon = {
                         IconButton(onClick = onDismiss) {
-                            Icon(Icons.Filled.Close, contentDescription = "Close")
+                            Icon(Icons.Filled.Close, contentDescription = t("common.close"))
                         }
                     },
                     actions = {
-                        TextButton(onClick = { onDone(checked) }) { Text("Done") }
+                        TextButton(onClick = { onDone(checked) }) { Text(t("common.done")) }
                     },
                 )
             },

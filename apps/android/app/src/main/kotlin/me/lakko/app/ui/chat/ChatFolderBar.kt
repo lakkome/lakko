@@ -43,6 +43,7 @@ import me.lakko.app.chat.ConversationListRow
 import me.lakko.app.chat.folderRows
 import me.lakko.app.chat.folderUnreadCount
 import me.lakko.app.chat.hasUnread
+import me.lakko.app.l10n.t
 
 /**
  * The folder bar, `docs/ux/chat-folders.md` section 2.
@@ -80,7 +81,7 @@ internal fun FolderBar(
         },
     ) {
         FolderTab(
-            label = "All chats",
+            label = t("folders.all_chats"),
             count = 0,
             selected = selected == 0,
             onClick = { onSelect(0) },
@@ -88,12 +89,12 @@ internal fun FolderBar(
             val unread = rows.filter { !it.membershipEnded && it.hasUnread }
             if (unread.isNotEmpty()) {
                 DropdownMenuItem(
-                    text = { Text("Mark all as read") },
+                    text = { Text(t("folders.mark_all_read")) },
                     onClick = { dismiss(); onMarkAllRead(unread) },
                 )
             }
             DropdownMenuItem(
-                text = { Text("Edit folders") },
+                text = { Text(t("folders.edit_all")) },
                 onClick = { dismiss(); onEditFolders() },
             )
         }
@@ -106,12 +107,12 @@ internal fun FolderBar(
                 onClick = { onSelect(i + 1) },
             ) { dismiss ->
                 DropdownMenuItem(
-                    text = { Text("Edit folder") },
+                    text = { Text(t("folders.edit")) },
                     onClick = { dismiss(); onEditFolder(folder) },
                 )
                 if (count > 0) {
                     DropdownMenuItem(
-                        text = { Text("Mark all as read") },
+                        text = { Text(t("folders.mark_all_read")) },
                         onClick = {
                             dismiss()
                             onMarkAllRead(folderRows(folder, rows).filter { it.hasUnread })
@@ -119,11 +120,11 @@ internal fun FolderBar(
                     )
                 }
                 DropdownMenuItem(
-                    text = { Text("Reorder folders") },
+                    text = { Text(t("folders.reorder")) },
                     onClick = { dismiss(); onReorder() },
                 )
                 DropdownMenuItem(
-                    text = { Text("Delete folder", color = MaterialTheme.colorScheme.error) },
+                    text = { Text(t("folders.delete"), color = MaterialTheme.colorScheme.error) },
                     onClick = { dismiss(); onDelete(folder) },
                 )
             }
@@ -144,7 +145,7 @@ private fun FolderTab(
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     val spoken = if (count > 0) {
-        "$label, $count unread ${if (count == 1) "chat" else "chats"}"
+        t("folders.tab_a11y", mapOf("name" to label), mapOf("count" to count.toULong()))
     } else {
         label
     }
@@ -201,11 +202,11 @@ internal fun EmptyFolderPanel(onEdit: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                text = "Nothing here right now",
+                text = t("folders.empty"),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlinedButton(onClick = onEdit) { Text("Edit folder") }
+            OutlinedButton(onClick = onEdit) { Text(t("folders.edit")) }
         }
     }
 }
@@ -215,14 +216,14 @@ internal fun EmptyFolderPanel(onEdit: () -> Unit) {
 internal fun DeleteFolderDialog(folder: ChatFolder, onDismiss: () -> Unit, onConfirm: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Delete folder “${folder.name}”?") },
-        text = { Text("The chats in it stay in All chats.") },
+        title = { Text(t("folders.delete_confirm.title", mapOf("name" to folder.name))) },
+        text = { Text(t("folders.delete_confirm.body")) },
         confirmButton = {
             TextButton(onClick = onConfirm) {
-                Text("Delete", color = MaterialTheme.colorScheme.error)
+                Text(t("common.delete"), color = MaterialTheme.colorScheme.error)
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(t("common.cancel")) } },
     )
 }
 

@@ -210,7 +210,7 @@ enum InviteLinkRows {
     /// `docs/ux/client-redesign.md` section 5.3 — what a row whose secret
     /// this device does not hold shows in place of Copy and Share (Revoke
     /// stays).
-    static let createdElsewhereCopy = "Created on another device. Copy it there, or revoke it here."
+    static var createdElsewhereCopy: String { Localization.text("invite.links.made_elsewhere_hint") }
 
     /// `https://lakko.me/i/<slug>#<secret>`, or `nil` when this device does
     /// not hold the link's secret for the account.

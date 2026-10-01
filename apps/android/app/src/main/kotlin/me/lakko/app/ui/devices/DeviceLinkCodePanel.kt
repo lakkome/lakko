@@ -43,6 +43,9 @@ import me.lakko.app.devices.NewDeviceLink
 import me.lakko.app.devices.NewDeviceLinkState
 import me.lakko.app.devices.PairingOrchestrator
 import me.lakko.app.devices.WelcomeCourier
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 
 /**
  * ADR-0049 section 2 — the new device's "Confirm on another device" route
@@ -63,7 +66,7 @@ internal fun DeviceLinkCodePanel(
     val scope = rememberCoroutineScope()
     var attempt by remember { mutableIntStateOf(0) }
     var state: NewDeviceLinkState? by remember { mutableStateOf(null) }
-    var error: String? by remember { mutableStateOf(null) }
+    var error: UiText? by remember { mutableStateOf(null) }
     var code by remember { mutableStateOf("") }
     var link: NewDeviceLink? by remember { mutableStateOf(null) }
     var session: PairingOrchestrator.JoinSession? by remember { mutableStateOf(null) }
@@ -103,9 +106,9 @@ internal fun DeviceLinkCodePanel(
     }
 
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(DEVICE_LINK_NEW_TITLE, style = MaterialTheme.typography.titleMedium)
+        Text(DEVICE_LINK_NEW_TITLE.text(), style = MaterialTheme.typography.titleMedium)
         Text(
-            DEVICE_LINK_NEW_LEAD,
+            DEVICE_LINK_NEW_LEAD.text(),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -114,7 +117,7 @@ internal fun DeviceLinkCodePanel(
         OutlinedTextField(
             value = code,
             onValueChange = { typed -> code = typed.filter(Char::isDigit).take(DEVICE_LINK_CODE_DIGITS) },
-            label = { Text("Code") },
+            label = { Text(t("device_link.code.field_a11y")) },
             singleLine = true,
             enabled = fieldEnabled,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -123,16 +126,16 @@ internal fun DeviceLinkCodePanel(
         when (s) {
             NewDeviceLinkState.WaitingForOtherDevice -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CircularProgressIndicator()
-                Text(DEVICE_LINK_WAITING_COPY, style = MaterialTheme.typography.bodySmall)
+                Text(DEVICE_LINK_WAITING_COPY.text(), style = MaterialTheme.typography.bodySmall)
             }
             NewDeviceLinkState.Checking -> CircularProgressIndicator()
-            NewDeviceLinkState.WrongCode -> Text(DEVICE_LINK_WRONG_CODE_COPY, color = MaterialTheme.colorScheme.error)
-            NewDeviceLinkState.Declined -> Text(DEVICE_LINK_DECLINED_COPY, color = MaterialTheme.colorScheme.error)
-            NewDeviceLinkState.Expired -> Text(DEVICE_LINK_EXPIRED_COPY, color = MaterialTheme.colorScheme.error)
-            NewDeviceLinkState.Confirmed -> Text(DEVICE_LINK_RESTORING_COPY)
+            NewDeviceLinkState.WrongCode -> Text(DEVICE_LINK_WRONG_CODE_COPY.text(), color = MaterialTheme.colorScheme.error)
+            NewDeviceLinkState.Declined -> Text(DEVICE_LINK_DECLINED_COPY.text(), color = MaterialTheme.colorScheme.error)
+            NewDeviceLinkState.Expired -> Text(DEVICE_LINK_EXPIRED_COPY.text(), color = MaterialTheme.colorScheme.error)
+            NewDeviceLinkState.Confirmed -> Text(DEVICE_LINK_RESTORING_COPY.text())
             NewDeviceLinkState.EnterCode, null -> Unit
         }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        error?.let { Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             when (s) {
                 NewDeviceLinkState.EnterCode -> Button(
@@ -156,8 +159,7 @@ internal fun DeviceLinkCodePanel(
                                                 recovery = true,
                                             )
                                             if (recovery == null) {
-                                                error = "The other device linked this one but didn't send " +
-                                                    "recovery data. Restore with your recovery phrase instead."
+                                                error = UiText("device_link.error.no_identity")
                                             } else {
                                                 onRecovered(recovery)
                                             }
@@ -176,12 +178,12 @@ internal fun DeviceLinkCodePanel(
                             }
                         }
                     },
-                ) { Text("Continue") }
+                ) { Text(t("common.continue")) }
                 NewDeviceLinkState.WrongCode, NewDeviceLinkState.Declined, NewDeviceLinkState.Expired, null ->
-                    Button(onClick = { attempt += 1 }) { Text("Start again") }
+                    Button(onClick = { attempt += 1 }) { Text(t("device_link.code.start_again")) }
                 else -> Unit
             }
-            OutlinedButton(onClick = onShowQr) { Text(DEVICE_LINK_SHOW_QR) }
+            OutlinedButton(onClick = onShowQr) { Text(DEVICE_LINK_SHOW_QR.text()) }
         }
     }
 }
@@ -190,13 +192,15 @@ internal fun DeviceLinkCodePanel(
 private const val DEVICE_LINK_CODE_DIGITS: Int = 6
 
 /** One sentence for a failure outside the named states (a limit, the
- *  network, login by name switched off). */
-private fun deviceLinkFailureCopy(cause: Throwable): String {
+ *  network, login by name switched off), rendered from its kind. */
+private fun deviceLinkFailureCopy(cause: Throwable): UiText {
     val http = cause as? me.lakko.app.auth.AuthHttpError
     if (http != null) {
-        me.lakko.app.auth.authLimitCopy(http)?.let { return it }
-        if (http.status == 503) return "Signing in by name is not available right now. Use a QR code instead."
+        me.lakko.app.auth.authLimitText(http)?.let { return it }
+        if (http.status == HTTP_UNAVAILABLE) return UiText("device_link.error.ask_unavailable")
     }
-    if (cause is me.lakko.app.auth.AuthNetworkError) return "No connection. Check your network and try again."
-    return "Something went wrong. Start again."
+    if (cause is me.lakko.app.auth.AuthNetworkError) return UiText("device_link.code.unreachable")
+    return UiText("device_link.error.generic")
 }
+
+private const val HTTP_UNAVAILABLE: Int = 503

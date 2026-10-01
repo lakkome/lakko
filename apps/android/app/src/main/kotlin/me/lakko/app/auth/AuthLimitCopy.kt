@@ -94,6 +94,7 @@ public fun authLimitText(err: AuthHttpError): me.lakko.app.l10n.UiText? {
         "recovery-code-send-limited" -> me.lakko.app.l10n.UiText("recovery.error.code_send_limited")
         "device-request-limited" -> me.lakko.app.l10n.UiText("device_link.error.request_limited")
         "signup-rate-limited" -> SIGNUP_RATE_LIMITED_TEXT
+        "handle-bind-limited" -> handleBindLimitedText(err.retryAfterSecs)
         else -> {
             val wait = err.retryAfterSecs
             if (wait != null && wait > SECONDS_PER_MINUTE) {
@@ -107,6 +108,22 @@ public fun authLimitText(err: AuthHttpError): me.lakko.app.l10n.UiText? {
             }
         }
     }
+}
+
+/**
+ * [handleBindLimitedCopy] as a catalog message: one whole sentence per case,
+ * `username.error.bind_limited_minutes` with M = ceil(retry_after_secs / 60),
+ * or `username.error.bind_limited_later` over an hour or with no stated wait.
+ */
+public fun handleBindLimitedText(retryAfterSecs: Long?): me.lakko.app.l10n.UiText {
+    if (retryAfterSecs == null || retryAfterSecs > SECONDS_PER_HOUR) {
+        return me.lakko.app.l10n.UiText("username.error.bind_limited_later")
+    }
+    val minutes = ((retryAfterSecs + SECONDS_PER_MINUTE - 1) / SECONDS_PER_MINUTE).coerceAtLeast(1L)
+    return me.lakko.app.l10n.UiText(
+        "username.error.bind_limited_minutes",
+        counts = mapOf("minutes" to minutes.toULong()),
+    )
 }
 
 /** `signup-rate-limited` as a catalog message; the form compares against it. */

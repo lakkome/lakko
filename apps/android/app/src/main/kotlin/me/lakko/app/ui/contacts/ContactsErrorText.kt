@@ -19,7 +19,8 @@ import me.lakko.app.l10n.UiText
  * (that goes to the log). The kinds, in the order they are asked:
  *
  *  1. a [ContactsError] naming an unknown username
- *     (`chat.members.add.error.unknown_username`) or a person who has not
+ *     (`search.people.not_found`), a refused reach grant
+ *     (`search.people.request_refused`) or a person who has not
  *     finished setting up (`chat.members.add.error.no_bundle`);
  *  2. the anonymous-token pool (ADR-0054): a used-up allowance or any other
  *     token failure (`tokens.*`, `common.error.offline`);
@@ -55,13 +56,11 @@ private fun contactsVariantText(error: Throwable): UiText? {
                 // ADR-0060 / docs/ux/who-can-find-me.md section 6.1 "Not found":
                 // the same whether the account does not exist or does not let
                 // the searcher find it, so it never names the username.
-                // TODO(ADR-0061): main's literal, carried as the key until it
-                // is moved into the catalog (an unknown key renders verbatim).
                 is ContactsError.Variant.UsernameUnknown ->
-                    return UiText(me.lakko.app.search.SEARCH_NOT_FOUND)
-                // ADR-0060 "Request refused"; the same literal-as-key carry.
+                    return me.lakko.app.search.SEARCH_NOT_FOUND
+                // ADR-0060 "Request refused": they changed who can find them.
                 is ContactsError.Variant.ReachRefused ->
-                    return UiText(ContactsError.REACH_REFUSED_COPY)
+                    return me.lakko.app.search.REQUEST_REFUSED
                 is ContactsError.Variant.NoIdentityBundle ->
                     return UiText("chat.members.add.error.no_bundle")
                 is ContactsError.Variant.Wrapped -> Unit

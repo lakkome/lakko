@@ -647,20 +647,3 @@ internal fun supersessionRefusedMessage(
     }
 }
 
-/**
- * The user-facing message for a [ContactsError].
- *
- * A name that does not resolve reads as `docs/ux/who-can-find-me.md` section
- * 6.1 "Not found": the same whether the account does not exist or exists and
- * does not let the searcher find it (ADR-0060), so it never claims the name
- * is unregistered.
- */
-internal fun contactsErrorCopy(err: ContactsError): String =
-    when (val v = err.variant) {
-        is ContactsError.Variant.UsernameUnknown -> me.lakko.app.search.SEARCH_NOT_FOUND
-        is ContactsError.Variant.NoIdentityBundle ->
-            "That account has no identity bundle yet — ask them to open the app once."
-        is ContactsError.Variant.Wrapped ->
-            v.cause.message ?: "Send failed."
-        is ContactsError.Variant.ReachRefused -> ContactsError.REACH_REFUSED_COPY
-    }

@@ -52,10 +52,9 @@ export const signupRateLimited = (): string => t("auth.signup.error.rate_limited
  *  choosing or changing a username too often. In minutes, rounded up; over
  *  an hour (or with no wait given) it says "later" instead of a number. */
 export function handleBindLimitedMessage(retryAfterSecs: number | null): string {
-  const lead = "You have changed your username too often.";
-  if (retryAfterSecs === null || retryAfterSecs > 3600) return `${lead} Try again later.`;
+  if (retryAfterSecs === null || retryAfterSecs > 3600) return t("username.error.bind_limited_later");
   const minutes = Math.max(1, Math.ceil(retryAfterSecs / 60));
-  return `${lead} Try again in ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`;
+  return t("username.error.bind_limited_minutes", { minutes });
 }
 
 /** `true` when `err` is auth's `429 handle-bind-limited`. */

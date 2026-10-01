@@ -173,8 +173,8 @@ public fun SettingsScreen(
 
             // docs/ux/who-can-find-me.md section 2 — Privacy, after Profile: it
             // is about people, not keys, which is why it is not under Security.
-            SectionLabel("Privacy")
-            SettingsRow("Who can find me", Icons.Filled.Visibility, onOpenWhoCanFindMe)
+            SectionLabel(t("settings.section.privacy"))
+            SettingsRow(t("who_can_find_me.title"), Icons.Filled.Visibility, onOpenWhoCanFindMe)
 
             SectionLabel(t("settings.section.security"))
             SettingsRow(t("settings.passkeys.title"), Icons.Filled.Key, onOpenPasskeys)
@@ -191,8 +191,8 @@ public fun SettingsScreen(
                 supporting = t("settings.security.recovery.sub"),
             )
 
-            SectionLabel("Chat folders")
-            SettingsRow("Chat folders", Icons.Filled.Folder, onOpenChatFolders)
+            SectionLabel(t("settings.section.folders"))
+            SettingsRow(t("settings.section.folders"), Icons.Filled.Folder, onOpenChatFolders)
 
             SectionLabel(t("settings.section.appearance"))
             Row(

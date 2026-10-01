@@ -1585,7 +1585,9 @@ private fun SessionRoot(
                     val chatState by chatRepository.state.collectAsStateWithLifecycle()
                     val channels by channelsState.channels.collectAsStateWithLifecycle()
                     val ctx = chatRepository.context
-                    val scopes = remember(chatState.threads, channels) {
+                    val groupFallback = me.lakko.app.l10n.t("chat.group.fallback_name")
+                    val channelFallback = me.lakko.app.l10n.t("channels.fallback_name")
+                    val scopes = remember(chatState.threads, channels, groupFallback, channelFallback) {
                         val groups = chatState.threads
                             .filterNot { it.membershipEnded }
                             .filter {
@@ -1597,14 +1599,14 @@ private fun SessionRoot(
                                     kind = me.lakko.app.ui.settings.FindMeScopeKind.GROUP,
                                     idHex = thread.groupIdHex,
                                     name = chatRepository.groupName(thread.groupIdHex)?.name
-                                        ?.takeIf { it.isNotBlank() } ?: "Group",
+                                        ?.takeIf { it.isNotBlank() } ?: groupFallback,
                                 )
                             }
                         val chans = channels.map { handle ->
                             me.lakko.app.ui.settings.FindMeScope(
                                 kind = me.lakko.app.ui.settings.FindMeScopeKind.CHANNEL,
                                 idHex = handle.id,
-                                name = handle.sharedName.ifBlank { handle.localName }.ifBlank { "Channel" },
+                                name = handle.sharedName.ifBlank { handle.localName }.ifBlank { channelFallback },
                             )
                         }
                         groups + chans

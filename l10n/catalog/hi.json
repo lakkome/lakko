@@ -1306,6 +1306,50 @@
       "text": "चैनल मैनेज करें",
       "status": "machine"
     },
+    "channels.members.back_a11y": {
+      "text": "चैनल की जानकारी पर वापस जाएँ",
+      "status": "machine"
+    },
+    "channels.members.empty": {
+      "text": "अभी तक किसी सदस्य ने कार्ड शेयर नहीं किया है।",
+      "status": "machine"
+    },
+    "channels.members.error.load": {
+      "text": "सदस्य लोड नहीं हो सके। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.members.heading": {
+      "text": "सदस्य ({count})",
+      "status": "machine"
+    },
+    "channels.members.info_sub": {
+      "text": "कौन यह चैनल पढ़ता है और किसने कार्ड शेयर किया है।",
+      "status": "machine"
+    },
+    "channels.members.loading": {
+      "text": "सदस्य लोड हो रहे हैं...",
+      "status": "machine"
+    },
+    "channels.members.title": {
+      "text": "सदस्य",
+      "status": "machine"
+    },
+    "channels.members.truncated": {
+      "text": "सिर्फ़ शुरुआती सदस्य दिखाए जा रहे हैं।",
+      "status": "machine"
+    },
+    "channels.members.unnamed": {
+      "text": "सदस्य",
+      "status": "machine"
+    },
+    "channels.members.unreadable": {
+      "text": "{count, plural, one {# सदस्य ने ऐसी पुरानी कुंजी से कार्ड शेयर किया जो इस डिवाइस के पास नहीं है।} other {# सदस्यों ने ऐसी पुरानी कुंजी से कार्ड शेयर किए जो इस डिवाइस के पास नहीं है।}}",
+      "status": "machine"
+    },
+    "channels.members.you": {
+      "text": "आप",
+      "status": "machine"
+    },
     "channels.meta.desc": {
       "text": "नाम और विवरण हर सब्सक्राइबर तक एन्क्रिप्टेड रूप में पहुँचते हैं। सर्वर उन्हें कभी नहीं पढ़ता।",
       "status": "machine"
@@ -3426,6 +3470,10 @@
       "text": "सेशन अभी तैयार नहीं है।",
       "status": "machine"
     },
+    "common.error.starting_up": {
+      "text": "Lakko अभी शुरू हो रहा है। थोड़ी देर में फिर से कोशिश करें।",
+      "status": "machine"
+    },
     "common.error.too_many_attempts": {
       "text": "बहुत ज़्यादा कोशिशें हो गईं। थोड़ा रुकें, फिर से कोशिश करें।",
       "status": "machine"
@@ -3854,16 +3902,52 @@
       "text": "{name} को अनुरोध भेजा गया। उनके स्वीकार करने तक यह \"भेजे गए\" में रहेगा।",
       "status": "machine"
     },
-    "device_link.compare_hint": {
-      "text": "पक्का करें कि दूसरे डिवाइस पर भी यही कोड दिख रहा है।",
+    "device_link.code.enter_six_digits": {
+      "text": "आपके दूसरे डिवाइस पर दिख रहे छह अंक डालें।",
       "status": "machine"
     },
-    "device_link.comparison_code": {
-      "text": "मिलान कोड",
+    "device_link.code.expired": {
+      "text": "इस अनुरोध की समय-सीमा खत्म हो गई। फिर से शुरू करें।",
       "status": "machine"
     },
-    "device_link.confirm_there": {
-      "text": "किसी ऐसे डिवाइस पर Lakko खोलें जिस पर पहले से साइन इन है, और वहाँ इस साइन इन की पुष्टि करें।",
+    "device_link.code.field_a11y": {
+      "text": "आपके दूसरे डिवाइस का कोड",
+      "status": "machine"
+    },
+    "device_link.code.intro": {
+      "text": "Lakko को किसी ब्राउज़र में या अपने उस फ़ोन पर खोलें जहाँ आप पहले से साइन इन हैं। वहाँ छह अंकों का कोड दिखेगा। उसे यहाँ डालें।",
+      "status": "machine"
+    },
+    "device_link.code.intro_native": {
+      "text": "Lakko को ऐसे डिवाइस पर खोलें जिस पर आप पहले से साइन इन हैं। वह छह अंकों का कोड दिखाएगा। उसे यहाँ डालें।",
+      "status": "machine"
+    },
+    "device_link.code.restoring": {
+      "text": "रीस्टोर हो रहा है...",
+      "status": "machine"
+    },
+    "device_link.code.start_again": {
+      "text": "फिर से शुरू करें",
+      "status": "machine"
+    },
+    "device_link.code.title": {
+      "text": "दूसरे डिवाइस पर पुष्टि करें",
+      "status": "machine"
+    },
+    "device_link.code.unreachable": {
+      "text": "Lakko से कनेक्ट नहीं हो सका। अपना कनेक्शन जाँचें, फिर से शुरू करें।",
+      "status": "machine"
+    },
+    "device_link.code.use_instead": {
+      "text": "इसके बजाय दूसरे डिवाइस पर पुष्टि करें",
+      "status": "machine"
+    },
+    "device_link.code.waiting": {
+      "text": "आपके दूसरे डिवाइस का इंतज़ार है...",
+      "status": "machine"
+    },
+    "device_link.code.wrong": {
+      "text": "यह कोड मेल नहीं खाता। फिर से शुरू करें और अपने दूसरे डिवाइस पर दिख रहा कोड डालें।",
       "status": "machine"
     },
     "device_link.error.ask_unavailable": {
@@ -3918,10 +4002,6 @@
       "text": "यह कोड किसी दूसरे अकाउंट का है। जाँचें कि नया डिवाइस वही यूज़रनेम इस्तेमाल कर रहा है जो यह डिवाइस करता है।",
       "status": "machine"
     },
-    "device_link.qr.hide": {
-      "text": "QR कोड छिपाएँ",
-      "status": "machine"
-    },
     "device_link.qr.intro": {
       "text": "यह कोड ऐसे डिवाइस को दिखाएँ जिस पर अभी भी आपका अकाउंट है। वह इस डिवाइस को जोड़ देगा और आपकी पहचान को एंड-टू-एंड एन्क्रिप्टेड तरीके से ट्रांसफ़र करेगा, कोई फ़्रेज़ टाइप नहीं करनी होगी।",
       "status": "machine"
@@ -3946,20 +4026,8 @@
       "text": "डिवाइस जोड़ा जा रहा है...",
       "status": "machine"
     },
-    "device_link.request.body": {
-      "text": "एक नया डिवाइस आपके अकाउंट से जुड़ना चाहता है। उस पर एक कोड दिख रहा है।",
-      "status": "machine"
-    },
-    "device_link.request.code_label": {
-      "text": "नए डिवाइस पर दिख रहा कोड",
-      "status": "machine"
-    },
-    "device_link.request.confirm": {
-      "text": "हाँ, जोड़ें",
-      "status": "machine"
-    },
-    "device_link.request.confirm_only_if": {
-      "text": "पुष्टि तभी करें जब नए डिवाइस पर ठीक यही कोड दिख रहा हो।",
+    "device_link.request.code_a11y": {
+      "text": "साइन-इन कोड",
       "status": "machine"
     },
     "device_link.request.decline": {
@@ -3970,6 +4038,10 @@
       "text": "अस्वीकार कर दिया गया। अगर ऐसा बार-बार हो, तो अपना पासवर्ड बदलें।",
       "status": "machine"
     },
+    "device_link.request.enter_code": {
+      "text": "यह कोड नए डिवाइस पर डालें:",
+      "status": "machine"
+    },
     "device_link.request.error.generic": {
       "text": "डिवाइस नहीं जोड़ा जा सका। फिर से कोशिश करें।",
       "status": "machine"
@@ -3978,8 +4050,40 @@
       "text": "इस ब्राउज़र में कोई डिवाइस कुंजी नहीं है। फिर से साइन इन करें।",
       "status": "machine"
     },
+    "device_link.request.handled_elsewhere": {
+      "text": "साइन-इन का यह अनुरोध किसी दूसरे डिवाइस पर संभाल लिया गया।",
+      "status": "machine"
+    },
+    "device_link.request.heading": {
+      "text": "साइन-इन का नया अनुरोध",
+      "status": "machine"
+    },
+    "device_link.request.never_share": {
+      "text": "यह कोड कभी किसी को पढ़कर न सुनाएँ। Lakko इसे कभी नहीं माँगेगा।",
+      "status": "machine"
+    },
+    "device_link.request.not_recorded": {
+      "text": "डिवाइस जोड़ना पूरा करने के लिए Lakko से कनेक्ट नहीं हो सका। कुछ भी नहीं जोड़ा गया। नए डिवाइस से फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "device_link.request.someone_signing_in": {
+      "text": "कोई नए डिवाइस पर आपके खाते में साइन इन कर रहा है।",
+      "status": "machine"
+    },
     "device_link.request.title": {
       "text": "क्या यह आप हैं?",
+      "status": "machine"
+    },
+    "device_link.request.too_many": {
+      "text": "आज साइन-इन के बहुत ज़्यादा अनुरोध आए। QR कोड इस्तेमाल करें, या कल फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "device_link.request.wrong_code": {
+      "text": "कोड मेल नहीं खाया। कुछ भी नहीं जोड़ा गया।",
+      "status": "machine"
+    },
+    "device_link.request.yes_its_me": {
+      "text": "हाँ, यह मैं हूँ",
       "status": "machine"
     },
     "device_link.restored": {
@@ -4036,6 +4140,18 @@
     },
     "devices.pairing.qr_description": {
       "text": "पेयरिंग QR कोड",
+      "status": "machine"
+    },
+    "devices.removed.body": {
+      "text": "इसे किसी दूसरे डिवाइस से आपके खाते से हटा दिया गया। नए मैसेज अब इस तक नहीं पहुँचते। अगर आप इसे इस्तेमाल करना चाहते हैं, तो साइन आउट करें और फिर से साइन इन करें।",
+      "status": "machine"
+    },
+    "devices.removed.sign_out": {
+      "text": "साइन आउट करें",
+      "status": "machine"
+    },
+    "devices.removed.title": {
+      "text": "यह डिवाइस हटा दिया गया",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -4100,6 +4216,226 @@
     },
     "ds.clock_skew": {
       "text": "इस डिवाइस की तारीख और समय जाँचें।",
+      "status": "machine"
+    },
+    "folders.add_to_folder": {
+      "text": "फ़ोल्डर में जोड़ें",
+      "status": "machine"
+    },
+    "folders.all_chats": {
+      "text": "सभी चैट",
+      "status": "machine"
+    },
+    "folders.bar_a11y": {
+      "text": "फ़ोल्डर",
+      "status": "machine"
+    },
+    "folders.chat_count": {
+      "text": "{count, plural, one {# चैट} other {# चैट}}",
+      "status": "machine"
+    },
+    "folders.delete": {
+      "text": "फ़ोल्डर मिटाएँ",
+      "status": "machine"
+    },
+    "folders.delete_confirm.body": {
+      "text": "इसकी चैट \"सभी चैट\" में बनी रहेंगी।",
+      "status": "machine"
+    },
+    "folders.delete_confirm.title": {
+      "text": "फ़ोल्डर \"{name}\" मिटाएँ?",
+      "status": "machine"
+    },
+    "folders.edit": {
+      "text": "फ़ोल्डर एडिट करें",
+      "status": "machine"
+    },
+    "folders.edit_all": {
+      "text": "फ़ोल्डरों को एडिट करें",
+      "status": "machine"
+    },
+    "folders.editor.add_chats": {
+      "text": "चैट जोड़ें",
+      "status": "machine"
+    },
+    "folders.editor.discard.confirm": {
+      "text": "छोड़ दें",
+      "status": "machine"
+    },
+    "folders.editor.discard.keep": {
+      "text": "एडिट करते रहें",
+      "status": "machine"
+    },
+    "folders.editor.discard.title": {
+      "text": "बदलाव छोड़ दें?",
+      "status": "machine"
+    },
+    "folders.editor.error.save": {
+      "text": "फ़ोल्डर सेव नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "folders.editor.exclude.archived": {
+      "text": "आर्काइव की गई",
+      "status": "machine"
+    },
+    "folders.editor.exclude.muted": {
+      "text": "म्यूट की गई",
+      "status": "machine"
+    },
+    "folders.editor.exclude.read": {
+      "text": "पढ़ी गई",
+      "status": "machine"
+    },
+    "folders.editor.exclude_chats": {
+      "text": "चैट बाहर रखें",
+      "status": "machine"
+    },
+    "folders.editor.excluded": {
+      "text": "बाहर रखी गई",
+      "status": "machine"
+    },
+    "folders.editor.included": {
+      "text": "शामिल",
+      "status": "machine"
+    },
+    "folders.editor.kind.channels": {
+      "text": "चैनल",
+      "status": "machine"
+    },
+    "folders.editor.kind.groups": {
+      "text": "ग्रुप",
+      "status": "machine"
+    },
+    "folders.editor.kind.one_to_one": {
+      "text": "निजी चैट",
+      "status": "machine"
+    },
+    "folders.editor.name_placeholder": {
+      "text": "फ़ोल्डर का नाम",
+      "status": "machine"
+    },
+    "folders.editor.remove_chat_a11y": {
+      "text": "{name} हटाएँ",
+      "status": "machine"
+    },
+    "folders.empty": {
+      "text": "अभी यहाँ कुछ नहीं है",
+      "status": "machine"
+    },
+    "folders.in_folder_a11y": {
+      "text": "इस फ़ोल्डर में",
+      "status": "machine"
+    },
+    "folders.limit": {
+      "text": "आप ज़्यादा से ज़्यादा {count, plural, one {# फ़ोल्डर} other {# फ़ोल्डर}} रख सकते हैं।",
+      "status": "machine"
+    },
+    "folders.mark_all_read": {
+      "text": "सभी को पढ़ा हुआ मार्क करें",
+      "status": "machine"
+    },
+    "folders.new": {
+      "text": "नया फ़ोल्डर",
+      "status": "machine"
+    },
+    "folders.new_ellipsis": {
+      "text": "नया फ़ोल्डर...",
+      "status": "machine"
+    },
+    "folders.picker.limit_exclude": {
+      "text": "एक फ़ोल्डर ज़्यादा से ज़्यादा {count, plural, one {# चैट} other {# चैट}} एक-एक करके बाहर रख सकता है। इससे ज़्यादा के लिए प्रकार वाले स्विच इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "folders.picker.limit_include": {
+      "text": "एक फ़ोल्डर में ज़्यादा से ज़्यादा {count, plural, one {# चैट} other {# चैट}} एक-एक करके जोड़ी जा सकती हैं। इससे ज़्यादा के लिए प्रकार वाले स्विच इस्तेमाल करें।",
+      "status": "machine"
+    },
+    "folders.pin_limit": {
+      "text": "आप एक फ़ोल्डर में ज़्यादा से ज़्यादा {count, plural, one {# चैट} other {# चैट}} पिन कर सकते हैं।",
+      "status": "machine"
+    },
+    "folders.remove_from_folder": {
+      "text": "फ़ोल्डर से हटाएँ",
+      "status": "machine"
+    },
+    "folders.reorder": {
+      "text": "फ़ोल्डर का क्रम बदलें",
+      "status": "machine"
+    },
+    "folders.settings.drag_hint": {
+      "text": "क्रम बदलने के लिए खींचें",
+      "status": "machine"
+    },
+    "folders.settings.intro": {
+      "text": "अपनी चैट को उसी तरह समूहों में रखें जैसे आप उनके बारे में सोचते हैं। फ़ोल्डर आपके सभी डिवाइस पर दिखते हैं।",
+      "status": "machine"
+    },
+    "folders.settings.more_a11y": {
+      "text": "{name} के लिए और विकल्प",
+      "status": "machine"
+    },
+    "folders.settings.move_down": {
+      "text": "नीचे ले जाएँ",
+      "status": "machine"
+    },
+    "folders.settings.move_up": {
+      "text": "ऊपर ले जाएँ",
+      "status": "machine"
+    },
+    "folders.settings.pending_sync": {
+      "text": "यह डिवाइस फिर से ऑनलाइन होने पर बदलाव आपके दूसरे डिवाइस तक पहुँच जाएँगे।",
+      "status": "machine"
+    },
+    "folders.settings.yours": {
+      "text": "आपके फ़ोल्डर",
+      "status": "machine"
+    },
+    "folders.suggested.add": {
+      "text": "जोड़ें",
+      "status": "machine"
+    },
+    "folders.suggested.add_a11y": {
+      "text": "{name} जोड़ें",
+      "status": "machine"
+    },
+    "folders.suggested.channels.description": {
+      "text": "आपके फ़ॉलो किए गए चैनल",
+      "status": "machine"
+    },
+    "folders.suggested.channels.name": {
+      "text": "चैनल",
+      "status": "machine"
+    },
+    "folders.suggested.groups.description": {
+      "text": "ग्रुप चैट",
+      "status": "machine"
+    },
+    "folders.suggested.groups.name": {
+      "text": "ग्रुप",
+      "status": "machine"
+    },
+    "folders.suggested.personal.description": {
+      "text": "निजी चैट",
+      "status": "machine"
+    },
+    "folders.suggested.personal.name": {
+      "text": "निजी",
+      "status": "machine"
+    },
+    "folders.suggested.title": {
+      "text": "सुझाए गए",
+      "status": "machine"
+    },
+    "folders.suggested.unread.description": {
+      "text": "नए मैसेज वाली चैट",
+      "status": "machine"
+    },
+    "folders.suggested.unread.name": {
+      "text": "बिना पढ़ी",
+      "status": "machine"
+    },
+    "folders.tab_a11y": {
+      "text": "{name}, {count, plural, one {# बिना पढ़ी चैट} other {# बिना पढ़ी चैट}}",
       "status": "machine"
     },
     "group.join.needs_account": {
@@ -4442,6 +4778,14 @@
       "text": "सक्रिय इनवाइट लिंक",
       "status": "machine"
     },
+    "invite.links.made_elsewhere": {
+      "text": "दूसरे डिवाइस पर बनाया गया",
+      "status": "machine"
+    },
+    "invite.links.made_elsewhere_hint": {
+      "text": "दूसरे डिवाइस पर बनाया गया। उसे वहीं कॉपी करें, या यहाँ रद्द करें।",
+      "status": "machine"
+    },
     "invite.links.never_expires": {
       "text": "कभी खत्म नहीं होता",
       "status": "machine"
@@ -4699,7 +5043,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "अपना यूज़रनेम डालें, फिर किसी ऐसे डिवाइस पर पुष्टि करें जिस पर अभी भी लॉग इन है और उस पर दिख रहे कोड का मिलान करें। ऐसा कुछ नहीं भेजा जाता जिसे Lakko के सर्वर पढ़ सकें। कैमरे की ज़रूरत नहीं; चाहें तो QR कोड भी है।",
+      "text": "अपना यूज़रनेम डालें, फिर Lakko को ऐसे डिवाइस पर खोलें जो अभी भी लॉग इन है और उस पर दिख रहा कोड टाइप करें। ऐसा कुछ नहीं भेजा जाता जिसे Lakko के सर्वर पढ़ सकें। कैमरे की ज़रूरत नहीं; चाहें तो QR कोड भी है।",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -5035,7 +5379,7 @@
       "status": "machine"
     },
     "restore_identity.device_intro": {
-      "text": "जिस डिवाइस पर अभी भी लॉग इन है, उस पर एक सूचना दिखेगी; वहाँ पुष्टि करें और कोड का मिलान करें। ट्रांसफ़र एंड-टू-एंड एन्क्रिप्टेड है; Lakko के सर्वर इसे नहीं पढ़ सकते। कैमरे की ज़रूरत नहीं; चाहें तो QR कोड भी है।",
+      "text": "जो डिवाइस अभी भी लॉग इन है, वह छह अंकों का कोड दिखाता है; उसे यहाँ टाइप करें। ट्रांसफ़र एंड-टू-एंड एन्क्रिप्टेड है; Lakko के सर्वर इसे नहीं पढ़ सकते। कैमरे की ज़रूरत नहीं; चाहें तो QR कोड भी है।",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -5120,6 +5464,46 @@
     },
     "restore_identity.title": {
       "text": "अपनी पहचान रिस्टोर करें",
+      "status": "machine"
+    },
+    "search.people.add_contact": {
+      "text": "संपर्क जोड़ें",
+      "status": "machine"
+    },
+    "search.people.add_contact_title": {
+      "text": "{name} को जोड़ें",
+      "status": "machine"
+    },
+    "search.people.channel_result": {
+      "text": "चैनल {handle}",
+      "status": "machine"
+    },
+    "search.people.failed": {
+      "text": "खोज नहीं हो सकी। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "search.people.heading": {
+      "text": "लोग",
+      "status": "machine"
+    },
+    "search.people.not_found": {
+      "text": "कोई नहीं मिला। स्पेलिंग जाँचें, या उनसे इनवाइट लिंक माँगें।",
+      "status": "machine"
+    },
+    "search.people.request_refused": {
+      "text": "अनुरोध नहीं भेजा जा सका। हो सकता है उन्होंने बदल दिया हो कि उन्हें कौन ढूँढ सकता है।",
+      "status": "machine"
+    },
+    "search.people.search": {
+      "text": "लोगों को खोजें",
+      "status": "machine"
+    },
+    "search.people.searching_a11y": {
+      "text": "खोज जारी है",
+      "status": "machine"
+    },
+    "search.people.send_request": {
+      "text": "अनुरोध भेजें",
       "status": "machine"
     },
     "security.identity_changed.body": {
@@ -5734,6 +6118,10 @@
       "text": "डेटा",
       "status": "machine"
     },
+    "settings.section.folders": {
+      "text": "चैट फ़ोल्डर",
+      "status": "machine"
+    },
     "settings.section.media": {
       "text": "मीडिया",
       "status": "machine"
@@ -5744,6 +6132,10 @@
     },
     "settings.section.notifications": {
       "text": "सूचनाएँ",
+      "status": "machine"
+    },
+    "settings.section.privacy": {
+      "text": "प्राइवेसी",
       "status": "machine"
     },
     "settings.section.profile": {
@@ -5806,6 +6198,14 @@
       "text": "यूज़रनेम: {message}",
       "status": "machine"
     },
+    "username.error.bind_limited_later": {
+      "text": "आपने अपना यूज़रनेम बहुत बार बदला है। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "username.error.bind_limited_minutes": {
+      "text": "आपने अपना यूज़रनेम बहुत बार बदला है। {minutes, plural, one {# मिनट} other {# मिनट}} बाद फिर से कोशिश करें।",
+      "status": "machine"
+    },
     "username.error.empty": {
       "text": "यूज़रनेम डालें",
       "status": "machine"
@@ -5828,6 +6228,126 @@
     },
     "username.hint.shown_as": {
       "text": "{username} के रूप में दिखेगा",
+      "status": "machine"
+    },
+    "who_can_find_me.applying_a11y": {
+      "text": "लागू किया जा रहा है",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts": {
+      "text": "मेरे संपर्कों के संपर्क",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_helper": {
+      "text": "वे लोग जिन्हें आपके संपर्कों ने जोड़ा है।",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_spreading": {
+      "text": "आपके संपर्क जब अगली बार Lakko खोलेंगे, तब उनके संपर्क आपको ढूँढ पाएँगे।",
+      "status": "machine"
+    },
+    "who_can_find_me.groups": {
+      "text": "मेरे ग्रुप और चैनल के सदस्य",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.all": {
+      "text": "सभी ग्रुप और चैनल",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.chosen": {
+      "text": "सिर्फ़ वे जिन्हें मैं चुनूँ",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_all_helper": {
+      "text": "उन सभी ग्रुप और चैनल के सभी लोग जिनमें आप हैं।",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_chosen_helper": {
+      "text": "सिर्फ़ वे जिन्हें आप चुनें ({total} में से {chosen})।",
+      "status": "machine"
+    },
+    "who_can_find_me.lede": {
+      "text": "जो कोई आपको यूज़रनेम या नाम से ढूँढ सकता है, वह आपका संपर्क बनने का अनुरोध कर सकता है।",
+      "status": "machine"
+    },
+    "who_can_find_me.lede_link": {
+      "text": "जिन लोगों के पास आपका इनवाइट लिंक या QR कोड है, वे हमेशा आप तक पहुँच सकते हैं।",
+      "status": "machine"
+    },
+    "who_can_find_me.list.channels": {
+      "text": "चैनल",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose": {
+      "text": "ग्रुप और चैनल चुनें",
+      "status": "machine"
+    },
+    "who_can_find_me.list.empty": {
+      "text": "आप अभी तक किसी ग्रुप या चैनल में नहीं हैं।",
+      "status": "machine"
+    },
+    "who_can_find_me.list.groups": {
+      "text": "ग्रुप",
+      "status": "machine"
+    },
+    "who_can_find_me.list.no_match": {
+      "text": "कोई ग्रुप या चैनल मेल नहीं खाता।",
+      "status": "machine"
+    },
+    "who_can_find_me.list.search": {
+      "text": "ग्रुप और चैनल खोजें",
+      "status": "machine"
+    },
+    "who_can_find_me.members_can_find_me": {
+      "text": "सदस्य मुझे ढूँढ सकते हैं",
+      "status": "machine"
+    },
+    "who_can_find_me.members_excluded_notice": {
+      "text": "अब सिर्फ़ वे ग्रुप और चैनल जिन्हें आप चुनें। {privacy} में बदलें।",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone": {
+      "text": "सभी",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone_helper": {
+      "text": "कोई भी आपको आपके यूज़रनेम या नाम से ढूँढ सकता है।",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody": {
+      "text": "कोई नहीं",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody_helper": {
+      "text": "सिर्फ़ वही लोग आप तक पहुँच सकते हैं जिनके पास आपका इनवाइट लिंक या QR कोड है।",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.some": {
+      "text": "कुछ लोग",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_after_create": {
+      "text": "आपका खाता बनते ही यह खुल जाएगा।",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_change": {
+      "text": "बदलें",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_line": {
+      "text": "आपके संपर्कों के संपर्क और आपके ग्रुप और चैनल के लोग आपको ढूँढ सकते हैं। आप इसे सेटिंग्स > प्राइवेसी में बदल सकते हैं।",
+      "status": "machine"
+    },
+    "who_can_find_me.status.failed": {
+      "text": "यह अपडेट नहीं हो सका कि आपको कौन ढूँढ सकता है। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "who_can_find_me.status.offline": {
+      "text": "आपके फिर से ऑनलाइन होने पर लागू होगा।",
+      "status": "machine"
+    },
+    "who_can_find_me.title": {
+      "text": "मुझे कौन ढूँढ सकता है",
       "status": "machine"
     }
   }

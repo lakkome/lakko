@@ -14,13 +14,14 @@
  * tested without a Delivery Service.
  */
 
-/** The copy of the removed-device screen, exactly as the UX spec words it. */
+import { t } from "../../l10n";
+
+/** The copy of the removed-device screen, exactly as the UX spec words it,
+ *  rendered in the current language on every call. */
 export const REMOVED_DEVICE_COPY = {
-  title: "This device was removed",
-  body:
-    "It was removed from your account on another device. New messages no " +
-    "longer reach it. Sign out, then sign in again if you want to use it.",
-  signOut: "Sign out",
+  title: (): string => t("devices.removed.title"),
+  body: (): string => t("devices.removed.body"),
+  signOut: (): string => t("devices.removed.sign_out"),
 } as const;
 
 /** What the runtime reads: the wasm DeviceGroup's `isActive` getter. */

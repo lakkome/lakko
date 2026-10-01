@@ -3,6 +3,8 @@
 
 package me.lakko.app.search
 
+import me.lakko.app.l10n.UiText
+
 /*
  * People search, the pure half (`docs/ux/who-can-find-me.md` section 6.1,
  * ADR-0060 "Client contract (S4 / S5)", Search). The Android twin of
@@ -210,13 +212,13 @@ public fun mergePeople(lists: List<List<PersonResult>>, ownKeyHex: String?): Lis
 
 /** Not found - identical whether the person does not exist or does not let
  *  the searcher find them. */
-public const val SEARCH_NOT_FOUND: String = "No one found. Check the spelling, or ask them for an invite link."
+public val SEARCH_NOT_FOUND: UiText = UiText("search.people.not_found")
 
 /** Network failure. Never "not found". */
-public const val SEARCH_FAILED: String = "Couldn't search. Check your connection and try again."
+public val SEARCH_FAILED: UiText = UiText("search.people.failed")
 
 /** The person changed their setting after they were found. */
-public const val REQUEST_REFUSED: String = "Couldn't send the request. They may have changed who can find them."
+public val REQUEST_REFUSED: UiText = UiText("search.people.request_refused")
 
 /** How one question of a search ended. */
 public enum class LegOutcome { ANSWERED, FAILED, ALLOWANCE_USED }
@@ -238,10 +240,10 @@ public fun foldSearch(foundCount: Int, legs: Collection<LegOutcome>): PeopleSear
 
 /** The line under the row for a state; `null` when the state says nothing in
  *  words (idle, searching - the spinner says it - and found). */
-public fun searchStateMessage(state: PeopleSearchState): String? = when (state) {
+public fun searchStateMessage(state: PeopleSearchState): UiText? = when (state) {
     PeopleSearchState.NOT_FOUND -> SEARCH_NOT_FOUND
     PeopleSearchState.FAILED -> SEARCH_FAILED
-    PeopleSearchState.ALLOWANCE_USED -> me.lakko.app.anon.LOOKUP_ALLOWANCE_USED_COPY
+    PeopleSearchState.ALLOWANCE_USED -> UiText("tokens.lookup_allowance_used")
     else -> null
 }
 

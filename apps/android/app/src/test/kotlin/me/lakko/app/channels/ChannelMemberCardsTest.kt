@@ -225,6 +225,7 @@ class ChannelMemberCardsTest {
 
     @Test
     fun `the own card is You and files nothing`() = runTest {
+        me.lakko.app.l10n.EnglishForTests.install()
         val ownPk = ByteArray(32) { 3 }
         val fake = Fake(
             cards = listOf("me" to ownPk),

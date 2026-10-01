@@ -1306,6 +1306,50 @@
       "text": "ניהול הערוץ",
       "status": "machine"
     },
+    "channels.members.back_a11y": {
+      "text": "חזרה לפרטי הערוץ",
+      "status": "machine"
+    },
+    "channels.members.empty": {
+      "text": "אף חבר עדיין לא שיתף כרטיס.",
+      "status": "machine"
+    },
+    "channels.members.error.load": {
+      "text": "לא ניתן היה לטעון את החברים. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "channels.members.heading": {
+      "text": "חברים ({count})",
+      "status": "machine"
+    },
+    "channels.members.info_sub": {
+      "text": "מי שקורא את הערוץ הזה ושיתף כרטיס.",
+      "status": "machine"
+    },
+    "channels.members.loading": {
+      "text": "טוענים חברים...",
+      "status": "machine"
+    },
+    "channels.members.title": {
+      "text": "חברים",
+      "status": "machine"
+    },
+    "channels.members.truncated": {
+      "text": "מוצגים רק החברים הראשונים.",
+      "status": "machine"
+    },
+    "channels.members.unnamed": {
+      "text": "חבר",
+      "status": "machine"
+    },
+    "channels.members.unreadable": {
+      "text": "{count, plural, one {חבר אחד שיתף כרטיס במפתח ישן יותר שאין למכשיר הזה.} two {שני חברים שיתפו כרטיסים במפתח ישן יותר שאין למכשיר הזה.} other {# חברים שיתפו כרטיסים במפתח ישן יותר שאין למכשיר הזה.}}",
+      "status": "machine"
+    },
+    "channels.members.you": {
+      "text": "את/ה",
+      "status": "machine"
+    },
     "channels.meta.desc": {
       "text": "השם והתיאור מגיעים לכל מנוי כשהם מוצפנים. השרת אף פעם לא קורא אותם.",
       "status": "machine"
@@ -3426,6 +3470,10 @@
       "text": "ההתחברות עדיין לא מוכנה.",
       "status": "machine"
     },
+    "common.error.starting_up": {
+      "text": "Lakko עדיין עולה. נסו שוב בעוד רגע.",
+      "status": "machine"
+    },
     "common.error.too_many_attempts": {
       "text": "יותר מדי ניסיונות. המתינו רגע ונסו שוב.",
       "status": "machine"
@@ -3854,16 +3902,52 @@
       "text": "הבקשה נשלחה אל {name}. היא ממתינה ב„נשלחו” עד שתאושר.",
       "status": "machine"
     },
-    "device_link.compare_hint": {
-      "text": "ודאו שבמכשיר השני מוצג אותו קוד.",
+    "device_link.code.enter_six_digits": {
+      "text": "הזינו את שש הספרות שמוצגות במכשיר השני שלכם.",
       "status": "machine"
     },
-    "device_link.comparison_code": {
-      "text": "קוד השוואה",
+    "device_link.code.expired": {
+      "text": "תוקף הבקשה הזו פג. התחילו מחדש.",
       "status": "machine"
     },
-    "device_link.confirm_there": {
-      "text": "פתחו את Lakko במכשיר שכבר מחובר ואשרו שם את ההתחברות הזו.",
+    "device_link.code.field_a11y": {
+      "text": "הקוד מהמכשיר השני שלכם",
+      "status": "machine"
+    },
+    "device_link.code.intro": {
+      "text": "פתחו את Lakko בדפדפן או בטלפון שבו אתם כבר מחוברים. יוצג שם קוד בן שש ספרות. הזינו אותו כאן.",
+      "status": "machine"
+    },
+    "device_link.code.intro_native": {
+      "text": "יש לפתוח את Lakko במכשיר שכבר מחובר. יוצג בו קוד בן שש ספרות. יש להזין אותו כאן.",
+      "status": "machine"
+    },
+    "device_link.code.restoring": {
+      "text": "משחזרים...",
+      "status": "machine"
+    },
+    "device_link.code.start_again": {
+      "text": "להתחיל מחדש",
+      "status": "machine"
+    },
+    "device_link.code.title": {
+      "text": "אישור במכשיר אחר",
+      "status": "machine"
+    },
+    "device_link.code.unreachable": {
+      "text": "לא ניתן היה להגיע ל-Lakko. בדקו את החיבור והתחילו מחדש.",
+      "status": "machine"
+    },
+    "device_link.code.use_instead": {
+      "text": "אישור במכשיר אחר במקום זאת",
+      "status": "machine"
+    },
+    "device_link.code.waiting": {
+      "text": "ממתינים למכשיר השני שלכם...",
+      "status": "machine"
+    },
+    "device_link.code.wrong": {
+      "text": "הקוד הזה לא תואם. התחילו מחדש והזינו את הקוד שמוצג במכשיר השני שלכם.",
       "status": "machine"
     },
     "device_link.error.ask_unavailable": {
@@ -3918,10 +4002,6 @@
       "text": "הקוד הזה שייך לחשבון אחר. ודאו שבמכשיר החדש משתמשים באותו שם משתמש כמו כאן.",
       "status": "machine"
     },
-    "device_link.qr.hide": {
-      "text": "הסתרת קוד ה-QR",
-      "status": "machine"
-    },
     "device_link.qr.intro": {
       "text": "הציגו את הקוד הזה למכשיר שעדיין יש בו את החשבון שלכם. הוא יוסיף את המכשיר הזה ויעביר את הזהות שלכם בהצפנה מקצה לקצה, בלי להקליד ביטוי.",
       "status": "machine"
@@ -3946,20 +4026,8 @@
       "text": "מוסיפים את המכשיר...",
       "status": "machine"
     },
-    "device_link.request.body": {
-      "text": "מכשיר חדש מבקש להצטרף לחשבון שלכם. מוצג בו קוד.",
-      "status": "machine"
-    },
-    "device_link.request.code_label": {
-      "text": "הקוד במכשיר החדש",
-      "status": "machine"
-    },
-    "device_link.request.confirm": {
-      "text": "כן, להוסיף",
-      "status": "machine"
-    },
-    "device_link.request.confirm_only_if": {
-      "text": "אשרו רק אם במכשיר החדש מוצג בדיוק הקוד הזה.",
+    "device_link.request.code_a11y": {
+      "text": "קוד התחברות",
       "status": "machine"
     },
     "device_link.request.decline": {
@@ -3970,6 +4038,10 @@
       "text": "נדחה. אם זה ממשיך לקרות, שנו את הסיסמה.",
       "status": "machine"
     },
+    "device_link.request.enter_code": {
+      "text": "הזינו את הקוד הזה במכשיר החדש:",
+      "status": "machine"
+    },
     "device_link.request.error.generic": {
       "text": "לא ניתן היה להוסיף את המכשיר. נסו שוב.",
       "status": "machine"
@@ -3978,8 +4050,40 @@
       "text": "אין מפתח מכשיר בדפדפן הזה. התחברו שוב.",
       "status": "machine"
     },
+    "device_link.request.handled_elsewhere": {
+      "text": "בקשת ההתחברות הזו טופלה במכשיר אחר.",
+      "status": "machine"
+    },
+    "device_link.request.heading": {
+      "text": "בקשת התחברות חדשה",
+      "status": "machine"
+    },
+    "device_link.request.never_share": {
+      "text": "לעולם אל תקריאו את הקוד הזה לאף אחד. Lakko לעולם לא יבקש אותו.",
+      "status": "machine"
+    },
+    "device_link.request.not_recorded": {
+      "text": "לא ניתן היה להגיע ל-Lakko כדי לסיים את הוספת המכשיר. שום דבר לא נוסף. נסו שוב מהמכשיר החדש.",
+      "status": "machine"
+    },
+    "device_link.request.someone_signing_in": {
+      "text": "מישהו מתחבר לחשבון שלכם ממכשיר חדש.",
+      "status": "machine"
+    },
     "device_link.request.title": {
       "text": "האם זה אתם?",
+      "status": "machine"
+    },
+    "device_link.request.too_many": {
+      "text": "יותר מדי בקשות התחברות היום. השתמשו בקוד QR, או נסו שוב מחר.",
+      "status": "machine"
+    },
+    "device_link.request.wrong_code": {
+      "text": "הקוד לא תאם. שום דבר לא נוסף.",
+      "status": "machine"
+    },
+    "device_link.request.yes_its_me": {
+      "text": "כן, זה אני",
       "status": "machine"
     },
     "device_link.restored": {
@@ -4036,6 +4140,18 @@
     },
     "devices.pairing.qr_description": {
       "text": "קוד QR לקישור",
+      "status": "machine"
+    },
+    "devices.removed.body": {
+      "text": "המכשיר הוסר מהחשבון שלכם ממכשיר אחר. הודעות חדשות כבר לא מגיעות אליו. התנתקו, ואז התחברו שוב אם תרצו להשתמש בו.",
+      "status": "machine"
+    },
+    "devices.removed.sign_out": {
+      "text": "התנתקות",
+      "status": "machine"
+    },
+    "devices.removed.title": {
+      "text": "המכשיר הזה הוסר",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -4100,6 +4216,226 @@
     },
     "ds.clock_skew": {
       "text": "בדקו את התאריך והשעה במכשיר הזה.",
+      "status": "machine"
+    },
+    "folders.add_to_folder": {
+      "text": "הוספה לתיקייה",
+      "status": "machine"
+    },
+    "folders.all_chats": {
+      "text": "כל הצ׳אטים",
+      "status": "machine"
+    },
+    "folders.bar_a11y": {
+      "text": "תיקיות",
+      "status": "machine"
+    },
+    "folders.chat_count": {
+      "text": "{count, plural, one {צ׳אט אחד} two {שני צ׳אטים} other {# צ׳אטים}}",
+      "status": "machine"
+    },
+    "folders.delete": {
+      "text": "מחיקת התיקייה",
+      "status": "machine"
+    },
+    "folders.delete_confirm.body": {
+      "text": "הצ׳אטים שבה נשארים ב„כל הצ׳אטים”.",
+      "status": "machine"
+    },
+    "folders.delete_confirm.title": {
+      "text": "למחוק את התיקייה „{name}”?",
+      "status": "machine"
+    },
+    "folders.edit": {
+      "text": "עריכת התיקייה",
+      "status": "machine"
+    },
+    "folders.edit_all": {
+      "text": "עריכת תיקיות",
+      "status": "machine"
+    },
+    "folders.editor.add_chats": {
+      "text": "הוספת צ׳אטים",
+      "status": "machine"
+    },
+    "folders.editor.discard.confirm": {
+      "text": "ביטול השינויים",
+      "status": "machine"
+    },
+    "folders.editor.discard.keep": {
+      "text": "המשך עריכה",
+      "status": "machine"
+    },
+    "folders.editor.discard.title": {
+      "text": "לבטל את השינויים?",
+      "status": "machine"
+    },
+    "folders.editor.error.save": {
+      "text": "לא ניתן היה לשמור את התיקייה. נסו שוב.",
+      "status": "machine"
+    },
+    "folders.editor.exclude.archived": {
+      "text": "בארכיון",
+      "status": "machine"
+    },
+    "folders.editor.exclude.muted": {
+      "text": "מושתקים",
+      "status": "machine"
+    },
+    "folders.editor.exclude.read": {
+      "text": "שנקראו",
+      "status": "machine"
+    },
+    "folders.editor.exclude_chats": {
+      "text": "החרגת צ׳אטים",
+      "status": "machine"
+    },
+    "folders.editor.excluded": {
+      "text": "מוחרגים",
+      "status": "machine"
+    },
+    "folders.editor.included": {
+      "text": "כלולים",
+      "status": "machine"
+    },
+    "folders.editor.kind.channels": {
+      "text": "ערוצים",
+      "status": "machine"
+    },
+    "folders.editor.kind.groups": {
+      "text": "קבוצות",
+      "status": "machine"
+    },
+    "folders.editor.kind.one_to_one": {
+      "text": "צ׳אטים אישיים",
+      "status": "machine"
+    },
+    "folders.editor.name_placeholder": {
+      "text": "שם התיקייה",
+      "status": "machine"
+    },
+    "folders.editor.remove_chat_a11y": {
+      "text": "הסרת {name}",
+      "status": "machine"
+    },
+    "folders.empty": {
+      "text": "אין כאן כלום כרגע",
+      "status": "machine"
+    },
+    "folders.in_folder_a11y": {
+      "text": "בתיקייה הזו",
+      "status": "machine"
+    },
+    "folders.limit": {
+      "text": "אפשר ליצור עד {count, plural, one {תיקייה אחת} two {שתי תיקיות} other {# תיקיות}}.",
+      "status": "machine"
+    },
+    "folders.mark_all_read": {
+      "text": "סימון הכול כנקרא",
+      "status": "machine"
+    },
+    "folders.new": {
+      "text": "תיקייה חדשה",
+      "status": "machine"
+    },
+    "folders.new_ellipsis": {
+      "text": "תיקייה חדשה...",
+      "status": "machine"
+    },
+    "folders.picker.limit_exclude": {
+      "text": "תיקייה יכולה להחריג עד {count, plural, one {צ׳אט אחד} two {שני צ׳אטים} other {# צ׳אטים}} אחד אחד. כדי להחריג יותר, השתמשו במתגי הסוגים.",
+      "status": "machine"
+    },
+    "folders.picker.limit_include": {
+      "text": "תיקייה יכולה להכיל עד {count, plural, one {צ׳אט אחד} two {שני צ׳אטים} other {# צ׳אטים}} שנוספו אחד אחד. כדי להוסיף יותר, השתמשו במתגי הסוגים.",
+      "status": "machine"
+    },
+    "folders.pin_limit": {
+      "text": "אפשר להצמיד עד {count, plural, one {צ׳אט אחד} two {שני צ׳אטים} other {# צ׳אטים}} בתיקייה.",
+      "status": "machine"
+    },
+    "folders.remove_from_folder": {
+      "text": "הסרה מהתיקייה",
+      "status": "machine"
+    },
+    "folders.reorder": {
+      "text": "שינוי סדר התיקיות",
+      "status": "machine"
+    },
+    "folders.settings.drag_hint": {
+      "text": "גררו כדי לשנות את הסדר",
+      "status": "machine"
+    },
+    "folders.settings.intro": {
+      "text": "קבצו את הצ׳אטים שלכם כמו שאתם חושבים עליהם. התיקיות מופיעות בכל המכשירים שלכם.",
+      "status": "machine"
+    },
+    "folders.settings.more_a11y": {
+      "text": "עוד אפשרויות עבור {name}",
+      "status": "machine"
+    },
+    "folders.settings.move_down": {
+      "text": "הזזה למטה",
+      "status": "machine"
+    },
+    "folders.settings.move_up": {
+      "text": "הזזה למעלה",
+      "status": "machine"
+    },
+    "folders.settings.pending_sync": {
+      "text": "השינויים יגיעו למכשירים האחרים שלכם כשהמכשיר הזה יחזור להיות מחובר.",
+      "status": "machine"
+    },
+    "folders.settings.yours": {
+      "text": "התיקיות שלכם",
+      "status": "machine"
+    },
+    "folders.suggested.add": {
+      "text": "הוספה",
+      "status": "machine"
+    },
+    "folders.suggested.add_a11y": {
+      "text": "הוספת {name}",
+      "status": "machine"
+    },
+    "folders.suggested.channels.description": {
+      "text": "ערוצים שאתם עוקבים אחריהם",
+      "status": "machine"
+    },
+    "folders.suggested.channels.name": {
+      "text": "ערוצים",
+      "status": "machine"
+    },
+    "folders.suggested.groups.description": {
+      "text": "צ׳אטים קבוצתיים",
+      "status": "machine"
+    },
+    "folders.suggested.groups.name": {
+      "text": "קבוצות",
+      "status": "machine"
+    },
+    "folders.suggested.personal.description": {
+      "text": "צ׳אטים אישיים",
+      "status": "machine"
+    },
+    "folders.suggested.personal.name": {
+      "text": "אישי",
+      "status": "machine"
+    },
+    "folders.suggested.title": {
+      "text": "הצעות",
+      "status": "machine"
+    },
+    "folders.suggested.unread.description": {
+      "text": "צ׳אטים עם הודעות חדשות",
+      "status": "machine"
+    },
+    "folders.suggested.unread.name": {
+      "text": "לא נקראו",
+      "status": "machine"
+    },
+    "folders.tab_a11y": {
+      "text": "{name}, {count, plural, one {צ׳אט אחד שלא נקרא} two {שני צ׳אטים שלא נקראו} other {# צ׳אטים שלא נקראו}}",
       "status": "machine"
     },
     "group.join.needs_account": {
@@ -4442,6 +4778,14 @@
       "text": "קישורי הזמנה פעילים",
       "status": "machine"
     },
+    "invite.links.made_elsewhere": {
+      "text": "נוצר במכשיר אחר",
+      "status": "machine"
+    },
+    "invite.links.made_elsewhere_hint": {
+      "text": "נוצר במכשיר אחר. העתיקו אותו שם, או בטלו אותו כאן.",
+      "status": "machine"
+    },
     "invite.links.never_expires": {
       "text": "ללא תפוגה",
       "status": "machine"
@@ -4699,7 +5043,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "הזינו את שם המשתמש, ואז אשרו במכשיר שעדיין מחובר והשוו את הקוד שמוצג בו. לא נשלח שום דבר שהשרתים של Lakko יכולים לקרוא. לא צריך מצלמה; קוד QR זמין אם מעדיפים.",
+      "text": "הזינו את שם המשתמש, ואז פתחו את Lakko במכשיר שעדיין מחובר והקלידו את הקוד שמוצג בו. לא נשלח שום דבר שהשרתים של Lakko יכולים לקרוא. לא צריך מצלמה; אפשר גם קוד QR אם נוח לכם יותר.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -5035,7 +5379,7 @@
       "status": "machine"
     },
     "restore_identity.device_intro": {
-      "text": "במכשיר שעדיין מחובר תופיע בקשה; אשרו אותה שם והשוו את הקוד. ההעברה מוצפנת מקצה לקצה; השרתים של Lakko לא יכולים לקרוא אותה. לא צריך מצלמה; קוד QR זמין אם מעדיפים.",
+      "text": "מכשיר שעדיין מחובר מציג קוד בן שש ספרות; הקלידו אותו כאן. ההעברה מוצפנת מקצה לקצה; השרתים של Lakko לא יכולים לקרוא אותה. לא צריך מצלמה; אפשר גם קוד QR אם נוח לכם יותר.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -5120,6 +5464,46 @@
     },
     "restore_identity.title": {
       "text": "שחזור הזהות שלכם",
+      "status": "machine"
+    },
+    "search.people.add_contact": {
+      "text": "הוספת איש קשר",
+      "status": "machine"
+    },
+    "search.people.add_contact_title": {
+      "text": "הוספת {name}",
+      "status": "machine"
+    },
+    "search.people.channel_result": {
+      "text": "ערוץ {handle}",
+      "status": "machine"
+    },
+    "search.people.failed": {
+      "text": "לא ניתן היה לחפש. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "search.people.heading": {
+      "text": "אנשים",
+      "status": "machine"
+    },
+    "search.people.not_found": {
+      "text": "לא נמצא אף אחד. בדקו את האיות, או בקשו קישור הזמנה.",
+      "status": "machine"
+    },
+    "search.people.request_refused": {
+      "text": "לא ניתן היה לשלוח את הבקשה. ייתכן שהם שינו את ההגדרה של מי יכול למצוא אותם.",
+      "status": "machine"
+    },
+    "search.people.search": {
+      "text": "חיפוש אנשים",
+      "status": "machine"
+    },
+    "search.people.searching_a11y": {
+      "text": "מחפשים",
+      "status": "machine"
+    },
+    "search.people.send_request": {
+      "text": "שליחת בקשה",
       "status": "machine"
     },
     "security.identity_changed.body": {
@@ -5734,6 +6118,10 @@
       "text": "נתונים",
       "status": "machine"
     },
+    "settings.section.folders": {
+      "text": "תיקיות צ׳אטים",
+      "status": "machine"
+    },
     "settings.section.media": {
       "text": "מדיה",
       "status": "machine"
@@ -5744,6 +6132,10 @@
     },
     "settings.section.notifications": {
       "text": "התראות",
+      "status": "machine"
+    },
+    "settings.section.privacy": {
+      "text": "פרטיות",
       "status": "machine"
     },
     "settings.section.profile": {
@@ -5806,6 +6198,14 @@
       "text": "שם משתמש: {message}",
       "status": "machine"
     },
+    "username.error.bind_limited_later": {
+      "text": "שיניתם את שם המשתמש יותר מדי פעמים. נסו שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "username.error.bind_limited_minutes": {
+      "text": "שיניתם את שם המשתמש יותר מדי פעמים. נסו שוב בעוד {minutes, plural, one {דקה} two {שתי דקות} other {# דקות}}.",
+      "status": "machine"
+    },
     "username.error.empty": {
       "text": "הזינו שם משתמש",
       "status": "machine"
@@ -5828,6 +6228,126 @@
     },
     "username.hint.shown_as": {
       "text": "יוצג בתור {username}",
+      "status": "machine"
+    },
+    "who_can_find_me.applying_a11y": {
+      "text": "מחילים",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts": {
+      "text": "אנשי הקשר של אנשי הקשר שלי",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_helper": {
+      "text": "אנשים שאנשי הקשר שלכם הוסיפו.",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_spreading": {
+      "text": "אנשי הקשר של אנשי הקשר שלכם יוכלו למצוא אתכם בפעם הבאה שאנשי הקשר שלכם יפתחו את Lakko.",
+      "status": "machine"
+    },
+    "who_can_find_me.groups": {
+      "text": "חברי הקבוצות והערוצים שלי",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.all": {
+      "text": "כל הקבוצות והערוצים",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.chosen": {
+      "text": "רק אלה שאבחר",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_all_helper": {
+      "text": "כל מי שנמצא בקבוצות ובערוצים שאתם חברים בהם.",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_chosen_helper": {
+      "text": "רק אלה שתבחרו ({chosen} מתוך {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.lede": {
+      "text": "מי שיכול למצוא אתכם לפי שם משתמש או שם יכול לבקש להיות איש קשר שלכם.",
+      "status": "machine"
+    },
+    "who_can_find_me.lede_link": {
+      "text": "מי שיש לו את קישור ההזמנה או קוד ה-QR שלכם תמיד יכול ליצור איתכם קשר.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.channels": {
+      "text": "ערוצים",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose": {
+      "text": "בחירת קבוצות וערוצים",
+      "status": "machine"
+    },
+    "who_can_find_me.list.empty": {
+      "text": "אתם עדיין לא חברים באף קבוצה או ערוץ.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.groups": {
+      "text": "קבוצות",
+      "status": "machine"
+    },
+    "who_can_find_me.list.no_match": {
+      "text": "אין קבוצות או ערוצים תואמים.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.search": {
+      "text": "חיפוש קבוצות וערוצים",
+      "status": "machine"
+    },
+    "who_can_find_me.members_can_find_me": {
+      "text": "החברים יכולים למצוא אותי",
+      "status": "machine"
+    },
+    "who_can_find_me.members_excluded_notice": {
+      "text": "עכשיו רק הקבוצות והערוצים שתבחרו. אפשר לשנות ב{privacy}.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone": {
+      "text": "כולם",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone_helper": {
+      "text": "כל אחד יכול למצוא אתכם לפי שם המשתמש או השם שלכם.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody": {
+      "text": "אף אחד",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody_helper": {
+      "text": "רק מי שיש לו את קישור ההזמנה או קוד ה-QR שלכם יכול ליצור איתכם קשר.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.some": {
+      "text": "חלק מהאנשים",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_after_create": {
+      "text": "ייפתח אחרי שהחשבון שלכם ייווצר.",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_change": {
+      "text": "שינוי",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_line": {
+      "text": "אנשי הקשר של אנשי הקשר שלכם ואנשים בקבוצות ובערוצים שלכם יכולים למצוא אתכם. אפשר לשנות זאת בהגדרות > פרטיות.",
+      "status": "machine"
+    },
+    "who_can_find_me.status.failed": {
+      "text": "לא ניתן היה לעדכן מי יכול למצוא אתכם. נסו שוב.",
+      "status": "machine"
+    },
+    "who_can_find_me.status.offline": {
+      "text": "יוחל כשתחזרו להיות מחוברים.",
+      "status": "machine"
+    },
+    "who_can_find_me.title": {
+      "text": "מי יכול למצוא אותי",
       "status": "machine"
     }
   }

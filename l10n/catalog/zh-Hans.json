@@ -1306,6 +1306,50 @@
       "text": "管理频道",
       "status": "machine"
     },
+    "channels.members.back_a11y": {
+      "text": "返回频道信息",
+      "status": "machine"
+    },
+    "channels.members.empty": {
+      "text": "还没有成员分享名片。",
+      "status": "machine"
+    },
+    "channels.members.error.load": {
+      "text": "无法加载成员。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "channels.members.heading": {
+      "text": "成员（{count}）",
+      "status": "machine"
+    },
+    "channels.members.info_sub": {
+      "text": "阅读此频道并分享了名片的人。",
+      "status": "machine"
+    },
+    "channels.members.loading": {
+      "text": "正在加载成员…",
+      "status": "machine"
+    },
+    "channels.members.title": {
+      "text": "成员",
+      "status": "machine"
+    },
+    "channels.members.truncated": {
+      "text": "仅显示前面的部分成员。",
+      "status": "machine"
+    },
+    "channels.members.unnamed": {
+      "text": "成员",
+      "status": "machine"
+    },
+    "channels.members.unreadable": {
+      "text": "{count, plural, other {有 # 位成员用此设备没有的旧密钥分享了名片。}}",
+      "status": "machine"
+    },
+    "channels.members.you": {
+      "text": "你",
+      "status": "machine"
+    },
     "channels.meta.desc": {
       "text": "名称和简介会加密送达每位订阅者。服务器永远不会读取它们。",
       "status": "machine"
@@ -3426,6 +3470,10 @@
       "text": "会话尚未就绪。",
       "status": "machine"
     },
+    "common.error.starting_up": {
+      "text": "Lakko 仍在启动中。请稍后再试。",
+      "status": "machine"
+    },
     "common.error.too_many_attempts": {
       "text": "尝试次数过多。请稍等片刻再试。",
       "status": "machine"
@@ -3854,16 +3902,52 @@
       "text": "已向 {name} 发送请求。对方接受前，它会显示在“已发送”中。",
       "status": "machine"
     },
-    "device_link.compare_hint": {
-      "text": "请确认另一台设备显示的是相同的代码。",
+    "device_link.code.enter_six_digits": {
+      "text": "请输入你另一台设备上显示的六位数字。",
       "status": "machine"
     },
-    "device_link.comparison_code": {
-      "text": "比对码",
+    "device_link.code.expired": {
+      "text": "此请求已过期。请重新开始。",
       "status": "machine"
     },
-    "device_link.confirm_there": {
-      "text": "在一台已登录的设备上打开 Lakko，并在那里确认此次登录。",
+    "device_link.code.field_a11y": {
+      "text": "来自另一台设备的代码",
+      "status": "machine"
+    },
+    "device_link.code.intro": {
+      "text": "在已登录的浏览器或手机上打开 Lakko。它会显示一个六位数代码。请在这里输入。",
+      "status": "machine"
+    },
+    "device_link.code.intro_native": {
+      "text": "在已登录的设备上打开 Lakko。它会显示一个六位数代码。请在此输入。",
+      "status": "machine"
+    },
+    "device_link.code.restoring": {
+      "text": "正在恢复…",
+      "status": "machine"
+    },
+    "device_link.code.start_again": {
+      "text": "重新开始",
+      "status": "machine"
+    },
+    "device_link.code.title": {
+      "text": "在另一台设备上确认",
+      "status": "machine"
+    },
+    "device_link.code.unreachable": {
+      "text": "无法连接 Lakko。请检查网络连接，然后重新开始。",
+      "status": "machine"
+    },
+    "device_link.code.use_instead": {
+      "text": "改为在另一台设备上确认",
+      "status": "machine"
+    },
+    "device_link.code.waiting": {
+      "text": "正在等待你的另一台设备…",
+      "status": "machine"
+    },
+    "device_link.code.wrong": {
+      "text": "代码不匹配。请重新开始，并输入你另一台设备上显示的代码。",
       "status": "machine"
     },
     "device_link.error.ask_unavailable": {
@@ -3918,10 +4002,6 @@
       "text": "此代码属于另一个账号。请确认新设备使用的用户名与这台设备相同。",
       "status": "machine"
     },
-    "device_link.qr.hide": {
-      "text": "隐藏二维码",
-      "status": "machine"
-    },
     "device_link.qr.intro": {
       "text": "将此二维码出示给仍登录着你账号的设备。它会添加此设备，并以端到端加密方式转移你的身份，无需输入短语。",
       "status": "machine"
@@ -3946,20 +4026,8 @@
       "text": "正在添加设备…",
       "status": "machine"
     },
-    "device_link.request.body": {
-      "text": "一台新设备请求加入你的账号。它会显示一个代码。",
-      "status": "machine"
-    },
-    "device_link.request.code_label": {
-      "text": "新设备上的代码",
-      "status": "machine"
-    },
-    "device_link.request.confirm": {
-      "text": "是，添加",
-      "status": "machine"
-    },
-    "device_link.request.confirm_only_if": {
-      "text": "仅当新设备显示的代码与此完全相同时才确认。",
+    "device_link.request.code_a11y": {
+      "text": "登录代码",
       "status": "machine"
     },
     "device_link.request.decline": {
@@ -3970,6 +4038,10 @@
       "text": "已拒绝。如果这种情况反复出现，请修改密码。",
       "status": "machine"
     },
+    "device_link.request.enter_code": {
+      "text": "请在新设备上输入此代码：",
+      "status": "machine"
+    },
     "device_link.request.error.generic": {
       "text": "无法添加设备。请重试。",
       "status": "machine"
@@ -3978,8 +4050,40 @@
       "text": "此浏览器上没有设备密钥。请重新登录。",
       "status": "machine"
     },
+    "device_link.request.handled_elsewhere": {
+      "text": "此登录请求已在另一台设备上处理。",
+      "status": "machine"
+    },
+    "device_link.request.heading": {
+      "text": "新的登录请求",
+      "status": "machine"
+    },
+    "device_link.request.never_share": {
+      "text": "切勿把此代码告诉任何人。Lakko 绝不会向你索要它。",
+      "status": "machine"
+    },
+    "device_link.request.not_recorded": {
+      "text": "无法连接 Lakko 以完成添加设备。没有添加任何设备。请在新设备上重试。",
+      "status": "machine"
+    },
+    "device_link.request.someone_signing_in": {
+      "text": "有人正在新设备上登录你的账户。",
+      "status": "machine"
+    },
     "device_link.request.title": {
       "text": "是你吗？",
+      "status": "machine"
+    },
+    "device_link.request.too_many": {
+      "text": "今天的登录请求过多。请使用二维码，或明天再试。",
+      "status": "machine"
+    },
+    "device_link.request.wrong_code": {
+      "text": "代码不匹配。没有添加任何设备。",
+      "status": "machine"
+    },
+    "device_link.request.yes_its_me": {
+      "text": "是的，是我",
       "status": "machine"
     },
     "device_link.restored": {
@@ -4036,6 +4140,18 @@
     },
     "devices.pairing.qr_description": {
       "text": "配对二维码",
+      "status": "machine"
+    },
+    "devices.removed.body": {
+      "text": "已在另一台设备上将它从你的账户中移除。新消息不再发送到这台设备。如果你想继续使用，请退出登录后重新登录。",
+      "status": "machine"
+    },
+    "devices.removed.sign_out": {
+      "text": "退出登录",
+      "status": "machine"
+    },
+    "devices.removed.title": {
+      "text": "此设备已被移除",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -4100,6 +4216,226 @@
     },
     "ds.clock_skew": {
       "text": "请检查此设备的日期和时间。",
+      "status": "machine"
+    },
+    "folders.add_to_folder": {
+      "text": "添加到文件夹",
+      "status": "machine"
+    },
+    "folders.all_chats": {
+      "text": "全部聊天",
+      "status": "machine"
+    },
+    "folders.bar_a11y": {
+      "text": "文件夹",
+      "status": "machine"
+    },
+    "folders.chat_count": {
+      "text": "{count, plural, other {# 个聊天}}",
+      "status": "machine"
+    },
+    "folders.delete": {
+      "text": "删除文件夹",
+      "status": "machine"
+    },
+    "folders.delete_confirm.body": {
+      "text": "其中的聊天仍保留在“全部聊天”中。",
+      "status": "machine"
+    },
+    "folders.delete_confirm.title": {
+      "text": "删除文件夹“{name}”？",
+      "status": "machine"
+    },
+    "folders.edit": {
+      "text": "编辑文件夹",
+      "status": "machine"
+    },
+    "folders.edit_all": {
+      "text": "编辑文件夹",
+      "status": "machine"
+    },
+    "folders.editor.add_chats": {
+      "text": "添加聊天",
+      "status": "machine"
+    },
+    "folders.editor.discard.confirm": {
+      "text": "放弃",
+      "status": "machine"
+    },
+    "folders.editor.discard.keep": {
+      "text": "继续编辑",
+      "status": "machine"
+    },
+    "folders.editor.discard.title": {
+      "text": "放弃更改？",
+      "status": "machine"
+    },
+    "folders.editor.error.save": {
+      "text": "无法保存文件夹。请重试。",
+      "status": "machine"
+    },
+    "folders.editor.exclude.archived": {
+      "text": "已归档",
+      "status": "machine"
+    },
+    "folders.editor.exclude.muted": {
+      "text": "已静音",
+      "status": "machine"
+    },
+    "folders.editor.exclude.read": {
+      "text": "已读",
+      "status": "machine"
+    },
+    "folders.editor.exclude_chats": {
+      "text": "排除聊天",
+      "status": "machine"
+    },
+    "folders.editor.excluded": {
+      "text": "排除",
+      "status": "machine"
+    },
+    "folders.editor.included": {
+      "text": "包含",
+      "status": "machine"
+    },
+    "folders.editor.kind.channels": {
+      "text": "频道",
+      "status": "machine"
+    },
+    "folders.editor.kind.groups": {
+      "text": "群组",
+      "status": "machine"
+    },
+    "folders.editor.kind.one_to_one": {
+      "text": "一对一聊天",
+      "status": "machine"
+    },
+    "folders.editor.name_placeholder": {
+      "text": "文件夹名称",
+      "status": "machine"
+    },
+    "folders.editor.remove_chat_a11y": {
+      "text": "移除{name}",
+      "status": "machine"
+    },
+    "folders.empty": {
+      "text": "这里暂时什么都没有",
+      "status": "machine"
+    },
+    "folders.in_folder_a11y": {
+      "text": "在此文件夹中",
+      "status": "machine"
+    },
+    "folders.limit": {
+      "text": "最多可以有 {count, plural, other {# 个文件夹}}。",
+      "status": "machine"
+    },
+    "folders.mark_all_read": {
+      "text": "全部标为已读",
+      "status": "machine"
+    },
+    "folders.new": {
+      "text": "新建文件夹",
+      "status": "machine"
+    },
+    "folders.new_ellipsis": {
+      "text": "新建文件夹…",
+      "status": "machine"
+    },
+    "folders.picker.limit_exclude": {
+      "text": "一个文件夹最多可逐个排除 {count, plural, other {# 个聊天}}。如需更多，请使用类型开关。",
+      "status": "machine"
+    },
+    "folders.picker.limit_include": {
+      "text": "一个文件夹最多可逐个添加 {count, plural, other {# 个聊天}}。如需更多，请使用类型开关。",
+      "status": "machine"
+    },
+    "folders.pin_limit": {
+      "text": "一个文件夹中最多可置顶 {count, plural, other {# 个聊天}}。",
+      "status": "machine"
+    },
+    "folders.remove_from_folder": {
+      "text": "从文件夹中移除",
+      "status": "machine"
+    },
+    "folders.reorder": {
+      "text": "调整文件夹顺序",
+      "status": "machine"
+    },
+    "folders.settings.drag_hint": {
+      "text": "拖动以调整顺序",
+      "status": "machine"
+    },
+    "folders.settings.intro": {
+      "text": "按你的习惯整理聊天。文件夹会出现在你的所有设备上。",
+      "status": "machine"
+    },
+    "folders.settings.more_a11y": {
+      "text": "{name}的更多选项",
+      "status": "machine"
+    },
+    "folders.settings.move_down": {
+      "text": "下移",
+      "status": "machine"
+    },
+    "folders.settings.move_up": {
+      "text": "上移",
+      "status": "machine"
+    },
+    "folders.settings.pending_sync": {
+      "text": "此设备重新联网后，更改会同步到你的其他设备。",
+      "status": "machine"
+    },
+    "folders.settings.yours": {
+      "text": "你的文件夹",
+      "status": "machine"
+    },
+    "folders.suggested.add": {
+      "text": "添加",
+      "status": "machine"
+    },
+    "folders.suggested.add_a11y": {
+      "text": "添加{name}",
+      "status": "machine"
+    },
+    "folders.suggested.channels.description": {
+      "text": "你关注的频道",
+      "status": "machine"
+    },
+    "folders.suggested.channels.name": {
+      "text": "频道",
+      "status": "machine"
+    },
+    "folders.suggested.groups.description": {
+      "text": "群聊",
+      "status": "machine"
+    },
+    "folders.suggested.groups.name": {
+      "text": "群组",
+      "status": "machine"
+    },
+    "folders.suggested.personal.description": {
+      "text": "一对一聊天",
+      "status": "machine"
+    },
+    "folders.suggested.personal.name": {
+      "text": "私聊",
+      "status": "machine"
+    },
+    "folders.suggested.title": {
+      "text": "推荐",
+      "status": "machine"
+    },
+    "folders.suggested.unread.description": {
+      "text": "有新消息的聊天",
+      "status": "machine"
+    },
+    "folders.suggested.unread.name": {
+      "text": "未读",
+      "status": "machine"
+    },
+    "folders.tab_a11y": {
+      "text": "{name}，{count, plural, other {# 个未读聊天}}",
       "status": "machine"
     },
     "group.join.needs_account": {
@@ -4442,6 +4778,14 @@
       "text": "有效的邀请链接",
       "status": "machine"
     },
+    "invite.links.made_elsewhere": {
+      "text": "在另一台设备上创建",
+      "status": "machine"
+    },
+    "invite.links.made_elsewhere_hint": {
+      "text": "在另一台设备上创建。请在那台设备上复制，或在此处撤销。",
+      "status": "machine"
+    },
     "invite.links.never_expires": {
       "text": "永不过期",
       "status": "machine"
@@ -4699,7 +5043,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "输入你的用户名，然后在一台仍在登录的设备上确认，并比对它显示的代码。发送的内容 Lakko 的服务器都无法读取。无需摄像头；如果你愿意，也可以使用二维码。",
+      "text": "输入你的用户名，然后在仍处于登录状态的设备上打开 Lakko，并在这里输入它显示的代码。不会发送任何 Lakko 服务器能读取的内容。无需摄像头；如果你愿意，也可以使用二维码。",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -5035,7 +5379,7 @@
       "status": "machine"
     },
     "restore_identity.device_intro": {
-      "text": "仍在登录的设备上会显示提示；请在那里确认并比对代码。传输过程端到端加密，Lakko 的服务器无法读取。无需摄像头；如果你愿意，也可以使用二维码。",
+      "text": "仍处于登录状态的设备会显示一个六位数代码；请在这里输入。传输采用端到端加密，Lakko 的服务器无法读取。无需摄像头；如果你愿意，也可以使用二维码。",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -5120,6 +5464,46 @@
     },
     "restore_identity.title": {
       "text": "恢复你的身份",
+      "status": "machine"
+    },
+    "search.people.add_contact": {
+      "text": "添加联系人",
+      "status": "machine"
+    },
+    "search.people.add_contact_title": {
+      "text": "添加 {name}",
+      "status": "machine"
+    },
+    "search.people.channel_result": {
+      "text": "频道 {handle}",
+      "status": "machine"
+    },
+    "search.people.failed": {
+      "text": "无法搜索。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "search.people.heading": {
+      "text": "用户",
+      "status": "machine"
+    },
+    "search.people.not_found": {
+      "text": "没有找到任何人。请检查拼写，或向对方索要邀请链接。",
+      "status": "machine"
+    },
+    "search.people.request_refused": {
+      "text": "无法发送请求。对方可能已更改谁可以找到他们。",
+      "status": "machine"
+    },
+    "search.people.search": {
+      "text": "搜索用户",
+      "status": "machine"
+    },
+    "search.people.searching_a11y": {
+      "text": "正在搜索",
+      "status": "machine"
+    },
+    "search.people.send_request": {
+      "text": "发送请求",
       "status": "machine"
     },
     "security.identity_changed.body": {
@@ -5734,6 +6118,10 @@
       "text": "数据",
       "status": "machine"
     },
+    "settings.section.folders": {
+      "text": "聊天文件夹",
+      "status": "machine"
+    },
     "settings.section.media": {
       "text": "媒体",
       "status": "machine"
@@ -5744,6 +6132,10 @@
     },
     "settings.section.notifications": {
       "text": "通知",
+      "status": "machine"
+    },
+    "settings.section.privacy": {
+      "text": "隐私",
       "status": "machine"
     },
     "settings.section.profile": {
@@ -5806,6 +6198,14 @@
       "text": "用户名：{message}",
       "status": "machine"
     },
+    "username.error.bind_limited_later": {
+      "text": "你更改用户名过于频繁。请稍后再试。",
+      "status": "machine"
+    },
+    "username.error.bind_limited_minutes": {
+      "text": "你更改用户名过于频繁。请在 {minutes, plural, other {# 分钟}}后重试。",
+      "status": "machine"
+    },
     "username.error.empty": {
       "text": "请输入用户名",
       "status": "machine"
@@ -5828,6 +6228,126 @@
     },
     "username.hint.shown_as": {
       "text": "将显示为 {username}",
+      "status": "machine"
+    },
+    "who_can_find_me.applying_a11y": {
+      "text": "正在应用",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts": {
+      "text": "我的联系人的联系人",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_helper": {
+      "text": "你的联系人添加的人。",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_spreading": {
+      "text": "你的联系人下次打开 Lakko 后，他们的联系人就能找到你。",
+      "status": "machine"
+    },
+    "who_can_find_me.groups": {
+      "text": "我的群组和频道的成员",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.all": {
+      "text": "所有群组和频道",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.chosen": {
+      "text": "仅我选择的",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_all_helper": {
+      "text": "你所在群组和频道中的所有人。",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_chosen_helper": {
+      "text": "仅你选择的（{chosen}/{total}）。",
+      "status": "machine"
+    },
+    "who_can_find_me.lede": {
+      "text": "能通过用户名或名字找到你的人，都可以请求添加你为联系人。",
+      "status": "machine"
+    },
+    "who_can_find_me.lede_link": {
+      "text": "拥有你的邀请链接或二维码的人始终可以联系你。",
+      "status": "machine"
+    },
+    "who_can_find_me.list.channels": {
+      "text": "频道",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose": {
+      "text": "选择群组和频道",
+      "status": "machine"
+    },
+    "who_can_find_me.list.empty": {
+      "text": "你还没有加入任何群组或频道。",
+      "status": "machine"
+    },
+    "who_can_find_me.list.groups": {
+      "text": "群组",
+      "status": "machine"
+    },
+    "who_can_find_me.list.no_match": {
+      "text": "没有匹配的群组或频道。",
+      "status": "machine"
+    },
+    "who_can_find_me.list.search": {
+      "text": "搜索群组和频道",
+      "status": "machine"
+    },
+    "who_can_find_me.members_can_find_me": {
+      "text": "成员可以找到我",
+      "status": "machine"
+    },
+    "who_can_find_me.members_excluded_notice": {
+      "text": "现在仅限你选择的群组和频道。可在{privacy}中更改。",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone": {
+      "text": "所有人",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone_helper": {
+      "text": "任何人都可以通过你的用户名或名字找到你。",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody": {
+      "text": "没有人",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody_helper": {
+      "text": "只有拥有你的邀请链接或二维码的人才能联系你。",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.some": {
+      "text": "部分人",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_after_create": {
+      "text": "账户创建后会立即打开。",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_change": {
+      "text": "更改",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_line": {
+      "text": "你的联系人的联系人以及你所在群组和频道中的人可以找到你。你可以在“设置”>“隐私”中更改。",
+      "status": "machine"
+    },
+    "who_can_find_me.status.failed": {
+      "text": "无法更新谁可以找到你。请重试。",
+      "status": "machine"
+    },
+    "who_can_find_me.status.offline": {
+      "text": "将在你重新联网后应用。",
+      "status": "machine"
+    },
+    "who_can_find_me.title": {
+      "text": "谁可以找到我",
       "status": "machine"
     }
   }

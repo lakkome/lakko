@@ -1306,6 +1306,50 @@
       "text": "مدیریت کانال",
       "status": "machine"
     },
+    "channels.members.back_a11y": {
+      "text": "بازگشت به اطلاعات کانال",
+      "status": "machine"
+    },
+    "channels.members.empty": {
+      "text": "هنوز هیچ عضوی کارتی به اشتراک نگذاشته است.",
+      "status": "machine"
+    },
+    "channels.members.error.load": {
+      "text": "اعضا بارگیری نشدند. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.members.heading": {
+      "text": "اعضا ({count})",
+      "status": "machine"
+    },
+    "channels.members.info_sub": {
+      "text": "کسانی که این کانال را می‌خوانند و کارتی به اشتراک گذاشته‌اند.",
+      "status": "machine"
+    },
+    "channels.members.loading": {
+      "text": "در حال بارگیری اعضا...",
+      "status": "machine"
+    },
+    "channels.members.title": {
+      "text": "اعضا",
+      "status": "machine"
+    },
+    "channels.members.truncated": {
+      "text": "فقط نخستین اعضا نشان داده می‌شوند.",
+      "status": "machine"
+    },
+    "channels.members.unnamed": {
+      "text": "عضو",
+      "status": "machine"
+    },
+    "channels.members.unreadable": {
+      "text": "{count, plural, one {# عضو کارتی را با کلیدی قدیمی‌تر به اشتراک گذاشته که این دستگاه ندارد.} other {# عضو کارت‌هایی را با کلیدی قدیمی‌تر به اشتراک گذاشته‌اند که این دستگاه ندارد.}}",
+      "status": "machine"
+    },
+    "channels.members.you": {
+      "text": "شما",
+      "status": "machine"
+    },
     "channels.meta.desc": {
       "text": "نام و توضیحات به‌صورت رمزگذاری‌شده به همه مشترکان می‌رسد. سرور هرگز آن‌ها را نمی‌خواند.",
       "status": "machine"
@@ -3426,6 +3470,10 @@
       "text": "نشست هنوز آماده نیست.",
       "status": "machine"
     },
+    "common.error.starting_up": {
+      "text": "Lakko هنوز در حال راه‌اندازی است. لحظه‌ای بعد دوباره تلاش کنید.",
+      "status": "machine"
+    },
     "common.error.too_many_attempts": {
       "text": "تلاش‌ها بیش از حد است. کمی صبر کنید و دوباره تلاش کنید.",
       "status": "machine"
@@ -3854,16 +3902,52 @@
       "text": "درخواست به {name} فرستاده شد. تا وقتی آن را بپذیرد، در «ارسال‌شده» می‌ماند.",
       "status": "machine"
     },
-    "device_link.compare_hint": {
-      "text": "مطمئن شوید دستگاه دیگر همین کد را نشان می‌دهد.",
+    "device_link.code.enter_six_digits": {
+      "text": "شش رقمی را که دستگاه دیگرتان نشان می‌دهد وارد کنید.",
       "status": "machine"
     },
-    "device_link.comparison_code": {
-      "text": "کد مقایسه",
+    "device_link.code.expired": {
+      "text": "این درخواست منقضی شد. از نو شروع کنید.",
       "status": "machine"
     },
-    "device_link.confirm_there": {
-      "text": "Lakko را روی دستگاهی که از قبل وارد شده باز کنید و این ورود را آنجا تأیید کنید.",
+    "device_link.code.field_a11y": {
+      "text": "کد از دستگاه دیگر شما",
+      "status": "machine"
+    },
+    "device_link.code.intro": {
+      "text": "Lakko را در مرورگر یا روی گوشی‌ای که در آن وارد شده‌اید باز کنید. یک کد شش‌رقمی نشان می‌دهد. آن را اینجا وارد کنید.",
+      "status": "machine"
+    },
+    "device_link.code.intro_native": {
+      "text": "Lakko را روی دستگاهی باز کنید که از قبل وارد آن شده‌اید. یک کد شش‌رقمی نشان می‌دهد. آن را اینجا وارد کنید.",
+      "status": "machine"
+    },
+    "device_link.code.restoring": {
+      "text": "در حال بازیابی...",
+      "status": "machine"
+    },
+    "device_link.code.start_again": {
+      "text": "شروع دوباره",
+      "status": "machine"
+    },
+    "device_link.code.title": {
+      "text": "تأیید در دستگاه دیگر",
+      "status": "machine"
+    },
+    "device_link.code.unreachable": {
+      "text": "اتصال به Lakko ممکن نشد. اتصال خود را بررسی کنید و از نو شروع کنید.",
+      "status": "machine"
+    },
+    "device_link.code.use_instead": {
+      "text": "به‌جای آن، در دستگاه دیگر تأیید کنید",
+      "status": "machine"
+    },
+    "device_link.code.waiting": {
+      "text": "در انتظار دستگاه دیگر شما...",
+      "status": "machine"
+    },
+    "device_link.code.wrong": {
+      "text": "این کد مطابقت ندارد. از نو شروع کنید و کدی را که دستگاه دیگرتان نشان می‌دهد وارد کنید.",
       "status": "machine"
     },
     "device_link.error.ask_unavailable": {
@@ -3918,10 +4002,6 @@
       "text": "این کد برای حساب دیگری است. بررسی کنید دستگاه جدید همان نام کاربری این دستگاه را به کار می‌برد.",
       "status": "machine"
     },
-    "device_link.qr.hide": {
-      "text": "پنهان کردن کد QR",
-      "status": "machine"
-    },
     "device_link.qr.intro": {
       "text": "این کد را به دستگاهی نشان دهید که حسابتان هنوز روی آن است. آن دستگاه این دستگاه را اضافه می‌کند و هویت شما را با رمزگذاری سرتاسری منتقل می‌کند، بدون اینکه عبارتی تایپ کنید.",
       "status": "machine"
@@ -3946,20 +4026,8 @@
       "text": "در حال افزودن دستگاه...",
       "status": "machine"
     },
-    "device_link.request.body": {
-      "text": "یک دستگاه جدید درخواست پیوستن به حساب شما را دارد. آن دستگاه یک کد نشان می‌دهد.",
-      "status": "machine"
-    },
-    "device_link.request.code_label": {
-      "text": "کد روی دستگاه جدید",
-      "status": "machine"
-    },
-    "device_link.request.confirm": {
-      "text": "بله، اضافه کن",
-      "status": "machine"
-    },
-    "device_link.request.confirm_only_if": {
-      "text": "فقط در صورتی تأیید کنید که دستگاه جدید دقیقاً همین کد را نشان دهد.",
+    "device_link.request.code_a11y": {
+      "text": "کد ورود",
       "status": "machine"
     },
     "device_link.request.decline": {
@@ -3970,6 +4038,10 @@
       "text": "رد شد. اگر این اتفاق تکرار شد، رمز عبور خود را تغییر دهید.",
       "status": "machine"
     },
+    "device_link.request.enter_code": {
+      "text": "این کد را در دستگاه جدید وارد کنید:",
+      "status": "machine"
+    },
     "device_link.request.error.generic": {
       "text": "افزودن دستگاه ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
@@ -3978,8 +4050,40 @@
       "text": "کلید دستگاه در این مرورگر وجود ندارد. دوباره وارد شوید.",
       "status": "machine"
     },
+    "device_link.request.handled_elsewhere": {
+      "text": "به این درخواست ورود در دستگاه دیگری پاسخ داده شد.",
+      "status": "machine"
+    },
+    "device_link.request.heading": {
+      "text": "درخواست ورود جدید",
+      "status": "machine"
+    },
+    "device_link.request.never_share": {
+      "text": "هرگز این کد را برای کسی نخوانید. Lakko هرگز آن را از شما نمی‌خواهد.",
+      "status": "machine"
+    },
+    "device_link.request.not_recorded": {
+      "text": "برای تکمیل افزودن دستگاه، اتصال به Lakko ممکن نشد. چیزی افزوده نشد. از دستگاه جدید دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "device_link.request.someone_signing_in": {
+      "text": "کسی در حال ورود به حساب شما در یک دستگاه جدید است.",
+      "status": "machine"
+    },
     "device_link.request.title": {
       "text": "این شما هستید؟",
+      "status": "machine"
+    },
+    "device_link.request.too_many": {
+      "text": "امروز درخواست‌های ورود بیش از حد بوده است. از کد QR استفاده کنید یا فردا دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "device_link.request.wrong_code": {
+      "text": "کد مطابقت نداشت. چیزی افزوده نشد.",
+      "status": "machine"
+    },
+    "device_link.request.yes_its_me": {
+      "text": "بله، خودم هستم",
       "status": "machine"
     },
     "device_link.restored": {
@@ -4036,6 +4140,18 @@
     },
     "devices.pairing.qr_description": {
       "text": "کد QR اتصال",
+      "status": "machine"
+    },
+    "devices.removed.body": {
+      "text": "این دستگاه از طریق دستگاه دیگری از حساب شما حذف شد. پیام‌های جدید دیگر به آن نمی‌رسند. اگر می‌خواهید از آن استفاده کنید، خارج شوید و دوباره وارد شوید.",
+      "status": "machine"
+    },
+    "devices.removed.sign_out": {
+      "text": "خروج",
+      "status": "machine"
+    },
+    "devices.removed.title": {
+      "text": "این دستگاه حذف شد",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -4100,6 +4216,226 @@
     },
     "ds.clock_skew": {
       "text": "تاریخ و ساعت این دستگاه را بررسی کنید.",
+      "status": "machine"
+    },
+    "folders.add_to_folder": {
+      "text": "افزودن به پوشه",
+      "status": "machine"
+    },
+    "folders.all_chats": {
+      "text": "همه گفتگوها",
+      "status": "machine"
+    },
+    "folders.bar_a11y": {
+      "text": "پوشه‌ها",
+      "status": "machine"
+    },
+    "folders.chat_count": {
+      "text": "{count, plural, one {# گفتگو} other {# گفتگو}}",
+      "status": "machine"
+    },
+    "folders.delete": {
+      "text": "حذف پوشه",
+      "status": "machine"
+    },
+    "folders.delete_confirm.body": {
+      "text": "گفتگوهای آن در «همه گفتگوها» باقی می‌مانند.",
+      "status": "machine"
+    },
+    "folders.delete_confirm.title": {
+      "text": "پوشه «{name}» حذف شود؟",
+      "status": "machine"
+    },
+    "folders.edit": {
+      "text": "ویرایش پوشه",
+      "status": "machine"
+    },
+    "folders.edit_all": {
+      "text": "ویرایش پوشه‌ها",
+      "status": "machine"
+    },
+    "folders.editor.add_chats": {
+      "text": "افزودن گفتگو",
+      "status": "machine"
+    },
+    "folders.editor.discard.confirm": {
+      "text": "دور انداختن",
+      "status": "machine"
+    },
+    "folders.editor.discard.keep": {
+      "text": "ادامه ویرایش",
+      "status": "machine"
+    },
+    "folders.editor.discard.title": {
+      "text": "تغییرات دور انداخته شود؟",
+      "status": "machine"
+    },
+    "folders.editor.error.save": {
+      "text": "پوشه ذخیره نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "folders.editor.exclude.archived": {
+      "text": "بایگانی‌شده",
+      "status": "machine"
+    },
+    "folders.editor.exclude.muted": {
+      "text": "بی‌صدا",
+      "status": "machine"
+    },
+    "folders.editor.exclude.read": {
+      "text": "خوانده‌شده",
+      "status": "machine"
+    },
+    "folders.editor.exclude_chats": {
+      "text": "مستثنا کردن گفتگو",
+      "status": "machine"
+    },
+    "folders.editor.excluded": {
+      "text": "مستثناشده",
+      "status": "machine"
+    },
+    "folders.editor.included": {
+      "text": "شامل‌شده",
+      "status": "machine"
+    },
+    "folders.editor.kind.channels": {
+      "text": "کانال‌ها",
+      "status": "machine"
+    },
+    "folders.editor.kind.groups": {
+      "text": "گروه‌ها",
+      "status": "machine"
+    },
+    "folders.editor.kind.one_to_one": {
+      "text": "گفتگوهای دونفره",
+      "status": "machine"
+    },
+    "folders.editor.name_placeholder": {
+      "text": "نام پوشه",
+      "status": "machine"
+    },
+    "folders.editor.remove_chat_a11y": {
+      "text": "برداشتن {name}",
+      "status": "machine"
+    },
+    "folders.empty": {
+      "text": "فعلاً چیزی اینجا نیست",
+      "status": "machine"
+    },
+    "folders.in_folder_a11y": {
+      "text": "در این پوشه",
+      "status": "machine"
+    },
+    "folders.limit": {
+      "text": "می‌توانید حداکثر {count, plural, one {# پوشه} other {# پوشه}} داشته باشید.",
+      "status": "machine"
+    },
+    "folders.mark_all_read": {
+      "text": "علامت‌گذاری همه به‌عنوان خوانده‌شده",
+      "status": "machine"
+    },
+    "folders.new": {
+      "text": "پوشه جدید",
+      "status": "machine"
+    },
+    "folders.new_ellipsis": {
+      "text": "پوشه جدید...",
+      "status": "machine"
+    },
+    "folders.picker.limit_exclude": {
+      "text": "یک پوشه می‌تواند حداکثر {count, plural, one {# گفتگو} other {# گفتگو}} را تک‌تک مستثنا کند. برای بیشتر، از کلیدهای نوع گفتگو استفاده کنید.",
+      "status": "machine"
+    },
+    "folders.picker.limit_include": {
+      "text": "یک پوشه می‌تواند حداکثر {count, plural, one {# گفتگو} other {# گفتگو}} داشته باشد که تک‌تک افزوده شده‌اند. برای بیشتر، از کلیدهای نوع گفتگو استفاده کنید.",
+      "status": "machine"
+    },
+    "folders.pin_limit": {
+      "text": "در هر پوشه می‌توانید حداکثر {count, plural, one {# گفتگو} other {# گفتگو}} را سنجاق کنید.",
+      "status": "machine"
+    },
+    "folders.remove_from_folder": {
+      "text": "برداشتن از پوشه",
+      "status": "machine"
+    },
+    "folders.reorder": {
+      "text": "تغییر ترتیب پوشه‌ها",
+      "status": "machine"
+    },
+    "folders.settings.drag_hint": {
+      "text": "برای تغییر ترتیب بکشید",
+      "status": "machine"
+    },
+    "folders.settings.intro": {
+      "text": "گفتگوهایتان را همان‌طور که درباره‌شان فکر می‌کنید دسته‌بندی کنید. پوشه‌ها در همه دستگاه‌هایتان نمایش داده می‌شوند.",
+      "status": "machine"
+    },
+    "folders.settings.more_a11y": {
+      "text": "گزینه‌های بیشتر برای {name}",
+      "status": "machine"
+    },
+    "folders.settings.move_down": {
+      "text": "انتقال به پایین",
+      "status": "machine"
+    },
+    "folders.settings.move_up": {
+      "text": "انتقال به بالا",
+      "status": "machine"
+    },
+    "folders.settings.pending_sync": {
+      "text": "تغییرات وقتی این دستگاه دوباره آنلاین شود به دستگاه‌های دیگرتان می‌رسند.",
+      "status": "machine"
+    },
+    "folders.settings.yours": {
+      "text": "پوشه‌های شما",
+      "status": "machine"
+    },
+    "folders.suggested.add": {
+      "text": "افزودن",
+      "status": "machine"
+    },
+    "folders.suggested.add_a11y": {
+      "text": "افزودن {name}",
+      "status": "machine"
+    },
+    "folders.suggested.channels.description": {
+      "text": "کانال‌هایی که دنبال می‌کنید",
+      "status": "machine"
+    },
+    "folders.suggested.channels.name": {
+      "text": "کانال‌ها",
+      "status": "machine"
+    },
+    "folders.suggested.groups.description": {
+      "text": "گفتگوهای گروهی",
+      "status": "machine"
+    },
+    "folders.suggested.groups.name": {
+      "text": "گروه‌ها",
+      "status": "machine"
+    },
+    "folders.suggested.personal.description": {
+      "text": "گفتگوهای دونفره",
+      "status": "machine"
+    },
+    "folders.suggested.personal.name": {
+      "text": "شخصی",
+      "status": "machine"
+    },
+    "folders.suggested.title": {
+      "text": "پیشنهادی",
+      "status": "machine"
+    },
+    "folders.suggested.unread.description": {
+      "text": "گفتگوهای دارای پیام جدید",
+      "status": "machine"
+    },
+    "folders.suggested.unread.name": {
+      "text": "خوانده‌نشده",
+      "status": "machine"
+    },
+    "folders.tab_a11y": {
+      "text": "{name}، {count, plural, one {# گفتگوی خوانده‌نشده} other {# گفتگوی خوانده‌نشده}}",
       "status": "machine"
     },
     "group.join.needs_account": {
@@ -4442,6 +4778,14 @@
       "text": "پیوندهای دعوت فعال",
       "status": "machine"
     },
+    "invite.links.made_elsewhere": {
+      "text": "ساخته‌شده در دستگاهی دیگر",
+      "status": "machine"
+    },
+    "invite.links.made_elsewhere_hint": {
+      "text": "در دستگاه دیگری ساخته شده است. آن را همان‌جا کپی کنید یا اینجا لغو کنید.",
+      "status": "machine"
+    },
     "invite.links.never_expires": {
       "text": "منقضی نمی‌شود",
       "status": "machine"
@@ -4699,7 +5043,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "نام کاربری خود را وارد کنید، سپس روی دستگاهی که هنوز وارد شده تأیید کنید و کدی را که نشان می‌دهد مقایسه کنید. هیچ چیزی فرستاده نمی‌شود که سرورهای Lakko بتوانند بخوانند. نیازی به دوربین نیست؛ اگر بخواهید کد QR هم هست.",
+      "text": "نام کاربری خود را وارد کنید، سپس Lakko را در دستگاهی که هنوز وارد آن هستید باز کنید و کدی را که نشان می‌دهد تایپ کنید. چیزی که سرورهای Lakko بتوانند بخوانند فرستاده نمی‌شود. به دوربین نیازی نیست؛ اگر ترجیح می‌دهید، کد QR هم هست.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -5035,7 +5379,7 @@
       "status": "machine"
     },
     "restore_identity.device_intro": {
-      "text": "دستگاهی که هنوز وارد شده یک درخواست نشان می‌دهد؛ آن را آنجا تأیید کنید و کد را مقایسه کنید. انتقال رمزگذاری سرتاسری دارد و سرورهای Lakko نمی‌توانند آن را بخوانند. نیازی به دوربین نیست؛ اگر بخواهید کد QR هم هست.",
+      "text": "دستگاهی که هنوز وارد آن هستید یک کد شش‌رقمی نشان می‌دهد؛ آن را اینجا تایپ کنید. انتقال سرتاسری رمزگذاری شده است؛ سرورهای Lakko نمی‌توانند آن را بخوانند. به دوربین نیازی نیست؛ اگر ترجیح می‌دهید، کد QR هم هست.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -5120,6 +5464,46 @@
     },
     "restore_identity.title": {
       "text": "هویت خود را بازیابی کنید",
+      "status": "machine"
+    },
+    "search.people.add_contact": {
+      "text": "افزودن مخاطب",
+      "status": "machine"
+    },
+    "search.people.add_contact_title": {
+      "text": "افزودن {name}",
+      "status": "machine"
+    },
+    "search.people.channel_result": {
+      "text": "کانال {handle}",
+      "status": "machine"
+    },
+    "search.people.failed": {
+      "text": "جستجو ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "search.people.heading": {
+      "text": "افراد",
+      "status": "machine"
+    },
+    "search.people.not_found": {
+      "text": "کسی پیدا نشد. املا را بررسی کنید یا از او پیوند دعوت بخواهید.",
+      "status": "machine"
+    },
+    "search.people.request_refused": {
+      "text": "درخواست فرستاده نشد. شاید تغییر داده باشد چه کسانی می‌توانند او را پیدا کنند.",
+      "status": "machine"
+    },
+    "search.people.search": {
+      "text": "جستجوی افراد",
+      "status": "machine"
+    },
+    "search.people.searching_a11y": {
+      "text": "در حال جستجو",
+      "status": "machine"
+    },
+    "search.people.send_request": {
+      "text": "فرستادن درخواست",
       "status": "machine"
     },
     "security.identity_changed.body": {
@@ -5734,6 +6118,10 @@
       "text": "داده‌ها",
       "status": "machine"
     },
+    "settings.section.folders": {
+      "text": "پوشه‌های گفتگو",
+      "status": "machine"
+    },
     "settings.section.media": {
       "text": "رسانه",
       "status": "machine"
@@ -5744,6 +6132,10 @@
     },
     "settings.section.notifications": {
       "text": "اعلان‌ها",
+      "status": "machine"
+    },
+    "settings.section.privacy": {
+      "text": "حریم خصوصی",
       "status": "machine"
     },
     "settings.section.profile": {
@@ -5806,6 +6198,14 @@
       "text": "نام کاربری: {message}",
       "status": "machine"
     },
+    "username.error.bind_limited_later": {
+      "text": "نام کاربری خود را بیش از حد تغییر داده‌اید. بعداً دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "username.error.bind_limited_minutes": {
+      "text": "نام کاربری خود را بیش از حد تغییر داده‌اید. {minutes, plural, one {# دقیقه} other {# دقیقه}} دیگر دوباره تلاش کنید.",
+      "status": "machine"
+    },
     "username.error.empty": {
       "text": "یک نام کاربری وارد کنید",
       "status": "machine"
@@ -5828,6 +6228,126 @@
     },
     "username.hint.shown_as": {
       "text": "به این شکل نمایش داده می‌شود: {username}",
+      "status": "machine"
+    },
+    "who_can_find_me.applying_a11y": {
+      "text": "در حال اعمال",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts": {
+      "text": "مخاطبان مخاطبانم",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_helper": {
+      "text": "کسانی که مخاطبان شما افزوده‌اند.",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_spreading": {
+      "text": "مخاطبان مخاطبانتان وقتی مخاطبانتان دفعه بعد Lakko را باز کنند می‌توانند شما را پیدا کنند.",
+      "status": "machine"
+    },
+    "who_can_find_me.groups": {
+      "text": "اعضای گروه‌ها و کانال‌هایم",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.all": {
+      "text": "همه گروه‌ها و کانال‌ها",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.chosen": {
+      "text": "فقط آن‌هایی که انتخاب می‌کنم",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_all_helper": {
+      "text": "همه کسانی که در گروه‌ها و کانال‌های شما هستند.",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_chosen_helper": {
+      "text": "فقط آن‌هایی که انتخاب می‌کنید ({chosen} از {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.lede": {
+      "text": "هر کسی که بتواند شما را با نام کاربری یا نام پیدا کند، می‌تواند درخواست کند مخاطب شما شود.",
+      "status": "machine"
+    },
+    "who_can_find_me.lede_link": {
+      "text": "کسانی که پیوند دعوت یا کد QR شما را دارند همیشه می‌توانند با شما ارتباط بگیرند.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.channels": {
+      "text": "کانال‌ها",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose": {
+      "text": "گروه‌ها و کانال‌ها را انتخاب کنید",
+      "status": "machine"
+    },
+    "who_can_find_me.list.empty": {
+      "text": "هنوز در هیچ گروه یا کانالی نیستید.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.groups": {
+      "text": "گروه‌ها",
+      "status": "machine"
+    },
+    "who_can_find_me.list.no_match": {
+      "text": "هیچ گروه یا کانالی مطابقت ندارد.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.search": {
+      "text": "جستجوی گروه‌ها و کانال‌ها",
+      "status": "machine"
+    },
+    "who_can_find_me.members_can_find_me": {
+      "text": "اعضا می‌توانند مرا پیدا کنند",
+      "status": "machine"
+    },
+    "who_can_find_me.members_excluded_notice": {
+      "text": "اکنون فقط گروه‌ها و کانال‌هایی که انتخاب می‌کنید. در {privacy} تغییرش دهید.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone": {
+      "text": "همه",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone_helper": {
+      "text": "هر کسی می‌تواند شما را با نام کاربری یا نامتان پیدا کند.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody": {
+      "text": "هیچ‌کس",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody_helper": {
+      "text": "فقط کسانی که پیوند دعوت یا کد QR شما را دارند می‌توانند با شما ارتباط بگیرند.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.some": {
+      "text": "برخی افراد",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_after_create": {
+      "text": "پس از ساخته شدن حسابتان باز می‌شود.",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_change": {
+      "text": "تغییر",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_line": {
+      "text": "مخاطبان مخاطبانتان و افراد گروه‌ها و کانال‌هایتان می‌توانند شما را پیدا کنند. می‌توانید این را در تنظیمات > حریم خصوصی تغییر دهید.",
+      "status": "machine"
+    },
+    "who_can_find_me.status.failed": {
+      "text": "به‌روزرسانی اینکه چه کسی می‌تواند شما را پیدا کند ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "who_can_find_me.status.offline": {
+      "text": "وقتی دوباره آنلاین شوید اعمال می‌شود.",
+      "status": "machine"
+    },
+    "who_can_find_me.title": {
+      "text": "چه کسی می‌تواند مرا پیدا کند",
       "status": "machine"
     }
   }

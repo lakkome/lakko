@@ -546,10 +546,10 @@ public final class ContactsViewModel: ObservableObject {
             // answer whether the name is unregistered or its owner does not
             // let this person find them (ADR-0060). Never claim which, and
             // never echo the name back.
-            return UiText { "No one found. Check the spelling, or ask them for an invite link." }
+            return .key("search.people.not_found")
         case .requestRefused?:
             // `docs/ux/who-can-find-me.md` section 6.1, "Request refused".
-            return UiText { "Couldn't send the request. They may have changed who can find them." }
+            return .key("search.people.request_refused")
         case .noIdentityBundle?:
             return .key("chat.members.add.error.no_bundle")
         case .wrapped(let cause)?:

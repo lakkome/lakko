@@ -93,7 +93,7 @@ function rowOf(
       describeInviteUses(invite.usedCount, invite.maxUses),
     ];
     if (invite.bootstrapReferral) parts.push(t("invite.links.for_new_user"));
-    if (url === null) parts.push("Made on another device");
+    if (url === null) parts.push(t("invite.links.made_elsewhere"));
     return joinFacts(parts);
   };
   return {
@@ -199,7 +199,7 @@ export function InviteLinksPanel(): JSX.Element {
       // work. No reach session, or a failed registration, fails the mint.
       const session = reachSession();
       if (session === null) {
-        throw new Error("Lakko is still starting up. Try again in a moment.");
+        throw new KeyedError("common.error.starting_up");
       }
       const wasm = await loadWasm();
       const widths = inviteLinkWidths(wasm);
@@ -448,7 +448,7 @@ export function InviteLinksPanel(): JSX.Element {
                       when={row.url}
                       fallback={
                         <span class="lk-link-text lk-muted">
-                          Created on another device. Copy it there, or revoke it here.
+                          {t("invite.links.made_elsewhere_hint")}
                         </span>
                       }
                     >

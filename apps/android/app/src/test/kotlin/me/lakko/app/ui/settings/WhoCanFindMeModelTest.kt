@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.settings
 
+import me.lakko.app.l10n.en
 import me.lakko.app.reach.ReachApplyStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -48,7 +49,7 @@ class WhoCanFindMeModelTest {
         val rows = findMeRows(model, listOf(g1, g2, c1))
         assertEquals(1, rows.chosenCount)
         assertEquals(3, rows.scopeCount)
-        assertEquals("Only the ones you choose (1 of 3).", rows.membersHelper)
+        assertEquals("Only the ones you choose (1 of 3).", rows.membersHelper.en)
     }
 
     @Test

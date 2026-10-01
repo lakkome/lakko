@@ -917,12 +917,17 @@ public final class ChatViewModel: ObservableObject {
         return .key(fallbackKey)
     }
 
-    /// The add-member form's failure: a name nobody registered and a person
-    /// who has not finished setting up say so; the rest as any action.
+    /// The add-member form's failure: a name that does not resolve and a
+    /// person who has not finished setting up say so; the rest as any action.
+    /// A name that does not resolve reads the neutral search answer
+    /// (ADR-0060, `docs/ux/who-can-find-me.md` 6.1): the same whether the
+    /// account does not exist or does not let this person find it, never
+    /// claiming which and never echoing the name back. `username` is kept
+    /// for the callers; nothing here renders it.
     nonisolated static func addMemberErrorText(for error: Error, username: String) -> UiText {
         switch error as? ContactsError {
         case .usernameUnknown?:
-            return .key("chat.members.add.error.unknown_username", texts: ["name": "@\(username)"])
+            return .key("search.people.not_found")
         case .noIdentityBundle?:
             return .key("chat.members.add.error.no_bundle")
         default:

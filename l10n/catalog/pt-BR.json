@@ -1306,6 +1306,50 @@
       "text": "Gerenciar canal",
       "status": "machine"
     },
+    "channels.members.back_a11y": {
+      "text": "Voltar às informações do canal",
+      "status": "machine"
+    },
+    "channels.members.empty": {
+      "text": "Nenhum membro compartilhou um cartão ainda.",
+      "status": "machine"
+    },
+    "channels.members.error.load": {
+      "text": "Não foi possível carregar os membros. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "channels.members.heading": {
+      "text": "Membros ({count})",
+      "status": "machine"
+    },
+    "channels.members.info_sub": {
+      "text": "Quem lê este canal e compartilhou um cartão.",
+      "status": "machine"
+    },
+    "channels.members.loading": {
+      "text": "Carregando membros...",
+      "status": "machine"
+    },
+    "channels.members.title": {
+      "text": "Membros",
+      "status": "machine"
+    },
+    "channels.members.truncated": {
+      "text": "Mostrando apenas os primeiros membros.",
+      "status": "machine"
+    },
+    "channels.members.unnamed": {
+      "text": "Membro",
+      "status": "machine"
+    },
+    "channels.members.unreadable": {
+      "text": "{count, plural, one {# membro compartilhou um cartão com uma chave antiga que este dispositivo não tem.} other {# membros compartilharam cartões com uma chave antiga que este dispositivo não tem.}}",
+      "status": "machine"
+    },
+    "channels.members.you": {
+      "text": "Você",
+      "status": "machine"
+    },
     "channels.meta.desc": {
       "text": "O nome e a descrição chegam a todos os inscritos com criptografia. O servidor nunca os lê.",
       "status": "machine"
@@ -3426,6 +3470,10 @@
       "text": "A sessão ainda não está pronta.",
       "status": "machine"
     },
+    "common.error.starting_up": {
+      "text": "O Lakko ainda está iniciando. Tente novamente em instantes.",
+      "status": "machine"
+    },
     "common.error.too_many_attempts": {
       "text": "Muitas tentativas. Aguarde um momento e tente novamente.",
       "status": "machine"
@@ -3854,16 +3902,52 @@
       "text": "Pedido enviado para {name}. Ele fica em Enviados até ser aceito.",
       "status": "machine"
     },
-    "device_link.compare_hint": {
-      "text": "Confira se o outro dispositivo mostra o mesmo código.",
+    "device_link.code.enter_six_digits": {
+      "text": "Digite os seis dígitos que seu outro dispositivo mostra.",
       "status": "machine"
     },
-    "device_link.comparison_code": {
-      "text": "Código de comparação",
+    "device_link.code.expired": {
+      "text": "Esta solicitação expirou. Comece de novo.",
       "status": "machine"
     },
-    "device_link.confirm_there": {
-      "text": "Abra o Lakko em um dispositivo que já esteja conectado e confirme esta entrada nele.",
+    "device_link.code.field_a11y": {
+      "text": "Código do seu outro dispositivo",
+      "status": "machine"
+    },
+    "device_link.code.intro": {
+      "text": "Abra o Lakko em um navegador ou no celular em que você já entrou. Ele vai mostrar um código de seis dígitos. Digite-o aqui.",
+      "status": "machine"
+    },
+    "device_link.code.intro_native": {
+      "text": "Abra o Lakko em um dispositivo em que você já entrou. Ele vai mostrar um código de seis dígitos. Digite-o aqui.",
+      "status": "machine"
+    },
+    "device_link.code.restoring": {
+      "text": "Restaurando...",
+      "status": "machine"
+    },
+    "device_link.code.start_again": {
+      "text": "Começar de novo",
+      "status": "machine"
+    },
+    "device_link.code.title": {
+      "text": "Confirmar em outro dispositivo",
+      "status": "machine"
+    },
+    "device_link.code.unreachable": {
+      "text": "Não foi possível conectar ao Lakko. Verifique sua conexão e comece de novo.",
+      "status": "machine"
+    },
+    "device_link.code.use_instead": {
+      "text": "Confirmar em outro dispositivo",
+      "status": "machine"
+    },
+    "device_link.code.waiting": {
+      "text": "Aguardando seu outro dispositivo...",
+      "status": "machine"
+    },
+    "device_link.code.wrong": {
+      "text": "Esse código não confere. Comece de novo e digite o código que seu outro dispositivo mostra.",
       "status": "machine"
     },
     "device_link.error.ask_unavailable": {
@@ -3918,10 +4002,6 @@
       "text": "Este código é de outra conta. Confira se o novo dispositivo usa o mesmo nome de usuário que este.",
       "status": "machine"
     },
-    "device_link.qr.hide": {
-      "text": "Ocultar o QR code",
-      "status": "machine"
-    },
     "device_link.qr.intro": {
       "text": "Mostre este código a um dispositivo que ainda tenha sua conta. Ele adiciona este dispositivo e transfere sua identidade com criptografia de ponta a ponta, sem precisar digitar nenhuma frase.",
       "status": "machine"
@@ -3946,20 +4026,8 @@
       "text": "Adicionando o dispositivo...",
       "status": "machine"
     },
-    "device_link.request.body": {
-      "text": "Um novo dispositivo está pedindo para entrar na sua conta. Ele mostra um código.",
-      "status": "machine"
-    },
-    "device_link.request.code_label": {
-      "text": "Código no novo dispositivo",
-      "status": "machine"
-    },
-    "device_link.request.confirm": {
-      "text": "Sim, adicionar",
-      "status": "machine"
-    },
-    "device_link.request.confirm_only_if": {
-      "text": "Confirme apenas se o novo dispositivo mostrar exatamente este código.",
+    "device_link.request.code_a11y": {
+      "text": "Código de entrada",
       "status": "machine"
     },
     "device_link.request.decline": {
@@ -3970,6 +4038,10 @@
       "text": "Recusado. Se isso continuar acontecendo, altere sua senha.",
       "status": "machine"
     },
+    "device_link.request.enter_code": {
+      "text": "Digite este código no novo dispositivo:",
+      "status": "machine"
+    },
     "device_link.request.error.generic": {
       "text": "Não foi possível adicionar o dispositivo. Tente novamente.",
       "status": "machine"
@@ -3978,8 +4050,40 @@
       "text": "Não há chave de dispositivo neste navegador. Entre novamente.",
       "status": "machine"
     },
+    "device_link.request.handled_elsewhere": {
+      "text": "Esta solicitação de entrada foi respondida em outro dispositivo.",
+      "status": "machine"
+    },
+    "device_link.request.heading": {
+      "text": "Nova solicitação de entrada",
+      "status": "machine"
+    },
+    "device_link.request.never_share": {
+      "text": "Nunca diga este código a ninguém. O Lakko nunca vai pedi-lo.",
+      "status": "machine"
+    },
+    "device_link.request.not_recorded": {
+      "text": "Não foi possível conectar ao Lakko para concluir a adição do dispositivo. Nada foi adicionado. Tente novamente a partir do novo dispositivo.",
+      "status": "machine"
+    },
+    "device_link.request.someone_signing_in": {
+      "text": "Alguém está entrando na sua conta em um novo dispositivo.",
+      "status": "machine"
+    },
     "device_link.request.title": {
       "text": "É você?",
+      "status": "machine"
+    },
+    "device_link.request.too_many": {
+      "text": "Muitas solicitações de entrada hoje. Use um QR code ou tente novamente amanhã.",
+      "status": "machine"
+    },
+    "device_link.request.wrong_code": {
+      "text": "O código não conferiu. Nada foi adicionado.",
+      "status": "machine"
+    },
+    "device_link.request.yes_its_me": {
+      "text": "Sim, sou eu",
       "status": "machine"
     },
     "device_link.restored": {
@@ -4036,6 +4140,18 @@
     },
     "devices.pairing.qr_description": {
       "text": "QR code de pareamento",
+      "status": "machine"
+    },
+    "devices.removed.body": {
+      "text": "Ele foi removido da sua conta em outro dispositivo. Novas mensagens não chegam mais a ele. Saia e entre novamente se quiser usá-lo.",
+      "status": "machine"
+    },
+    "devices.removed.sign_out": {
+      "text": "Sair",
+      "status": "machine"
+    },
+    "devices.removed.title": {
+      "text": "Este dispositivo foi removido",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -4100,6 +4216,226 @@
     },
     "ds.clock_skew": {
       "text": "Verifique a data e a hora deste dispositivo.",
+      "status": "machine"
+    },
+    "folders.add_to_folder": {
+      "text": "Adicionar à pasta",
+      "status": "machine"
+    },
+    "folders.all_chats": {
+      "text": "Todas as conversas",
+      "status": "machine"
+    },
+    "folders.bar_a11y": {
+      "text": "Pastas",
+      "status": "machine"
+    },
+    "folders.chat_count": {
+      "text": "{count, plural, one {# conversa} other {# conversas}}",
+      "status": "machine"
+    },
+    "folders.delete": {
+      "text": "Excluir pasta",
+      "status": "machine"
+    },
+    "folders.delete_confirm.body": {
+      "text": "As conversas dela continuam em Todas as conversas.",
+      "status": "machine"
+    },
+    "folders.delete_confirm.title": {
+      "text": "Excluir a pasta “{name}”?",
+      "status": "machine"
+    },
+    "folders.edit": {
+      "text": "Editar pasta",
+      "status": "machine"
+    },
+    "folders.edit_all": {
+      "text": "Editar pastas",
+      "status": "machine"
+    },
+    "folders.editor.add_chats": {
+      "text": "Adicionar conversas",
+      "status": "machine"
+    },
+    "folders.editor.discard.confirm": {
+      "text": "Descartar",
+      "status": "machine"
+    },
+    "folders.editor.discard.keep": {
+      "text": "Continuar editando",
+      "status": "machine"
+    },
+    "folders.editor.discard.title": {
+      "text": "Descartar alterações?",
+      "status": "machine"
+    },
+    "folders.editor.error.save": {
+      "text": "Não foi possível salvar a pasta. Tente novamente.",
+      "status": "machine"
+    },
+    "folders.editor.exclude.archived": {
+      "text": "Arquivadas",
+      "status": "machine"
+    },
+    "folders.editor.exclude.muted": {
+      "text": "Silenciadas",
+      "status": "machine"
+    },
+    "folders.editor.exclude.read": {
+      "text": "Lidas",
+      "status": "machine"
+    },
+    "folders.editor.exclude_chats": {
+      "text": "Deixar conversas de fora",
+      "status": "machine"
+    },
+    "folders.editor.excluded": {
+      "text": "Deixadas de fora",
+      "status": "machine"
+    },
+    "folders.editor.included": {
+      "text": "Incluídas",
+      "status": "machine"
+    },
+    "folders.editor.kind.channels": {
+      "text": "Canais",
+      "status": "machine"
+    },
+    "folders.editor.kind.groups": {
+      "text": "Grupos",
+      "status": "machine"
+    },
+    "folders.editor.kind.one_to_one": {
+      "text": "Conversas individuais",
+      "status": "machine"
+    },
+    "folders.editor.name_placeholder": {
+      "text": "Nome da pasta",
+      "status": "machine"
+    },
+    "folders.editor.remove_chat_a11y": {
+      "text": "Remover {name}",
+      "status": "machine"
+    },
+    "folders.empty": {
+      "text": "Nada aqui no momento",
+      "status": "machine"
+    },
+    "folders.in_folder_a11y": {
+      "text": "Nesta pasta",
+      "status": "machine"
+    },
+    "folders.limit": {
+      "text": "Você pode ter até {count, plural, one {# pasta} other {# pastas}}.",
+      "status": "machine"
+    },
+    "folders.mark_all_read": {
+      "text": "Marcar tudo como lido",
+      "status": "machine"
+    },
+    "folders.new": {
+      "text": "Nova pasta",
+      "status": "machine"
+    },
+    "folders.new_ellipsis": {
+      "text": "Nova pasta...",
+      "status": "machine"
+    },
+    "folders.picker.limit_exclude": {
+      "text": "Uma pasta pode deixar de fora até {count, plural, one {# conversa escolhida} other {# conversas escolhidas}} uma a uma. Para mais, use as opções por tipo.",
+      "status": "machine"
+    },
+    "folders.picker.limit_include": {
+      "text": "Uma pasta pode ter até {count, plural, one {# conversa adicionada} other {# conversas adicionadas}} uma a uma. Para mais, use as opções por tipo.",
+      "status": "machine"
+    },
+    "folders.pin_limit": {
+      "text": "Você pode fixar até {count, plural, one {# conversa} other {# conversas}} em uma pasta.",
+      "status": "machine"
+    },
+    "folders.remove_from_folder": {
+      "text": "Remover da pasta",
+      "status": "machine"
+    },
+    "folders.reorder": {
+      "text": "Reordenar pastas",
+      "status": "machine"
+    },
+    "folders.settings.drag_hint": {
+      "text": "Arraste para reordenar",
+      "status": "machine"
+    },
+    "folders.settings.intro": {
+      "text": "Organize suas conversas do jeito que você pensa nelas. As pastas aparecem em todos os seus dispositivos.",
+      "status": "machine"
+    },
+    "folders.settings.more_a11y": {
+      "text": "Mais opções para {name}",
+      "status": "machine"
+    },
+    "folders.settings.move_down": {
+      "text": "Mover para baixo",
+      "status": "machine"
+    },
+    "folders.settings.move_up": {
+      "text": "Mover para cima",
+      "status": "machine"
+    },
+    "folders.settings.pending_sync": {
+      "text": "As alterações chegarão aos seus outros dispositivos quando este dispositivo estiver on-line de novo.",
+      "status": "machine"
+    },
+    "folders.settings.yours": {
+      "text": "Suas pastas",
+      "status": "machine"
+    },
+    "folders.suggested.add": {
+      "text": "Adicionar",
+      "status": "machine"
+    },
+    "folders.suggested.add_a11y": {
+      "text": "Adicionar {name}",
+      "status": "machine"
+    },
+    "folders.suggested.channels.description": {
+      "text": "Canais que você segue",
+      "status": "machine"
+    },
+    "folders.suggested.channels.name": {
+      "text": "Canais",
+      "status": "machine"
+    },
+    "folders.suggested.groups.description": {
+      "text": "Conversas em grupo",
+      "status": "machine"
+    },
+    "folders.suggested.groups.name": {
+      "text": "Grupos",
+      "status": "machine"
+    },
+    "folders.suggested.personal.description": {
+      "text": "Conversas individuais",
+      "status": "machine"
+    },
+    "folders.suggested.personal.name": {
+      "text": "Pessoais",
+      "status": "machine"
+    },
+    "folders.suggested.title": {
+      "text": "Sugeridas",
+      "status": "machine"
+    },
+    "folders.suggested.unread.description": {
+      "text": "Conversas com mensagens novas",
+      "status": "machine"
+    },
+    "folders.suggested.unread.name": {
+      "text": "Não lidas",
+      "status": "machine"
+    },
+    "folders.tab_a11y": {
+      "text": "{name}, {count, plural, one {# conversa não lida} other {# conversas não lidas}}",
       "status": "machine"
     },
     "group.join.needs_account": {
@@ -4442,6 +4778,14 @@
       "text": "Links de convite ativos",
       "status": "machine"
     },
+    "invite.links.made_elsewhere": {
+      "text": "Criado em outro dispositivo",
+      "status": "machine"
+    },
+    "invite.links.made_elsewhere_hint": {
+      "text": "Criado em outro dispositivo. Copie-o lá ou revogue-o aqui.",
+      "status": "machine"
+    },
     "invite.links.never_expires": {
       "text": "Nunca expira",
       "status": "machine"
@@ -4699,7 +5043,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "Digite seu nome de usuário, depois confirme em um dispositivo que ainda esteja conectado e compare o código que ele mostra. Nada é enviado de forma que os servidores do Lakko possam ler. Não precisa de câmera; há um QR code se preferir.",
+      "text": "Digite seu nome de usuário e abra o Lakko em um dispositivo que ainda esteja conectado; depois digite aqui o código que ele mostrar. Nada que os servidores do Lakko possam ler é enviado. Não precisa de câmera; se preferir, há um QR code.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -5035,7 +5379,7 @@
       "status": "machine"
     },
     "restore_identity.device_intro": {
-      "text": "Um dispositivo que ainda esteja conectado mostra um aviso; confirme nele e compare o código. A transferência tem criptografia de ponta a ponta; os servidores do Lakko não conseguem lê-la. Não precisa de câmera; há um QR code se preferir.",
+      "text": "Um dispositivo que ainda esteja conectado mostra um código de seis dígitos; digite-o aqui. A transferência tem criptografia de ponta a ponta; os servidores do Lakko não conseguem lê-la. Não precisa de câmera; se preferir, há um QR code.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -5120,6 +5464,46 @@
     },
     "restore_identity.title": {
       "text": "Restaure sua identidade",
+      "status": "machine"
+    },
+    "search.people.add_contact": {
+      "text": "Adicionar contato",
+      "status": "machine"
+    },
+    "search.people.add_contact_title": {
+      "text": "Adicionar {name}",
+      "status": "machine"
+    },
+    "search.people.channel_result": {
+      "text": "Canal {handle}",
+      "status": "machine"
+    },
+    "search.people.failed": {
+      "text": "Não foi possível pesquisar. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "search.people.heading": {
+      "text": "Pessoas",
+      "status": "machine"
+    },
+    "search.people.not_found": {
+      "text": "Ninguém encontrado. Confira a grafia ou peça um link de convite à pessoa.",
+      "status": "machine"
+    },
+    "search.people.request_refused": {
+      "text": "Não foi possível enviar o pedido. Talvez a pessoa tenha mudado quem pode encontrá-la.",
+      "status": "machine"
+    },
+    "search.people.search": {
+      "text": "Pesquisar pessoas",
+      "status": "machine"
+    },
+    "search.people.searching_a11y": {
+      "text": "Pesquisando",
+      "status": "machine"
+    },
+    "search.people.send_request": {
+      "text": "Enviar pedido",
       "status": "machine"
     },
     "security.identity_changed.body": {
@@ -5734,6 +6118,10 @@
       "text": "Dados",
       "status": "machine"
     },
+    "settings.section.folders": {
+      "text": "Pastas de conversas",
+      "status": "machine"
+    },
     "settings.section.media": {
       "text": "Mídia",
       "status": "machine"
@@ -5744,6 +6132,10 @@
     },
     "settings.section.notifications": {
       "text": "Notificações",
+      "status": "machine"
+    },
+    "settings.section.privacy": {
+      "text": "Privacidade",
       "status": "machine"
     },
     "settings.section.profile": {
@@ -5806,6 +6198,14 @@
       "text": "Nome de usuário: {message}",
       "status": "machine"
     },
+    "username.error.bind_limited_later": {
+      "text": "Você mudou seu nome de usuário muitas vezes. Tente novamente mais tarde.",
+      "status": "machine"
+    },
+    "username.error.bind_limited_minutes": {
+      "text": "Você mudou seu nome de usuário muitas vezes. Tente novamente em {minutes, plural, one {# minuto} other {# minutos}}.",
+      "status": "machine"
+    },
     "username.error.empty": {
       "text": "Digite um nome de usuário",
       "status": "machine"
@@ -5828,6 +6228,126 @@
     },
     "username.hint.shown_as": {
       "text": "Será exibido como {username}",
+      "status": "machine"
+    },
+    "who_can_find_me.applying_a11y": {
+      "text": "Aplicando",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts": {
+      "text": "Contatos dos meus contatos",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_helper": {
+      "text": "Pessoas que seus contatos adicionaram.",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_spreading": {
+      "text": "Os contatos dos seus contatos poderão encontrar você quando seus contatos abrirem o Lakko da próxima vez.",
+      "status": "machine"
+    },
+    "who_can_find_me.groups": {
+      "text": "Membros dos meus grupos e canais",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.all": {
+      "text": "Todos os grupos e canais",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.chosen": {
+      "text": "Só os que eu escolher",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_all_helper": {
+      "text": "Todas as pessoas nos grupos e canais de que você participa.",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_chosen_helper": {
+      "text": "Só os que você escolher ({chosen} de {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.lede": {
+      "text": "Quem conseguir encontrar você pelo nome de usuário ou pelo nome pode pedir para ser seu contato.",
+      "status": "machine"
+    },
+    "who_can_find_me.lede_link": {
+      "text": "Pessoas com seu link de convite ou QR code sempre conseguem falar com você.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.channels": {
+      "text": "Canais",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose": {
+      "text": "Escolha grupos e canais",
+      "status": "machine"
+    },
+    "who_can_find_me.list.empty": {
+      "text": "Você ainda não participa de nenhum grupo ou canal.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.groups": {
+      "text": "Grupos",
+      "status": "machine"
+    },
+    "who_can_find_me.list.no_match": {
+      "text": "Nenhum grupo ou canal corresponde.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.search": {
+      "text": "Pesquisar grupos e canais",
+      "status": "machine"
+    },
+    "who_can_find_me.members_can_find_me": {
+      "text": "Membros podem me encontrar",
+      "status": "machine"
+    },
+    "who_can_find_me.members_excluded_notice": {
+      "text": "Agora só os grupos e canais que você escolher. Altere em {privacy}.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone": {
+      "text": "Todos",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone_helper": {
+      "text": "Qualquer pessoa pode encontrar você pelo nome de usuário ou pelo nome.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody": {
+      "text": "Ninguém",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody_helper": {
+      "text": "Só pessoas com seu link de convite ou QR code conseguem falar com você.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.some": {
+      "text": "Algumas pessoas",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_after_create": {
+      "text": "Isso abre assim que sua conta for criada.",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_change": {
+      "text": "Alterar",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_line": {
+      "text": "Contatos dos seus contatos e pessoas dos seus grupos e canais podem encontrar você. Você pode mudar isso em Configurações > Privacidade.",
+      "status": "machine"
+    },
+    "who_can_find_me.status.failed": {
+      "text": "Não foi possível atualizar quem pode encontrar você. Tente novamente.",
+      "status": "machine"
+    },
+    "who_can_find_me.status.offline": {
+      "text": "Será aplicado quando você estiver on-line de novo.",
+      "status": "machine"
+    },
+    "who_can_find_me.title": {
+      "text": "Quem pode me encontrar",
       "status": "machine"
     }
   }

@@ -96,12 +96,9 @@ public struct RestoreViaDevicePanel: View {
     @ViewBuilder
     private var codeBody: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Confirm on another device")
+            Text(l10n.t("device_link.code.title"))
                 .font(.headline)
-            Text(
-                "Open Lakko in a browser or on your phone, on a device that is " +
-                "already signed in. It will show a six-digit code. Enter it here."
-            )
+            Text(l10n.t("device_link.code.intro_native"))
             .font(.footnote)
             .foregroundStyle(.secondary)
 
@@ -215,7 +212,7 @@ public struct RestoreViaDevicePanel: View {
                     Button(l10n.t("common.try_again"), action: { ui = .idle })
                 }
             }
-            Button("Confirm on another device instead") {
+            Button(l10n.t("device_link.code.use_instead")) {
                 cancel()
                 ui = .idle
                 link = nil

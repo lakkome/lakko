@@ -31,6 +31,7 @@ struct PeopleSearchSection: View {
     @State private var outcome: PeopleSearchOutcome?
     @State private var searchedFor = ""
     @State private var requesting: FoundPerson?
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -39,11 +40,12 @@ struct PeopleSearchSection: View {
                     HStack(spacing: 12) {
                         Image(systemName: "person.2")
                             .foregroundStyle(Color.lakkoAccent)
-                        Text("Search people")
+                        Text(l10n.t("search.people.search"))
                             .foregroundStyle(Color.lakkoText)
                         Spacer()
                         if busy {
                             ProgressView().controlSize(.small)
+                                .accessibilityLabel(l10n.t("search.people.searching_a11y"))
                         } else {
                             Image(systemName: "chevron.right")
                                 .font(.footnote.weight(.semibold))
@@ -63,7 +65,7 @@ struct PeopleSearchSection: View {
                                 identity: person.accountKey.base64EncodedString(),
                                 size: 40)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(person.displayName ?? "Lakko user")
+                                Text(person.displayName ?? l10n.t("contacts.request.someone"))
                                     .foregroundStyle(Color.lakkoText)
                                 if let username = person.username {
                                     Text("@\(username)")
@@ -76,7 +78,7 @@ struct PeopleSearchSection: View {
                             // not let this account find them is shown by
                             // name only (UX section 6.1, web `canAddContact`).
                             if person.canAddContact {
-                                Button("Add contact") { requesting = person }
+                                Button(l10n.t("search.people.add_contact")) { requesting = person }
                                     .buttonStyle(.borderless)
                             }
                         }
@@ -111,33 +113,34 @@ private struct ContactRequestSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var intro = ""
     @State private var sending = false
-    @State private var error: String?
+    @State private var error: UiText?
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Say who you are (optional)", text: $intro, axis: .vertical)
+                    TextField(l10n.t("contacts.add.intro_label"), text: $intro, axis: .vertical)
                         .lineLimit(3...6)
                 } header: {
-                    Text(person.displayName ?? person.username.map { "@\($0)" } ?? "Lakko user")
+                    Text(person.displayName ?? person.username.map { "@\($0)" } ?? l10n.t("contacts.request.someone"))
                         .textCase(nil)
                 }
                 if let error {
-                    Text(error).foregroundStyle(Color.lakkoDanger)
+                    Text(error.text).foregroundStyle(Color.lakkoDanger)
                 }
             }
-            .navigationTitle("Add contact")
+            .navigationTitle(l10n.t("search.people.add_contact"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(l10n.t("common.cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     if sending {
                         ProgressView()
                     } else {
-                        Button("Send") { Task { await submit() } }
+                        Button(l10n.t("search.people.send_request")) { Task { await submit() } }
                     }
                 }
             }
@@ -150,14 +153,12 @@ private struct ContactRequestSheet: View {
         do {
             try await send(person, intro)
             dismiss()
-        } catch let refused as ContactsError {
-            if case .requestRefused = refused {
-                error = "Couldn't send the request. They may have changed who can find them."
-            } else {
-                error = refused.errorDescription ?? "Couldn't send the request."
-            }
         } catch {
-            self.error = "Couldn't send the request. Check your connection and try again."
+            // Rendered from the error's kind, never its English description:
+            // a refused request reads `search.people.request_refused`, a
+            // network failure the offline line, anything else the generic
+            // send failure (web `contactsErrorText(err, "contacts.error.send")`).
+            self.error = ContactsViewModel.contactsErrorText(for: error, fallbackKey: "contacts.error.send")
         }
     }
 }

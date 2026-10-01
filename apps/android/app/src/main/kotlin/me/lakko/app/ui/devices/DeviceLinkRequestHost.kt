@@ -14,8 +14,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -30,6 +33,7 @@ import me.lakko.app.auth.UniffiLoginHandleSource
 import me.lakko.app.devices.AuthClientDeviceLinkApi
 import me.lakko.app.devices.DEVICE_LINK_ADDING_COPY
 import me.lakko.app.devices.DEVICE_LINK_CONSENT_LEAD
+import me.lakko.app.devices.DEVICE_LINK_CONSENT_QUESTION
 import me.lakko.app.devices.DEVICE_LINK_YES_ITS_ME
 import me.lakko.app.devices.DEVICE_LINK_NOT_ME
 import me.lakko.app.devices.DEVICE_LINK_OLD_LEAD
@@ -44,6 +48,8 @@ import me.lakko.app.devices.PairingScanDecision
 import me.lakko.app.devices.decodeForOwnAccount
 import me.lakko.app.devices.deviceLinkAnswerLimit
 import me.lakko.app.devices.ownPairingHandle
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import uniffi.lakko_ffi_uniffi.DecodedPairingQr
 
 /**
@@ -136,45 +142,56 @@ public fun DeviceLinkRequestHost(
         // "Yes, it's me". Dismissing sends nothing.
         OldDeviceLinkState.AskConsent -> AlertDialog(
             onDismissRequest = { link.dismiss() },
-            title = { Text(DEVICE_LINK_OLD_TITLE) },
-            text = { Text(DEVICE_LINK_CONSENT_LEAD) },
+            title = { Text(DEVICE_LINK_OLD_TITLE.text()) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(DEVICE_LINK_CONSENT_LEAD.text())
+                    Text(DEVICE_LINK_CONSENT_QUESTION.text())
+                }
+            },
             confirmButton = {
-                TextButton(onClick = { scope.launch { runCatching { link.confirm() } } }) { Text(DEVICE_LINK_YES_ITS_ME) }
+                TextButton(onClick = { scope.launch { runCatching { link.confirm() } } }) { Text(DEVICE_LINK_YES_ITS_ME.text()) }
             },
             dismissButton = {
-                TextButton(onClick = { scope.launch { link.decline() } }) { Text(DEVICE_LINK_NOT_ME) }
+                TextButton(onClick = { scope.launch { link.decline() } }) { Text(DEVICE_LINK_NOT_ME.text()) }
             },
         )
         is OldDeviceLinkState.ShowCode -> AlertDialog(
             onDismissRequest = {},
-            title = { Text(DEVICE_LINK_OLD_TITLE) },
+            title = { Text(DEVICE_LINK_OLD_TITLE.text()) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(DEVICE_LINK_OLD_LEAD)
-                    Text(m.formattedCode, fontSize = 32.sp, fontWeight = FontWeight.SemiBold)
+                    Text(DEVICE_LINK_OLD_LEAD.text())
+                    val codeA11y = t("device_link.request.code_a11y")
                     Text(
-                        DEVICE_LINK_OLD_WARNING,
+                        m.formattedCode,
+                        fontSize = 32.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.semantics { contentDescription = "$codeA11y ${m.formattedCode}" },
+                    )
+                    Text(
+                        DEVICE_LINK_OLD_WARNING.text(),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             },
             confirmButton = {
-                TextButton(onClick = { scope.launch { link.decline() } }) { Text(DEVICE_LINK_NOT_ME) }
+                TextButton(onClick = { scope.launch { link.decline() } }) { Text(DEVICE_LINK_NOT_ME.text()) }
             },
         )
         OldDeviceLinkState.Adding -> AlertDialog(
             onDismissRequest = {},
-            title = { Text(DEVICE_LINK_OLD_TITLE) },
-            text = { Text(DEVICE_LINK_ADDING_COPY) },
+            title = { Text(DEVICE_LINK_OLD_TITLE.text()) },
+            text = { Text(DEVICE_LINK_ADDING_COPY.text()) },
             confirmButton = {},
         )
         is OldDeviceLinkState.Notice -> AlertDialog(
             onDismissRequest = { link.dismiss() },
-            title = { Text(DEVICE_LINK_OLD_TITLE) },
-            text = { Text(m.message) },
+            title = { Text(DEVICE_LINK_OLD_TITLE.text()) },
+            text = { Text(m.message.text()) },
             confirmButton = {
-                TextButton(onClick = { link.dismiss() }) { Text("Close") }
+                TextButton(onClick = { link.dismiss() }) { Text(t("common.close")) }
             },
         )
     }

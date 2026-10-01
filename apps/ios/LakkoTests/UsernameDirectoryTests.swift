@@ -281,7 +281,7 @@ final class UsernameDirectoryTests: XCTestCase {
             XCTAssertEqual(limited.retryAfterSecs, 125)
             XCTAssertEqual(
                 limited.errorDescription,
-                "You have changed your username too often. Try again in 3 minutes.")
+                Localization.text("username.error.bind_limited_minutes", counts: ["minutes": 3]))
         } catch {
             XCTFail("expected UsernameBindLimited, got \(error)")
         }
@@ -292,22 +292,22 @@ final class UsernameDirectoryTests: XCTestCase {
     func testTheHandleBindLimitCopy() {
         XCTAssertEqual(
             AuthRateLimit.handleBindLimitedCopy(retryAfterSecs: 60),
-            "You have changed your username too often. Try again in 1 minute.")
+            Localization.text("username.error.bind_limited_minutes", counts: ["minutes": 1]))
         XCTAssertEqual(
             AuthRateLimit.handleBindLimitedCopy(retryAfterSecs: 61),
-            "You have changed your username too often. Try again in 2 minutes.")
+            Localization.text("username.error.bind_limited_minutes", counts: ["minutes": 2]))
         XCTAssertEqual(
             AuthRateLimit.handleBindLimitedCopy(retryAfterSecs: 3601),
-            "You have changed your username too often. Try again later.")
+            Localization.text("username.error.bind_limited_later"))
         XCTAssertEqual(
             AuthRateLimit.handleBindLimitedCopy(retryAfterSecs: nil),
-            "You have changed your username too often. Try again later.")
+            Localization.text("username.error.bind_limited_later"))
         let error = AuthClientError.http(
             status: 429, endpoint: "/auth/login-handle",
             body: #"{"error":"handle-bind-limited","retry_after_secs":600}"#)
         XCTAssertEqual(
             AuthRateLimit.copy(for: error),
-            "You have changed your username too often. Try again in 10 minutes.")
+            Localization.text("username.error.bind_limited_minutes", counts: ["minutes": 10]))
     }
 
     func testADiscoveryConflictReleasesTheHandleAndIsTaken() async {

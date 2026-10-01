@@ -3,6 +3,7 @@
 
 package me.lakko.app.devices.sync
 
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -71,12 +72,12 @@ class RemovedDeviceTest {
 
     @Test
     fun uses_the_spec_copy_exactly() {
-        assertEquals("This device was removed", RemovedDevice.TITLE)
+        assertEquals("This device was removed", RemovedDevice.TITLE.en)
         assertEquals(
             "It was removed from your account on another device. New messages no longer reach it. " +
                 "Sign out, then sign in again if you want to use it.",
-            RemovedDevice.BODY,
+            RemovedDevice.BODY.en,
         )
-        assertEquals("Sign out", RemovedDevice.SIGN_OUT)
+        assertEquals("Sign out", RemovedDevice.SIGN_OUT.en)
     }
 }

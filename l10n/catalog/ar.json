@@ -1306,6 +1306,50 @@
       "text": "إدارة القناة",
       "status": "machine"
     },
+    "channels.members.back_a11y": {
+      "text": "العودة إلى معلومات القناة",
+      "status": "machine"
+    },
+    "channels.members.empty": {
+      "text": "لم يشارك أي عضو بطاقة بعد.",
+      "status": "machine"
+    },
+    "channels.members.error.load": {
+      "text": "تعذّر تحميل الأعضاء. تحقّق من اتصالك وحاول مجددًا.",
+      "status": "machine"
+    },
+    "channels.members.heading": {
+      "text": "الأعضاء ({count})",
+      "status": "machine"
+    },
+    "channels.members.info_sub": {
+      "text": "من يقرأ هذه القناة وشارك بطاقة.",
+      "status": "machine"
+    },
+    "channels.members.loading": {
+      "text": "جارٍ تحميل الأعضاء...",
+      "status": "machine"
+    },
+    "channels.members.title": {
+      "text": "الأعضاء",
+      "status": "machine"
+    },
+    "channels.members.truncated": {
+      "text": "يُعرض أوائل الأعضاء فقط.",
+      "status": "machine"
+    },
+    "channels.members.unnamed": {
+      "text": "عضو",
+      "status": "machine"
+    },
+    "channels.members.unreadable": {
+      "text": "{count, plural, zero {لا توجد بطاقات بمفتاح أقدم لا يملكه هذا الجهاز.} one {عضو واحد شارك بطاقة بمفتاح أقدم لا يملكه هذا الجهاز.} two {عضوان شاركا بطاقتين بمفتاح أقدم لا يملكه هذا الجهاز.} few {# أعضاء شاركوا بطاقات بمفتاح أقدم لا يملكه هذا الجهاز.} many {# عضوًا شاركوا بطاقات بمفتاح أقدم لا يملكه هذا الجهاز.} other {# عضو شاركوا بطاقات بمفتاح أقدم لا يملكه هذا الجهاز.}}",
+      "status": "machine"
+    },
+    "channels.members.you": {
+      "text": "أنت",
+      "status": "machine"
+    },
     "channels.meta.desc": {
       "text": "يصل الاسم والوصف إلى كل مشترك مشفّرَين. لا يقرؤهما الخادم أبدًا.",
       "status": "machine"
@@ -3426,6 +3470,10 @@
       "text": "الجلسة ليست جاهزة بعد.",
       "status": "machine"
     },
+    "common.error.starting_up": {
+      "text": "لا يزال Lakko قيد التشغيل. حاول مجددًا بعد لحظات.",
+      "status": "machine"
+    },
     "common.error.too_many_attempts": {
       "text": "محاولات كثيرة جدًا. انتظر قليلًا ثم حاول مجددًا.",
       "status": "machine"
@@ -3854,16 +3902,52 @@
       "text": "أُرسل الطلب إلى {name}. يبقى ضمن «المُرسلة» إلى أن يقبله.",
       "status": "machine"
     },
-    "device_link.compare_hint": {
-      "text": "تأكّد من أن الجهاز الآخر يعرض الرمز نفسه.",
+    "device_link.code.enter_six_digits": {
+      "text": "أدخل الأرقام الستة التي يعرضها جهازك الآخر.",
       "status": "machine"
     },
-    "device_link.comparison_code": {
-      "text": "رمز المطابقة",
+    "device_link.code.expired": {
+      "text": "انتهت صلاحية هذا الطلب. ابدأ من جديد.",
       "status": "machine"
     },
-    "device_link.confirm_there": {
-      "text": "افتح Lakko على جهاز مسجّل الدخول بالفعل وأكّد تسجيل الدخول هذا من هناك.",
+    "device_link.code.field_a11y": {
+      "text": "الرمز من جهازك الآخر",
+      "status": "machine"
+    },
+    "device_link.code.intro": {
+      "text": "افتح Lakko في متصفح أو على هاتفك حيث سجّلت الدخول بالفعل. سيعرض رمزًا من ستة أرقام. أدخله هنا.",
+      "status": "machine"
+    },
+    "device_link.code.intro_native": {
+      "text": "افتح Lakko على جهاز مسجَّل الدخول بالفعل. سيعرض رمزًا من ستة أرقام. أدخله هنا.",
+      "status": "machine"
+    },
+    "device_link.code.restoring": {
+      "text": "جارٍ الاستعادة...",
+      "status": "machine"
+    },
+    "device_link.code.start_again": {
+      "text": "البدء من جديد",
+      "status": "machine"
+    },
+    "device_link.code.title": {
+      "text": "التأكيد على جهاز آخر",
+      "status": "machine"
+    },
+    "device_link.code.unreachable": {
+      "text": "تعذّر الوصول إلى Lakko. تحقّق من اتصالك، ثم ابدأ من جديد.",
+      "status": "machine"
+    },
+    "device_link.code.use_instead": {
+      "text": "التأكيد على جهاز آخر بدلًا من ذلك",
+      "status": "machine"
+    },
+    "device_link.code.waiting": {
+      "text": "بانتظار جهازك الآخر...",
+      "status": "machine"
+    },
+    "device_link.code.wrong": {
+      "text": "هذا الرمز غير مطابق. ابدأ من جديد وأدخل الرمز الذي يعرضه جهازك الآخر.",
       "status": "machine"
     },
     "device_link.error.ask_unavailable": {
@@ -3918,10 +4002,6 @@
       "text": "هذا الرمز لحساب مختلف. تحقّق من أن الجهاز الجديد يستخدم اسم المستخدم نفسه المستخدم هنا.",
       "status": "machine"
     },
-    "device_link.qr.hide": {
-      "text": "إخفاء رمز QR",
-      "status": "machine"
-    },
     "device_link.qr.intro": {
       "text": "اعرض هذا الرمز على جهاز لا يزال حسابك عليه. سيضيف هذا الجهاز وينقل هويتك مشفّرةً تشفيرًا تامًا بين الطرفين، دون الحاجة إلى كتابة أي عبارة.",
       "status": "machine"
@@ -3946,20 +4026,8 @@
       "text": "جارٍ إضافة الجهاز...",
       "status": "machine"
     },
-    "device_link.request.body": {
-      "text": "جهاز جديد يطلب الانضمام إلى حسابك. إنه يعرض رمزًا.",
-      "status": "machine"
-    },
-    "device_link.request.code_label": {
-      "text": "الرمز على الجهاز الجديد",
-      "status": "machine"
-    },
-    "device_link.request.confirm": {
-      "text": "نعم، أضِفه",
-      "status": "machine"
-    },
-    "device_link.request.confirm_only_if": {
-      "text": "لا تؤكّد إلا إذا كان الجهاز الجديد يعرض هذا الرمز بالضبط.",
+    "device_link.request.code_a11y": {
+      "text": "رمز تسجيل الدخول",
       "status": "machine"
     },
     "device_link.request.decline": {
@@ -3970,6 +4038,10 @@
       "text": "تم الرفض. إذا تكرّر هذا، فغيّر كلمة مرورك.",
       "status": "machine"
     },
+    "device_link.request.enter_code": {
+      "text": "أدخل هذا الرمز على الجهاز الجديد:",
+      "status": "machine"
+    },
     "device_link.request.error.generic": {
       "text": "تعذّرت إضافة الجهاز. حاول مجددًا.",
       "status": "machine"
@@ -3978,8 +4050,40 @@
       "text": "لا يوجد مفتاح جهاز في هذا المتصفح. سجّل الدخول مجددًا.",
       "status": "machine"
     },
+    "device_link.request.handled_elsewhere": {
+      "text": "تمت معالجة طلب تسجيل الدخول هذا على جهاز آخر.",
+      "status": "machine"
+    },
+    "device_link.request.heading": {
+      "text": "طلب تسجيل دخول جديد",
+      "status": "machine"
+    },
+    "device_link.request.never_share": {
+      "text": "لا تقرأ هذا الرمز لأي أحد أبدًا. لن يطلبه Lakko منك أبدًا.",
+      "status": "machine"
+    },
+    "device_link.request.not_recorded": {
+      "text": "تعذّر الوصول إلى Lakko لإتمام إضافة الجهاز. لم يُضَف أي شيء. حاول مجددًا من الجهاز الجديد.",
+      "status": "machine"
+    },
+    "device_link.request.someone_signing_in": {
+      "text": "هناك من يسجّل الدخول إلى حسابك على جهاز جديد.",
+      "status": "machine"
+    },
     "device_link.request.title": {
       "text": "هل هذا أنت؟",
+      "status": "machine"
+    },
+    "device_link.request.too_many": {
+      "text": "طلبات تسجيل دخول كثيرة جدًا اليوم. استخدم رمز QR، أو حاول مجددًا غدًا.",
+      "status": "machine"
+    },
+    "device_link.request.wrong_code": {
+      "text": "لم يتطابق الرمز. لم يُضَف أي شيء.",
+      "status": "machine"
+    },
+    "device_link.request.yes_its_me": {
+      "text": "نعم، هذا أنا",
       "status": "machine"
     },
     "device_link.restored": {
@@ -4036,6 +4140,18 @@
     },
     "devices.pairing.qr_description": {
       "text": "رمز QR للربط",
+      "status": "machine"
+    },
+    "devices.removed.body": {
+      "text": "أُزيل من حسابك من جهاز آخر. لم تعد الرسائل الجديدة تصل إليه. سجّل الخروج، ثم سجّل الدخول مجددًا إذا أردت استخدامه.",
+      "status": "machine"
+    },
+    "devices.removed.sign_out": {
+      "text": "تسجيل الخروج",
+      "status": "machine"
+    },
+    "devices.removed.title": {
+      "text": "أُزيل هذا الجهاز",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -4100,6 +4216,226 @@
     },
     "ds.clock_skew": {
       "text": "تحقّق من تاريخ هذا الجهاز ووقته.",
+      "status": "machine"
+    },
+    "folders.add_to_folder": {
+      "text": "إضافة إلى مجلد",
+      "status": "machine"
+    },
+    "folders.all_chats": {
+      "text": "كل الدردشات",
+      "status": "machine"
+    },
+    "folders.bar_a11y": {
+      "text": "المجلدات",
+      "status": "machine"
+    },
+    "folders.chat_count": {
+      "text": "{count, plural, zero {لا دردشات} one {دردشة واحدة} two {دردشتان} few {# دردشات} many {# دردشة} other {# دردشة}}",
+      "status": "machine"
+    },
+    "folders.delete": {
+      "text": "حذف المجلد",
+      "status": "machine"
+    },
+    "folders.delete_confirm.body": {
+      "text": "تبقى دردشاته في «كل الدردشات».",
+      "status": "machine"
+    },
+    "folders.delete_confirm.title": {
+      "text": "حذف المجلد «{name}»؟",
+      "status": "machine"
+    },
+    "folders.edit": {
+      "text": "تعديل المجلد",
+      "status": "machine"
+    },
+    "folders.edit_all": {
+      "text": "تعديل المجلدات",
+      "status": "machine"
+    },
+    "folders.editor.add_chats": {
+      "text": "إضافة دردشات",
+      "status": "machine"
+    },
+    "folders.editor.discard.confirm": {
+      "text": "تجاهل",
+      "status": "machine"
+    },
+    "folders.editor.discard.keep": {
+      "text": "متابعة التعديل",
+      "status": "machine"
+    },
+    "folders.editor.discard.title": {
+      "text": "تجاهل التغييرات؟",
+      "status": "machine"
+    },
+    "folders.editor.error.save": {
+      "text": "تعذّر حفظ المجلد. حاول مجددًا.",
+      "status": "machine"
+    },
+    "folders.editor.exclude.archived": {
+      "text": "المؤرشفة",
+      "status": "machine"
+    },
+    "folders.editor.exclude.muted": {
+      "text": "المكتومة",
+      "status": "machine"
+    },
+    "folders.editor.exclude.read": {
+      "text": "المقروءة",
+      "status": "machine"
+    },
+    "folders.editor.exclude_chats": {
+      "text": "استبعاد دردشات",
+      "status": "machine"
+    },
+    "folders.editor.excluded": {
+      "text": "المستبعَدة",
+      "status": "machine"
+    },
+    "folders.editor.included": {
+      "text": "المضمَّنة",
+      "status": "machine"
+    },
+    "folders.editor.kind.channels": {
+      "text": "القنوات",
+      "status": "machine"
+    },
+    "folders.editor.kind.groups": {
+      "text": "المجموعات",
+      "status": "machine"
+    },
+    "folders.editor.kind.one_to_one": {
+      "text": "الدردشات الفردية",
+      "status": "machine"
+    },
+    "folders.editor.name_placeholder": {
+      "text": "اسم المجلد",
+      "status": "machine"
+    },
+    "folders.editor.remove_chat_a11y": {
+      "text": "إزالة {name}",
+      "status": "machine"
+    },
+    "folders.empty": {
+      "text": "لا شيء هنا الآن",
+      "status": "machine"
+    },
+    "folders.in_folder_a11y": {
+      "text": "في هذا المجلد",
+      "status": "machine"
+    },
+    "folders.limit": {
+      "text": "يمكنك إنشاء {count, plural, zero {# مجلد} one {مجلد واحد} two {مجلدين} few {# مجلدات} many {# مجلدًا} other {# مجلد}} كحد أقصى.",
+      "status": "machine"
+    },
+    "folders.mark_all_read": {
+      "text": "تعليم الكل كمقروء",
+      "status": "machine"
+    },
+    "folders.new": {
+      "text": "مجلد جديد",
+      "status": "machine"
+    },
+    "folders.new_ellipsis": {
+      "text": "مجلد جديد...",
+      "status": "machine"
+    },
+    "folders.picker.limit_exclude": {
+      "text": "يمكن للمجلد أن يستبعد {count, plural, zero {# دردشة} one {دردشة واحدة} two {دردشتين} few {# دردشات} many {# دردشة} other {# دردشة}} كحد أقصى واحدةً تلو الأخرى. استخدم مفاتيح الأنواع لاستبعاد المزيد.",
+      "status": "machine"
+    },
+    "folders.picker.limit_include": {
+      "text": "يمكن للمجلد أن يضم {count, plural, zero {# دردشة} one {دردشة واحدة} two {دردشتين} few {# دردشات} many {# دردشة} other {# دردشة}} كحد أقصى مضافة واحدةً تلو الأخرى. استخدم مفاتيح الأنواع لإضافة المزيد.",
+      "status": "machine"
+    },
+    "folders.pin_limit": {
+      "text": "يمكنك تثبيت {count, plural, zero {# دردشة} one {دردشة واحدة} two {دردشتين} few {# دردشات} many {# دردشة} other {# دردشة}} كحد أقصى في المجلد.",
+      "status": "machine"
+    },
+    "folders.remove_from_folder": {
+      "text": "إزالة من المجلد",
+      "status": "machine"
+    },
+    "folders.reorder": {
+      "text": "إعادة ترتيب المجلدات",
+      "status": "machine"
+    },
+    "folders.settings.drag_hint": {
+      "text": "اسحب لإعادة الترتيب",
+      "status": "machine"
+    },
+    "folders.settings.intro": {
+      "text": "نظّم دردشاتك بالطريقة التي تفكر بها. تظهر المجلدات على جميع أجهزتك.",
+      "status": "machine"
+    },
+    "folders.settings.more_a11y": {
+      "text": "المزيد لـ {name}",
+      "status": "machine"
+    },
+    "folders.settings.move_down": {
+      "text": "نقل لأسفل",
+      "status": "machine"
+    },
+    "folders.settings.move_up": {
+      "text": "نقل لأعلى",
+      "status": "machine"
+    },
+    "folders.settings.pending_sync": {
+      "text": "ستصل التغييرات إلى أجهزتك الأخرى عندما يعود هذا الجهاز إلى الاتصال.",
+      "status": "machine"
+    },
+    "folders.settings.yours": {
+      "text": "مجلداتك",
+      "status": "machine"
+    },
+    "folders.suggested.add": {
+      "text": "إضافة",
+      "status": "machine"
+    },
+    "folders.suggested.add_a11y": {
+      "text": "إضافة {name}",
+      "status": "machine"
+    },
+    "folders.suggested.channels.description": {
+      "text": "القنوات التي تتابعها",
+      "status": "machine"
+    },
+    "folders.suggested.channels.name": {
+      "text": "القنوات",
+      "status": "machine"
+    },
+    "folders.suggested.groups.description": {
+      "text": "دردشات المجموعات",
+      "status": "machine"
+    },
+    "folders.suggested.groups.name": {
+      "text": "المجموعات",
+      "status": "machine"
+    },
+    "folders.suggested.personal.description": {
+      "text": "الدردشات الفردية",
+      "status": "machine"
+    },
+    "folders.suggested.personal.name": {
+      "text": "شخصي",
+      "status": "machine"
+    },
+    "folders.suggested.title": {
+      "text": "مقترحة",
+      "status": "machine"
+    },
+    "folders.suggested.unread.description": {
+      "text": "دردشات فيها رسائل جديدة",
+      "status": "machine"
+    },
+    "folders.suggested.unread.name": {
+      "text": "غير المقروءة",
+      "status": "machine"
+    },
+    "folders.tab_a11y": {
+      "text": "{name}، {count, plural, zero {لا دردشات غير مقروءة} one {دردشة واحدة غير مقروءة} two {دردشتان غير مقروءتين} few {# دردشات غير مقروءة} many {# دردشة غير مقروءة} other {# دردشة غير مقروءة}}",
       "status": "machine"
     },
     "group.join.needs_account": {
@@ -4442,6 +4778,14 @@
       "text": "روابط الدعوة النشطة",
       "status": "machine"
     },
+    "invite.links.made_elsewhere": {
+      "text": "أُنشئ على جهاز آخر",
+      "status": "machine"
+    },
+    "invite.links.made_elsewhere_hint": {
+      "text": "أُنشئ على جهاز آخر. انسخه من هناك، أو أبطله من هنا.",
+      "status": "machine"
+    },
     "invite.links.never_expires": {
       "text": "لا تنتهي صلاحيته",
       "status": "machine"
@@ -4699,7 +5043,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "أدخل اسم المستخدم، ثم أكّد على جهاز لا يزال مسجّل الدخول وطابِق الرمز الذي يعرضه. لا يُرسل شيء يمكن لخوادم Lakko قراءته. لا حاجة إلى كاميرا؛ ويتوفر رمز QR إن فضّلت ذلك.",
+      "text": "أدخل اسم المستخدم، ثم افتح Lakko على جهاز لا يزال مسجّل الدخول واكتب الرمز الذي يعرضه. لا يُرسَل أي شيء يمكن لخوادم Lakko قراءته. لا حاجة إلى كاميرا؛ ويتوفر رمز QR إن كنت تفضّله.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -5035,7 +5379,7 @@
       "status": "machine"
     },
     "restore_identity.device_intro": {
-      "text": "يعرض جهاز لا يزال مسجّل الدخول طلبًا؛ أكّده هناك وطابِق الرمز. النقل مشفّر تشفيرًا تامًا بين الطرفين؛ لا تستطيع خوادم Lakko قراءته. لا حاجة إلى كاميرا؛ ويتوفر رمز QR إن فضّلت ذلك.",
+      "text": "يعرض جهاز لا يزال مسجّل الدخول رمزًا من ستة أرقام؛ اكتبه هنا. النقل مشفّر من طرف إلى طرف؛ ولا يمكن لخوادم Lakko قراءته. لا حاجة إلى كاميرا؛ ويتوفر رمز QR إن كنت تفضّله.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -5120,6 +5464,46 @@
     },
     "restore_identity.title": {
       "text": "استعِد هويتك",
+      "status": "machine"
+    },
+    "search.people.add_contact": {
+      "text": "إضافة جهة اتصال",
+      "status": "machine"
+    },
+    "search.people.add_contact_title": {
+      "text": "إضافة {name}",
+      "status": "machine"
+    },
+    "search.people.channel_result": {
+      "text": "القناة {handle}",
+      "status": "machine"
+    },
+    "search.people.failed": {
+      "text": "تعذّر البحث. تحقّق من اتصالك وحاول مجددًا.",
+      "status": "machine"
+    },
+    "search.people.heading": {
+      "text": "الأشخاص",
+      "status": "machine"
+    },
+    "search.people.not_found": {
+      "text": "لم يُعثر على أحد. تحقّق من التهجئة، أو اطلب منه رابط دعوة.",
+      "status": "machine"
+    },
+    "search.people.request_refused": {
+      "text": "تعذّر إرسال الطلب. ربما غيّر من يمكنه العثور عليه.",
+      "status": "machine"
+    },
+    "search.people.search": {
+      "text": "البحث عن أشخاص",
+      "status": "machine"
+    },
+    "search.people.searching_a11y": {
+      "text": "جارٍ البحث",
+      "status": "machine"
+    },
+    "search.people.send_request": {
+      "text": "إرسال الطلب",
       "status": "machine"
     },
     "security.identity_changed.body": {
@@ -5734,6 +6118,10 @@
       "text": "البيانات",
       "status": "machine"
     },
+    "settings.section.folders": {
+      "text": "مجلدات الدردشة",
+      "status": "machine"
+    },
     "settings.section.media": {
       "text": "الوسائط",
       "status": "machine"
@@ -5744,6 +6132,10 @@
     },
     "settings.section.notifications": {
       "text": "الإشعارات",
+      "status": "machine"
+    },
+    "settings.section.privacy": {
+      "text": "الخصوصية",
       "status": "machine"
     },
     "settings.section.profile": {
@@ -5806,6 +6198,14 @@
       "text": "اسم المستخدم: {message}",
       "status": "machine"
     },
+    "username.error.bind_limited_later": {
+      "text": "غيّرت اسم المستخدم مرات كثيرة جدًا. حاول مجددًا لاحقًا.",
+      "status": "machine"
+    },
+    "username.error.bind_limited_minutes": {
+      "text": "غيّرت اسم المستخدم مرات كثيرة جدًا. حاول مجددًا بعد {minutes, plural, zero {# دقيقة} one {دقيقة واحدة} two {دقيقتين} few {# دقائق} many {# دقيقة} other {# دقيقة}}.",
+      "status": "machine"
+    },
     "username.error.empty": {
       "text": "أدخل اسم مستخدم",
       "status": "machine"
@@ -5828,6 +6228,126 @@
     },
     "username.hint.shown_as": {
       "text": "سيظهر هكذا: {username}",
+      "status": "machine"
+    },
+    "who_can_find_me.applying_a11y": {
+      "text": "جارٍ التطبيق",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts": {
+      "text": "جهات اتصال جهات اتصالي",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_helper": {
+      "text": "الأشخاص الذين أضافتهم جهات اتصالك.",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_spreading": {
+      "text": "سيتمكن جهات اتصال جهات اتصالك من العثور عليك عندما تفتح جهات اتصالك Lakko في المرة القادمة.",
+      "status": "machine"
+    },
+    "who_can_find_me.groups": {
+      "text": "أعضاء مجموعاتي وقنواتي",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.all": {
+      "text": "كل المجموعات والقنوات",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.chosen": {
+      "text": "التي أختارها فقط",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_all_helper": {
+      "text": "كل من في المجموعات والقنوات التي أنت فيها.",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_chosen_helper": {
+      "text": "التي تختارها فقط ({chosen} من {total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.lede": {
+      "text": "يمكن لمن يستطيع العثور عليك باسم المستخدم أو الاسم أن يطلب إضافتك كجهة اتصال.",
+      "status": "machine"
+    },
+    "who_can_find_me.lede_link": {
+      "text": "يمكن دائمًا لمن لديهم رابط الدعوة أو رمز QR الخاص بك الوصول إليك.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.channels": {
+      "text": "القنوات",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose": {
+      "text": "اختر المجموعات والقنوات",
+      "status": "machine"
+    },
+    "who_can_find_me.list.empty": {
+      "text": "لست في أي مجموعة أو قناة بعد.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.groups": {
+      "text": "المجموعات",
+      "status": "machine"
+    },
+    "who_can_find_me.list.no_match": {
+      "text": "لا توجد مجموعات أو قنوات مطابقة.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.search": {
+      "text": "البحث في المجموعات والقنوات",
+      "status": "machine"
+    },
+    "who_can_find_me.members_can_find_me": {
+      "text": "يمكن للأعضاء العثور عليّ",
+      "status": "machine"
+    },
+    "who_can_find_me.members_excluded_notice": {
+      "text": "أصبحت الآن المجموعات والقنوات التي تختارها فقط. غيّر ذلك في {privacy}.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone": {
+      "text": "الجميع",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone_helper": {
+      "text": "يمكن لأي شخص العثور عليك باسم المستخدم أو الاسم.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody": {
+      "text": "لا أحد",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody_helper": {
+      "text": "لا يمكن الوصول إليك إلا لمن لديهم رابط الدعوة أو رمز QR الخاص بك.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.some": {
+      "text": "بعض الأشخاص",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_after_create": {
+      "text": "ستُفتح بعد إنشاء حسابك.",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_change": {
+      "text": "تغيير",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_line": {
+      "text": "يمكن لجهات اتصال جهات اتصالك والأشخاص في مجموعاتك وقنواتك العثور عليك. يمكنك تغيير ذلك من الإعدادات > الخصوصية.",
+      "status": "machine"
+    },
+    "who_can_find_me.status.failed": {
+      "text": "تعذّر تحديث من يمكنه العثور عليك. حاول مجددًا.",
+      "status": "machine"
+    },
+    "who_can_find_me.status.offline": {
+      "text": "سيُطبَّق عند عودتك إلى الاتصال.",
+      "status": "machine"
+    },
+    "who_can_find_me.title": {
+      "text": "من يمكنه العثور عليّ",
       "status": "machine"
     }
   }

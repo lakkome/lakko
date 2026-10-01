@@ -264,14 +264,14 @@ private fun InfoPanel(
 @Composable
 private fun DamagedPanel(onDone: () -> Unit) {
     Text(
-        text = me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY,
+        text = me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY.text(),
         style = MaterialTheme.typography.bodyMedium,
     )
     Spacer(Modifier.height(24.dp))
     Button(
         onClick = onDone,
         modifier = Modifier.fillMaxWidth(),
-    ) { Text("Done") }
+    ) { Text(t("common.done")) }
 }
 
 /** ADR-0054 UX section 3 - the day's allowance of invite tokens is used up:

@@ -317,9 +317,9 @@ public fun NewChannelScreen(
                                 throw e
                             } catch (e: Throwable) {
                                 Log.w(TAG, "channel journal claim did not land; not created", e)
-                                // TODO(ADR-0061): main's literal, carried as the key
-                                // until it moves into the catalog (renders verbatim).
-                                error = UiText("Could not reach the server. Try again.")
+                                // The claim is a DS request; whatever refused it, the
+                                // person can only check the connection and retry.
+                                error = UiText("common.error.offline")
                                 busy = false
                                 return@launch
                             }
@@ -1037,10 +1037,10 @@ private fun ChannelInfoSheet(
                         .clickable { onOpenMembers() }
                         .padding(vertical = 14.dp),
                 ) {
-                    Text("Members", style = MaterialTheme.typography.bodyLarge)
+                    Text(t("channels.members.title"), style = MaterialTheme.typography.bodyLarge)
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        "Who reads this channel and shared a card.",
+                        t("channels.members.info_sub"),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

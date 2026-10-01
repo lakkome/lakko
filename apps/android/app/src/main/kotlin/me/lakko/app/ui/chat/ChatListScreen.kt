@@ -1183,7 +1183,7 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
                     onClick = { close(); model.onPin() },
                 )
                 if (!model.pinEnabled) {
-                    MenuHelperLine("You can pin up to 10 chats in a folder.")
+                    MenuHelperLine(t("folders.pin_limit", emptyMap(), mapOf("count" to FolderLimits.MAX_PINS.toULong())))
                 }
             }
             if (model.showFlags) {
@@ -1205,7 +1205,7 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
             }
             if (model.showFolderItems) {
                 DropdownMenuItem(
-                    text = { Text("Add to folder") },
+                    text = { Text(t("folders.add_to_folder")) },
                     leadingIcon = { Icon(Icons.Filled.Folder, contentDescription = null) },
                     // With no folders yet it goes straight to the editor, as
                     // "New folder..." would.
@@ -1222,7 +1222,7 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
                 val tab = model.folder
                 if (tab != null) {
                     DropdownMenuItem(
-                        text = { Text("Remove from folder") },
+                        text = { Text(t("folders.remove_from_folder")) },
                         leadingIcon = { Icon(Icons.Filled.FolderOff, contentDescription = null) },
                         onClick = { close(); model.toggle(tab) },
                     )
@@ -1236,7 +1236,7 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
                     text = { Text(f.name) },
                     leadingIcon = {
                         if (checked) {
-                            Icon(Icons.Filled.Check, contentDescription = "In this folder")
+                            Icon(Icons.Filled.Check, contentDescription = t("folders.in_folder_a11y"))
                         } else {
                             Spacer(Modifier.size(24.dp))
                         }
@@ -1246,13 +1246,13 @@ private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuMode
                 )
             }
             DropdownMenuItem(
-                text = { Text("New folder...") },
+                text = { Text(t("folders.new_ellipsis")) },
                 leadingIcon = { Icon(Icons.Filled.CreateNewFolder, contentDescription = null) },
                 enabled = model.canCreateFolder,
                 onClick = { close(); model.newFolder() },
             )
             if (!model.canCreateFolder) {
-                MenuHelperLine("You can have up to 20 folders.")
+                MenuHelperLine(t("folders.limit", emptyMap(), mapOf("count" to FolderLimits.MAX_FOLDERS.toULong())))
             }
         }
     }

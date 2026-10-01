@@ -1306,6 +1306,50 @@
       "text": "Kanalı yönet",
       "status": "machine"
     },
+    "channels.members.back_a11y": {
+      "text": "Kanal bilgilerine dön",
+      "status": "machine"
+    },
+    "channels.members.empty": {
+      "text": "Henüz hiçbir üye kart paylaşmadı.",
+      "status": "machine"
+    },
+    "channels.members.error.load": {
+      "text": "Üyeler yüklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "channels.members.heading": {
+      "text": "Üyeler ({count})",
+      "status": "machine"
+    },
+    "channels.members.info_sub": {
+      "text": "Bu kanalı okuyan ve kart paylaşan kişiler.",
+      "status": "machine"
+    },
+    "channels.members.loading": {
+      "text": "Üyeler yükleniyor...",
+      "status": "machine"
+    },
+    "channels.members.title": {
+      "text": "Üyeler",
+      "status": "machine"
+    },
+    "channels.members.truncated": {
+      "text": "Yalnızca ilk üyeler gösteriliyor.",
+      "status": "machine"
+    },
+    "channels.members.unnamed": {
+      "text": "Üye",
+      "status": "machine"
+    },
+    "channels.members.unreadable": {
+      "text": "{count, plural, one {# üye, bu cihazda bulunmayan eski bir anahtarla kart paylaştı.} other {# üye, bu cihazda bulunmayan eski bir anahtarla kart paylaştı.}}",
+      "status": "machine"
+    },
+    "channels.members.you": {
+      "text": "Siz",
+      "status": "machine"
+    },
     "channels.meta.desc": {
       "text": "Ad ve açıklama tüm abonelere şifreli olarak ulaşır. Sunucu bunları asla okumaz.",
       "status": "machine"
@@ -3426,6 +3470,10 @@
       "text": "Oturum henüz hazır değil.",
       "status": "machine"
     },
+    "common.error.starting_up": {
+      "text": "Lakko hâlâ başlatılıyor. Birazdan tekrar deneyin.",
+      "status": "machine"
+    },
     "common.error.too_many_attempts": {
       "text": "Çok fazla deneme yapıldı. Biraz bekleyip tekrar deneyin.",
       "status": "machine"
@@ -3854,16 +3902,52 @@
       "text": "İstek gönderildi: {name}. Kabul edilene kadar Gönderilenler bölümünde bekler.",
       "status": "machine"
     },
-    "device_link.compare_hint": {
-      "text": "Diğer cihazın aynı kodu gösterdiğinden emin olun.",
+    "device_link.code.enter_six_digits": {
+      "text": "Diğer cihazınızın gösterdiği altı haneyi girin.",
       "status": "machine"
     },
-    "device_link.comparison_code": {
-      "text": "Karşılaştırma kodu",
+    "device_link.code.expired": {
+      "text": "Bu isteğin süresi doldu. Yeniden başlayın.",
       "status": "machine"
     },
-    "device_link.confirm_there": {
-      "text": "Lakko'yu oturumu zaten açık olan bir cihazda açın ve bu girişi orada onaylayın.",
+    "device_link.code.field_a11y": {
+      "text": "Diğer cihazınızdaki kod",
+      "status": "machine"
+    },
+    "device_link.code.intro": {
+      "text": "Lakko'yu oturumunuzun zaten açık olduğu bir tarayıcıda veya telefonda açın. Altı haneli bir kod gösterecek. Kodu buraya girin.",
+      "status": "machine"
+    },
+    "device_link.code.intro_native": {
+      "text": "Lakko'yu zaten oturum açılmış bir cihazda aç. Altı haneli bir kod gösterecek. Kodu buraya gir.",
+      "status": "machine"
+    },
+    "device_link.code.restoring": {
+      "text": "Geri yükleniyor...",
+      "status": "machine"
+    },
+    "device_link.code.start_again": {
+      "text": "Yeniden başla",
+      "status": "machine"
+    },
+    "device_link.code.title": {
+      "text": "Başka bir cihazda onayla",
+      "status": "machine"
+    },
+    "device_link.code.unreachable": {
+      "text": "Lakko'ya ulaşılamadı. Bağlantınızı kontrol edip yeniden başlayın.",
+      "status": "machine"
+    },
+    "device_link.code.use_instead": {
+      "text": "Bunun yerine başka bir cihazda onayla",
+      "status": "machine"
+    },
+    "device_link.code.waiting": {
+      "text": "Diğer cihazınız bekleniyor...",
+      "status": "machine"
+    },
+    "device_link.code.wrong": {
+      "text": "Bu kod eşleşmiyor. Yeniden başlayın ve diğer cihazınızın gösterdiği kodu girin.",
       "status": "machine"
     },
     "device_link.error.ask_unavailable": {
@@ -3918,10 +4002,6 @@
       "text": "Bu kod farklı bir hesaba ait. Yeni cihazın bu cihazla aynı kullanıcı adını kullandığını kontrol edin.",
       "status": "machine"
     },
-    "device_link.qr.hide": {
-      "text": "QR kodunu gizle",
-      "status": "machine"
-    },
     "device_link.qr.intro": {
       "text": "Bu kodu hesabınızın hâlâ bulunduğu bir cihaza gösterin. O cihaz bu cihazı ekler ve kimliğinizi uçtan uca şifreli olarak aktarır; ifade yazmanız gerekmez.",
       "status": "machine"
@@ -3946,20 +4026,8 @@
       "text": "Cihaz ekleniyor...",
       "status": "machine"
     },
-    "device_link.request.body": {
-      "text": "Yeni bir cihaz hesabınıza katılmak istiyor. Bir kod gösteriyor.",
-      "status": "machine"
-    },
-    "device_link.request.code_label": {
-      "text": "Yeni cihazdaki kod",
-      "status": "machine"
-    },
-    "device_link.request.confirm": {
-      "text": "Evet, ekle",
-      "status": "machine"
-    },
-    "device_link.request.confirm_only_if": {
-      "text": "Yalnızca yeni cihaz tam olarak bu kodu gösteriyorsa onaylayın.",
+    "device_link.request.code_a11y": {
+      "text": "Giriş kodu",
       "status": "machine"
     },
     "device_link.request.decline": {
@@ -3970,6 +4038,10 @@
       "text": "Reddedildi. Bu tekrarlanırsa şifrenizi değiştirin.",
       "status": "machine"
     },
+    "device_link.request.enter_code": {
+      "text": "Bu kodu yeni cihaza girin:",
+      "status": "machine"
+    },
     "device_link.request.error.generic": {
       "text": "Cihaz eklenemedi. Tekrar deneyin.",
       "status": "machine"
@@ -3978,8 +4050,40 @@
       "text": "Bu tarayıcıda cihaz anahtarı yok. Tekrar giriş yapın.",
       "status": "machine"
     },
+    "device_link.request.handled_elsewhere": {
+      "text": "Bu giriş isteği başka bir cihazda yanıtlandı.",
+      "status": "machine"
+    },
+    "device_link.request.heading": {
+      "text": "Yeni giriş isteği",
+      "status": "machine"
+    },
+    "device_link.request.never_share": {
+      "text": "Bu kodu asla kimseye söylemeyin. Lakko bu kodu sizden asla istemez.",
+      "status": "machine"
+    },
+    "device_link.request.not_recorded": {
+      "text": "Cihaz eklemeyi tamamlamak için Lakko'ya ulaşılamadı. Hiçbir şey eklenmedi. Yeni cihazdan tekrar deneyin.",
+      "status": "machine"
+    },
+    "device_link.request.someone_signing_in": {
+      "text": "Biri yeni bir cihazda hesabınıza giriş yapıyor.",
+      "status": "machine"
+    },
     "device_link.request.title": {
       "text": "Bu siz misiniz?",
+      "status": "machine"
+    },
+    "device_link.request.too_many": {
+      "text": "Bugün çok fazla giriş isteği geldi. QR kodu kullanın veya yarın tekrar deneyin.",
+      "status": "machine"
+    },
+    "device_link.request.wrong_code": {
+      "text": "Kod eşleşmedi. Hiçbir şey eklenmedi.",
+      "status": "machine"
+    },
+    "device_link.request.yes_its_me": {
+      "text": "Evet, benim",
       "status": "machine"
     },
     "device_link.restored": {
@@ -4036,6 +4140,18 @@
     },
     "devices.pairing.qr_description": {
       "text": "Eşleştirme QR kodu",
+      "status": "machine"
+    },
+    "devices.removed.body": {
+      "text": "Bu cihaz, başka bir cihazdan hesabınızdan kaldırıldı. Yeni mesajlar artık bu cihaza ulaşmıyor. Kullanmak istiyorsanız çıkış yapın, ardından tekrar giriş yapın.",
+      "status": "machine"
+    },
+    "devices.removed.sign_out": {
+      "text": "Çıkış yap",
+      "status": "machine"
+    },
+    "devices.removed.title": {
+      "text": "Bu cihaz kaldırıldı",
       "status": "machine"
     },
     "devices.scan.confirm.body": {
@@ -4100,6 +4216,226 @@
     },
     "ds.clock_skew": {
       "text": "Bu cihazın tarih ve saatini kontrol edin.",
+      "status": "machine"
+    },
+    "folders.add_to_folder": {
+      "text": "Klasöre ekle",
+      "status": "machine"
+    },
+    "folders.all_chats": {
+      "text": "Tüm sohbetler",
+      "status": "machine"
+    },
+    "folders.bar_a11y": {
+      "text": "Klasörler",
+      "status": "machine"
+    },
+    "folders.chat_count": {
+      "text": "{count, plural, one {# sohbet} other {# sohbet}}",
+      "status": "machine"
+    },
+    "folders.delete": {
+      "text": "Klasörü sil",
+      "status": "machine"
+    },
+    "folders.delete_confirm.body": {
+      "text": "İçindeki sohbetler Tüm sohbetler'de kalır.",
+      "status": "machine"
+    },
+    "folders.delete_confirm.title": {
+      "text": "\"{name}\" klasörü silinsin mi?",
+      "status": "machine"
+    },
+    "folders.edit": {
+      "text": "Klasörü düzenle",
+      "status": "machine"
+    },
+    "folders.edit_all": {
+      "text": "Klasörleri düzenle",
+      "status": "machine"
+    },
+    "folders.editor.add_chats": {
+      "text": "Sohbet ekle",
+      "status": "machine"
+    },
+    "folders.editor.discard.confirm": {
+      "text": "Vazgeç",
+      "status": "machine"
+    },
+    "folders.editor.discard.keep": {
+      "text": "Düzenlemeye devam et",
+      "status": "machine"
+    },
+    "folders.editor.discard.title": {
+      "text": "Değişiklikler silinsin mi?",
+      "status": "machine"
+    },
+    "folders.editor.error.save": {
+      "text": "Klasör kaydedilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "folders.editor.exclude.archived": {
+      "text": "Arşivlenenler",
+      "status": "machine"
+    },
+    "folders.editor.exclude.muted": {
+      "text": "Sessize alınanlar",
+      "status": "machine"
+    },
+    "folders.editor.exclude.read": {
+      "text": "Okunanlar",
+      "status": "machine"
+    },
+    "folders.editor.exclude_chats": {
+      "text": "Sohbetleri hariç tut",
+      "status": "machine"
+    },
+    "folders.editor.excluded": {
+      "text": "Hariç tutulanlar",
+      "status": "machine"
+    },
+    "folders.editor.included": {
+      "text": "Dahil edilenler",
+      "status": "machine"
+    },
+    "folders.editor.kind.channels": {
+      "text": "Kanallar",
+      "status": "machine"
+    },
+    "folders.editor.kind.groups": {
+      "text": "Gruplar",
+      "status": "machine"
+    },
+    "folders.editor.kind.one_to_one": {
+      "text": "Bire bir sohbetler",
+      "status": "machine"
+    },
+    "folders.editor.name_placeholder": {
+      "text": "Klasör adı",
+      "status": "machine"
+    },
+    "folders.editor.remove_chat_a11y": {
+      "text": "Kaldır: {name}",
+      "status": "machine"
+    },
+    "folders.empty": {
+      "text": "Şu anda burada bir şey yok",
+      "status": "machine"
+    },
+    "folders.in_folder_a11y": {
+      "text": "Bu klasörde",
+      "status": "machine"
+    },
+    "folders.limit": {
+      "text": "En fazla {count, plural, one {# klasörünüz} other {# klasörünüz}} olabilir.",
+      "status": "machine"
+    },
+    "folders.mark_all_read": {
+      "text": "Tümünü okundu olarak işaretle",
+      "status": "machine"
+    },
+    "folders.new": {
+      "text": "Yeni klasör",
+      "status": "machine"
+    },
+    "folders.new_ellipsis": {
+      "text": "Yeni klasör...",
+      "status": "machine"
+    },
+    "folders.picker.limit_exclude": {
+      "text": "Bir klasörde tek tek en fazla {count, plural, one {# sohbet} other {# sohbet}} hariç tutulabilir. Daha fazlası için tür anahtarlarını kullanın.",
+      "status": "machine"
+    },
+    "folders.picker.limit_include": {
+      "text": "Bir klasöre tek tek en fazla {count, plural, one {# sohbet} other {# sohbet}} eklenebilir. Daha fazlası için tür anahtarlarını kullanın.",
+      "status": "machine"
+    },
+    "folders.pin_limit": {
+      "text": "Bir klasörde en fazla {count, plural, one {# sohbet} other {# sohbet}} sabitleyebilirsiniz.",
+      "status": "machine"
+    },
+    "folders.remove_from_folder": {
+      "text": "Klasörden çıkar",
+      "status": "machine"
+    },
+    "folders.reorder": {
+      "text": "Klasörleri yeniden sırala",
+      "status": "machine"
+    },
+    "folders.settings.drag_hint": {
+      "text": "Sıralamak için sürükleyin",
+      "status": "machine"
+    },
+    "folders.settings.intro": {
+      "text": "Sohbetlerinizi kafanızdaki düzene göre gruplayın. Klasörler tüm cihazlarınızda görünür.",
+      "status": "machine"
+    },
+    "folders.settings.more_a11y": {
+      "text": "Diğer seçenekler: {name}",
+      "status": "machine"
+    },
+    "folders.settings.move_down": {
+      "text": "Aşağı taşı",
+      "status": "machine"
+    },
+    "folders.settings.move_up": {
+      "text": "Yukarı taşı",
+      "status": "machine"
+    },
+    "folders.settings.pending_sync": {
+      "text": "Değişiklikler, bu cihaz yeniden çevrimiçi olduğunda diğer cihazlarınıza ulaşır.",
+      "status": "machine"
+    },
+    "folders.settings.yours": {
+      "text": "Klasörleriniz",
+      "status": "machine"
+    },
+    "folders.suggested.add": {
+      "text": "Ekle",
+      "status": "machine"
+    },
+    "folders.suggested.add_a11y": {
+      "text": "Ekle: {name}",
+      "status": "machine"
+    },
+    "folders.suggested.channels.description": {
+      "text": "Takip ettiğiniz kanallar",
+      "status": "machine"
+    },
+    "folders.suggested.channels.name": {
+      "text": "Kanallar",
+      "status": "machine"
+    },
+    "folders.suggested.groups.description": {
+      "text": "Grup sohbetleri",
+      "status": "machine"
+    },
+    "folders.suggested.groups.name": {
+      "text": "Gruplar",
+      "status": "machine"
+    },
+    "folders.suggested.personal.description": {
+      "text": "Bire bir sohbetler",
+      "status": "machine"
+    },
+    "folders.suggested.personal.name": {
+      "text": "Kişisel",
+      "status": "machine"
+    },
+    "folders.suggested.title": {
+      "text": "Önerilenler",
+      "status": "machine"
+    },
+    "folders.suggested.unread.description": {
+      "text": "Yeni mesajı olan sohbetler",
+      "status": "machine"
+    },
+    "folders.suggested.unread.name": {
+      "text": "Okunmamış",
+      "status": "machine"
+    },
+    "folders.tab_a11y": {
+      "text": "{name}, {count, plural, one {# okunmamış sohbet} other {# okunmamış sohbet}}",
       "status": "machine"
     },
     "group.join.needs_account": {
@@ -4442,6 +4778,14 @@
       "text": "Etkin davet bağlantıları",
       "status": "machine"
     },
+    "invite.links.made_elsewhere": {
+      "text": "Başka bir cihazda oluşturuldu",
+      "status": "machine"
+    },
+    "invite.links.made_elsewhere_hint": {
+      "text": "Başka bir cihazda oluşturuldu. Orada kopyalayın veya burada iptal edin.",
+      "status": "machine"
+    },
     "invite.links.never_expires": {
       "text": "Süresi dolmaz",
       "status": "machine"
@@ -4699,7 +5043,7 @@
       "status": "machine"
     },
     "recovery.device.intro": {
-      "text": "Kullanıcı adınızı girin, ardından oturumu hâlâ açık olan bir cihazda onaylayın ve gösterdiği kodu karşılaştırın. Lakko sunucularının okuyabileceği hiçbir şey gönderilmez. Kamera gerekmez; isterseniz QR kodu da var.",
+      "text": "Kullanıcı adınızı girin, ardından Lakko'yu oturumu hâlâ açık olan bir cihazda açın ve gösterdiği kodu buraya yazın. Lakko'nun sunucularının okuyabileceği hiçbir şey gönderilmez. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
       "status": "machine"
     },
     "recovery.device.intro_qr": {
@@ -5035,7 +5379,7 @@
       "status": "machine"
     },
     "restore_identity.device_intro": {
-      "text": "Oturumu hâlâ açık olan bir cihazda bir istek görünür; orada onaylayın ve kodu karşılaştırın. Aktarım uçtan uca şifrelidir; Lakko sunucuları onu okuyamaz. Kamera gerekmez; isterseniz QR kodu da var.",
+      "text": "Oturumu hâlâ açık olan bir cihaz altı haneli bir kod gösterir; kodu buraya yazın. Aktarım uçtan uca şifrelidir; Lakko'nun sunucuları onu okuyamaz. Kamera gerekmez; isterseniz QR kodu da kullanabilirsiniz.",
       "status": "machine"
     },
     "restore_identity.error.bad_saved_account": {
@@ -5120,6 +5464,46 @@
     },
     "restore_identity.title": {
       "text": "Kimliğinizi geri yükleyin",
+      "status": "machine"
+    },
+    "search.people.add_contact": {
+      "text": "Kişi ekle",
+      "status": "machine"
+    },
+    "search.people.add_contact_title": {
+      "text": "{name} ekle",
+      "status": "machine"
+    },
+    "search.people.channel_result": {
+      "text": "Kanal {handle}",
+      "status": "machine"
+    },
+    "search.people.failed": {
+      "text": "Arama yapılamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "search.people.heading": {
+      "text": "Kişiler",
+      "status": "machine"
+    },
+    "search.people.not_found": {
+      "text": "Kimse bulunamadı. Yazımı kontrol edin veya kişiden bir davet bağlantısı isteyin.",
+      "status": "machine"
+    },
+    "search.people.request_refused": {
+      "text": "İstek gönderilemedi. Kişi, kimlerin kendisini bulabileceğini değiştirmiş olabilir.",
+      "status": "machine"
+    },
+    "search.people.search": {
+      "text": "Kişi ara",
+      "status": "machine"
+    },
+    "search.people.searching_a11y": {
+      "text": "Aranıyor",
+      "status": "machine"
+    },
+    "search.people.send_request": {
+      "text": "İstek gönder",
       "status": "machine"
     },
     "security.identity_changed.body": {
@@ -5734,6 +6118,10 @@
       "text": "Veriler",
       "status": "machine"
     },
+    "settings.section.folders": {
+      "text": "Sohbet klasörleri",
+      "status": "machine"
+    },
     "settings.section.media": {
       "text": "Medya",
       "status": "machine"
@@ -5744,6 +6132,10 @@
     },
     "settings.section.notifications": {
       "text": "Bildirimler",
+      "status": "machine"
+    },
+    "settings.section.privacy": {
+      "text": "Gizlilik",
       "status": "machine"
     },
     "settings.section.profile": {
@@ -5806,6 +6198,14 @@
       "text": "Kullanıcı adı: {message}",
       "status": "machine"
     },
+    "username.error.bind_limited_later": {
+      "text": "Kullanıcı adınızı çok sık değiştirdiniz. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "username.error.bind_limited_minutes": {
+      "text": "Kullanıcı adınızı çok sık değiştirdiniz. {minutes, plural, one {# dakika} other {# dakika}} sonra tekrar deneyin.",
+      "status": "machine"
+    },
     "username.error.empty": {
       "text": "Bir kullanıcı adı girin",
       "status": "machine"
@@ -5828,6 +6228,126 @@
     },
     "username.hint.shown_as": {
       "text": "Şöyle görünecek: {username}",
+      "status": "machine"
+    },
+    "who_can_find_me.applying_a11y": {
+      "text": "Uygulanıyor",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts": {
+      "text": "Kişilerimin kişileri",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_helper": {
+      "text": "Kişilerinizin eklediği kişiler.",
+      "status": "machine"
+    },
+    "who_can_find_me.contacts_of_contacts_spreading": {
+      "text": "Kişilerinizin kişileri, kişileriniz Lakko'yu bir sonraki açışında sizi bulabilecek.",
+      "status": "machine"
+    },
+    "who_can_find_me.groups": {
+      "text": "Gruplarımın ve kanallarımın üyeleri",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.all": {
+      "text": "Tüm gruplar ve kanallar",
+      "status": "machine"
+    },
+    "who_can_find_me.groups.chosen": {
+      "text": "Yalnızca seçtiklerim",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_all_helper": {
+      "text": "Bulunduğunuz gruplardaki ve kanallardaki herkes.",
+      "status": "machine"
+    },
+    "who_can_find_me.groups_chosen_helper": {
+      "text": "Yalnızca seçtikleriniz ({chosen}/{total}).",
+      "status": "machine"
+    },
+    "who_can_find_me.lede": {
+      "text": "Sizi kullanıcı adınızla veya adınızla bulabilen herkes size kişi isteği gönderebilir.",
+      "status": "machine"
+    },
+    "who_can_find_me.lede_link": {
+      "text": "Davet bağlantınıza veya QR kodunuza sahip kişiler size her zaman ulaşabilir.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.channels": {
+      "text": "Kanallar",
+      "status": "machine"
+    },
+    "who_can_find_me.list.choose": {
+      "text": "Grupları ve kanalları seç",
+      "status": "machine"
+    },
+    "who_can_find_me.list.empty": {
+      "text": "Henüz hiçbir grupta veya kanalda değilsiniz.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.groups": {
+      "text": "Gruplar",
+      "status": "machine"
+    },
+    "who_can_find_me.list.no_match": {
+      "text": "Eşleşen grup veya kanal yok.",
+      "status": "machine"
+    },
+    "who_can_find_me.list.search": {
+      "text": "Grup ve kanal ara",
+      "status": "machine"
+    },
+    "who_can_find_me.members_can_find_me": {
+      "text": "Üyeler beni bulabilir",
+      "status": "machine"
+    },
+    "who_can_find_me.members_excluded_notice": {
+      "text": "Artık yalnızca seçtiğiniz gruplar ve kanallar. Değiştirmek için: {privacy}.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone": {
+      "text": "Herkes",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.everyone_helper": {
+      "text": "Herkes sizi kullanıcı adınızla veya adınızla bulabilir.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody": {
+      "text": "Hiç kimse",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.nobody_helper": {
+      "text": "Size yalnızca davet bağlantınıza veya QR kodunuza sahip kişiler ulaşabilir.",
+      "status": "machine"
+    },
+    "who_can_find_me.mode.some": {
+      "text": "Bazı kişiler",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_after_create": {
+      "text": "Hesabınız oluşturulur oluşturulmaz açılır.",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_change": {
+      "text": "Değiştir",
+      "status": "machine"
+    },
+    "who_can_find_me.signup_line": {
+      "text": "Kişilerinizin kişileri ve gruplarınızdaki ve kanallarınızdaki kişiler sizi bulabilir. Bunu Ayarlar > Gizlilik bölümünden değiştirebilirsiniz.",
+      "status": "machine"
+    },
+    "who_can_find_me.status.failed": {
+      "text": "Sizi kimlerin bulabileceği güncellenemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "who_can_find_me.status.offline": {
+      "text": "Yeniden çevrimiçi olduğunuzda uygulanacak.",
+      "status": "machine"
+    },
+    "who_can_find_me.title": {
+      "text": "Beni kimler bulabilir",
       "status": "machine"
     }
   }

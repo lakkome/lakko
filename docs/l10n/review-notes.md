@@ -515,3 +515,144 @@ recovery area (`docs/l10n/batch-1-auth.md`).
   ("Отправлено # вложение") because the sender is not the subject;
   pt-BR/tr keep "sent" with an implied sender.
 - **`call.settings.mirror`:** ru "Зеркалить" is colloquial.
+
+## Batch 6 (main features): ar, es, fa, he, hi
+
+### Terms used
+
+| en | ar | es | fa | he | hi |
+|---|---|---|---|---|---|
+| folder | مجلد | carpeta | پوشه | תיקייה | फ़ोल्डर |
+| All chats | كل الدردشات | Todos los chats | همه گفتگوها | כל הצ׳אטים | सभी चैट |
+| one-to-one chats | الدردشات الفردية | chats individuales | گفتگوهای دونفره | צ׳אטים אישיים | निजी चैट |
+| exclude | استبعاد | excluir | مستثنا کردن | החרגה | बाहर रखना |
+| member card | بطاقة | tarjeta | کارت | כרטיס | कार्ड |
+| sign-in request | طلب تسجيل دخول | solicitud de inicio de sesión | درخواست ورود | בקשת התחברות | साइन-इन का अनुरोध |
+| Who can find me | من يمكنه العثور عليّ | Quién puede encontrarme | چه کسی می‌تواند مرا پیدا کند | מי יכול למצוא אותי | मुझे कौन ढूँढ सकता है |
+| Contacts of my contacts | جهات اتصال جهات اتصالي | Contactos de mis contactos | مخاطبان مخاطبانم | אנשי הקשר של אנשי הקשר שלי | मेरे संपर्कों के संपर्क |
+| Privacy | الخصوصية | Privacidad | حریم خصوصی | פרטיות | प्राइवेसी |
+| reach (someone) | الوصول إليك | contactarte | ارتباط گرفتن | ליצור קשר | आप तक पहुँचना |
+
+### Across languages
+
+- **`device_link.request.never_share`** (security-critical): "read this code to
+  anyone" is rendered as "read aloud / dictate" (ar "لا تقرأ ... لأي أحد",
+  es "Nunca le leas", fa "برای کسی نخوانید", he "אל תקריאו", hi "पढ़कर न
+  सुनाएँ"). A reviewer may prefer the broader "never share/give" so the
+  warning also covers typing the code into a chat.
+- **`who_can_find_me.lede`** (security-critical): "ask to be your contact"
+  becomes "ask to become your contact" in all five; es avoids the
+  reciprocal "seáis contactos" (vosotros) with "pedir ser tu contacto".
+- **`folders.editor.exclude.read`**: the adjective "Read" (already read) is
+  a past participle agreeing with "chats" (es "Leídos", ar "المقروءة",
+  fa "خوانده‌شده", he "שנקראו", hi "पढ़ी गई"); check it is not read as the
+  verb.
+- **`folders.picker.limit_include` / `_exclude`**: restructured around the
+  plural; "kind toggles" is "interruptores por tipo" / "مفاتيح الأنواع" /
+  "کلیدهای نوع گفتگو" / "מתגי הסוגים" / "प्रकार वाले स्विच".
+- **Suggested folder names** (`folders.suggested.*.name`) become the folder's
+  own stored name once added, so they should read like a name, not a
+  label: es "Personal", "No leídos"; ar "شخصي", "غير المقروءة"; fa
+  "شخصی", "خوانده‌نشده"; he "אישי", "לא נקראו"; hi "निजी", "बिना पढ़ी".
+- **`who_can_find_me.members_excluded_notice`**: {privacy} is a link reading
+  the translated "Privacy"; he attaches it with the prefix ב ("ב{privacy}"),
+  which renders as "בפרטיות" with no space. ar/fa/hi/es use a plain
+  preposition before it.
+- **`recovery.device.intro` / `restore_identity.device_intro`**
+  (security-critical, retranslated): "logged in" uses each language's
+  existing log-in term; "end-to-end encrypted" follows earlier batches.
+
+### Per language
+
+- **ar**: masculine singular imperative as in earlier batches.
+  `folders.limit` / `_pin_limit` use "... كحد أقصى" around the plural rather
+  than "حتى". `channels.members.unreadable` zero form says there are no such
+  cards (the line should not render at zero anyway). `devices.removed.title`
+  is "أُزيل هذا الجهاز" (passive, no gender issue).
+- **es**: tú register. `search.people.request_refused` uses "esa persona ...
+  encontrarla" to avoid leísmo/gender of "them". `folders.suggested.title` is
+  "Sugeridas" (agreeing with carpetas).
+- **fa**: formal plural. `folders.chat_count` uses the singular noun after a
+  number in both forms (Persian grammar). `devices.removed.body` is "از طریق
+  دستگاه دیگری". "reach you" is "با شما ارتباط بگیرند", not "تماس" (which
+  would read as a call).
+- **he**: plural address. `channels.members.you` is "את/ה" as in batch 5;
+  "חבר"/"חברים" for members is masculine. `device_link.request.yes_its_me`
+  "כן, זה אני" is gender-neutral. `folders.editor.discard.confirm` is "ביטול
+  השינויים" (a bare "ביטול" would collide with Cancel).
+- **hi**: आप register. "Edit" follows earlier batches' "एडिट"; `folders.edit`
+  "फ़ोल्डर एडिट करें" vs `folders.edit_all` "फ़ोल्डरों को एडिट करें" — a
+  reviewer may want a clearer distinction. `folders.chat_count` uses "चैट" in
+  both plural forms (invariant in Hindi). Privacy is the loanword
+  "प्राइवेसी"; "गोपनीयता" is the formal alternative if earlier screens use it.
+
+## Batch 6 (main features): pt-BR, ru, tr, uk, zh-Hans
+
+- **Glossary.** folder: pasta / папка / klasör / папка / 文件夹 (Telegram
+  zh uses 文件夹 for chat folders too; 分组 was the alternative); chat:
+  conversa / чат / sohbet / чат / 聊天 (pt-BR follows `chats.*` "conversas",
+  not "chat"); member: membro / участник / üye / учасник / 成员; card
+  (channel member card): cartão / карточка / kart / картка / 名片; sign-in
+  request: solicitação de entrada / запрос на вход / giriş isteği / запит
+  на вхід / 登录请求; invite link and QR code as in earlier batches;
+  Privacy: Privacidade / Конфиденциальность / Gizlilik / Конфіденційність /
+  隐私.
+- **pt-BR "Exclude" vs "Delete" (`folders.editor.exclude_chats`,
+  `folders.editor.excluded`, `folders.picker.limit_exclude`).** "Excluir"
+  is pt-BR for delete (`folders.delete` = "Excluir pasta"), so leaving
+  chats out reads "Deixar conversas de fora" / "Deixadas de fora". The
+  heading pair is then "Incluídas" / "Deixadas de fora"; check it reads
+  well as two section headings.
+- **"Discard changes?"** ru "Отменить изменения?" + button "Не сохранять";
+  uk "Скасувати зміни?" + "Не зберігати"; tr "Değişiklikler silinsin mi?"
+  + "Vazgeç" (tr button means "give up", may read as Cancel next to
+  "Düzenlemeye devam et").
+- **`device_link.request.never_share` (security-critical).** "Never read
+  this code to anyone": rendered as "never tell/say" (ru "сообщайте", uk
+  "повідомляйте", pt-BR "diga", tr "söylemeyin", zh 告诉). The point is
+  that typing or reading it out gives away the account; a reviewer may
+  prefer a stronger "do not give it to anyone".
+- **"Signed in / still logged in" (`recovery.device.intro`,
+  `restore_identity.device_intro`, `device_link.code.intro`, all
+  security-critical).** ru/uk "где вы ещё не вышли из аккаунта" / "де ви ще
+  не вийшли з облікового запису"; pt-BR "ainda esteja conectado" (same as
+  the earlier `device_link.confirm_there`); tr "oturumu hâlâ açık"; zh
+  仍处于登录状态. pt-BR recovery intro reorders the sentence ("digite seu
+  nome de usuário e abra ...; depois digite aqui o código").
+- **"by username or name" (Who can find me, security-critical).** ru "по
+  имени пользователя или по имени", uk "за ім’ям користувача або за
+  ім’ям": the two "имени" read close together; "name" here is the profile
+  display name. A reviewer may prefer "по нику" / "по отображаемому имени";
+  I kept the catalog's existing term for username.
+- **`who_can_find_me.lede`.** "can ask to be your contact" rendered as
+  "can send you a contact request" in ru/uk/tr (matches
+  `invite.links.desc`); pt-BR/zh keep "ask to be your contact".
+- **`who_can_find_me.members_excluded_notice` (`{privacy}` link).** ru/uk
+  "в разделе {privacy}", pt-BR "Altere em {privacy}", zh "可在{privacy}中更改"
+  (no spaces), tr has no natural place for a link in the sentence and uses
+  label form "Değiştirmek için: {privacy}." — check with the rendered link.
+- **`who_can_find_me.signup_line`.** The path is quoted as on screen: ru/uk
+  «Настройки» > «Конфиденциальность», zh “设置”>“隐私”, pt-BR/tr bare.
+- **Plurals.** ru/uk `folders.limit` uses genitive after "не более" (ru "не
+  более # папки/папок"), uk accusative after "щонайбільше" ("# папку/папки/
+  папок"). tr repeats the same form in one/other. zh `channels.members.unreadable`
+  is one sentence with "有 # 位成员".
+- **tr apostrophes.** "Lakko'yu", "Tüm sohbetler'de" (suffix on a quoted
+  UI name; Turkish style would normally use quotes: "Tüm sohbetler"de).
+  No apostrophe sits before `{` or `#`.
+- **tr `folders.limit`** "En fazla # klasörünüz olabilir" ("you can have at
+  most # folders of yours") — the possessive is inside the plural branches.
+- **zh account term.** I used 账户 (Settings section "账户"); the device-link
+  errors of earlier batches use 账号. One of the two should win.
+- **zh `search.people.heading` / `.search`** use 用户 ("users") rather than
+  人 for "People"; 搜索用户 reads more natural than 搜索人.
+- **ru/uk `channels.members.back_a11y`** "Назад к сведениям о канале" /
+  "Назад до відомостей про канал" — check against how "channel info" is
+  named on screen.
+- **Tooling note.** `just l10n-check` reports OK for all languages, then
+  fails on "stale: apps/web/src/l10n/catalog (run just l10n-compile)"; the
+  compiled web catalog is outside my files and was not regenerated.
+
+### Batch 6 top-up (keys added by iOS and Android)
+
+The six keys iOS and Android added (`device_link.code.intro_native`, `.title`, `.use_instead`, `folders.in_folder_a11y`, `search.people.add_contact_title`, `who_can_find_me.list.choose`) were translated by the coordinator. `search.people.add_contact_title` ("Add {name}") is a dialog title naming the person to send a request to; ru/uk use "Добавить: {name}" / "Додати: {name}" to avoid declining the name.

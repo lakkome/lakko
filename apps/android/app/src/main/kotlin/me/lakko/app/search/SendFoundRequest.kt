@@ -4,6 +4,7 @@
 package me.lakko.app.search
 
 import kotlin.coroutines.cancellation.CancellationException
+import me.lakko.app.l10n.UiText
 
 /*
  * Sending the contact request to a person a search found. The Android twin
@@ -22,7 +23,7 @@ import kotlin.coroutines.cancellation.CancellationException
 public sealed interface SendOutcome {
     public data object Sent : SendOutcome
     public data object Refused : SendOutcome
-    public data class Failed(val message: String) : SendOutcome
+    public data class Failed(val message: UiText) : SendOutcome
 }
 
 /** The identity bundle of an account. */
@@ -50,8 +51,8 @@ public interface SendDeps {
      *  way (the username no longer resolves: they left Everyone). */
     public fun isRefusal(error: Throwable): Boolean
 
-    /** The sentence for any other failure. */
-    public fun errorMessage(error: Throwable): String
+    /** The sentence for any other failure, rendered from its kind. */
+    public fun errorMessage(error: Throwable): UiText
 }
 
 private fun hexToBytes(hex: String): ByteArray? {

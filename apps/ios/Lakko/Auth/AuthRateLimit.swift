@@ -68,12 +68,13 @@ public enum AuthRateLimit {
     /// minutes.` with M = ceil(retry_after_secs / 60), `Try again later.` when
     /// the wait is over an hour or unknown.
     public static func handleBindLimitedCopy(retryAfterSecs: Int?) -> String {
-        let lead = "You have changed your username too often."
+        // One whole sentence per case (batch 6), the minutes a plural argument.
         guard let secs = retryAfterSecs, secs > 0, secs <= 3600 else {
-            return lead + " Try again later."
+            return Localization.text("username.error.bind_limited_later")
         }
         let minutes = (secs + 59) / 60
-        return lead + " Try again in \(minutes) " + (minutes == 1 ? "minute." : "minutes.")
+        return Localization.text(
+            "username.error.bind_limited_minutes", counts: ["minutes": UInt64(minutes)])
     }
 
     /// The copy for one refusal.

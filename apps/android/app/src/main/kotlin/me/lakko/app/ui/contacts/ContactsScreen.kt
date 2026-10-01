@@ -763,7 +763,7 @@ private fun InviteLinksSheet(
                     LinkRow(
                         title = row.label.ifBlank { t("chat.invite_link.label") },
                         meta = meta,
-                        note = if (share is InviteRowShare.CreatedElsewhere) INVITE_CREATED_ELSEWHERE_COPY else null,
+                        note = if (share is InviteRowShare.CreatedElsewhere) INVITE_CREATED_ELSEWHERE_COPY.text() else null,
                         onCopy = shareUrl?.let { url -> { onCopy(url) } },
                         onShare = shareUrl?.let { url -> { onShare(url) } },
                         trailing = {

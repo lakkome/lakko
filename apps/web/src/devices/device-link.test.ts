@@ -590,14 +590,14 @@ describe("new device: trusting the outcome", () => {
     declined.setStatus({ pending: false });
     await declined.flow.poll();
     expect(declined.flow.view().kind).toBe("declined");
-    expect(initiatorEndMessage(declined.flow.view())).toBe("Declined on another device.");
+    expect(initiatorEndMessage(declined.flow.view())?.()).toBe("Declined on another device.");
 
     const expired = initiatorHarness();
     await expired.flow.start();
     expired.advance(600_000);
     await expired.flow.poll();
     expect(expired.flow.view().kind).toBe("expired");
-    expect(initiatorEndMessage(expired.flow.view())).toBe("This request expired. Start again.");
+    expect(initiatorEndMessage(expired.flow.view())?.()).toBe("This request expired. Start again.");
   });
 
   it("an offline payload post is re-sent on the next poll; already-used counts as posted", async () => {

@@ -117,8 +117,8 @@ struct SettingsScreen: View {
             }
 
             // `docs/ux/who-can-find-me.md` section 2 — Privacy, after Profile.
-            Section("Privacy") {
-                row("Who can find me", systemImage: "person.2.badge.gearshape") {
+            Section(l10n.t("settings.section.privacy")) {
+                row(l10n.t("who_can_find_me.title"), systemImage: "person.2.badge.gearshape") {
                     onOpen(.whoCanFindMe)
                 }
             }
@@ -134,7 +134,7 @@ struct SettingsScreen: View {
             // `docs/ux/chat-folders.md` section 4 — between Notifications
             // (not a section on this client) and Appearance.
             Section {
-                row("Chat folders", systemImage: "folder") { onOpen(.chatFolders(reorder: false)) }
+                row(l10n.t("settings.section.folders"), systemImage: "folder") { onOpen(.chatFolders(reorder: false)) }
             }
 
             Section(l10n.t("settings.section.appearance")) {

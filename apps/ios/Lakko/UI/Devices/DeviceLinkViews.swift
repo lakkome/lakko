@@ -12,6 +12,7 @@ struct DeviceLinkCodeEntry: View {
     let onContinue: () -> Void
     /// Post a new request (one try per request).
     let onStartAgain: () -> Void
+    @ObservedObject private var l10n = Localization.shared
 
     /// Digits only, at most six (spaces and dashes of a paste dropped).
     static func digits(_ input: String) -> String {
@@ -25,6 +26,7 @@ struct DeviceLinkCodeEntry: View {
                 .textContentType(.oneTimeCode)
                 .font(.title2.monospacedDigit())
                 .textFieldStyle(.roundedBorder)
+                .accessibilityLabel(l10n.t("device_link.code.field_a11y"))
                 .disabled(link.phase != .enterCode)
                 .onChange(of: typedCode) { _, value in
                     let clean = Self.digits(value)
@@ -36,11 +38,14 @@ struct DeviceLinkCodeEntry: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             case .enterCode:
-                Button("Continue", action: onContinue)
+                Text(l10n.t("device_link.code.enter_six_digits"))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button(l10n.t("common.continue"), action: onContinue)
                     .buttonStyle(.borderedProminent)
                     .disabled(Self.digits(typedCode).count != 6)
             case .checking:
-                ProgressView("Checking...")
+                ProgressView(l10n.t("common.checking"))
             case .confirmed:
                 EmptyView()
             case .wrongCode:
@@ -50,7 +55,7 @@ struct DeviceLinkCodeEntry: View {
             case .expired:
                 hint(DeviceLinkJoinCopy.expired)
             case .failed(let message):
-                hint(message)
+                hint(message.text)
             }
         }
     }
@@ -60,7 +65,7 @@ struct DeviceLinkCodeEntry: View {
             Label(text, systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red)
                 .font(.footnote)
-            Button("Start again", action: onStartAgain)
+            Button(l10n.t("device_link.code.start_again"), action: onStartAgain)
         }
     }
 }
@@ -69,6 +74,7 @@ struct DeviceLinkCodeEntry: View {
 /// new device's payload is acted on as soon as it arrives.
 struct DeviceLinkRequestModal: View {
     @ObservedObject var flow: DeviceLinkResponderFlow
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         VStack(spacing: 16) {
@@ -91,7 +97,8 @@ struct DeviceLinkRequestModal: View {
                     .multilineTextAlignment(.center)
                 Text(code)
                     .font(.system(size: 40, weight: .semibold, design: .monospaced))
-                    .accessibilityLabel(code.replacingOccurrences(of: " ", with: ""))
+                    .accessibilityLabel(DeviceLinkModalCopy.codeA11y)
+                    .accessibilityValue(code.replacingOccurrences(of: " ", with: ""))
                 Text(DeviceLinkModalCopy.warning)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -141,7 +148,7 @@ struct DeviceLinkRequestModal: View {
     private func info(_ text: String) -> some View {
         VStack(spacing: 12) {
             Text(text).multilineTextAlignment(.center)
-            Button("OK") { flow.dismiss() }
+            Button(l10n.t("common.ok")) { flow.dismiss() }
                 .buttonStyle(.borderedProminent)
         }
     }

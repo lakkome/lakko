@@ -135,7 +135,7 @@ public struct InviteLandingScreen: View {
         case .exhausted: return l10n.t("invite.contact.result.used_up_title")
         case .notFound: return l10n.t("invite.contact.result.not_found_title")
         case .malformedSlug: return l10n.t("invite.contact.invalid_title")
-        case .damaged: return "Invite link damaged"
+        case .damaged: return l10n.t("invite.contact.invalid_title")
         case .rateLimited: return l10n.t("invite.contact.result.rate_limited_title")
         case .requiresReauth: return l10n.t("chat.reauth.title")
         case .failed: return l10n.t("invite.contact.result.failed_title")
@@ -158,7 +158,8 @@ public struct InviteLandingScreen: View {
         case .notFound:
             return l10n.t("invite.contact.no_longer_valid")
         case .malformedSlug:
-            return "This link is incomplete. Ask for it to be sent again."
+            // The web renders a fragment-less link as the invalid panel.
+            return l10n.t("invite.contact.invalid_body")
         case .damaged:
             return l10n.t("invite.link.damaged")
         case .rateLimited:

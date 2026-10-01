@@ -113,8 +113,7 @@ internal const val INVITE_UNLIMITED_USES: Long = 0xFFFF_FFFFL
 
 /** UX 5.3 — the line a row shows in place of Copy and Share when this device
  *  does not hold the link's secret. Revoke stays. */
-public const val INVITE_CREATED_ELSEWHERE_COPY: String =
-    "Created on another device. Copy it there, or revoke it here."
+public val INVITE_CREATED_ELSEWHERE_COPY: UiText = UiText("invite.links.made_elsewhere_hint")
 
 /** One row of the "Invite links" sheet. */
 public data class InviteLinkRow(

@@ -589,8 +589,8 @@ fun JoinCallScreen(
                 TextButton(onClick = onExit) { Text(t("common.back")) }
             }
             ui.damaged -> {
-                Text(me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY)
-                TextButton(onClick = onExit) { Text("Go back") }
+                Text(me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY.text())
+                TextButton(onClick = onExit) { Text(t("common.back")) }
             }
             ui.decoded == null || ui.decoded?.valid == false -> {
                 Text(t("call.link.invalid"))

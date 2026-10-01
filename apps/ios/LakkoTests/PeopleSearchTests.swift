@@ -109,7 +109,7 @@ final class PeopleSearchTests: XCTestCase {
         XCTAssertEqual(outcome, .failed)
         XCTAssertEqual(
             PeopleSearch.message(for: .failed),
-            "Couldn't search. Check your connection and try again.")
+            Localization.text("search.people.failed"))
     }
 
     /// A person in Everyone answers the username lookup; nothing to sign with,
