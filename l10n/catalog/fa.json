@@ -2,6 +2,26 @@
   "format": 1,
   "language": "fa",
   "messages": {
+    "app.not_found.body": {
+      "text": "در این نشانی چیزی نیست.",
+      "status": "machine"
+    },
+    "app.not_found.title": {
+      "text": "صفحه پیدا نشد",
+      "status": "machine"
+    },
+    "app.update.ready": {
+      "text": "نسخه‌ی جدید Lakko آماده است.",
+      "status": "machine"
+    },
+    "app.update.reload": {
+      "text": "بارگذاری دوباره",
+      "status": "machine"
+    },
+    "app.update.reloading": {
+      "text": "در حال بارگذاری دوباره...",
+      "status": "machine"
+    },
     "auth.brand.body": {
       "text": "گفتگوها، گروه‌ها، کانال‌ها و تماس‌ها به‌طور پیش‌فرض رمزگذاری سرتاسری دارند. سرورهای Lakko هرگز پیام‌های شما را نمی‌بینند.",
       "status": "machine"
@@ -4062,6 +4082,10 @@
       "text": "فقط یک خط",
       "status": "machine"
     },
+    "display_name.error.signed_out": {
+      "text": "برای تعیین نامتان وارد شوید.",
+      "status": "machine"
+    },
     "display_name.error.too_long": {
       "text": "حداکثر {count, plural, one {# نویسه} other {# نویسه}}",
       "status": "machine"
@@ -4540,6 +4564,10 @@
     },
     "nav.contacts": {
       "text": "مخاطبان",
+      "status": "machine"
+    },
+    "nav.rail_a11y": {
+      "text": "اصلی",
       "status": "machine"
     },
     "nav.settings": {
@@ -5756,6 +5784,22 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "امروز افراد زیادی را جستجو کرده‌اید. فردا دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "update.available.message": {
+      "text": "نسخه‌ی جدید Lakko در دسترس است.",
+      "status": "machine"
+    },
+    "update.available.opens_app_store_hint": {
+      "text": "App Store را باز می‌کند",
+      "status": "machine"
+    },
+    "update.available.update": {
+      "text": "به‌روزرسانی",
+      "status": "machine"
+    },
+    "update.available.update_play_a11y": {
+      "text": "به‌روزرسانی، Play Store را باز می‌کند",
       "status": "machine"
     },
     "username.a11y_hint": {

@@ -46,7 +46,7 @@ struct CallsScreen: View {
     /// Start a group video call and land in it. Returns the one sentence to
     /// show when it could not start (another call holds the slot, or there is
     /// no session), `nil` when it did.
-    let onNewCall: () async -> String?
+    let onNewCall: () async -> UiText?
     /// Open the conversation a row belongs to.
     let onOpenConversation: (_ groupIdHex: String, _ kind: CallHistoryKind) -> Void
     /// Call that conversation back, in the mode the row records.
@@ -57,11 +57,12 @@ struct CallsScreen: View {
 
     @State private var joinByLinkPresented = false
     @State private var pastedLink = ""
-    @State private var joinError: String?
+    @State private var joinError: UiText?
     /// A call is being started. Brief — the press founds the call locally —
     /// but long enough that a second press must not found a second one.
     @State private var starting = false
-    @State private var startError: String?
+    /// Kept as a message so an alert already up follows a language switch.
+    @State private var startError: UiText?
 
     private let calendar = Calendar.current
     /// The interface language, so day headings and times follow it (ADR-0058).
@@ -106,7 +107,7 @@ struct CallsScreen: View {
             ) { _ in
                 Button(l10n.t("common.ok"), role: .cancel) { startError = nil }
             } message: { message in
-                Text(message)
+                Text(message.text)
             }
     }
 
@@ -241,7 +242,7 @@ struct CallsScreen: View {
                 }
                 if let joinError {
                     Section {
-                        Text(joinError)
+                        Text(joinError.text)
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoDanger)
                     }
@@ -267,7 +268,7 @@ struct CallsScreen: View {
         guard let url = URL(string: trimmed),
               InviteIntake.slug(from: url.path, prefix: CallInviteUrl.urlPrefix) != nil
         else {
-            joinError = Localization.text("call.history.join_invalid")
+            joinError = .key("call.history.join_invalid")
             return
         }
         dismissJoinSheet()

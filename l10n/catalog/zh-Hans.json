@@ -2,6 +2,26 @@
   "format": 1,
   "language": "zh-Hans",
   "messages": {
+    "app.not_found.body": {
+      "text": "此地址没有任何内容。",
+      "status": "machine"
+    },
+    "app.not_found.title": {
+      "text": "找不到页面",
+      "status": "machine"
+    },
+    "app.update.ready": {
+      "text": "新版 Lakko 已准备就绪。",
+      "status": "machine"
+    },
+    "app.update.reload": {
+      "text": "重新加载",
+      "status": "machine"
+    },
+    "app.update.reloading": {
+      "text": "正在重新加载...",
+      "status": "machine"
+    },
     "auth.brand.body": {
       "text": "聊天、群组、频道和通话默认端到端加密。Lakko 的服务器永远看不到你的消息。",
       "status": "machine"
@@ -4062,6 +4082,10 @@
       "text": "只能有一行",
       "status": "machine"
     },
+    "display_name.error.signed_out": {
+      "text": "请登录后设置你的名字。",
+      "status": "machine"
+    },
     "display_name.error.too_long": {
       "text": "最多 {count, plural, other {# 个字符}}",
       "status": "machine"
@@ -4540,6 +4564,10 @@
     },
     "nav.contacts": {
       "text": "联系人",
+      "status": "machine"
+    },
+    "nav.rail_a11y": {
+      "text": "主导航",
       "status": "machine"
     },
     "nav.settings": {
@@ -5756,6 +5784,22 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "你今天查找的人太多了。请明天再试。",
+      "status": "machine"
+    },
+    "update.available.message": {
+      "text": "有新版 Lakko 可用。",
+      "status": "machine"
+    },
+    "update.available.opens_app_store_hint": {
+      "text": "打开 App Store",
+      "status": "machine"
+    },
+    "update.available.update": {
+      "text": "更新",
+      "status": "machine"
+    },
+    "update.available.update_play_a11y": {
+      "text": "更新，将打开 Play 商店",
       "status": "machine"
     },
     "username.a11y_hint": {

@@ -103,7 +103,32 @@ export const NOTIFICATION_STRINGS_EN = Object.freeze({
   accept: "Accept",
   decline: "Decline",
   incomingCall: "Incoming call",
+  newMessage: "New message",
+  /** @type {readonly string[]} */
+  attachments: Object.freeze([]),
 });
+
+/**
+ * How many attachment counts the page renders ahead of time. The line
+ * "Sent 3 attachments" is a plural message, and the worker cannot run the
+ * plural rules, so the page stores it already rendered for the counts
+ * 1..{@link NOTIFICATION_ATTACHMENT_COUNTS}; a larger count reads in English.
+ */
+export const NOTIFICATION_ATTACHMENT_COUNTS = 99;
+
+/**
+ * The attachment-only preview line for `count` attachments: the stored,
+ * already-rendered line for that count, English otherwise.
+ *
+ * @param {{ attachments: readonly string[] }} strings
+ * @param {number} count  At least 1.
+ * @returns {string}
+ */
+export function attachmentsLine(strings, count) {
+  const stored = strings.attachments[count - 1];
+  if (typeof stored === "string" && stored.length > 0) return stored;
+  return count === 1 ? "Sent an attachment" : `Sent ${count} attachments`;
+}
 
 /** The Cache Storage cache the page keeps the notification words in. */
 export const NOTIFICATION_STRINGS_CACHE = "lakko-l10n";
@@ -120,12 +145,15 @@ const MAX_NOTIFICATION_STRING = 200;
  * English otherwise.
  *
  * @param {unknown} raw
- * @returns {{ voiceCall: string, videoCall: string, accept: string, decline: string, incomingCall: string }}
+ * `attachments` is kept entry by entry: a malformed entry is dropped to an
+ * empty string, which {@link attachmentsLine} reads as English.
+ *
+ * @returns {{ voiceCall: string, videoCall: string, accept: string, decline: string, incomingCall: string, newMessage: string, attachments: string[] }}
  */
 export function notificationStrings(raw) {
   /** @type {Record<string, unknown>} */
   const source = typeof raw === "object" && raw !== null ? /** @type {Record<string, unknown>} */ (raw) : {};
-  /** @param {"voiceCall" | "videoCall" | "accept" | "decline" | "incomingCall"} key */
+  /** @param {"voiceCall" | "videoCall" | "accept" | "decline" | "incomingCall" | "newMessage"} key */
   const pick = (key) => {
     const v = source[key];
     return typeof v === "string" && v.length > 0 && v.length <= MAX_NOTIFICATION_STRING
@@ -138,6 +166,12 @@ export function notificationStrings(raw) {
     accept: pick("accept"),
     decline: pick("decline"),
     incomingCall: pick("incomingCall"),
+    newMessage: pick("newMessage"),
+    attachments: Array.isArray(source.attachments)
+      ? source.attachments
+          .slice(0, NOTIFICATION_ATTACHMENT_COUNTS)
+          .map((v) => (typeof v === "string" && v.length <= MAX_NOTIFICATION_STRING ? v : ""))
+      : [],
   };
 }
 

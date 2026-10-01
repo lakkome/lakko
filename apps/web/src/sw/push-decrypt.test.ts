@@ -318,6 +318,17 @@ describe("decryptPushPreview — happy path", () => {
     expect(out?.body).toBe("Sent 2 attachments");
   });
 
+  it("renders the attachment hint in the words the page stored (ADR-0058)", async () => {
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({
+        messages: [msg(42, { kind: "chat", text: "", attachmentCount: 2 })],
+      })),
+      notificationWords: { attachments: ["Отправлено вложение", "Отправлено 2 вложения"] },
+    });
+    const out = await decryptPushPreview(wake(), deps);
+    expect(out?.body).toBe("Отправлено 2 вложения");
+  });
+
   it("uses the app's persisted cursor as the READ-ONLY fetch start", async () => {
     const { deps, dsFetchGroup } = baseDeps({
       startCursor: vi.fn(async () => 30),

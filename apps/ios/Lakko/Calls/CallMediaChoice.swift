@@ -83,6 +83,15 @@ public enum CallMediaChoice {
         return Localization.text("call.start.no_camera")
     }
 
+    /// ``noCameraNotice(for:hasCamera:)`` held as a message, for the host that
+    /// keeps it while the call rings out: it follows a language switch.
+    public static func noCameraNoticeText(
+        for button: CallButtonKind, hasCamera: Bool
+    ) -> UiText? {
+        guard button == .video, !hasCamera else { return nil }
+        return .key("call.start.no_camera")
+    }
+
     /// The media flags the offer carries: exactly what the buttons said when the
     /// call was placed — never what the header button asked for. A voice call
     /// dials `(audio: true, video: false)`; the camera check's two round buttons

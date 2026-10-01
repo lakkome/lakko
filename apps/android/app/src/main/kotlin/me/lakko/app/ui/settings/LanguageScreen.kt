@@ -73,7 +73,7 @@ public fun LanguageScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 title = { Text(t("settings.language.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )

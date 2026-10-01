@@ -2,6 +2,26 @@
   "format": 1,
   "language": "es",
   "messages": {
+    "app.not_found.body": {
+      "text": "No hay nada en esta dirección.",
+      "status": "machine"
+    },
+    "app.not_found.title": {
+      "text": "Página no encontrada",
+      "status": "machine"
+    },
+    "app.update.ready": {
+      "text": "Hay una nueva versión de Lakko lista.",
+      "status": "machine"
+    },
+    "app.update.reload": {
+      "text": "Recargar",
+      "status": "machine"
+    },
+    "app.update.reloading": {
+      "text": "Recargando...",
+      "status": "machine"
+    },
     "auth.brand.body": {
       "text": "Chats, grupos, canales y llamadas, con cifrado de extremo a extremo por defecto. Los servidores de Lakko nunca ven tus mensajes.",
       "status": "machine"
@@ -4062,6 +4082,10 @@
       "text": "Solo una línea",
       "status": "machine"
     },
+    "display_name.error.signed_out": {
+      "text": "Inicia sesión para establecer tu nombre.",
+      "status": "machine"
+    },
     "display_name.error.too_long": {
       "text": "Como máximo {count, plural, one {# carácter} other {# caracteres}}",
       "status": "machine"
@@ -4540,6 +4564,10 @@
     },
     "nav.contacts": {
       "text": "Contactos",
+      "status": "machine"
+    },
+    "nav.rail_a11y": {
+      "text": "Principal",
       "status": "machine"
     },
     "nav.settings": {
@@ -5756,6 +5784,22 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "Hoy has buscado a muchas personas. Inténtalo de nuevo mañana.",
+      "status": "machine"
+    },
+    "update.available.message": {
+      "text": "Hay una nueva versión de Lakko disponible.",
+      "status": "machine"
+    },
+    "update.available.opens_app_store_hint": {
+      "text": "Abre la App Store",
+      "status": "machine"
+    },
+    "update.available.update": {
+      "text": "Actualizar",
+      "status": "machine"
+    },
+    "update.available.update_play_a11y": {
+      "text": "Actualizar, abre Play Store",
       "status": "machine"
     },
     "username.a11y_hint": {

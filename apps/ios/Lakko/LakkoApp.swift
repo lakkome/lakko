@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import SwiftUI
 
 /// `@main` entry point for the iOS / iPadOS app.
@@ -321,6 +322,13 @@ struct LakkoApp: App {
                     // lock screen while this app is not running.
                     services.chatRepository.mirrorCallPeerNames()
                 }
+            }
+            // ADR-0058 — the mirrored names carry words of the interface
+            // language (a nameless group's title, the placeholder), so a
+            // language switch rewrites them rather than leaving the lock
+            // screen in the old language until the next activation.
+            .onReceive(Localization.shared.$language.removeDuplicates()) { _ in
+                services.chatRepository.mirrorCallPeerNames()
             }
             .task {
                 foregroundReceive.scheduler.start()
@@ -968,7 +976,7 @@ private struct SessionRoot: View, Equatable {
     /// `docs/ux/call-links.md` section 2 — `New call` founds a group video
     /// call and lands the person in it. Nothing is asked first, and no link is
     /// made: one is minted from inside the call if somebody presses `Invite`.
-    private func startNewCall() async -> String? {
+    private func startNewCall() async -> UiText? {
         switch await services.linkCallHost.startNewCall() {
         case .started, .alreadyInThisCall:
             return nil

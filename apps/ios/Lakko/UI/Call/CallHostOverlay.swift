@@ -82,8 +82,10 @@ struct CallHostOverlay: ViewModifier {
         return nil
     }
 
+    /// Rendered at display time, so an alert already up follows a language
+    /// switch (the hosts hold the message, not its text).
     private var errorMessage: String? {
-        host.callError ?? group.callError ?? group.callNotice
+        (host.callError ?? group.callError ?? group.callNotice)?.text
     }
 
     // MARK: - The collapsed bar

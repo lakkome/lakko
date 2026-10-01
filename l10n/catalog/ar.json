@@ -2,6 +2,26 @@
   "format": 1,
   "language": "ar",
   "messages": {
+    "app.not_found.body": {
+      "text": "لا يوجد شيء في هذا العنوان.",
+      "status": "machine"
+    },
+    "app.not_found.title": {
+      "text": "الصفحة غير موجودة",
+      "status": "machine"
+    },
+    "app.update.ready": {
+      "text": "إصدار جديد من Lakko جاهز.",
+      "status": "machine"
+    },
+    "app.update.reload": {
+      "text": "إعادة التحميل",
+      "status": "machine"
+    },
+    "app.update.reloading": {
+      "text": "جارٍ إعادة التحميل...",
+      "status": "machine"
+    },
     "auth.brand.body": {
       "text": "الدردشات والمجموعات والقنوات والمكالمات مشفّرة تشفيرًا تامًا بين الطرفين افتراضيًا. خوادم Lakko لا ترى رسائلك أبدًا.",
       "status": "machine"
@@ -4062,6 +4082,10 @@
       "text": "سطر واحد فقط",
       "status": "machine"
     },
+    "display_name.error.signed_out": {
+      "text": "سجّل الدخول لتعيين اسمك.",
+      "status": "machine"
+    },
     "display_name.error.too_long": {
       "text": "{count, plural, zero {# حرف} one {حرف واحد} two {حرفان} few {# أحرف} many {# حرفًا} other {# حرف}} كحد أقصى",
       "status": "machine"
@@ -4540,6 +4564,10 @@
     },
     "nav.contacts": {
       "text": "جهات الاتصال",
+      "status": "machine"
+    },
+    "nav.rail_a11y": {
+      "text": "الرئيسي",
       "status": "machine"
     },
     "nav.settings": {
@@ -5756,6 +5784,22 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "لقد بحثت عن عدد كبير من الأشخاص اليوم. حاول مجددًا غدًا.",
+      "status": "machine"
+    },
+    "update.available.message": {
+      "text": "يتوفر إصدار جديد من Lakko.",
+      "status": "machine"
+    },
+    "update.available.opens_app_store_hint": {
+      "text": "يفتح App Store",
+      "status": "machine"
+    },
+    "update.available.update": {
+      "text": "تحديث",
+      "status": "machine"
+    },
+    "update.available.update_play_a11y": {
+      "text": "تحديث، يفتح Play Store",
       "status": "machine"
     },
     "username.a11y_hint": {

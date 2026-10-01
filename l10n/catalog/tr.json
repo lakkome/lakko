@@ -2,6 +2,26 @@
   "format": 1,
   "language": "tr",
   "messages": {
+    "app.not_found.body": {
+      "text": "Bu adreste hiçbir şey yok.",
+      "status": "machine"
+    },
+    "app.not_found.title": {
+      "text": "Sayfa bulunamadı",
+      "status": "machine"
+    },
+    "app.update.ready": {
+      "text": "Lakko'nun yeni sürümü hazır.",
+      "status": "machine"
+    },
+    "app.update.reload": {
+      "text": "Yeniden yükle",
+      "status": "machine"
+    },
+    "app.update.reloading": {
+      "text": "Yeniden yükleniyor...",
+      "status": "machine"
+    },
     "auth.brand.body": {
       "text": "Sohbetler, gruplar, kanallar ve aramalar varsayılan olarak uçtan uca şifreli. Lakko sunucuları mesajlarınızı asla göremez.",
       "status": "machine"
@@ -4062,6 +4082,10 @@
       "text": "Yalnızca tek satır",
       "status": "machine"
     },
+    "display_name.error.signed_out": {
+      "text": "Adını ayarlamak için oturum aç.",
+      "status": "machine"
+    },
     "display_name.error.too_long": {
       "text": "En fazla {count, plural, one {# karakter} other {# karakter}}",
       "status": "machine"
@@ -4540,6 +4564,10 @@
     },
     "nav.contacts": {
       "text": "Kişiler",
+      "status": "machine"
+    },
+    "nav.rail_a11y": {
+      "text": "Ana",
       "status": "machine"
     },
     "nav.settings": {
@@ -5756,6 +5784,22 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "Bugün çok fazla kişi aradınız. Yarın tekrar deneyin.",
+      "status": "machine"
+    },
+    "update.available.message": {
+      "text": "Lakko'nun yeni bir sürümü var.",
+      "status": "machine"
+    },
+    "update.available.opens_app_store_hint": {
+      "text": "App Store'u açar",
+      "status": "machine"
+    },
+    "update.available.update": {
+      "text": "Güncelle",
+      "status": "machine"
+    },
+    "update.available.update_play_a11y": {
+      "text": "Güncelle, Play Store'u açar",
       "status": "machine"
     },
     "username.a11y_hint": {

@@ -2,6 +2,26 @@
   "format": 1,
   "language": "he",
   "messages": {
+    "app.not_found.body": {
+      "text": "אין כלום בכתובת הזו.",
+      "status": "machine"
+    },
+    "app.not_found.title": {
+      "text": "הדף לא נמצא",
+      "status": "machine"
+    },
+    "app.update.ready": {
+      "text": "גרסה חדשה של Lakko מוכנה.",
+      "status": "machine"
+    },
+    "app.update.reload": {
+      "text": "טעינה מחדש",
+      "status": "machine"
+    },
+    "app.update.reloading": {
+      "text": "טוען מחדש...",
+      "status": "machine"
+    },
     "auth.brand.body": {
       "text": "צ׳אטים, קבוצות, ערוצים ושיחות – מוצפנים מקצה לקצה כברירת מחדל. השרתים של Lakko אף פעם לא רואים את ההודעות שלכם.",
       "status": "machine"
@@ -4062,6 +4082,10 @@
       "text": "שורה אחת בלבד",
       "status": "machine"
     },
+    "display_name.error.signed_out": {
+      "text": "יש להתחבר כדי להגדיר את השם שלך.",
+      "status": "machine"
+    },
     "display_name.error.too_long": {
       "text": "לכל היותר {count, plural, one {תו אחד} two {שני תווים} other {# תווים}}",
       "status": "machine"
@@ -4540,6 +4564,10 @@
     },
     "nav.contacts": {
       "text": "אנשי קשר",
+      "status": "machine"
+    },
+    "nav.rail_a11y": {
+      "text": "ראשי",
       "status": "machine"
     },
     "nav.settings": {
@@ -5756,6 +5784,22 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "חיפשתם היום הרבה אנשים. נסו שוב מחר.",
+      "status": "machine"
+    },
+    "update.available.message": {
+      "text": "גרסה חדשה של Lakko זמינה.",
+      "status": "machine"
+    },
+    "update.available.opens_app_store_hint": {
+      "text": "פותח את App Store",
+      "status": "machine"
+    },
+    "update.available.update": {
+      "text": "עדכון",
+      "status": "machine"
+    },
+    "update.available.update_play_a11y": {
+      "text": "עדכון, פותח את Play Store",
       "status": "machine"
     },
     "username.a11y_hint": {

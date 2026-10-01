@@ -83,6 +83,7 @@ import { createUsernameCheck } from "../profile/username-field";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
 import { t } from "../l10n";
+import { DIRECT_CHAT_STAND_IN } from "../chat/group-title";
 import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 
@@ -242,7 +243,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     const result = await props.client.startGroupWith(requireIdentity(), peerAccountId, peerPubkey);
     // ADR-0048 — a 1x1 chat is labelled by the resolver (the peer's name);
     // this label is only the fallback.
-    const active = chats.add({ label: "Direct chat", group: result.group });
+    const active = chats.add({ label: DIRECT_CHAT_STAND_IN, group: result.group });
     // ADR-0048 §2 — founding a group is joining it.
     profiles.groupJoined(active.groupIdB64);
     // docs/ux/client-redesign.md section 3 — a contact's conversation is a

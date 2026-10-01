@@ -46,7 +46,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
         case live
         case ended
         case dead
-        case busy(String)
+        case busy(UiText)
         /// Kept as ``UiText`` so a message on screen follows a live language
         /// switch (ADR-0058). A message from the call host is passed as is.
         case error(UiText)
@@ -127,7 +127,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
                 return .error(UiText {
                     Localization.text(
                         "common.sentence_pair",
-                        texts: ["first": Localization.text("call.link.error.generic"), "second": message])
+                        texts: ["first": Localization.text("call.link.error.generic"), "second": message.text])
                 })
             }
             return .error(.key("call.link.error.generic"))
@@ -373,7 +373,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
         case .busy(let message):
             localPhase = .busy(message)
         case .failed(let message):
-            localPhase = .error(UiText { message })
+            localPhase = .error(message)
         }
     }
 }
@@ -503,7 +503,7 @@ public struct JoinCallLandingScreen: View {
                 .multilineTextAlignment(.center)
             closeButton
         case .busy(let message):
-            Text(message)
+            Text(message.text)
                 .multilineTextAlignment(.center)
             Button(l10n.t("call.link.end_current")) { viewModel.endCurrentCall() }
                 .buttonStyle(.borderedProminent)

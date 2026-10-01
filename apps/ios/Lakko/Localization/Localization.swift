@@ -202,6 +202,14 @@ final class Localization: ObservableObject {
             for key in SharedStorage.notificationWordKeys {
                 if let word = strings[key] { words[key] = word }
             }
+            // The extension has no plural rules: one rendered line per count.
+            for key in SharedStorage.notificationCountedWordKeys {
+                for count in 1...SharedStorage.notificationCountedWordMax {
+                    if let line = built?.format(key: key, texts: [:], counts: ["count": UInt64(count)]) {
+                        words[SharedStorage.countedNotificationWordKey(key, count: count)] = line
+                    }
+                }
+            }
             SharedStorage.setNotificationWords(words)
         }
     }

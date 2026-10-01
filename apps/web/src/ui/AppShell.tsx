@@ -74,7 +74,7 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
 
   return (
     <div class="app-shell">
-      <nav class="lk-rail" aria-label="Primary">
+      <nav class="lk-rail" aria-label={t("nav.rail_a11y")}>
         <img class="lk-rail-logo" src="/icon-192.png" alt="Lakko" width="40" height="40" />
         {ITEMS.map((item) => (
           <A

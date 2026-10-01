@@ -2,6 +2,26 @@
   "format": 1,
   "language": "hi",
   "messages": {
+    "app.not_found.body": {
+      "text": "इस पते पर कुछ नहीं है।",
+      "status": "machine"
+    },
+    "app.not_found.title": {
+      "text": "पेज नहीं मिला",
+      "status": "machine"
+    },
+    "app.update.ready": {
+      "text": "Lakko का नया वर्शन तैयार है।",
+      "status": "machine"
+    },
+    "app.update.reload": {
+      "text": "फिर से लोड करें",
+      "status": "machine"
+    },
+    "app.update.reloading": {
+      "text": "फिर से लोड हो रहा है...",
+      "status": "machine"
+    },
     "auth.brand.body": {
       "text": "चैट, ग्रुप, चैनल और कॉल, सब डिफ़ॉल्ट रूप से एंड-टू-एंड एन्क्रिप्टेड। Lakko के सर्वर आपके मैसेज कभी नहीं देखते।",
       "status": "machine"
@@ -4062,6 +4082,10 @@
       "text": "सिर्फ़ एक लाइन",
       "status": "machine"
     },
+    "display_name.error.signed_out": {
+      "text": "अपना नाम सेट करने के लिए साइन इन करें।",
+      "status": "machine"
+    },
     "display_name.error.too_long": {
       "text": "ज़्यादा से ज़्यादा {count, plural, one {# अक्षर} other {# अक्षर}}",
       "status": "machine"
@@ -4540,6 +4564,10 @@
     },
     "nav.contacts": {
       "text": "संपर्क",
+      "status": "machine"
+    },
+    "nav.rail_a11y": {
+      "text": "मुख्य",
       "status": "machine"
     },
     "nav.settings": {
@@ -5756,6 +5784,22 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "आज आप बहुत सारे लोगों को खोज चुके हैं। कल फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "update.available.message": {
+      "text": "Lakko का नया वर्शन उपलब्ध है।",
+      "status": "machine"
+    },
+    "update.available.opens_app_store_hint": {
+      "text": "App Store खोलता है",
+      "status": "machine"
+    },
+    "update.available.update": {
+      "text": "अपडेट करें",
+      "status": "machine"
+    },
+    "update.available.update_play_a11y": {
+      "text": "अपडेट करें, Play Store खोलता है",
       "status": "machine"
     },
     "username.a11y_hint": {

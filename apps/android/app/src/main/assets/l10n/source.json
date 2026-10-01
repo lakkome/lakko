@@ -2,6 +2,26 @@
   "format": 1,
   "version": 1,
   "messages": {
+    "app.not_found.body": {
+      "text": "There is nothing at this address.",
+      "comment": "Line under 'Page not found' on the web page shown for an unknown address."
+    },
+    "app.not_found.title": {
+      "text": "Page not found",
+      "comment": "Heading of the web page shown for an address the app does not know."
+    },
+    "app.update.ready": {
+      "text": "A new version of Lakko is ready.",
+      "comment": "Web banner shown when a newer version of the web app has been downloaded and a reload will start it."
+    },
+    "app.update.reload": {
+      "text": "Reload",
+      "comment": "Button on the web update banner that reloads the page to start the new version."
+    },
+    "app.update.reloading": {
+      "text": "Reloading...",
+      "comment": "Update banner button while the page is reloading."
+    },
     "auth.brand.body": {
       "text": "Chats, groups, channels and calls, end-to-end encrypted by default. Lakko's servers never see your messages.",
       "comment": "Text under the headline on the brand panel beside the sign-in and sign-up forms.",
@@ -4152,6 +4172,10 @@
       "text": "One line only",
       "comment": "Shown under a name field that contains a line break."
     },
+    "display_name.error.signed_out": {
+      "text": "Sign in to set your name.",
+      "comment": "Shown when the person tries to save their display name while no account is signed in on this device."
+    },
     "display_name.error.too_long": {
       "text": "At most {count, plural, one {# character} other {# characters}}",
       "comment": "Shown under a name field that is too long; {count} is the maximum."
@@ -4644,6 +4668,10 @@
     "nav.contacts": {
       "text": "Contacts",
       "comment": "Primary navigation: contacts."
+    },
+    "nav.rail_a11y": {
+      "text": "Primary",
+      "comment": "Screen-reader name of the main navigation rail (Chats, Calls, Contacts, Channels, Settings). Read as '<this>, navigation'."
     },
     "nav.settings": {
       "text": "Settings",
@@ -5953,6 +5981,22 @@
     "tokens.lookup_allowance_used": {
       "text": "You have looked up a lot of people today. Try again tomorrow.",
       "comment": "Search for a username or channel refused because the account's daily allowance of lookups is used up."
+    },
+    "update.available.message": {
+      "text": "A new version of Lakko is available.",
+      "comment": "Dismissible banner at the top of the app when the signed release notice says a newer version is in the store."
+    },
+    "update.available.opens_app_store_hint": {
+      "text": "Opens the App Store",
+      "comment": "Screen-reader hint on the Update button of the update-available banner (iOS): what pressing the button does."
+    },
+    "update.available.update": {
+      "text": "Update",
+      "comment": "Button on the update-available banner; opens the app's store page."
+    },
+    "update.available.update_play_a11y": {
+      "text": "Update, opens the Play Store",
+      "comment": "Screen-reader label of the Update button on the update-available banner (Android): says the tap leaves the app for the Play Store."
     },
     "username.a11y_hint": {
       "text": "Username: {message}",

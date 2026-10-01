@@ -618,7 +618,7 @@ public struct CallScreen: View {
     private let externallyDriven: Bool
     let onExit: () -> Void
     /// A camera start this screen refused because camera access is denied.
-    @State private var permissionMessage: String?
+    @State private var permissionMessage: UiText?
     /// When media started flowing, for the status line's running time. Seeded
     /// from the call's own moment (`docs/ux/calls.md` section 4.5 — collapsing
     /// leaves the timer untouched), so a call brought back from the bar carries
@@ -631,7 +631,7 @@ public struct CallScreen: View {
     /// The other person's name, resolved by the call's owner.
     private let peerName: String?
     /// One plain line about this call's media (today: the no-camera downgrade).
-    private let notice: String?
+    private let notice: UiText?
     /// The link to THIS call, for `Invite` (`docs/ux/call-links.md` section 3).
     /// `nil` on every call that cannot offer one: a 1x1 call, a group call in a
     /// chat, and a link call this device joined rather than founded.
@@ -664,7 +664,7 @@ public struct CallScreen: View {
     public init(
         session: CallSession? = nil,
         peerName: String? = nil,
-        notice: String? = nil,
+        notice: UiText? = nil,
         connectedAt: Date? = nil,
         onCollapse: (() -> Void)? = nil,
         onExit: @escaping () -> Void
@@ -821,14 +821,17 @@ public struct CallScreen: View {
             if case .connected = state.phase, !lastRemoteIds.isEmpty {
                 for p in remote where !lastRemoteIds.contains(p.id) {
                     sounds.controller.playOnce(.join)
-                    state.addSystemEvent(Localization.text(
-                        "call.chat.joined",
-                        texts: ["name": CallPeerName.tileLabel(displayName: p.displayName, isLocal: false)]))
+                    let displayName = p.displayName
+                    state.addSystemEvent(UiText {
+                        Localization.text(
+                            "call.chat.joined",
+                            texts: ["name": CallPeerName.tileLabel(displayName: displayName, isLocal: false)])
+                    })
                 }
                 let currentIds = Set(remoteIds)
                 for prevId in lastRemoteIds where !currentIds.contains(prevId) {
                     sounds.controller.playOnce(.leave)
-                    state.addSystemEvent(Localization.text("call.chat.left"))
+                    state.addSystemEvent(UiText.key("call.chat.left"))
                 }
             }
             lastRemoteIds = remoteIds
@@ -869,7 +872,7 @@ public struct CallScreen: View {
         ) { _ in
             Button(l10n.t("common.ok"), role: .cancel) { permissionMessage = nil }
         } message: { message in
-            Text(message)
+            Text(message.text)
         }
         // `Invite`, when this call has a link to offer.
         .modifier(CallInvitePanel(offer: invite))
@@ -1021,7 +1024,7 @@ public struct CallScreen: View {
                 // A stream that cannot be decrypted outranks the camera
                 // downgrade: one is why this call has no picture at all, the
                 // other is a note about how it started.
-                notice: state.undecryptableNotice ?? state.mediaNotice,
+                notice: state.undecryptableNotice ?? state.mediaNotice?.text,
                 prominent: true,
                 onEncryptionTap: { state.setEncryptionSheetOpen(true) })
             Spacer(minLength: 0)
@@ -1285,7 +1288,7 @@ public struct CallScreen: View {
         // off and explains why.
         Task { @MainActor in
             guard await CameraPermission.ensureGranted() else {
-                permissionMessage = CameraPermission.deniedMessage
+                permissionMessage = CameraPermission.deniedText
                 return
             }
             applyCamera(true)
@@ -1530,13 +1533,15 @@ private struct ChatSheet: View {
 }
 
 private struct ChatMessageRow: View {
+    @ObservedObject var l10n = Localization.shared
     let msg: CallUiState.ChatMessage
 
     var body: some View {
         if msg.kind == .system {
             HStack {
                 Spacer()
-                Text(msg.text)
+                // Rendered now, so a system line follows a language switch.
+                Text(msg.displayText)
                     .font(.system(size: 12).italic())
                     .foregroundColor(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)

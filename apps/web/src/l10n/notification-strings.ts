@@ -22,18 +22,44 @@ export const NOTIFICATION_STRINGS_CACHE = "lakko-l10n";
 /** Request key; must equal `NOTIFICATION_STRINGS_URL` in the worker. */
 export const NOTIFICATION_STRINGS_URL = "/__lakko/l10n/notification-strings.json";
 
-/** The words, rendered now. The field names are the worker's. */
-export function renderNotificationStrings(): Record<string, string> {
+/**
+ * How many attachment counts are rendered ahead of time; must equal
+ * `NOTIFICATION_ATTACHMENT_COUNTS` in the worker. The attachment line is a
+ * plural message and the worker cannot run plural rules, so each count is
+ * stored already rendered; a larger count reads in English.
+ */
+export const NOTIFICATION_ATTACHMENT_COUNTS = 99;
+
+/** The words the worker reads. The field names are the worker's. */
+export interface NotificationWords {
+  voiceCall: string;
+  videoCall: string;
+  accept: string;
+  decline: string;
+  incomingCall: string;
+  newMessage: string;
+  /** Entry `i` is the attachment-only preview line for `i + 1` attachments. */
+  attachments: string[];
+}
+
+/** The words, rendered now. */
+export function renderNotificationStrings(): NotificationWords {
+  const attachments: string[] = [];
+  for (let count = 1; count <= NOTIFICATION_ATTACHMENT_COUNTS; count++) {
+    attachments.push(t("notification.message.attachments", { count }));
+  }
   return {
     voiceCall: t("call.kind.voice"),
     videoCall: t("call.kind.video"),
     accept: t("call.incoming.accept"),
     decline: t("call.incoming.decline"),
     incomingCall: t("call.notification.incoming"),
+    newMessage: t("notification.message.new"),
+    attachments,
   };
 }
 
-async function store(words: Record<string, string>): Promise<void> {
+async function store(words: NotificationWords): Promise<void> {
   if (typeof caches === "undefined") return;
   try {
     const cache = await caches.open(NOTIFICATION_STRINGS_CACHE);

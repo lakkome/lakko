@@ -346,7 +346,9 @@ async function handlePush(wake) {
   const title = preview?.title ?? "Lakko";
   const body =
     preview?.body ??
-    (wake?.isCall === true ? storedIncomingCallWord(await readNotificationStrings()) : "New message");
+    (wake?.isCall === true
+      ? storedIncomingCallWord(await readNotificationStrings())
+      : storedNewMessageWord(await readNotificationStrings()));
   const tag = preview?.tag ?? wake?.groupHex ?? "lakko-default";
   const data =
     wake !== null
@@ -406,6 +408,19 @@ async function readNotificationStrings() {
 function storedIncomingCallWord(raw) {
   const v = typeof raw === "object" && raw !== null ? /** @type {Record<string, unknown>} */ (raw).incomingCall : undefined;
   return typeof v === "string" && v.length > 0 && v.length <= 200 ? v : "Incoming call";
+}
+
+/**
+ * "New message" in the stored language, for the generic message notification
+ * the worker shows when no preview could be decrypted; English when nothing
+ * usable is stored.
+ *
+ * @param {unknown} raw
+ * @returns {string}
+ */
+function storedNewMessageWord(raw) {
+  const v = typeof raw === "object" && raw !== null ? /** @type {Record<string, unknown>} */ (raw).newMessage : undefined;
+  return typeof v === "string" && v.length > 0 && v.length <= 200 ? v : "New message";
 }
 
 /**
@@ -540,6 +555,9 @@ async function backgroundPreview(wake) {
 
   const [core, wasm] = await Promise.all([loadDecryptModule(), loadSwWasm()]);
   const deps = buildDecryptDeps(wasm, core);
+  // ADR-0058 — the words the page stored, so an attachment-only preview
+  // reads in the interface language.
+  deps.notificationWords = await readNotificationStrings();
   return core.decryptPushPreview(wake, deps);
 }
 

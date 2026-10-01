@@ -637,6 +637,33 @@ func nseWord(_ key: String, english: String) -> String {
     nseNotificationWordLookup(key) ?? english
 }
 
+/// "Sent an attachment" / "Sent N attachments" in the interface language.
+///
+/// The extension has no plural rules, so the app stores one rendered line per
+/// count under `<key>#<count>` (`SharedStorage.countedNotificationWordKey`,
+/// up to `notificationCountedWordMax`); a count it did not render, or a store
+/// the app has not written, reads English.
+public func nseAttachmentsLine(count: Int) -> String {
+    let key = "notification.message.attachments"
+    if let line = nseNotificationWordLookup("\(key)#\(count)") { return line }
+    return count == 1 ? "Sent an attachment" : "Sent \(count) attachments"
+}
+
+/// The body the server put on a wake, in the interface language when it is
+/// one of the two generic placeholders `push-gw` sends (`New message`,
+/// `Incoming call`); any other body is returned unchanged.
+///
+/// This is what a notification says when nothing could be decrypted: the
+/// extension leaves the server's alert as it came, and the server knows no
+/// language (invariant #5), so its English placeholder is swapped here.
+public func nseGenericBody(_ serverBody: String) -> String {
+    switch serverBody {
+    case "New message": return nseWord("notification.message.new", english: serverBody)
+    case "Incoming call": return nseWord("call.notification.incoming", english: serverBody)
+    default: return serverBody
+    }
+}
+
 /// What a passive call notification says when the call is already over.
 public var nseMissedCallBody: String {
     nseWord("call.log.missed", english: "Missed call")
@@ -735,9 +762,9 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     case .chat:
         if !row.text.isEmpty { return truncate(row.text) }
         if row.attachmentCount == 1 {
-            return nseMediaLabel(kind: row.singleAttachmentKind) ?? "Sent an attachment"
+            return nseMediaLabel(kind: row.singleAttachmentKind) ?? nseAttachmentsLine(count: 1)
         }
-        if row.attachmentCount > 1 { return "Sent \(row.attachmentCount) attachments" }
+        if row.attachmentCount > 1 { return nseAttachmentsLine(count: row.attachmentCount) }
         return nil
     // An edit rewrites a prior message → surface the new text.
     case .edit:

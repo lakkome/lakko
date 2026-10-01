@@ -29,6 +29,10 @@ enum CameraPermission {
     /// Rendered in the interface language when it is read.
     static var deniedMessage: String { Localization.text("call.permission.camera.body") }
 
+    /// The same copy held as a message, for a notice kept in state: it
+    /// renders in the language of the moment it is shown (ADR-0058).
+    static var deniedText: UiText { .key("call.permission.camera.body") }
+
     /// Grant state now, then — only when undetermined — the system prompt.
     ///
     /// The two ports are injected so the decision is testable without the

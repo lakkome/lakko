@@ -218,6 +218,38 @@ final class LocalizationTests: XCTestCase {
             l10n.t("settings.profile.name.hint", counts: ["count": 64]),
             "Shown to the people you talk to. Not unique, at most 64 characters.")
     }
+
+    /// The notification extension reads the counted attachment line under
+    /// `<key>#<count>` (`nseAttachmentsLine`, which hard-codes the same shape
+    /// because it compiles without this module); pin both ends here.
+    func testCountedNotificationWordKeyShape() {
+        XCTAssertEqual(
+            SharedStorage.countedNotificationWordKey("notification.message.attachments", count: 3),
+            "notification.message.attachments#3")
+        XCTAssertTrue(SharedStorage.notificationCountedWordKeys.contains("notification.message.attachments"))
+        XCTAssertTrue(SharedStorage.notificationWordKeys.contains("notification.message.new"))
+        let l10n = make(system: ["en-US"])
+        XCTAssertEqual(
+            l10n.t("notification.message.attachments", counts: ["count": 3]), "Sent 3 attachments")
+        XCTAssertEqual(l10n.t("notification.message.new"), "New message")
+    }
+
+    /// A message held as ``UiText`` renders at every read, so a notice kept
+    /// in state (a call error, a call-chat system line) follows a language
+    /// switch instead of keeping the words of the moment it was produced.
+    func testHeldCallTextRendersAtReadTime() {
+        var word = "first"
+        let state = CallUiState()
+        state.addSystemEvent(UiText { word })
+        state.setMediaNotice(UiText { word })
+        word = "second"
+        XCTAssertEqual(state.chatMessages.last?.displayText, "second")
+        XCTAssertEqual(state.mediaNotice?.text, "second")
+        XCTAssertEqual(
+            CallSlot.busyText(.group, verb: .start).text,
+            CallSlot.busyMessage(.group, verb: .start))
+        XCTAssertEqual(CameraPermission.deniedText.text, CameraPermission.deniedMessage)
+    }
 }
 
 extension String {

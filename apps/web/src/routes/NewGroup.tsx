@@ -22,6 +22,7 @@ import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { contactsErrorText } from "../contacts/errors";
 import { t } from "../l10n";
+import { DEFAULT_GROUP_LABEL } from "../chat/group-title";
 import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 
@@ -85,7 +86,7 @@ export default function NewGroup(): JSX.Element {
         base64Decode(first.signaturePubkeyB64),
       );
       const active = chats.add({
-        label: name().trim().length > 0 ? name().trim() : "New group",
+        label: name().trim().length > 0 ? name().trim() : DEFAULT_GROUP_LABEL,
         group: result.group,
       });
       profiles.groupJoined(active.groupIdB64);

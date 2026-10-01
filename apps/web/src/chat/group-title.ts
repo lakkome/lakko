@@ -15,8 +15,24 @@
  */
 import { joinList, t } from "../l10n";
 
-/** The new-group form's default label. */
+/**
+ * The new-group form's default label.
+ *
+ * This and the stand-ins below are MARKERS, not screen text (ADR-0058): the
+ * store keeps them in English whatever the interface language, and every
+ * screen names the conversation through {@link groupTitle}, which reads them
+ * as "unnamed" and renders the members' names or `chat.group.default_name`
+ * in the interface language. Storing a localized stand-in instead would stop
+ * it being recognised after a language switch and put it on screen verbatim.
+ */
 export const DEFAULT_GROUP_LABEL = "New group";
+
+/** Stand-in label of a one-to-one created from a contact (the peer's name
+ *  always wins over it). */
+export const DIRECT_CHAT_STAND_IN = "Direct chat";
+
+/** Stand-in label of a group restored after a reload with no name held. */
+export const GROUP_STAND_IN = "Group";
 
 /** The stand-in labels the store hands out when nobody named the group:
  *  `rehydrate.ts` after a reload, the mailbox on a Welcome, the join-link

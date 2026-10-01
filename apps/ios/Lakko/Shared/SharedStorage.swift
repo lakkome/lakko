@@ -121,7 +121,25 @@ public enum SharedStorage {
         "call.log.missed",
         "chat.media.voice_message",
         "chat.media.video_message",
+        "notification.message.new",
     ]
+
+    /// The one plural the extension shows ("Sent 3 attachments"). The
+    /// extension has no plural rules, so the app stores the rendered line for
+    /// each count up to ``notificationCountedWordMax`` under
+    /// ``countedNotificationWordKey(_:count:)``; a larger count falls back to
+    /// English.
+    public static let notificationCountedWordKeys: [String] = [
+        "notification.message.attachments",
+    ]
+
+    /// The largest count the app renders a counted word for.
+    public static let notificationCountedWordMax = 50
+
+    /// The stored key of `key` rendered for `count`.
+    public static func countedNotificationWordKey(_ key: String, count: Int) -> String {
+        "\(key)#\(count)"
+    }
 
     /// Store the words (app side). Best-effort: a `nil` suite is a silent
     /// no-op and notifications stay in English.

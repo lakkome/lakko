@@ -142,7 +142,7 @@ final class UndecryptableCallStateTests: XCTestCase {
     func testTheUndecryptableLineOutranksTheCameraNotice() {
         let state = CallUiState()
         state.setParticipants([participant("remote", "Alice")])
-        state.setMediaNotice("No camera on this device - calling with voice")
+        state.setMediaNotice(UiText { "No camera on this device - calling with voice" })
         XCTAssertNil(state.undecryptableNotice)
         state.markUndecryptable("remote")
         XCTAssertEqual(state.undecryptableNotice.map(l10nPlain), "Can't decrypt Alice's media")

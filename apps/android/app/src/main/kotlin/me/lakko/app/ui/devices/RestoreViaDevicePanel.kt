@@ -193,6 +193,8 @@ internal fun deviceRestoreErrorText(cause: Throwable): UiText = when (cause) {
     is me.lakko.app.auth.IdentityVerificationUnavailable -> UiText(
         if (cause.missing) "restore_identity.error.not_published" else "restore_identity.error.unreachable",
     )
+    is me.lakko.app.auth.TypedNameOtherAccount -> UiText("device_link.error.name_other_account")
+    is me.lakko.app.auth.TypedNameCheckUnavailable -> UiText("common.error.offline")
     is me.lakko.app.auth.AuthClientArgError -> cause.text ?: UiText("device_link.error.generic")
     else -> UiText("device_link.error.generic")
 }

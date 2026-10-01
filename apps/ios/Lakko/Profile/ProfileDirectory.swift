@@ -94,7 +94,7 @@ public final class ProfileDirectory: ObservableObject {
     @discardableResult
     public func setOwnDisplayName(_ input: String, accountIdB64: String? = nil) throws -> OwnProfile {
         guard let account = accountIdB64 ?? self.accountIdB64 else {
-            throw DisplayNameRuleViolation(message: "Sign in to set your name.")
+            throw DisplayNameRuleViolation(message: Localization.text("display_name.error.signed_out"))
         }
         let normalized = try checkDisplayName(input)
         let nowMs = UInt64(max(0, Date().timeIntervalSince1970 * 1000))

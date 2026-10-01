@@ -178,6 +178,7 @@ import { deleteFloor } from "../backup/floor-store";
 import { restoreFromServerBackupFromPhraseString } from "../backup/restore";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { KeyedError } from "../l10n/keyed-error";
+import { t } from "../l10n";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -2955,11 +2956,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
                   restored.reason,
                 );
                 if (typeof window !== "undefined" && typeof window.alert === "function") {
-                  window.alert(
-                    "We could not safely restore your backup — the server " +
-                      "returned an altered or outdated backup. Your account " +
-                      "is safe; continuing without restoring the older data.",
-                  );
+                  window.alert(t("backup.rollback_refused.body"));
                 }
               } else {
                 // eslint-disable-next-line no-console

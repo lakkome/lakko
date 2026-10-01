@@ -80,14 +80,27 @@ final class LinkCallHost: ObservableObject {
         let slug: String?
         let isOwner: Bool
         var phase: LinkCallHostRules.Phase
-        var errorMessage: String?
+        /// Kept as a message so an error on screen follows a language switch.
+        var errorMessage: UiText?
     }
 
     enum StartOutcome: Equatable {
         case started
         case alreadyInThisCall
-        case busy(message: String)
-        case failed(message: String)
+        /// The messages are kept as ``UiText`` so a landing showing one follows
+        /// a language switch (ADR-0058).
+        case busy(message: UiText)
+        case failed(message: UiText)
+
+        /// Two outcomes are equal when they would show the same words now: a
+        /// message is compared by its text, not by its identity.
+        static func == (lhs: StartOutcome, rhs: StartOutcome) -> Bool {
+            switch (lhs, rhs) {
+            case (.started, .started), (.alreadyInThisCall, .alreadyInThisCall): return true
+            case let (.busy(a), .busy(b)), let (.failed(a), .failed(b)): return a.text == b.text
+            default: return false
+            }
+        }
     }
 
     // MARK: - Published state
@@ -141,8 +154,8 @@ final class LinkCallHost: ObservableObject {
     }
 
     /// The copy a refusal would show right now, or `nil` when a call may start.
-    func busyMessage(verb: CallSlot.Verb) -> String? {
-        slotOccupant().map { CallSlot.busyMessage($0, verb: verb) }
+    func busyMessage(verb: CallSlot.Verb) -> UiText? {
+        slotOccupant().map { CallSlot.busyText($0, verb: verb) }
     }
 
     /// The slot, when it belongs to `callIdHex`.
@@ -177,7 +190,7 @@ final class LinkCallHost: ObservableObject {
     /// choice, no participants, no name, and no link.
     func startNewCall() async -> StartOutcome {
         guard let own = ports.ownIdentity() else {
-            return .failed(message: Localization.text("call.error.signed_out_start"))
+            return .failed(message: .key("call.error.signed_out_start"))
         }
         return await start(Request(
             slug: nil,
@@ -211,11 +224,11 @@ final class LinkCallHost: ObservableObject {
             break
         }
         guard let session = ports.session() else {
-            return .failed(message: Localization.text("common.error.session_ended"))
+            return .failed(message: .key("common.error.session_ended"))
         }
         guard let base = ports.sfuBaseUrl() else {
             NSLog("link call: SFU URL not configured (LakkoSfuUrl); refusing")
-            return .failed(message: Localization.text("call.error.unavailable"))
+            return .failed(message: .key("call.error.unavailable"))
         }
 
         let attempt = UUID()
@@ -241,8 +254,8 @@ final class LinkCallHost: ObservableObject {
         // Settle the microphone permission before the SFU session exists, so a
         // denial is an explained refusal instead of a call nobody can hear.
         guard await ports.microphoneGranted() else {
-            apply(attempt, .error, errorMessage: MicrophonePermission.deniedMessage)
-            return .failed(message: MicrophonePermission.deniedMessage)
+            apply(attempt, .error, errorMessage: MicrophonePermission.deniedText)
+            return .failed(message: MicrophonePermission.deniedText)
         }
         // A video call link starts the camera at connect. The link's media is
         // the creator's choice, not this user's, so a denied camera joins with
@@ -258,7 +271,7 @@ final class LinkCallHost: ObservableObject {
             onNoCommitter: { [weak self] in self?.apply(attempt, .noCommitter) },
             onError: { [weak self] error in
                 NSLog("multi-joiner call: failed: %@", String(describing: error))
-                self?.apply(attempt, .error, errorMessage: CallErrorText.reason(for: error))
+                self?.apply(attempt, .error, errorMessage: CallErrorText.reasonText(for: error))
             }
         )
         let started: LinkCallHandle
@@ -266,9 +279,9 @@ final class LinkCallHost: ObservableObject {
             started = try await ports.startCall(request, session, base, joinWithVideo, ui, callbacks)
         } catch {
             NSLog("multi-joiner call: start failed: %@", String(describing: error))
-            let reason = CallErrorText.reason(for: error)
+            let reason = CallErrorText.reasonText(for: error)
             apply(attempt, .error, errorMessage: reason)
-            return .failed(message: reason ?? Localization.text("call.link.error.generic"))
+            return .failed(message: reason ?? .key("call.link.error.generic"))
         }
         guard self.attempt == attempt, occupiesSlot else {
             // Left, replaced, or already over while the start was in flight.
@@ -279,13 +292,13 @@ final class LinkCallHost: ObservableObject {
         bindControls(ui: ui, handle: started)
         apply(attempt, .signalingOpen(owner: request.isOwner))
         if request.mediaVideo && !cameraAllowed {
-            ui.addSystemEvent(CameraPermission.deniedMessage)
+            ui.addSystemEvent(CameraPermission.deniedText)
         }
         return .started
     }
 
     /// Fold one orchestrator report into the slot.
-    private func apply(_ attempt: UUID, _ event: LinkCallHostRules.Event, errorMessage: String? = nil) {
+    private func apply(_ attempt: UUID, _ event: LinkCallHostRules.Event, errorMessage: UiText? = nil) {
         guard self.attempt == attempt, var current = slot else { return }
         let phase = LinkCallHostRules.reduce(current.phase, event)
         guard phase != current.phase else { return }
@@ -407,7 +420,7 @@ final class LinkCallHost: ObservableObject {
             // layered half.
             guard await self?.ports.cameraGranted(true) ?? false else {
                 ui.setCamera(false)
-                ui.addSystemEvent(CameraPermission.deniedMessage)
+                ui.addSystemEvent(CameraPermission.deniedText)
                 return
             }
             do {
@@ -416,7 +429,7 @@ final class LinkCallHost: ObservableObject {
                 // Fail-safe (invariant #4): revert the toggle and say why; the
                 // call stays up audio-only.
                 ui.setCamera(false)
-                ui.addSystemEvent(CallErrorText.cameraFailure(error))
+                ui.addSystemEvent(CallErrorText.cameraFailureText(error))
                 NSLog("multi-joiner call: publishVideo failed: %@", String(describing: error))
             }
         }

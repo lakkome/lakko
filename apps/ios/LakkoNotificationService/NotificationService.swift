@@ -86,6 +86,10 @@ public final class NotificationService: UNNotificationServiceExtension {
             contentHandler(request.content)
             return
         }
+        // Every path that delivers without a decrypted preview shows the
+        // server's generic placeholder: in the interface language, not the
+        // server's English (ADR-0058).
+        best.body = nseGenericBody(best.body)
 
         // Grouping FIRST — retained regardless of the decrypt outcome so
         // per-conversation stacking works even under memory pressure or on a

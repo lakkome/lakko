@@ -2,6 +2,26 @@
   "format": 1,
   "language": "ru",
   "messages": {
+    "app.not_found.body": {
+      "text": "По этому адресу ничего нет.",
+      "status": "machine"
+    },
+    "app.not_found.title": {
+      "text": "Страница не найдена",
+      "status": "machine"
+    },
+    "app.update.ready": {
+      "text": "Новая версия Lakko готова.",
+      "status": "machine"
+    },
+    "app.update.reload": {
+      "text": "Перезагрузить",
+      "status": "machine"
+    },
+    "app.update.reloading": {
+      "text": "Перезагрузка...",
+      "status": "machine"
+    },
     "auth.brand.body": {
       "text": "Чаты, группы, каналы и звонки — со сквозным шифрованием по умолчанию. Серверы Lakko никогда не видят ваши сообщения.",
       "status": "machine"
@@ -4062,6 +4082,10 @@
       "text": "Только одна строка",
       "status": "machine"
     },
+    "display_name.error.signed_out": {
+      "text": "Войдите, чтобы задать имя.",
+      "status": "machine"
+    },
     "display_name.error.too_long": {
       "text": "Не более {count, plural, one {# символа} few {# символов} many {# символов} other {# символа}}",
       "status": "machine"
@@ -4540,6 +4564,10 @@
     },
     "nav.contacts": {
       "text": "Контакты",
+      "status": "machine"
+    },
+    "nav.rail_a11y": {
+      "text": "Основная",
       "status": "machine"
     },
     "nav.settings": {
@@ -5756,6 +5784,22 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "Сегодня вы искали очень много людей. Попробуйте завтра.",
+      "status": "machine"
+    },
+    "update.available.message": {
+      "text": "Доступна новая версия Lakko.",
+      "status": "machine"
+    },
+    "update.available.opens_app_store_hint": {
+      "text": "Открывает App Store",
+      "status": "machine"
+    },
+    "update.available.update": {
+      "text": "Обновить",
+      "status": "machine"
+    },
+    "update.available.update_play_a11y": {
+      "text": "Обновить, откроется Play Маркет",
       "status": "machine"
     },
     "username.a11y_hint": {

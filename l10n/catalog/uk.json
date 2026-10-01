@@ -2,6 +2,26 @@
   "format": 1,
   "language": "uk",
   "messages": {
+    "app.not_found.body": {
+      "text": "За цією адресою нічого немає.",
+      "status": "machine"
+    },
+    "app.not_found.title": {
+      "text": "Сторінку не знайдено",
+      "status": "machine"
+    },
+    "app.update.ready": {
+      "text": "Нова версія Lakko готова.",
+      "status": "machine"
+    },
+    "app.update.reload": {
+      "text": "Перезавантажити",
+      "status": "machine"
+    },
+    "app.update.reloading": {
+      "text": "Перезавантаження...",
+      "status": "machine"
+    },
     "auth.brand.body": {
       "text": "Чати, групи, канали й дзвінки з наскрізним шифруванням за замовчуванням. Сервери Lakko ніколи не бачать ваших повідомлень.",
       "status": "machine"
@@ -4062,6 +4082,10 @@
       "text": "Лише один рядок",
       "status": "machine"
     },
+    "display_name.error.signed_out": {
+      "text": "Увійдіть, щоб указати ім'я.",
+      "status": "machine"
+    },
     "display_name.error.too_long": {
       "text": "Щонайбільше {count, plural, one {# символ} few {# символи} many {# символів} other {# символу}}",
       "status": "machine"
@@ -4540,6 +4564,10 @@
     },
     "nav.contacts": {
       "text": "Контакти",
+      "status": "machine"
+    },
+    "nav.rail_a11y": {
+      "text": "Основна",
       "status": "machine"
     },
     "nav.settings": {
@@ -5756,6 +5784,22 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "Сьогодні ви шукали дуже багато людей. Спробуйте завтра.",
+      "status": "machine"
+    },
+    "update.available.message": {
+      "text": "Доступна нова версія Lakko.",
+      "status": "machine"
+    },
+    "update.available.opens_app_store_hint": {
+      "text": "Відкриває App Store",
+      "status": "machine"
+    },
+    "update.available.update": {
+      "text": "Оновити",
+      "status": "machine"
+    },
+    "update.available.update_play_a11y": {
+      "text": "Оновити, відкриється Play Маркет",
       "status": "machine"
     },
     "username.a11y_hint": {

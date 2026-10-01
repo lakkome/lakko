@@ -152,9 +152,9 @@ final class GroupCallHost: ObservableObject {
     /// Identifies ``presentation`` (a fresh screen per call).
     @Published private(set) var presentationId: String?
     /// An entry point could not proceed. The root shows it as an alert.
-    @Published private(set) var callError: String?
+    @Published private(set) var callError: UiText?
     /// A join found that the call had already ended.
-    @Published private(set) var callNotice: String?
+    @Published private(set) var callNotice: UiText?
 
     /// The call occupying the app's one call slot, across all three kinds.
     /// Wired by the composition root (``CallSlotWiring``).
@@ -222,7 +222,7 @@ final class GroupCallHost: ObservableObject {
     func start(groupIdHex: String, video: Bool, joinCallId: Data?) {
         let verb: CallSlot.Verb = joinCallId == nil ? .start : .join
         if let occupant = slotOccupant() ?? (occupiesSlot ? .group : nil) {
-            callError = CallSlot.busyMessage(occupant, verb: verb)
+            callError = CallSlot.busyText(occupant, verb: verb)
             return
         }
         guard !ports.membershipEnded(groupIdHex) else { return }
@@ -242,24 +242,24 @@ final class GroupCallHost: ObservableObject {
             if isCurrent(attempt) { startingGroupIdHex = nil }
         }
         guard await ports.microphoneGranted() else {
-            if isCurrent(attempt) { callError = MicrophonePermission.deniedMessage }
+            if isCurrent(attempt) { callError = MicrophonePermission.deniedText }
             return
         }
         // A video start or join captures the camera at connect; settle that
         // permission before anything is announced or connected.
         guard await ports.cameraGranted(video) else {
-            if isCurrent(attempt) { callError = CameraPermission.deniedMessage }
+            if isCurrent(attempt) { callError = CameraPermission.deniedText }
             return
         }
         guard isCurrent(attempt) else { return }
         guard let base = ports.sfuBaseUrl() else {
             NSLog("group call: SFU URL not configured (LakkoSfuUrl); refusing")
-            callError = Localization.text("chat.call.unavailable")
+            callError = .key("chat.call.unavailable")
             return
         }
         guard let token = ports.sessionToken() else {
             NSLog("group call: no session token; refusing")
-            callError = Localization.text("call.error.signed_out_start")
+            callError = .key("call.error.signed_out_start")
             return
         }
         if let joinCallId {
@@ -275,7 +275,7 @@ final class GroupCallHost: ObservableObject {
                   GroupCallReducer.isLive(
                       record, nowMs: ports.nowMs(),
                       ignoringDevice: ports.ownDeviceKey(groupIdHex)) else {
-                callNotice = Localization.text("chat.call.group_ended")
+                callNotice = .key("chat.call.group_ended")
                 return
             }
         }
@@ -285,7 +285,7 @@ final class GroupCallHost: ObservableObject {
         let keyedEpoch = ports.epoch(groupIdHex)
         guard let key = ports.deriveCallKey(groupIdHex, callId) else {
             NSLog("group call: call-key derivation failed; refusing per invariant #4")
-            callError = Localization.text("call.error.encryption_setup")
+            callError = .key("call.error.encryption_setup")
             return
         }
         let jwt: String
@@ -294,7 +294,7 @@ final class GroupCallHost: ObservableObject {
         } catch {
             NSLog("group call: JWT mint failed: %@", error.localizedDescription)
             if isCurrent(attempt) {
-                callError = CallErrorText.message(
+                callError = CallErrorText.messageText(
                     for: error,
                     fallbackKey: joinCallId == nil ? "call.error.start_group" : "call.error.join_group")
             }
@@ -324,7 +324,7 @@ final class GroupCallHost: ObservableObject {
             guard announced else {
                 // Not announced: nobody could join, so the call is refused
                 // rather than connected as an invisible room.
-                callError = Localization.text("call.error.start_group")
+                callError = .key("call.error.start_group")
                 return
             }
             ports.applySignal(
@@ -391,12 +391,12 @@ final class GroupCallHost: ObservableObject {
                 NSLog("group call: the SFU says call %@ ended before we joined", callIdHex)
                 leave(hungUp: false)
                 dismissPresentation()
-                callError = Localization.text("chat.call.group_ended")
+                callError = .key("chat.call.group_ended")
                 await endRecordReportedBySfu(groupIdHex: groupIdHex, callId: callId)
                 return
             }
             NSLog("group call connect failed: %@", error.localizedDescription)
-            callError = CallErrorText.message(
+            callError = CallErrorText.messageText(
                 for: error, fallbackKey: initiator ? "call.error.start_group" : "call.error.join_group")
             leave(hungUp: false)
             // Take the call screen down at once, so the explanation is not
@@ -767,7 +767,7 @@ final class GroupCallHost: ObservableObject {
             // capture the user has not allowed.
             guard await self?.ports.cameraGranted(true) ?? false else {
                 ui.setCamera(false)
-                ui.addSystemEvent(CameraPermission.deniedMessage)
+                ui.addSystemEvent(CameraPermission.deniedText)
                 return
             }
             do {
@@ -776,7 +776,7 @@ final class GroupCallHost: ObservableObject {
                 // Fail-safe (invariant #4): revert the toggle and say why. The
                 // call stays up audio-only.
                 ui.setCamera(false)
-                ui.addSystemEvent(CallErrorText.cameraFailure(error))
+                ui.addSystemEvent(CallErrorText.cameraFailureText(error))
                 NSLog("SFU group call: publishVideo failed: %@", String(describing: error))
             }
         }

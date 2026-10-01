@@ -33,10 +33,12 @@ public struct ResolvedDisplayName: Equatable, Sendable {
         case placeholder
     }
 
-    /// The roster / sender label for a person nothing is known about.
-    public static let placeholderMember = "Member"
-    /// The request-row label for a person nothing is known about.
-    public static let placeholderSomeone = "Someone"
+    /// The roster / sender label for a person nothing is known about, in the
+    /// interface language when it is read (ADR-0058).
+    public static var placeholderMember: String { Localization.text("chat.members.unnamed") }
+    /// The request-row label for a person nothing is known about, in the
+    /// interface language when it is read.
+    public static var placeholderSomeone: String { Localization.text("contacts.request.someone") }
 
     /// The name to show. Chat bubbles and call tiles show only this.
     public let name: String

@@ -186,6 +186,14 @@ public final class CallUiState: ObservableObject {
         public let text: String
         /// Wall-clock timestamp.
         public let ts: Date
+        /// A system event kept as the way to render it, so a line already in
+        /// the call chat follows a language switch (ADR-0058). `nil` for a
+        /// message a person typed, whose ``text`` is the whole of it.
+        public let systemText: UiText?
+
+        /// What the row shows: a system event in the language of the moment,
+        /// else the typed text.
+        public var displayText: String { systemText?.text ?? text }
 
         public init(
             id: String,
@@ -193,10 +201,12 @@ public final class CallUiState: ObservableObject {
             senderId: String?,
             senderName: String,
             text: String,
-            ts: Date
+            ts: Date,
+            systemText: UiText? = nil
         ) {
             self.id = id
             self.kind = kind
+            self.systemText = systemText
             self.senderId = senderId
             self.senderName = senderName
             self.text = text
@@ -225,7 +235,7 @@ public final class CallUiState: ObservableObject {
     /// One plain line about this call's media, or `nil`. Today's only use is
     /// section 3.2's "no camera on this device" downgrade; it sits under the
     /// status line while the call rings out and goes when it connects.
-    @Published public private(set) var mediaNotice: String?
+    @Published public private(set) var mediaNotice: UiText?
     /// Participants (by roster id) at least one of whose incoming streams could
     /// not be SFrame-decrypted, because arming that receiver's decryptor
     /// failed. Their media is already discarded fail-closed by libwebrtc
@@ -529,7 +539,7 @@ public final class CallUiState: ObservableObject {
     }
 
     /// Set (or clear) the one line under the status line.
-    public func setMediaNotice(_ notice: String?) {
+    public func setMediaNotice(_ notice: UiText?) {
         self.mediaNotice = notice
     }
 
@@ -658,6 +668,21 @@ public final class CallUiState: ObservableObject {
             senderName: "",
             text: text,
             ts: Date()
+        )
+        self.chatMessages.append(msg)
+    }
+
+    /// A system event kept as a message: the row renders it in the language
+    /// of the moment it is shown, so it follows a language switch.
+    public func addSystemEvent(_ text: UiText) {
+        let msg = ChatMessage(
+            id: nextChatId(),
+            kind: .system,
+            senderId: nil,
+            senderName: "",
+            text: text.text,
+            ts: Date(),
+            systemText: text
         )
         self.chatMessages.append(msg)
     }

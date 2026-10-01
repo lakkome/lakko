@@ -68,6 +68,12 @@ enum CallSlot {
         }
         return Localization.text(key)
     }
+
+    /// ``busyMessage(_:verb:)`` held as a message, for a host that keeps the
+    /// refusal in state: it renders in the language of the moment it is shown.
+    static func busyText(_ occupant: CallKind, verb: Verb) -> UiText {
+        UiText { busyMessage(occupant, verb: verb) }
+    }
 }
 
 /// Connects the three app-level call hosts so each can see the one call slot.
@@ -146,6 +152,25 @@ enum CallErrorText {
         default:
             return Localization.text("call.camera_failed.other")
         }
+    }
+
+    // MARK: - Held in state
+
+    /// ``reason(for:)`` held as a message, so a reason already on screen
+    /// follows a language switch. `nil` exactly when ``reason(for:)`` is.
+    static func reasonText(for error: Error) -> UiText? {
+        guard reason(for: error) != nil else { return nil }
+        return UiText { reason(for: error) ?? "" }
+    }
+
+    /// ``message(for:fallbackKey:)`` held as a message.
+    static func messageText(for error: Error, fallbackKey: String) -> UiText {
+        UiText { message(for: error, fallbackKey: fallbackKey) }
+    }
+
+    /// ``cameraFailure(_:)`` held as a message.
+    static func cameraFailureText(_ error: Error) -> UiText {
+        UiText { cameraFailure(error) }
     }
 
     private static let offlineCodes: Set<URLError.Code> = [
