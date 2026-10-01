@@ -85,7 +85,8 @@ final class CallHost: ObservableObject {
         /// else; having the app consult a different source would be the
         /// beginning of the two disagreeing. Absent → not muted → rings.
         var isMuted: @MainActor (_ groupIdHex: String) -> Bool = {
-            ConversationMuteMirror.isMuted(groupIdHex: $0)
+            ConversationMuteMirror.isMuted(
+                accountIdB64: AcceptedContactsStore.boundAccountIdB64, groupIdHex: $0)
         }
         /// Does this device have a camera at all? Decides whether the video
         /// button opens the camera check or places a voice call

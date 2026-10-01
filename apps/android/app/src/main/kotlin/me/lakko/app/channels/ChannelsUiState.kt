@@ -43,6 +43,11 @@ import org.json.JSONObject
  * The content-key `seed` re-derives from the MLS PublisherGroup
  * on open, so it is not persisted here.
  *
+ * Both, and the publish counters, are per ACCOUNT: each row is keyed
+ * `<key>:<accountIdB64>` ([accountKey]), loaded on [bind] and written only
+ * while an account is bound, so a second account signed in on the same phone
+ * never reuses the first account's subscriber keypair or publisher key.
+ *
  * The channel LIST, the subscriber `epoch -> seed` map and the per-channel
  * rotation state are persisted per account through [logStore]
  * ([ChannelLogStore], the same encrypted prefs file) from [bind] on:
@@ -71,6 +76,10 @@ public class ChannelsUiState(
         public const val SUBSCRIBER_KEYS_PREF_KEY: String =
             "lakko.channels.subscriber-keys.v1"
 
+        /** ADR-0060 - the subscriber key scheme a persisted row was made
+         *  under (Ed25519, the seed envelope's X25519 derived from it). */
+        public const val SUBSCRIBER_KEY_SCHEME_ED25519: String = "ed25519"
+
         /** Storage key for publisher signing-seed persistence
          *  (G-29). Same name the iOS side keys its Keychain
          *  rows under so an on-device audit grep finds both
@@ -79,20 +88,90 @@ public class ChannelsUiState(
             "lakko.channels.publisher-signing-seeds.v1"
 
         /** Storage key for the per-channel publish **counter**
-         *  persistence. The AEAD key+nonce for each post is
+         *  persistence. The AEAD key and nonce for each post are
          *  HKDF-derived from `(seed, channel_id, epoch_id,
-         *  sender_pubkey, message_counter)` and the content
-         *  `seed` is STABLE across a relaunch (re-derived from
-         *  the persisted MLS PublisherGroup exporter). An
-         *  in-memory-only counter therefore restarts at 0 on
-         *  relaunch WITHIN the same epoch + seed and reuses the
-         *  same `(key, nonce)` on a new plaintext — catastrophic
-         *  ChaCha20 keystream reuse. Persisting the counter at
-         *  rest (alongside the signing seed) makes it
-         *  forever-monotone; `epoch_id` is in the HKDF, so no
-         *  per-epoch reset is needed. */
+         *  sender_pubkey)`, the nonce also from the message
+         *  counter, and both the content `seed` (re-derived from
+         *  the persisted MLS PublisherGroup exporter) and the
+         *  sender key (the persisted signing seed) are STABLE
+         *  across a relaunch. An in-memory-only counter therefore
+         *  restarts at 0 on relaunch WITHIN the same epoch + seed
+         *  + sender key and reuses the same `(key, nonce)` on a
+         *  new plaintext — catastrophic ChaCha20 keystream reuse.
+         *  Persisting the counter at rest, per account, beside the
+         *  signing seeds makes it monotone for as long as that
+         *  signing key exists; `epoch_id` is in the HKDF, so no
+         *  per-epoch reset is needed. The row is removed only
+         *  together with the account's signing seeds
+         *  ([deleteAccountRows]). */
         public const val PUBLISHER_COUNTERS_PREF_KEY: String =
             "lakko.channels.publisher-counters.v1"
+
+        /**
+         * The row of [baseKey] for one account: `<baseKey>:<accountIdB64>`
+         * (standard base64). The subscriber keypairs, publisher signing seeds
+         * and publish counters are the account's, not the device's; until
+         * 2026-09-30 each lived under the bare [baseKey], shared by every
+         * account signed in on the phone. The bare rows are never read;
+         * [deleteAccountRows] removes them.
+         */
+        public fun accountKey(baseKey: String, accountIdB64: String): String =
+            baseKey + ":" + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+
+        /**
+         * Forget device / Delete account: delete [accountIdB64]'s persisted
+         * channel log (list, subscribed seeds, rotation state), subscriber
+         * keypairs, publisher signing seeds and publish counters, and the
+         * retired device-wide rows of builds before 2026-09-30. Other
+         * accounts' rows stay. The one production caller is
+         * [me.lakko.app.account.AccountLocalWipe]; the session state itself
+         * is dropped by [unbind].
+         *
+         * Why the counter goes WITH the signing seeds, and only with them: a
+         * post's AEAD key and nonce both derive from
+         * `(seed, channel_id, epoch_id, sender_pubkey)` and the nonce also
+         * from the counter (`lakko-channels` `derive_key_and_nonce`). The
+         * sender key is random per device and channel
+         * (`SigningKey::generate`), never derived from the recovery phrase
+         * and never carried in a backup, a pairing bundle or DeviceGroup
+         * sync, so once its seed is deleted here it is unrecoverable: the
+         * next post on this channel signs under a NEW sender key, whose
+         * `(key, nonce)` space is disjoint, and a counter restarting from 0
+         * cannot collide. The one dangerous shape is a counter rewinding
+         * while the SAME signing seed is still stored, which is why
+         * [removeChannel] and [unbind] keep the counter, and why nothing may
+         * delete the counter row without deleting the account's signing
+         * seeds in the same edit.
+         */
+        public fun deleteAccountRows(
+            prefs: SharedPreferences?,
+            publisherPrefs: SharedPreferences?,
+            logStore: ChannelLogStore?,
+            accountIdB64: String,
+        ) {
+            logStore?.delete(accountIdB64)
+            prefs?.edit()
+                ?.remove(accountKey(SUBSCRIBER_KEYS_PREF_KEY, accountIdB64))
+                ?.remove(SUBSCRIBER_KEYS_PREF_KEY)
+                ?.apply()
+            publisherPrefs?.edit()
+                ?.remove(accountKey(PUBLISHER_SIGNING_SEEDS_PREF_KEY, accountIdB64))
+                ?.remove(accountKey(PUBLISHER_COUNTERS_PREF_KEY, accountIdB64))
+                ?.remove(PUBLISHER_SIGNING_SEEDS_PREF_KEY)
+                ?.remove(PUBLISHER_COUNTERS_PREF_KEY)
+                ?.apply()
+        }
+
+        /** Per channel, the higher of two counter floors (a counter never
+         *  moves backwards, whichever side held it). */
+        internal fun mergeCounterFloors(a: Map<String, ULong>, b: Map<String, ULong>): Map<String, ULong> {
+            val out = HashMap(a)
+            for ((channel, floor) in b) {
+                val held = out[channel]
+                if (held == null || floor > held) out[channel] = floor
+            }
+            return out
+        }
     }
 
     private val _channels = MutableStateFlow<List<ChannelHandle>>(emptyList())
@@ -116,9 +195,9 @@ public class ChannelsUiState(
         _keysByChannel.asStateFlow()
 
     private val _counterByChannel =
-        MutableStateFlow<Map<String, ULong>>(loadPublisherCounters())
+        MutableStateFlow<Map<String, ULong>>(emptyMap())
     /** Per-channel forever-monotone publish counter, restored
-     *  from [publisherPrefs] on construction so it survives a
+     *  from [publisherPrefs] for the account on [bind] so it survives a
      *  relaunch. Seeded to 0 only for a channel with no persisted
      *  value ([setKeys] is load-else-0); NEVER reset on a key
      *  install or an epoch rotation — resetting it against the
@@ -128,11 +207,11 @@ public class ChannelsUiState(
         _counterByChannel.asStateFlow()
 
     private val _subscriberKeysByChannel =
-        MutableStateFlow<Map<String, ChannelSubscriberKeys>>(loadSubscriberKeys())
-    /** Per-channel subscriber-side X25519 keypair
-     *  (Phase 4b G4-3c). Persisted in SharedPreferences
-     *  under ``SUBSCRIBER_KEYS_PREF_KEY`` whenever the
-     *  map changes. */
+        MutableStateFlow<Map<String, ChannelSubscriberKeys>>(emptyMap())
+    /** Per-channel subscriber-side keypair of the bound account
+     *  (Phase 4b G4-3c). Persisted in SharedPreferences under
+     *  ``SUBSCRIBER_KEYS_PREF_KEY:<account>`` whenever the map
+     *  changes; loaded on [bind]. */
     public val subscriberKeysByChannel: StateFlow<Map<String, ChannelSubscriberKeys>> =
         _subscriberKeysByChannel.asStateFlow()
 
@@ -174,12 +253,41 @@ public class ChannelsUiState(
                 val store = logStore
                 val channels = store?.loadChannels(accountIdB64) ?: emptyList()
                 val seeds = store?.loadSubscribedSeeds(accountIdB64) ?: emptyMap()
+                // The per-channel key material is the account's too: a second
+                // account on this phone must neither reuse the first account's
+                // subscriber keypair (the publisher would see one key for two
+                // accounts) nor sign under its publisher seed.
+                val firstBind = boundAccountIdB64 == null
+                val storedSubscriberKeys = loadSubscriberKeys(accountIdB64)
+                val storedSigningSeeds = loadPublisherSigningSeeds(accountIdB64)
+                val storedCounters = loadPublisherCounters(accountIdB64)
                 _postsByChannel.value = emptyMap()
                 _epochByChannel.value = emptyMap()
                 _keysByChannel.value = emptyMap()
                 _channels.value = channels
                 _subscribedSeedsByChannel.value = seeds
+                if (firstBind) {
+                    // A mutation that ran before the first bind stays, under
+                    // what the store holds; a counter keeps the higher floor.
+                    _subscriberKeysByChannel.value =
+                        _subscriberKeysByChannel.value + storedSubscriberKeys
+                    publisherSigningSeedByChannel =
+                        publisherSigningSeedByChannel + storedSigningSeeds
+                    _counterByChannel.value = mergeCounterFloors(_counterByChannel.value, storedCounters)
+                } else {
+                    _subscriberKeysByChannel.value = storedSubscriberKeys
+                    publisherSigningSeedByChannel = storedSigningSeeds
+                    _counterByChannel.value = storedCounters
+                }
                 boundAccountIdB64 = accountIdB64
+                // ADR-0060 - persist at once any key [loadSubscriberKeys]
+                // regenerated, so the new key survives a restart before its
+                // first subscribe; and anything a first bind merged in.
+                if (_subscriberKeysByChannel.value.isNotEmpty()) persistSubscriberKeys()
+                if (firstBind) {
+                    if (publisherSigningSeedByChannel.isNotEmpty()) persistPublisherSigningSeeds()
+                    if (_counterByChannel.value.isNotEmpty()) persistPublisherCounters()
+                }
             }
             publisher?.bind(accountIdB64, accountIdentitySeed)
             reopenPublisherKeys()
@@ -222,23 +330,9 @@ public class ChannelsUiState(
         _epochByChannel.value = emptyMap()
         _keysByChannel.value = emptyMap()
         _subscribedSeedsByChannel.value = emptyMap()
-    }
-
-    /** [unbind] AND delete the bound account's persisted channel log and
-     *  publisher provider snapshot. Forget device. The subscriber keypairs,
-     *  publisher signing seeds and publish counters are device-wide (not
-     *  keyed per account) and are left as they were. */
-    public fun forgetAccount() {
-        val acct = boundAccountIdB64
-        publisher?.forget()
-        if (acct != null) {
-            try {
-                logStore?.delete(acct)
-            } catch (e: Throwable) {
-                Log.w(TAG, "channel log not deleted", e)
-            }
-        }
-        unbind()
+        _subscriberKeysByChannel.value = emptyMap()
+        publisherSigningSeedByChannel = emptyMap()
+        _counterByChannel.value = emptyMap()
     }
 
     /** The persisted rotation heartbeat state for [channelId], or `null`
@@ -256,14 +350,13 @@ public class ChannelsUiState(
     }
 
     /** Per-channel persisted publisher **signing** seed (G-29),
-     *  restored from [publisherPrefs] on construction. The
+     *  restored from [publisherPrefs] for the account on [bind]. The
      *  publisher-open path ([ChannelsComposer.freshPublisherKeys])
      *  reuses the seed here so this device continues signing the
      *  channel under the same Ed25519 key across a relaunch.
      *  In-memory mirror of the encrypted store; never exposed as
      *  a flow (it drives the open path, not the UI). */
-    private var publisherSigningSeedByChannel: Map<String, ByteArray> =
-        loadPublisherSigningSeeds()
+    private var publisherSigningSeedByChannel: Map<String, ByteArray> = emptyMap()
 
     public fun addChannel(handle: ChannelHandle) {
         _channels.update { list ->
@@ -501,24 +594,37 @@ public class ChannelsUiState(
      *  once. */
     private fun persistSubscriberKeys() {
         val sink = prefs ?: return
+        val acct = boundAccountIdB64 ?: return
         val arr = JSONArray()
         for ((channelId, keys) in _subscriberKeysByChannel.value) {
             val row = JSONObject()
             row.put("channelId", channelId)
             row.put("secretHex", ChannelsComposer.bytesToHex(keys.secret))
             row.put("publicHex", ChannelsComposer.bytesToHex(keys.publicKey))
+            // ADR-0060 section 3 - the key scheme: Ed25519 since the
+            // member-card amendment. A row without it holds an older key.
+            row.put("scheme", SUBSCRIBER_KEY_SCHEME_ED25519)
             arr.put(row)
         }
-        sink.edit().putString(SUBSCRIBER_KEYS_PREF_KEY, arr.toString()).apply()
+        sink.edit().putString(accountKey(SUBSCRIBER_KEYS_PREF_KEY, acct), arr.toString()).apply()
     }
 
-    private fun loadSubscriberKeys(): Map<String, ChannelSubscriberKeys> {
-        val raw = prefs?.getString(SUBSCRIBER_KEYS_PREF_KEY, null) ?: return emptyMap()
+    private fun loadSubscriberKeys(accountIdB64: String): Map<String, ChannelSubscriberKeys> {
+        val raw = prefs?.getString(accountKey(SUBSCRIBER_KEYS_PREF_KEY, accountIdB64), null) ?: return emptyMap()
         val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyMap()
         val out = LinkedHashMap<String, ChannelSubscriberKeys>(arr.length())
         for (i in 0 until arr.length()) {
             val row = arr.optJSONObject(i) ?: continue
             val channelId = row.optString("channelId").takeIf { it.isNotEmpty() } ?: continue
+            if (row.optString("scheme") != SUBSCRIBER_KEY_SCHEME_ED25519) {
+                // ADR-0060 section 3 - a stored X25519 subscriber key cannot
+                // sign a member card. A fresh Ed25519 key replaces it; the
+                // reader's idempotent re-subscribe registers it and the
+                // publisher reseals the seed to it at the next fanout. No
+                // migration of the old key: there is no deployment to carry.
+                out[channelId] = ChannelsComposer.freshSubscriberKeys()
+                continue
+            }
             val secretHex = row.optString("secretHex")
             val publicHex = row.optString("publicHex")
             val secret = hexToBytes(secretHex) ?: continue
@@ -537,6 +643,7 @@ public class ChannelsUiState(
      *  grep reads both publisher + subscriber stores identically. */
     private fun persistPublisherSigningSeeds() {
         val sink = publisherPrefs ?: return
+        val acct = boundAccountIdB64 ?: return
         val arr = JSONArray()
         for ((channelId, seed) in publisherSigningSeedByChannel) {
             val row = JSONObject()
@@ -544,11 +651,11 @@ public class ChannelsUiState(
             row.put("signingSeedHex", ChannelsComposer.bytesToHex(seed))
             arr.put(row)
         }
-        sink.edit().putString(PUBLISHER_SIGNING_SEEDS_PREF_KEY, arr.toString()).apply()
+        sink.edit().putString(accountKey(PUBLISHER_SIGNING_SEEDS_PREF_KEY, acct), arr.toString()).apply()
     }
 
-    private fun loadPublisherSigningSeeds(): Map<String, ByteArray> {
-        val raw = publisherPrefs?.getString(PUBLISHER_SIGNING_SEEDS_PREF_KEY, null)
+    private fun loadPublisherSigningSeeds(accountIdB64: String): Map<String, ByteArray> {
+        val raw = publisherPrefs?.getString(accountKey(PUBLISHER_SIGNING_SEEDS_PREF_KEY, accountIdB64), null)
             ?: return emptyMap()
         val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyMap()
         val out = LinkedHashMap<String, ByteArray>(arr.length())
@@ -572,6 +679,7 @@ public class ChannelsUiState(
      *  floor survives a relaunch. */
     private fun persistPublisherCounters() {
         val sink = publisherPrefs ?: return
+        val acct = boundAccountIdB64 ?: return
         val arr = JSONArray()
         for ((channelId, counter) in _counterByChannel.value) {
             val row = JSONObject()
@@ -579,11 +687,11 @@ public class ChannelsUiState(
             row.put("counter", counter.toString())
             arr.put(row)
         }
-        sink.edit().putString(PUBLISHER_COUNTERS_PREF_KEY, arr.toString()).apply()
+        sink.edit().putString(accountKey(PUBLISHER_COUNTERS_PREF_KEY, acct), arr.toString()).apply()
     }
 
-    private fun loadPublisherCounters(): Map<String, ULong> {
-        val raw = publisherPrefs?.getString(PUBLISHER_COUNTERS_PREF_KEY, null)
+    private fun loadPublisherCounters(accountIdB64: String): Map<String, ULong> {
+        val raw = publisherPrefs?.getString(accountKey(PUBLISHER_COUNTERS_PREF_KEY, accountIdB64), null)
             ?: return emptyMap()
         val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyMap()
         val out = LinkedHashMap<String, ULong>(arr.length())

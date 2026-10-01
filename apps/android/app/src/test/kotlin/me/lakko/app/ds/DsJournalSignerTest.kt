@@ -15,15 +15,12 @@ import org.junit.Test
 /**
  * ADR-0053 — the pure client rules: which signer a journal is signed with
  * (and which one the 401 retry falls back to), the pre-publish registration
- * guard, heal on apply, and the clock-skew rule.
+ * guard (ADR-0057: signed by a root or registrar), and the clock-skew rule.
  */
+private fun Signer(epoch: ULong): DsJournalSigner = FakeJournalSigner(epoch)
+
 class DsJournalSignerTest {
 
-    private class Signer(override val epoch: ULong) : DsJournalSigner {
-        override fun sign(method: String, path: String, query: String, body: ByteArray) = "p$epoch"
-        override fun groupClaimBody() = "{}"
-        override fun mailboxClaimBody() = "{}"
-    }
 
     private class MovingSource(var epoch: ULong, var readable: Boolean = true) : DsSignerSource {
         var derives = 0
@@ -114,45 +111,41 @@ class DsJournalSignerTest {
 
     // ------------------------------------------------------------ register before publish
 
+    private val journal = ByteArray(32) { 9 }
+
     @Test
-    fun `registration proves the next epoch under the current one and returns the current`() = runTest {
+    fun `registration registers the next epoch's key with the statement signer and returns the current`() = runTest {
         val before = Signer(7uL)
         val after = Signer(8uL)
-        val seen = mutableListOf<Pair<ULong, ULong>>()
-        val used = registerBeforePublish(before, after) { next, current -> seen += next.epoch to current.epoch }
+        val root = RecordingStatementSigner("root")
+        var put: DsStatement? = null
+        val used = registerEpochBeforePublish(journal, before, after, root, emptyList()) { make -> put = make() }
         assertSame(before, used)
-        assertEquals(listOf(8uL to 7uL), seen)
+        assertEquals(listOf("register@8"), root.calls)
+        assertTrue(put!!.path.endsWith("/access"))
     }
 
     @Test
-    fun `registration refuses without a signer or without a one-epoch step`() {
+    fun `registration refuses without a signer, without a one-epoch step, or without a statement signer`() {
         val calls = mutableListOf<String>()
-        for ((before, after) in listOf(
-            null to Signer(1uL),
-            Signer(1uL) to null,
-            Signer(1uL) to Signer(1uL),
-            Signer(1uL) to Signer(3uL),
+        val root = RecordingStatementSigner("root")
+        for ((pair, statements) in listOf(
+            (null to Signer(1uL)) to root,
+            (Signer(1uL) to null) to root,
+            (Signer(1uL) to Signer(1uL)) to root,
+            (Signer(1uL) to Signer(3uL)) to root,
+            (Signer(1uL) to Signer(2uL)) to null,
         )) {
             assertThrows(DsRegistrationUnavailable::class.java) {
                 kotlinx.coroutines.runBlocking {
-                    registerBeforePublish(before, after) { _, _ -> calls += "register" }
+                    registerEpochBeforePublish(journal, pair.first, pair.second, statements, emptyList()) {
+                        calls += "register"
+                    }
                 }
             }
         }
         assertTrue("nothing may be registered", calls.isEmpty())
-    }
-
-    // ------------------------------------------------------------ heal
-
-    @Test
-    fun `heal registers only when the batch advanced the epoch`() {
-        assertNull(healRegistration(Signer(3uL), Signer(3uL)))
-        assertNull(healRegistration(null, Signer(4uL)))
-        assertNull(healRegistration(Signer(4uL), null))
-        assertNull(healRegistration(Signer(4uL), Signer(3uL)))
-        val (next, current) = healRegistration(Signer(3uL), Signer(5uL))!!
-        assertEquals(5uL, next.epoch)
-        assertEquals(3uL, current.epoch)
+        assertTrue(root.calls.isEmpty())
     }
 
     // ------------------------------------------------------------ skew

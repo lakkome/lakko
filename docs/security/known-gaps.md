@@ -2613,12 +2613,20 @@ Android `:app:testDebugUnitTest` (`ChannelPublishCounterTest`, incl. removeChann
 Touches C-40..C-42 (channel publisher path); invariant #7 (the counter now persists in
 hardware-backed storage on native).
 
-**Residuals (accepted, narrow).** (a) **`reset()` drops the persisted counters** — safe
-ONLY when paired with a full-device wipe (`forgetDevice`, which also clears the OpenMLS
-provider so the content seed is gone); a `reset()` followed by a same-epoch
-backup-restore of the PublisherGroup could in principle re-collide. `reset()` currently
-has no soft-logout caller, so this is not live; flagged so it is never wired to a soft
-logout. (b) **Multi-device publisher** (one account publishing the same channel from two
+**Residuals (accepted, narrow).** (a) **A counter may only be dropped together with the
+publisher signing seed it was counting for.** Corrected 2026-10-01: this residual used to
+say a counter reset followed by a same-epoch backup-restore of the PublisherGroup could
+re-collide, which leaves out that `sender_pubkey` is an input to both the key and the
+nonce. The sender signing key is random per device and channel (`SigningKey::generate`),
+is never derived from the phrase or the account seed, and is carried by no backup,
+pairing bundle or DeviceGroup sync, so once the seed is gone the next post signs under a
+new key and a counter restarting from 0 cannot collide. Forget device and Delete account
+therefore remove the account's counters together with its signing seeds on all three
+clients (iOS since its per-account store, web and Android since 2026-10-01; web's counter
+moved from a device-wide key to a per-account one). The rewind that stays dangerous is a
+counter dropped while the same signing seed survives; Log out, account switch and
+`removeChannel` keep the counter, and the residual turns live again only if the signing
+seed ever becomes recoverable. (b) **Multi-device publisher** (one account publishing the same channel from two
 devices) keeps independent counters and could collide — a pre-existing concern the crate's
 per-client-storage contract explicitly scopes out; closing it needs a synced publisher
 counter (a separate arc).

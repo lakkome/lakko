@@ -6,7 +6,7 @@ package me.lakko.app.feed
 import kotlinx.serialization.Serializable
 
 /**
- * The channel-post log (ADR-0058 section 3): the posts of subscribed and own
+ * The channel-post log (ADR-0061 section 3): the posts of subscribed and own
  * channels this device has decrypted, kept so the feed can rank them without
  * opening each channel. Mirror of `apps/web/src/feed/channel-post-log.ts`.
  *
@@ -22,7 +22,7 @@ import kotlinx.serialization.Serializable
  */
 public const val CHANNEL_POST_LOG_VERSION: Int = 1
 
-/** Most posts kept per channel (chosen, ADR-0058 open question 1). */
+/** Most posts kept per channel (chosen, ADR-0061 open question 1). */
 public const val CHANNEL_POST_CAP: Int = 500
 
 /** The server's post retention; older posts are dropped from the log. */

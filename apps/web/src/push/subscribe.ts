@@ -48,6 +48,12 @@
 import { anonTokenQuotaExhausted } from "../tokens/anon-token-pool";
 import { PushClient } from "./client";
 import { clearDevicePushId, getOrCreateDevicePushId } from "./device-id";
+import { getWakeBinding } from "./group-routing-store";
+import {
+  pseudonymMustRotate,
+  recordWakeBinding,
+  releaseWakeBinding,
+} from "./wake-binding";
 
 /** Build-time VAPID public key (base64url-no-pad). Vite inlines
  *  the `import.meta.env.VITE_*` access at build, so a missing env
@@ -84,8 +90,18 @@ export interface SubscribeResult {
  *
  * The caller treats `null` as "push not available, fall back to
  * foreground polling" — no error is thrown for any of the above.
+ *
+ * ADR-0042, "A wake is shown only for the signed-in account": once
+ * `push-gw` accepts the pseudonym, the `(pseudonym, account)` wake binding
+ * is recorded for the service worker; and when the binding names another
+ * account, a fresh pseudonym is minted first so that account's wakes fail
+ * the worker's gate.
+ *
+ * @param accountIdB64 base64 account id of the account signing in.
  */
-export async function subscribeToPush(): Promise<SubscribeResult | null> {
+export async function subscribeToPush(
+  accountIdB64: string,
+): Promise<SubscribeResult | null> {
   if (VAPID_PUBLIC_KEY_B64URL.length === 0) {
     // No build-time VAPID key — dev fallback.
     return null;
@@ -145,6 +161,13 @@ export async function subscribeToPush(): Promise<SubscribeResult | null> {
     }
   }
 
+  let existing = null;
+  try {
+    existing = await getWakeBinding();
+  } catch {
+    existing = null;
+  }
+  if (pseudonymMustRotate(existing, accountIdB64)) clearDevicePushId();
   const devicePseudonym = getOrCreateDevicePushId();
 
   // Serialize the subscription into the JSON shape
@@ -171,6 +194,7 @@ export async function subscribeToPush(): Promise<SubscribeResult | null> {
     console.warn("push token register failed", err);
     return null;
   }
+  await recordWakeBinding(accountIdB64, devicePseudonym);
 
   return {
     devicePseudonym,
@@ -185,6 +209,9 @@ export async function subscribeToPush(): Promise<SubscribeResult | null> {
  * really act on "push gateway is down during logout").
  */
 export async function unsubscribeFromPush(): Promise<void> {
+  // The callers release the wake binding before anything else; this repeat
+  // is idempotent and keeps the invariant for any other caller.
+  await releaseWakeBinding();
   const devicePseudonym = getOrCreateDevicePushId();
   // Best-effort server tell.
   try {

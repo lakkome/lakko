@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Combine
+import LakkoCore
 import SwiftUI
 
 /// `@main` entry point for the iOS / iPadOS app.
@@ -84,6 +85,11 @@ struct LakkoApp: App {
     /// rather than a `@StateObject`.
     private let callKitBridge: CallKitBridge
 
+    /// ADR-0049 section 2 (amended 2026-09-28) — the OLD device's side of
+    /// "confirm on another device": looks for an open sign-in request when the
+    /// app becomes active and shows the code modal.
+    @StateObject private var deviceLinkResponder: DeviceLinkResponderFlow
+
     /// The same objects as plain references, for the shell views that hand
     /// them down without observing them (see ``AppServices``). Built once in
     /// `init` from the very instances the `@StateObject`s above own.
@@ -159,16 +165,16 @@ struct LakkoApp: App {
         // This is the other half: fetch the journal row the wake points at, so
         // the offer arrives on the ordinary receive path and the system screen
         // is corrected with the real caller and call kind.
-        VoipPushRegistrar.shared.onWake = { [weak chat] wake in
-            guard let chat, let wakeGroupHex = wake.groupHex else { return }
-            // The wake's `g` is the ADR-0042 opaque routing id; the DS journal
-            // is keyed on the real group id. A miss falls back to reading `g`
-            // as a group id, exactly as the notification extension does.
-            let groupIdHex = PushRoutingStore()
-                .lookupRoute(pushGidHex: wakeGroupHex.lowercased())?.groupIdHex
-                ?? wakeGroupHex.lowercased()
+        VoipPushRegistrar.shared.onWake = { [weak chat] target in
+            // The registrar has already checked the wake against the account
+            // binding (ADR-0042, amended 2026-09-30) and reverse-mapped its
+            // opaque `push_gid` for that account. The chat repository serves
+            // the signed-in session; a target for any other account is not
+            // polled.
+            guard let chat,
+                  AcceptedContactsStore.boundAccountIdB64 == target.accountIdB64 else { return }
             Task { @MainActor [weak chat] in
-                try? await chat?.pollGroup(groupIdHex: groupIdHex, waitSecs: 0)
+                try? await chat?.pollGroup(groupIdHex: target.groupIdHex, waitSecs: 0)
             }
         }
         self._chatRepository = StateObject(wrappedValue: chat)
@@ -182,6 +188,18 @@ struct LakkoApp: App {
             )
         )
         let sync = DeviceGroupSyncRepository()
+        // ADR-0060 section 7 — a local change of the "who can find me"
+        // setting or of a reach-key version goes to the account's other
+        // devices over the DeviceGroup.
+        ReachCenter.shared.onDeviceEnvelope = { [weak sync] envelope in
+            Task { @MainActor in await sync?.sendServiceEnvelope(envelope) }
+        }
+        // ADR-0048 section 4a — the own name saved or cleared here goes to the
+        // account's other devices the same way, through the sync runtime's own
+        // DeviceGroup handle.
+        ProfileDirectory.shared.onOwnDeviceEnvelope = { [weak sync] envelope in
+            Task { @MainActor in await sync?.sendServiceEnvelope(envelope) }
+        }
         let intake = InviteIntake()
         self._deviceGroupSync = StateObject(wrappedValue: sync)
         self._inviteIntake = StateObject(wrappedValue: intake)
@@ -202,6 +220,54 @@ struct LakkoApp: App {
                 return (personKey: contact.request.fromPubkey, accountId: accountId)
             }
         }
+        self._deviceLinkResponder = StateObject(wrappedValue: DeviceLinkResponderFlow(
+            ports: .init(
+                relay: DeviceLinkClient(),
+                sessionToken: { [weak auth] in auth?.identitySecrets?.sessionToken },
+                ownHandle: { [weak auth] in auth.flatMap { DeviceSession.current($0)?.loginHandle } },
+                checkPayload: { payload, handle in
+                    _ = try PairingCodec.parsePairingQrPayload(
+                        wireBytes: payload, expectedLoginHandle: handle)
+                },
+                runPairing: { [weak auth, weak chat, weak sync] payload in
+                    guard let auth, let session = DeviceSession.current(auth),
+                          let handle = session.loginHandle else {
+                        throw AuthClientError.argument("no session")
+                    }
+                    let token = session.sessionToken
+                    let recovery = PairingOrchestrator.ScanRecovery(
+                        accountIdentitySeed: session.accountIdentitySeed,
+                        deviceAuthorizeStart: {
+                            try await AuthClient().deviceAuthorizeStart(sessionToken: token)
+                        }
+                    )
+                    let scanned = try await PairingOrchestrator.runScanFlow(
+                        scannedBytes: payload,
+                        ownLoginHandle: handle,
+                        accountIdBytes: session.accountIdBytes,
+                        accountIdB64: session.accountIdB64,
+                        recovery: recovery
+                    )
+                    // The add ran on a DeviceGroup handle of its own: the sync
+                    // runtime reloads from the snapshot the pairing persisted,
+                    // as the QR route does (`AddDeviceScreen.onDeviceAdded`).
+                    // Without it, the long-lived handle stays an epoch behind,
+                    // cannot read what the new device sends, and its next
+                    // persist rolls the stored DeviceGroup back (seen live
+                    // 2026-09-29: WrongEpoch on the new web device's folder).
+                    if let secrets = auth.identitySecrets {
+                        await MainActor.run { [weak sync] in
+                            sync?.reloadAfterLocalMembershipChange(secrets: secrets)
+                        }
+                    }
+                    // ADR-0050 section 2.8 — admit the new device to every chat.
+                    let deviceKey = scanned.newDeviceKey
+                    Task { @MainActor [weak chat] in
+                        _ = try? await chat?.admitDevice(deviceKey: deviceKey)
+                    }
+                }
+            )
+        ))
         self.services = AppServices(
             authRepository: auth,
             contactsRepository: contacts,
@@ -317,6 +383,24 @@ struct LakkoApp: App {
                 foregroundReceive.scheduler.start()
                 foregroundReceive.scheduler.setForeground(scenePhase == .active)
             }
+            .task(id: scenePhase) {
+                // ADR-0049 section 2 — a sign-in request waiting for this
+                // device's answer. Polled for as long as the app is active,
+                // not only when it becomes active: a request usually arrives
+                // while this device is open in front of the person.
+                guard scenePhase == .active else { return }
+                while !Task.isCancelled {
+                    await deviceLinkResponder.check()
+                    try? await Task.sleep(nanoseconds: DeviceLinkResponderFlow.foregroundPollNanos)
+                }
+            }
+            .sheet(isPresented: Binding(
+                get: { deviceLinkResponder.modal != nil },
+                set: { if !$0 { deviceLinkResponder.dismiss() } }
+            )) {
+                DeviceLinkRequestModal(flow: deviceLinkResponder)
+                    .presentationDetents([.medium])
+            }
     }
 }
 
@@ -351,6 +435,12 @@ struct AppRoot: View, Equatable {
     /// dropped on confirm.
     @State private var pendingSignupPhrase: String?
 
+    /// Mirror of ``DeviceGroupSyncRepository/deviceRemoved`` (UX spec
+    /// second-device section 3.1). Received rather than observed: observing
+    /// the sync repository would re-run this body on every draft and read
+    /// cursor it publishes (see ``AppServices``).
+    @State private var deviceRemoved = false
+
     init(services: AppServices) {
         self.services = services
         self._authRepository = ObservedObject(wrappedValue: services.authRepository)
@@ -384,6 +474,9 @@ struct AppRoot: View, Equatable {
             // AppRoot appear (view identity is stable across auth-state flips).
             .task {
                 await releaseChecker.checkOnLaunch()
+            }
+            .onReceive(services.deviceGroupSync.$deviceRemoved.removeDuplicates()) { removed in
+                if deviceRemoved != removed { deviceRemoved = removed }
             }
             // ADR-0037 §6 (G-11) — a rolled-back / tampered backup was refused
             // at restore. User-visible alarm; the served (older / altered) state
@@ -477,21 +570,21 @@ struct AppRoot: View, Equatable {
                 services.deviceGroupSync.clear()
                 // ADR-0048 — no account, no own profile to publish.
                 ProfileDirectory.shared.deactivate()
+                // ADR-0060 — no account, no reach keys to register.
+                ReachCenter.shared.deactivate()
                 // No session, no call: end anything live and forget the
                 // session's call bookkeeping.
                 services.callHost.reset()
                 services.groupCallHost.reset()
                 services.linkCallHost.reset()
-                // …and with it anything the phone is still showing as a call,
-                // plus the names mirrored for a lock screen that now belongs to
-                // no account (``CallPeerNameMirror``) and the muted set that
-                // decided which of its calls were allowed to ring
-                // (``ConversationMuteMirror``) — left behind, it would silence
-                // the next account's calls in a conversation it never had.
+                // …and with it anything the phone is still showing as a call.
+                // The lock-screen name mirror (``CallPeerNameMirror``) and the
+                // muted set (``ConversationMuteMirror``) are per account since
+                // 2026-09-30, so they stay for the next sign-in of the same
+                // account and can never reach another; forget-device removes
+                // the account's rows (``AccountLocalDataWipe``).
                 CallKitProvider.shared.endAll()
                 CallKitCallRegistry.shared.reset()
-                CallPeerNameMirror.clearAll()
-                ConversationMuteMirror.clearAll()
             }
 
         case .session(let account) where pendingSignupPhrase != nil:
@@ -503,6 +596,12 @@ struct AppRoot: View, Equatable {
                 onDone: { pendingSignupPhrase = nil }
             )
             .id(account.accountIdB64)
+
+        case .session where deviceRemoved:
+            // docs/ux/second-device.md section 3.1 — another device removed
+            // this one. The removed screen replaces the whole signed-in app:
+            // no tabs, no banners, no call overlay behind it.
+            RemovedDeviceScreen(onSignOut: { services.forgetThisDevice() })
 
         case .session(let account):
             VStack(spacing: 0) {
@@ -583,7 +682,7 @@ struct AppRoot: View, Equatable {
 /// stack. Calls is back, with the recent-call history it never had.
 enum SessionTab: Hashable {
     case chats
-    /// ADR-0058 — the on-device feed, second so it is one tap from the home
+    /// ADR-0061 — the on-device feed, second so it is one tap from the home
     /// without displacing it (`docs/ux/feed.md` section 2).
     case feed
     case contacts
@@ -622,6 +721,11 @@ enum TabRoute: Hashable {
     case antiCensorship
     /// ADR-0059 section 6 — Settings -> Security -> Channels I share.
     case channelsIShare
+    /// `docs/ux/chat-folders.md` section 4 — Settings > Chat folders, opened
+    /// in its reorder state from a folder tab's Reorder folders.
+    case chatFolders(reorder: Bool)
+    /// Settings > Privacy > Who can find me (ADR-0060).
+    case whoCanFindMe
     /// Deep links (`/i/`, `/g/`, `/c/`), pushed over the current tab rather
     /// than replacing the app (UX spec section 3).
     case inviteLanding(slug: String)
@@ -673,7 +777,7 @@ private final class SessionModels: ObservableObject {
     /// the merged conversation list and the pushed channel screens have to read
     /// ONE store, and a `@StateObject` on a screen belongs to that screen.
     let channelsState: ChannelsUiState
-    /// ADR-0058 — the foreground channel-post sync and the Feed's model.
+    /// ADR-0061 — the foreground channel-post sync and the Feed's model.
     let channelPostSync: ChannelPostSync
     let feedVM: FeedViewModel
     /// `docs/ux/feed.md` section 5 — this device's feed reading state: hidden
@@ -839,7 +943,46 @@ private struct SessionRoot: View, Equatable {
                     onFoundChannel: { channelId, handle in
                         push(.channelFound(channelId: channelId, handle: handle), on: .chats)
                     },
-                    onFoundPerson: { handOffToContacts(username: $0) }
+                    onFoundPerson: { handOffToContacts(username: $0) },
+                    onOpenFolderSettings: { reorder in
+                        push(.chatFolders(reorder: reorder), on: .chats)
+                    },
+                    peopleSearch: PeopleSearchActions(
+                        search: { [contactsRepository, chatRepository] query in
+                            // Local first (web `localPeople`): contacts and
+                            // the members of this device's groups and
+                            // channels, with or without a grant.
+                            let own = ReachCenter.shared.ownAccountKey
+                            let contacts = contactsRepository.state.accepted.map {
+                                (accountKey: $0.request.fromPubkey, accountId: $0.request.fromAccountId)
+                            }
+                            let contactKeys = Set(contacts.map { $0.accountKey.base64EncodedString() })
+                            let local = PeopleSearch.local(
+                                query: query,
+                                candidates: PeopleSearchWiring.localCandidates(
+                                    contacts: contacts,
+                                    groupPeopleKeys: chatRepository.allMemberAccountKeys(),
+                                    profiles: ProfileDirectory.shared.receivedProfiles()),
+                                ownAccountKey: own)
+                            let network = await PeopleSearch.network(
+                                query: query,
+                                records: IntroductionBook.shared.relayedRecords()
+                                    + IntroductionBook.shared.offeredRecords(),
+                                known: {
+                                    PeopleSearchWiring.known(
+                                        keyB64: $0.base64EncodedString(), contactKeys: contactKeys)
+                                },
+                                ownAccountKey: own,
+                                ports: contactsRepository.peopleSearchPorts())
+                            if case .found(let people) = network {
+                                return .found(PeopleSearch.merge([local, people], ownAccountKey: own))
+                            }
+                            return local.isEmpty ? network : .found(local)
+                        },
+                        sendRequest: { [contactsRepository] person, intro in
+                            _ = try await contactsRepository.sendContactRequest(
+                                to: person, introMessage: intro)
+                        })
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .chats) }
             }
@@ -907,7 +1050,8 @@ private struct SessionRoot: View, Equatable {
                     authRepository: authRepository,
                     onOpen: { settingsPath.append($0) },
                     onLogout: authRepository.logout,
-                    onForgetDevice: forgetDevice
+                    onForgetDevice: forgetDevice,
+                    onAccountDeleted: { services.wipeAccountLocalData(accountIdB64: $0) }
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .settings) }
             }
@@ -939,9 +1083,9 @@ private struct SessionRoot: View, Equatable {
         .onChange(of: inviteIntake.pendingSlug) { _, _ in pushPendingDeepLinks() }
         .onChange(of: inviteIntake.pendingGroupJoinSlug) { _, _ in pushPendingDeepLinks() }
         .onChange(of: inviteIntake.pendingCallJoinSlug) { _, _ in pushPendingDeepLinks() }
-        // ADR-0058 — a shared feed link opens the import on the Feed tab.
+        // ADR-0061 — a shared feed link opens the import on the Feed tab.
         .onChange(of: inviteIntake.pendingFeedImport) { _, _ in openPendingFeedImport() }
-        // ADR-0058 section 4 — channel posts join the foreground poll for the
+        // ADR-0061 section 4 — channel posts join the foreground poll for the
         // whole session, so the feed has them without opening each channel.
         .task(id: account.accountIdB64) {
             models.channelPostSync.start()
@@ -990,7 +1134,14 @@ private struct SessionRoot: View, Equatable {
                         ? chatRepository.state.threads.map(\.groupIdHex)
                         : nil
                 },
-                snapshot: { chatRepository.currentStorageSnapshot() }
+                snapshot: { chatRepository.currentStorageSnapshot() },
+                // ADR-0058 section 5.2 — the folded synced state (folders,
+                // pins, mutes, archive, read cursors, drafts).
+                syncedState: {
+                    authRepository.identitySecrets.flatMap {
+                        SyncedStateStore.bytes(accountIdB64: base64Encode($0.accountId))
+                    }
+                }
             ))
             driver.start()
             // The task is cancelled when the account changes or the shell goes
@@ -1008,6 +1159,59 @@ private struct SessionRoot: View, Equatable {
                     accountIdB64: base64Encode(secrets.accountId),
                     username: account.username
                 )
+                // ADR-0060 — reach keys and the "who can find me" setting,
+                // bound before the chat bootstrap for the same reason: a join
+                // publishes the own profile, which carries this account's
+                // grants.
+                if let accountIdentity = try? Identity.fromSeed(seed: secrets.accountIdentitySeed) {
+                    ReachCenter.shared.activate(
+                        accountIdB64: base64Encode(secrets.accountId),
+                        accountIdentity: accountIdentity)
+                }
+                ReachCenter.shared.sessionTokenProvider = { [authRepository] in
+                    authRepository.identitySecrets?.sessionToken
+                }
+                ReachCenter.shared.ownNameProvider = {
+                    let profiles = ProfileDirectory.shared
+                    let accountId = profiles.accountIdB64.flatMap { Data(base64Encoded: $0) }
+                    return (profiles.ownProfile?.displayName, profiles.ownUsername, accountId)
+                }
+                ReachCenter.shared.channelEpochsProvider = { [channelsState] in
+                    channelsState.channels.compactMap { channel -> (id: Data, epoch: UInt32)? in
+                        guard let id = CoPublisher.hexToData(channel.id),
+                              let epoch = channelsState.subscribedSeeds(channelId: channel.id).keys.max()
+                        else { return nil }
+                        return (id, epoch)
+                    }
+                }
+                ReachCenter.shared.allScopesProvider = { [chatRepository, channelsState] in
+                    let groups = chatRepository.state.threads
+                        .filter { chatRepository.conversationKind(groupIdHex: $0.groupIdHex) == .group }
+                        .compactMap { CoPublisher.hexToData($0.groupIdHex) }
+                        .map { FfiScopeId(kind: .group, id: $0) }
+                    let channels = channelsState.channels
+                        .compactMap { CoPublisher.hexToData($0.id) }
+                        .map { FfiScopeId(kind: .channel, id: $0) }
+                    return groups + channels
+                }
+                // ADR-0060 section 5 — the username certificate every profile
+                // v3 carries beside the username. Fetched once per device (the
+                // server signs it on request); until it lands the profile
+                // carries the name alone.
+                if !account.username.isEmpty,
+                   ReachCenter.shared.ownUsernameCertificate == nil {
+                    let token = secrets.sessionToken
+                    Task { @MainActor in
+                        do {
+                            let cert = try await DiscoveryClient(sessionToken: token)
+                                .fetchUsernameCertificate()
+                            ReachCenter.shared.setOwnUsernameCertificate(cert)
+                            if cert != nil { await chatRepository.publishOwnProfileToAllGroups() }
+                        } catch {
+                            NSLog("ADR-0060: username certificate not fetched: \(error)")
+                        }
+                    }
+                }
                 // `docs/ux/navigation.md` section 6.2 — the flat Calls index.
                 // Bound here for the same reason the profile directory is: the
                 // writer is the call hosts' record port, built once at the
@@ -1237,18 +1441,31 @@ private struct SessionRoot: View, Equatable {
             // published into every group this device is in.
             ProfileSettingsScreen(
                 viewModel: ProfileSettingsViewModel(
-                    publishToAllGroups: { await chatRepository.publishOwnProfileToAllGroups() }
+                    publishToAllGroups: {
+                        await chatRepository.publishOwnProfileToAllGroups()
+                        // ADR-0060 — a new name changes what Everyone publishes
+                        // and what the introduction record is findable by.
+                        ReachCenter.shared.sync()
+                        await chatRepository.sendIntroductions()
+                    }
                 )
             )
         case .passkeys:
             PasskeysView(
-                viewModel: PasskeysViewModel(authRepository: authRepository)
+                viewModel: PasskeysViewModel(
+                    authRepository: authRepository,
+                    wipeAfterDeletion: { services.wipeAccountLocalData(accountIdB64: $0) })
             )
         case .devices:
             DevicesScreen(
                 authRepository: authRepository,
                 onAddDevice: { push(.addDevice, on: tab) },
                 onDeviceRemoved: { deviceKey in
+                    // The removal ran on a DeviceGroup handle of its own; the
+                    // sync runtime reloads from the snapshot it persisted.
+                    if let secrets = authRepository.identitySecrets {
+                        services.deviceGroupSync.reloadAfterLocalMembershipChange(secrets: secrets)
+                    }
                     // ADR-0050 section 2.10 — retire the removed device
                     // from every chat, then from the directory.
                     Task { @MainActor in
@@ -1260,6 +1477,13 @@ private struct SessionRoot: View, Equatable {
             AddDeviceScreen(
                 authRepository: authRepository,
                 onDeviceAdded: { deviceKey in
+                    // ADR-0058 section 5.1 — the add ran on a DeviceGroup
+                    // handle of its own; the sync runtime reloads, sees the
+                    // group grew, and re-sends its state to the new device
+                    // when this is the lowest prior leaf.
+                    if let secrets = authRepository.identitySecrets {
+                        services.deviceGroupSync.reloadAfterLocalMembershipChange(secrets: secrets)
+                    }
                     // ADR-0050 section 2.8 — admit the new device to
                     // every chat once its KeyPackage is published.
                     Task { @MainActor in
@@ -1283,6 +1507,29 @@ private struct SessionRoot: View, Equatable {
                 title: { groupIdHex in
                     chatRepository.state.threads.contains { $0.groupIdHex == groupIdHex }
                         ? chatListVM.title(groupIdHex: groupIdHex) : nil
+                })
+        case .chatFolders(let reorder):
+            ChatFoldersSettingsScreen(
+                startInReorder: reorder, viewModel: chatListVM, channels: channelsState)
+        case .whoCanFindMe:
+            WhoCanFindMeScreen(
+                reach: ReachCenter.shared,
+                groups: chatRepository.state.threads
+                    .filter { chatRepository.conversationKind(groupIdHex: $0.groupIdHex) == .group }
+                    .compactMap { thread -> VisibilityScopeRow? in
+                        guard let id = CoPublisher.hexToData(thread.groupIdHex) else { return nil }
+                        return VisibilityScopeRow(
+                            id: thread.groupIdHex,
+                            scope: FfiScopeId(kind: .group, id: id),
+                            title: chatRepository.groupName(groupIdHex: thread.groupIdHex) ?? "Group")
+                    },
+                channels: channelsState.channels.compactMap { channel -> VisibilityScopeRow? in
+                    guard let id = CoPublisher.hexToData(channel.id) else { return nil }
+                    let name = channel.sharedName.isEmpty ? channel.localName : channel.sharedName
+                    return VisibilityScopeRow(
+                        id: channel.id,
+                        scope: FfiScopeId(kind: .channel, id: id),
+                        title: name.isEmpty ? "@" + channel.handle : name)
                 })
         case .inviteLanding(let slug):
             InviteLandingScreen(
@@ -1350,20 +1597,9 @@ private struct SessionRoot: View, Equatable {
         }
     }
 
-    /// ADR-0050 section 2.10 — take this device's KeyPackage out of the
-    /// directory BEFORE the wipe, while the bearer token still exists: the
-    /// account's other devices retire this device's leaves when their
-    /// scheduled check sees the row gone.
+    /// Settings' "Forget this device" (``AppServices/forgetThisDevice()``).
     private func forgetDevice() {
-        // This device's calls go with the device. The transcript rows in each
-        // conversation are the message log's to wipe, not this index's.
-        CallHistoryStore.shared.clear()
-        Task { @MainActor in
-            if let own = chatRepository.ownDeviceLeafKey {
-                await chatRepository.deleteDirectoryKeyPackage(deviceKey: own)
-            }
-            authRepository.forgetDevice()
-        }
+        services.forgetThisDevice()
     }
 
     // MARK: - Path plumbing

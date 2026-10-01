@@ -76,7 +76,7 @@ class MembershipRefusalTest {
         // this file keeps, so a reason added to `lakko-mls` and regenerated
         // arrives here automatically.
         // 20 since ADR-0050 appended DEVICE_BINDING_INVALID and DEVICE_LIMIT_REACHED;
-        // 23 since ADR-0060 appended the three conversation-kind reasons.
+        // 23 since ADR-0062 appended the three conversation-kind reasons.
         assertEquals(23, FfiRefusalReason.entries.size)
 
         for (reason in FfiRefusalReason.entries) {
@@ -102,7 +102,7 @@ class MembershipRefusalTest {
     // ---- The copy ---------------------------------------------------------
 
     @Test
-    fun `a chat's fixed membership reads the ADR-0060 sentences`() {
+    fun `a chat's fixed membership reads the ADR-0062 sentences`() {
         assertEquals(
             "A chat is always the same two people.",
             say(FfiRefusalReason.ONE_TO_ONE_MEMBERSHIP_FIXED),

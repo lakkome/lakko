@@ -62,6 +62,13 @@
 //!   filter question for the ADR-0052 shared-pin envelope. Decode returns the
 //!   operation (to word a preview); nothing here composes, orders or persists
 //!   one (C-59).
+//! - [`scoped_discovery::decode_scoped_discovery_envelope`] +
+//!   [`scoped_discovery::scoped_discovery_envelope_min_len`] /
+//!   [`scoped_discovery::scoped_discovery_envelope_max_len`] — the same
+//!   filter question for the four ADR-0060 envelopes (introduction offer,
+//!   introductions bundle, "who can find me" setting, reach state). Decode
+//!   returns nothing: those envelopes carry secret grants and the owner's
+//!   private configuration (C-59).
 //!
 //! - [`shared_channels::decode_shared_channels_envelope`] +
 //!   [`shared_channels::shared_channels_envelope_min_len`] /
@@ -93,6 +100,8 @@ pub mod pin;
 pub mod profile;
 pub mod profile_request;
 pub mod push_routing;
+pub mod registrar_seed;
+pub mod scoped_discovery;
 pub mod shared_channels;
 
 uniffi::setup_scaffolding!();
@@ -179,6 +188,9 @@ impl From<lakko_mls::Error> for FfiError {
             // match is exhaustive, so the arm is written rather than
             // wildcarded, and it keeps the sentence.
             lakko_mls::Error::MembershipRefused { detail, .. } => Self::Group(detail),
+            // ADR-0058 DeviceGroup folder payloads are never parsed here;
+            // the arm exists because the match is exhaustive.
+            lakko_mls::Error::PayloadBounds(e) => Self::Codec(e.to_string()),
         }
     }
 }
@@ -263,7 +275,7 @@ impl Identity {
     }
 }
 
-/// What kind of conversation a [`Group`] is (ADR-0060) — the same enum the full
+/// What kind of conversation a [`Group`] is (ADR-0062) — the same enum the full
 /// UniFFI surface exports, carried here as a read only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum GroupKind {
@@ -378,7 +390,7 @@ impl Group {
         Ok(g.account_key_at(leaf_index))
     }
 
-    /// The conversation's kind (ADR-0060), read from the restored
+    /// The conversation's kind (ADR-0062), read from the restored
     /// GroupContext, so a notification for a two-person group is titled with
     /// the group and not with the sender as if it were a one-to-one. `None`
     /// only for a group that carries no kind (not a conversation). A read of
@@ -480,7 +492,7 @@ mod tests {
         assert_eq!(
             ffi_group.group_kind().unwrap(),
             Some(GroupKind::OneToOne),
-            "the NSE reads the kind the creator wrote (ADR-0060)",
+            "the NSE reads the kind the creator wrote (ADR-0062)",
         );
 
         let processed = ffi_group

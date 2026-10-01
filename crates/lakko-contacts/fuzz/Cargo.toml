@@ -140,8 +140,43 @@ doc = false
 bench = false
 
 [[bin]]
+name = "introduction_open"
+path = "fuzz_targets/introduction_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "invite_link_open"
 path = "fuzz_targets/invite_link_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "introductions_bundle_decode"
+path = "fuzz_targets/introductions_bundle_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "visibility_decode"
+path = "fuzz_targets/visibility_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reach_state_decode"
+path = "fuzz_targets/reach_state_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reach_grant_decode"
+path = "fuzz_targets/reach_grant_decode.rs"
 test = false
 doc = false
 bench = false
@@ -156,6 +191,13 @@ bench = false
 [[bin]]
 name = "shared_channels_decode"
 path = "fuzz_targets/shared_channels_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "committer_delegation_decode"
+path = "fuzz_targets/committer_delegation_decode.rs"
 test = false
 doc = false
 bench = false

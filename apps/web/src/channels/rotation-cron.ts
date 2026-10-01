@@ -82,6 +82,7 @@ import {
   type ChannelEpoch,
   type RotateBatchEntry,
 } from "./api";
+import { sealEachSkippingInvalid } from "./member-card-rules";
 
 /**
  * Caller-provided handles + persistence callbacks. Kept as
@@ -155,22 +156,19 @@ export async function runRotationOnce(
   //    server's atomic-rotation guarantee means no partial
   //    landings are observable.
   // ADR-0053 — the rotation is a self-update commit, so the PublisherGroup's
-  // DS access key moves with it. Take the old epoch's key before, register the
-  // new one proven under it after. Best effort, unlike a published commit:
-  // the rotation commit is not published and cannot be rolled back here, so a
-  // refused registration is logged, and the journal's read tier plus the
-  // next claim on open cover the gap.
+  // DS access key moves with it: register the new epoch's key after, signed
+  // with the channel owner's root (ADR-0057). Best effort, unlike a published
+  // commit: the rotation commit is not published and cannot be rolled back
+  // here, so a refused registration is logged, and the owner's lazy claim on
+  // the next refused request (which registers the current epoch with the
+  // root) covers the gap.
   const signerN = takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.identity));
   ctx.publisherGroup.rotate(ctx.identity);
   {
     const signerN1 = takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.identity));
     try {
-      await registerBeforePublish(
-        new DsClient(),
-        ctx.publisherGroup.groupId(),
-        signerN,
-        signerN1,
-      );
+      // ADR-0057 — registered with the channel owner's root.
+      await registerBeforePublish(new DsClient(), ctx.publisherGroup.groupId(), signerN1);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("ds: PublisherGroup epoch registration after rotation failed", err);
@@ -195,7 +193,7 @@ export async function runRotationOnce(
 
   // 3. Walk the subscriber list + seal new envelopes.
   const subscribers = await listSubscribers(ctx.channelIdHex, ctx.identity, ctx.apiBase);
-  const batch: RotateBatchEntry[] = [];
+  const keyed: Array<{ readonly hex: string; readonly bytes: Uint8Array }> = [];
   for (const subscriberHex of subscribers.subscribers) {
     const subscriberBytes = hexToBytes(subscriberHex);
     if (subscriberBytes === null) {
@@ -207,17 +205,32 @@ export async function runRotationOnce(
         `subscriber pubkey hex is not valid: ${subscriberHex}`,
       );
     }
-    const envelope = wasm.sealSubscriberSeedEnvelope(
-      subscriberBytes,
-      channelIdBytes,
-      newServerEpoch,
-      newSeed,
-    );
-    batch.push({
-      subscriber_pubkey_hex: subscriberHex,
-      envelope_b64: base64Encode(envelope),
-    });
+    keyed.push({ hex: subscriberHex, bytes: subscriberBytes });
   }
+  // ADR-0060: a subscriber key is Ed25519 now. A key registered before the
+  // flag day (an X25519 key) may not be a valid Ed25519 point, and the core
+  // refuses to seal to it; that subscriber could not open the envelope
+  // anyway, so it is skipped rather than aborting the whole rotation. Its
+  // device re-registers a fresh key on its next open of the channel.
+  const bytesByHex = new Map(keyed.map((k) => [k.hex, k.bytes] as const));
+  const { sealed, skipped } = sealEachSkippingInvalid(
+    keyed.map((k) => k.hex),
+    (hex) =>
+      wasm.sealSubscriberSeedEnvelope(
+        bytesByHex.get(hex) ?? new Uint8Array(0),
+        channelIdBytes,
+        newServerEpoch,
+        newSeed,
+      ),
+  );
+  if (skipped.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(`[channels] rotation skipped ${skipped.length} subscriber key(s) the core refused`);
+  }
+  const batch: RotateBatchEntry[] = sealed.map((s) => ({
+    subscriber_pubkey_hex: s.subscriberHex,
+    envelope_b64: base64Encode(s.value),
+  }));
 
   // 4. Fan out with the ADR-0030 chunked staged-rotation
   //    protocol: stage the sealed envelopes in bounded chunks,

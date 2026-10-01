@@ -85,6 +85,10 @@ class MediaBaselineScreenshotTest {
 
     @Before
     fun setUp() {
+        // A chat is only ever open with an account signed in; the played marks
+        // are that account's (2026-09-30), and with none bound a mark is not
+        // kept at all.
+        me.lakko.app.contacts.AcceptedContactsStore.bind(ByteArray(16) { 0x0A })
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         hub = ChatMediaHub(compose.activity, scope, allowlist)
         val file = hub.fileLocal(ChatMediaHub.mediaKey(VOICE.blobId), "voice.m4a", ByteArray(64))
@@ -103,6 +107,7 @@ class MediaBaselineScreenshotTest {
     fun tearDown() {
         hub.dispose()
         scope.cancel()
+        me.lakko.app.contacts.AcceptedContactsStore.unbind()
     }
 
     @Composable

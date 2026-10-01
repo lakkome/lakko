@@ -59,6 +59,7 @@ When asked to verify a change:
 2. Run the narrowest sufficient suite first (`cargo test -p <crate>` beats a full `just test` for a single-crate change).
 3. For client changes, run the platform's build+test (it must actually compile — `tsc --noEmit` / `xcodebuild` / `compileDebugKotlin`).
 4. Report exactly what ran and the real result. If something could not run here (needs an emulator, a deployed SFU, nightly fuzz budget), say so and name the gate that covers it.
+5. Tear down what the pass started before reporting: dev servers, `target/debug/lakko-svc-*`, emulators (`qemu-system-*`), booted simulators (`xcrun simctl shutdown all`), Gradle daemons (`./gradlew --stop`), and any browser tabs opened for the walk. Only this session's processes; leave Docker / `lakko-local-db` alone. Anything deliberately left running is named in the report with its PID or port (CLAUDE.md, "Clean up after yourself").
 
 ## Pre-commit gate
 

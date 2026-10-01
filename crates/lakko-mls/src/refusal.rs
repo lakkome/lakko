@@ -247,7 +247,7 @@ pub enum RefusalReason {
     /// Remove a device first.
     DeviceLimitReached,
 
-    // ---- ADR-0060 conversation kind ----------------------------------------
+    // ---- ADR-0062 conversation kind ----------------------------------------
     /// The operation would change the set of people in a one-to-one: add a
     /// third person, remove a person, or let a person leave. A one-to-one
     /// always has the same two people; each person's own devices may still

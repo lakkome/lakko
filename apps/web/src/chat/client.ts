@@ -75,10 +75,11 @@
  */
 import { DsClient } from "../ds/client";
 import type { FetchResult } from "../ds/client";
-import { base64Encode } from "../auth/account-id";
+import { base64Decode, base64Encode } from "../auth/account-id";
 import { withGroupMlsLock } from "../mls/group-lock";
-import { healAfterApply, takeSigner } from "../ds/access";
+
 import { readKnockCursor, takeKnockReadSlot, writeKnockCursor } from "./knock-cursor";
+import { boundContactsAccount } from "../contacts/local-store";
 import { PUSH_GID_LEN, type DsWake } from "../ds/wake";
 import { loadWasm } from "../wasm";
 import type {
@@ -101,11 +102,15 @@ import {
   markOwnPublished,
 } from "./own-published";
 import { sniffProfile, type ReceivedProfile } from "../profile/profile-envelope";
+import { sniffScopedEnvelope, type ScopedEnvelopeKind } from "../reach/envelope-sniff";
 import { sniffProfileRequest } from "../profile/profile-request";
 import { sniffGroupName } from "./group-name-envelope";
 import type { StoredGroupName } from "./group-name-store";
 import { sniffPin } from "./pin-envelope";
 import { sniffSharedChannels, type SharedList } from "../discover/shared-channels";
+import { isRegistrarSeedEnvelope } from "./registrar-seed-envelope";
+import { deliverRegistrarSeed } from "../ds/registrar-seeds";
+import { noteOwnerTransition, readRoleTableOwner } from "../ds/root-handover";
 import type { IncomingPin } from "./pin-store";
 import {
   resolveLeafSignatureKey,
@@ -458,7 +463,7 @@ export type IncomingChatEvent =
        *  with a role table, dropped. */
       senderKey: MemberIdentity | undefined;
       createdAt: string;
-     }
+    }
   | {
       /** ADR-0059 section 6 — the listed channels one member shares with
        *  this group. Never a timeline bubble: the receive loop files it
@@ -473,6 +478,47 @@ export type IncomingChatEvent =
       /** The sender's ACCOUNT key resolved at receipt (C-68) — the only key
        *  a list may be filed under. `undefined` ⇒ dropped. */
       senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0060 — a scoped-discovery service envelope (an introduction offer
+       *  or bundle, a committer delegation, and the DeviceGroup-only
+       *  Visibility / ReachState / ADR-0057 RegistrarSeed kinds should one
+       *  arrive in a conversation). Dispatched to its handler, never a
+       *  timeline row. `payload` is the plaintext, for the handler to decode. */
+      kind: "scopedDiscovery";
+      messageId: number;
+      envelope: ScopedEnvelopeKind;
+      payload: Uint8Array;
+      senderLeaf: number | undefined;
+      /** The sender's ACCOUNT key resolved at receipt (C-68). */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0057 — a registrar-seed envelope the group's owner sent one
+       *  member. Never a timeline bubble and never handed to a view: the
+       *  receive path runs it through the gate in `ds/registrar-seeds.ts`
+       *  AT RECEIPT (the live role table's owner is read there) and drops it
+       *  from the batch. Listed in the union only so a caller that forgets
+       *  to consume it cannot render it. */
+      kind: "registrarSeed";
+      messageId: number;
+      /** The whole envelope, for decode and open. */
+      plaintext: Uint8Array;
+      /** The sender's ACCOUNT key resolved at receipt (C-68). */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** A `lakko/…` service envelope none of the sniffers above claimed: a
+       *  newer version of a known kind or a kind this build does not know
+       *  (the core's `MessageBody::ServiceEnvelope`). Never rendered and never
+       *  persisted: the poll and the sweep drop it at receipt, and every view
+       *  carries a defensive arm. Listed in the union, like `registrarSeed`,
+       *  only so a caller that forgets to drop it cannot render it. */
+      kind: "serviceEnvelope";
+      messageId: number;
       createdAt: string;
     };
 
@@ -1048,13 +1094,23 @@ export class ChatClient {
     // poll period of latency, which the approval it waits on dwarfs. A failed
     // read is logged and retried next poll; it never fails the journal poll.
     const groupIdB64 = base64Encode(groupId);
-    let knocks: { after: number; rows: FetchResult } | null = null;
-    if (readsKnocks(group, myIdentity) && takeKnockReadSlot(groupIdB64, Date.now())) {
-      const knockAfter = readKnockCursor(groupIdB64);
+    let knocks: { after: number; rows: FetchResult; owner: string } | null = null;
+    // The knock cursor is the signed-in account's (`knock-cursor.ts`), pinned
+    // here so the read and the write of one batch name the same account. With
+    // no account bound there is nowhere to record progress, so the queue is
+    // not read at all rather than re-fed on every poll.
+    const knockOwner = boundContactsAccount();
+    if (
+      knockOwner !== null &&
+      readsKnocks(group, myIdentity) &&
+      takeKnockReadSlot(groupIdB64, Date.now())
+    ) {
+      const knockAfter = readKnockCursor(groupIdB64, knockOwner);
       try {
         knocks = {
           after: knockAfter,
           rows: await this.ds.fetchKnocks(groupId, { after: knockAfter, waitSecs: 0 }),
+          owner: knockOwner,
         };
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -1066,7 +1122,13 @@ export class ChatClient {
     return withGroupMlsLock(groupIdB64, async () => {
       const result = await this.applyPolledBatch(myIdentity, group, after, raw, cursorRef);
       if (knocks === null || result.outcome !== "applied") return result;
-      const knockEvents = await this.applyKnocks(myIdentity, group, knocks.after, knocks.rows);
+      const knockEvents = await this.applyKnocks(
+        myIdentity,
+        group,
+        knocks.after,
+        knocks.rows,
+        knocks.owner,
+      );
       return knockEvents.length === 0
         ? result
         : { ...result, events: [...result.events, ...knockEvents] };
@@ -1087,10 +1149,11 @@ export class ChatClient {
     group: WasmGroup,
     after: number,
     raw: FetchResult,
+    owner: string,
   ): Promise<IncomingChatEvent[]> {
     const groupIdB64 = base64Encode(group.groupId);
     // A concurrent poll consumed this batch already.
-    if (readKnockCursor(groupIdB64) !== after) return [];
+    if (readKnockCursor(groupIdB64, owner) !== after) return [];
     const events: IncomingChatEvent[] = [];
     let last = after;
     for (const row of raw.messages) {
@@ -1132,7 +1195,7 @@ export class ChatClient {
       console.warn("ChatClient: knock batch not persisted; cursor held", err);
       return events;
     }
-    writeKnockCursor(groupIdB64, last);
+    writeKnockCursor(groupIdB64, last, owner);
     return events;
   }
 
@@ -1159,27 +1222,16 @@ export class ChatClient {
       cursorRef.beforeApply?.();
     }
 
-    // ADR-0053 contract point 4 — the access key of the epoch the group is at
-    // BEFORE this batch, so a commit in it can be followed by registering the
-    // new epoch's key proven under this one.
-    const signerBefore = takeSigner(() => group.dsAccessSigner(myIdentity));
-    try {
-      return await this.applyPolledRows(myIdentity, group, after, raw, cursorRef, signerBefore);
-    } catch (err) {
-      signerBefore?.free();
-      throw err;
-    }
+    return this.applyPolledRows(myIdentity, group, after, raw, cursorRef);
   }
 
-  /** The row loop and the cursor gate of {@link applyPolledBatch}; owns
-   *  `signerBefore` from here on (freed once the heal settles). */
+  /** The row loop and the cursor gate of {@link applyPolledBatch}. */
   private async applyPolledRows(
     myIdentity: WasmIdentity,
     group: WasmGroup,
     after: number,
     raw: FetchResult,
     cursorRef: PollCursorRef | undefined,
-    signerBefore: ReturnType<typeof takeSigner>,
   ): Promise<PollMessagesResult> {
     const events: IncomingChatEvent[] = [];
     let cursor = after;
@@ -1189,6 +1241,10 @@ export class ChatClient {
     // and every subsequent poll would log a `CannotDecryptOwnMessage` for it.
     const matchedEchoes: number[] = [];
     const groupIdB64 = base64Encode(group.groupId);
+    // ADR-0057 root handover - the role table's owner before each applied
+    // row, so a commit that moves ownership away from this account is seen
+    // at the apply that carried it.
+    let ownerSeen = readRoleTableOwner(group);
     for (const message of raw.messages) {
       cursor = message.id;
       // Drop our own echoes — the DS doesn't dedupe and
@@ -1226,19 +1282,30 @@ export class ChatClient {
         console.warn("processIncomingVerifyingRoles failed", message.id, err);
         continue;
       }
+      {
+        const ownerNow = readRoleTableOwner(group);
+        noteOwnerTransition(group.groupId, ownerSeen, ownerNow);
+        ownerSeen = ownerNow;
+      }
       // 1.19c2: application messages run through the wasm
       // envelope parser (which is async because it has to
       // resolve the cached wasm module promise on first call,
       // then synchronous thereafter). System rows skip it.
-      events.push(
-        await toEvent(
-          message.id,
-          message.createdAt,
-          processed,
-          (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
-          (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
-        ),
+      const event = await toEvent(
+        message.id,
+        message.createdAt,
+        processed,
+        (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
+        (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
       );
+      // ADR-0057 — consumed here, at receipt, and never handed on.
+      if (event.kind === "registrarSeed") {
+        await consumeRegistrarSeed(group, event);
+        continue;
+      }
+      // Never shown, never persisted, never previewed.
+      if (event.kind === "serviceEnvelope") continue;
+      events.push(event);
     }
 
     // Still inside the lock: the ratchet and the journal position move
@@ -1256,14 +1323,11 @@ export class ChatClient {
         for (const id of matchedEchoes) consumeOwnPublished(groupIdB64, id);
       },
     );
-    // ADR-0053 contract point 4 — heal on apply. Fired, not awaited: it is a
-    // network call and this region holds the group lock. The helper signs
-    // synchronously when called, so the signers can be freed once it settles.
-    const signerAfter = takeSigner(() => group.dsAccessSigner(myIdentity));
-    void healAfterApply(this.ds, group.groupId, signerBefore, signerAfter).finally(() => {
-      signerBefore?.free();
-      signerAfter?.free();
-    });
+    // ADR-0057 obligation 6 — no heal on apply. An epoch this batch reached
+    // is registered by its committer before the commit was published; a
+    // device that is neither root nor a registrar never registers one, and a
+    // write refused for a missing key waits for that registration and retries
+    // on the next poll.
     if (verdict === "held") {
       // Report `after`, never the un-committed `cursor`: a caller that ignores
       // `outcome` and writes `result.cursor` back must still not lead.
@@ -1301,6 +1365,39 @@ export function rosterOf(group: WasmGroup): RosterMember[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * ADR-0057 obligation 4 — hand one registrar-seed envelope to the gate, with
+ * the owner read off the LIVE role table now, at receipt (C-68). Never
+ * throws: every refusal is a silent drop. INTERNAL, shared with the ADR-0045
+ * sweep's verdict apply, which consumes journal rows the poll never sees.
+ */
+export async function consumeRegistrarSeed(
+  group: WasmGroup,
+  event: { readonly plaintext: Uint8Array; readonly senderKey: MemberIdentity | undefined },
+): Promise<void> {
+  let ownerAccountKey: Uint8Array | undefined;
+  let groupId: Uint8Array;
+  try {
+    ownerAccountKey = group.roleTableOwner();
+    groupId = group.groupId;
+  } catch {
+    return;
+  }
+  let senderAccountKey: Uint8Array | undefined;
+  try {
+    senderAccountKey = event.senderKey === undefined ? undefined : base64Decode(event.senderKey);
+  } catch {
+    senderAccountKey = undefined;
+  }
+  await deliverRegistrarSeed({
+    groupId,
+    groupIdB64: base64Encode(groupId),
+    plaintext: event.plaintext,
+    senderAccountKey,
+    ownerAccountKey,
+  });
 }
 
 /**
@@ -1378,6 +1475,13 @@ export async function toEvent(
         senderKey,
         createdAt,
       };
+    }
+    // ADR-0057 — a registrar-seed envelope, before the chat parser for the
+    // same reason as every service envelope below. Classified by the core
+    // (`dispatchIncomingEnvelope`, kind `RegistrarSeed`), gated by its one
+    // fixed length so a chat message never pays for the call.
+    if (isRegistrarSeedEnvelope(await loadWasm(), bytes)) {
+      return { kind: "registrarSeed", messageId, plaintext: bytes, senderKey, createdAt };
     }
     // ADR-0042 — sniff for a push-routing-secret distribution envelope
     // before the chat parser. The wasm codec is fail-closed (domain +
@@ -1496,6 +1600,24 @@ export async function toEvent(
         };
       }
     }
+    // ADR-0060 — the scoped-discovery service envelopes, before the chat
+    // parser for the same reason as the arms above: rendered through the
+    // lossy-UTF-8 fallback they would put domain bytes (and, for a
+    // delegation or an introduction, secrets) in a bubble.
+    {
+      const kind = sniffScopedEnvelope(await loadWasm(), bytes);
+      if (kind !== null) {
+        return {
+          kind: "scopedDiscovery",
+          messageId,
+          envelope: kind,
+          payload: bytes,
+          senderLeaf,
+          senderKey,
+          createdAt,
+        };
+      }
+    }
     // ADR-0023 — feed the application bytes through the
     // structured body parser, which surfaces the chat / edit /
     // delete / reaction discriminator. A plain chat message
@@ -1504,6 +1626,12 @@ export async function toEvent(
     // `application` event; an op returns the `op` event the UI
     // folds into the target message.
     const body = await parseBodyEnvelope(bytes);
+    // A service envelope the sniffers above did not recognise (a v3 profile
+    // from a newer build reached every client as a chat bubble reading
+    // `lakko/profile/v1` plus binary before the core classified it).
+    if (body.kind === "service-envelope") {
+      return { kind: "serviceEnvelope", messageId, createdAt };
+    }
     if (body.kind === "chat") {
       return {
         kind: "application",

@@ -79,10 +79,12 @@ describe("ADR-0059 — a shared-channels list is filtered in the foreground loop
     expect(ev.senderKey).toBe(base64Encode(SENDER_KEY));
   });
 
-  it("the bytes would render as a chat bubble without the arm (the defect)", () => {
+  it("the real parser never degrades the bytes to chat (the defect is closed in the core)", () => {
     const parsed = wasm.parseBodyEnvelope(oneChannel(1n));
-    expect(parsed.kind).toBe("chat");
-    expect(parsed.text).toContain("lakko/shared-channels/v1");
+    // The core classifies any `lakko/` plaintext as a service envelope; the
+    // arm is still what files the list in the shared-channels store.
+    expect(parsed.kind).toBe("service-envelope");
+    expect(parsed.text).toBe("");
   });
 
   it("a malformed list is dropped, not rendered", async () => {

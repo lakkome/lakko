@@ -50,14 +50,16 @@ import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { useCallHost } from "../calls/CallHostContext";
 import { isDsNetworkFailure } from "../ds/client";
+import { JOURNAL_REPAIR_MAX_POLLS, journalRepair } from "../ds/journal-repair";
 import {
   createWakeLatch,
   LONG_POLL_WAIT_SECS,
   runLongPollLoop,
   sleepCancellable,
 } from "../ds/long-poll-loop";
-import { useProfiles } from "../profile/ProfileContext";
-import { observeMembers } from "../profile/membership-baseline";
+import { isOneToOne, useProfiles } from "../profile/ProfileContext";
+import { intakeScopedEnvelope } from "../reach/scoped-intake";
+import { observeMembership } from "../profile/membership-baseline";
 import { isOwnKeyB64 } from "../profile/own-key";
 import {
   memberSignatureKeys,
@@ -693,7 +695,18 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     for (const row of plan.signaling) callHost.ingestSignaling(groupIdB64, row);
 
     for (const p of plan.profiles) {
-      if (p.profile !== undefined && p.senderKey !== undefined) profiles.ingest(p.senderKey, p.profile);
+      if (p.profile !== undefined && p.senderKey !== undefined) {
+        profiles.ingest(p.senderKey, p.profile, { groupIdB64 });
+      }
+    }
+    // ADR-0060 — scoped-discovery service envelopes, to their handler.
+    for (const e of plan.scoped) {
+      void intakeScopedEnvelope({
+        kind: e.envelope,
+        payload: e.payload,
+        senderKeyB64: e.senderKey,
+        oneToOne: isOneToOne(entry.group),
+      });
     }
     // ADR-0048 §2 trigger 4 — another member asked this group to introduce
     // itself; answer with the own profile through the throttled growth path.
@@ -788,12 +801,16 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // a chat nobody has open still re-sends its name (with the ADR-0051 group
     // name, same throttle). Every batch, not only one carrying a commit row:
     // an Add this device swept itself lands with no commit event of its own.
-    if (observeMembers(account, groupIdB64, new Set(personKeysOf(entry.group)))) {
+    const membership = observeMembership(account, groupIdB64, new Set(personKeysOf(entry.group)));
+    if (membership.grew) {
       profiles.groupGrew(groupIdB64);
       groupNames.groupGrew(groupIdB64);
       pins.groupGrew(groupIdB64);
       sharedChannels.groupGrew(groupIdB64);
     }
+    // ADR-0060 section 3 — a person left: this account's reach keys for the
+    // group rotate and the profile carrying the new ones is republished.
+    if (membership.shrank) void profiles.groupShrank(groupIdB64);
 
     // The chat view gets the rest, now or when it next mounts.
     coordinator.deliver(groupIdB64, plan.toView);
@@ -1077,7 +1094,24 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   // load-bearing call `WakeNavigator` and `CallActionListener` make).
   if (typeof swContainer?.startMessages === "function") swContainer.startMessages();
 
+  // ADR-0057 second security pass, finding 1 - the repair check polls a
+  // conversation group to its journal head before deciding. A group the chat
+  // view has open is already long-polled to its head by the view, so only a
+  // background group is polled here (the same exclusion as `syncGroupNow`).
+  const unregisterHeadPoller = journalRepair.registerHeadPoller({
+    owns: (groupId) => chats.get(base64Encode(groupId)) !== undefined,
+    pollToHead: async (groupId) => {
+      const groupIdB64 = base64Encode(groupId);
+      if (coordinator.isForeground(groupIdB64)) return;
+      for (let i = 0; i < JOURNAL_REPAIR_MAX_POLLS; i++) {
+        const r = await pollGroup(groupIdB64, 0, new AbortController().signal);
+        if (!r.yieldedRows) return;
+      }
+    },
+  });
+
   onCleanup(() => {
+    unregisterHeadPoller();
     globalThis.document?.removeEventListener("visibilitychange", onVisibility);
     swContainer?.removeEventListener("message", onSwMessage);
     stop();

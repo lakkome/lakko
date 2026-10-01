@@ -58,7 +58,7 @@ final class PinnedMessagesTests: XCTestCase {
             "a sender the roster cannot name is not a participant")
     }
 
-    /// ADR-0060 — a two-person GROUP is not a one-to-one: its plain member
+    /// ADR-0062 — a two-person GROUP is not a one-to-one: its plain member
     /// may not pin for everyone. What decides is the kind, never the count.
     func testATwoPersonGroupFollowsTheRoleTable() {
         XCTAssertEqual(classify(sender: member, authority: table(), oneToOne: false), .rejectNotAuthorized)
@@ -323,11 +323,15 @@ final class PinnedMessagesTests: XCTestCase {
         XCTAssertFalse(unpin.pinned)
     }
 
-    func testWithoutTheArmThePinWouldRenderAsText() {
+    func testWithoutTheArmThePinWouldBeDroppedUnread() {
         let bytes = composePinEnvelope(op: FfiPinOp(messageId: 1, pinned: true, updatedAtMs: 1))
         let parsed = parseBodyEnvelope(bytes: bytes)
-        XCTAssertEqual(parsed.kind, .chat, "the legacy fallback degrades it to a chat body")
-        XCTAssertTrue(parsed.text.contains("lakko/pin/v1"))
+        // Since 2026-09-29 the parser drops any `lakko/` plaintext as a service
+        // envelope (it used to degrade it to a chat body reading
+        // `lakko/pin/v1` plus binary). Without the arm the envelope would
+        // therefore never render, and never reach its receive handler either.
+        XCTAssertEqual(parsed.kind, .serviceEnvelope)
+        XCTAssertEqual(parsed.text, "")
     }
 
     func testTheDecoderRoundTripsAndRefusesForeignBytes() throws {

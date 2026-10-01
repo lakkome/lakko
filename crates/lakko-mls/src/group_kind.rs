@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! A conversation's kind, carried in the `0xFF03` GroupContext extension
-//! ([ADR-0060]).
+//! ([ADR-0062]).
 //!
 //! The creator writes the kind into the GroupContext at
 //! [`crate::Group::create`]; no commit ever changes it, and every member reads
@@ -28,13 +28,13 @@
 //! same FFI surfaces and names a different thing — a list a row belongs to
 //! rather than a membership rule.
 //!
-//! [ADR-0060]: ../../../docs/adr/0060-conversation-kind.md
+//! [ADR-0062]: ../../../docs/adr/0062-conversation-kind.md
 
 use openmls::prelude::{Extension, ExtensionType, Extensions, GroupContext};
 
 use crate::error::{Error, Result};
 
-/// The group-kind GroupContext extension type (ADR-0060). In the MLS
+/// The group-kind GroupContext extension type (ADR-0062). In the MLS
 /// private-use range beside `0xFF01` (ADR-0015) and `0xFF02` (ADR-0022), so
 /// OpenMLS surfaces it as `Extension::Unknown`.
 pub(crate) const GROUP_KIND_EXTENSION_TYPE: u16 = 0xFF03;
@@ -51,7 +51,7 @@ const KIND_ONE_TO_ONE: u8 = 0x01;
 /// Wire byte of [`GroupKind::Group`].
 const KIND_GROUP: u8 = 0x02;
 
-/// What kind of conversation a [`crate::Group`] is (ADR-0060).
+/// What kind of conversation a [`crate::Group`] is (ADR-0062).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GroupKind {
     /// Two people, always the same two. No commit may remove a person or add a
@@ -115,7 +115,7 @@ impl GroupKind {
 /// `0xFF03` body, and whether `RequiredCapabilities` names `0xFF03`.
 ///
 /// Compared **byte for byte** rather than decoded, because the rule is "no
-/// commit changes the kind" (ADR-0060 section 4) and a decoded comparison would
+/// commit changes the kind" (ADR-0062 section 4) and a decoded comparison would
 /// let a commit swap one malformed body for another, or drop the extension from
 /// a group whose body happened not to decode.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

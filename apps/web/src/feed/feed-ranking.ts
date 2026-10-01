@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The one ranking, reached through the wasm core (ADR-0058).
+ * The one ranking, reached through the wasm core (ADR-0061).
  *
  * The order lives in `lakko-feed` so web, iOS and Android draw the same
  * messages in the same order; this module only moves `buildFeedInput`'s

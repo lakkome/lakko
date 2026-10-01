@@ -6,7 +6,7 @@ import LakkoCore
 
 /// Which of the two lists a conversation belongs to (UX spec section 3).
 ///
-/// Since ADR-0060 the kind is NOT derived on this device. The creator writes
+/// Since ADR-0062 the kind is NOT derived on this device. The creator writes
 /// it into the group's GroupContext (`0xFF03`) and every member reads it with
 /// `Group.groupKind()`, so it is the same answer on every device and never
 /// changes: a two-person group is a group, and a one-to-one never becomes a
@@ -29,7 +29,7 @@ public enum ConversationKind: Equatable {
         groupKind == .oneToOne ? .chat : .group
     }
 
-    /// ADR-0060 section 7 — whether a group-name envelope (ADR-0051) may be
+    /// ADR-0062 section 7 — whether a group-name envelope (ADR-0051) may be
     /// applied in a conversation of `groupKind`. A one-to-one has no group
     /// name, and applying one would retitle the person, so it is dropped.
     public static func acceptsGroupName(groupKind: GroupKind?) -> Bool {

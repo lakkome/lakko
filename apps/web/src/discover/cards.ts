@@ -6,7 +6,7 @@
  * three sources become cards, how this device orders them, and the check a
  * card must pass before it can be subscribed to.
  *
- * **Ranking for the person happens here, not in the ADR-0058 engine.** The
+ * **Ranking for the person happens here, not in the ADR-0061 engine.** The
  * engine ranks messages of conversations the device already holds (its
  * candidates carry a conversation, an author, reactions and a time); a card
  * is none of those, so it cannot be handed to `rankFeed` without inventing

@@ -61,6 +61,7 @@ pub(crate) fn state(db: MySqlPool, enabled: bool) -> AppState {
         )),
         fresh_identity_cooldown_secs: 0,
         transparency: None,
+        username_cert_key: Arc::new(lakko_crypto::signing::SigningKey::from_seed(&[3u8; 32])),
     }
 }
 
@@ -106,8 +107,23 @@ pub(crate) async fn test_pool(name: &str) -> Option<MySqlPool> {
         .connect(&url)
         .await
         .expect("connect test DB");
-    crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+    // Parallel tests share one database and sqlx's migrator does not tolerate
+    // two concurrent runs on it (the first run on an empty database failed
+    // several tests), so migrate once per process.
+    migrate_once(&pool).await;
     Some(pool)
+}
+
+static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+/// Run the migrations on the shared test database once per test process.
+/// Every DB-backed test module calls this rather than the migrator.
+pub(crate) async fn migrate_once(pool: &MySqlPool) {
+    MIGRATED
+        .get_or_init(|| async {
+            crate::MIGRATIONS.run(pool).await.expect("run migrations");
+        })
+        .await;
 }
 
 #[test]

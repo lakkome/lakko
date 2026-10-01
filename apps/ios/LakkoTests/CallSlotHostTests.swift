@@ -198,7 +198,7 @@ final class GroupCallHostRulesTests: XCTestCase {
         XCTAssertEqual(
             GroupCallHostRules.chatCallAction(
                 membershipEnded: false, callInProgress: false, affordance: .none, isGroup: true),
-            .startGroup, "a group of any size calls over the SFU (ADR-0060)")
+            .startGroup, "a group of any size calls over the SFU (ADR-0062)")
         XCTAssertEqual(
             GroupCallHostRules.chatCallAction(
                 membershipEnded: false, callInProgress: false, affordance: .none, isGroup: false),

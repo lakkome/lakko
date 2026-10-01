@@ -210,7 +210,7 @@ public fun NewGroupScreen(
                             chatRepository.startGroupWith(
                                 recipientAccountId = first.request.fromAccountId!!,
                                 recipientSignaturePubkey = first.request.fromPubkey,
-                                // ADR-0060 — a group from the first pick on,
+                                // ADR-0062 — a group from the first pick on,
                                 // even while it holds two people.
                                 kind = uniffi.lakko_ffi_uniffi.GroupKind.GROUP,
                             )

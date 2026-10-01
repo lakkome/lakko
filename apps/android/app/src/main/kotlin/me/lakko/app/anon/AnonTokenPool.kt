@@ -25,8 +25,8 @@ import kotlin.coroutines.cancellation.CancellationException
  * Everything that touches the native core sits behind [AnonTokenCore] and
  * everything that touches the network behind [AnonTokenIssuerApi], so the pool
  * rules (per-context batch sizes and refill thresholds up to thirty-two, drop
- * a dead token, persist across a relaunch, clear on logout, wait bounded then
- * fail) run in a host JVM test with no native library.
+ * a dead token, persist per account across a relaunch and a logout, wait
+ * bounded then fail) run in a host JVM test with no native library.
  */
 
 /** The rationed actions, in wire order (`anonTokenContexts()`);
@@ -228,8 +228,10 @@ public interface AnonTokenSource {
      *  session is gone. Takes a pooled token of that account first. */
     public suspend fun takeDetached(session: AnonSession, context: AnonTokenContext): PooledAnonToken
 
-    /** Drop every pooled token and forget the account (logout, account switch). */
-    public fun clear()
+    /** Drop the tokens held in memory and forget which account they belong
+     *  to (Log out). The account's persisted tokens stay for its next
+     *  sign-in; nothing on disk is touched. */
+    public fun releaseSession()
 }
 
 /**
@@ -241,9 +243,14 @@ public interface AnonTokenSource {
  * remembers it until the window rolls over, so the issuer is not asked again
  * meanwhile.
  *
- * The store holds one account at a time, exactly like the memory: adopting a
- * different account, [clear] (logout, forget-device) and an account switch
- * all drop what was held. Dead-epoch tokens are dropped on load.
+ * Tokens are account data (maintainer decision, 2026-10-01). The memory holds
+ * one account at a time; the store holds every account's pool separately.
+ * Adopting a different account drops the memory and loads that account's own
+ * persisted tokens, leaving every other account's on disk; [releaseSession]
+ * (Log out) drops the memory only; [forgetAccount] (the Forget device / Delete
+ * account wipe) removes one account's tokens from memory and disk. A token is
+ * only ever handed to a request made under the account it was issued to.
+ * Dead-epoch tokens are dropped on load.
  */
 public class AnonTokenPool(
     private val core: AnonTokenCore,
@@ -312,17 +319,29 @@ public class AnonTokenPool(
 
     override suspend fun takeDetached(session: AnonSession, context: AnonTokenContext): PooledAnonToken {
         synchronized(lock) {
-            if (owner == session.accountKey) popLiveLocked(context)?.let { return it }
+            if (owner == session.accountKey) {
+                popLiveLocked(context)?.let { return it }
+            } else {
+                // The logout path: the memory was already released, the
+                // account's tokens are still on disk.
+                popPersistedLocked(session.accountKey, context)?.let { return it }
+            }
         }
         val result = issueBatch(context, session, count = 1)
         if (result is RefillResult.Filled && result.tokens.isNotEmpty()) return result.tokens.first()
         throw failureFor(context, result, timedOut = false)
     }
 
-    override fun clear() {
+    override fun releaseSession() {
+        synchronized(lock) { resetLocked(newOwner = null) }
+    }
+
+    /** Remove [accountKey]'s tokens, held and persisted. Another account's
+     *  stay, in memory and on disk. */
+    public fun forgetAccount(accountKey: String) {
         synchronized(lock) {
-            resetLocked(newOwner = null)
-            runCatching { store.clear() }
+            if (owner == accountKey) resetLocked(newOwner = null)
+            runCatching { store.delete(accountKey) }
         }
     }
 
@@ -349,13 +368,10 @@ public class AnonTokenPool(
     }
 
     /** Take over what [store] holds for [accountKey], dropping dead-epoch
-     *  tokens; a store holding another account is emptied (account switch). */
+     *  tokens. Other accounts' persisted pools are not touched. */
     private fun loadLocked(accountKey: String) {
-        val persisted = runCatching { store.load() }.getOrNull()
-        if (persisted == null || persisted.owner != accountKey) {
-            if (persisted != null) runCatching { store.clear() }
-            return
-        }
+        val persisted = runCatching { store.load(accountKey) }.getOrNull()
+        if (persisted == null || persisted.owner != accountKey) return
         val current = currentEpochLocked()
         for (t in persisted.tokens) {
             if (!core.isLive(t.epoch, current)) continue
@@ -363,6 +379,20 @@ public class AnonTokenPool(
             if (queue.size < max) queue.addLast(t)
         }
         persistLocked()
+    }
+
+    /** One live token of [context] from [accountKey]'s persisted pool, for an
+     *  account the memory does not hold; the rest is written back (dead
+     *  tokens dropped). */
+    private fun popPersistedLocked(accountKey: String, context: AnonTokenContext): PooledAnonToken? {
+        val persisted = runCatching { store.load(accountKey) }.getOrNull() ?: return null
+        if (persisted.owner != accountKey) return null
+        val current = currentEpochLocked()
+        val live = persisted.tokens.filter { core.isLive(it.epoch, current) }
+        val found = live.firstOrNull { it.context == context }
+        val rest = if (found == null) live else live - found
+        if (rest != persisted.tokens) runCatching { store.save(PersistedAnonPool(accountKey, rest)) }
+        return found
     }
 
     /** Mirror the queues to [store]. A store failure only costs the relaunch
@@ -553,7 +583,7 @@ public suspend fun <R> AnonTokenSource.spendWithRetry(
 /**
  * A source bound to one explicit [session], for work that outlives the live
  * session (the push unregister a logout fires). Every take is a
- * [AnonTokenSource.takeDetached] on [base]; [clear] is a no-op.
+ * [AnonTokenSource.takeDetached] on [base]; [releaseSession] is a no-op.
  */
 public class DetachedAnonTokenSource(
     private val base: AnonTokenSource,
@@ -567,7 +597,7 @@ public class DetachedAnonTokenSource(
     override suspend fun takeDetached(session: AnonSession, context: AnonTokenContext): PooledAnonToken =
         base.takeDetached(session, context)
 
-    override fun clear() = Unit
+    override fun releaseSession() = Unit
 }
 
 /** The generic network-failure sentence an action shows when no token could
@@ -594,7 +624,7 @@ public fun anonTokenFailureCopy(error: Throwable, quotaCopy: String): String? {
 // Persistence (ADR-0054 S5)
 // -----------------------------------------------------------------------------
 
-/** What the pool keeps between launches: one account's tokens. */
+/** What the pool keeps between launches for one account. */
 public data class PersistedAnonPool(
     /** [AnonSession.accountKey] of the account the tokens were issued to. */
     val owner: String,
@@ -602,25 +632,28 @@ public data class PersistedAnonPool(
 )
 
 /**
- * Where the pool survives a relaunch. The tokens are anonymous bearer
- * credentials: an implementation keeps them in app-private, never-backed-up
- * storage, never logs them and never syncs them between devices.
+ * Where each account's pool survives a relaunch and a logout. The tokens are
+ * anonymous bearer credentials: an implementation keeps them in app-private,
+ * never-backed-up storage, never logs them and never syncs them between
+ * devices. Accounts are kept apart: no call reads or removes another
+ * account's pool.
  */
 public interface AnonTokenStore {
-    /** The persisted pool, or `null` when none (or it is unreadable). */
-    public fun load(): PersistedAnonPool?
+    /** [accountKey]'s persisted pool, or `null` when none (or it is
+     *  unreadable). */
+    public fun load(accountKey: String): PersistedAnonPool?
 
-    /** Replace what is persisted. */
+    /** Replace what is persisted for [PersistedAnonPool.owner]. */
     public fun save(pool: PersistedAnonPool)
 
-    /** Drop what is persisted. */
-    public fun clear()
+    /** Drop what is persisted for [accountKey]. */
+    public fun delete(accountKey: String)
 }
 
 /** A store that keeps nothing (tests that do not care, and a process with no
  *  context to put a file in). */
 public object NoAnonTokenStore : AnonTokenStore {
-    override fun load(): PersistedAnonPool? = null
+    override fun load(accountKey: String): PersistedAnonPool? = null
     override fun save(pool: PersistedAnonPool) = Unit
-    override fun clear() = Unit
+    override fun delete(accountKey: String) = Unit
 }

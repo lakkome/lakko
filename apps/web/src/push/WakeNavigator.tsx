@@ -55,6 +55,7 @@
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
+import { currentInternalPath, entrySearch } from "../routes/origin-history";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import {
@@ -85,13 +86,15 @@ export function WakeNavigator(): JSX.Element {
 
   onMount(() => {
     // (1) Cold open: `/?wake=<hex>`.
-    const raw = readWakeParam(window.location.search);
+    // The address bar is already `/` (`routes/origin-history.ts`): read the
+    // entry path's query, strip from the router's current path.
+    const raw = readWakeParam(entrySearch());
     if (raw !== null) {
       // Parse BEFORE the strip — the strip rewrites the URL we read.
       // A malformed value yields `null` and is silently ignored, but
       // the param is stripped either way so a reload is inert.
       setPending(parseWakeTarget(raw));
-      const cleaned = stripWakeParam(window.location.href);
+      const cleaned = stripWakeParam(new URL(currentInternalPath(), window.location.origin).href);
       if (cleaned !== null) navigate(cleaned, { replace: true });
     }
 

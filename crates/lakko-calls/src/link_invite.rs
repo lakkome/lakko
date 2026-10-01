@@ -159,7 +159,7 @@ pub fn accept_call_invite(
     // 1. Joiner founds a fresh MLS group. Per ROADMAP 3c3
     //    "call MLS group spins up on first accepted
     //    joiner" — this is that step.
-    // ADR-0060: a call-link group is a Group — ADR-0032 admits joiners
+    // ADR-0062: a call-link group is a Group — ADR-0032 admits joiners
     //    into it, so its membership grows.
     let mut group = Group::create(joiner_identity, GroupKind::Group)
         .map_err(|e| Error::Crypto(format!("accept_call_invite Group::create: {e}")))?;
@@ -284,7 +284,7 @@ pub struct FoundedCall {
 ///
 /// [ADR-0032]: ../../../docs/adr/0032-multi-joiner-call-links.md
 pub fn found_call(owner_identity: &Identity, call_id: [u8; 16]) -> Result<FoundedCall> {
-    // ADR-0060: call-link groups grow (ADR-0032), so they are a Group.
+    // ADR-0062: call-link groups grow (ADR-0032), so they are a Group.
     let group = Group::create(owner_identity, GroupKind::Group)
         .map_err(|e| Error::Crypto(format!("found_call Group::create: {e}")))?;
     let session =
@@ -300,6 +300,12 @@ pub fn found_call(owner_identity: &Identity, call_id: [u8; 16]) -> Result<Founde
 /// bytes to the acting committer — over the SFU `signal-relay` for a live call,
 /// or the stranger-inbox `wrap_call_kp_forward` for a cold start. The joiner
 /// never founds a group.
+///
+/// On a cold start the owner's mailbox is closed to strangers (ADR-0060): the
+/// joiner writes the `ContactRequest` carrying the forward under the
+/// capability's `link` grant, and puts its own `reply` grant inside that
+/// request (`lakko_contacts::request::compose`) so the Welcome can come back
+/// to its closed mailbox.
 ///
 /// # Errors
 ///
@@ -415,6 +421,18 @@ mod tests {
     /// first (stream-0) SFrame stream (ADR-0035).
     fn kid(sender_leaf: u32) -> u64 {
         SframeHeader::kid_for(sender_leaf, 0).expect("stream 0 fits")
+    }
+
+    const TEST_LINK_ID: [u8; 16] = [0x1C; 16];
+
+    fn test_link_grant() -> lakko_contacts::reach::ReachGrant {
+        lakko_contacts::reach::ReachGrant::derive(
+            &[0x6E; 32],
+            lakko_contacts::reach::ReachClass::Link,
+            &TEST_LINK_ID,
+            0,
+        )
+        .unwrap()
     }
 
     fn fixture_account_id() -> [u8; 16] {
@@ -641,6 +659,8 @@ mod tests {
             CallInviteMedia::audio_video(),
             &alice_kp_bytes,
             "Alice's standup",
+            &TEST_LINK_ID,
+            &test_link_grant(),
         )
         .unwrap();
         let capability = lakko_contacts::call_invite::decode_and_verify(&cap_wire).unwrap();
@@ -718,6 +738,8 @@ mod tests {
             CallInviteMedia::audio_only(),
             &alice_kp_bytes,
             "",
+            &TEST_LINK_ID,
+            &test_link_grant(),
         )
         .unwrap();
         let capability = lakko_contacts::call_invite::decode_and_verify(&cap_wire).unwrap();
@@ -752,6 +774,8 @@ mod tests {
             CallInviteMedia::audio_only(),
             &alice_kp_bytes,
             "",
+            &TEST_LINK_ID,
+            &test_link_grant(),
         )
         .unwrap();
         let capability = lakko_contacts::call_invite::decode_and_verify(&cap_wire).unwrap();
@@ -778,6 +802,8 @@ mod tests {
             CallInviteMedia::audio_only(),
             &alice_kp_bytes,
             "",
+            &TEST_LINK_ID,
+            &test_link_grant(),
         )
         .unwrap();
         let capability = lakko_contacts::call_invite::decode_and_verify(&cap_wire).unwrap();
@@ -842,6 +868,8 @@ mod tests {
             CallInviteMedia::audio_video(),
             &alice_kp_bytes,
             "Alice's standup",
+            &TEST_LINK_ID,
+            &test_link_grant(),
         )
         .unwrap();
         let capability = lakko_contacts::call_invite::decode_and_verify(&cap_wire).unwrap();
@@ -1012,6 +1040,8 @@ mod tests {
             CallInviteMedia::audio_video(),
             &alice_kp_bytes,
             "Alice's standup",
+            &TEST_LINK_ID,
+            &test_link_grant(),
         )
         .unwrap();
         let capability = lakko_contacts::call_invite::decode_and_verify(&cap_wire).unwrap();
@@ -1178,6 +1208,8 @@ mod tests {
             CallInviteMedia::audio_video(),
             &alice_kp_bytes,
             "Alice's all-hands",
+            &TEST_LINK_ID,
+            &test_link_grant(),
         )
         .unwrap();
         let capability = lakko_contacts::call_invite::decode_and_verify(&cap_wire).unwrap();

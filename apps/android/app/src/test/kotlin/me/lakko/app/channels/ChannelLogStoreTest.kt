@@ -23,7 +23,7 @@ import org.junit.Test
  *   3. [channelsToReopen] — which channels a relaunch re-opens publisher
  *      keys for.
  *   4. [ChannelsUiState] write-through + load on bind, unbind keeping the
- *      persisted state, forgetAccount deleting it.
+ *      persisted state, the forget-device rows deleting it.
  */
 class ChannelLogStoreTest {
 
@@ -246,7 +246,7 @@ class ChannelLogStoreTest {
     }
 
     @Test
-    fun `unbind keeps the persisted log and forgetAccount deletes it`() = runBlocking {
+    fun `unbind keeps the persisted log and the forget-device rows delete it`() = runBlocking {
         val store = InMemoryChannelLogStore()
         val state = ChannelsUiState(logStore = store)
         state.bind(account, ByteArray(64))
@@ -264,7 +264,8 @@ class ChannelLogStoreTest {
         assertEquals(1, state.channels.value.size)
         assertEquals(1, state.subscribedSeeds(channel(1).id).size)
 
-        state.forgetAccount()
+        state.unbind()
+        ChannelsUiState.deleteAccountRows(prefs = null, publisherPrefs = null, logStore = store, accountIdB64 = account)
         assertNull(state.boundAccount)
         assertTrue(store.loadChannels(account).isEmpty())
         assertTrue(store.loadSubscribedSeeds(account).isEmpty())

@@ -65,25 +65,77 @@ final class EmojiIndexTests: XCTestCase {
     }
 
     func testRecentRoundTripsAndIgnoresNonEmoji() {
-        EmojiIndex.saveRecent(["\u{1F600}", "\u{1F44D}"], defaults)
-        XCTAssertEqual(EmojiIndex.loadRecent(defaults), ["\u{1F600}", "\u{1F44D}"])
-        defaults.set(["ok?", "\u{1F600}"], forKey: EmojiIndex.recentKey)
-        XCTAssertEqual(EmojiIndex.loadRecent(defaults), ["\u{1F600}"])
-        defaults.set("garbage", forKey: EmojiIndex.recentKey)
-        XCTAssertEqual(EmojiIndex.loadRecent(defaults), [])
+        let a = "QUNDT1VOVEE="
+        EmojiIndex.saveRecent(["\u{1F600}", "\u{1F44D}"], defaults, accountIdB64: a)
+        XCTAssertEqual(EmojiIndex.loadRecent(defaults, accountIdB64: a), ["\u{1F600}", "\u{1F44D}"])
+        defaults.set(["ok?", "\u{1F600}"], forKey: EmojiIndex.recentKey(accountIdB64: a))
+        XCTAssertEqual(EmojiIndex.loadRecent(defaults, accountIdB64: a), ["\u{1F600}"])
+        defaults.set("garbage", forKey: EmojiIndex.recentKey(accountIdB64: a))
+        XCTAssertEqual(EmojiIndex.loadRecent(defaults, accountIdB64: a), [])
     }
 
     func testToneBecomesDefaultAndBaseClearsIt() throws {
+        let a = "QUNDT1VOVEE="
         let wave = try XCTUnwrap(dataset.byEmoji["\u{1F44B}"])
         let dark = try XCTUnwrap(wave.tones?[4])
         var prefs = EmojiIndex.withTonePref([:], entry: wave, variant: dark)
         XCTAssertEqual(EmojiIndex.displayEmoji(wave, prefs: prefs), dark)
-        EmojiIndex.saveTonePrefs(prefs, defaults)
-        XCTAssertEqual(EmojiIndex.displayEmoji(wave, prefs: EmojiIndex.loadTonePrefs(defaults)), dark)
+        EmojiIndex.saveTonePrefs(prefs, defaults, accountIdB64: a)
+        XCTAssertEqual(
+            EmojiIndex.displayEmoji(wave, prefs: EmojiIndex.loadTonePrefs(defaults, accountIdB64: a)), dark)
         prefs = EmojiIndex.withTonePref(prefs, entry: wave, variant: wave.emoji)
         XCTAssertEqual(EmojiIndex.displayEmoji(wave, prefs: prefs), wave.emoji)
         // A stored variant that is not one of the entry's tones is ignored.
         XCTAssertEqual(EmojiIndex.displayEmoji(wave, prefs: [wave.emoji: "\u{1F600}"]), wave.emoji)
+    }
+
+    // MARK: - Account data (maintainer rule, 2026-09-30)
+
+    func testTwoAccountsKeepSeparateRecentsAndTones() {
+        let a = "QUNDT1VOVEE=", b = "QUNDT1VOVEI="
+        EmojiIndex.saveRecent(["\u{1F600}"], defaults, accountIdB64: a)
+        EmojiIndex.saveRecent(["\u{1F44D}", "\u{1F600}"], defaults, accountIdB64: b)
+        EmojiIndex.saveTonePrefs(["\u{1F44B}": "\u{1F44B}\u{1F3FF}"], defaults, accountIdB64: a)
+        EmojiIndex.saveTonePrefs(["\u{1F44B}": "\u{1F44B}\u{1F3FB}"], defaults, accountIdB64: b)
+
+        XCTAssertEqual(EmojiIndex.loadRecent(defaults, accountIdB64: a), ["\u{1F600}"])
+        XCTAssertEqual(EmojiIndex.loadRecent(defaults, accountIdB64: b), ["\u{1F44D}", "\u{1F600}"])
+        XCTAssertEqual(EmojiIndex.loadTonePrefs(defaults, accountIdB64: a)["\u{1F44B}"], "\u{1F44B}\u{1F3FF}")
+        XCTAssertEqual(EmojiIndex.loadTonePrefs(defaults, accountIdB64: b)["\u{1F44B}"], "\u{1F44B}\u{1F3FB}")
+    }
+
+    func testNoAccountReadsEmptyAndWritesNothing() {
+        // The old device-wide rows are never read.
+        defaults.set(["\u{1F600}"], forKey: EmojiIndex.recentKey)
+        defaults.set(["\u{1F44B}": "\u{1F44B}\u{1F3FF}"], forKey: EmojiIndex.tonesKey)
+        XCTAssertEqual(EmojiIndex.loadRecent(defaults, accountIdB64: nil), [])
+        XCTAssertEqual(EmojiIndex.loadTonePrefs(defaults, accountIdB64: nil), [:])
+        XCTAssertEqual(EmojiIndex.loadRecent(defaults, accountIdB64: "QUNDT1VOVEE="), [])
+
+        let before = Set(defaults.dictionaryRepresentation().keys)
+        EmojiIndex.saveRecent(["\u{1F44D}"], defaults, accountIdB64: nil)
+        EmojiIndex.saveTonePrefs(["\u{1F44B}": "\u{1F44B}\u{1F3FB}"], defaults, accountIdB64: nil)
+        XCTAssertEqual(Set(defaults.dictionaryRepresentation().keys), before, "no write without an account")
+        XCTAssertEqual(defaults.stringArray(forKey: EmojiIndex.recentKey), ["\u{1F600}"])
+    }
+
+    func testClearRemovesOnlyThatAccountsRowsAndTheOldDeviceWideOnes() {
+        let a = "QUNDT1VOVEE=", b = "QUNDT1VOVEI="
+        for account in [a, b] {
+            EmojiIndex.saveRecent(["\u{1F600}"], defaults, accountIdB64: account)
+            EmojiIndex.saveTonePrefs(["\u{1F44B}": "\u{1F44B}\u{1F3FF}"], defaults, accountIdB64: account)
+        }
+        defaults.set(["\u{1F600}"], forKey: EmojiIndex.recentKey)
+        defaults.set(["\u{1F44B}": "\u{1F44B}\u{1F3FF}"], forKey: EmojiIndex.tonesKey)
+
+        EmojiIndex.clear(accountIdB64: a, defaults)
+
+        XCTAssertNil(defaults.object(forKey: EmojiIndex.recentKey(accountIdB64: a)))
+        XCTAssertNil(defaults.object(forKey: EmojiIndex.tonesKey(accountIdB64: a)))
+        XCTAssertNil(defaults.object(forKey: EmojiIndex.recentKey))
+        XCTAssertNil(defaults.object(forKey: EmojiIndex.tonesKey))
+        XCTAssertEqual(EmojiIndex.loadRecent(defaults, accountIdB64: b), ["\u{1F600}"])
+        XCTAssertEqual(EmojiIndex.loadTonePrefs(defaults, accountIdB64: b).count, 1)
     }
 
     func testSingleGraphemeAcceptsEveryShapeThePickerProduces() {

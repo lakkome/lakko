@@ -29,8 +29,10 @@ import LakkoCoreExtension
 /// anywhere in this file.
 
 /// Builds the real, read-only ``NsePushDecryptDeps`` from the shared stores +
-/// the slim FFI. `resolveAccount` reverses the wake's group pseudonym to an
-/// account straight from ``KnownGroupsStore`` (the NSE has no live
+/// the slim FFI. `boundAccount` reads the `(device pseudonym, account)`
+/// binding the app wrote (``PushAccountBindingStore``) and is the only source
+/// of the account a wake is decrypted as; `accountKnowsGroup` checks that
+/// account's own ``KnownGroupsStore`` row (the NSE has no live
 /// `ChatRepository`); `openThrowawayGroup` reconstructs a FRESH throwaway
 /// `Identity` + `Group` — never the app's handles (the NSE is a separate
 /// process anyway); `dsFetch` is a slim `URLSession` GET (``NseDsFetch``, no
@@ -50,25 +52,38 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         self.session = session
     }
 
-    /// ADR-0042 Sprint 4 — the App-Group reverse-index read that turns the
-    /// wake's opaque `push_gid` hex back into the real `(account, group_id)`.
-    /// Reuses ``PushRoutingStore`` (compiled into the NSE target as a sibling
-    /// source, like the other shared stores): it is FFI-clean — Foundation +
-    /// CryptoKit only, no `LakkoCore` — and `lookupRoute` is a plain
-    /// shared-suite `UserDefaults` read (the Keychain-touching secret paths
-    /// exist on the store but are never called from the NSE), so the one
-    /// `me.lakko.push-route.v1.` key-shape definition is shared with the app
-    /// instead of duplicated here. READ-ONLY.
-    func lookupRoute(pushGidHex: String) -> (accountIdB64: String, groupIdHex: String)? {
-        pushRoutes.lookupRoute(pushGidHex: pushGidHex)
+    /// ADR-0042 (amended 2026-09-30) — the account the app bound this
+    /// device's push pseudonym to, when the wake's `d` equals that pseudonym.
+    /// The rule is ``PushAccountBinding/boundAccount(wakeDevicePseudonymHex:binding:)``,
+    /// shared with the app's VoIP handler; this only reads the App Group row
+    /// the app writes. READ-ONLY.
+    func boundAccount(wakeDevicePseudonymHex: String?) -> String? {
+        PushAccountBinding.boundAccount(
+            wakeDevicePseudonymHex: wakeDevicePseudonymHex,
+            binding: PushAccountBindingStore.live.current()
+        )
     }
 
-    func resolveAccount(groupHex: String) -> NseResolvedAccount? {
-        guard let accountIdB64 = knownGroups.findAccountForGroup(groupIdHex: groupHex),
-              let groupIdBytes = Self.hexToData(groupHex) else {
-            return nil
-        }
-        return NseResolvedAccount(accountIdB64: accountIdB64, groupIdBytes: groupIdBytes)
+    /// ADR-0042 Sprint 4 — the App-Group reverse-index read that turns the
+    /// wake's opaque `push_gid` hex back into the real `group_id`, for the
+    /// bound account only. Reuses ``PushRoutingStore`` (compiled into the NSE
+    /// target as a sibling source, like the other shared stores): it is
+    /// FFI-clean — Foundation + CryptoKit only, no `LakkoCore` — and
+    /// `lookupRoute` is a plain shared-suite `UserDefaults` read (the
+    /// Keychain-touching secret paths exist on the store but are never called
+    /// from the NSE), so the one key-shape definition is shared with the app
+    /// instead of duplicated here. READ-ONLY.
+    func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? {
+        pushRoutes.lookupRoute(accountIdB64: accountIdB64, pushGidHex: pushGidHex)
+    }
+
+    /// The legacy raw-group_id wake: does the BOUND account know the group?
+    /// Only that account's known-groups row is read; another account's is
+    /// never consulted. READ-ONLY.
+    func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool {
+        let needle = groupHex.lowercased()
+        return knownGroups.load(accountIdB64: accountIdB64)
+            .contains { $0.lowercased() == needle }
     }
 
     func loadIdentitySeed(accountIdB64: String) -> Data? {
@@ -143,8 +158,8 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
     /// lock screen, from the App Group mirror the APP writes
     /// (``CallPeerNameMirror``). READ-ONLY; this process resolves no names and
     /// writes nothing (C-59). Absent → the alert is unnamed.
-    func callerName(groupIdHex: String) -> String? {
-        CallPeerNameMirror.name(groupIdHex: groupIdHex)
+    func callerName(accountIdB64: String, groupIdHex: String) -> String? {
+        CallPeerNameMirror.name(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
     }
 
     /// `docs/ux/calls.md` section 2.1 — the App Group muted-conversation
@@ -152,8 +167,8 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
     /// process holds no thread flags and writes none (C-59). Absent → not
     /// muted → the call rings, which is the only direction a missing mirror
     /// may fail in.
-    func isMuted(groupIdHex: String) -> Bool {
-        ConversationMuteMirror.isMuted(groupIdHex: groupIdHex)
+    func isMuted(accountIdB64: String, groupIdHex: String) -> Bool {
+        ConversationMuteMirror.isMuted(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
     }
 
     /// Decode a lowercase-hex string into bytes. `nil` on any malformed input
@@ -246,6 +261,10 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             profileRequestEnvelopeLen: Self.profileRequestEnvelopeLength,
             decodesAsPin: Self.decodesAsPin,
             pinEnvelopeLen: Self.pinEnvelopeLength,
+            decodesAsRegistrarSeed: Self.decodesAsRegistrarSeed,
+            registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLength,
+            decodesAsScopedDiscovery: Self.decodesAsScopedDiscovery,
+            scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLengths,
             decodesAsSharedChannels: Self.decodesAsSharedChannels,
             sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLengths
         ) {
@@ -260,6 +279,10 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         case .reaction: kind = .reaction
         case .typing: kind = .typing
         case .readReceipt: kind = .readReceipt
+        // A service envelope the filter above did not recognise (a newer
+        // version from a client ahead of this one): the pure core never
+        // previews it.
+        case .serviceEnvelope: kind = .serviceEnvelope
         }
         return NseProcessedRow(
             kind: kind,
@@ -401,6 +424,20 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         (try? decodePinEnvelope(plaintext: bytes)) != nil
     }
 
+    /// The AUTHORITATIVE half of the ADR-0060 filter: the slim FFI's
+    /// `decodeScopedDiscoveryEnvelope`, which answers "one of the five 'who can
+    /// find me' envelopes" and returns nothing else. READ-ONLY: a pure decode;
+    /// the NSE never keeps a grant, a setting or a delegation (C-59). The
+    /// foreground app acts on them on its own receive path.
+    private static func decodesAsScopedDiscovery(_ bytes: Data) -> Bool {
+        (try? decodeScopedDiscoveryEnvelope(plaintext: bytes)) != nil
+    }
+
+    /// The length range of the five ADR-0060 envelopes, from the slim FFI.
+    private static var scopedDiscoveryEnvelopeLengths: ClosedRange<Int> {
+        Int(scopedDiscoveryEnvelopeMinLen())...Int(scopedDiscoveryEnvelopeMaxLen())
+    }
+
     /// The exact composed length of an ADR-0052 pin envelope, read from the
     /// slim FFI's `pinEnvelopeLen()` so the cheap pre-filter carries no
     /// hand-copied wire number; a Rust golden pins the exported value against
@@ -408,6 +445,20 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     /// narrowing this filter.
     private static var pinEnvelopeLength: Int {
         Int(pinEnvelopeLen())
+    }
+
+    /// The AUTHORITATIVE half of the ADR-0057 registrar-seed filter: the slim
+    /// FFI's `decodeRegistrarSeedEnvelope` (a pure decode; the seed stays
+    /// sealed). The NSE never opens or stores it (C-59); the foreground app
+    /// gates and keeps it on its own receive path.
+    private static func decodesAsRegistrarSeed(_ bytes: Data) -> Bool {
+        (try? decodeRegistrarSeedEnvelope(plaintext: bytes)) != nil
+    }
+
+    /// The exact length of an ADR-0057 registrar-seed envelope, from the slim
+    /// FFI's `registrarSeedEnvelopeLen()` (173).
+    private static var registrarSeedEnvelopeLength: Int {
+        Int(registrarSeedEnvelopeLen())
     }
 
     /// The ADR-0059 shared-channels filter: the slim FFI's

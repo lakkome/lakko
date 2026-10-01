@@ -388,7 +388,7 @@ public enum PairingOrchestrator {
                 rendezvousPseudonym: rendezvous,
                 afterCursor: cursor
             ) {
-                let applied = StateBundle.apply(bundle)
+                let applied = StateBundle.apply(bundle, accountIdB64: accountIdB64)
                 NSLog("state bundle: %d contacts, %d pins", applied.contacts, applied.pins)
             }
         }
@@ -538,7 +538,7 @@ public enum PairingOrchestrator {
             }
             if let bundle = stateBundle {
                 stateBundle = nil
-                let applied = StateBundle.apply(bundle)
+                let applied = StateBundle.apply(bundle, accountIdB64: accountIdB64)
                 NSLog("state bundle: %d contacts, %d pins", applied.contacts, applied.pins)
             }
         }
@@ -727,7 +727,11 @@ public enum PairingOrchestrator {
         let ds = DsClient()
         // ADR-0053 point 2 — claim-on-open (idempotent; also the claim of a
         // DeviceGroup this flow just founded).
-        await DeviceGroupDsAccess.claim(group: ensured.group, identity: ensured.identity, ds: ds)
+        await DeviceGroupDsAccess.claim(
+            group: ensured.group, identity: ensured.identity, accountIdB64: accountIdB64, ds: ds)
+        // Second security pass, finding 3 — a DeviceGroup founded here whose
+        // claim did not land sends no Welcome.
+        try DeviceGroupDsAccess.requireFoundingClaim(group: ensured.group)
 
         // ADR-0053 point 3 — the N+1 key is registered, proven under N, before
         // the snapshot is written and anything is published; the commit then
@@ -735,6 +739,7 @@ public enum PairingOrchestrator {
         _ = try await DeviceGroupDsAccess.directCommit(
             group: ensured.group,
             identity: ensured.identity,
+            accountIdB64: accountIdB64,
             ds: ds,
             create: {
                 try ensured.group.addDeviceFromWire(
@@ -784,6 +789,11 @@ public enum PairingOrchestrator {
                 return addition
             }
         )
+
+        // ADR-0060 section 7 — the setting and the reach-key versions reach
+        // the new device from the sync runtime, which the caller reloads at the
+        // post-add epoch (`reloadAfterLocalMembershipChange`): this handle
+        // seals nothing more, so the two never share a sender generation.
 
         // Phase 2a3d8-ui — best-effort history catch-up bundle.
         // Read the local message log, derive the post-add

@@ -57,6 +57,10 @@ export interface StoredProfile {
    *  carried none (ADR-0048 v2). What the call roster derives the ADR-0021
    *  peer tag from; never an identity on its own — the signature key is. */
   readonly accountIdHex: string | null;
+  /** ADR-0060 — the username certificate the profile carried (standard
+   *  base64), what `verifyUsernameBinding` checks the claimed username
+   *  against; absent or `null` when none. Public (discovery signed it). */
+  readonly usernameCertificateB64?: string | null;
 }
 
 /** A decoded profile as the core hands it over (the wasm `Profile` getters). */
@@ -66,6 +70,8 @@ export interface IncomingProfile {
   readonly updatedAtMs: bigint;
   /** Exactly 16 bytes, or absent. Anything else is stored as "none". */
   readonly accountId?: Uint8Array | undefined | null;
+  /** ADR-0060 — the username certificate, or absent. */
+  readonly usernameCertificate?: Uint8Array | undefined | null;
 }
 
 /** Length of an auth account id, in bytes. */
@@ -150,7 +156,17 @@ function toStored(p: IncomingProfile): StoredProfile {
     username,
     updatedAtMs: p.updatedAtMs,
     accountIdHex: accountIdHexOfBytes(p.accountId),
+    usernameCertificateB64:
+      p.usernameCertificate === undefined || p.usernameCertificate === null
+        ? null
+        : bytesToB64(p.usernameCertificate),
   };
+}
+
+function bytesToB64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] ?? 0);
+  return btoa(bin);
 }
 
 export class ProfileStore {

@@ -7,7 +7,7 @@ import XCTest
 /// The pure rules behind the Phase B list and timeline
 /// (docs/ux/client-redesign.md sections 5.1 and 5.2): the row time and
 /// preview, the date separators, the run grouping and the bubble time. The
-/// conversation kind is ADR-0060's and is tested in `ConversationTitleTests`.
+/// conversation kind is ADR-0062's and is tested in `ConversationTitleTests`.
 final class ChatListRedesignTests: XCTestCase {
 
     // MARK: - Row time

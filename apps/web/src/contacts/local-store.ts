@@ -4,33 +4,37 @@
 /**
  * On-device persistence for the contacts UI (1.16d3d).
  *
- * Two pieces survive a page reload:
+ * The local "address book" of the SIGNED-IN ACCOUNT: the accepted contacts
+ * (the public keys we need to reach each one, plus the viewer's local rename)
+ * and the per-contact account-pubkey pins (below). Bytes-only; no secrets.
  *
- *   1. **Mailbox cursor** (`number`): the highest DS message id
- *      we have already processed. Lets the next poll skip the
- *      backlog we already showed the user.
+ * ## One row per account (2026-09-30)
  *
- *   2. **Accepted contacts** (`AcceptedContact[]`): the local
- *      "address book". Holds the public keys we'll need to send
- *      messages back to each contact, plus a user-typed display
- *      label. Bytes-only; no secrets.
+ * The row is keyed by the signed-in account id,
+ * `lakko.contacts.v3.<accountIdB64>`, like the inbox
+ * (`inbox-store.ts`) and the sent-requests list. It used to be one
+ * device-wide row, so a second account signed in on the same browser listed,
+ * messaged and searched the first account's contacts as its own (seen live:
+ * account Eve, on a browser where Cara had been, treated Cara's contact Dan
+ * as hers).
  *
- * Both live in `localStorage` for now. The values are not
- * secret — public keys are public by definition, and the cursor
- * is just a row id. Phase 1.16f will move them to an encrypted
- * IDB store once `lakko-storage`'s wasm-targeted backend lands.
+ * Which account a call means: the caller may pass the account id as the
+ * trailing `owner` argument; otherwise the account bound by
+ * {@link bindContactsAccount} is used. `AuthContext` binds the account the
+ * moment a session lands and unbinds it on sign-out. With no account at all,
+ * a read is empty and a write is a no-op: there is no shared fallback row.
+ * Log out keeps the row for the next sign-in of the same account; Forget
+ * device drops it ({@link clearAccountContacts}).
  *
- * **Pending requests are NOT persisted.** They live in the
- * Solid component's signal during the current page session and
- * get re-fetched on every refresh — the source of truth is the
- * DS mailbox, replaying the cursor from `0` reproduces the same
- * list. Persisting decoded `intro` plaintext to localStorage
- * would be a regression — those bytes are out of the WebCrypto
- * sandbox.
+ * The DS mailbox cursor that used to share this row lives in the per-account
+ * inbox store now.
+ *
+ * The values are not secret (public keys are public by definition), so they
+ * live in `localStorage`.
  *
  * ## G-4 (ADR-0016): per-account account-pubkey PIN store
  *
- * The third persisted piece (schema v2) is the **account-pubkey
+ * The second persisted piece is the **account-pubkey
  * pin** map. A peer's discovery identity bundle carries the
  * peer's AccountIdentity Ed25519 `signature_pubkey`; that key
  * **rotates** on recover-from-words. ADR-0016 correctness rule
@@ -51,19 +55,27 @@
  *
  * The pin bytes are NOT secret (a pubkey is public), but the
  * *trust* decision they encode is security-critical — see the
- * fetch-path verify in `contacts/client.ts`.
+ * fetch-path verify in `contacts/client.ts`. A pin is the VIEWING account's
+ * trust decision, so it lives in that account's row too.
  */
-
-/** Current schema version. v1 (`lakko.contacts.v1`) carried only
- *  `cursor` + `accepted`; v2 adds the account-pubkey `pins` map
- *  (G-4, ADR-0016) and migrates the v1 row additively on first
- *  read so existing users keep their contacts. */
 import { adoptOneToOnePeer, type OneToOnePeer } from "./adopt-one-to-one";
 
-const STORAGE_KEY = "lakko.contacts.v2";
-/** Legacy v1 key, read once during migration then left in place
- *  (harmless; we never write it again). */
-const LEGACY_STORAGE_KEY_V1 = "lakko.contacts.v1";
+/** Prefix of the per-account row; the signed-in account id follows. */
+const KEY_PREFIX = "lakko.contacts.v3.";
+/** The retired device-wide rows. Never read; removed by Forget device so a
+ *  wipe leaves nothing of them behind. */
+const RETIRED_DEVICE_WIDE_KEYS = ["lakko.contacts.v2", "lakko.contacts.v1"] as const;
+
+/** The account a call without an explicit `owner` reads and writes. */
+let boundAccountIdB64: string | null = null;
+
+/** Why the accepted list a listener sees may have changed. */
+export type AcceptedChange =
+  /** An accept, a rename, a removal or a wipe of the bound account's list. */
+  | "edited"
+  /** A different account (or none) is bound now: re-read, nothing was
+   *  written. */
+  | "account-changed";
 
 /** A contact the user has explicitly accepted. */
 export interface AcceptedContact {
@@ -168,10 +180,8 @@ const LOG_VERIFY_STATUSES: ReadonlySet<string> = new Set([
   "off",
 ]);
 
-interface PersistedV2 {
-  v: 2;
-  /** Highest DS message id already processed. */
-  cursor: number;
+interface PersistedV3 {
+  v: 3;
   accepted: AcceptedContact[];
   /** G-4 (ADR-0016): `account_id` (base64) → account-pubkey pin.
    *  A plain object, not a `Map`, so it survives `JSON.stringify`
@@ -236,59 +246,50 @@ function isAccountPubkeyPin(p: unknown): p is AccountPubkeyPin {
   return true;
 }
 
-function emptyRecord(): PersistedV2 {
-  return { v: 2, cursor: 0, accepted: [], pins: {} };
+function emptyRecord(): PersistedV3 {
+  return { v: 3, accepted: [], pins: {} };
 }
 
-/** Read + validate the v1 legacy row, returning its `cursor` +
- *  `accepted` (or `null` if absent / malformed). The v1 schema
- *  had no `pins`, so the migration seeds an empty map. */
-function loadLegacyV1(): { cursor: number; accepted: AcceptedContact[] } | null {
-  const raw = localStorage.getItem(LEGACY_STORAGE_KEY_V1);
-  if (raw === null) return null;
+/**
+ * Bind the signed-in account whose contacts the owner-less calls read and
+ * write; `null` unbinds (signed out). Listeners are told, so a view showing
+ * the list re-reads it for the new account.
+ */
+export function bindContactsAccount(accountIdB64: string | null): void {
+  const next = accountIdB64 === null || accountIdB64.length === 0 ? null : accountIdB64;
+  if (next === boundAccountIdB64) return;
+  boundAccountIdB64 = next;
+  notifyAcceptedChanged("account-changed");
+}
+
+/** The account the owner-less calls use, or `null` when none is bound. */
+export function boundContactsAccount(): string | null {
+  return boundAccountIdB64;
+}
+
+function ownerOf(owner: string | undefined): string | null {
+  if (owner !== undefined) return owner.length === 0 ? null : owner;
+  return boundAccountIdB64;
+}
+
+function storageKey(owner: string): string {
+  return KEY_PREFIX + owner;
+}
+
+function load(owner: string | null): PersistedV3 {
+  if (owner === null || typeof localStorage === "undefined") {
+    return emptyRecord();
+  }
+  let raw: string | null;
   try {
-    const parsed = JSON.parse(raw) as {
-      v?: unknown;
-      cursor?: unknown;
-      accepted?: unknown;
-    };
-    if (
-      parsed.v === 1 &&
-      typeof parsed.cursor === "number" &&
-      Array.isArray(parsed.accepted)
-    ) {
-      return {
-        cursor: parsed.cursor,
-        accepted: parsed.accepted.filter(isAcceptedContact),
-      };
-    }
+    raw = localStorage.getItem(storageKey(owner));
   } catch {
-    // Fall through — malformed legacy row, drop it.
-  }
-  return null;
-}
-
-function load(): PersistedV2 {
-  if (typeof localStorage === "undefined") {
     return emptyRecord();
   }
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (raw === null) {
-    // No v2 row yet. Migrate the v1 row additively if present so
-    // existing users don't lose their contacts on the schema bump.
-    const legacy = loadLegacyV1();
-    if (legacy !== null) {
-      return { v: 2, cursor: legacy.cursor, accepted: legacy.accepted, pins: {} };
-    }
-    return emptyRecord();
-  }
+  if (raw === null) return emptyRecord();
   try {
-    const parsed = JSON.parse(raw) as Partial<PersistedV2>;
-    if (
-      parsed.v === 2 &&
-      typeof parsed.cursor === "number" &&
-      Array.isArray(parsed.accepted)
-    ) {
+    const parsed = JSON.parse(raw) as Partial<PersistedV3>;
+    if (parsed.v === 3 && Array.isArray(parsed.accepted)) {
       // Filter `pins` to structurally well-formed entries; a junk
       // value is dropped rather than mis-trusted.
       const pins: Record<string, AccountPubkeyPin> = {};
@@ -301,8 +302,7 @@ function load(): PersistedV2 {
         }
       }
       return {
-        v: 2,
-        cursor: parsed.cursor,
+        v: 3,
         accepted: parsed.accepted.filter(isAcceptedContact),
         pins,
       };
@@ -313,27 +313,18 @@ function load(): PersistedV2 {
   return emptyRecord();
 }
 
-function save(record: PersistedV2): void {
-  if (typeof localStorage === "undefined") return;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(record));
+/** Write one account's row. A call with no account writes nothing: there is
+ *  no shared row to fall back to. Returns whether the row was written. */
+function save(owner: string | null, record: PersistedV3): boolean {
+  if (owner === null || typeof localStorage === "undefined") return false;
+  localStorage.setItem(storageKey(owner), JSON.stringify(record));
+  return true;
 }
 
-/** Read the persisted cursor. Defaults to `0` when there's no
- *  record yet (first-ever poll). */
-export function loadCursor(): number {
-  return load().cursor;
-}
-
-/** Update the cursor (and rewrite the accepted list along with
- *  it — the schema is one row). */
-export function saveCursor(cursor: number): void {
-  const current = load();
-  save({ ...current, cursor });
-}
-
-/** Read the accepted-contacts list. */
-export function loadAccepted(): AcceptedContact[] {
-  return load().accepted;
+/** Read the accepted-contacts list of `owner` (default: the bound
+ *  account). Empty with no account. */
+export function loadAccepted(owner?: string): AcceptedContact[] {
+  return load(ownerOf(owner)).accepted;
 }
 
 /**
@@ -363,31 +354,33 @@ export function peerContactByMemberPubkeys(
   return undefined;
 }
 
-const acceptedListeners = new Set<() => void>();
+const acceptedListeners = new Set<(change: AcceptedChange) => void>();
 
 /** ADR-0048 — subscribe to changes of the accepted list (an accept, a rename,
- *  a removal), so a view resolving names re-reads the local renames. Returns
- *  the unsubscribe. Same-page only. */
-export function subscribeAcceptedChanged(listener: () => void): () => void {
+ *  a removal, or another account being bound), so a view resolving names
+ *  re-reads the local renames. Returns the unsubscribe. Same-page only. */
+export function subscribeAcceptedChanged(
+  listener: (change: AcceptedChange) => void,
+): () => void {
   acceptedListeners.add(listener);
   return () => acceptedListeners.delete(listener);
 }
 
-function notifyAcceptedChanged(): void {
+function notifyAcceptedChanged(change: AcceptedChange): void {
   for (const l of acceptedListeners) {
     try {
-      l();
+      l(change);
     } catch {
       // A failing listener must not break the write that triggered it.
     }
   }
 }
 
-/** ADR-0048 — the local renames, keyed by base64 signature key. Contacts
- *  with no rename are absent. */
-export function loadRenames(): Map<string, string> {
+/** ADR-0048 — the local renames of `owner` (default: the bound account),
+ *  keyed by base64 signature key. Contacts with no rename are absent. */
+export function loadRenames(owner?: string): Map<string, string> {
   const out = new Map<string, string>();
-  for (const c of loadAccepted()) {
+  for (const c of loadAccepted(owner)) {
     const name = c.displayName.trim();
     if (name.length > 0) out.set(c.signaturePubkeyB64, name);
   }
@@ -395,9 +388,13 @@ export function loadRenames(): Map<string, string> {
 }
 
 /** Append (or replace by `signaturePubkeyB64`) an accepted
- *  contact and persist. Returns the new list. */
-export function upsertAccepted(contact: AcceptedContact): AcceptedContact[] {
-  const current = load();
+ *  contact in `owner`'s list (default: the bound account) and persist.
+ *  Returns the new list; with no account nothing is written and the result
+ *  is empty. */
+export function upsertAccepted(contact: AcceptedContact, owner?: string): AcceptedContact[] {
+  const account = ownerOf(owner);
+  if (account === null) return [];
+  const current = load(account);
   const existing = current.accepted.findIndex(
     (a) => a.signaturePubkeyB64 === contact.signaturePubkeyB64,
   );
@@ -405,8 +402,8 @@ export function upsertAccepted(contact: AcceptedContact): AcceptedContact[] {
     existing === -1
       ? [...current.accepted, contact]
       : current.accepted.map((a, i) => (i === existing ? contact : a));
-  save({ ...current, accepted: next });
-  notifyAcceptedChanged();
+  save(account, { ...current, accepted: next });
+  notifyAcceptedChanged("edited");
   return next;
 }
 
@@ -414,38 +411,40 @@ export function upsertAccepted(contact: AcceptedContact): AcceptedContact[] {
  *  (`adopt-one-to-one.ts`): apply the rule for one peer against the
  *  persisted list, write only when it changes something, and tell the
  *  listeners. Returns whether a write happened. */
-export function adoptOneToOne(peer: OneToOnePeer): boolean {
-  const current = load();
+export function adoptOneToOne(peer: OneToOnePeer, owner?: string): boolean {
+  const account = ownerOf(owner);
+  if (account === null) return false;
+  const current = load(account);
   const next = adoptOneToOnePeer(current.accepted, peer);
   if (next === null) return false;
-  save({ ...current, accepted: next });
-  notifyAcceptedChanged();
+  save(account, { ...current, accepted: next });
+  notifyAcceptedChanged("edited");
   return true;
 }
 
 /** Remove an accepted contact by its signature pubkey. No-op
- *  when there's no match. */
-export function removeAccepted(signaturePubkeyB64: string): AcceptedContact[] {
-  const current = load();
+ *  when there's no match or no account. */
+export function removeAccepted(signaturePubkeyB64: string, owner?: string): AcceptedContact[] {
+  const account = ownerOf(owner);
+  if (account === null) return [];
+  const current = load(account);
   const next = current.accepted.filter(
     (a) => a.signaturePubkeyB64 !== signaturePubkeyB64,
   );
-  save({ ...current, accepted: next });
-  notifyAcceptedChanged();
+  save(account, { ...current, accepted: next });
+  notifyAcceptedChanged("edited");
   return next;
 }
 
-/** Wipe everything. Called from the AppShell's "Forget device"
- *  flow in a follow-up sprint. Today the AuthContext doesn't
- *  call this — leaving it here so 1.16d3d's persistence isn't
- *  surprise-survived after a deliberate device wipe. Drops both
- *  the v2 row and the legacy v1 row (G-4) so a wipe truly clears
- *  the device. */
-export function clearAll(): void {
+/** Forget device: drop `owner`'s row (default: the bound account) and the
+ *  retired device-wide rows. Another account's row on this browser is left
+ *  alone — it is that account's, and only its own Forget device drops it. */
+export function clearAccountContacts(owner?: string): void {
   if (typeof localStorage === "undefined") return;
-  localStorage.removeItem(STORAGE_KEY);
-  localStorage.removeItem(LEGACY_STORAGE_KEY_V1);
-  notifyAcceptedChanged();
+  const account = ownerOf(owner);
+  if (account !== null) localStorage.removeItem(storageKey(account));
+  for (const key of RETIRED_DEVICE_WIDE_KEYS) localStorage.removeItem(key);
+  notifyAcceptedChanged("edited");
 }
 
 // ----------------------------------------------------------------------------
@@ -462,15 +461,16 @@ export function clearAll(): void {
  * the fetched `signature_pubkey` against; a mismatch demands a
  * verified supersession proof (ADR-0016 rule #2, fail-closed).
  */
-export function readPin(accountIdB64: string): AccountPubkeyPin | undefined {
-  return load().pins[accountIdB64];
+export function readPin(accountIdB64: string, owner?: string): AccountPubkeyPin | undefined {
+  return load(ownerOf(owner)).pins[accountIdB64];
 }
 
 /** Outcome of a [`setPin`] call. `"set"` covers both a first-time
  *  TOFU-pin and a monotonic forward re-pin; `"rejected-backward"`
  *  signals the marker would have moved backwards (ADR-0016 rule
- *  #4) so nothing was written. */
-export type SetPinResult = "set" | "rejected-backward";
+ *  #4) so nothing was written; `"no-account"` means no signed-in
+ *  account was given or bound, so nothing was written either. */
+export type SetPinResult = "set" | "rejected-backward" | "no-account";
 
 /**
  * Set or update the account-pubkey pin for `accountIdB64`,
@@ -497,8 +497,11 @@ export function setPin(
   accountIdB64: string,
   pinnedSignaturePubkeyB64: string,
   rotationMarker: number,
+  owner?: string,
 ): SetPinResult {
-  const current = load();
+  const account = ownerOf(owner);
+  if (account === null) return "no-account";
+  const current = load(account);
   const existing = current.pins[accountIdB64];
   if (existing !== undefined && rotationMarker < existing.rotationMarker) {
     return "rejected-backward";
@@ -530,18 +533,19 @@ export function setPin(
         : {}),
     },
   };
-  save({ ...current, pins: nextPins });
+  save(account, { ...current, pins: nextPins });
   return "set";
 }
 
 /** Remove the pin for `accountIdB64`. No-op when absent. Exposed
  *  for the "forget contact" / re-verify-from-scratch flows. */
-export function removePin(accountIdB64: string): void {
-  const current = load();
+export function removePin(accountIdB64: string, owner?: string): void {
+  const account = ownerOf(owner);
+  const current = load(account);
   if (current.pins[accountIdB64] === undefined) return;
   const nextPins = { ...current.pins };
   delete nextPins[accountIdB64];
-  save({ ...current, pins: nextPins });
+  save(account, { ...current, pins: nextPins });
 }
 
 /**
@@ -558,8 +562,10 @@ export function removePin(accountIdB64: string): void {
 export function recordLogStatus(
   accountIdB64: string,
   logStatus: LogVerifyStatus,
+  owner?: string,
 ): boolean {
-  const current = load();
+  const account = ownerOf(owner);
+  const current = load(account);
   const existing = current.pins[accountIdB64];
   if (existing === undefined) return false;
   if (existing.logStatus === logStatus) return true; // idempotent, no write
@@ -567,7 +573,7 @@ export function recordLogStatus(
     ...current.pins,
     [accountIdB64]: { ...existing, logStatus },
   };
-  save({ ...current, pins: nextPins });
+  save(account, { ...current, pins: nextPins });
   return true;
 }
 
@@ -575,8 +581,9 @@ export function recordLogStatus(
  *  when no pin / no status. Exposed for the UI signal. */
 export function readLogStatus(
   accountIdB64: string,
+  owner?: string,
 ): LogVerifyStatus | undefined {
-  return load().pins[accountIdB64]?.logStatus;
+  return load(ownerOf(owner)).pins[accountIdB64]?.logStatus;
 }
 
 /**
@@ -595,8 +602,10 @@ export function readLogStatus(
 export function recordLogReset(
   accountIdB64: string,
   isReset: boolean | null,
+  owner?: string,
 ): boolean {
-  const current = load();
+  const account = ownerOf(owner);
+  const current = load(account);
   const existing = current.pins[accountIdB64];
   if (existing === undefined) return false;
   const currentValue = existing.isReset;
@@ -605,7 +614,7 @@ export function recordLogReset(
     if (currentValue === undefined) return true; // already clear, no write
     const cleared: AccountPubkeyPin = { ...existing };
     delete cleared.isReset;
-    save({
+    save(account, {
       ...current,
       pins: { ...current.pins, [accountIdB64]: cleared },
     });
@@ -616,14 +625,14 @@ export function recordLogReset(
     ...current.pins,
     [accountIdB64]: { ...existing, isReset },
   };
-  save({ ...current, pins: nextPins });
+  save(account, { ...current, pins: nextPins });
   return true;
 }
 
 /** Read the recorded `is_reset` marker (KT-log S4) for an account, or
  *  `undefined` when no pin / no recorded marker. Exposed for the UI. */
-export function readLogReset(accountIdB64: string): boolean | undefined {
-  return load().pins[accountIdB64]?.isReset;
+export function readLogReset(accountIdB64: string, owner?: string): boolean | undefined {
+  return load(ownerOf(owner)).pins[accountIdB64]?.isReset;
 }
 
 /**
@@ -645,8 +654,10 @@ export function readLogReset(accountIdB64: string): boolean | undefined {
 export function recordLogVersion(
   accountIdB64: string,
   version: number | null,
+  owner?: string,
 ): boolean {
-  const current = load();
+  const account = ownerOf(owner);
+  const current = load(account);
   const existing = current.pins[accountIdB64];
   if (existing === undefined) return false;
   const currentValue = existing.pinnedLogVersion;
@@ -655,7 +666,7 @@ export function recordLogVersion(
     if (currentValue === undefined) return true; // already clear, no write
     const cleared: AccountPubkeyPin = { ...existing };
     delete cleared.pinnedLogVersion;
-    save({
+    save(account, {
       ...current,
       pins: { ...current.pins, [accountIdB64]: cleared },
     });
@@ -666,7 +677,7 @@ export function recordLogVersion(
     ...current.pins,
     [accountIdB64]: { ...existing, pinnedLogVersion: version },
   };
-  save({ ...current, pins: nextPins });
+  save(account, { ...current, pins: nextPins });
   return true;
 }
 
@@ -674,8 +685,8 @@ export function recordLogVersion(
  *  account, or `undefined` when no pin / no recorded version. The next
  *  rotation's chain proof is checked against this as the downgrade
  *  floor (default `0` when absent). */
-export function readLogVersion(accountIdB64: string): number | undefined {
-  return load().pins[accountIdB64]?.pinnedLogVersion;
+export function readLogVersion(accountIdB64: string, owner?: string): number | undefined {
+  return load(ownerOf(owner)).pins[accountIdB64]?.pinnedLogVersion;
 }
 
 /** Render a short hex prefix for a public key (8 hex chars, unseparated).

@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "The on-device feed: a declarative rule, its bounded codec, and the one ranking every client draws (ADR-0058)"
+description = "The on-device feed: a declarative rule, its bounded codec, and the one ranking every client draws (ADR-0061)"
 
 [lints]
 workspace = true

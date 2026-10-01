@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! A feed rule and its wire codec (ADR-0058 section 1).
+//! A feed rule and its wire codec (ADR-0061 section 1).
 //!
 //! ## Wire
 //!

@@ -387,7 +387,7 @@ class MultiJoinerCall private constructor(
         val seed: ByteArray
         val leaf: Int
         try {
-            // ADR-0060 — a call-link group grows (ADR-0032 admits joiners
+            // ADR-0062 — a call-link group grows (ADR-0032 admits joiners
             // into it), so it follows the group rule.
             founded = Group.create(opts.identity, GroupKind.GROUP)
             seed = deriveSeed(founded)
@@ -640,9 +640,16 @@ class MultiJoinerCall private constructor(
             // under the conversation's lock. A relay payload binds the pin to
             // no conversation and no member; dropped, never stored.
             FfiIncomingEnvelopeKind.PIN -> Unit
-            // ADR-0057 — a registrar seed rides the GROUP JOURNAL, sealed to one
-            // member's account key, never the SFU signal-relay; dropped.
-            FfiIncomingEnvelopeKind.REGISTRAR_SEED -> Unit
+            // ADR-0060 / ADR-0057 — the scoped-discovery envelopes and the
+            // registrar seed ride a conversation journal or the DeviceGroup,
+            // never the SFU signal-relay. Off-contract here — dropped.
+            FfiIncomingEnvelopeKind.INTRODUCTION_OFFER,
+            FfiIncomingEnvelopeKind.INTRODUCTIONS,
+            FfiIncomingEnvelopeKind.VISIBILITY,
+            FfiIncomingEnvelopeKind.REACH_STATE,
+            FfiIncomingEnvelopeKind.REGISTRAR_SEED,
+            FfiIncomingEnvelopeKind.COMMITTER_DELEGATION,
+            -> Unit
             // ADR-0059 - a shared-channels list rides the GROUP JOURNAL and
             // speaks for its MLS sender, never the SFU signal-relay; dropped.
             FfiIncomingEnvelopeKind.SHARED_CHANNELS -> Unit

@@ -102,6 +102,9 @@ describe("ADR-0048 — a profile is filtered in the foreground loop", () => {
       username: "alice",
       updatedAtMs: 1_700n,
       accountId: null,
+      // ADR-0060 profile v3 — no certificate and no grants in this envelope.
+      usernameCertificate: null,
+      grants: [],
     });
   });
 
@@ -131,10 +134,12 @@ describe("ADR-0048 — a profile is filtered in the foreground loop", () => {
     expect(ev?.kind).not.toBe("application");
   });
 
-  it("profile bytes would render as a chat bubble without the arm (the defect)", () => {
+  it("the real parser never degrades the bytes to chat (the defect is closed in the core)", () => {
     const parsed = wasm.parseBodyEnvelope(profileEnvelope("Zed Unique Name"));
-    expect(parsed.kind).toBe("chat");
-    expect(parsed.text).toContain("Zed Unique Name");
+    // Before 2026-09-29 the lossy-UTF-8 fallback rendered these bytes as a
+    // chat bubble; the core now classifies them as a service envelope.
+    expect(parsed.kind).toBe("service-envelope");
+    expect(parsed.text).toBe("");
   });
 
   it("a malformed profile is dropped, not rendered", async () => {

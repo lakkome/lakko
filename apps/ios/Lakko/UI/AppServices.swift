@@ -49,3 +49,57 @@ final class AppServices {
         self.inviteIntake = inviteIntake
     }
 }
+
+extension AppServices {
+    /// Settings' "Forget this device", and the removed-device screen's Sign
+    /// out (docs/ux/second-device.md section 3.1): this device's keys and
+    /// local data for the account go, then the login screen.
+    ///
+    /// ADR-0050 section 2.10 — take this device's KeyPackage out of the
+    /// directory BEFORE the wipe, while the bearer token still exists: the
+    /// account's other devices retire this device's leaves when their
+    /// scheduled check sees the row gone.
+    func forgetThisDevice() {
+        // ADR-0042 (amended 2026-09-30) — FIRST, before the directory call
+        // (which waits on the network): no background wake is handled for
+        // this account from here on, and nothing it received stays on the
+        // lock screen. The wipe repeats both.
+        PushAccountBindingStore.live.clear()
+        AuthRepository.removeAllDeliveredNotifications()
+        let accountIdB64 = authRepository.identitySecrets.map { base64Encode($0.accountId) }
+        Task { @MainActor in
+            if let own = chatRepository.ownDeviceLeafKey {
+                await chatRepository.deleteDirectoryKeyPackage(deviceKey: own)
+            }
+            wipeAccountLocalData(accountIdB64: accountIdB64)
+        }
+    }
+
+    /// Forget device and Delete account, after their server-side part: remove
+    /// every piece of the account's local data on this device and end the
+    /// session. The one path both flows take; Log out does not come here.
+    ///
+    /// Order: the push binding and delivered notifications first; then the
+    /// runtimes let go of the account, so nothing they flush re-writes a
+    /// store the wipe has just emptied; then every store
+    /// (``AccountLocalDataWipe``); then the session ends.
+    ///
+    /// - Parameter accountIdB64: the account to wipe; `nil` (no session to
+    ///   name one) falls back to the persisted session record.
+    func wipeAccountLocalData(accountIdB64: String?) {
+        PushAccountBindingStore.live.clear()
+        AuthRepository.removeAllDeliveredNotifications()
+        let target = accountIdB64 ?? SessionStore().load()?.accountIdB64
+        // The runtimes. `clear()` keeps the stores (it is also the logout
+        // path); the wipe below is what removes them.
+        CallHistoryStore.shared.unbind()
+        chatRepository.clear()
+        deviceGroupSync.clear()
+        if let target {
+            AccountLocalDataWipe.wipe(accountIdB64: target)
+        } else {
+            NSLog("[account-wipe] WARN no account to wipe: no session and no session record")
+        }
+        authRepository.endSessionAfterLocalWipe()
+    }
+}

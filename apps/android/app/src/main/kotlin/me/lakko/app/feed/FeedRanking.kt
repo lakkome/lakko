@@ -13,7 +13,7 @@ import uniffi.lakko_ffi_uniffi.FfiException
 
 /**
  * The one ranking and the one rule, reached through the UniFFI core
- * (ADR-0058). Mirror of `apps/web/src/feed/feed-ranking.ts`.
+ * (ADR-0061). Mirror of `apps/web/src/feed/feed-ranking.ts`.
  *
  * The order lives in `lakko-feed` so web, iOS and Android draw the same
  * messages in the same order; this file only moves [buildFeedInput]'s lists

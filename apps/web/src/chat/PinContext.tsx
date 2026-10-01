@@ -150,7 +150,7 @@ export function PinProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
-  /** ADR-0060 — read from the group, not from the people count: a
+  /** ADR-0062 — read from the group, not from the people count: a
    *  two-person group keeps the group rule (owner / admin). */
   function isOneToOne(group: WasmGroup): boolean {
     return conversationKindOf(group) === "chat";

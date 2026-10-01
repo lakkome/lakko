@@ -37,6 +37,7 @@ import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
+import { currentInternalPath, entrySearch, replaceInternalPath } from "../routes/origin-history";
 import { useCallHost } from "./CallHostContext";
 import {
   decideCallAction,
@@ -66,13 +67,16 @@ export function CallActionListener(): JSX.Element {
     // (1) Cold open: the worker had no window to talk to and opened one.
     //     Parse BEFORE the strip — the strip rewrites the URL we read — and
     //     strip either way, so a refresh can never answer a call twice.
-    arm(readCallActionParams(window.location.search));
-    const cleaned = stripCallActionParams(window.location.href);
-    if (cleaned !== null && cleaned !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
-      // `replaceState` rather than the router's `navigate`: the only change is
-      // to the query, and a navigation here would race `WakeNavigator`'s own
-      // strip of `?wake=` on the very same URL.
-      window.history.replaceState(window.history.state, "", cleaned);
+    //     The address bar is already `/` (`routes/origin-history.ts`): read
+    //     the entry path's query and strip from the router's current path.
+    arm(readCallActionParams(entrySearch()));
+    const here = currentInternalPath();
+    const cleaned = stripCallActionParams(new URL(here, window.location.origin).href);
+    if (cleaned !== null && cleaned !== here) {
+      // Rewrite the entry rather than navigate: the only change is to the
+      // query, and a navigation here would race `WakeNavigator`'s own strip
+      // of `?wake=` on the very same entry.
+      replaceInternalPath(cleaned);
     }
 
     // (2) A window was already open: the worker posted the press to it.

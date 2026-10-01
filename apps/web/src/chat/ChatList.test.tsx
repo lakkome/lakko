@@ -77,8 +77,16 @@ vi.mock("../profile/ProfileContext", () => ({
     version: () => 0,
     resolve: (k: Uint8Array | string) => ({
       name: typeof k === "string" ? k : "Member",
-      username: undefined,
+      // `ResolvedName.username` is `string | null`; `undefined` is not a value
+      // the real resolver returns.
+      username: null,
     }),
+    // The people search (src/search) reads these for local candidates and
+    // for the Add contact action; nothing here holds an account id.
+    accountIdBindings: () => [],
+    accountIdHexOf: () => null,
+    learnUsername: () => {},
+    ownProfileEnvelope: async () => null,
   }),
 }));
 vi.mock("./GroupNameContext", () => ({
@@ -89,7 +97,10 @@ vi.mock("../devices/sync/DeviceGroupSyncContext", () => ({
   useDeviceGroupSync: () => ({
     flags: () => flags,
     readCursors: () => ({}),
+    folders: () => [],
+    pendingFolderSync: () => false,
     setFlags: () => Promise.resolve(),
+    applyFolderEdits: () => Promise.resolve(),
   }),
 }));
 vi.mock("../auth/AuthContext", () => ({
@@ -139,7 +150,7 @@ beforeEach(() => {
  *
  * `group` stands in for the wasm `Group` with the three reads `ChatList` makes
  * of it — the roster, the id and whether the membership is live. It has no
- * `groupKind()`, which reads as a group (ADR-0060, `conversation-kind.ts`), so
+ * `groupKind()`, which reads as a group (ADR-0062, `conversation-kind.ts`), so
  * the title is the label:
  * a 1x1 would be titled by the peer resolver instead, which is a different
  * question from this one.

@@ -165,7 +165,10 @@ export function isHandleTaken(err: unknown): boolean {
  * register the name at discovery.
  *
  * - `bind` answering auth's `409` throws {@link UsernameTakenError} and
- *   discovery is never asked.
+ *   discovery is never asked; any other bind failure, auth's `429
+ *   handle-bind-limited` included (anti-abuse section 2: its own copy via
+ *   `authLimitMessage`, the form keeps its contents), is rethrown as it is,
+ *   and discovery is not asked either.
  * - `register` failing (taken, or anything else) calls `release` (drop the
  *   handle, or re-bind the previous one on a rename) before rethrowing; a
  *   discovery `409` is rethrown as {@link UsernameTakenError}.

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// ADR-0048 — a person's profile as THEY state it: display name, the username
 /// they claim, and the sender-clock time they set it.
@@ -24,18 +25,61 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
     /// is a claim; the sender can only mis-state its own tag, which then
     /// matches nobody on the call.
     public let accountId: Data?
+    /// ADR-0060 section 5 — the discovery-signed certificate of `username`
+    /// (profile envelope v3), or `nil`. The username is shown only once it
+    /// verifies against this certificate.
+    public let usernameCertificate: Data?
+    /// ADR-0060 sections 3 and 6 — the reach grants the envelope carried.
+    /// SECRET, and scoped to the conversation the envelope arrived in, so they
+    /// are handed to ``ReachCenter`` at receipt and NEVER persisted with the
+    /// profile (``CodingKeys`` leaves them out).
+    public let grants: [FfiReachGrant]
+
+    enum CodingKeys: String, CodingKey {
+        case displayName, username, updatedAtMs, accountId, usernameCertificate
+    }
 
     public init(
         displayName: String?,
         username: String?,
         updatedAtMs: UInt64,
-        accountId: Data? = nil
+        accountId: Data? = nil,
+        usernameCertificate: Data? = nil,
+        grants: [FfiReachGrant] = []
     ) {
         self.displayName = displayName
         self.username = username
         self.updatedAtMs = updatedAtMs
         // Only a whole 16-byte id is kept; anything else is no id at all.
         self.accountId = accountId.flatMap { $0.count == 16 ? $0 : nil }
+        self.usernameCertificate = usernameCertificate
+        self.grants = grants
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            displayName: try c.decodeIfPresent(String.self, forKey: .displayName),
+            username: try c.decodeIfPresent(String.self, forKey: .username),
+            updatedAtMs: try c.decode(UInt64.self, forKey: .updatedAtMs),
+            accountId: try c.decodeIfPresent(Data.self, forKey: .accountId),
+            usernameCertificate: try c.decodeIfPresent(Data.self, forKey: .usernameCertificate))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(displayName, forKey: .displayName)
+        try c.encodeIfPresent(username, forKey: .username)
+        try c.encode(updatedAtMs, forKey: .updatedAtMs)
+        try c.encodeIfPresent(accountId, forKey: .accountId)
+        try c.encodeIfPresent(usernameCertificate, forKey: .usernameCertificate)
+    }
+
+    /// The same claim without its grants — what the profile store keeps.
+    public var withoutGrants: ProfileClaim {
+        ProfileClaim(
+            displayName: displayName, username: username, updatedAtMs: updatedAtMs,
+            accountId: accountId, usernameCertificate: usernameCertificate)
     }
 }
 
@@ -178,6 +222,9 @@ final class ReceivedProfileStore {
     }
 
     /// The stored profile for `signatureKeyB64`, if any.
+    /// Every received profile, by signature key (b64).
+    func all() -> [String: ProfileClaim] { profiles }
+
     func profile(signatureKeyB64: String) -> ProfileClaim? {
         profiles[signatureKeyB64]
     }
@@ -226,7 +273,10 @@ public struct OwnProfile: Codable, Equatable, Sendable {
 /// Local persistence of the own profile, per account.
 ///
 /// Local only: there is no per-account profile on any server (ADR-0048
-/// alternatives), and a second device of the same account keeps its own.
+/// alternatives). The account's other devices learn it over the DeviceGroup
+/// (ADR-0048 section 4a): ``ProfileDirectory`` sends the stored profile with
+/// its stored stamp, and a device that receives a strictly newer one keeps it
+/// through ``store(_:accountIdB64:)``, stamp unchanged.
 struct OwnProfileStore {
     let defaults: UserDefaults
     let keyPrefix: String
@@ -256,6 +306,15 @@ struct OwnProfileStore {
             defaults.set(data, forKey: keyPrefix + accountIdB64)
         }
         return profile
+    }
+
+    /// Keep `profile` exactly as given, stamp included: the own profile
+    /// another of this account's devices set (ADR-0048 section 4a). Never
+    /// re-stamped, or the next device it reaches would order it wrongly.
+    func store(_ profile: OwnProfile, accountIdB64: String) {
+        if let data = try? JSONEncoder().encode(profile) {
+            defaults.set(data, forKey: keyPrefix + accountIdB64)
+        }
     }
 
     func delete(accountIdB64: String) {

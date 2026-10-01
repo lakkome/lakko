@@ -56,6 +56,13 @@ public struct ChatListScreen: View {
     /// introduction this field has no room for, so the name travels to
     /// Contacts rather than being half-answered here.
     public var onFoundPerson: (_ username: String) -> Void
+    /// `docs/ux/chat-folders.md` 2.2 — Reorder folders / Edit folders open
+    /// Settings > Chat folders (`true` = in its reorder state).
+    public var onOpenFolderSettings: (_ reorder: Bool) -> Void
+    /// ADR-0060 — "Search people" (`docs/ux/who-can-find-me.md` section 6.1):
+    /// the network search for a username or a name, and the request to one of
+    /// its results. `nil` hides the row.
+    public var peopleSearch: PeopleSearchActions?
 
     /// Phase 2a3e2c-iOS — cross-device per-thread flags (pinned / muted /
     /// archived). The Combine subscription inside ``DeviceGroupSyncRepository``
@@ -76,7 +83,9 @@ public struct ChatListScreen: View {
         onOpen: @escaping (ConversationListRow) -> Void,
         onCreate: @escaping (CreateChoice) -> Void,
         onFoundChannel: @escaping (String, String) -> Void,
-        onFoundPerson: @escaping (String) -> Void
+        onFoundPerson: @escaping (String) -> Void,
+        onOpenFolderSettings: @escaping (Bool) -> Void = { _ in },
+        peopleSearch: PeopleSearchActions? = nil
     ) {
         self.viewModel = viewModel
         self.channels = channels
@@ -85,6 +94,8 @@ public struct ChatListScreen: View {
         self.onCreate = onCreate
         self.onFoundChannel = onFoundChannel
         self.onFoundPerson = onFoundPerson
+        self.onOpenFolderSettings = onOpenFolderSettings
+        self.peopleSearch = peopleSearch
     }
 
     /// Spec section 4 — the field covers users, groups and channels. The local
@@ -94,11 +105,60 @@ public struct ChatListScreen: View {
     @State private var lookupBusy = false
     @State private var lookupNote: String?
 
+    // MARK: Chat folders (`docs/ux/chat-folders.md`)
+
+    /// The tab last selected on THIS device (section 2.5): a folder id in hex,
+    /// or empty for All chats. Never synced. A folder id of the signed-in
+    /// account under a device-wide key, so Forget device and Delete account
+    /// remove it (``AccountLocalDataWipe/selectedFolderTabKey``).
+    @AppStorage("lakko.chatFolders.selectedTab") private var storedTab: String = ""
+    /// The editor sheet, when open.
+    @State private var editor: FolderEditorRequest?
+    /// The folder whose deletion is being confirmed.
+    @State private var deleting: FolderView?
+
     public var body: some View {
 #if DEBUG
         let _ = BodyEvaluationCounter.tick("ChatListScreen")
 #endif
         content
+            // Section 2.1 — the strip under the navigation title, above the
+            // list. Hidden until a folder exists, and while searching, since a
+            // search is over everything (section 2.4).
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if showsFolderBar {
+                    FolderBar(
+                        folders: deviceGroupSync.folders,
+                        selection: selectedTabBinding,
+                        counts: folderCounts,
+                        anyUnread: ChatFolders.anyUnread(allRows),
+                        onEdit: { editor = FolderEditorRequest(folder: $0, rows: allRows) },
+                        onMarkAllRead: { folder in Task { await markAllRead(in: folder) } },
+                        onReorder: { onOpenFolderSettings(true) },
+                        onEditFolders: { onOpenFolderSettings(false) },
+                        onDelete: { deleting = $0 })
+                }
+            }
+            .sheet(item: $editor) { request in
+                FolderEditorScreen(
+                    request: request,
+                    listedFolderIds: deviceGroupSync.folders.map(\.folderId),
+                    onSave: { changes in
+                        Task { try? await deviceGroupSync.applyFolderChanges(changes) }
+                    },
+                    onDelete: { folder in deleteFolder(folder) })
+            }
+            .alert(
+                deleting.map { "Delete folder \u{201C}\($0.meta.name)\u{201D}?" } ?? "",
+                isPresented: Binding(
+                    get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+                presenting: deleting
+            ) { folder in
+                Button("Cancel", role: .cancel) { deleting = nil }
+                Button("Delete", role: .destructive) { deleteFolder(folder) }
+            } message: { _ in
+                Text("The chats in it stay in All chats.")
+            }
             .navigationTitle("Chats")
             .navigationBarTitleDisplayMode(.large)
             .searchable(text: $searchText, prompt: "Search")
@@ -159,12 +219,32 @@ public struct ChatListScreen: View {
     /// own — and a channel's last post time has to become the same field as a
     /// chat's last message time, or the one ordering has nothing to order by.
     private var rows: [ConversationListRow] {
-        let chatRows = Self.chatRows(
+        ConversationList.filtered(allRows, query: searchText)
+    }
+
+    /// Every conversation, ordered, unfiltered: what All chats shows and what
+    /// every folder is matched against.
+    private var allRows: [ConversationListRow] {
+        Self.allRows(
             viewModel: viewModel,
+            channels: channels,
             flags: deviceGroupSync.flags,
-            readCursors: deviceGroupSync.readCursors)
-        return ConversationList.filtered(
-            ConversationList.sorted(chatRows + channelRows), query: searchText)
+            readCursors: deviceGroupSync.readCursors,
+            channelUnread: feedReading.channelUnread)
+    }
+
+    /// The merged list, ordered by the shared rule. One definition for the
+    /// Chats tab, the folder editor and Settings > Chat folders.
+    static func allRows(
+        viewModel: ChatListViewModel,
+        channels: ChannelsUiState,
+        flags: [String: FlagsState],
+        readCursors: [String: ReadCursorState],
+        channelUnread: [String: Int]
+    ) -> [ConversationListRow] {
+        let chatRows = Self.chatRows(viewModel: viewModel, flags: flags, readCursors: readCursors)
+        return ConversationList.sorted(
+            chatRows + Self.channelRows(channels: channels, channelUnread: channelUnread))
     }
 
     /// The chat and group rows, in the shape the ordering takes. One
@@ -199,7 +279,8 @@ public struct ChatListScreen: View {
                 // of something somebody else did.
                 endedLine: chatListLine(
                     membershipState(
-                        isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)))
+                        isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)),
+                markedUnread: flags?.unreadOverride == true)
         }
     }
 
@@ -211,7 +292,9 @@ public struct ChatListScreen: View {
     /// added, the same way a chat with no messages sorts by when it was
     /// created; the alternative is a freshly subscribed channel invisible at
     /// the bottom of a long list until a fetch lands.
-    private var channelRows: [ConversationListRow] {
+    static func channelRows(
+        channels: ChannelsUiState, channelUnread: [String: Int]
+    ) -> [ConversationListRow] {
         let nowMs = ChatRepository.nowMs()
         return channels.channels.map { channel in
             let posts = channels.postsByChannel[channel.id] ?? []
@@ -232,24 +315,49 @@ public struct ChatListScreen: View {
                 title: model.title,
                 preview: model.secondLine,
                 lastActivityMs: lastPostMs ?? Int64(clamping: channel.addedAtMs),
-                unread: feedReading.channelUnread[channel.id] ?? 0)
+                unread: channelUnread[channel.id] ?? 0)
         }
     }
 
     @ViewBuilder
     private var content: some View {
-        let visible = rows
+        if showsFolderBar {
+            // Section 2.1, iOS — the list pages sideways between folders and
+            // the strip follows. All chats is always the first page.
+            let all = allRows
+            TabView(selection: selectedTabBinding) {
+                listPage(rows: all, folder: nil)
+                    .tag("")
+                ForEach(deviceGroupSync.folders, id: \.folderId) { folder in
+                    listPage(rows: ChatFolders.rows(in: folder, from: all), folder: folder)
+                        .tag(ChatFolders.hex(folder.folderId))
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+        } else {
+            listPage(rows: rows, folder: nil)
+        }
+    }
+
+    /// One page: All chats (`folder == nil`) or one folder's rows.
+    @ViewBuilder
+    private func listPage(rows visible: [ConversationListRow], folder: FolderView?) -> some View {
         if visible.isEmpty {
             // Inside a scroll view so the pull gesture works on the empty list
             // too.
             ScrollView {
-                if query.isEmpty {
+                if let folder {
+                    folderEmptyState(folder)
+                } else if query.isEmpty {
                     emptyState
                 } else {
                     VStack(spacing: 12) {
                         Text("No results")
                             .foregroundStyle(Color.lakkoTextMuted)
                         lookupSection
+                        if let peopleSearch {
+                            PeopleSearchSection(query: query, actions: peopleSearch)
+                        }
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, 16)
@@ -285,15 +393,177 @@ public struct ChatListScreen: View {
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        rowActions(row: row)
+                        rowActions(row: row, folder: folder)
                     }
                     // Spec section 2.1, Per platform — the row's own menu is a
-                    // long press on both natives. Same three actions as the
-                    // swipe, because they are the same menu reached two ways.
-                    .contextMenu { rowActions(row: row) }
+                    // long press on both natives: the swipe's actions plus the
+                    // folder items (`docs/ux/chat-folders.md` section 5).
+                    .contextMenu {
+                        rowActions(row: row, folder: folder, inMenu: true)
+                        folderActions(row: row, folder: folder)
+                    }
+                }
+                // ADR-0060 — the network search stays offered under the local
+                // results (UX section 6.1).
+                if !query.isEmpty, let peopleSearch {
+                    PeopleSearchSection(query: query, actions: peopleSearch)
+                        .listRowSeparator(.hidden)
                 }
             }
             .listStyle(.plain)
+        }
+    }
+
+    /// `docs/ux/chat-folders.md` 2.4 — one line and one secondary button, the
+    /// same whatever the folder's rule is.
+    private func folderEmptyState(_ folder: FolderView) -> some View {
+        VStack(spacing: 12) {
+            Text("Nothing here right now")
+                .foregroundStyle(Color.lakkoTextMuted)
+            Button("Edit folder") {
+                editor = FolderEditorRequest(folder: folder, rows: allRows)
+            }
+            .buttonStyle(.bordered)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 16)
+        .padding(.top, 80)
+    }
+
+    // MARK: - Chat folders
+
+    /// The strip shows once a folder exists, and never during a search.
+    private var showsFolderBar: Bool {
+        !deviceGroupSync.folders.isEmpty && query.isEmpty
+    }
+
+    /// The selected tab: the stored one while that folder exists, else All
+    /// chats (section 2.5). Writing it stores it for the next launch.
+    private var selectedTabBinding: Binding<String> {
+        Binding(
+            get: {
+                ChatFolders.resolveSelectedTab(
+                    stored: storedTab, folders: deviceGroupSync.folders) ?? ""
+            },
+            set: { storedTab = $0 })
+    }
+
+    private var folderCounts: [String: Int] {
+        let all = allRows
+        var out: [String: Int] = [:]
+        for folder in deviceGroupSync.folders {
+            out[ChatFolders.hex(folder.folderId)] = ChatFolders.unreadCount(folder, in: all)
+        }
+        return out
+    }
+
+    /// Section 5 — Add to folder, and inside a folder, Remove from folder.
+    @ViewBuilder
+    private func folderActions(row: ConversationListRow, folder: FolderView?) -> some View {
+        let folders = deviceGroupSync.folders
+        if folders.isEmpty {
+            // With no folders yet, Add to folder goes straight to the editor.
+            Button {
+                editor = FolderEditorRequest(
+                    folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
+            } label: {
+                Label("Add to folder", systemImage: "folder.badge.plus")
+            }
+        } else {
+            Menu {
+                ForEach(folders, id: \.folderId) { f in
+                    let isIn = ChatFolders.matches(f, row)
+                    Button {
+                        Task { await toggleMembership(folder: f, row: row) }
+                    } label: {
+                        if isIn {
+                            Label(f.meta.name, systemImage: "checkmark")
+                        } else {
+                            Text(f.meta.name)
+                        }
+                    }
+                    .disabled(
+                        !isIn && ChatFolders.handState(f, rowId: row.id) != .excluded
+                            && ChatFolders.handAddLimitReached(f))
+                }
+                Divider()
+                Button("New folder...") {
+                    editor = FolderEditorRequest(
+                        folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
+                }
+                .disabled(folders.count >= ChatFolders.maxFolders)
+                if folders.count >= ChatFolders.maxFolders {
+                    Text("You can have up to 20 folders.")
+                }
+            } label: {
+                Label("Add to folder", systemImage: "folder.badge.plus")
+            }
+        }
+        if let folder {
+            Button {
+                Task { await toggleMembership(folder: folder, row: row) }
+            } label: {
+                Label("Remove from folder", systemImage: "folder.badge.minus")
+            }
+        }
+    }
+
+    private func toggleMembership(folder: FolderView, row: ConversationListRow) async {
+        guard let changes = ChatFolders.toggleMembership(
+            folder: folder, row: row, hlc: deviceGroupSync.mintHlc()) else { return }
+        do {
+            try await deviceGroupSync.applyFolderChanges(changes)
+        } catch {
+            NSLog("folder membership edit failed: %@", error.localizedDescription)
+        }
+    }
+
+    private func toggleFolderPin(folder: FolderView, row: ConversationListRow) async {
+        guard let changes = ChatFolders.togglePin(
+            folder: folder, row: row, hlc: deviceGroupSync.mintHlc()) else { return }
+        do {
+            try await deviceGroupSync.applyFolderChanges(changes)
+        } catch {
+            NSLog("folder pin edit failed: %@", error.localizedDescription)
+        }
+    }
+
+    private func deleteFolder(_ folder: FolderView) {
+        deleting = nil
+        let changes = ChatFolders.remove(folderId: folder.folderId, hlc: deviceGroupSync.mintHlc())
+        Task {
+            do {
+                try await deviceGroupSync.applyFolderChanges(changes)
+            } catch {
+                NSLog("folder delete failed: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    /// Section 2.2 — for every conversation in the tab that has something
+    /// unread, the same mark-read the chat itself does: the local badge, the
+    /// read cursor every device of the account folds, and a manual "mark as
+    /// unread" cleared. Channels carry no unread state on this client.
+    private func markAllRead(in folder: FolderView?) async {
+        let all = allRows
+        let targets = all.filter { row in
+            guard ChatFolders.hasUnread(row), row.kind != .channel else { return false }
+            guard let folder else { return true }
+            return ChatFolders.matches(folder, row)
+        }
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        for row in targets {
+            guard let groupId = Self.hexToBytes(row.id) else { continue }
+            if let upTo = viewModel.markReadLocally(groupIdHex: row.id) {
+                try? await deviceGroupSync.setReadCursor(
+                    groupId: groupId, upToMessageId: UnreadCounting.cursorBytes(upTo),
+                    readAtMs: now)
+            }
+            if let flags = deviceGroupSync.flags[row.id], flags.unreadOverride {
+                try? await deviceGroupSync.setFlags(
+                    groupId: groupId, pinned: flags.pinned, muted: flags.muted,
+                    archived: flags.archived, unreadOverride: false)
+            }
         }
     }
 
@@ -403,7 +673,7 @@ public struct ChatListScreen: View {
         let cursorId = Self.decodeBeI64(cursor.upToMessageId)
         return thread.messages.reduce(0) { acc, msg in
             if msg.direction == .outgoing { return acc }
-            // ADR-0058 section 5 — a message the feed showed is seen, even
+            // ADR-0061 section 5 — a message the feed showed is seen, even
             // when it sits above messages that are not.
             if thread.feedSeen.contains(msg.messageId) { return acc }
             if msg.messageId > cursorId { return acc + 1 }
@@ -424,17 +694,36 @@ public struct ChatListScreen: View {
     /// long-press menu (spec section 2.1).
     ///
     /// Pin / mute / archive are keyed on a conversation id a channel does not
-    /// carry, so a channel row offers none of them rather than offering one
-    /// that could not be honoured.
+    /// carry, so in All chats a channel row offers none of them rather than
+    /// offering one that could not be honoured. Inside a folder, Pin acts on
+    /// that folder's own pin list (`docs/ux/chat-folders.md` 2.3), which does
+    /// name channels.
     @ViewBuilder
-    private func rowActions(row: ConversationListRow) -> some View {
-        if row.kind != .channel {
+    private func rowActions(
+        row: ConversationListRow, folder: FolderView?, inMenu: Bool = false
+    ) -> some View {
+        if let folder {
+            let pinned = ChatFolders.isPinned(row, in: folder)
+            let atLimit = !pinned && folder.pinned.count >= ChatFolders.maxPins
+            Button {
+                Task { await toggleFolderPin(folder: folder, row: row) }
+            } label: {
+                Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+            }
+            .tint(Color.lakkoAccent)
+            .disabled(atLimit)
+            if atLimit && inMenu {
+                Text("You can pin up to 10 chats in a folder.")
+            }
+        } else if row.kind != .channel {
             Button {
                 Task { await toggleFlag(groupIdHex: row.id, field: .pin) }
             } label: {
                 Label(row.pinned ? "Unpin" : "Pin", systemImage: row.pinned ? "pin.slash" : "pin")
             }
             .tint(Color.lakkoAccent)
+        }
+        if row.kind != .channel {
             Button {
                 Task { await toggleFlag(groupIdHex: row.id, field: .mute) }
             } label: {
@@ -672,7 +961,7 @@ public final class ChatListViewModel: ObservableObject {
         StateBundle.pendingKnownGroups(joinedGroupIdHexes: threads.map { $0.groupIdHex }) > 0
     }
 
-    /// The conversation's kind (ADR-0060, read from the group's own
+    /// The conversation's kind (ADR-0062, read from the group's own
     /// GroupContext). Routes a tap, splits Chats from Groups and picks the
     /// preview's sender prefix. A two-person group is a group here, on every
     /// member's device.
@@ -682,7 +971,7 @@ public final class ChatListViewModel: ObservableObject {
 
     /// The row title (ADR-0051 §5): the shared group name whenever the
     /// conversation has one (only a group can: a name received in a
-    /// one-to-one is dropped, ADR-0060 §7) — else the other person's resolved
+    /// one-to-one is dropped, ADR-0062 §7) — else the other person's resolved
     /// name (ADR-0048) for a one-to-one, else the members' names. Never a hex id (UX spec section 6).
     func title(groupIdHex: String) -> String {
         if let shared = repository.groupName(groupIdHex: groupIdHex) {
@@ -738,6 +1027,17 @@ public final class ChatListViewModel: ObservableObject {
             return nil
         }
         return ChatRepository.parseDsTimestampMs(last.createdAt)
+    }
+
+    /// Chat folders' Mark all as read: clear the local badge and return the
+    /// newest server message id, for the read cursor the caller broadcasts.
+    /// `nil` when the chat holds no acknowledged message.
+    func markReadLocally(groupIdHex: String) -> Int64? {
+        repository.clearUnread(groupIdHex: groupIdHex)
+        guard let thread = threads.first(where: { $0.groupIdHex == groupIdHex }) else {
+            return nil
+        }
+        return thread.messages.map(\.messageId).filter { $0 > 0 }.max()
     }
 
     /// The pull-to-refresh action: the same poll the app already runs, once,

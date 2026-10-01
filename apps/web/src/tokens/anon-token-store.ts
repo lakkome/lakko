@@ -27,11 +27,13 @@
  *
  * The tokens are anonymous bearer credentials. They are never logged, and
  * they live only in this origin's IndexedDB: nothing here is part of a
- * backup, and nothing syncs them to another device. The pool clears the
- * whole store wherever it clears itself (sign-out, account switch, forget
- * device). They are not wrapped under the device key: a token names no
- * account and grants one anonymous request of a rationed kind, and the pool
- * holds no device key.
+ * backup, and nothing syncs them to another device. They are the account's
+ * (2026-10-01): an account switch and Log out leave every account's rows
+ * here, and Forget device / Delete account delete only that account's rows
+ * ({@link deleteAnonTokensForAccount} in the wipe, `deleteAccount` through
+ * the pool for what the sign-out spends after it). They are not wrapped
+ * under the device key: a token names no account and grants one anonymous
+ * request of a rationed kind, and the pool holds no device key.
  */
 import type { AnonTokenContext } from "./anon-token-pool";
 
@@ -47,8 +49,8 @@ export interface AnonTokenStore {
   load(account: string): Promise<Map<AnonTokenContext, PersistedAnonToken[]>>;
   /** Replace one (account, context) row; an empty list deletes it. */
   save(account: string, context: AnonTokenContext, tokens: readonly PersistedAnonToken[]): Promise<void>;
-  /** Drop every row of every account. */
-  clear(): Promise<void>;
+  /** Drop every row of `account`; other accounts' rows stay. */
+  deleteAccount(account: string): Promise<void>;
 }
 
 const DB_NAME = "lakko-anon-tokens";
@@ -63,6 +65,10 @@ interface Row {
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("IndexedDB unavailable in this environment"));
+      return;
+    }
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (): void => {
       const db = req.result;
@@ -129,13 +135,40 @@ export function indexedDbAnonTokenStore(): AnonTokenStore {
       else store.put({ account, context, tokens: tokens.map((t) => ({ ...t })) } satisfies Row);
       await done(tx);
     },
-    async clear() {
+    async deleteAccount(account) {
       const conn = await open();
       const tx = conn.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).clear();
+      deleteRowsOf(tx.objectStore(STORE), account);
       await done(tx);
     },
   };
+}
+
+/** Delete every row of `account` inside an open readwrite transaction. */
+function deleteRowsOf(store: IDBObjectStore, account: string): void {
+  const req = store.getAll();
+  req.onsuccess = (): void => {
+    for (const row of (req.result ?? []) as Row[]) {
+      if (row.account === account) store.delete([row.account, row.context]);
+    }
+  };
+}
+
+/**
+ * Drop every stored row of one account, leaving other accounts' rows (Forget
+ * device, Delete account). `account` is the key the pool files rows under:
+ * the account part of the session token, base64url of the account id.
+ * Throws when the store cannot be opened; the caller logs.
+ */
+export async function deleteAnonTokensForAccount(account: string): Promise<void> {
+  const conn = await openDb();
+  try {
+    const tx = conn.transaction(STORE, "readwrite");
+    deleteRowsOf(tx.objectStore(STORE), account);
+    await done(tx);
+  } finally {
+    conn.close();
+  }
 }
 
 /** The app's store: IndexedDB where the environment has it, else none (the
@@ -165,8 +198,10 @@ export function memoryAnonTokenStore(): AnonTokenStore & {
       if (tokens.length === 0) rows.delete(key(account, context));
       else rows.set(key(account, context), tokens.map((t) => ({ ...t })));
     },
-    async clear() {
-      rows.clear();
+    async deleteAccount(account) {
+      for (const k of [...rows.keys()]) {
+        if (k.split("\u0000")[0] === account) rows.delete(k);
+      }
     },
   };
 }

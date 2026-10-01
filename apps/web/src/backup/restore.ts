@@ -62,7 +62,9 @@ export async function restoreFromServerBackup(
   client.setSessionToken(inputs.sessionToken);
   const result = await client.restore(phraseBytes, inputs.gate);
   if (result.kind === "restored") {
-    applyRestoredContacts(result.acceptedContacts);
+    // Into the RESTORED account's list, named explicitly: the recover flow
+    // runs this before (or while) the session for that account lands.
+    applyRestoredContacts(result.acceptedContacts, inputs.gate.accountIdB64);
   }
   return result;
 }

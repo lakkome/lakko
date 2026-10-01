@@ -39,8 +39,9 @@ import Foundation
 @MainActor
 public final class InviteIntake: ObservableObject {
 
-    /// The slug from the most recent `lakko.me/i/<slug>` Universal
-    /// Link tap. `nil` when no invite is pending.
+    /// The link token (`slug#fragment`, see ``InviteLinkSecret/token(slug:fragment:)``)
+    /// from the most recent `lakko.me/i/<slug>` Universal Link tap. `nil` when
+    /// no invite is pending.
     @Published public private(set) var pendingSlug: String?
 
     /// ADR-0028 (G-3) — the slug from the most recent
@@ -55,12 +56,12 @@ public final class InviteIntake: ObservableObject {
     /// - it is decoded on the device and nowhere else.
     public private(set) var pendingGroupJoinFragment: String?
 
-    /// ADR-0032 (G-21/G-22) — the slug from the most recent
-    /// `lakko.me/c/<slug>` multi-joiner call-invite link tap. `nil` when no
-    /// call-join is pending. Drives ``JoinCallLandingScreen``.
+    /// ADR-0032 (G-21/G-22) — the link token (`slug#fragment`) from the most
+    /// recent `lakko.me/c/<slug>` multi-joiner call-invite link tap. `nil` when
+    /// no call-join is pending. Drives ``JoinCallLandingScreen``.
     @Published public private(set) var pendingCallJoinSlug: String?
 
-    /// ADR-0058 — a `/feed/import#<rule>` link waiting for the Feed tab.
+    /// ADR-0061 — a `/feed/import#<rule>` link waiting for the Feed tab.
     @Published private(set) var pendingFeedImport: FeedImportRequest?
 
     /// Take the parked feed import, if any.
@@ -91,7 +92,7 @@ public final class InviteIntake: ObservableObject {
     /// `.onOpenURL` for URLs whose host has a verified AASA file
     /// claiming this bundle id.
     public func handle(_ url: URL) {
-        // ADR-0058, `docs/ux/feed.md` section 5 — a `.lakkofeed` file opened
+        // ADR-0061, `docs/ux/feed.md` section 5 — a `.lakkofeed` file opened
         // from Files, mail or a messenger ("Open in Lakko") lands on the same
         // import screen as a link.
         if url.isFileURL {
@@ -102,16 +103,19 @@ public final class InviteIntake: ObservableObject {
         }
         let path = url.path
         if let slug = Self.slug(from: path, prefix: "/i/") {
-            pendingSlug = slug
+            // ADR-0028 amendment 2026-09-28 — the sealed-link secret rides the
+            // fragment; it is parked inside the token (`slug#fragment`) so it
+            // reaches the landing through the route, never a server.
+            pendingSlug = InviteLinkSecret.token(slug: slug, fragment: Self.fragment(of: url))
         } else if let slug = Self.slug(from: path, prefix: "/g/") {
             // The fragment is set BEFORE the published slug so an observer
             // that wakes on the slug already finds its key.
             pendingGroupJoinFragment = Self.fragment(of: url)
             pendingGroupJoinSlug = slug
         } else if let slug = Self.slug(from: path, prefix: "/c/") {
-            pendingCallJoinSlug = slug
+            pendingCallJoinSlug = InviteLinkSecret.token(slug: slug, fragment: Self.fragment(of: url))
         } else if path == "/feed/import" || path == "/feed/import/" {
-            // ADR-0058 — a shared feed rides in the fragment, never the path.
+            // ADR-0061 — a shared feed rides in the fragment, never the path.
             let fragment = Self.fragment(of: url)
             let bytes = FeedDraft.bytes(fromFragment: fragment)
             pendingFeedImport = FeedImportRequest(

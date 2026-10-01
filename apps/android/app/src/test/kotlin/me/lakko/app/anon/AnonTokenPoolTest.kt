@@ -25,8 +25,9 @@ import org.junit.Test
  * ADR-0054 S3 - the anonymous-token pool, host-side: the native core and the
  * issuer sit behind [AnonTokenCore] / [AnonTokenIssuerApi], so no native
  * library is loaded. What is pinned: a take triggers a background refill below
- * two, batches of eight up to thirty-two, a dead token is dropped, logout and
- * an account switch clear the pool, a batch is verified against the key from
+ * two, batches of eight up to thirty-two, a dead token is dropped, tokens are
+ * per account (a logout keeps them on disk, a switch loads the other account's
+ * own, the wipe removes one account's only), a batch is verified against the key from
  * the GET route and discarded when it does not verify, a used-up quota and a
  * disabled issuer surface as their own failures, and a disagreeing epoch is
  * rebuilt once.
@@ -105,17 +106,25 @@ class AnonTokenPoolTest {
         store = store,
     )
 
-    /** What a store on disk keeps, without the disk. */
+    /** What a store on disk keeps, without the disk: one pool per account. */
     private class MemoryStore : AnonTokenStore {
-        var persisted: PersistedAnonPool? = null
-        var clears = 0
-        override fun load(): PersistedAnonPool? = persisted
+        val pools = HashMap<String, PersistedAnonPool>()
+        val deletes = mutableListOf<String>()
+
+        /** Alice's pool, the account most tests use. */
+        var persisted: PersistedAnonPool?
+            get() = pools["alice"]
+            set(value) {
+                if (value == null) pools.remove("alice") else pools[value.owner] = value
+            }
+
+        override fun load(accountKey: String): PersistedAnonPool? = pools[accountKey]
         override fun save(pool: PersistedAnonPool) {
-            persisted = pool
+            pools[pool.owner] = pool
         }
-        override fun clear() {
-            clears += 1
-            persisted = null
+        override fun delete(accountKey: String) {
+            deletes += accountKey
+            pools.remove(accountKey)
         }
     }
 
@@ -207,27 +216,104 @@ class AnonTokenPoolTest {
     }
 
     @Test
-    fun logoutClearsWhatIsPersisted() = runTest {
+    fun logoutKeepsTheAccountsTokensForItsNextSignIn() = runTest {
         val store = MemoryStore()
-        val pool = pool(FakeCore(), FakeApi(), { alice }, store = store)
+        var who: AnonSession? = alice
+        val api = FakeApi()
+        val pool = pool(FakeCore(), api, { who }, store = store)
         pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        assertTrue(store.persisted != null)
-        pool.clear()
-        assertEquals(null, store.persisted)
-        val relaunched = pool(FakeCore(), FakeApi(), { alice }, store = store)
-        assertEquals(0, relaunched.held(AnonTokenContext.DISCOVERY_LOOKUP))
+        assertEquals(7, store.persisted!!.tokens.size)
+        // Log out: the memory goes, the disk does not.
+        pool.releaseSession()
+        who = null
+        assertEquals(0, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
+        assertEquals(7, store.persisted!!.tokens.size)
+        assertTrue(store.deletes.isEmpty())
+        // The same account signs in again: its tokens load, no new issuance.
+        who = alice
+        assertEquals("t1", pool.take(AnonTokenContext.DISCOVERY_LOOKUP).headerValue)
+        assertEquals(1, api.sessions.size)
     }
 
     @Test
-    fun anotherAccountNeverLoadsThePersistedTokens() = runTest {
+    fun anotherAccountNeverLoadsThePersistedTokensAndLeavesThemOnDisk() = runTest {
         val store = MemoryStore()
         pool(FakeCore(), FakeApi(), { alice }, store = store).take(AnonTokenContext.DISCOVERY_LOOKUP)
+        val aliceTokens = store.persisted!!.tokens
         val api = FakeApi()
         val core = FakeCore()
         val asBob = pool(core, api, { bob }, store = store)
         asBob.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        // Bob's token came from an issuance to Bob, not from Alice's pool.
         assertEquals(listOf(bob), api.sessions)
-        assertEquals("bob", store.persisted!!.owner)
+        assertEquals("bob", store.pools["bob"]!!.owner)
+        // Alice's stay on disk, untouched.
+        assertEquals(aliceTokens, store.persisted!!.tokens)
+        assertTrue(store.deletes.isEmpty())
+    }
+
+    @Test
+    fun twoAccountsTokensCoexistAndASwitchBackLoadsTheFirstAccountsOwn() = runTest {
+        val store = MemoryStore()
+        var who = alice
+        val core = FakeCore()
+        val api = FakeApi()
+        val pool = pool(core, api, { who }, store = store)
+        val a1 = pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        who = bob
+        val b1 = pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        assertEquals(7, store.pools["alice"]!!.tokens.size)
+        assertEquals(7, store.pools["bob"]!!.tokens.size)
+        val bobHeld = store.pools["bob"]!!.tokens.map { it.headerValue }.toSet()
+        // Back to Alice: served from Alice's own pool, never one of Bob's.
+        who = alice
+        val a2 = pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        assertEquals(2, core.begun.size)
+        assertTrue(a2.headerValue !in bobHeld && a2.headerValue != b1.headerValue)
+        assertTrue(a2.headerValue != a1.headerValue)
+        assertEquals(6, store.pools["alice"]!!.tokens.size)
+        assertEquals(7, store.pools["bob"]!!.tokens.size)
+    }
+
+    @Test
+    fun theWipeRemovesOnlyTheWipedAccountsTokens() = runTest {
+        val store = MemoryStore()
+        var who = alice
+        val api = FakeApi()
+        val pool = pool(FakeCore(), api, { who }, store = store)
+        pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        who = bob
+        pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        // Bob is held in memory; wiping Alice leaves Bob's memory and disk.
+        pool.forgetAccount("alice")
+        assertEquals(null, store.pools["alice"])
+        assertEquals(7, store.pools["bob"]!!.tokens.size)
+        assertEquals(7, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
+        // Wiping Bob (held) drops his memory and his file.
+        pool.forgetAccount("bob")
+        assertEquals(0, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
+        assertEquals(null, store.pools["bob"])
+        assertEquals(listOf("alice", "bob"), store.deletes)
+    }
+
+    @Test
+    fun aDetachedTakeAfterLogoutDrawsFromThatAccountsDiskPool() = runTest {
+        val store = MemoryStore()
+        var who: AnonSession? = alice
+        val api = FakeApi()
+        val pool = pool(FakeCore(), api, { who }, store = store)
+        pool.take(AnonTokenContext.PUSH_REGISTER) // four drawn, three left
+        assertEquals(3, store.persisted!!.tokens.size)
+        pool.releaseSession()
+        who = null
+        val t = pool.takeDetached(alice, AnonTokenContext.PUSH_REGISTER)
+        assertEquals(AnonTokenContext.PUSH_REGISTER, t.context)
+        assertEquals("served from disk: no new issuance", 1, api.sessions.size)
+        assertEquals(2, store.persisted!!.tokens.size)
+        // Bob's detached take never draws from Alice's pool.
+        pool.takeDetached(bob, AnonTokenContext.PUSH_REGISTER)
+        assertEquals(bob, api.sessions.last())
+        assertEquals(2, store.persisted!!.tokens.size)
     }
 
     // ------------------------------------------------------------ take + refill
@@ -297,15 +383,15 @@ class AnonTokenPoolTest {
         assertEquals(12L, core.begun.last().second)
     }
 
-    // ------------------------------------------------------------ clear
+    // ------------------------------------------------------------ release
 
     @Test
-    fun logoutClearsThePool() = runTest {
+    fun logoutReleasesTheMemory() = runTest {
         val core = FakeCore()
         val pool = pool(core, FakeApi(), { alice })
         pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
         assertEquals(7, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
-        pool.clear()
+        pool.releaseSession()
         assertEquals(0, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
     }
 

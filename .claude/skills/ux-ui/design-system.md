@@ -174,16 +174,22 @@ Top-level destinations, in this order, identical on the three clients:
 3. **Contacts**: accepted contacts, incoming requests, add by username,
    invite link.
 4. **Calls**: recent calls, "Create call link", join by link.
-5. **Settings**: Profile · Security · Notifications · Appearance · Data ·
-   About.
+5. **Settings**: Profile · Privacy · Security · Notifications · Chat folders ·
+   Appearance · Data · About.
 
 Settings sections:
 
 - **Profile**: avatar, display name, `@username`.
+- **Privacy**: who can find me by username or name, and so who can ask to
+  be a contact ([`docs/ux/who-can-find-me.md`](../../../docs/ux/who-can-find-me.md)).
+  About people, not keys, so not under Security.
 - **Security**: passkeys (list + add), linked devices (list, link new via
   QR, remove), recovery phrase (view once / verify), two-step (TOTP),
   recovery contact.
 - **Notifications**: push on/off, previews, sounds, per-chat mutes.
+- **Chat folders**: the person's folders (order, create, edit, delete) and
+  suggested folders; see `docs/ux/chat-folders.md`. The folder bar above the
+  Chats list appears once one folder exists.
 - **Appearance**: theme system/light/dark, text size, autoplay media.
 - **Data**: encrypted backup, export my data, storage usage.
 - **About**: version, licences, privacy, "How Lakko protects you" (the one

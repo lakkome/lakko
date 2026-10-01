@@ -59,7 +59,7 @@ fn is_member(g: &Group, id: &Identity) -> bool {
 /// The `0xFF02` role-table extension type, restated locally — the constant is
 /// `pub(crate)` and these tests hand-build extension sets a peer must judge.
 const ROLE_EXTENSION_TYPE: u16 = 0xFF02;
-/// The ADR-0060 conversation-kind extension type.
+/// The ADR-0062 conversation-kind extension type.
 const KIND_EXTENSION_TYPE: u16 = 0xFF03;
 
 /// The extension set `set_group_roles` builds, restated so a test can build a

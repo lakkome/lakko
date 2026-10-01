@@ -169,7 +169,7 @@ import Security
 ///     re-subscribes at its tail;
 ///   * an **unsubscribe** timeout is swallowed, exactly as an unreachable
 ///     push-gw is, leaving a stale push-gw row that nothing ever notifies
-///     again — already the documented cost in ``retireOldPushGid(oldSecret:)``.
+///     again — already the documented cost in ``retireOldPushGid(accountIdB64:oldSecret:)``.
 ///
 /// A rotation therefore occupies the row for at most three deadlines instead
 /// of forever, and every expiry leaves it in a state a later trigger repairs.
@@ -267,6 +267,19 @@ public final class PushGroupRouting {
     /// never invoked); injectable so tests can spy on the target.
     private let unsubscribeUnderPushGid: (Data) async throws -> Void
 
+    /// ADR-0057 obligation 8, second security pass finding 5 — bind the
+    /// group's journal to `derivePushGid(secret)` BEFORE the secret is
+    /// broadcast, called with `(account, group, secret)`. The repository binds
+    /// with the root (owner) or the admin registrar key and answers
+    /// ``PushBindOutcome/notPermitted`` for a member. Runs under the routing
+    /// lock, bounded by ``networkCallTimeout``. `nil` binds nothing.
+    public var bindSecret: ((String, String, Data) async -> PushBindOutcome)?
+
+    /// Groups whose last bind did not land (`503` disabled, offline): the next
+    /// provisioning pass binds again (wakes are dropped until bound).
+    /// Session-scoped.
+    private var bindRetry: Set<String> = []
+
     /// Per-group in-flight provisioning keys, so a concurrent legacy-sweep
     /// + onAppear for the same group mint the random secret exactly once.
     private var inflight: Set<String> = []
@@ -326,7 +339,7 @@ public final class PushGroupRouting {
     ///   not reentrant, so that would deadlock. The leaf helpers the sections
     ///   DO call — ``persistSecret(accountIdB64:groupIdHex:secret:distributed:mintEpoch:)``,
     ///   ``subscribeUnderPushGidBestEffort(accountIdB64:groupIdHex:)``,
-    ///   ``retireOldPushGid(oldSecret:)``, ``pushGid(accountIdB64:groupIdHex:)``
+    ///   ``retireOldPushGid(accountIdB64:oldSecret:)``, ``pushGid(accountIdB64:groupIdHex:)``
     ///   — are deliberately lock-FREE for exactly this reason, and must stay
     ///   that way. The injected `subscribe` / `unsubscribe` seams and the
     ///   `broadcast` closure reach `PushClient` and `ChatClient` respectively,
@@ -646,12 +659,11 @@ public final class PushGroupRouting {
         return Self.derivePushGid(secret: secret)
     }
 
-    /// Reverse-map a `push_gid` (lowercase hex) to `(account, group_id)`.
-    /// Exposed for the Sprint-4 NSE decrypt reverse-map (Sprint 3 only
-    /// POPULATES this via ``persistSecret``).
-    public func lookupRoute(pushGidHex: String)
-        -> (accountIdB64: String, groupIdHex: String)? {
-        store.lookupRoute(pushGidHex: pushGidHex)
+    /// Reverse-map a `push_gid` (lowercase hex) to the `group_id` it routes
+    /// for `accountIdB64`. Another account's row for the same `push_gid` is a
+    /// miss (ADR-0042, amended 2026-09-30).
+    public func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? {
+        store.lookupRoute(accountIdB64: accountIdB64, pushGidHex: pushGidHex)
     }
 
     // MARK: - Subscribe / receive / redistribute
@@ -686,7 +698,7 @@ public final class PushGroupRouting {
     /// ADR-0045 UX §6.2.8 item 5 — retire this device's OWN subscription for a
     /// group whose membership has ended.
     ///
-    /// The THIRD caller of ``retireOldPushGid(oldSecret:)``, and the one
+    /// The THIRD caller of ``retireOldPushGid(accountIdB64:oldSecret:)``, and the one
     /// ADR-0043 said could not exist: it recorded an evicted member's push-gw
     /// row as *"never deleted — nobody else can delete it and no client has
     /// 'you were removed' handling"*, so the row went **inert** rather than
@@ -717,7 +729,7 @@ public final class PushGroupRouting {
                   let secret = self.store.getSecret(
                     accountIdB64: accountIdB64, groupIdHex: groupIdHex)
             else { return false }
-            await self.retireOldPushGid(oldSecret: secret)
+            await self.retireOldPushGid(accountIdB64: accountIdB64, oldSecret: secret)
             return true
         }
     }
@@ -745,7 +757,7 @@ public final class PushGroupRouting {
     /// Best-effort and never throws: the caller has ALREADY switched to the
     /// new id, so a failure here must not unwind the rotation. The cost of a
     /// failed unsubscribe is a stale row that nothing notifies again.
-    public func retireOldPushGid(oldSecret: Data) async {
+    public func retireOldPushGid(accountIdB64: String, oldSecret: Data) async {
         guard let oldGid = Self.derivePushGid(secret: oldSecret) else {
             NSLog("push-routing old push_gid derivation failed")
             return
@@ -764,7 +776,7 @@ public final class PushGroupRouting {
             // that nothing notifies again, not a broken group.
             NSLog("push_gid unsubscribe failed: \(error)")
         }
-        store.removeRoute(pushGidHex: Self.hex(oldGid))
+        store.removeRoute(accountIdB64: accountIdB64, pushGidHex: Self.hex(oldGid))
     }
 
     /// RECEIVE side — a member got the distribution envelope: run the
@@ -787,7 +799,7 @@ public final class PushGroupRouting {
     /// **ADR-0043 — the receiving half of a rotation.** When the accepted
     /// secret CHANGES the one this device held, the id it was subscribed
     /// under is now dead, so the old `push_gid` is retired here too
-    /// (``retireOldPushGid(oldSecret:)``). Every member tears down its OWN
+    /// (``retireOldPushGid(accountIdB64:oldSecret:)``). Every member tears down its OWN
     /// push-gw row because no client can delete anyone else's; skip this and
     /// each rotation leaves one dead row PER MEMBER. The old secret is read
     /// from the `stored` snapshot taken BEFORE the persist below — the secret
@@ -957,7 +969,7 @@ public final class PushGroupRouting {
             NSLog(
                 "push-routing secret ROTATED by a peer (retiring the old push_gid; "
                     + "authority \(resolved.authority.diagnosticTag))")
-            await retireOldPushGid(oldSecret: superseded)
+            await retireOldPushGid(accountIdB64: accountIdB64, oldSecret: superseded)
         }
     }
 
@@ -968,7 +980,7 @@ public final class PushGroupRouting {
     /// The two `accept*` cases both persist + (re-)subscribe; the three
     /// `reject*` cases drop the envelope entirely — no persist, no
     /// subscribe, and (the one that carries the security value) no
-    /// ``retireOldPushGid(oldSecret:)``.
+    /// ``retireOldPushGid(accountIdB64:oldSecret:)``.
     public enum SecretVerdict: Equatable {
         /// A CHANGED (or first-ever) secret that cleared BOTH the ADR-0042 /
         /// ADR-0043 authority gate and the ADR-0044 order.
@@ -1400,6 +1412,55 @@ public final class PushGroupRouting {
         }
     }
 
+    // MARK: - Bind before broadcast (ADR-0057 second security pass, finding 5)
+
+    /// Bind with the network bounded (this runs under the routing-row lock).
+    /// Never throws; a timeout counts as ``PushBindOutcome/failed``. A `503`
+    /// or a failure marks the group for a re-bind on the next provisioning
+    /// pass.
+    private func bindBounded(accountIdB64: String, groupIdHex: String, secret: Data) async -> PushBindOutcome {
+        guard let bindSecret else { return .notPermitted }
+        let lockKey = Self.lockKey(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        var outcome: PushBindOutcome = .failed
+        do {
+            try await withNetworkTimeout("bind") {
+                outcome = await bindSecret(accountIdB64, groupIdHex, secret)
+            }
+        } catch {
+            outcome = .failed
+        }
+        switch outcome {
+        case .disabled, .failed: bindRetry.insert(lockKey)
+        case .bound, .conflict, .notPermitted: bindRetry.remove(lockKey)
+        }
+        return outcome
+    }
+
+    /// Mint a fresh secret and bind the journal to its routing id BEFORE the
+    /// caller persists and broadcasts it (finding 5): `204` bound; `503` or a
+    /// failure: broadcast anyway and re-bind later; `409` (the id is bound to
+    /// another journal): mint once more and bind again, and if that also
+    /// fails, broadcast it unbound. A member binds nothing (only an owner or
+    /// an admin mints or rotates). `mint` is injectable for tests.
+    func mintAndBind(
+        accountIdB64: String,
+        groupIdHex: String,
+        mint: () -> Data? = { PushGroupRouting.mintSecret() }
+    ) async -> Data? {
+        guard var secret = mint() else { return nil }
+        var outcome = await bindBounded(accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret)
+        if outcome == .conflict {
+            NSLog("push-routing: the minted routing id is bound elsewhere; minting another once")
+            guard let second = mint() else { return nil }
+            secret = second
+            outcome = await bindBounded(accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret)
+            if outcome == .conflict {
+                NSLog("push-routing: the second routing id is bound elsewhere too; broadcasting unbound")
+            }
+        }
+        return secret
+    }
+
     // MARK: - Owner-mint funnel
 
     /// Ensure a group's push routing is provisioned for this device.
@@ -1459,10 +1520,10 @@ public final class PushGroupRouting {
     /// none, and waits for the receive path).
     ///
     /// A per-group in-flight guard coalesces a concurrent legacy-sweep +
-    /// onAppear. The mint → persist is synchronous (no `await` before
-    /// ``PushRoutingStore/hasSecret(accountIdB64:groupIdHex:)`` flips true),
-    /// so even absent the guard a second concurrent call would never
-    /// re-mint; the guard additionally suppresses a redundant re-broadcast.
+    /// onAppear. Since the second security pass the mint awaits the push
+    /// binding before it persists, so it is the serializing routing lock that
+    /// keeps a second concurrent call from re-minting; the guard additionally
+    /// suppresses a redundant re-broadcast.
     ///
     /// - Parameter broadcast: posts the distribution-envelope bytes to the
     ///   group journal as an E2EE MLS application message
@@ -1517,6 +1578,9 @@ public final class PushGroupRouting {
         // open-question decision to keep un-owned legacy groups on deferred
         // push until a natural re-creation.
         let isOwner = (try? group.ownRole(identity: identity)) == .owner
+        // Finding 5 — the mint and the re-broadcast bind in this pass; only a
+        // row that was already distributed on entry retries a failed bind.
+        var boundThisPass = false
 
         if !store.hasSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
             // MINT — OWNER ONLY. The secret is 32 RANDOM bytes, so a second
@@ -1535,12 +1599,17 @@ public final class PushGroupRouting {
                         accountIdB64: accountIdB64, groupIdHex: groupIdHex)
                     return
                 }
-                // Persist synchronously (flips `hasSecret` true) before any
-                // await, marked NOT distributed, then tell the group over the
+                // Persist (flips `hasSecret` true) right after the bind, marked
+                // NOT distributed, then tell the group over the
                 // E2EE journal. Persist-before-broadcast stays: minting twice
                 // would diverge the group's routing id, which is far worse
                 // than re-broadcasting one envelope.
-                guard let secret = Self.mintSecret() else { return }
+                // Bind BEFORE broadcasting (finding 5 of the second security
+                // pass). The coalescing guard and the routing lock keep a
+                // second mint out while this awaits.
+                guard let secret = await mintAndBind(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex) else { return }
+                boundThisPass = true
                 if persistSecret(
                     accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret,
                     distributed: false, mintEpoch: mintEpoch) != nil {
@@ -1583,10 +1652,23 @@ public final class PushGroupRouting {
             // secret a newer position than the rotation that superseded it and
             // reproduce the finding with the ordering gate fully armed. The
             // pair comes from the ONE `getRecord` above.
+            //
+            // Finding 5 — bound before it goes on the wire (a 204 when it is
+            // bound already; a member binds nothing).
+            _ = await bindBounded(accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: pending.secret)
+            boundThisPass = true
             await broadcastAndSettle(
                 secret: pending.secret, mintEpoch: pending.mintEpoch,
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex,
                 what: "re-broadcast", broadcast: broadcast)
+        }
+        // A bind that did not land (503 disabled, offline) is retried here, on
+        // the next provisioning pass (finding 5: wakes are dropped until bound).
+        if !boundThisPass,
+           bindRetry.contains(Self.lockKey(accountIdB64: accountIdB64, groupIdHex: groupIdHex)),
+           let held = store.getRecord(accountIdB64: accountIdB64, groupIdHex: groupIdHex),
+           held.distributed {
+            _ = await bindBounded(accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: held.secret)
         }
         // A device holding a secret it cannot READ (`getRecord` nil while
         // `hasSecret` is true — wrap key rotated / corrupt row) falls through
@@ -1811,7 +1893,7 @@ public final class PushGroupRouting {
     ///      broadcast strands the whole group: the rotator alone on the new
     ///      id, everyone else on the old one, nobody notifying either;
     ///   6. subscribe under the NEW id, then 7./8. retire the OLD one
-    ///      (``retireOldPushGid(oldSecret:)``) — in that order, so the device
+    ///      (``retireOldPushGid(accountIdB64:oldSecret:)``) — in that order, so the device
     ///      is never unsubscribed from both at once.
     ///
     /// Rotation NEVER mints a first secret: with no secret held this is a
@@ -1895,7 +1977,9 @@ public final class PushGroupRouting {
         // (4) — mint + persist PENDING. Persist before broadcasting for
         // the same reason the mint path does: two divergent random secrets
         // are worse than two identical envelopes.
-        guard let next = Self.mintSecret() else { return .skipNoSecret }
+        // Bind BEFORE broadcasting (finding 5 of the second security pass).
+        guard let next = await mintAndBind(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex) else { return .skipNoSecret }
         guard persistSecret(
             accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: next,
             distributed: false, mintEpoch: stamp) != nil else {
@@ -1917,7 +2001,7 @@ public final class PushGroupRouting {
 
         // (7)+(8) — retire the OLD id: unsubscribe this device's row, drop
         // the stale reverse-index entry.
-        await retireOldPushGid(oldSecret: oldSecret)
+        await retireOldPushGid(accountIdB64: accountIdB64, oldSecret: oldSecret)
         return .rotated
     }
 
@@ -2041,7 +2125,7 @@ public final class PushGroupRouting {
     // MARK: - Store passthrough
 
     /// Wipe every push-routing secret + reverse-index entry for the
-    /// account. Called from ``ChatRepository/forgetDevice()``.
+    /// account. Called from ``AccountLocalDataWipe``.
     public func clear(accountIdB64: String) {
         store.clear(accountIdB64: accountIdB64)
     }

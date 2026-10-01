@@ -22,7 +22,7 @@ import { feedIconName } from "../feed/feed-icons";
 import { loadFeedState, newFeedId, saveFeedState, upsertFeed } from "../feed/feed-store";
 import { Icon } from "../ui/icons";
 import { loadWasm, type Wasm } from "../wasm";
-import { FEED_SELECTION_STORAGE_KEY } from "./Feed";
+import { writeFeedSelection } from "../feed/feed-selection-store";
 import { paths } from "./paths";
 
 const REFUSED = "This file isn't a feed Lakko can open.";
@@ -105,11 +105,9 @@ export default function FeedImport(): JSX.Element {
         deviceKey,
         upsertFeed(state, { id, rule: encodeDraft(w, d) }),
       );
-      try {
-        localStorage.setItem(FEED_SELECTION_STORAGE_KEY, `custom:${id}`);
-      } catch {
-        // The feed opens on its default; the saved feed is still in the row.
-      }
+      // The feed opens on its default when storage refuses; the saved feed
+      // is still in the row.
+      writeFeedSelection(s.account.accountId, `custom:${id}`);
       navigate(paths.feed);
     } catch {
       setError("Couldn't save the feed. Try again.");

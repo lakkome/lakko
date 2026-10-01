@@ -196,7 +196,7 @@ public enum PinVerdict: Equatable {
 /// | role table | unresolvable / table unreadable | `rejectUnverifiable` |
 /// | no role table | any member | accept if newer |
 ///
-/// "One-to-one" is the conversation's ADR-0060 kind, read from its
+/// "One-to-one" is the conversation's ADR-0062 kind, read from its
 /// GroupContext — NOT a people count: a two-person GROUP follows the role
 /// table (only the owner or an admin pins for everyone). It comes before the
 /// role table because a one-to-one does carry a table with one owner — and

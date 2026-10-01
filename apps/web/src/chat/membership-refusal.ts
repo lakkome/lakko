@@ -263,13 +263,13 @@ export const DEVICE_LIMIT_REACHED = "Up to 8 devices per account. Remove one fir
 export const DEVICE_BINDING_INVALID =
   "Something is wrong with this device's key. Remove it from Devices and add it again.";
 
-/** ADR-0060 — a one-to-one is always the same two people. No screen offers
+/** ADR-0062 — a one-to-one is always the same two people. No screen offers
  *  an add, remove or leave there, so these are plain facts for a refusal
  *  that should never be reached from the UI. */
 export const ONE_TO_ONE_MEMBERSHIP_FIXED = "A chat is always the same two people.";
-/** ADR-0060 — a one-to-one has no admins and no ownership to hand over. */
+/** ADR-0062 — a one-to-one has no admins and no ownership to hand over. */
 export const ONE_TO_ONE_HAS_NO_ROLES = "A chat has no admins.";
-/** ADR-0060 — a change that would alter what kind of conversation this is. */
+/** ADR-0062 — a change that would alter what kind of conversation this is. */
 export const GROUP_KIND_CHANGED = "This change can't be made to this conversation.";
 
 const TABLE: Readonly<Record<string, Copy>> = {
@@ -288,7 +288,7 @@ const TABLE: Readonly<Record<string, Copy>> = {
   // client bug and gets the same plain sentence rather than a screen.
   deviceLimitReached: { fact: DEVICE_LIMIT_REACHED },
   deviceBindingInvalid: { fact: DEVICE_BINDING_INVALID },
-  // ADR-0060: neutral facts, no invitation — none of the three resolves by
+  // ADR-0062: neutral facts, no invitation — none of the three resolves by
   // waiting (NotPermitted / NotPermitted / DoNotRetry in the core).
   oneToOneMembershipFixed: { fact: ONE_TO_ONE_MEMBERSHIP_FIXED },
   oneToOneHasNoRoles: { fact: ONE_TO_ONE_HAS_NO_ROLES },

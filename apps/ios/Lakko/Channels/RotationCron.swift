@@ -152,24 +152,20 @@ public actor RotationCron {
         //    from the new local state, and the server's
         //    atomic-rotation guarantee means no partial
         //    landings are observable.
-        let signerBefore = try? context.publisherGroup.dsAccessSigner(identity: context.identity)
         _ = try context.publisherGroup.rotate(identity: context.identity)
-        // ADR-0053 — a rotation moves the PublisherGroup epoch, so the journal's
-        // access key moves with it: register the new key proven under the old
-        // one, or this device's own later journal reads would be refused. The
-        // rotation commit is not published to the journal, so no peer can hold
-        // an unregistered epoch; best effort, and the co-publisher panel's
-        // claim-on-open is not a repair for a missed one.
-        if let signerBefore,
-           let signerAfter = try? context.publisherGroup.dsAccessSigner(identity: context.identity),
-           let groupId = try? context.publisherGroup.groupId() {
+        // ADR-0057 — a rotation moves the PublisherGroup epoch, so the journal's
+        // access key moves with it: register the new key under the journal
+        // root (the channel owner's account key), or this device's own later
+        // journal reads would be refused. The rotation commit is not published
+        // to the journal, so no peer can hold an unregistered epoch; best
+        // effort.
+        if let signerAfter = try? context.publisherGroup.dsAccessSigner(identity: context.identity) {
             do {
-                try await DsClient().claimGroup(
-                    groupId: groupId,
-                    bodyJson: signerAfter.groupClaimBodyJson(),
-                    provenBy: signerBefore)
+                try await CoPublisher.registerEpoch(
+                    ds: DsClient(), identity: context.identity,
+                    publisherGroup: context.publisherGroup, next: signerAfter)
             } catch {
-                NSLog("ADR-0053: PublisherGroup rotation epoch not registered: %@",
+                NSLog("ADR-0057: PublisherGroup rotation epoch not registered: %@",
                       String(describing: error))
             }
         }

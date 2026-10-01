@@ -223,17 +223,17 @@ internal const val DEVICE_BINDING_INVALID: String =
     "Something is wrong with this device's key. Remove it from Devices and add it again."
 
 /**
- * ADR-0060 — a chat (one-to-one) is always the same two people. No screen
+ * ADR-0062 — a chat (one-to-one) is always the same two people. No screen
  * offers add / remove / leave on a chat, so this is reached only by a stale
  * view; stated as the standing rule. Same copy as web.
  */
 internal const val ONE_TO_ONE_MEMBERSHIP_FIXED: String = "A chat is always the same two people."
 
-/** ADR-0060 — a chat has no owner or admins. Same copy as web. */
+/** ADR-0062 — a chat has no owner or admins. Same copy as web. */
 internal const val ONE_TO_ONE_HAS_NO_ROLES: String = "A chat has no admins."
 
 /**
- * ADR-0060 — a change that would alter or drop the conversation's kind,
+ * ADR-0062 — a change that would alter or drop the conversation's kind,
  * refused by the peer gate. Same copy as web.
  */
 internal const val GROUP_KIND_CHANGED: String = "This change can't be made to this conversation."
@@ -455,7 +455,7 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.MembershipJoinerAlreadyAMember ->
                     FfiRefusalReason.JOINER_ALREADY_A_MEMBER
                 is FfiException.SweepAlreadyStaged -> FfiRefusalReason.SWEEP_ALREADY_STAGED
-                // ADR-0060 — the conversation-kind refusals.
+                // ADR-0062 — the conversation-kind refusals.
                 is FfiException.MembershipOneToOneMembershipFixed ->
                     FfiRefusalReason.ONE_TO_ONE_MEMBERSHIP_FIXED
                 is FfiException.MembershipOneToOneHasNoRoles ->
@@ -469,11 +469,23 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.AnonToken,
                 is FfiException.AnonTokenAlreadyFinalized,
                 -> null
-                // ADR-0049 section 2 device link, sealed invite links, and
-                // ADR-0058 feed rules; none is a membership refusal.
+                // ADR-0049 device link, the sealed invite links of the
+                // 2026-09-28 security pass, ADR-0060 scoped discovery,
+                // ADR-0061 feed rules and ADR-0059 channel listings: none is a
+                // membership refusal.
                 is FfiException.DeviceLinkWrongCode,
                 is FfiException.DeviceLink,
                 is FfiException.InviteLinkDamaged,
+                // ADR-0058 - a refused DeviceGroup folder / snapshot payload
+                // and a refused synced-state operation; not membership
+                // refusals.
+                is FfiException.DeviceGroupPayloadRefused,
+                is FfiException.SyncedState,
+                is FfiException.Reach,
+                is FfiException.Introduction,
+                is FfiException.Visibility,
+                is FfiException.UsernameCertificate,
+                is FfiException.CommitterDelegation,
                 is FfiException.FeedRule,
                 is FfiException.ChannelListing,
                 is FfiException.ChannelCoPublisherBinding,

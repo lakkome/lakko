@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Date:** 2026-09-28
 - **Context:** product completeness, the recommendation half of the Feed.
   UX spec: [`docs/ux/feed.md`](../ux/feed.md) section 6. The on-device feed
-  itself is [ADR-0058](0058-on-device-feed.md).
+  itself is [ADR-0061](0061-on-device-feed.md).
 
 ## Context
 
@@ -144,7 +144,7 @@ target `channel_listing_decode`.
   description, top 24 results, one token of a new context
   **`DirectorySearch = 7`**. The query is not logged. The UI states it is
   sent.
-- **Ranking for the person** happens on the device (ADR-0058's engine
+- **Ranking for the person** happens on the device (ADR-0061's engine
   scores cards against the person's picked topics, language and
   not-interested set). The server's bucket order is only the order of
   public popularity.
@@ -217,7 +217,7 @@ is consumed once. Every refusal is the same `401 owner-proof-required`.
   reader had to fetch and drop. Post authenticity is unchanged: readers
   still verify each post's signature.
 - No migration: the owner key and the co-publisher table already exist
-  (migrations `0005`, `0007`), and a channel without an owner key is
+  (migrations `0007`, `0009`), and a channel without an owner key is
   refused (there is no production data).
 
 ## Alternatives
@@ -329,7 +329,7 @@ is consumed once. Every refusal is the same `401 owner-proof-required`.
     `{channel_id, owner_pubkey_hex}` (64 hex, must decode as an Ed25519
     point, else `400 bad-owner-pubkey`). A second create with the same key is
     idempotent; another key for an existing id is `409 channel-exists` and
-    changes nothing. Migration `0005` adds `channels.owner_pubkey` NOT NULL
+    changes nothing. Migration `0007` adds `channels.owner_pubkey` NOT NULL
     (flag day, no back-fill).
   - *Owner-signed routes* (`PUT` / `DELETE .../listing`, `GET
     .../subscribers`) go through one gate (`src/owner_auth.rs`): parse the
@@ -371,7 +371,7 @@ is consumed once. Every refusal is the same `401 owner-proof-required`.
   - *Tokens without a database.* `lakko-anon-token-server` gained
     `TokenVerifier::in_memory` so the service's in-memory mode (dev, tests)
     spends through the same gate; the SQL mode uses the byte-identical
-    spent-set migration `0006`.
+    spent-set migration `0008`.
   - *nginx* logs neither directory-search location (the query is in the
     query string).
   - **Finding: co-publishers lose the subscriber list.** The list is now
@@ -399,7 +399,7 @@ is consumed once. Every refusal is the same `401 owner-proof-required`.
     ways; the key must decode as an Ed25519 point (`400
     bad-copublisher-key`); at most `MAX_COPUBLISHERS` = 32 per channel
     (chosen, not measured; `409 too-many-copublishers`), counted under the
-    channel row's lock. Migration `0007` (`channel_copublishers`, FK cascade).
+    channel row's lock. Migration `0009` (`channel_copublishers`, FK cascade).
   - *The co-publisher proof.* A **separate header**,
     `x-lakko-channel-copublisher-proof: v1.<copublisher_key_b64url>.<unix_ms>.<nonce>.<sig>`,
     rather than a key-id field in the owner header: the owner header's shape
@@ -485,7 +485,7 @@ is consumed once. Every refusal is the same `401 owner-proof-required`.
     discarded; only picked buckets are cached. Refresh at most daily, or at
     once when the picked set changes; a refresh whose every bucket failed
     shows "Suggestions aren't available right now." and keeps the cache.
-  - *Card ranking* (`cards.ts`) is a small local scorer, not the ADR-0058
+  - *Card ranking* (`cards.ts`) is a small local scorer, not the ADR-0061
     engine: `rankFeed` ranks messages of conversations the device holds and
     a card has none of their fields. Score: picked topic 100, language 50,
     group followers 40 each (up to 5), band index x 10, `100 - server rank`;
@@ -622,8 +622,10 @@ is consumed once. Every refusal is the same `401 owner-proof-required`.
 
 ## References
 
-- [`docs/ux/feed.md`](../ux/feed.md), ADR-0058
+- [`docs/ux/feed.md`](../ux/feed.md), ADR-0061
 - ADR-0010 (channels), ADR-0028 / ADR-0048 / ADR-0051 (envelope pattern,
   display-name rule, channel metadata), ADR-0053 (request proofs),
   ADR-0054 (anonymous tokens), ADR-0057 (per-group owner root)
 - `services/channels/src/api.rs`, `services/discovery/src/channel_names.rs`
+
+The channels migrations of this ADR were renumbered 0005-0007 to 0007-0009 on 2026-10-01 when main's member-card migrations took 0005 and 0006.

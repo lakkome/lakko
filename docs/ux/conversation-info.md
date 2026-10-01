@@ -101,7 +101,7 @@ not — which is the divergence this document exists to remove, and the
 question of which behaviour to keep is the maintainer's rather than whichever
 client happened to keep it.
 
-Since [ADR-0060](../adr/0060-conversation-kind.md) this is a rule of the
+Since [ADR-0062](../adr/0062-conversation-kind.md) this is a rule of the
 conversation, not only of the screen. Whether a conversation is a one-to-one
 or a group is set when it is created and never changes, and it is read from
 the conversation itself, never from how many people are in it; a two-person

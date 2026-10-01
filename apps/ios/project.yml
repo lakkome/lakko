@@ -143,6 +143,11 @@ targets:
         #   * LakkoTransparencyWitnessThreshold — the K-of-N threshold
         #     (default 1). Only consulted when the key set is non-empty; a
         #     threshold above the pinned-key count refuses every root.
+        # ADR-0060 section 5 — base64url of the 32-byte Ed25519 key discovery
+        # signs username certificates with, pinned out-of-band at build time.
+        # Empty -> fetched from `/.well-known/lakko-username-cert-key` (the
+        # transition posture; a pin defends a compromised serving tier).
+        LakkoUsernameCertKey: ""
         LakkoTransparencyUrl: ""
         LakkoTransparencyOperatorKey: ""
         LakkoTransparencyWitnessKey: ""
@@ -199,7 +204,7 @@ targets:
         # `GifClient.defaultBaseURL` (`http://localhost:8091`, a local proxy
         # the simulator reaches on the Mac).
         LakkoGifProxyUrl: ""
-        # ADR-0058, `docs/ux/feed.md` section 5 — a shared feed is a
+        # ADR-0061, `docs/ux/feed.md` section 5 — a shared feed is a
         # `.lakkofeed` file. Declaring the type (exported: Lakko defines it)
         # and a document type that claims it puts "Open in Lakko" on such a
         # file in Files, Mail and other apps; the opened URL arrives through
@@ -496,11 +501,19 @@ targets:
         buildPhase: sources
       # ADR-0042 Sprint 4 — the push-routing store whose `lookupRoute`
       # reverse-maps the wake's opaque `push_gid` hex back to the real
-      # `(account, group_id)` via the plaintext App Group reverse index
+      # `group_id` for the bound account (keyed `(account, push_gid)` since
+      # the 2026-09-30 amendment) via the plaintext App Group reverse index
       # Sprint 3 populates. FFI-clean (Foundation + CryptoKit only); the
       # NSE only ever calls the read-only `lookupRoute` — the
       # Keychain-touching secret paths are app-side only.
       - path: Lakko/Push/PushRoutingStore.swift
+        type: file
+        buildPhase: sources
+      # ADR-0042 (amended 2026-09-30) — the `(device pseudonym, account)`
+      # binding the app writes at push registration and this extension READS
+      # to decide whether a wake is for the signed-in account at all.
+      # Foundation only; read-only here.
+      - path: Lakko/Push/PushAccountBinding.swift
         type: file
         buildPhase: sources
       # `docs/ux/calls.md` section 2.1 — the App Group name mirror the app

@@ -28,27 +28,58 @@ package me.lakko.app.profile
  * keying rules are testable in a plain JVM.
  */
 
-/** Durable backing for the two stores. Reads return an empty map on any
- *  decode failure; writes are best-effort. */
+/**
+ * Durable backing for the two stores, ONE set per account.
+ *
+ * What a person learned about other people's names belongs to the signed-in
+ * account, not to the device: until 2026-09-30 the profiles and verification
+ * results lived under one device-wide key, so a second account signed in on
+ * the same phone resolved names the first account had learned. The stores ask
+ * [currentAccount] on every operation and reload when it changed; with no
+ * account a read is empty and a write is dropped.
+ *
+ * Reads return an empty map on any decode failure; writes are best-effort.
+ */
 public interface ProfilePersistence {
-    public fun loadProfiles(): Map<String, PeerProfile>
-    public fun saveProfiles(profiles: Map<String, PeerProfile>)
-    public fun loadVerifications(): Map<String, UsernameVerification>
-    public fun saveVerifications(verifications: Map<String, UsernameVerification>)
+    /** The account the stores act on now, or `null` when none is signed in. */
+    public fun currentAccount(): String?
+
+    public fun loadProfiles(account: String): Map<String, PeerProfile>
+    public fun saveProfiles(account: String, profiles: Map<String, PeerProfile>)
+    public fun loadVerifications(account: String): Map<String, UsernameVerification>
+    public fun saveVerifications(account: String, verifications: Map<String, UsernameVerification>)
 }
 
-/** A [ProfilePersistence] that keeps nothing (tests, and a missing Context). */
-public class InMemoryProfilePersistence : ProfilePersistence {
-    private var profiles: Map<String, PeerProfile> = emptyMap()
-    private var verifications: Map<String, UsernameVerification> = emptyMap()
+/**
+ * A [ProfilePersistence] that keeps its maps in memory, per account (tests,
+ * and a missing Context). [account] is the account the stores act on; tests
+ * switch it to model a second account signing in on the same device.
+ */
+public class InMemoryProfilePersistence(
+    @Volatile public var account: String? = DEFAULT_ACCOUNT,
+) : ProfilePersistence {
+    private val profiles = HashMap<String, Map<String, PeerProfile>>()
+    private val verifications = HashMap<String, Map<String, UsernameVerification>>()
 
-    override fun loadProfiles(): Map<String, PeerProfile> = profiles
-    override fun saveProfiles(profiles: Map<String, PeerProfile>) {
-        this.profiles = profiles
+    override fun currentAccount(): String? = account
+
+    override fun loadProfiles(account: String): Map<String, PeerProfile> =
+        synchronized(this) { profiles[account] ?: emptyMap() }
+
+    override fun saveProfiles(account: String, profiles: Map<String, PeerProfile>) {
+        synchronized(this) { this.profiles[account] = profiles }
     }
-    override fun loadVerifications(): Map<String, UsernameVerification> = verifications
-    override fun saveVerifications(verifications: Map<String, UsernameVerification>) {
-        this.verifications = verifications
+
+    override fun loadVerifications(account: String): Map<String, UsernameVerification> =
+        synchronized(this) { verifications[account] ?: emptyMap() }
+
+    override fun saveVerifications(account: String, verifications: Map<String, UsernameVerification>) {
+        synchronized(this) { this.verifications[account] = verifications }
+    }
+
+    public companion object {
+        /** The one account a single-account test runs as. */
+        public const val DEFAULT_ACCOUNT: String = "test-account"
     }
 }
 
@@ -62,6 +93,9 @@ public enum class ProfileOffer {
 
     /** Dropped: no signature key to bind it to (C-68 — never stored unbound). */
     UNATTRIBUTED,
+
+    /** Dropped: no account is signed in, so there is no one to file it for. */
+    NO_ACCOUNT,
 }
 
 /** The per-signature-key profile store. Thread-safe. */
@@ -71,19 +105,33 @@ public class PeerProfileStore(
         { incoming, stored -> uniffi.lakko_ffi_uniffi.profileIsNewer(incoming, stored) },
 ) {
     private val lock = Any()
-    private var profiles: Map<String, PeerProfile> = persistence.loadProfiles()
+    private var profiles: Map<String, PeerProfile> = emptyMap()
+
+    /** The account [profiles] was loaded for; [UNLOADED] before the first read. */
+    private var loadedFor: String? = UNLOADED
+
+    /** The current account's map, reloaded when the account changed. Call
+     *  under [lock]. */
+    private fun current(): Map<String, PeerProfile> {
+        val account = persistence.currentAccount()
+        if (account != loadedFor) {
+            profiles = account?.let { persistence.loadProfiles(it) } ?: emptyMap()
+            loadedFor = account
+        }
+        return profiles
+    }
 
     /** The profile held for [signatureKeyB64], or `null`. */
     public fun get(signatureKeyB64: String): PeerProfile? =
-        synchronized(lock) { profiles[signatureKeyB64] }
+        synchronized(lock) { current()[signatureKeyB64] }
 
     /** Every held profile (a snapshot). */
-    public fun all(): Map<String, PeerProfile> = synchronized(lock) { profiles }
+    public fun all(): Map<String, PeerProfile> = synchronized(lock) { current() }
 
     /** Signature key -> account id hex, for every held profile that has one
      *  (the ADR-0021 call-roster sources). */
     public fun accountIdsByKey(): Map<String, String> = synchronized(lock) {
-        profiles.mapNotNull { (key, p) -> p.accountIdHex?.let { key to it } }.toMap()
+        current().mapNotNull { (key, p) -> p.accountIdHex?.let { key to it } }.toMap()
     }
 
     /**
@@ -97,6 +145,9 @@ public class PeerProfileStore(
     public fun offer(signatureKeyB64: String?, profile: PeerProfile): ProfileOffer {
         if (signatureKeyB64.isNullOrEmpty()) return ProfileOffer.UNATTRIBUTED
         synchronized(lock) {
+            current()
+            // No account signed in: nothing to file it under.
+            val account = loadedFor ?: return ProfileOffer.NO_ACCOUNT
             val held = profiles[signatureKeyB64]
             if (held != null && !isNewer(profile.updatedAtMs, held.updatedAtMs)) {
                 // The same profile sent again (a growth or request answer
@@ -112,7 +163,7 @@ public class PeerProfileStore(
                     return ProfileOffer.NOT_NEWER
                 }
                 profiles = profiles + (signatureKeyB64 to held.copy(accountIdHex = learned))
-                persistence.saveProfiles(profiles)
+                persistence.saveProfiles(account, profiles)
                 return ProfileOffer.STORED
             }
             val merged = if (profile.accountIdHex == null && held?.accountIdHex != null) {
@@ -121,42 +172,62 @@ public class PeerProfileStore(
                 profile
             }
             profiles = profiles + (signatureKeyB64 to merged)
-            persistence.saveProfiles(profiles)
+            persistence.saveProfiles(account, profiles)
             return ProfileOffer.STORED
         }
     }
 
-    /** Drop everything (forget device). */
-    public fun clear() {
+    /** Drop everything held for [account] (forget device). Other accounts'
+     *  profiles stay. */
+    public fun clear(account: String) {
         synchronized(lock) {
-            profiles = emptyMap()
-            persistence.saveProfiles(profiles)
+            persistence.saveProfiles(account, emptyMap())
+            if (loadedFor == account) profiles = emptyMap()
         }
     }
 }
 
+/** Marks a store that has not read its persistence yet (never an account). */
+private const val UNLOADED: String = "\u0000unloaded"
+
 /** The per `(signature key, username)` verification cache. Thread-safe. */
 public class UsernameVerificationStore(private val persistence: ProfilePersistence) {
     private val lock = Any()
-    private var results: Map<String, UsernameVerification> = persistence.loadVerifications()
+    private var results: Map<String, UsernameVerification> = emptyMap()
+    private var loadedFor: String? = UNLOADED
+
+    /** The current account's results, reloaded when the account changed.
+     *  Call under [lock]. */
+    private fun current(): Map<String, UsernameVerification> {
+        val account = persistence.currentAccount()
+        if (account != loadedFor) {
+            results = account?.let { persistence.loadVerifications(it) } ?: emptyMap()
+            loadedFor = account
+        }
+        return results
+    }
 
     /** The cached result for the pair, or `null` when never verified. */
     public fun get(signatureKeyB64: String, username: String): UsernameVerification? =
-        synchronized(lock) { results[pairKey(signatureKeyB64, username)] }
+        synchronized(lock) { current()[pairKey(signatureKeyB64, username)] }
 
-    /** Record a definitive result for the pair. */
+    /** Record a definitive result for the pair. Dropped with no account
+     *  signed in. */
     public fun put(signatureKeyB64: String, username: String, result: UsernameVerification) {
         synchronized(lock) {
+            current()
+            val account = loadedFor ?: return
             results = results + (pairKey(signatureKeyB64, username) to result)
-            persistence.saveVerifications(results)
+            persistence.saveVerifications(account, results)
         }
     }
 
-    /** Drop everything (forget device). */
-    public fun clear() {
+    /** Drop everything held for [account] (forget device). Other accounts'
+     *  results stay. */
+    public fun clear(account: String) {
         synchronized(lock) {
-            results = emptyMap()
-            persistence.saveVerifications(results)
+            persistence.saveVerifications(account, emptyMap())
+            if (loadedFor == account) results = emptyMap()
         }
     }
 

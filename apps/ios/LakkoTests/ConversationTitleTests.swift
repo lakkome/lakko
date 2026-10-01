@@ -9,7 +9,7 @@ import XCTest
 /// group title (docs/ux/client-redesign.md sections 3 and 5.1).
 final class ConversationTitleTests: XCTestCase {
 
-    // MARK: - Conversation kind (ADR-0060)
+    // MARK: - Conversation kind (ADR-0062)
 
     /// The kind is read from the group, never from a count: what the creator
     /// passed to `Group.create` is what `groupKind()` answers, through the
@@ -32,7 +32,7 @@ final class ConversationTitleTests: XCTestCase {
         XCTAssertEqual(ConversationKind.of(groupKind: nil), .group)
     }
 
-    /// ADR-0060 section 7 — a group-name envelope in a one-to-one is dropped.
+    /// ADR-0062 section 7 — a group-name envelope in a one-to-one is dropped.
     func testAGroupNameAppliesOnlyOutsideAOneToOne() {
         XCTAssertFalse(ConversationKind.acceptsGroupName(groupKind: .oneToOne))
         XCTAssertTrue(ConversationKind.acceptsGroupName(groupKind: .group))

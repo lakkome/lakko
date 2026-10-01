@@ -61,14 +61,14 @@ struct FeedPreviewLine: Identifiable, Equatable {
     let text: String
 }
 
-/// The Feed destination's model (`docs/ux/feed.md`, ADR-0058). Mirror of the
+/// The Feed destination's model (`docs/ux/feed.md`, ADR-0061). Mirror of the
 /// state web `routes/Feed.tsx` keeps.
 ///
 /// Messages from the person's groups and posts from their channels, ranked on
 /// this device by the one rule engine in the core. Channel posts come from
 /// the channel-post log ``ChannelPostSync`` fills in the foreground.
 ///
-/// Seen (ADR-0058 section 5): a group message fully on screen for
+/// Seen (ADR-0061 section 5): a group message fully on screen for
 /// ``FeedSeen/dwellSeconds`` joins its group's seen set; when that makes the
 /// set contiguous further than before, the group gets a read receipt and the
 /// other devices a read cursor at the new watermark, never past a message the
@@ -635,7 +635,7 @@ final class FeedViewModel: ObservableObject {
         return resolved.name
     }
 
-    // MARK: - Seen (ADR-0058 section 5)
+    // MARK: - Seen (ADR-0061 section 5)
 
     /// Seen ids waiting to be filed, per group.
     private var pendingSeen: [String: Set<Int64>] = [:]

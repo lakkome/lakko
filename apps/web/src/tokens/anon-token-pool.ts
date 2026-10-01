@@ -21,17 +21,29 @@
  * often the action happens ({@link refillBatch}), never above
  * {@link MAX_POOL}. An action with no token at hand waits for the refill as
  * part of its normal loading state, bounded by {@link TAKE_WAIT_MS}, then
- * fails with {@link AnonTokenUnavailableError} (the network copy). The pool is
- * cleared on logout and on an account switch.
+ * fails with {@link AnonTokenUnavailableError} (the network copy).
+ *
+ * ## The tokens belong to the account (2026-10-01)
+ *
+ * The buckets in memory are the signed-in account's. An account switch drops
+ * them from memory and loads the new account's own; Log out
+ * ({@link AnonTokenPool.unbindIfNoSession}) drops them from memory only, so
+ * the account's next sign-in on this device finds them again. Forget device
+ * and Delete account remove the account's stored rows (the `anon-tokens`
+ * step of `auth/wipe-account.ts`, and {@link AnonTokenPool.forgetAccount}
+ * for what the sign-out spends after it), never another account's. A take
+ * that started under one account and finishes after the pool moved to
+ * another fails instead of handing over a token: one account's token is
+ * never spent while another is signed in.
  *
  * ## Across launches (ADR-0054 S5)
  *
  * The buckets are written through to an {@link AnonTokenStore} (IndexedDB in
- * the app, `anon-token-store.ts`) after every take and every refill, and
- * loaded when a session is installed: tokens whose epoch is dead are dropped
- * on load, and a take waits for the load before it decides to refill. Every
- * clear wipes the store too. A token taken is removed from the store before
- * it is spent, so a reload never offers it again.
+ * the app, `anon-token-store.ts`) under the account after every take and
+ * every refill, and loaded when a session is installed: tokens whose epoch is
+ * dead are dropped on load, and a take waits for the load before it decides
+ * to refill. A token taken is removed from the store before it is spent, so
+ * a reload never offers it again.
  *
  * ## Verification of an issuance
  *
@@ -61,6 +73,7 @@
  * `anon-token-required` is a client bug and is surfaced as is.
  */
 import { loadWasm } from "../wasm";
+import { base64Decode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
 
 /** The token contexts, in wire order (`anonTokenContexts()`).
@@ -350,12 +363,14 @@ export class AnonTokenPool {
   /** The load of the stored tokens for the current account, once started. */
   private hydration: Promise<void> | null = null;
   private hydrated = false;
-  /** Store operations run in order: a write queued before a clear lands
-   *  before it, and a load after a clear sees the cleared store. */
+  /** Store operations run in order: a write queued before an account's
+   *  rows are deleted lands before the delete, and a load sees every write
+   *  queued ahead of it. */
   private storeChain: Promise<void> = Promise.resolve();
   private accountKey: string | null = null;
-  /** Bumped on every clear / account switch: a refill that started under an
-   *  older generation throws its tokens away. */
+  /** Bumped whenever the account's tokens leave memory (unbind, account
+   *  switch, forget): a refill or a take that started under an older
+   *  generation hands nothing over. */
   private generation = 0;
   /** Server epoch minus the locally computed one, from `epoch-not-issuable`. */
   private epochCorrection = 0n;
@@ -376,9 +391,11 @@ export class AnonTokenPool {
   // ------------------------------------------------------------------
 
   /**
-   * The session tokens are drawn with. A different account clears the pool;
-   * `null` stops drawing but keeps what is held, so a sign-out can still
-   * spend one token on its push unregister before it calls {@link clear}.
+   * The session tokens are drawn with. A different account's session drops
+   * the held tokens from memory (they stay stored under their account) and
+   * loads the new account's own; `null` stops drawing but keeps what is held,
+   * so a sign-out can still spend one token on its push unregister before it
+   * calls {@link unbindIfNoSession}.
    */
   setSessionToken(token: string | null): void {
     if (token === null) {
@@ -386,26 +403,48 @@ export class AnonTokenPool {
       return;
     }
     const key = accountKey(token);
-    if (this.accountKey !== null && this.accountKey !== key) this.clear();
+    if (this.accountKey !== null && this.accountKey !== key) this.dropMemory();
     const fresh = this.accountKey !== key;
     this.accountKey = key;
     this.sessionToken = token;
     if (fresh || this.hydration === null) this.startHydration(key);
   }
 
-  /** Drop every token, every refill in flight and the session, here and in
-   *  the store. */
-  clear(): void {
+  /** Drop the held tokens, every refill in flight and the session from
+   *  memory. The store keeps the account's rows (Log out), so its next
+   *  sign-in loads them again. */
+  unbind(): void {
+    this.dropMemory();
+  }
+
+  /**
+   * {@link unbind}, then delete `accountIdB64`'s stored rows (standard
+   * base64 of the account id, the form `AuthState` carries) after every
+   * write already queued (Forget device, Delete account: what the sign-out
+   * spent after the wipe is written back, and must go too). Another
+   * account's rows stay.
+   */
+  forgetAccount(accountIdB64: string): void {
+    this.dropMemory();
+    const store = this.store;
+    let account: string;
+    try {
+      account = base64UrlEncodeNoPad(base64Decode(accountIdB64));
+    } catch {
+      return;
+    }
+    if (store !== null && account.length > 0) {
+      void this.enqueueStore(() => store.deleteAccount(account), "delete");
+    }
+  }
+
+  private dropMemory(): void {
     this.generation += 1;
     this.buckets.clear();
     this.sessionToken = null;
     this.accountKey = null;
     this.hydration = null;
     this.hydrated = false;
-    const store = this.store;
-    if (store !== null) {
-      this.enqueueStore(() => store.clear(), "clear");
-    }
   }
 
   /** Resolves once every store write queued so far has landed (tests,
@@ -420,10 +459,10 @@ export class AnonTokenPool {
     if (this.hydration !== null) await this.hydration;
   }
 
-  /** {@link clear}, unless a session has been installed since the sign-out
+  /** {@link unbind}, unless a session has been installed since the sign-out
    *  (a sign-in that landed while the sign-out's push unregister ran). */
-  clearIfNoSession(): void {
-    if (this.sessionToken === null) this.clear();
+  unbindIfNoSession(): void {
+    if (this.sessionToken === null) this.unbind();
   }
 
   /** How many tokens of `context` are held right now (tests, diagnostics). */
@@ -462,8 +501,14 @@ export class AnonTokenPool {
    * or {@link AnonTokenUnavailableError}.
    */
   async take(context: AnonTokenContext): Promise<PooledToken> {
+    // The account the take is for: if the pool moves to another account (or
+    // to none) while this waits, it hands nothing over.
+    const generation = this.generation;
+    const moved = (): AnonTokenUnavailableError =>
+      new AnonTokenUnavailableError(context, "account changed");
     await this.ready();
     const wasm = await this.wasmLoader();
+    if (generation !== this.generation) throw moved();
     const bucket = this.bucket(context);
     const current = this.currentEpoch(wasm);
     bucket.tokens = bucket.tokens.filter((t) => wasm.anonTokenIsLive(t.epoch, current));
@@ -500,6 +545,7 @@ export class AnonTokenPool {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+    if (generation !== this.generation) throw moved();
     const next = bucket.tokens.shift();
     this.persist(context);
     if (next === undefined) throw new AnonTokenUnavailableError(context, "refill produced no token");
@@ -598,15 +644,14 @@ export class AnonTokenPool {
     const store = this.store;
     const account = this.accountKey;
     if (store === null || account === null) return;
-    const generation = this.generation;
+    // The snapshot is this account's, taken now, and is written under this
+    // account even if the pool has moved on by the time it lands; a delete
+    // of the account's rows queued after it still wins.
     const snapshot = (this.buckets.get(context)?.tokens ?? []).map((t) => ({
       epoch: t.epoch.toString(),
       headerValue: t.headerValue,
     }));
-    void this.enqueueStore(async () => {
-      if (generation !== this.generation) return; // cleared meanwhile
-      await store.save(account, context, snapshot);
-    }, "save");
+    void this.enqueueStore(() => store.save(account, context, snapshot), "save");
   }
 
   private bucket(context: AnonTokenContext): Bucket {
@@ -777,5 +822,5 @@ export class AnonTokenPool {
   }
 }
 
-/** The app's pool. `AuthContext` installs and clears its session. */
+/** The app's pool. `AuthContext` installs and unbinds its session. */
 export const anonTokens = new AnonTokenPool();

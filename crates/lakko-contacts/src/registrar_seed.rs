@@ -33,7 +33,9 @@
 //!
 //! `sealed` is `eph_pub(32) || ChaCha20-Poly1305(seed(32)) || tag(16)`, with
 //! AAD = every byte before it. Fixed length: [`REGISTRAR_SEED_ENVELOPE_LEN`].
-//! Rank: `1` member, `2` admin (the `lakko_ds_proof::Rank` bytes).
+//! Rank: `1` member, `2` admin (the `lakko_ds_proof::Rank` bytes), `3` a
+//! root handover (the outgoing owner's root seed after an ownership transfer;
+//! `lakko_ds_proof::statement::ROOT_RANK_BYTE`).
 //!
 //! ## What the receiver still does
 //!
@@ -41,7 +43,11 @@
 //! and the sender resolves (at receipt, C-68) to the journal's owner - the
 //! seed is meaningful only if the root that derived it is the one the DS
 //! knows; a seed from anyone else simply fails at the DS. Opening needs the
-//! account X25519 secret; a failed open is dropped, never shown.
+//! account X25519 secret; a failed open is dropped, never shown. A root
+//! handover (rank `3`) is sent by the OUTGOING owner, so its gate is the
+//! other way round: keep it only while the live role table names the
+//! receiver owner; the DS refuses a `root` statement signed by anything but
+//! the current root.
 
 use core::result::Result as CoreResult;
 
@@ -85,6 +91,14 @@ pub enum RegistrarSeedRank {
     Member,
     /// One of the owner's admins.
     Admin,
+    /// A root handover: the outgoing owner's journal ROOT seed, sealed to
+    /// the new owner after an ADR-0045 ownership transfer lands, so the new
+    /// owner can sign the `root` statement naming its own root. The byte is
+    /// `lakko_ds_proof::statement::ROOT_RANK_BYTE`. The receiver keeps it
+    /// only while the live role table names it owner; the Delivery Service
+    /// refuses a seed that is not the current root, so a forged one is
+    /// harmless.
+    Root,
 }
 
 impl RegistrarSeedRank {
@@ -92,6 +106,7 @@ impl RegistrarSeedRank {
         match self {
             Self::Member => 1,
             Self::Admin => 2,
+            Self::Root => 3,
         }
     }
 }
@@ -193,6 +208,7 @@ pub fn try_unwrap_registrar_seed(
     let rank = match payload[65] {
         1 => RegistrarSeedRank::Member,
         2 => RegistrarSeedRank::Admin,
+        3 => RegistrarSeedRank::Root,
         other => return Err(RegistrarSeedError::UnknownRank(other)),
     };
     let sealed: [u8; REGISTRAR_SEED_SEALED_LEN] =
@@ -265,7 +281,7 @@ pub enum RegistrarSeedError {
     /// The version byte is not [`REGISTRAR_SEED_VERSION_V1`].
     #[error("registrar-seed envelope carries unknown schema version {0:#04x}")]
     UnknownVersion(u8),
-    /// The rank byte is neither member nor admin.
+    /// The rank byte is neither member, admin nor root.
     #[error("registrar-seed envelope carries unknown rank {0:#04x}")]
     UnknownRank(u8),
     /// Sealing the seed failed.
@@ -313,7 +329,11 @@ mod tests {
     #[test]
     fn compose_decode_open_round_trips_at_a_fixed_length() {
         let (secret, _) = member_keys();
-        for rank in [RegistrarSeedRank::Member, RegistrarSeedRank::Admin] {
+        for rank in [
+            RegistrarSeedRank::Member,
+            RegistrarSeedRank::Admin,
+            RegistrarSeedRank::Root,
+        ] {
             let bytes = wire(rank);
             assert_eq!(bytes.len(), REGISTRAR_SEED_ENVELOPE_LEN);
             let env = decode_registrar_seed(&bytes).unwrap();
@@ -399,7 +419,7 @@ mod tests {
             try_unwrap_registrar_seed(&long),
             Err(RegistrarSeedError::BadLength { .. })
         ));
-        for bad in [0x00, 0x03, 0xFF] {
+        for bad in [0x00, 0x04, 0xFF] {
             let mut r = good.clone();
             r[REGISTRAR_SEED_ENVELOPE_DOMAIN_V1.len() + 65] = bad;
             assert_eq!(

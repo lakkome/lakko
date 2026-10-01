@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The one ranking every client draws (ADR-0058 section 1).
+//! The one ranking every client draws (ADR-0061 section 1).
 //!
 //! The client hands over its conversations and one candidate per message in
 //! the window; [`rank`] returns which candidates to show, in which order,
@@ -29,7 +29,7 @@
 //! * from a contact, mentions or replies to the person, has media: all or
 //!   nothing.
 //!
-//! These shapes are chosen, not measured (ADR-0058). They are constants
+//! These shapes are chosen, not measured (ADR-0061). They are constants
 //! here so a change to them is one reviewed diff.
 //!
 //! The order is total: score descending, then time descending, then

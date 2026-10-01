@@ -23,8 +23,23 @@
 //!
 //!   2. [`OprfBlinder::finalize`] — consume the server's
 //!      `EvaluationElement`, run `OprfClient::finalize`, and
-//!      return the 64-byte OPRF output that goes into
-//!      `/discovery/{register, lookup}` as `oprf_hash`.
+//!      return an [`OprfFinalized`]: the 64-byte OPRF output, which
+//!      stays on the client, and the 64-byte lookup key derived from
+//!      it ([`discovery_lookup_key`]), which is the only value that
+//!      goes to `/discovery/{register, lookup}` as `oprf_hash`.
+//!
+//! ## Why the server never sees the OPRF output
+//!
+//! A public record ([ADR-0060] section 5) is sealed under keys derived
+//! from the OPRF output of each of its search terms. If the server stored
+//! the output itself, anyone reading its tables (a stolen backup, a
+//! compromised database) could open every public record and read every
+//! name in it. The server stores the one-way lookup key instead, so a
+//! table leak yields nothing that opens a record. What this does not
+//! protect against is the operator: it holds the OPRF key and can
+//! evaluate any guessed name itself.
+//!
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 //!
 //! [`OprfBlinder`] holds the normalised username internally so
 //! callers cannot accidentally hand a different string to
@@ -33,10 +48,12 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+use lakko_crypto::hash::{blake3_derive_key, blake3_keyed_xof};
 use rand::rngs::OsRng;
 use voprf::{EvaluationElement, OprfClient};
 
 use crate::error::DiscoveryClientError;
+use crate::name::{is_name_term, name_query_term};
 use crate::normalize::{normalize_username, validate_username};
 use crate::LakkoOprfCs;
 
@@ -44,6 +61,63 @@ use crate::LakkoOprfCs;
 /// SHA-512 digest). Pinned here as a `const` so callers (and the
 /// server side, which uses the same constant) stay in lock-step.
 pub const OPRF_HASH_LEN: usize = 64;
+
+/// Domain of the key the lookup key is derived under ([ADR-0060] section 5).
+///
+/// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+pub const DISCOVERY_LOOKUP_DOMAIN: &str = "lakko/discovery/lookup/v1";
+
+/// The value discovery stores and looks up for an OPRF output:
+/// `BLAKE3-keyed-XOF(BLAKE3-derive-key(DISCOVERY_LOOKUP_DOMAIN), output)`,
+/// 64 bytes so the server's columns and the username certificate keep their
+/// width. One-way: nothing that opens a record keyed by `output` can be
+/// computed from it.
+#[must_use]
+pub fn discovery_lookup_key(output: &[u8; OPRF_HASH_LEN]) -> [u8; OPRF_HASH_LEN] {
+    let key = blake3_derive_key(DISCOVERY_LOOKUP_DOMAIN);
+    let derived = blake3_keyed_xof(&key, output, OPRF_HASH_LEN);
+    let mut out = [0u8; OPRF_HASH_LEN];
+    out.copy_from_slice(&derived);
+    out
+}
+
+/// What one OPRF round yields: the output, which stays on the client
+/// (records are sealed under keys derived from it), and the lookup key the
+/// server stores. The two are separate types of value on purpose, so a call
+/// site has to name which one it sends.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OprfFinalized {
+    output: [u8; OPRF_HASH_LEN],
+    lookup_key: [u8; OPRF_HASH_LEN],
+}
+
+impl OprfFinalized {
+    /// Build from an OPRF output, deriving its lookup key.
+    #[must_use]
+    pub fn from_output(output: [u8; OPRF_HASH_LEN]) -> Self {
+        let lookup_key = discovery_lookup_key(&output);
+        Self { output, lookup_key }
+    }
+
+    /// The OPRF output. Never send it to the server: it is the key
+    /// material records are sealed under.
+    #[must_use]
+    pub const fn output(&self) -> &[u8; OPRF_HASH_LEN] {
+        &self.output
+    }
+
+    /// The lookup key, the `oprf_hash` of every discovery request.
+    #[must_use]
+    pub const fn lookup_key(&self) -> &[u8; OPRF_HASH_LEN] {
+        &self.lookup_key
+    }
+}
+
+impl core::fmt::Debug for OprfFinalized {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OprfFinalized").finish_non_exhaustive()
+    }
+}
 
 /// Domain-separation prefix for the `@channel` OPRF namespace
 /// (lakko-security channels review, Finding 2).
@@ -65,6 +139,19 @@ pub const OPRF_HASH_LEN: usize = 64;
 /// reproduce. The trailing `0x1F` (ASCII unit separator) delimits the
 /// domain label from the handle.
 const CHANNEL_OPRF_DOMAIN: &[u8] = b"\xfflakko/discovery/channel/v1\x1f";
+
+/// Domain-separation prefix for the display-name OPRF namespace
+/// ([ADR-0060] section 5), the same shape as [`CHANNEL_OPRF_DOMAIN`].
+///
+/// A name is blinded as `NAME_OPRF_DOMAIN ‖ normalize_name_for_search(name)`,
+/// so the same string used as a username, a channel handle and a name gives
+/// three unrelated OPRF outputs under the one server key. The leading `0xFF`
+/// keeps it unforgeable by any username (whose input is valid UTF-8), and the
+/// label differs from the channel domain's, so no channel handle can reproduce
+/// a name input either.
+///
+/// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+const NAME_OPRF_DOMAIN: &[u8] = b"\xfflakko/discovery/name/v1\x1f";
 
 /// In-flight OPRF blinding state. Single-use: `finalize` consumes
 /// the value to enforce one blind / one finalize per query.
@@ -159,6 +246,48 @@ impl OprfBlinder {
         Self::blind_input(normalised, oprf_input)
     }
 
+    /// Blind one name term ([ADR-0060] section 5) in the DOMAIN-SEPARATED
+    /// name namespace: the OPRF input is `NAME_OPRF_DOMAIN ‖ term`.
+    ///
+    /// A publisher blinds each of [`crate::name_search_terms`]; a searcher
+    /// blinds [`crate::name_query_term`] (or calls [`Self::blind_name`]). Both
+    /// derive the term from the same module, so a query term and the
+    /// published term it equals give one OPRF input. Finalise with
+    /// [`Self::finalize`]; [`Self::normalised_username`] returns the term.
+    ///
+    /// # Errors
+    ///
+    /// [`DiscoveryClientError::InvalidName`] when `term` is not a term
+    /// ([`crate::is_name_term`]: 1 to 16 characters, no whitespace, already
+    /// normalised), or [`DiscoveryClientError::Voprf`] on a `voprf` blind
+    /// failure.
+    ///
+    /// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+    pub fn blind_name_term(term: &str) -> Result<(Self, String), DiscoveryClientError> {
+        if !is_name_term(term) {
+            return Err(DiscoveryClientError::InvalidName);
+        }
+        let mut oprf_input = Vec::with_capacity(NAME_OPRF_DOMAIN.len() + term.len());
+        oprf_input.extend_from_slice(NAME_OPRF_DOMAIN);
+        oprf_input.extend_from_slice(term.as_bytes());
+        Self::blind_input(term.to_owned(), oprf_input)
+    }
+
+    /// Blind the one term a name query looks up: [`crate::name_query_term`]
+    /// of `query`, through [`Self::blind_name_term`]. The candidates the
+    /// lookup returns are then filtered locally with
+    /// [`crate::name_matches_query`].
+    ///
+    /// # Errors
+    ///
+    /// [`DiscoveryClientError::InvalidName`] when the query is not
+    /// searchable (over 1024 bytes, or under 2 characters normalised), or
+    /// [`DiscoveryClientError::Voprf`] on a `voprf` blind failure.
+    pub fn blind_name(query: &str) -> Result<(Self, String), DiscoveryClientError> {
+        let term = name_query_term(query).ok_or(DiscoveryClientError::InvalidName)?;
+        Self::blind_name_term(&term)
+    }
+
     /// Shared blind step: blind the already-constructed OPRF input
     /// bytes and build the blinder. `display` is the human-normalised
     /// handle (valid UTF-8) surfaced by [`Self::normalised_username`];
@@ -211,10 +340,7 @@ impl OprfBlinder {
     ///   element that doesn't satisfy the OPRF math; in
     ///   non-verifiable OPRF mode the only reachable case is
     ///   wire corruption between encode and decode).
-    pub fn finalize(
-        self,
-        evaluated_b64: &str,
-    ) -> Result<[u8; OPRF_HASH_LEN], DiscoveryClientError> {
+    pub fn finalize(self, evaluated_b64: &str) -> Result<OprfFinalized, DiscoveryClientError> {
         let evaluated_bytes = B64
             .decode(evaluated_b64)
             .map_err(DiscoveryClientError::base64)?;
@@ -233,7 +359,7 @@ impl OprfBlinder {
         debug_assert_eq!(slice.len(), OPRF_HASH_LEN);
         let mut out = [0u8; OPRF_HASH_LEN];
         out.copy_from_slice(slice);
-        Ok(out)
+        Ok(OprfFinalized::from_output(out))
     }
 }
 
@@ -265,8 +391,13 @@ mod tests {
         let evaluated_b64 = B64.encode(evaluated.serialize());
 
         // Client: finalize.
-        let hash = blinder.finalize(&evaluated_b64).expect("finalize");
-        assert_eq!(hash.len(), OPRF_HASH_LEN);
+        let done = blinder.finalize(&evaluated_b64).expect("finalize");
+        // The output is exactly what the server's own evaluation of the
+        // same input gives, and the lookup key is its derivation.
+        let direct = server.evaluate(b"alice").expect("evaluate");
+        assert_eq!(done.output().as_slice(), direct.as_slice());
+        assert_eq!(done.lookup_key(), &discovery_lookup_key(done.output()));
+        assert_ne!(done.lookup_key(), done.output());
     }
 
     /// Determinism: two clients looking up the SAME normalised
@@ -418,7 +549,7 @@ mod tests {
             BlindedElement::<LakkoOprfCs>::deserialize(&blinded_bytes).expect("deserialize");
         let evaluated = server.blind_evaluate(&blinded_elem);
         let evaluated_b64 = B64.encode(evaluated.serialize());
-        blinder.finalize(&evaluated_b64).expect("finalize")
+        *blinder.finalize(&evaluated_b64).expect("finalize").output()
     }
 
     /// Helper: full client + server round-trip in the
@@ -430,7 +561,7 @@ mod tests {
             BlindedElement::<LakkoOprfCs>::deserialize(&blinded_bytes).expect("deserialize");
         let evaluated = server.blind_evaluate(&blinded_elem);
         let evaluated_b64 = B64.encode(evaluated.serialize());
-        blinder.finalize(&evaluated_b64).expect("finalize")
+        *blinder.finalize(&evaluated_b64).expect("finalize").output()
     }
 
     /// Finding 2 (lakko-security channels review): the `@channel`
@@ -498,6 +629,123 @@ mod tests {
         assert_ne!(crafted_channel, real_user);
     }
 
+    fn oneshot_name(server: &OprfServer<LakkoOprfCs>, name: &str) -> [u8; OPRF_HASH_LEN] {
+        let (blinder, blinded_b64) = OprfBlinder::blind_name(name).expect("blind_name");
+        let blinded_bytes = B64.decode(&blinded_b64).expect("decode");
+        let blinded_elem =
+            BlindedElement::<LakkoOprfCs>::deserialize(&blinded_bytes).expect("deserialize");
+        let evaluated = server.blind_evaluate(&blinded_elem);
+        let evaluated_b64 = B64.encode(evaluated.serialize());
+        *blinder.finalize(&evaluated_b64).expect("finalize").output()
+    }
+
+    /// ADR-0060 section 5: the same string as a username, a channel handle
+    /// and a name gives three different OPRF inputs and three different
+    /// hashes under one server key.
+    #[test]
+    fn name_namespace_is_separated_from_usernames_and_channels() {
+        assert_eq!(NAME_OPRF_DOMAIN.first().copied(), Some(0xFF));
+        assert_ne!(NAME_OPRF_DOMAIN, CHANNEL_OPRF_DOMAIN);
+        let (user, _) = OprfBlinder::blind("alice").expect("blind");
+        let (channel, _) = OprfBlinder::blind_channel("alice").expect("blind_channel");
+        let (name, _) = OprfBlinder::blind_name("alice").expect("blind_name");
+        assert_eq!(user.oprf_input, b"alice");
+        assert!(channel.oprf_input.starts_with(CHANNEL_OPRF_DOMAIN));
+        assert!(name.oprf_input.starts_with(NAME_OPRF_DOMAIN));
+        assert_ne!(user.oprf_input, name.oprf_input);
+        assert_ne!(channel.oprf_input, name.oprf_input);
+
+        let server = OprfServer::<LakkoOprfCs>::new_from_seed(&[0x5Bu8; 32], b"lakko/oprf/v1")
+            .expect("server seed");
+        let as_user = oneshot(&server, "alice");
+        let as_channel = oneshot_channel(&server, "alice");
+        let as_name = oneshot_name(&server, "alice");
+        assert_ne!(as_name, as_user);
+        assert_ne!(as_name, as_channel);
+    }
+
+    /// Equivalent spellings of a query resolve to one hash; a query whose
+    /// longest word differs does not.
+    #[test]
+    fn equivalent_queries_yield_one_hash() {
+        let server = OprfServer::<LakkoOprfCs>::new_from_seed(&[0x5Cu8; 32], b"lakko/oprf/v1")
+            .expect("server seed");
+        let a = oneshot_name(&server, "Anna Weber");
+        assert_eq!(a, oneshot_name(&server, " anna  WEBER "));
+        assert_eq!(a, oneshot_name(&server, "Anna  W\u{e9}ber"));
+        assert_ne!(a, oneshot_name(&server, "anna"));
+        let (blinder, _) = OprfBlinder::blind_name("Anna  W\u{e9}ber").expect("blind_name");
+        assert_eq!(blinder.normalised_username(), "weber");
+    }
+
+    /// The publish / query invariant: for every term `t` a name publishes, a
+    /// query whose query term is `t` produces the same OPRF input, and so the
+    /// same hash under one server key.
+    #[test]
+    fn a_query_and_the_published_term_it_names_agree() {
+        let server = OprfServer::<LakkoOprfCs>::new_from_seed(&[0x5Du8; 32], b"lakko/oprf/v1")
+            .expect("server seed");
+        for name in [
+            "Anna W\u{e9}ber",
+            "\u{41b}\u{438} \u{412}\u{44d}\u{439}",
+            "J Abcdefghijklmnopqrstuvwxyzabcd",
+        ] {
+            let terms = crate::name_search_terms(name);
+            assert!(!terms.is_empty());
+            for t in &terms {
+                // `t` itself as a typed query, and the same term typed in
+                // capitals with an accent-free spelling, both name `t`.
+                for query in [t.clone(), t.to_uppercase()] {
+                    if name_query_term(&query).as_deref() != Some(t.as_str()) {
+                        continue;
+                    }
+                    let (published, _) = OprfBlinder::blind_name_term(t).expect("publish");
+                    let (queried, _) = OprfBlinder::blind_name(&query).expect("query");
+                    assert_eq!(published.oprf_input, queried.oprf_input, "{t:?}");
+                }
+                if t.chars().count() >= 2 {
+                    let hash = |term: &str| {
+                        let (b, blinded_b64) = OprfBlinder::blind_name_term(term).expect("term");
+                        let blinded = BlindedElement::<LakkoOprfCs>::deserialize(
+                            &B64.decode(&blinded_b64).expect("decode"),
+                        )
+                        .expect("deserialize");
+                        let evaluated = B64.encode(server.blind_evaluate(&blinded).serialize());
+                        *b.finalize(&evaluated).expect("finalize").output()
+                    };
+                    assert_eq!(hash(t), oneshot_name(&server, t), "{t:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blind_name_term_refuses_non_terms() {
+        for bad in ["", "anna weber", "Anna", "w\u{e9}ber", &"a".repeat(17)] {
+            assert!(
+                matches!(
+                    OprfBlinder::blind_name_term(bad),
+                    Err(DiscoveryClientError::InvalidName)
+                ),
+                "{bad:?}"
+            );
+        }
+        assert!(OprfBlinder::blind_name_term("j").is_ok());
+    }
+
+    #[test]
+    fn blind_name_refuses_unsearchable_queries() {
+        for bad in ["", "a", "  a ", &"a".repeat(1025)] {
+            assert!(
+                matches!(
+                    OprfBlinder::blind_name(bad),
+                    Err(DiscoveryClientError::InvalidName)
+                ),
+                "{bad:?}"
+            );
+        }
+    }
+
     #[test]
     fn blind_channel_rejects_empty_handle() {
         assert!(matches!(
@@ -517,4 +765,46 @@ mod tests {
         // `0xFF` domain prefix lives only in the OPRF input.
         assert_eq!(blinder.normalised_username(), "alice");
     }
+
+    /// The lookup key is pinned: the server and every client store and ask
+    /// for this exact derivation, so a change here makes every registered
+    /// name unfindable.
+    #[test]
+    fn golden_pins_the_lookup_key() {
+        let got = discovery_lookup_key(&[0x42; OPRF_HASH_LEN]);
+        assert_eq!(hex(&got), GOLDEN_LOOKUP_KEY);
+    }
+
+    /// The lookup key is not the output and not the introduction tag, so a
+    /// row the server holds is not a tag it could match against a record.
+    #[test]
+    fn lookup_key_is_apart_from_the_output_and_the_record_tag() {
+        let output = [0x17; OPRF_HASH_LEN];
+        let key = discovery_lookup_key(&output);
+        assert_ne!(key, output);
+        let tag = lakko_contacts::introduction::fof_tag(&output);
+        assert_ne!(&key[..tag.len()], tag.as_slice());
+        assert_ne!(discovery_lookup_key(&[0x18; OPRF_HASH_LEN]), key);
+    }
+
+    /// `Debug` shows neither value.
+    #[test]
+    fn debug_hides_both_values() {
+        let done = OprfFinalized::from_output([0xAB; OPRF_HASH_LEN]);
+        let text = format!("{done:?}");
+        assert!(
+            !text.contains("171") && !text.to_lowercase().contains("ab, "),
+            "{text}"
+        );
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        use core::fmt::Write as _;
+        bytes.iter().fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+    }
+
+    const GOLDEN_LOOKUP_KEY: &str = "8094566dab9909c8581a005c199c2bc168317bd4dda58dc05b8066973328480810f09b4cbfe1b17ef48202d670dbb654106303bc414fcdf2a8d5e74a998ea030";
 }

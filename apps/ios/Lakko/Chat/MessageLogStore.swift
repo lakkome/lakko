@@ -308,11 +308,11 @@ public func withoutGroup(
 public struct PersistedGroup: Codable, Equatable {
     public let cursor: Int64
     public let messages: [PersistedMessage]
-    /// ADR-0058 section 5 — the watermark this device last read the group up
+    /// ADR-0061 section 5 — the watermark this device last read the group up
     /// to (every message at or below it is seen). Absent on a row written
     /// before the feed existed, which reads as "no watermark".
     public let lastViewedMessageId: Int64?
-    /// ADR-0058 section 5 — ids above ``lastViewedMessageId`` the feed kept
+    /// ADR-0061 section 5 — ids above ``lastViewedMessageId`` the feed kept
     /// on screen long enough to count as seen. Folded into the watermark as
     /// soon as they are contiguous with it. Absent when empty.
     public let feedSeen: [Int64]?

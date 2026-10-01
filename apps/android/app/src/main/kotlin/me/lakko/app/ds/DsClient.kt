@@ -136,19 +136,28 @@ public class DsClient(
     // -----------------------------------------------------------------
 
     /**
-     * `POST /ds/mailbox/{pseudonym_hex}/messages` — publish a
-     * raw payload to a mailbox. Body is sent as
-     * `application/octet-stream`; the server caps the size.
+     * `POST /ds/mailbox/{pseudonym_hex}/messages` — write into a person's
+     * identity mailbox.
      *
-     * ADR-0053: never signed. Writing into a mailbox stays open (the cold
-     * inbox), and a rendezvous mailbox is unclaimed by design.
+     * ADR-0060 §2 — a claimed mailbox is CLOSED unless its owner chose
+     * Everyone: it stores a write only when [reach] signs it with a reach key
+     * the owner registered (or with a delegate key next to a delegation). A
+     * write with no [reach] to a closed mailbox is answered as stored and
+     * dropped, so an unsigned write is only right for a person who opened
+     * their mailbox. A reach proof the server does not accept is a
+     * [DsReachRefusedError].
+     *
+     * Rendezvous traffic (pairing, recovery, the welcome courier, the state
+     * bundle) does NOT come here: it goes to [publishRendezvous].
      *
      * @param pseudonym 32-byte recipient pseudonym.
      * @param payload   non-empty bytes to deliver.
+     * @param reach     the grant (or delegation) authorising the write.
      */
     public suspend fun publishMailbox(
         pseudonym: ByteArray,
         payload: ByteArray,
+        reach: DsReachAuth? = null,
     ): PublishResult {
         if (pseudonym.size != PSEUDONYM_LEN) {
             throw DsClientArgError("pseudonym must be $PSEUDONYM_LEN bytes")
@@ -156,8 +165,50 @@ public class DsClient(
         if (payload.isEmpty()) {
             throw DsClientArgError("payload must be non-empty")
         }
+        val endpoint = "/ds/mailbox/${pseudonymHex(pseudonym)}/messages"
+        if (reach == null) {
+            return doPublish(endpoint = endpoint, payload = payload, journal = null)
+        }
+        val response = send(
+            method = HttpMethod.Post,
+            endpoint = endpoint,
+            query = "",
+            body = payload,
+            contentType = ContentType.Application.OctetStream,
+            waitSecs = null,
+            signer = reach.signer,
+            extraHeaders = reach.delegationHeader
+                ?.let { mapOf(DS_DELEGATION_HEADER to it) }
+                .orEmpty(),
+        )
+        if (response.status.value == HTTP_UNAUTHORIZED) {
+            throw DsReachRefusedError(endpoint, response.safeReadBody())
+        }
+        if (!response.status.isSuccess()) {
+            throw DsHttpError(response.status.value, endpoint, response.safeReadBody())
+        }
+        val parsed: PublishWireResponse = response.body()
+        return PublishResult(id = parsed.id, createdAt = parsed.created_at)
+    }
+
+    /**
+     * ADR-0060 §2 — `POST /ds/rendezvous/{hex}/messages`: a write into a
+     * random rendezvous id (pairing, recovery, the welcome courier, the state
+     * bundle). Open and never claimable; it carries no proof, no delegation
+     * and no wake header (the server refuses any of them).
+     */
+    public suspend fun publishRendezvous(
+        rendezvous: ByteArray,
+        payload: ByteArray,
+    ): PublishResult {
+        if (rendezvous.size != PSEUDONYM_LEN) {
+            throw DsClientArgError("rendezvous id must be $PSEUDONYM_LEN bytes")
+        }
+        if (payload.isEmpty()) {
+            throw DsClientArgError("payload must be non-empty")
+        }
         return doPublish(
-            endpoint = "/ds/mailbox/${pseudonymHex(pseudonym)}/messages",
+            endpoint = "/ds/rendezvous/${pseudonymHex(rendezvous)}/messages",
             payload = payload,
             journal = null,
         )
@@ -240,9 +291,11 @@ public class DsClient(
      * connection up to that many seconds — typical 30-60 for an
      * active poll loop. The server clamps to its own `MAX_WAIT_SECS`.
      *
-     * ADR-0053: a claimed mailbox is read only under its identity key —
-     * [signer], else the registry's signer for this mailbox. A rendezvous
-     * mailbox is never in the registry and is read unsigned.
+     * ADR-0053 / ADR-0060 §2: a personal mailbox is read only under its
+     * identity key — [signer], else the registry's signer for this mailbox. An
+     * unsigned read is `401` whether the mailbox is claimed or not; a refusal
+     * claims the mailbox under the signer and retries once. Rendezvous ids are
+     * read with [fetchRendezvous].
      */
     public suspend fun fetchMailbox(
         pseudonym: ByteArray,
@@ -260,6 +313,28 @@ public class DsClient(
             limit = limit,
             waitSecs = waitSecs,
             journal = Journal.mailbox(pseudonym, signer),
+        )
+    }
+
+    /**
+     * ADR-0060 §2 — `GET /ds/rendezvous/{hex}/messages?after=&limit=&wait=`:
+     * read a rendezvous id, unsigned.
+     */
+    public suspend fun fetchRendezvous(
+        rendezvous: ByteArray,
+        after: Long? = null,
+        limit: Int? = null,
+        waitSecs: Int? = null,
+    ): FetchResult {
+        if (rendezvous.size != PSEUDONYM_LEN) {
+            throw DsClientArgError("rendezvous id must be $PSEUDONYM_LEN bytes")
+        }
+        return doFetch(
+            endpoint = "/ds/rendezvous/${pseudonymHex(rendezvous)}/messages",
+            after = after,
+            limit = limit,
+            waitSecs = waitSecs,
+            journal = null,
         )
     }
 
@@ -348,69 +423,47 @@ public class DsClient(
                 )
             },
             hasMore = parsed.has_more,
+            latestEpoch = parsed.latest_epoch?.takeIf { it >= 0 }?.toULong(),
         )
     }
 
     // -----------------------------------------------------------------
-    // ADR-0053: claims and registrations
+    // ADR-0057: journal statements (claim, reset, register, registrars,
+    // push binding)
     // -----------------------------------------------------------------
 
     /**
-     * `PUT /ds/group/{hex}/access` registering [signer]'s key at its epoch,
-     * proven by [provenBy] when given (unsigned otherwise: the first claim of
-     * an unclaimed journal, or a re-send of an already-registered key, needs
-     * no proof). Throws [DsHttpError] on a refusal.
+     * `PUT <statement.path>` with the statement's JSON body and NO proof
+     * header — the statement carries its own root or registrar signature.
+     * [make] signs a fresh statement per attempt (a statement's nonce is spent
+     * on the first try, so a retry must never re-send the same bytes).
+     *
+     * `409` is retried once: it is either a conflict the retry answers the
+     * same way, or a lock race the retry wins. Any other non-2xx throws a
+     * [DsHttpError] carrying the status (`400` malformed, `401` a stranger
+     * signer or an unclaimed journal on a non-claim route, `403` a rank
+     * shortfall, `503` push binding disabled).
      */
-    public suspend fun claimGroup(
-        groupId: ByteArray,
-        signer: DsJournalSigner,
-        provenBy: DsJournalSigner? = null,
-    ) {
-        val endpoint = "/ds/group/${pseudonymHex(groupId)}/access"
-        val body = signer.groupClaimBody().toByteArray(Charsets.UTF_8)
-        val response = send(
-            method = HttpMethod.Put,
-            endpoint = endpoint,
-            query = "",
-            body = body,
-            contentType = ContentType.Application.Json,
-            waitSecs = null,
-            signer = provenBy,
-        )
-        if (!response.status.isSuccess()) {
-            throw proofOrHttpError(response, endpoint)
+    public suspend fun putStatement(make: () -> DsStatement) {
+        var attempt = 0
+        while (true) {
+            attempt += 1
+            val statement = make()
+            val body = statement.bodyJson.toByteArray(Charsets.UTF_8)
+            val response = send(
+                method = HttpMethod.Put,
+                endpoint = statement.path,
+                query = "",
+                body = body,
+                contentType = ContentType.Application.Json,
+                waitSecs = null,
+                signer = null,
+            )
+            if (response.status.isSuccess()) return
+            val status = response.status.value
+            if (status == HTTP_CONFLICT && attempt < STATEMENT_ATTEMPTS) continue
+            throw DsHttpError(status, statement.path, response.safeReadBody())
         }
-    }
-
-    /**
-     * Register the key of the epoch a commit moves to ([next]) proven under
-     * the epoch it leaves ([current]) — ADR-0053 client contract point 3,
-     * run BEFORE the commit is persisted or published. On a refusal, retry
-     * once after re-claiming [current] (proven by the registry's previous
-     * signer for this journal, when held): the one case that repairs is a
-     * journal whose registration of [current] never landed. Throws on a
-     * second refusal; the caller aborts the commit.
-     */
-    public suspend fun registerNextEpoch(
-        groupId: ByteArray,
-        next: DsJournalSigner,
-        current: DsJournalSigner,
-    ) {
-        try {
-            claimGroup(groupId, next, provenBy = current)
-            return
-        } catch (e: DsHttpError) {
-            if (e.status != HTTP_UNAUTHORIZED && e.status != HTTP_CONFLICT) throw e
-        }
-        val previous = signers.previous(dsGroupKey(groupId))?.takeIf { it.epoch < current.epoch }
-        try {
-            claimGroup(groupId, current, provenBy = previous)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Throwable) {
-            // The retry below says whether it helped.
-        }
-        claimGroup(groupId, next, provenBy = current)
     }
 
     /**
@@ -433,6 +486,91 @@ public class DsClient(
         )
         if (!response.status.isSuccess()) {
             throw proofOrHttpError(response, endpoint)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0060 §2: reach keys
+    // -----------------------------------------------------------------
+
+    /**
+     * `PUT /ds/mailbox/{hex}/reach` — register [add] and unregister [remove]
+     * reach public keys on the owner's own mailbox, and set the Everyone flag
+     * when [open] is given, in one transaction. Signed by the identity key the
+     * mailbox is named after ([signer], the mailbox signer). Idempotent: a
+     * re-added key has its expiry replaced, a removed absent key is ignored.
+     * On a `401` the mailbox is claimed (it may never have been) and the
+     * update is sent once more.
+     */
+    public suspend fun putMailboxReach(
+        pseudonym: ByteArray,
+        signer: DsJournalSigner,
+        add: List<DsReachKeyAdd>,
+        remove: List<ByteArray>,
+        open: Boolean? = null,
+    ) {
+        if (pseudonym.size != PSEUDONYM_LEN) {
+            throw DsClientArgError("pseudonym must be $PSEUDONYM_LEN bytes")
+        }
+        val endpoint = "/ds/mailbox/${pseudonymHex(pseudonym)}/reach"
+        val body = json.encodeToString(
+            ReachWireRequest.serializer(),
+            ReachWireRequest(
+                add = add.map { ReachWireAdd(reach_pk_b64 = base64Encode(it.publicKey), expires_at_ms = it.expiresAtMs) },
+                remove = remove.map(::base64Encode),
+                open = open,
+            ),
+        ).toByteArray(Charsets.UTF_8)
+        suspend fun attempt(): HttpResponse = send(
+            method = HttpMethod.Put,
+            endpoint = endpoint,
+            query = "",
+            body = body,
+            contentType = ContentType.Application.Json,
+            waitSecs = null,
+            signer = signer,
+        )
+        var response = attempt()
+        if (response.status.value == HTTP_UNAUTHORIZED) {
+            try {
+                claimMailbox(pseudonym, signer)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                // The retry below reports the outcome.
+            }
+            response = attempt()
+        }
+        if (!response.status.isSuccess()) {
+            throw proofOrHttpError(response, endpoint)
+        }
+    }
+
+    /**
+     * `POST /ds/mailbox/{hex}/reach/check` — whether the reach key [reach]
+     * signs with is registered and unexpired on [pseudonym]'s mailbox:
+     * `true` on `204`, `false` on `401`. A searcher asks before showing a
+     * result (ADR-0060 §2), so a narrowed setting takes effect at once.
+     * Throws on anything else (a network failure is never "not found").
+     */
+    public suspend fun checkReach(pseudonym: ByteArray, reach: DsJournalSigner): Boolean {
+        if (pseudonym.size != PSEUDONYM_LEN) {
+            throw DsClientArgError("pseudonym must be $PSEUDONYM_LEN bytes")
+        }
+        val endpoint = "/ds/mailbox/${pseudonymHex(pseudonym)}/reach/check"
+        val response = send(
+            method = HttpMethod.Post,
+            endpoint = endpoint,
+            query = "",
+            body = ByteArray(0),
+            contentType = ContentType.Application.OctetStream,
+            waitSecs = null,
+            signer = reach,
+        )
+        return when {
+            response.status.isSuccess() -> true
+            response.status.value == HTTP_UNAUTHORIZED -> false
+            else -> throw DsHttpError(response.status.value, endpoint, response.safeReadBody())
         }
     }
 
@@ -505,8 +643,9 @@ public class DsClient(
     /**
      * ADR-0053 client contract points 1 and 5: sign with the journal's
      * current signer; on a `401`, once more with the previous epoch's signer
-     * (a read that raced a lagging registration), then once after a
-     * claim-on-open; a third refusal surfaces as [DsProofRefusedError],
+     * (a read that raced a lagging registration), then — for a journal this
+     * account OWNS (ADR-0057) or a mailbox — once after a claim; a third
+     * refusal surfaces as [DsProofRefusedError],
      * blaming the clock when the response `Date` says so. A request to a
      * journal no signer is known for goes out unsigned, and its `401` is
      * surfaced at once.
@@ -535,12 +674,18 @@ public class DsClient(
             if (response.status.value != HTTP_UNAUTHORIZED) return response
         }
         if (journal.reclaim) {
+            // ADR-0057 — a group journal is re-claimed only by its OWNER (the
+            // source installs the hook for an owned journal only), with the
+            // root; a plain member waits for the committer's registration and
+            // retries on its next poll. A mailbox keeps the ADR-0053 re-claim.
             val reclaimed = try {
                 when (journal.kind) {
-                    Journal.Kind.GROUP -> claimGroup(journal.pseudonym, first, provenBy = previous)
-                    Journal.Kind.MAILBOX -> claimMailbox(journal.pseudonym, first)
+                    Journal.Kind.GROUP -> signers.ownerClaim(journal.key)?.invoke() ?: false
+                    Journal.Kind.MAILBOX -> {
+                        claimMailbox(journal.pseudonym, first)
+                        true
+                    }
                 }
-                true
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Throwable) {
@@ -552,7 +697,16 @@ public class DsClient(
                 if (response.status.value != HTTP_UNAUTHORIZED) return response
             }
         }
-        throw refusedError(response, endpoint)
+        val refused = refusedError(response, endpoint)
+        // ADR-0057 second security pass, finding 1 — refused at this device's
+        // own epoch after everything else was tried: an owner or admin
+        // schedules the repair check (a member's note is dropped there). A
+        // wrong device clock is not a journal defect and notes nothing.
+        if (journal.kind == Journal.Kind.GROUP && !refused.clockSkewed) {
+            val epoch = (signers.current(journal.key) ?: first).epoch
+            signers.refusedAtHead(journal.key, epoch)
+        }
+        throw refused
     }
 
     private suspend fun refusedError(response: HttpResponse, endpoint: String): DsProofRefusedError =
@@ -584,6 +738,7 @@ public class DsClient(
         waitSecs: Int?,
         signer: DsJournalSigner?,
         wakeHeader: String? = null,
+        extraHeaders: Map<String, String> = emptyMap(),
     ): HttpResponse {
         val url = if (query.isEmpty()) "$baseUrl$endpoint" else "$baseUrl$endpoint?$query"
         val proof = signer?.let {
@@ -602,6 +757,7 @@ public class DsClient(
                 this.method = method
                 if (proof != null) header(DS_PROOF_HEADER, proof)
                 if (wakeHeader != null) header(DS_WAKE_HEADER, wakeHeader)
+                for ((name, value) in extraHeaders) header(name, value)
                 if (method != HttpMethod.Get) {
                     if (contentType != null) contentType(contentType)
                     setBody(body)
@@ -704,6 +860,10 @@ public class DsClient(
 
         private const val HTTP_CONFLICT: Int = 409
 
+        /** ADR-0057 — a statement is tried at most twice: once, and once
+         *  more after a `409` (a lock race the retry wins). */
+        private const val STATEMENT_ATTEMPTS: Int = 2
+
         /**
          * ADR-0053 — the query string of a fetch, built ONCE and used both in
          * the URL and in the proof: `after`, `limit`, `wait`, in that order,
@@ -751,6 +911,7 @@ private data class PublishWireResponse(
 private data class FetchWireResponse(
     val messages: List<FetchWireMessage>,
     val has_more: Boolean,
+    val latest_epoch: Long? = null,
 )
 
 @Serializable
@@ -765,6 +926,20 @@ private data class FetchWireMessage(
 @Suppress("ConstructorParameterNaming")
 private data class KnockWireRequest(
     val payloads_b64: List<String>,
+)
+
+@Serializable
+@Suppress("ConstructorParameterNaming")
+private data class ReachWireAdd(
+    val reach_pk_b64: String,
+    val expires_at_ms: Long? = null,
+)
+
+@Serializable
+private data class ReachWireRequest(
+    val add: List<ReachWireAdd>,
+    val remove: List<String>,
+    val open: Boolean? = null,
 )
 
 @Serializable
@@ -828,6 +1003,11 @@ public data class FetchResult(
     /** `true` if there are more rows past the last returned id;
      *  caller should call again with `after = lastMessage.id`. */
     val hasMore: Boolean,
+    /** The newest epoch registered on the DS for a CLAIMED group journal,
+     *  present on a signed read only; `null` for an unclaimed journal and
+     *  for mailboxes. A DeviceGroup reader compares it with its own epoch to
+     *  notice a fork it can never catch up from ([me.lakko.app.devices.sync.DeviceGroupFork]). */
+    val latestEpoch: ULong? = null,
 )
 
 // =============================================================================
@@ -872,6 +1052,32 @@ public class DsProofRefusedError(
     /** What the user reads, or `null` for the ordinary delivery error. */
     public val userMessage: String? get() = if (clockSkewed) DS_CLOCK_SKEW_COPY else null
 }
+
+/**
+ * ADR-0060 §2 — a write to someone's mailbox whose reach proof the server did
+ * not accept: the key it was signed with is not (or no longer) registered.
+ * The person changed who can find them, or revoked the link.
+ */
+public class DsReachRefusedError(
+    endpoint: String,
+    body: String,
+) : DsHttpError(status = 401, endpoint = endpoint, body = body, message = "ds $endpoint → 401: reach refused")
+
+/**
+ * ADR-0060 §2 — what authorises one write into someone else's mailbox: a
+ * reach-key signer (`DsProofSigner.forReach(seed)`), and, for a delegated
+ * write, the delegation header value naming [signer]'s key.
+ */
+public class DsReachAuth(
+    public val signer: DsJournalSigner,
+    public val delegationHeader: String? = null,
+)
+
+/** One reach public key to register, with its optional expiry. */
+public class DsReachKeyAdd(
+    public val publicKey: ByteArray,
+    public val expiresAtMs: Long? = null,
+)
 
 /** Network-level failure (DNS, TLS, no route, …). */
 public class DsNetworkError(

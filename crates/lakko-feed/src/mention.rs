@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Whether a message mentions the person (ADR-0058 section 2).
+//! Whether a message mentions the person (ADR-0061 section 2).
 //!
 //! No envelope carries a mention, so the device derives one: `@` followed by
 //! the person's canonical username, with no word character before the `@`

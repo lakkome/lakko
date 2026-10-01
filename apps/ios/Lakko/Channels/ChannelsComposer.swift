@@ -142,10 +142,18 @@ public enum ChannelsComposer {
         // Rust-core invariant.
         let seedBytes: Data
         do {
-            let group = try LakkoCore.publisherGroupOpenOrCreate(
-                identity: identity,
-                channelId: channelId
-            )
+            // ADR-0057 — a PublisherGroup founded here is marked, so its first
+            // journal claim may reset one the same root claimed before.
+            let group: PublisherGroup
+            if let existing = try LakkoCore.publisherGroupLoad(identity: identity, channelId: channelId) {
+                group = existing
+            } else {
+                group = try LakkoCore.publisherGroupOpenOrCreate(
+                    identity: identity,
+                    channelId: channelId
+                )
+                CoPublisher.markFounded(group)
+            }
             seedBytes = try group.channelSeed(identity: identity)
         } catch let FfiError.Group(msg) {
             // Retired v1 state refuses here and cannot be repaired.

@@ -6,7 +6,7 @@ package me.lakko.app.feed
 import kotlinx.serialization.Serializable
 
 /**
- * The person's own feeds on this device (ADR-0058 section 6): each a rule in
+ * The person's own feeds on this device (ADR-0061 section 6): each a rule in
  * the core's canonical encoding. Mirror of `apps/web/src/feed/feed-store.ts`;
  * sealed per account by [FeedSealedStore]. They do not follow the person to
  * other devices.

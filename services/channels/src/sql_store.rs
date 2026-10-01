@@ -6,7 +6,8 @@
 //! Mirror of [`crate::storage::InMemoryChannelStore`] —
 //! same trait, same opacity contract. The four tables
 //! (`channels`, `channel_posts`, `channel_subscribers`,
-//! `channel_envelopes`) live in `migrations/0001_init.sql`.
+//! `channel_envelopes`) live in `migrations/0001_init.sql`; the ADR-0060
+//! member cards in `migrations/0005_member_cards.sql`.
 //!
 //! ## Opacity contract — pinned
 //!
@@ -1170,5 +1171,356 @@ impl ChannelStore for SqlChannelStore {
         }
         tx.commit().await.map_err(db_err)?;
         Ok(())
+    }
+
+    async fn put_member_card(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        epoch: u32,
+        card: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        // Lock the channel row so the epoch check and the write cannot
+        // interleave with a rotation, then refuse a future or a regressed
+        // epoch.
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let existing: Option<(u32,)> =
+            sqlx::query_as("SELECT current_epoch FROM channels WHERE id = ? FOR UPDATE")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        let Some((current,)) = existing else {
+            return Err(StorageError::UnknownChannel);
+        };
+        let registered: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM channel_subscribers \
+             WHERE channel_id = ? AND subscriber_id = ? LIMIT 1",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(subscriber.as_bytes().as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if registered.is_none() {
+            return Err(StorageError::UnknownSubscriber);
+        }
+        if epoch > current {
+            return Err(StorageError::MemberCardEpochInFuture {
+                current,
+                got: epoch,
+            });
+        }
+        let stored: Option<(u32,)> = sqlx::query_as(
+            "SELECT epoch FROM channel_member_cards \
+             WHERE channel_id = ? AND subscriber_id = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(subscriber.as_bytes().as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if let Some((stored,)) = stored {
+            if epoch < stored {
+                return Err(StorageError::MemberCardStale { stored, got: epoch });
+            }
+        }
+        sqlx::query(
+            "INSERT INTO channel_member_cards (channel_id, subscriber_id, card, epoch) \
+             VALUES (?, ?, ?, ?) \
+             ON DUPLICATE KEY UPDATE \
+                 card = VALUES(card), epoch = VALUES(epoch), \
+                 updated_at = CURRENT_TIMESTAMP(3)",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(subscriber.as_bytes().as_slice())
+        .bind(&card)
+        .bind(epoch)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn delete_member_card(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<(), StorageError> {
+        if !self.exists(channel).await {
+            return Err(StorageError::UnknownChannel);
+        }
+        sqlx::query("DELETE FROM channel_member_cards WHERE channel_id = ? AND subscriber_id = ?")
+            .bind(channel.as_bytes().as_slice())
+            .bind(subscriber.as_bytes().as_slice())
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<(), StorageError> {
+        if !self.exists(channel).await {
+            return Err(StorageError::UnknownChannel);
+        }
+        // One transaction: the subscriber row (its envelopes and member card
+        // go with it through the FK cascades) and its staged envelopes (no FK
+        // to the subscriber, so removed explicitly).
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        sqlx::query("DELETE FROM channel_subscribers WHERE channel_id = ? AND subscriber_id = ?")
+            .bind(channel.as_bytes().as_slice())
+            .bind(subscriber.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        sqlx::query(
+            "DELETE FROM channel_staged_envelopes WHERE channel_id = ? AND subscriber_id = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(subscriber.as_bytes().as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn list_member_cards(
+        &self,
+        channel: ChannelId,
+        after: Option<SubscriberId>,
+        limit: usize,
+    ) -> Result<Vec<(SubscriberId, Vec<u8>)>, StorageError> {
+        if !self.exists(channel).await {
+            return Err(StorageError::UnknownChannel);
+        }
+        // BINARY(32) compares bytewise, the same order as `SubscriberId`'s
+        // derived `Ord`, so the page cursor means the same in both stores.
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = match after {
+            None => {
+                sqlx::query_as(
+                    "SELECT subscriber_id, card FROM channel_member_cards \
+                     WHERE channel_id = ? ORDER BY subscriber_id ASC LIMIT ?",
+                )
+                .bind(channel.as_bytes().as_slice())
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+            },
+            Some(after) => {
+                sqlx::query_as(
+                    "SELECT subscriber_id, card FROM channel_member_cards \
+                     WHERE channel_id = ? AND subscriber_id > ? \
+                     ORDER BY subscriber_id ASC LIMIT ?",
+                )
+                .bind(channel.as_bytes().as_slice())
+                .bind(after.as_bytes().as_slice())
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+            },
+        }
+        .map_err(db_err)?;
+        rows.into_iter()
+            .map(|(sub, card)| Ok((SubscriberId::from_bytes(&sub)?, card)))
+            .collect()
+    }
+}
+
+// ============================================================================
+// Tests - the ADR-0060 member-card paths against MariaDB, gated on
+// `LAKKO_CHANNELS_TEST_DATABASE_URL` and skipped silently without it.
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn store() -> Option<SqlChannelStore> {
+        let Ok(url) = std::env::var("LAKKO_CHANNELS_TEST_DATABASE_URL") else {
+            eprintln!("skipping: LAKKO_CHANNELS_TEST_DATABASE_URL unset");
+            return None;
+        };
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test db");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        Some(SqlChannelStore::new(pool))
+    }
+
+    /// The server clock the store is handed: since ADR-0059 the SQL store
+    /// files the subscriber's `registered_at` / `last_active_at` from it, and
+    /// MariaDB refuses the epoch itself as a `TIMESTAMP`.
+    fn now_ms() -> u64 {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    }
+
+    fn random<const N: usize>() -> [u8; N] {
+        let mut out = [0u8; N];
+        lakko_crypto::random::fill(&mut out);
+        out
+    }
+
+    #[tokio::test]
+    async fn member_cards_are_epoch_bounded_paged_and_pruned_with_the_subscriber() {
+        let Some(s) = store().await else {
+            return;
+        };
+        let channel = ChannelId::from_bytes(&random::<16>()).unwrap();
+        s.create(channel, [7; 32]).await.unwrap();
+        let mut subs: Vec<SubscriberId> = (0..3)
+            .map(|_| SubscriberId::from_bytes(&random::<32>()).unwrap())
+            .collect();
+        subs.sort_unstable();
+        for sub in &subs {
+            s.subscribe(channel, *sub, now_ms()).await.unwrap();
+        }
+
+        assert!(matches!(
+            s.put_member_card(channel, subs[0], 1, vec![1; 40]).await,
+            Err(StorageError::MemberCardEpochInFuture { current: 0, got: 1 })
+        ));
+        s.rotate(channel, vec![], 80).await.unwrap();
+        for sub in &subs {
+            s.put_member_card(channel, *sub, 1, sub.as_bytes().to_vec())
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            s.put_member_card(channel, subs[0], 0, vec![0; 40]).await,
+            Err(StorageError::MemberCardStale { stored: 1, got: 0 })
+        ));
+        assert!(matches!(
+            s.put_member_card(
+                channel,
+                SubscriberId::from_bytes(&random::<32>()).unwrap(),
+                0,
+                vec![0; 40]
+            )
+            .await,
+            Err(StorageError::UnknownSubscriber)
+        ));
+
+        let first = s.list_member_cards(channel, None, 2).await.unwrap();
+        assert_eq!(
+            first.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            subs[..2].to_vec()
+        );
+        let rest = s
+            .list_member_cards(channel, Some(subs[1]), 2)
+            .await
+            .unwrap();
+        assert_eq!(rest, vec![(subs[2], subs[2].as_bytes().to_vec())]);
+
+        s.delete_member_card(channel, subs[0]).await.unwrap();
+        s.delete_member_card(channel, subs[0]).await.unwrap();
+        assert_eq!(
+            s.list_member_cards(channel, None, 10).await.unwrap().len(),
+            2
+        );
+
+        // The stale-subscriber prune takes the card through the FK.
+        sqlx::query(
+            "UPDATE channel_subscribers SET last_active_at = FROM_UNIXTIME(1) \
+             WHERE channel_id = ? AND subscriber_id = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(subs[1].as_bytes().as_slice())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        s.prune_subscribers_older_than(10_000).await.unwrap();
+        assert_eq!(
+            s.list_member_cards(channel, None, 10).await.unwrap(),
+            vec![(subs[2], subs[2].as_bytes().to_vec())]
+        );
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_takes_the_row_envelopes_card_and_staged_rows() {
+        let Some(s) = store().await else {
+            return;
+        };
+        let channel = ChannelId::from_bytes(&random::<16>()).unwrap();
+        s.create(channel, [7; 32]).await.unwrap();
+        let sub = SubscriberId::from_bytes(&random::<32>()).unwrap();
+        let keep = SubscriberId::from_bytes(&random::<32>()).unwrap();
+        for id in [sub, keep] {
+            s.subscribe(channel, id, now_ms()).await.unwrap();
+            s.deliver_envelope(channel, id, None, vec![7; 80], 80)
+                .await
+                .unwrap();
+            s.put_member_card(channel, id, 0, vec![1; 40])
+                .await
+                .unwrap();
+        }
+        s.stage_envelopes(
+            channel,
+            1,
+            vec![(sub, vec![8; 80]), (keep, vec![8; 80])],
+            80,
+        )
+        .await
+        .unwrap();
+
+        s.unsubscribe(channel, sub).await.unwrap();
+        s.unsubscribe(channel, sub).await.unwrap();
+        assert_eq!(s.list_subscribers(channel).await.unwrap(), vec![keep]);
+        assert_eq!(
+            s.list_member_cards(channel, None, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect::<Vec<_>>(),
+            vec![keep]
+        );
+        let (envelopes,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM channel_envelopes WHERE channel_id = ? AND subscriber_id = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(sub.as_bytes().as_slice())
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+        assert_eq!(envelopes, 0);
+        let (staged,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM channel_staged_envelopes WHERE channel_id = ?")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(staged, 1, "only the remaining subscriber's staged row");
+        assert!(matches!(
+            s.unsubscribe(ChannelId::from_bytes(&random::<16>()).unwrap(), sub)
+                .await,
+            Err(StorageError::UnknownChannel)
+        ));
+    }
+
+    #[test]
+    fn the_member_card_column_fits_the_longest_card() {
+        let migration = include_str!("../migrations/0006_member_card_binding_width.sql");
+        assert!(migration.contains(&format!(
+            "VARBINARY({})",
+            lakko_channels::MEMBER_CARD_MAX_LEN
+        )));
     }
 }

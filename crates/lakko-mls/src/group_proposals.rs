@@ -560,7 +560,7 @@ pub(crate) struct CommitEffects {
     /// The accounts those added leaves resolve to (ADR-0050), in the same
     /// order; `None` for a leaf whose binding does not resolve.
     added_accounts: Vec<Option<Vec<u8>>>,
-    /// The group-kind facts (ADR-0060) each `GroupContextExtensions` proposal
+    /// The group-kind facts (ADR-0062) each `GroupContextExtensions` proposal
     /// the commit carries would install, one entry per such proposal. Its
     /// length is also the number of GroupContext rewrites the commit carries.
     installed_kinds: Vec<KindState>,
@@ -662,14 +662,14 @@ pub(crate) fn installed_kind_of(proposal: &Proposal) -> Option<KindState> {
 }
 
 /// `true` when `proposal` leaves the group's kind as `before` records it — any
-/// proposal that is not a GroupContext rewrite trivially does (ADR-0060
+/// proposal that is not a GroupContext rewrite trivially does (ADR-0062
 /// section 4). The per-proposal form of [`group_kind_unchanged`], shared by the
 /// receipt gate and the sweep filter so the two cannot disagree.
 pub(crate) fn proposal_keeps_group_kind(proposal: &Proposal, before: &KindState) -> bool {
     installed_kind_of(proposal).map_or(true, |after| before.preserved_by(&after))
 }
 
-/// **No commit changes a conversation's kind** (ADR-0060 section 4, C-70).
+/// **No commit changes a conversation's kind** (ADR-0062 section 4, C-70).
 ///
 /// Every `GroupContextExtensions` proposal the commit carries must install an
 /// `0xFF03` body byte-identical to the pre-merge one — present in both or
@@ -696,7 +696,7 @@ pub(crate) fn group_kind_unchanged(effects: &CommitEffects, before: &KindState) 
     ))
 }
 
-/// **A one-to-one keeps its two people** (ADR-0060 section 5, C-70) — the
+/// **A one-to-one keeps its two people** (ADR-0062 section 5, C-70) — the
 /// commit-wide rule, in the style of [`owner_survives`].
 ///
 /// For a one-to-one, the accounts in the roster the commit produces (pre-merge
@@ -766,7 +766,7 @@ pub(crate) fn one_to_one_holds(
     Ok(())
 }
 
-/// The early, per-proposal answer to the one-to-one rule (ADR-0060 section 5),
+/// The early, per-proposal answer to the one-to-one rule (ADR-0062 section 5),
 /// run where [`authorise`] runs for a proposal — at the proposer and at the
 /// receipt gate — so a request that could never be committed fails at once and
 /// never sits in anyone's pending set.
@@ -1253,7 +1253,7 @@ mod tests {
         assert!(authorise(&t, &m, Some(proposer(1, &admin)), &remove_ghost).is_ok());
     }
 
-    // ---- ADR-0060: the one-to-one rule ------------------------------------
+    // ---- ADR-0062: the one-to-one rule ------------------------------------
 
     fn rec(leaf: u32, account: u8) -> MemberRecord {
         MemberRecord {

@@ -9,7 +9,7 @@ import uniffi.lakko_ffi_uniffi.GroupKind
  * Which list a conversation belongs to — docs/ux/client-redesign.md
  * section 3 and 5.1.
  *
- * Two lists over the same conversation store, split by kind. Since ADR-0060
+ * Two lists over the same conversation store, split by kind. Since ADR-0062
  * the kind is NOT derived on this device: the creator fixes it in the group's
  * GroupContext (`0xFF03`) and every member reads it from there
  * ([ChatRepository.groupKind]), so a two-person group is a group on every
@@ -35,7 +35,7 @@ public fun conversationKindOf(groupKind: GroupKind?): ConversationKind = when (g
 }
 
 /**
- * ADR-0060 section 7 — whether a group-name envelope (ADR-0051) received in a
+ * ADR-0062 section 7 — whether a group-name envelope (ADR-0051) received in a
  * conversation of [groupKind] may be applied. A one-to-one has no group name,
  * and applying one would retitle the person, so it is dropped there. Any other
  * kind (a group, or a group this device could not classify) keeps the

@@ -987,7 +987,7 @@ pub enum Role {
 // Group
 // ============================================================================
 
-/// What kind of conversation a [`Group`] is (ADR-0060), fixed at creation
+/// What kind of conversation a [`Group`] is (ADR-0062), fixed at creation
 /// and the same on every member's device. Mirror of UniFFI's `GroupKind`.
 /// The numeric values are the `0xFF03` wire bytes, so a caller that logs one
 /// sees the same number the GroupContext carries.
@@ -1030,7 +1030,7 @@ pub struct Group {
 #[wasm_bindgen]
 impl Group {
     /// Create a fresh group with `identity` as the founding member and the
-    /// conversation `kind` written into its GroupContext for life (ADR-0060).
+    /// conversation `kind` written into its GroupContext for life (ADR-0062).
     /// Mirror of UniFFI's `Group::create`.
     #[wasm_bindgen(constructor)]
     pub fn new(identity: &Identity, kind: GroupKind) -> Result<Group, JsValue> {
@@ -1040,7 +1040,7 @@ impl Group {
         })
     }
 
-    /// The conversation's kind (ADR-0060), read from the GroupContext;
+    /// The conversation's kind (ADR-0062), read from the GroupContext;
     /// `undefined` only for a group that carries none (not a conversation).
     #[wasm_bindgen(js_name = groupKind)]
     pub fn group_kind(&self) -> Result<Option<GroupKind>, JsValue> {
@@ -1414,8 +1414,12 @@ impl Group {
     }
 
     /// This device's ADR-0045 committer rank: `0` for the owner, `k + 1` for
-    /// the `k`-th admin in the role table's canonical order, and
-    /// **`undefined`** for a plain member or a group with no role table.
+    /// the `k`-th admin in the role table's canonical order, and for any other
+    /// member (ADR-0050 section 2.5a) its account rank `n + 1 + i` **only while
+    /// its pending store holds a device admission or its own account's
+    /// self-service proposal** it could sweep — otherwise **`undefined`**.
+    /// `undefined` too for a device that is not its account's acting
+    /// (lowest-key) leaf, and for a group with no role table.
     ///
     /// `undefined` and `0` are **not** the same thing and must never be
     /// conflated: `0` is the owner, who acts as committer immediately, while
@@ -1429,10 +1433,14 @@ impl Group {
             .map_err(MlsFailure::into_js)
     }
 
-    /// **Another** member's ADR-0045 committer rank, by its 32-byte Ed25519
+    /// **Another** member's committer rank, by its 32-byte Ed25519 leaf
     /// signature public key: `0` for the owner, `k + 1` for the `k`-th admin in
-    /// the role table's canonical order, and `undefined` for a plain member, a
-    /// non-member, a wrong-length key, or a group with no role table.
+    /// the role table's canonical order, `n + 1 + i` for any other member
+    /// account (ADR-0050 section 2.5a: `n` admins, `i` the account's position
+    /// among the non-admin member accounts sorted bytewise by account key),
+    /// held only by the account's acting (lowest-key) leaf; `undefined` for a
+    /// non-acting leaf, a non-member, a wrong-length key, or a group with no
+    /// role table.
     ///
     /// The peer-facing twin of [`Self::own_committer_rank`], and the input
     /// `BeaconObservation.rank` needs: a committer beacon carries no identity,
@@ -1454,8 +1462,9 @@ impl Group {
     ///
     /// As with [`Self::own_committer_rank`], `undefined` and `0` are **not**
     /// the same thing — `0` is the owner — so `if (rank)` is wrong in both
-    /// directions. This orders the authorised committers; it does not widen
-    /// them.
+    /// directions. The owner and admins may sweep the whole set; a plain
+    /// member, ranked after them, sweeps only device admissions and its own
+    /// account's self-service proposals, and beacons only while it holds one.
     ///
     /// # Errors
     ///
@@ -2565,6 +2574,19 @@ impl DeviceGroup {
         Ok(g.own_leaf_index())
     }
 
+    /// Whether THIS device is still in its account's DeviceGroup: `false`
+    /// once it has applied a commit that removes its own leaf. The client
+    /// then shows "This device was removed" and stops polling (UX
+    /// `second-device.md` section 3.1).
+    #[wasm_bindgen(getter, js_name = isActive)]
+    pub fn is_active(&self) -> Result<bool, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.is_active())
+    }
+
     /// Revoke a device leaf (Phase 2a3c). Returns the encoded
     /// Commit bytes the caller MUST broadcast to every remaining
     /// device via the DS group journal so they advance past the
@@ -2741,6 +2763,70 @@ impl DeviceGroup {
         )
     }
 
+    /// Compose a `FolderChanges` cross-device payload (ADR-0058): a live
+    /// chat-folder edit carrying only the changed registers, each with its
+    /// own stamp. `hlc` is the message stamp and is ignored by the fold for
+    /// this kind. Throws when the change set breaks an ADR-0058 bound, so an
+    /// out-of-bounds edit is never sent. Fold the same change set locally
+    /// with `SyncedState.applyFolderChanges`.
+    #[wasm_bindgen(js_name = createDeviceGroupFolderChangesMessage)]
+    pub fn create_devicegroup_folder_changes_message(
+        &self,
+        identity: &Identity,
+        changes: &crate::synced_state::FolderChangeSet,
+        hlc: u64,
+    ) -> Result<Vec<u8>, JsValue> {
+        changes
+            .inner
+            .validate()
+            .map_err(|e| js_error(&e.to_string()))?;
+        self.create_devicegroup_body(
+            identity,
+            lakko_mls::device_group::DeviceGroupBody::FolderChanges(changes.inner.clone()),
+            hlc,
+        )
+    }
+
+    /// Compose one `StateSnapshot` part (ADR-0058 section 5): the catch-up
+    /// re-send, from `SyncedState.snapshotParts()`. Send every part.
+    #[wasm_bindgen(js_name = createDeviceGroupSnapshotMessage)]
+    pub fn create_devicegroup_snapshot_message(
+        &self,
+        identity: &Identity,
+        part: &crate::synced_state::SyncedSnapshotPart,
+        hlc: u64,
+    ) -> Result<Vec<u8>, JsValue> {
+        self.create_devicegroup_body(
+            identity,
+            lakko_mls::device_group::DeviceGroupBody::StateSnapshot(part.inner.clone()),
+            hlc,
+        )
+    }
+
+    /// Compose a `serviceEnvelope` cross-device payload carrying a
+    /// `lakko-contacts` envelope verbatim (ADR-0060 section 7: the output
+    /// of `composeVisibilityEnvelope` / `composeReachStateEnvelope`).
+    ///
+    /// # Errors
+    ///
+    /// Throws when `envelope` is empty or longer than
+    /// `deviceGroupServiceEnvelopeMaxLen()`; nothing is encrypted.
+    #[wasm_bindgen(js_name = createServiceEnvelopeMessage)]
+    pub fn create_service_envelope_message(
+        &self,
+        identity: &Identity,
+        envelope: &[u8],
+        hlc: u64,
+    ) -> Result<Vec<u8>, JsValue> {
+        self.create_devicegroup_body(
+            identity,
+            lakko_mls::device_group::DeviceGroupBody::ServiceEnvelope {
+                envelope: envelope.to_vec(),
+            },
+            hlc,
+        )
+    }
+
     /// Decrypt / advance the state machine for an inbound
     /// DeviceGroup wire message (Phase 2a3e2). JS layer reads
     /// `kind`:
@@ -2885,6 +2971,17 @@ const KIND_READ_CURSOR: &str = "readCursor";
 const KIND_DRAFT: &str = "draft";
 const KIND_FLAGS: &str = "flags";
 const KIND_ORDER: &str = "order";
+const KIND_FOLDER_CHANGES: &str = "folderChanges";
+const KIND_STATE_SNAPSHOT: &str = "stateSnapshot";
+const KIND_SERVICE_ENVELOPE: &str = "serviceEnvelope";
+
+/// Longest envelope a DeviceGroup `serviceEnvelope` payload carries
+/// (ADR-0060 section 7).
+#[wasm_bindgen(js_name = deviceGroupServiceEnvelopeMaxLen)]
+#[must_use]
+pub fn device_group_service_envelope_max_len() -> u32 {
+    u32::try_from(lakko_mls::MAX_SERVICE_ENVELOPE_LEN).unwrap_or(u32::MAX)
+}
 
 /// JS-side projection of
 /// [`lakko_mls::device_group::ParsedDeviceGroupPayload`]
@@ -2916,6 +3013,16 @@ pub struct ParsedDeviceGroupPayload {
     archived_val: bool,
     unread_override_val: bool,
     order_group_ids_val: Vec<Vec<u8>>,
+    /// The typed body, kept for `SyncedState.applyPayload` (ADR-0058).
+    body_val: lakko_mls::device_group::DeviceGroupBody,
+    service_envelope_val: Vec<u8>,
+}
+
+impl ParsedDeviceGroupPayload {
+    /// Every register this payload writes, stamped (ADR-0058).
+    pub(crate) fn stamped_entries(&self) -> Vec<(u64, lakko_sync::synced::SyncEntry)> {
+        self.body_val.stamped_entries(self.hlc_val)
+    }
 }
 
 #[wasm_bindgen]
@@ -2933,8 +3040,10 @@ impl ParsedDeviceGroupPayload {
     }
 
     /// One of `"readCursor"` / `"draft"` / `"flags"` /
-    /// `"order"`. JS reads this to decide which other fields
-    /// are meaningful.
+    /// `"order"` / `"folderChanges"` / `"stateSnapshot"` /
+    /// `"serviceEnvelope"`. JS reads this to decide which other fields are
+    /// meaningful. `folderChanges` / `stateSnapshot` carry no flat fields:
+    /// fold them with `SyncedState.applyPayload`.
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
         self.kind_val.to_string()
@@ -3007,6 +3116,33 @@ impl ParsedDeviceGroupPayload {
             .map(|g| js_sys::Uint8Array::from(g.as_slice()))
             .collect()
     }
+
+    /// `stateSnapshot` only: the 0-based part index (else 0).
+    #[wasm_bindgen(getter, js_name = snapshotPart)]
+    pub fn snapshot_part(&self) -> u32 {
+        match &self.body_val {
+            lakko_mls::device_group::DeviceGroupBody::StateSnapshot(s) => s.part,
+            _ => 0,
+        }
+    }
+
+    /// `stateSnapshot` only: the number of parts (else 0).
+    #[wasm_bindgen(getter, js_name = snapshotParts)]
+    pub fn snapshot_parts(&self) -> u32 {
+        match &self.body_val {
+            lakko_mls::device_group::DeviceGroupBody::StateSnapshot(s) => s.parts,
+            _ => 0,
+        }
+    }
+
+    /// `serviceEnvelope` only: the `lakko-contacts` envelope bytes,
+    /// uninterpreted (ADR-0060 section 7). Hand them to
+    /// `dispatchIncomingEnvelope` and keep only Visibility / ReachState.
+    /// Empty for other kinds.
+    #[wasm_bindgen(getter, js_name = serviceEnvelope)]
+    pub fn service_envelope(&self) -> Vec<u8> {
+        self.service_envelope_val.clone()
+    }
 }
 
 /// Parse a DeviceGroup application-payload plaintext (the
@@ -3030,6 +3166,8 @@ pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPa
         archived_val: false,
         unread_override_val: false,
         order_group_ids_val: Vec::new(),
+        body_val: parsed.body.clone(),
+        service_envelope_val: Vec::new(),
     };
     match parsed.body {
         Body::ReadCursor {
@@ -3069,6 +3207,12 @@ pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPa
         Body::Order { group_ids } => {
             out.kind_val = KIND_ORDER;
             out.order_group_ids_val = group_ids;
+        },
+        Body::FolderChanges(_) => out.kind_val = KIND_FOLDER_CHANGES,
+        Body::StateSnapshot(_) => out.kind_val = KIND_STATE_SNAPSHOT,
+        Body::ServiceEnvelope { envelope } => {
+            out.kind_val = KIND_SERVICE_ENVELOPE;
+            out.service_envelope_val = envelope;
         },
     }
     Ok(out)
@@ -5804,7 +5948,7 @@ mod tests {
         assert_eq!(pk.len(), 32, "Ed25519 public key length");
     }
 
-    /// ADR-0060: the kind the creator passes is what the group reports, and
+    /// ADR-0062: the kind the creator passes is what the group reports, and
     /// it survives a snapshot / restore / load round-trip.
     #[test]
     fn group_kind_is_what_the_creator_passed_and_survives_a_reload() {
@@ -6034,19 +6178,24 @@ mod tests {
                 Some(1),
                 "{label} must rank the sole admin 1",
             );
+            // ADR-0050 section 2.5a: a plain member account is ranked after
+            // the admins (one admin, one plain account: rank 2) — never 0.
             assert_eq!(
                 g.committer_rank_core(&charlie_key).unwrap(),
-                None,
-                "{label} must give a plain member NO rank — not rank 0",
+                Some(2),
+                "{label} must rank the plain member after the admin — not rank 0",
             );
         }
 
-        for (id, g) in [(&alice, &alice_g), (&bob, &bob_g), (&charlie, &charlie_g)] {
+        // Owner/admin: the peer-derived rank is the own rank. A plain member's
+        // OWN rank stays None until it holds a device admission it could sweep.
+        for (id, g) in [(&alice, &alice_g), (&bob, &bob_g)] {
             assert_eq!(
                 g.committer_rank_core(&id.signature_public_key()).unwrap(),
                 g.own_committer_rank_core(id).unwrap(),
             );
         }
+        assert_eq!(charlie_g.own_committer_rank_core(&charlie).unwrap(), None);
 
         let dave = Identity::new("dave").unwrap();
         assert_eq!(

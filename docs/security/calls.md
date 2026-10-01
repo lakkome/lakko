@@ -4532,7 +4532,7 @@ mailbox-only.
 
 ### C-70: A conversation's kind is fixed at creation, and a one-to-one keeps its two people
 
-[ADR-0060](../adr/0060-conversation-kind.md). **The rule.** Whether a conversation
+[ADR-0062](../adr/0062-conversation-kind.md). **The rule.** Whether a conversation
 is a one-to-one or a group is decided once, by its creator, and written into the
 MLS GroupContext as the `0xFF03` extension (`version 0x01 ‖ kind 0x01/0x02`), which
 `Group::create` also names in `RequiredCapabilities`. No commit may change or drop
@@ -4542,7 +4542,7 @@ may never remove a person. A person's own devices still join and retire
 (ADR-0050). **Every member's device refuses otherwise**; this is a protocol rule,
 not a UI promise.
 
-**Why it is indexed.** Before ADR-0060 nothing in the group said which kind it
+**Why it is indexed.** Before ADR-0062 nothing in the group said which kind it
 was, so each client guessed from the people count and a local flag. A
 two-person group read as a one-to-one on everyone but its creator, and nothing
 stopped any single device from adding a third person to a one-to-one, which

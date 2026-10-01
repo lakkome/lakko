@@ -50,8 +50,9 @@ class MutedPushWakeTest {
     ) : PushDecryptDeps {
         val mutedAsked = mutableListOf<Pair<String, String>>()
 
-        override fun lookupRoute(pushGidHex: String): Pair<String, String>? = null
-        override fun resolveAccount(groupHex: String): ResolvedPushAccount = account
+        override fun lookupRoute(accountIdB64: String, pushGidHex: String): String? = null
+        override fun accountKnowsGroup(accountIdB64: String, groupHex: String): Boolean =
+            accountIdB64 == account.accountIdB64
         override fun loadIdentitySeed(accountIdB64: String): ByteArray = ByteArray(64) { 1 }
         override fun loadSnapshot(accountIdB64: String): ByteArray = ByteArray(8) { 2 }
         override fun openThrowawayGroup(
@@ -97,7 +98,7 @@ class MutedPushWakeTest {
     )
 
     private suspend fun wake(d: FakeDeps) = decryptPushWake(
-        PushWake(groupHex = groupHex, pointer = 11),
+        PushWake(groupHex = groupHex, pointer = 11, accountIdB64 = accountId),
         d,
         nowMs = now,
         ringWindowMs = TEST_RING_WINDOW_MS,

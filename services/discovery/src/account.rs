@@ -6,10 +6,10 @@
 //! Part of the cross-service account deletion: `services/auth` purges the auth
 //! tier (FK cascade over OPAQUE / passkeys / recovery factors), THIS purges the
 //! discovery tier (username binding, identity bundle, KeyPackage, owned invite
-//! capabilities), and `services/storage` purges the backup blob. The DS, push,
-//! channels, transparency, and witness tiers are account-opaque (invariant #5 —
-//! they key on group / device / channel / username-hash pseudonyms, never the
-//! account_id) and hold nothing to delete.
+//! capabilities, name search terms), and `services/storage` purges the backup
+//! blob. The DS, push, channels, transparency, and witness tiers are
+//! account-opaque (invariant #5 — they key on group / device / channel /
+//! username-hash pseudonyms, never the account_id) and hold nothing to delete.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -35,6 +35,10 @@ pub(crate) async fn delete_account(
         "DELETE FROM usernames WHERE account_id = ?",
         "DELETE FROM identity_bundles WHERE account_id = ?",
         "DELETE FROM keypackages WHERE account_id = ?",
+        // ADR-0060 - the name search terms of a person in Everyone.
+        "DELETE FROM display_names WHERE account_id = ?",
+        // ADR-0060 - the public record published beside them.
+        "DELETE FROM public_records WHERE account_id = ?",
     ] {
         sqlx::query(sql)
             .bind(account_id.as_slice())

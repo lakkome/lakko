@@ -72,12 +72,28 @@
 //! key** signs it and clients only ever verify it (auth is never in the loop).
 //!
 //! [ADR-0038]: ../../../docs/adr/0038-update-available-notice.md
+//!
+//! # Username certificate
+//!
+//! The crate also hosts a fifth attestation format, [`UsernameCertificate`]
+//! (see the [`username_cert`] module, [ADR-0060] section 5): a
+//! discovery-signed binding of a username's OPRF output to an account id, so a
+//! viewer verifies a claimed username with one OPRF evaluation and no lookup.
+//! It shares the fixed-layout binary discipline and carries its own distinct
+//! domain separator, so all five kinds are cryptographically
+//! non-interchangeable even under a shared signing key — which matters most
+//! against the genesis attestation, whose wire length (153 bytes) it shares. It
+//! is signed by a dedicated discovery key and is permanent (no expiry,
+//! usernames are immutable).
+//!
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 
 #![forbid(unsafe_code)]
 
 pub mod backup_head;
 pub mod genesis;
 pub mod release_manifest;
+pub mod username_cert;
 
 pub use backup_head::{
     verify_backup_head, verify_backup_head_binding, BackupHead, BackupHeadError, BACKUP_HEAD_LEN,
@@ -89,6 +105,10 @@ pub use genesis::{
 pub use release_manifest::{
     release_status, release_status_for, verify_release_manifest, ReleaseManifest,
     ReleaseManifestError, UpdateStatus, RELEASE_MANIFEST_LEN,
+};
+pub use username_cert::{
+    verify_username_binding, UsernameCertError, UsernameCertificate, OPRF_HASH_LEN,
+    USERNAME_CERT_LEN,
 };
 
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, SIGNATURE_LEN};
@@ -286,7 +306,10 @@ pub fn verify_bound(
 /// of its own.
 #[doc(hidden)]
 pub mod fuzz_api {
-    use super::{ActionAttestation, BackupHead, GenesisAttestation, ReleaseManifest, SigningKey};
+    use super::{
+        ActionAttestation, BackupHead, GenesisAttestation, ReleaseManifest, SigningKey,
+        UsernameCertificate,
+    };
 
     /// Try to [`ActionAttestation::open`] the bytes against a FIXED verifying
     /// key. The bytes are attacker-controlled — an attestation rides alongside a
@@ -342,6 +365,20 @@ pub mod fuzz_api {
     pub fn open_release_manifest(bytes: &[u8]) -> bool {
         let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
         ReleaseManifest::open(bytes, &vk).is_ok()
+    }
+
+    /// Try to [`UsernameCertificate::open`] the bytes against a FIXED verifying
+    /// key. The bytes are attacker-controlled — a username certificate rides
+    /// opaquely inside a profile envelope any group member, channel subscriber
+    /// or stranger can craft (ADR-0060), reaching this bounded parser before any
+    /// state is consulted — and the parser must stay panic-free on any input.
+    /// The fuzzer cannot forge a valid signature against the fixed key, so it
+    /// exercises the length / version / field-slicing / signature-parse /
+    /// verify-fail path. Returns `true` on a (vanishingly rare) success.
+    #[must_use]
+    pub fn open_username_cert(bytes: &[u8]) -> bool {
+        let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
+        UsernameCertificate::open(bytes, &vk).is_ok()
     }
 }
 

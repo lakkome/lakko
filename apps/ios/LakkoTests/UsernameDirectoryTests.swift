@@ -260,6 +260,56 @@ final class UsernameDirectoryTests: XCTestCase {
         XCTAssertEqual(directory.calls, [.bind(handle: handle("alice"), sessionToken: "tok-signup")])
     }
 
+    /// `docs/ux/anti-abuse.md` section 2 — `429 handle-bind-limited` stops the
+    /// claim before discovery, like a taken name, with its own copy.
+    func testAHandleBindLimitStopsBeforeDiscoveryWithItsCopy() async {
+        let directory = FakeDirectory()
+        let binder = FakeBinder(log: directory)
+        binder.bindError = AuthClientError.http(
+            status: 429, endpoint: "/auth/login-handle",
+            body: #"{"error":"handle-bind-limited","retry_after_secs":125}"#)
+        do {
+            _ = try await claimSignupUsername(
+                accountId: randomAccountId(),
+                username: "alice",
+                sessionToken: "tok-signup",
+                directory: directory,
+                binder: binder
+            )
+            XCTFail("a limited bind must not claim")
+        } catch let limited as UsernameBindLimited {
+            XCTAssertEqual(limited.retryAfterSecs, 125)
+            XCTAssertEqual(
+                limited.errorDescription,
+                "You have changed your username too often. Try again in 3 minutes.")
+        } catch {
+            XCTFail("expected UsernameBindLimited, got \(error)")
+        }
+        XCTAssertEqual(directory.calls, [.bind(handle: handle("alice"), sessionToken: "tok-signup")],
+                       "discovery is never asked and nothing is released")
+    }
+
+    func testTheHandleBindLimitCopy() {
+        XCTAssertEqual(
+            AuthRateLimit.handleBindLimitedCopy(retryAfterSecs: 60),
+            "You have changed your username too often. Try again in 1 minute.")
+        XCTAssertEqual(
+            AuthRateLimit.handleBindLimitedCopy(retryAfterSecs: 61),
+            "You have changed your username too often. Try again in 2 minutes.")
+        XCTAssertEqual(
+            AuthRateLimit.handleBindLimitedCopy(retryAfterSecs: 3601),
+            "You have changed your username too often. Try again later.")
+        XCTAssertEqual(
+            AuthRateLimit.handleBindLimitedCopy(retryAfterSecs: nil),
+            "You have changed your username too often. Try again later.")
+        let error = AuthClientError.http(
+            status: 429, endpoint: "/auth/login-handle",
+            body: #"{"error":"handle-bind-limited","retry_after_secs":600}"#)
+        XCTAssertEqual(
+            AuthRateLimit.copy(for: error),
+            "You have changed your username too often. Try again in 10 minutes.")
+    }
+
     func testADiscoveryConflictReleasesTheHandleAndIsTaken() async {
         let directory = FakeDirectory()
         let binder = FakeBinder(log: directory)

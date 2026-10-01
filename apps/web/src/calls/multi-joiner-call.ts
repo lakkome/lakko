@@ -367,7 +367,7 @@ export class MultiJoinerCall {
     let group: WasmGroup;
     let seed: Uint8Array;
     try {
-      // ADR-0060 — a call-link group admits joiners, so it follows the
+      // ADR-0062 — a call-link group admits joiners, so it follows the
       // group rule; it stays out of the lists as before.
       group = new this.wasm.Group(this.opts.identity, this.wasm.GroupKind.Group);
       seed = this.deriveSeed(group);
@@ -755,6 +755,10 @@ export class MultiJoinerCall {
         // the SFU peer id is not an identity. Names travel sealed inside the
         // call group instead (`broadcastOwnProfile`), and surface through
         // `onMaybeCommit` as an MLS application message. Dropped here.
+        break;
+      case K.RegistrarSeed:
+        // ADR-0057 - no client consumes a registrar seed yet. Never a
+        // commit, never rendered: dropped.
         break;
       default:
         break;

@@ -114,7 +114,7 @@ final class MembershipRefusalTests: XCTestCase {
         // Reachable from a stale Approve / Reject tap.
         XCTAssertEqual(say(.noSuchJoinRequest), "That join request is no longer waiting.")
         XCTAssertEqual(say(.joinerAlreadyAMember), "That person has already joined this group.")
-        // ADR-0060 — the conversation-kind refusals, the same copy as web and
+        // ADR-0062 — the conversation-kind refusals, the same copy as web and
         // Android.
         XCTAssertEqual(say(.oneToOneMembershipFixed), "A chat is always the same two people.")
         XCTAssertEqual(say(.oneToOneHasNoRoles), "A chat has no admins.")

@@ -145,7 +145,7 @@ import java.time.ZoneId
 import java.util.Locale
 
 /**
- * The Feed destination (`docs/ux/feed.md`, ADR-0058). Mirror of
+ * The Feed destination (`docs/ux/feed.md`, ADR-0061). Mirror of
  * `apps/web/src/routes/Feed.tsx`.
  *
  * Messages from the person's groups and posts from their channels, ranked on
@@ -154,7 +154,7 @@ import java.util.Locale
  * replies, opening an item in its chat or channel, the "Show N new" pill, the
  * empty and first-run states, Edit and Share for a saved feed, and the editor.
  *
- * Seen (ADR-0058 section 5): a group message fully on screen for
+ * Seen (ADR-0061 section 5): a group message fully on screen for
  * [FEED_SEEN_DWELL_MS] joins its group's seen set; when that makes the set
  * contiguous further than before, the group gets a read receipt and the other
  * devices a read cursor at the new watermark, never past a message the person
@@ -484,7 +484,7 @@ public fun FeedScreen(
         shown?.let { items -> newDividerIndex(items.map { it.key }, visitBaseline) }
     }
 
-    // ----- Seen (ADR-0058 section 5) ---------------------------------------
+    // ----- Seen (ADR-0061 section 5) ---------------------------------------
 
     fun seenStateOf(hex: String): GroupSeenState {
         val thread = chatState.threads.firstOrNull { it.groupIdHex == hex }

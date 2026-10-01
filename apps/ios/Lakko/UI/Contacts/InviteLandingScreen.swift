@@ -139,6 +139,7 @@ public struct InviteLandingScreen: View {
         case .exhausted: return "Invite exhausted"
         case .notFound: return "Invite not found"
         case .malformedSlug: return "Invalid invite link"
+        case .damaged: return "Invite link damaged"
         case .rateLimited: return "Try again in a minute"
         case .requiresReauth: return "Please log in first"
         case .failed: return "Couldn't accept invite"
@@ -170,6 +171,8 @@ public struct InviteLandingScreen: View {
         case .malformedSlug:
             return
                 "This link is incomplete. Ask for it to be sent again."
+        case .damaged:
+            return inviteLinkDamagedMessage
         case .rateLimited:
             return inviteRateLimitedMessage
         case .requiresReauth:

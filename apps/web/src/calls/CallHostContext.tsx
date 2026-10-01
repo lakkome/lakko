@@ -696,7 +696,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const ownKeyB64 = own === null ? null : base64Encode(own.signaturePublicKey);
     const memberKeysB64 = memberKeysOf(entry.group);
     // The same title the chat header and the list show (ADR-0051 §5): the
-    // kind the conversation carries (ADR-0060) decides group-vs-1x1, the
+    // kind the conversation carries (ADR-0062) decides group-vs-1x1, the
     // shared name comes first.
     const isGroup = conversationKindOf(entry.group) === "group";
     return peerName({

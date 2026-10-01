@@ -19,7 +19,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * The feed's two per-account stores on disk (ADR-0058 sections 3 and 6): the
+ * The feed's two per-account stores on disk (ADR-0061 sections 3 and 6): the
  * channel-post log and the saved feeds. Same posture as
  * [me.lakko.app.chat.MessageLogStore] — the channel-post log holds decrypted
  * post text — so both are sealed under a dedicated Keystore-resident

@@ -1,131 +1,118 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-import { describe, expect, it } from "vitest";
+/**
+ * The stored sync row (ADR-0058): the Rust fold's own bytes, plus the folder
+ * edits that have not been sent yet. The fold is real here - these tests load
+ * the wasm core - so "round-trips" means the state a reload restores is the
+ * state that was written, not merely that some bytes came back.
+ */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { beforeAll, describe, expect, it } from "vitest";
 
+import initWasm, * as wasm from "../../../wasm/lakko_ffi_wasm";
 import {
   decodeSyncState,
   encodeSyncState,
   isEmptySyncState,
   SYNC_STATE_VERSION,
-  type SyncStateSnapshot,
+  type SyncStateRow,
 } from "./sync-state-store";
+import type { StampedEdit } from "../../chat/folders/folder-model";
+import { projectSyncedState } from "./synced-projection";
 
-const EMPTY: SyncStateSnapshot = { drafts: {}, flags: {}, readCursors: {}, order: null };
+beforeAll(async () => {
+  const path = fileURLToPath(new URL("../../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
+  await initWasm({ module_or_path: readFileSync(path) });
+});
 
-const full: SyncStateSnapshot = {
-  drafts: {
-    aa: { text: "half a sentence", replyToId: new Uint8Array([1, 2, 3]), updatedAtHlc: 7n },
-    bb: { text: "", replyToId: new Uint8Array(0), updatedAtHlc: 1n },
+const GROUP = new Uint8Array(32).fill(0xab);
+const FOLDER_HEX = "11".repeat(16);
+
+const pendingBatch: StampedEdit[] = [
+  {
+    t: "meta",
+    hlc: 5n,
+    folderIdHex: FOLDER_HEX,
+    name: "Work",
+    includeKinds: 2,
+    excludeFlags: 4,
   },
-  flags: {
-    aa: {
-      pinned: true,
-      muted: false,
-      archived: false,
-      unreadOverride: true,
-      updatedAtHlc: 9n,
-    },
-  },
-  readCursors: {
-    aa: {
-      upToMessageId: new Uint8Array([9, 9]),
-      readAtMs: 1_700_000_000_000n,
-      updatedAtHlc: 11n,
-    },
-  },
-  order: { groupIds: [new Uint8Array([1]), new Uint8Array([2])], updatedAtHlc: 13n },
-};
+  { t: "member", hlc: 6n, folderIdHex: FOLDER_HEX, ref: { kind: 3, id: new Uint8Array([1, 2]) }, state: 1 },
+  { t: "pins", hlc: 7n, folderIdHex: FOLDER_HEX, pinned: [{ kind: 2, id: GROUP }] },
+  { t: "removed", hlc: 8n, folderIdHex: FOLDER_HEX },
+  { t: "order", hlc: 9n, folderIdsHex: [FOLDER_HEX] },
+];
 
 describe("encode / decode", () => {
-  it("round-trips everything a reload used to lose", () => {
-    const back = decodeSyncState(encodeSyncState(full));
-    expect(back).toEqual(full);
+  it("round-trips the fold, so a reload restores what was folded", () => {
+    const s = new wasm.SyncedState();
+    s.applyFlags(9n, GROUP, true, true, false, false);
+    s.applyDraft(7n, GROUP, "half a sentence", new Uint8Array([1, 2, 3]));
+    s.applyReadCursor(11n, GROUP, new Uint8Array([9, 9]), 1_700_000_000_000n);
+    const row: SyncStateRow = { synced: s.toBytes(), pending: [] };
+    const back = decodeSyncState(encodeSyncState(row));
+    expect(back).not.toBeNull();
+    const restored = wasm.SyncedState.fromBytes(back!.synced);
+    const p = projectSyncedState(restored);
+    const hex = "ab".repeat(32);
+    expect(p.flags[hex]).toEqual({
+      pinned: true,
+      muted: true,
+      archived: false,
+      unreadOverride: false,
+      updatedAtHlc: 9n,
+    });
+    expect(p.drafts[hex]?.text).toBe("half a sentence");
+    expect(p.readCursors[hex]?.readAtMs).toBe(1_700_000_000_000n);
   });
 
-  it("keeps the HLC exactly, because it is what decides who wins", () => {
-    // The restored snapshot is folded against the journal by HLC. A stamp
-    // that came back as a float, or rounded, would let a stale sibling write
-    // overwrite a newer local one.
-    const big = 2n ** 63n - 1n;
+  it("keeps every kind of pending folder edit, stamps exact", () => {
+    const back = decodeSyncState(
+      encodeSyncState({ synced: new Uint8Array(0), pending: [pendingBatch] }),
+    );
+    expect(back?.pending).toEqual([pendingBatch]);
+  });
+
+  it("keeps a stamp at the top of the u64 range exactly", () => {
+    const big = 2n ** 64n - 1n;
     const back = decodeSyncState(
       encodeSyncState({
-        ...EMPTY,
-        flags: {
-          aa: {
-            pinned: true,
-            muted: false,
-            archived: false,
-            unreadOverride: false,
-            updatedAtHlc: big,
-          },
-        },
+        synced: new Uint8Array(0),
+        pending: [[{ t: "removed", hlc: big, folderIdHex: FOLDER_HEX }]],
       }),
     );
-    expect(back?.flags.aa?.updatedAtHlc).toBe(big);
-  });
-
-  it("round-trips an empty snapshot", () => {
-    expect(decodeSyncState(encodeSyncState(EMPTY))).toEqual(EMPTY);
-  });
-
-  it("refuses a payload that is not this schema", () => {
-    expect(decodeSyncState("not json")).toBeNull();
-    expect(decodeSyncState("null")).toBeNull();
-    expect(decodeSyncState(JSON.stringify({ v: SYNC_STATE_VERSION + 1 }))).toBeNull();
-  });
-
-  it("tolerates a payload missing whole sections", () => {
-    // A row written by a build that carried fewer maps reads as empty ones
-    // rather than as no row at all.
-    expect(decodeSyncState(JSON.stringify({ v: SYNC_STATE_VERSION }))).toEqual(EMPTY);
+    expect(back?.pending[0]?.[0]?.hlc).toBe(big);
   });
 });
 
-describe("a malformed entry", () => {
-  it("is dropped without taking the rest of the snapshot with it", () => {
-    // Losing one chat's pin is better than losing every chat's, and the poll
-    // can refill a single entry from a sibling's next write.
-    const wire = JSON.parse(encodeSyncState(full)) as Record<string, unknown>;
-    (wire["f"] as Record<string, unknown>)["broken"] = { p: "yes", h: "1" };
-    const back = decodeSyncState(JSON.stringify(wire));
-    expect(back?.flags.broken).toBeUndefined();
-    expect(back?.flags.aa?.pinned).toBe(true);
-    expect(Object.keys(back?.drafts ?? {})).toHaveLength(2);
+describe("what is refused", () => {
+  it("a row from the version before the Rust fold", () => {
+    expect(decodeSyncState(JSON.stringify({ v: 1, d: {}, f: {}, c: {}, o: null }))).toBeNull();
+    expect(SYNC_STATE_VERSION).toBe(2);
   });
 
-  it("drops a draft whose HLC is not a number, and only that draft", () => {
-    // Asserting the survivor as well as the casualty: a decoder that gave up
-    // on the whole snapshot would satisfy the first half alone.
-    const wire = JSON.parse(encodeSyncState(full)) as {
-      d: Record<string, Record<string, unknown>>;
-    };
-    const aa = wire.d["aa"];
-    if (aa === undefined) throw new Error("fixture lost its draft");
-    aa["h"] = "later";
-    const back = decodeSyncState(JSON.stringify(wire));
-    expect(back?.drafts.aa).toBeUndefined();
-    expect(back?.drafts.bb?.text).toBe("");
-    expect(back?.flags.aa?.pinned).toBe(true);
+  it("anything that is not a row", () => {
+    for (const bad of ["", "null", "[]", "{", '{"v":2}', '{"v":2,"s":7}']) {
+      expect(decodeSyncState(bad)).toBeNull();
+    }
   });
 
-  it("drops the WHOLE order when one id is unreadable", () => {
-    // The order is one value, not a map: keeping the readable ids would
-    // silently reorder the chat list rather than leave it alone.
-    const wire = JSON.parse(encodeSyncState(full)) as Record<string, unknown>;
-    (wire["o"] as { g: unknown[] }).g[1] = "!!!not base64!!!";
-    expect(decodeSyncState(JSON.stringify(wire))?.order).toBeNull();
+  it("a pending batch with one bad register is dropped whole, the others kept", () => {
+    const json = encodeSyncState({ synced: new Uint8Array(0), pending: [pendingBatch, pendingBatch] });
+    const parsed = JSON.parse(json) as { p: { s?: number }[][] };
+    const first = parsed.p[0];
+    if (first !== undefined && first[1] !== undefined) first[1].s = 9;
+    const back = decodeSyncState(JSON.stringify(parsed));
+    expect(back?.pending).toEqual([pendingBatch]);
   });
 });
 
 describe("isEmptySyncState", () => {
-  it("is true for a snapshot with nothing in it", () => {
-    expect(isEmptySyncState(EMPTY)).toBe(true);
-  });
-
-  it("is false when any one map holds something", () => {
-    expect(isEmptySyncState(full)).toBe(false);
-    expect(isEmptySyncState({ ...EMPTY, order: full.order })).toBe(false);
-    expect(isEmptySyncState({ ...EMPTY, drafts: full.drafts })).toBe(false);
+  it("is empty with no fold and nothing waiting", () => {
+    expect(isEmptySyncState({ synced: new Uint8Array(0), pending: [] })).toBe(true);
+    expect(isEmptySyncState({ synced: new Uint8Array(1), pending: [] })).toBe(false);
+    expect(isEmptySyncState({ synced: new Uint8Array(0), pending: [pendingBatch] })).toBe(false);
   });
 });

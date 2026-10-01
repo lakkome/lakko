@@ -11,7 +11,7 @@ import me.lakko.app.profile.ProfileDirectory
  * Chats vs Groups — docs/ux/client-redesign.md section 3.
  *
  * The kind itself lives in [me.lakko.app.chat.ConversationKind] and is read
- * from the group ([ChatRepository.conversationKind], ADR-0060); this alias
+ * from the group ([ChatRepository.conversationKind], ADR-0062); this alias
  * keeps the UI-side name the screens already use. Presentation only: nothing
  * here touches the MLS state.
  */
@@ -23,7 +23,7 @@ public typealias ConversationKind = me.lakko.app.chat.ConversationKind
  * The group NAME does not live here: since ADR-0051 a name is a fact shared
  * inside the group and is stored per `(account, group)` in
  * [me.lakko.app.chat.GroupNameStore]. The per-device "created as a group"
- * flag that used to live here is gone since ADR-0060 — the kind is read from
+ * flag that used to live here is gone since ADR-0062 — the kind is read from
  * the group, the same on every member's device.
  */
 public object GroupPresentationStore {
@@ -31,13 +31,13 @@ public object GroupPresentationStore {
     public const val MAX_NAME_CHARS: Int = 64
 }
 
-/** Which list a conversation belongs to — read from the group (ADR-0060). */
+/** Which list a conversation belongs to — read from the group (ADR-0062). */
 public fun conversationKind(
     repository: ChatRepository,
     groupIdHex: String,
 ): ConversationKind = repository.conversationKind(groupIdHex)
 
-/** `true` when the conversation is a group (ADR-0060 kind). */
+/** `true` when the conversation is a group (ADR-0062 kind). */
 public fun isGroupConversation(
     repository: ChatRepository,
     groupIdHex: String,

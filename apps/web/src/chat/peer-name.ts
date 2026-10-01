@@ -12,7 +12,7 @@
  * a linked contact's rename still names an accept-created chat.
  *
  * Which of the two a conversation IS follows the kind the conversation carries
- * (ADR-0060, `conversation-kind.ts`), not the member count: a two-person GROUP is titled
+ * (ADR-0062, `conversation-kind.ts`), not the member count: a two-person GROUP is titled
  * as a group (ADR-0051 shared name first, then the member-derived title), the
  * same way the list files it, so a rename reaches the header, the confirmations
  * and the ringing banner. Without `isGroup` the two-member roster used to win
@@ -34,7 +34,7 @@ export interface PeerNameInputs {
   /** The chat's label — for a group, already resolved with the ADR-0051
    *  precedence (shared name, else the label, else the members' names). */
   readonly label: string;
-  /** `true` when the conversation is filed as a GROUP (the kind the conversation carries, ADR-0060),
+  /** `true` when the conversation is filed as a GROUP (the kind the conversation carries, ADR-0062),
    *  whatever its size: the peer-name branches are skipped and `label` is
    *  the title. Defaults to the size-based rule. */
   readonly isGroup?: boolean;

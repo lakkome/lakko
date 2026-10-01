@@ -100,7 +100,9 @@ public final class BackupClient {
         /// The MLS `group_id`s this device knows about, hex as the repository
         /// holds them. The index the snapshot cannot supply: a restored
         /// provider holds every group and offers no way to enumerate them.
-        knownGroupIdsHex: [String] = []
+        knownGroupIdsHex: [String] = [],
+        /// ADR-0058 section 5.2 — `SyncedState.toBytes()`, or `nil`.
+        syncedState: Data? = nil
     ) async throws {
         let payloadBytes = try buildBackupPayload(
             accountId: accountId,
@@ -111,7 +113,8 @@ public final class BackupClient {
             // A row that is not a group id is dropped rather than failing the
             // backup: one malformed local entry must not cost the whole
             // envelope.
-            knownGroupIds: knownGroupIdsHex.compactMap(Self.groupIdBytes(fromHex:))
+            knownGroupIds: knownGroupIdsHex.compactMap(Self.groupIdBytes(fromHex:)),
+            syncedState: syncedState
         )
         let envelope = try sealBackup(phrase: phraseBytes, payloadBytes: payloadBytes)
         let (blob, floor) = await frameWithHead(envelope: envelope)
@@ -159,7 +162,8 @@ public final class BackupClient {
         ed25519Seed: Data,
         contacts: [BackupContactRecord],
         wholeStorageSnapshot: Data = Data(),
-        knownGroupIdsHex: [String] = []
+        knownGroupIdsHex: [String] = [],
+        syncedState: Data? = nil
     ) async -> UploadResult {
         let cachedOrNil: Data?
         do {
@@ -185,7 +189,8 @@ public final class BackupClient {
                 phraseBytes: phraseBytes,
                 contacts: contacts,
                 wholeStorageSnapshot: wholeStorageSnapshot,
-                knownGroupIdsHex: knownGroupIdsHex
+                knownGroupIdsHex: knownGroupIdsHex,
+                syncedState: syncedState
             )
             return .uploaded
         } catch {

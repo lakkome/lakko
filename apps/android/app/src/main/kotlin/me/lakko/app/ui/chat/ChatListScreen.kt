@@ -7,6 +7,8 @@ import android.text.format.DateFormat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,10 +24,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Groups
@@ -59,6 +67,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -73,7 +82,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import me.lakko.app.calls.quietOffer
 import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.chat.ChatFolder
 import me.lakko.app.chat.ChatMessage
+import me.lakko.app.chat.FolderActions
+import me.lakko.app.chat.FolderLimits
+import me.lakko.app.chat.folderRows
+import me.lakko.app.chat.membershipToggle
+import me.lakko.app.chat.membershipToggleBlocked
+import me.lakko.app.chat.rowsMatching
+import me.lakko.app.chat.selectedTabIndex
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
 import me.lakko.app.chat.ConversationListRow
@@ -86,6 +103,7 @@ import me.lakko.app.chat.findByName
 import me.lakko.app.chat.findByNameMessage
 import me.lakko.app.chat.findByNameRowLabel
 import me.lakko.app.chat.orderConversationRows
+import me.lakko.app.chat.showsEmptyConversationState
 import me.lakko.app.chat.toRowKind
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.devices.sync.FlagsState
@@ -94,6 +112,7 @@ import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.channels.channelRowModel
 import me.lakko.app.ui.components.LakkoAvatar
+import uniffi.lakko_ffi_uniffi.FolderView
 import java.time.ZoneId
 import java.util.Locale
 
@@ -146,23 +165,28 @@ public fun ChatListScreen(
      * its slot and adds no state of its own.
      */
     callHost: me.lakko.app.calls.OneToOneCallHost<*>? = null,
+    /** `docs/ux/chat-folders.md` 2.2 — the folder editor for one folder. */
+    onEditFolder: (folderIdHex: String) -> Unit = {},
+    /** UX spec 5 — "New folder..." from a row: the editor with that chat
+     *  already added (`null` for an empty editor). */
+    onNewFolder: (firstRow: ConversationListRow?) -> Unit = {},
+    /** UX spec 2.2 — Settings > Chat folders ("Edit folders", "Reorder folders"). */
+    onOpenFolderSettings: () -> Unit = {},
+    /**
+     * `docs/ux/who-can-find-me.md` section 6.1 — people in the search field:
+     * the people this device knows as the person types, and the one **Search
+     * people** row (username, name, contacts of contacts, and the channel
+     * namespace). `null` keeps the plain lookup row (tests, previews).
+     */
+    peopleSearch: me.lakko.app.search.PeopleSearchService? = null,
+    /** A contact row of the people results: open their chat. */
+    onOpenContact: (keyB64: String) -> Unit = {},
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    // ADR-0048 UX §5 — a two-member chat is listed under the other person's
-    // resolved name; a group under its local name or its members' names.
-    val directory = remember(repository) { ProfileDirectory.get(repository.context) }
-    val nameVersion by directory.version.collectAsStateWithLifecycle()
-    // ADR-0051 — a shared group name accepted on a poll re-titles the row.
-    val groupNameVersion by me.lakko.app.chat.GroupNameStore.version.collectAsStateWithLifecycle()
     val flagsState = deviceGroupSync?.flags?.collectAsStateWithLifecycle()
     val flagsMap: Map<String, FlagsState> = flagsState?.value ?: emptyMap()
-    val readCursorState = deviceGroupSync?.readCursors?.collectAsStateWithLifecycle()
-    val readCursorMap: Map<String, ReadCursorState> = readCursorState?.value ?: emptyMap()
-    val channelHandles = channels?.channels?.collectAsStateWithLifecycle()?.value ?: emptyList()
-    val channelPosts = channels?.postsByChannel?.collectAsStateWithLifecycle()?.value ?: emptyMap()
-    val channelKeys = channels?.keysByChannel?.collectAsStateWithLifecycle()?.value ?: emptyMap()
     var refreshing by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     var createMenuOpen by remember { mutableStateOf(false) }
@@ -193,6 +217,330 @@ public fun ChatListScreen(
         // long poll across every group runs app-wide from `MainActivity`.
         repository.pollAllGroups()
     }
+
+    // Every conversation, unordered: the one source for All chats, every
+    // folder, the folder editor and the picker.
+    val allRows = rememberConversationRows(repository, channels, deviceGroupSync)
+
+    val rows = remember(allRows) { orderConversationRows(allRows) }
+    val visible = remember(rows, query) {
+        rows.filter { conversationRowMatchesQuery(query, it.title, it.preview) }
+    }
+    val synchronizing = remember(state) { repository.isSynchronizing() }
+
+    // docs/ux/chat-folders.md — the person's folders, in their order.
+    val noFolders = remember { MutableStateFlow<List<FolderView>>(emptyList()) }
+    val folderViews by (deviceGroupSync?.folders ?: noFolders).collectAsStateWithLifecycle()
+    val folders = remember(folderViews) { folderViews.map(ChatFolder::of) }
+    val actions = remember(deviceGroupSync, repository) {
+        deviceGroupSync?.let { FolderActions(it, repository) }
+    }
+    val searching = query.isNotBlank()
+    // docs/ux/navigation.md section 4 / chat-folders.md — no folder bar over an
+    // empty list (the web client never showed one), and none while searching.
+    val showBar = folders.isNotEmpty() && !searching && rows.isNotEmpty()
+
+    // Section 2.5 — the tab last selected on THIS device, not synced; a folder
+    // deleted since (on any device) opens All chats.
+    var selectedFolderId by rememberSaveable { mutableStateOf(FolderTabPrefs.load(context)) }
+    val pagerState = rememberPagerState(
+        initialPage = selectedTabIndex(selectedFolderId, folders),
+    ) { 1 + folders.size }
+    LaunchedEffect(folders) {
+        val target = selectedTabIndex(selectedFolderId, folders)
+        if (target == 0 && selectedFolderId != null) {
+            selectedFolderId = null
+            FolderTabPrefs.save(context, null)
+        }
+        if (pagerState.currentPage != target) pagerState.scrollToPage(target)
+    }
+    LaunchedEffect(pagerState, folders) {
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            val id = folders.getOrNull(page - 1)?.idHex
+            if (id != selectedFolderId) {
+                selectedFolderId = id
+                FolderTabPrefs.save(context, id)
+            }
+        }
+    }
+
+    // `docs/ux/navigation.md` section 4.3 — ONE network lookup row, offered
+    // when nothing local matched and the text could be a name. It asks both
+    // namespaces because the person typing does not know which one holds the
+    // name they were given.
+    var lookupBusy by remember { mutableStateOf(false) }
+    var lookupNote by remember { mutableStateOf<String?>(null) }
+    val lookupOffered = remember(visible, query) {
+        visible.isEmpty() && query.isNotBlank() && looksLikeANameSafely(query)
+    }
+
+    var deletingFolder by remember { mutableStateOf<ChatFolder?>(null) }
+
+    // One set of row handlers for every tab; [folder] is the tab the row sits
+    // in (`null` = All chats), which is the pin set the row menu's Pin acts on.
+    val rowHandlers = RowHandlers(
+        folders = folders,
+        foldersEnabled = actions != null,
+        inFolder = { folder, row -> rowsMatching(folder.rule, listOf(row)).isNotEmpty() },
+        onToggleFlag = { row, field ->
+            toggleFlag(
+                sync = deviceGroupSync,
+                groupIdHex = row.id,
+                current = flagsMap[row.id],
+                field = field,
+                scope = scope,
+            )
+        },
+        onToggleFolderPin = { folder, row ->
+            scope.launch { actions?.togglePin(folder, row) }
+        },
+        onToggleMembership = { folder, row, inFolder ->
+            scope.launch { actions?.toggleMembership(folder, row, inFolder) }
+        },
+        onNewFolderWith = { row -> onNewFolder(row) },
+        onOpenThread = onOpenThread,
+        onOpenChannel = onOpenChannel,
+        quietCallOffer = quietCallOffer,
+        onAcceptCall = { withVideo -> callHost?.accept(withVideo = withVideo) },
+        onDeclineCall = { callHost?.decline() },
+    )
+
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = { Text("Chats") },
+                actions = {
+                    Box {
+                        IconButton(onClick = { createMenuOpen = true }) {
+                            Icon(Icons.Filled.Edit, contentDescription = "New")
+                        }
+                        CreateMenu(
+                            expanded = createMenuOpen,
+                            onDismiss = { createMenuOpen = false },
+                            onNewChat = onNewChat,
+                            onCreateGroup = onCreateGroup,
+                            onCreateChannel = onCreateChannel,
+                        )
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = {
+                scope.launch {
+                    refreshing = true
+                    try {
+                        repository.pollAllGroups()
+                    } catch (_: Throwable) {
+                        // The next automatic pass reports through the row state.
+                    } finally {
+                        refreshing = false
+                    }
+                }
+            },
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                SearchField(
+                    query = query,
+                    onQueryChange = {
+                        query = it
+                        lookupNote = null
+                    },
+                )
+                // ADR-0050 / docs/ux/second-device.md section 2: one label while
+                // this device is still being admitted to the account's chats.
+                if (synchronizing) {
+                    Text(
+                        "Synchronizing...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
+                }
+                // docs/ux/chat-folders.md 2.1 — the bar exists once one folder
+                // does; a search hides it and searches everything (2.4).
+                if (showBar) {
+                    FolderBar(
+                        folders = folders,
+                        rows = allRows,
+                        selectedIndex = pagerState.currentPage,
+                        onSelect = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
+                        onEditFolder = { onEditFolder(it.idHex) },
+                        onMarkAllRead = { tabRows -> scope.launch { actions?.markAllRead(tabRows) } },
+                        onReorder = onOpenFolderSettings,
+                        onDelete = { deletingFolder = it },
+                        onEditFolders = onOpenFolderSettings,
+                    )
+                }
+                when {
+                    // Cold start: the MLS restore that populates the list runs
+                    // off the main thread after the first frame, so an empty
+                    // list before it finishes is "loading", not "no chats".
+                    rows.isEmpty() && !state.bootstrapped -> Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                    // The empty state's button opens the SAME menu the compose
+                    // button does, not a different set of choices in a
+                    // different place. Only while nothing is typed: with an
+                    // empty list a search still reaches the people half below
+                    // (docs/ux/navigation.md section 4, "Also with an empty
+                    // list").
+                    showsEmptyConversationState(rows.isEmpty(), query) && !showBar ->
+                        EmptyPanel(onStart = { createMenuOpen = true })
+                    // UX who-can-find-me 6.1 — the people half of the search
+                    // field replaces the plain lookup row when it is wired.
+                    searching && visible.isEmpty() && peopleSearch != null -> Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        PeopleSearchSection(
+                            query = query,
+                            service = peopleSearch,
+                            conversationMatches = 0,
+                            onOpenChannel = { id, handle ->
+                                query = ""
+                                onSubscribeToChannel(id, handle)
+                            },
+                            onOpenContact = { key ->
+                                query = ""
+                                onOpenContact(key)
+                            },
+                        )
+                    }
+                    searching && visible.isEmpty() -> NoMatchPanel(
+                        offerLookup = lookupOffered,
+                        label = findByNameRowLabelSafely(query),
+                        busy = lookupBusy,
+                        note = lookupNote,
+                        onLookUp = {
+                            if (!lookupBusy) {
+                                lookupBusy = true
+                                lookupNote = null
+                                val typed = query
+                                scope.launch {
+                                    val found = lookUpName(typed)
+                                    lookupBusy = false
+                                    when (found) {
+                                        is FoundByName.Channel -> {
+                                            query = ""
+                                            onSubscribeToChannel(
+                                                found.channelIdHex,
+                                                found.handle,
+                                            )
+                                        }
+                                        is FoundByName.Person -> {
+                                            query = ""
+                                            onFoundPerson(found.username)
+                                        }
+                                        else -> lookupNote =
+                                            findByNameMessageSafely(found, typed)
+                                    }
+                                }
+                            }
+                        },
+                    )
+                    searching || !showBar -> ConversationList(
+                        rows = visible,
+                        folder = null,
+                        handlers = rowHandlers,
+                        // UX who-can-find-me 6.1 — people under the matching
+                        // conversations.
+                        footer = if (searching && peopleSearch != null) {
+                            {
+                                PeopleSearchSection(
+                                    query = query,
+                                    service = peopleSearch,
+                                    conversationMatches = visible.size,
+                                    onOpenChannel = { id, handle ->
+                                        query = ""
+                                        onSubscribeToChannel(id, handle)
+                                    },
+                                    onOpenContact = { key ->
+                                        query = ""
+                                        onOpenContact(key)
+                                    },
+                                )
+                            }
+                        } else {
+                            null
+                        },
+                    )
+                    // Android: the list pages sideways in step with the tabs.
+                    else -> HorizontalPager(
+                        state = pagerState,
+                        modifier = Modifier.fillMaxSize(),
+                        key = { page -> if (page == 0) "all" else folders.getOrNull(page - 1)?.idHex ?: "gone-$page" },
+                    ) { page ->
+                        val folder = folders.getOrNull(page - 1)
+                        if (folder == null) {
+                            if (rows.isEmpty()) {
+                                EmptyPanel(onStart = { createMenuOpen = true })
+                            } else {
+                                ConversationList(rows = rows, folder = null, handlers = rowHandlers)
+                            }
+                        } else {
+                            val inFolder = remember(folder, allRows) { folderRows(folder, allRows) }
+                            if (inFolder.isEmpty()) {
+                                EmptyFolderPanel(onEdit = { onEditFolder(folder.idHex) })
+                            } else {
+                                ConversationList(rows = inFolder, folder = folder, handlers = rowHandlers)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    deletingFolder?.let { folder ->
+        DeleteFolderDialog(
+            folder = folder,
+            onDismiss = { deletingFolder = null },
+            onConfirm = {
+                deletingFolder = null
+                scope.launch { actions?.delete(folder) }
+            },
+        )
+    }
+}
+
+/**
+ * Every conversation this device holds - chats, groups and channels - as the
+ * rows Compose draws, NOT yet ordered. One place builds them, for the merged
+ * list, every folder, the folder editor's live count and the chat picker, so
+ * a chat cannot be in a folder on one screen and missing from it on another.
+ */
+@Composable
+internal fun rememberConversationRows(
+    repository: ChatRepository,
+    channels: ChannelsUiState?,
+    deviceGroupSync: DeviceGroupSyncRepository?,
+): List<ConversationListRow> {
+    val state by repository.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    // ADR-0048 UX §5 — a two-member chat is listed under the other person's
+    // resolved name; a group under its local name or its members' names.
+    val directory = remember(repository) { ProfileDirectory.get(repository.context) }
+    val nameVersion by directory.version.collectAsStateWithLifecycle()
+    // ADR-0051 — a shared group name accepted on a poll re-titles the row.
+    val groupNameVersion by me.lakko.app.chat.GroupNameStore.version.collectAsStateWithLifecycle()
+    val flagsState = deviceGroupSync?.flags?.collectAsStateWithLifecycle()
+    val flagsMap: Map<String, FlagsState> = flagsState?.value ?: emptyMap()
+    val readCursorState = deviceGroupSync?.readCursors?.collectAsStateWithLifecycle()
+    val readCursorMap: Map<String, ReadCursorState> = readCursorState?.value ?: emptyMap()
+    val channelHandles = channels?.channels?.collectAsStateWithLifecycle()?.value ?: emptyList()
+    val channelPosts = channels?.postsByChannel?.collectAsStateWithLifecycle()?.value ?: emptyMap()
+    val channelKeys = channels?.keysByChannel?.collectAsStateWithLifecycle()?.value ?: emptyMap()
 
     val zone = remember { ZoneId.systemDefault() }
     val locale = remember { Locale.getDefault() }
@@ -274,184 +622,83 @@ public fun ChatListScreen(
             )
         }
     }
+    return remember(threadRows, channelRows) { threadRows + channelRows }
+}
 
-    val rows = remember(threadRows, channelRows) {
-        orderConversationRows(threadRows + channelRows)
-    }
-    val visible = remember(rows, query) {
-        rows.filter { conversationRowMatchesQuery(query, it.title, it.preview) }
-    }
-    val synchronizing = remember(state) { repository.isSynchronizing() }
+/** What a row can do, shared by every tab. */
+internal class RowHandlers(
+    val folders: List<ChatFolder>,
+    /** `false` while the sync runtime is not there: no folder items. */
+    val foldersEnabled: Boolean,
+    val inFolder: (ChatFolder, ConversationListRow) -> Boolean,
+    val onToggleFlag: (ConversationListRow, FlagField) -> Unit,
+    val onToggleFolderPin: (ChatFolder, ConversationListRow) -> Unit,
+    val onToggleMembership: (ChatFolder, ConversationListRow, Boolean) -> Unit,
+    val onNewFolderWith: (ConversationListRow) -> Unit,
+    val onOpenThread: (String) -> Unit,
+    val onOpenChannel: (String) -> Unit,
+    val quietCallOffer: me.lakko.app.calls.QuietCallOffer?,
+    val onAcceptCall: (Boolean) -> Unit,
+    val onDeclineCall: () -> Unit,
+)
 
-    // `docs/ux/navigation.md` section 4.3 — ONE network lookup row, offered
-    // when nothing local matched and the text could be a name. It asks both
-    // namespaces because the person typing does not know which one holds the
-    // name they were given.
-    var lookupBusy by remember { mutableStateOf(false) }
-    var lookupNote by remember { mutableStateOf<String?>(null) }
-    val lookupOffered = remember(visible, query) {
-        visible.isEmpty() && query.isNotBlank() && looksLikeANameSafely(query)
-    }
-
-    Scaffold(
-        modifier = modifier,
-        topBar = {
-            TopAppBar(
-                title = { Text("Chats") },
-                actions = {
-                    Box {
-                        IconButton(onClick = { createMenuOpen = true }) {
-                            Icon(Icons.Filled.Edit, contentDescription = "New")
-                        }
-                        CreateMenu(
-                            expanded = createMenuOpen,
-                            onDismiss = { createMenuOpen = false },
-                            onNewChat = onNewChat,
-                            onCreateGroup = onCreateGroup,
-                            onCreateChannel = onCreateChannel,
-                        )
-                    }
-                },
-            )
-        },
-    ) { padding ->
-        PullToRefreshBox(
-            isRefreshing = refreshing,
-            onRefresh = {
-                scope.launch {
-                    refreshing = true
-                    try {
-                        repository.pollAllGroups()
-                    } catch (_: Throwable) {
-                        // The next automatic pass reports through the row state.
-                    } finally {
-                        refreshing = false
-                    }
-                }
-            },
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                SearchField(
-                    query = query,
-                    onQueryChange = {
-                        query = it
-                        lookupNote = null
-                    },
+/** One tab's rows. [folder] is the tab (`null` = All chats). */
+@Composable
+private fun ConversationList(
+    rows: List<ConversationListRow>,
+    folder: ChatFolder?,
+    handlers: RowHandlers,
+    /** Drawn after the last row (the people search while searching). */
+    footer: (@Composable () -> Unit)? = null,
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(vertical = 4.dp),
+    ) {
+        items(items = rows, key = { "${it.kind}:${it.id}" }) { row ->
+            val menu = RowMenuModel(row = row, folder = folder, handlers = handlers)
+            if (row.kind == ConversationRowKind.CHANNEL) {
+                // Same avatar, same title, same second line as every other
+                // row. What it does NOT have is the badge, the glyphs and the
+                // flag items — all keyed on a conversation id a channel does
+                // not carry. Its menu holds only the folder items.
+                ChannelRow(row = row, menu = menu, onClick = { handlers.onOpenChannel(row.id) })
+            } else {
+                SwipeableThreadRow(
+                    row = row,
+                    menu = menu,
+                    onClick = { handlers.onOpenThread(row.id) },
+                    // Section 2.1.1 — the row carries Accept and Decline for
+                    // exactly the conversation the muted call is ringing in,
+                    // and for no other.
+                    quietCallOffer = handlers.quietCallOffer?.takeIf { it.isFor(row.id) },
+                    // The same two entry points the full-screen ring screen
+                    // drives.
+                    onAcceptCall = handlers.onAcceptCall,
+                    onDeclineCall = handlers.onDeclineCall,
                 )
-                // ADR-0050 / docs/ux/second-device.md section 2: one label while
-                // this device is still being admitted to the account's chats.
-                if (synchronizing) {
-                    Text(
-                        "Synchronizing...",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
-                }
-                when {
-                    // Cold start: the MLS restore that populates the list runs
-                    // off the main thread after the first frame, so an empty
-                    // list before it finishes is "loading", not "no chats".
-                    rows.isEmpty() && !state.bootstrapped -> Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CircularProgressIndicator()
-                    }
-                    // The empty state's button opens the SAME menu the compose
-                    // button does, not a different set of choices in a
-                    // different place.
-                    rows.isEmpty() -> EmptyPanel(onStart = { createMenuOpen = true })
-                    else -> Column(modifier = Modifier.fillMaxSize()) {
-                        if (visible.isEmpty()) {
-                            NoMatchPanel(
-                                offerLookup = lookupOffered,
-                                label = findByNameRowLabelSafely(query),
-                                busy = lookupBusy,
-                                note = lookupNote,
-                                onLookUp = {
-                                    if (!lookupBusy) {
-                                        lookupBusy = true
-                                        lookupNote = null
-                                        val typed = query
-                                        scope.launch {
-                                            val found = lookUpName(typed)
-                                            lookupBusy = false
-                                            when (found) {
-                                                is FoundByName.Channel -> {
-                                                    query = ""
-                                                    onSubscribeToChannel(
-                                                        found.channelIdHex,
-                                                        found.handle,
-                                                    )
-                                                }
-                                                is FoundByName.Person -> {
-                                                    query = ""
-                                                    onFoundPerson(found.username)
-                                                }
-                                                else -> lookupNote =
-                                                    findByNameMessageSafely(found, typed)
-                                            }
-                                        }
-                                    }
-                                },
-                            )
-                        } else {
-                            LazyColumn(
-                                modifier = Modifier.fillMaxSize(),
-                                contentPadding = PaddingValues(vertical = 4.dp),
-                            ) {
-                                items(items = visible, key = { "${it.kind}:${it.id}" }) { row ->
-                                    if (row.kind == ConversationRowKind.CHANNEL) {
-                                        // Same avatar, same title, same second
-                                        // line as every other row. What it does
-                                        // NOT have is the badge, the glyphs and
-                                        // the row menu — all keyed on a
-                                        // conversation id a channel does not
-                                        // carry.
-                                        ConversationRowBody(
-                                            row = row,
-                                            modifier = Modifier.clickable {
-                                                onOpenChannel(row.id)
-                                            },
-                                        )
-                                    } else {
-                                        val toggle: (FlagField) -> Unit = { field ->
-                                            toggleFlag(
-                                                sync = deviceGroupSync,
-                                                groupIdHex = row.id,
-                                                current = flagsMap[row.id],
-                                                field = field,
-                                                scope = scope,
-                                            )
-                                        }
-                                        SwipeableThreadRow(
-                                            row = row,
-                                            onClick = { onOpenThread(row.id) },
-                                            onToggleFlag = toggle,
-                                            // Section 2.1.1 — the row carries
-                                            // Accept and Decline for exactly
-                                            // the conversation the muted call
-                                            // is ringing in, and for no other.
-                                            quietCallOffer = quietCallOffer?.takeIf { it.isFor(row.id) },
-                                            // The same two entry points the
-                                            // full-screen ring screen drives.
-                                            onAcceptCall = { withVideo ->
-                                                callHost?.accept(withVideo = withVideo)
-                                            },
-                                            onDeclineCall = { callHost?.decline() },
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
+        if (footer != null) {
+            item(key = "people-search") { footer() }
+        }
+    }
+}
+
+/** A channel row: tap opens it, long press opens the folder items. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ChannelRow(row: ConversationListRow, menu: RowMenuModel, onClick: () -> Unit) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Box {
+        ConversationRowBody(
+            row = row,
+            modifier = Modifier.combinedClickable(
+                onClick = onClick,
+                onLongClick = { if (menu.hasItems) menuOpen = true },
+            ),
+        )
+        RowMenu(expanded = menuOpen, onDismiss = { menuOpen = false }, model = menu)
     }
 }
 
@@ -640,6 +887,8 @@ internal fun threadConversationRows(
         pinned = flags?.pinned == true,
         muted = flags?.muted == true,
         archived = flags?.archived == true,
+        unreadOverride = flags?.unreadOverride == true && !thread.membershipEnded,
+        membershipEnded = thread.membershipEnded,
     )
 }
 
@@ -687,7 +936,7 @@ internal fun rowPreview(
  *     the chat was not on screen ([ChatThread.localUnread]). Without it a chat
  *     with no cursor never showed a badge, whatever arrived. */
 internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
-    // ADR-0058 section 5 — a message the feed showed is read, whether or not
+    // ADR-0061 section 5 — a message the feed showed is read, whether or not
     // the chat was opened: its id sits in `feedSeen` or under the feed's own
     // watermark.
     val feedThrough = thread.feedSeenThrough
@@ -772,13 +1021,14 @@ internal fun SearchField(query: String, onQueryChange: (String) -> Unit) {
  * A row with its swipe actions: right (start to end) pins or unpins, left (end
  * to start) archives or unarchives. The row always snaps back — the swipe is
  * a command, not a dismissal — so `confirmValueChange` refuses every settle.
+ * Inside a folder the pin swipe acts on the folder's own pins, like the menu.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SwipeableThreadRow(
     row: ConversationListRow,
+    menu: RowMenuModel,
     onClick: () -> Unit,
-    onToggleFlag: (FlagField) -> Unit,
     quietCallOffer: me.lakko.app.calls.QuietCallOffer? = null,
     onAcceptCall: (withVideo: Boolean) -> Unit = {},
     onDeclineCall: () -> Unit = {},
@@ -786,8 +1036,8 @@ private fun SwipeableThreadRow(
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
             when (value) {
-                SwipeToDismissBoxValue.StartToEnd -> onToggleFlag(FlagField.Pin)
-                SwipeToDismissBoxValue.EndToStart -> onToggleFlag(FlagField.Archive)
+                SwipeToDismissBoxValue.StartToEnd -> if (menu.pinEnabled) menu.onPin()
+                SwipeToDismissBoxValue.EndToStart -> menu.onFlag(FlagField.Archive)
                 SwipeToDismissBoxValue.Settled -> Unit
             }
             false
@@ -836,8 +1086,8 @@ private fun SwipeableThreadRow(
         Box(modifier = Modifier.background(MaterialTheme.colorScheme.background)) {
             ThreadRow(
                 row = row,
+                menu = menu,
                 onClick = onClick,
-                onToggleFlag = onToggleFlag,
                 quietCallOffer = quietCallOffer,
                 onAcceptCall = onAcceptCall,
                 onDeclineCall = onDeclineCall,
@@ -850,8 +1100,8 @@ private fun SwipeableThreadRow(
 @Composable
 private fun ThreadRow(
     row: ConversationListRow,
+    menu: RowMenuModel,
     onClick: () -> Unit,
-    onToggleFlag: (FlagField) -> Unit,
     quietCallOffer: me.lakko.app.calls.QuietCallOffer? = null,
     onAcceptCall: (withVideo: Boolean) -> Unit = {},
     onDeclineCall: () -> Unit = {},
@@ -880,29 +1130,165 @@ private fun ThreadRow(
                 )
             }
         }
-        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-            DropdownMenuItem(
-                text = { Text(if (row.pinned) "Unpin" else "Pin") },
-                leadingIcon = { Icon(Icons.Filled.PushPin, contentDescription = null) },
-                onClick = { menuOpen = false; onToggleFlag(FlagField.Pin) },
-            )
-            DropdownMenuItem(
-                text = { Text(if (row.muted) "Unmute" else "Mute") },
-                leadingIcon = { Icon(Icons.Filled.NotificationsOff, contentDescription = null) },
-                onClick = { menuOpen = false; onToggleFlag(FlagField.Mute) },
-            )
-            DropdownMenuItem(
-                text = { Text(if (row.archived) "Unarchive" else "Archive") },
-                leadingIcon = {
-                    Icon(
-                        if (row.archived) Icons.Filled.Unarchive else Icons.Filled.Archive,
-                        contentDescription = null,
+        RowMenu(expanded = menuOpen, onDismiss = { menuOpen = false }, model = menu)
+    }
+}
+
+/**
+ * The row menu's state for one row in one tab: which pin set Pin acts on,
+ * which folders the row is in, and what each item does.
+ */
+internal class RowMenuModel(
+    val row: ConversationListRow,
+    /** The tab the row sits in; `null` = All chats. */
+    val folder: ChatFolder?,
+    private val handlers: RowHandlers,
+) {
+    private val isChannel = row.kind == ConversationRowKind.CHANNEL
+
+    /** Pin / Unpin shows for a chat or group everywhere, and for a channel
+     *  inside a folder (a folder's pins name any conversation). */
+    val showPin: Boolean = folder != null || !isChannel
+
+    /** Pinned in the pin set this tab uses. */
+    val pinned: Boolean = row.pinned
+
+    /** UX spec 3.4 — ten pins per folder. */
+    val pinEnabled: Boolean = folder == null || pinned || folder.pinned.size < FolderLimits.MAX_PINS
+
+    val showFlags: Boolean = !isChannel
+    val showFolderItems: Boolean = handlers.foldersEnabled
+    val folders: List<ChatFolder> = handlers.folders
+    val canCreateFolder: Boolean = handlers.folders.size < FolderLimits.MAX_FOLDERS
+
+    val hasItems: Boolean get() = showPin || showFlags || showFolderItems
+
+    fun onPin() {
+        if (folder != null) handlers.onToggleFolderPin(folder, row) else handlers.onToggleFlag(row, FlagField.Pin)
+    }
+
+    fun onFlag(field: FlagField) {
+        if (!isChannel) handlers.onToggleFlag(row, field)
+    }
+
+    fun isIn(f: ChatFolder): Boolean = handlers.inFolder(f, row)
+
+    /** Whether tapping [f] in the list would pass a hand-list limit. */
+    fun blocked(f: ChatFolder): Boolean {
+        val state = membershipToggle(f, row, isIn(f)) ?: return false
+        return membershipToggleBlocked(f, row, state)
+    }
+
+    fun toggle(f: ChatFolder) = handlers.onToggleMembership(f, row, isIn(f))
+
+    fun newFolder() = handlers.onNewFolderWith(row)
+}
+
+/**
+ * The long-press menu. "Add to folder" is a second step of the same dropdown
+ * on Android (`docs/ux/chat-folders.md` 5): the folders with a checkmark where
+ * the chat is in them, then "New folder...".
+ */
+@Composable
+private fun RowMenu(expanded: Boolean, onDismiss: () -> Unit, model: RowMenuModel) {
+    var folderStep by remember { mutableStateOf(false) }
+    val close = {
+        folderStep = false
+        onDismiss()
+    }
+    DropdownMenu(expanded = expanded, onDismissRequest = close) {
+        if (!folderStep) {
+            if (model.showPin) {
+                DropdownMenuItem(
+                    text = { Text(if (model.pinned) "Unpin" else "Pin") },
+                    leadingIcon = { Icon(Icons.Filled.PushPin, contentDescription = null) },
+                    enabled = model.pinEnabled,
+                    onClick = { close(); model.onPin() },
+                )
+                if (!model.pinEnabled) {
+                    MenuHelperLine("You can pin up to 10 chats in a folder.")
+                }
+            }
+            if (model.showFlags) {
+                DropdownMenuItem(
+                    text = { Text(if (model.row.muted) "Unmute" else "Mute") },
+                    leadingIcon = { Icon(Icons.Filled.NotificationsOff, contentDescription = null) },
+                    onClick = { close(); model.onFlag(FlagField.Mute) },
+                )
+                DropdownMenuItem(
+                    text = { Text(if (model.row.archived) "Unarchive" else "Archive") },
+                    leadingIcon = {
+                        Icon(
+                            if (model.row.archived) Icons.Filled.Unarchive else Icons.Filled.Archive,
+                            contentDescription = null,
+                        )
+                    },
+                    onClick = { close(); model.onFlag(FlagField.Archive) },
+                )
+            }
+            if (model.showFolderItems) {
+                DropdownMenuItem(
+                    text = { Text("Add to folder") },
+                    leadingIcon = { Icon(Icons.Filled.Folder, contentDescription = null) },
+                    // With no folders yet it goes straight to the editor, as
+                    // "New folder..." would.
+                    enabled = model.folders.isNotEmpty() || model.canCreateFolder,
+                    onClick = {
+                        if (model.folders.isEmpty()) {
+                            close()
+                            model.newFolder()
+                        } else {
+                            folderStep = true
+                        }
+                    },
+                )
+                val tab = model.folder
+                if (tab != null) {
+                    DropdownMenuItem(
+                        text = { Text("Remove from folder") },
+                        leadingIcon = { Icon(Icons.Filled.FolderOff, contentDescription = null) },
+                        onClick = { close(); model.toggle(tab) },
                     )
-                },
-                onClick = { menuOpen = false; onToggleFlag(FlagField.Archive) },
+                }
+            }
+        } else {
+            for (f in model.folders) {
+                val checked = model.isIn(f)
+                val blocked = model.blocked(f)
+                DropdownMenuItem(
+                    text = { Text(f.name) },
+                    leadingIcon = {
+                        if (checked) {
+                            Icon(Icons.Filled.Check, contentDescription = "In this folder")
+                        } else {
+                            Spacer(Modifier.size(24.dp))
+                        }
+                    },
+                    enabled = !blocked,
+                    onClick = { close(); model.toggle(f) },
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("New folder...") },
+                leadingIcon = { Icon(Icons.Filled.CreateNewFolder, contentDescription = null) },
+                enabled = model.canCreateFolder,
+                onClick = { close(); model.newFolder() },
             )
+            if (!model.canCreateFolder) {
+                MenuHelperLine("You can have up to 20 folders.")
+            }
         }
     }
+}
+
+@Composable
+private fun MenuHelperLine(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp).width(220.dp),
+    )
 }
 
 /**

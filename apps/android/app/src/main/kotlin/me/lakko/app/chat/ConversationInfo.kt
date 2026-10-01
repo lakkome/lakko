@@ -65,7 +65,7 @@ public data class ContactLink(
  * Which info [groupIdHex] opens.
  *
  * The group test is the same one the header's own shape uses: the kind read
- * from the group (ADR-0060). It is never derived from the people count — a
+ * from the group (ADR-0062). It is never derived from the people count — a
  * two-person group is a group, and a one-to-one cannot grow.
  *
  * A one-to-one is then matched to a contact by the CHAT first and by the

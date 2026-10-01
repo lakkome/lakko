@@ -661,7 +661,7 @@ public final class ChatViewModel: ObservableObject {
     /// ``groupCallAffordance(nowMs:)`` rather than reading this directly.
     @Published private(set) var ongoingGroupCall: OngoingGroupCall?
 
-    /// ADR-0060 — the list this conversation belongs to, read from the
+    /// ADR-0062 — the list this conversation belongs to, read from the
     /// group's own GroupContext (`Group.groupKind()`), the same answer on
     /// every member's device and fixed at creation. It decides everything
     /// that distinguishes a one-to-one from a group: sender names in bubbles,
@@ -2607,7 +2607,7 @@ public final class ChatViewModel: ObservableObject {
         return entries[index].messageId
     }
 
-    /// Whether this conversation is a one-to-one (its ADR-0060 kind — a
+    /// Whether this conversation is a one-to-one (its ADR-0062 kind — a
     /// two-person group is not one), which is what turns `Pin for everyone`
     /// into `Pin for both`.
     var isOneToOneForPins: Bool {
@@ -2921,7 +2921,7 @@ public final class ChatViewModel: ObservableObject {
             return "Several people are typing…"
         }
         let who = typers[0]
-        // A one-to-one (its ADR-0060 kind) reads as a bare "typing…" —
+        // A one-to-one (its ADR-0062 kind) reads as a bare "typing…" —
         // naming the sole peer adds nothing. A two-person group names them.
         if !isGroupChat {
             return "typing…"

@@ -41,6 +41,21 @@ export const DEVICE_REQUEST_LIMITED =
 export const SIGNUP_RATE_LIMITED =
   "Too many new accounts from this network right now. Try again later.";
 
+/** `handle-bind-limited` (`PUT /auth/login-handle`, added 2026-09-28):
+ *  choosing or changing a username too often. In minutes, rounded up; over
+ *  an hour (or with no wait given) it says "later" instead of a number. */
+export function handleBindLimitedMessage(retryAfterSecs: number | null): string {
+  const lead = "You have changed your username too often.";
+  if (retryAfterSecs === null || retryAfterSecs > 3600) return `${lead} Try again later.`;
+  const minutes = Math.max(1, Math.ceil(retryAfterSecs / 60));
+  return `${lead} Try again in ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`;
+}
+
+/** `true` when `err` is auth's `429 handle-bind-limited`. */
+export function isHandleBindLimited(err: unknown): boolean {
+  return err instanceof AuthHttpError && err.status === 429 && err.errorCode === "handle-bind-limited";
+}
+
 /** The attempts copy, in minutes when the server asks for more than one. */
 export function tooManyAttemptsMessage(retryAfterSecs: number | null): string {
   if (retryAfterSecs !== null && retryAfterSecs > 60) {
@@ -66,6 +81,8 @@ export function authLimitMessage(err: unknown): string | null {
       return DEVICE_REQUEST_LIMITED;
     case "signup-rate-limited":
       return SIGNUP_RATE_LIMITED;
+    case "handle-bind-limited":
+      return handleBindLimitedMessage(err.retryAfter);
     default:
       return tooManyAttemptsMessage(err.retryAfter);
   }

@@ -68,6 +68,9 @@ public final class ContactsViewModel: ObservableObject {
     // MARK: - Wiring
 
     private let repository: ContactsRepository
+
+    /// The key the per-account invite link secrets are read under.
+    var inviteAccountIdB64: String? { repository.inviteAccountIdB64 }
     /// Optional bridge to the chat surface. When non-nil,
     /// ``onAcceptClicked(messageId:)`` drives
     /// ``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:)``
@@ -181,7 +184,7 @@ public final class ContactsViewModel: ObservableObject {
                 )
             } catch let err as ContactsError {
                 sending = false
-                sendError = userFacing(err)
+                sendError = Self.userFacing(err)
             } catch {
                 sending = false
                 sendError = (error as? LocalizedError)?.errorDescription
@@ -260,27 +263,12 @@ public final class ContactsViewModel: ObservableObject {
         let pending = repository.state.pending.first { $0.messageId == messageId }
         guard let pending = pending else { return }
 
-        // 1.9b1: ship a ContactAck back to the original sender's
-        // mailbox so their UI can flip from "pending" to
-        // "accepted" without waiting on the Welcome arrival.
-        // Best-effort — a network failure here doesn't unwind the
-        // local accept (the user already trusted the peer); we
-        // log and move on. The signed ack is independent of MLS
-        // state, so the sender can light up their address book
-        // even if the group-creation step below stalls.
-        Task {
-            do {
-                _ = try await repository.sendContactAck(request: pending)
-            } catch {
-                // best-effort
-            }
-        }
-
         guard let chatRepository = chatRepository,
               let fromAccountId = pending.fromAccountId else {
             // No chat bridge wired OR v1 legacy envelope without a
             // sender account-id — fall back to the local-marker
             // semantics.
+            Task { await sendAckBestEffort(pending) }
             repository.acceptContactRequest(messageId: messageId)
             return
         }
@@ -302,6 +290,27 @@ public final class ContactsViewModel: ObservableObject {
                 messageId: messageId,
                 groupIdHex: groupIdHex
             )
+            // AFTER the chat's Welcome, never before it: see
+            // ``sendAckBestEffort(_:)``.
+            await sendAckBestEffort(pending)
+        }
+    }
+
+    /// 1.9b1: ship a ContactAck back to the original sender's mailbox so
+    /// their UI can flip from "pending" to "accepted". Best-effort — a
+    /// network failure here doesn't unwind the local accept.
+    ///
+    /// Sent once the 1:1 chat's Welcome has been written. Both are written
+    /// with the requester's `reply` grant (ADR-0060 section 6), and a
+    /// requester closes that key as soon as the ack arrives: an ack sent
+    /// first (or in parallel) let an online requester close the key before
+    /// the Welcome landed, and the Welcome was refused (seen live on web
+    /// 2026-09-30).
+    private func sendAckBestEffort(_ pending: IncomingContactRequest) async {
+        do {
+            _ = try await repository.sendContactAck(request: pending)
+        } catch {
+            // best-effort
         }
     }
 
@@ -421,7 +430,7 @@ public final class ContactsViewModel: ObservableObject {
                 await loadActiveInvites()
             } catch let err as ContactsError {
                 generatingInvite = false
-                inviteError = userFacing(err)
+                inviteError = Self.userFacing(err)
             } catch {
                 generatingInvite = false
                 inviteError = (error as? LocalizedError)?.errorDescription
@@ -438,7 +447,7 @@ public final class ContactsViewModel: ObservableObject {
             do {
                 _ = try await repository.revokeInviteLink(blobId: blobId)
             } catch let err as ContactsError {
-                inviteError = userFacing(err)
+                inviteError = Self.userFacing(err)
             } catch {
                 inviteError = (error as? LocalizedError)?.errorDescription
                     ?? "Revoke failed."
@@ -490,7 +499,7 @@ public final class ContactsViewModel: ObservableObject {
             }
             activeInvitesLoaded = true
         } catch let err as ContactsError {
-            activeInvitesError = userFacing(err)
+            activeInvitesError = Self.userFacing(err)
         } catch {
             activeInvitesError = (error as? LocalizedError)?.errorDescription
                 ?? "Could not load invites."
@@ -517,7 +526,7 @@ public final class ContactsViewModel: ObservableObject {
                 _ = try await repository.revokeInviteLink(blobId: blobId)
                 activeInvites = activeInvites.filter { $0.blobIdSlug != slug }
             } catch let err as ContactsError {
-                activeInvitesError = userFacing(err)
+                activeInvitesError = Self.userFacing(err)
             } catch {
                 activeInvitesError = (error as? LocalizedError)?.errorDescription
                     ?? "Revoke failed."
@@ -527,10 +536,15 @@ public final class ContactsViewModel: ObservableObject {
 
     // MARK: - Error mapping
 
-    private func userFacing(_ err: ContactsError) -> String {
+    /// The copy for a contacts error. `static` and internal so the copy is
+    /// pinned in a unit test.
+    static func userFacing(_ err: ContactsError) -> String {
         switch err {
-        case .usernameUnknown(let normalised):
-            return "@\(normalised) is not registered on Lakko."
+        case .usernameUnknown:
+            // `docs/ux/who-can-find-me.md` section 6.1, "Not found": the same
+            // answer whether the name is unregistered or its owner does not
+            // let this person find them (ADR-0060). Never claim which.
+            return "No one found. Check the spelling, or ask them for an invite link."
         case .noIdentityBundle:
             return "That account has no identity bundle yet — ask them to open the app once."
         case .wrapped(let cause):
@@ -538,6 +552,9 @@ public final class ContactsViewModel: ObservableObject {
             if let search = AnonTokenCopy.searchMessage(for: cause) { return search }
             return (cause as? LocalizedError)?.errorDescription
                 ?? String(describing: cause)
+        case .requestRefused:
+            // `docs/ux/who-can-find-me.md` section 6.1, "Request refused".
+            return "Couldn't send the request. They may have changed who can find them."
         }
     }
 

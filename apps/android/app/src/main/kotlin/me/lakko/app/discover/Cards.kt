@@ -11,7 +11,7 @@ import kotlinx.serialization.Serializable
  * card must pass before it can be subscribed to. Mirror of
  * `apps/web/src/discover/cards.ts`.
  *
- * Ranking for the person happens here, not in the ADR-0058 engine: the engine
+ * Ranking for the person happens here, not in the ADR-0061 engine: the engine
  * ranks messages of conversations the device holds, and a card is none of
  * those. [scoreCard] is a small local scorer over what a card carries; integer
  * arithmetic, chosen weights (not measured), identical to web.

@@ -5,7 +5,7 @@ import Foundation
 import LakkoCore
 
 /// The feed's input, assembled from what this device already holds
-/// (ADR-0058 section 1, `docs/ux/feed.md` section 9). Mirror of web
+/// (ADR-0061 section 1, `docs/ux/feed.md` section 9). Mirror of web
 /// `feed/feed-model.ts`.
 ///
 /// The ranking is not here: it is `lakko-feed` in Rust, reached through

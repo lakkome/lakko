@@ -5,7 +5,7 @@ import LakkoCore
 import SwiftUI
 import UIKit
 
-/// The Feed destination (`docs/ux/feed.md`, ADR-0058). Mirror of web
+/// The Feed destination (`docs/ux/feed.md`, ADR-0061). Mirror of web
 /// `routes/Feed.tsx`.
 ///
 /// What is here: the feed switcher (presets, saved feeds, New feed), Edit and

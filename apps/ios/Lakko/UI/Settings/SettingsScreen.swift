@@ -27,14 +27,16 @@ struct SettingsScreen: View {
         authRepository: AuthRepository,
         onOpen: @escaping (TabRoute) -> Void,
         onLogout: @escaping () -> Void,
-        onForgetDevice: @escaping () -> Void
+        onForgetDevice: @escaping () -> Void,
+        onAccountDeleted: @escaping (String) -> Void
     ) {
         self.account = account
         self.onOpen = onOpen
         self.onLogout = onLogout
         self.onForgetDevice = onForgetDevice
         self._accountDeletion = StateObject(
-            wrappedValue: PasskeysViewModel(authRepository: authRepository))
+            wrappedValue: PasskeysViewModel(
+                authRepository: authRepository, wipeAfterDeletion: onAccountDeleted))
     }
     /// ADR-0047 / UX spec section 3 — "Autoplay video notes", default OFF:
     /// autoplay downloads media, so it is the user's choice, per device.
@@ -111,6 +113,13 @@ struct SettingsScreen: View {
                 row("Profile", systemImage: "person.crop.circle") { onOpen(.profile) }
             }
 
+            // `docs/ux/who-can-find-me.md` section 2 — Privacy, after Profile.
+            Section("Privacy") {
+                row("Who can find me", systemImage: "person.2.badge.gearshape") {
+                    onOpen(.whoCanFindMe)
+                }
+            }
+
             Section("Security") {
                 row("Passkeys", systemImage: "person.badge.key") { onOpen(.passkeys) }
                 row("Devices", systemImage: "laptopcomputer.and.iphone") { onOpen(.devices) }
@@ -120,6 +129,12 @@ struct SettingsScreen: View {
                 row("Channels I share", systemImage: "dot.radiowaves.left.and.right") {
                     onOpen(.channelsIShare)
                 }
+            }
+
+            // `docs/ux/chat-folders.md` section 4 — between Notifications
+            // (not a section on this client) and Appearance.
+            Section {
+                row("Chat folders", systemImage: "folder") { onOpen(.chatFolders(reorder: false)) }
             }
 
             Section("Appearance") {

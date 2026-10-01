@@ -285,7 +285,9 @@ impl RoleTable {
 /// have; the two coexist by design and neither subsumes the other.
 ///
 /// Rank orders the authorised committers; it does not widen them. The set that
-/// may commit is exactly ADR-0022's owner-plus-admins, unchanged.
+/// may commit the **whole** pending set is exactly ADR-0022's owner-plus-admins,
+/// unchanged. ADR-0050 section 2.5a ranks the remaining member accounts after
+/// them for device admissions only — see [`account_committer_rank`].
 #[must_use]
 pub fn committer_rank(table: &RoleTable, pubkey: &[u8]) -> Option<u32> {
     if table.is_owner(pubkey) {
@@ -298,6 +300,60 @@ pub fn committer_rank(table: &RoleTable, pubkey: &[u8]) -> Option<u32> {
     // `admins` is capped at MAX_ADMINS (256), so neither conversion nor the
     // increment can overflow; both are written fallibly rather than asserted.
     u32::try_from(position).ok()?.checked_add(1)
+}
+
+/// The ADR-0050 section 2.5a **account rank** of `account`: the owner and the
+/// admins exactly as [`committer_rank`] ranks them, and every other member
+/// account `n + 1 + i`, where `n` is the number of admins in the table and `i`
+/// is the account's position among the **non-admin** member accounts of
+/// `roster_accounts`, sorted bytewise and deduplicated.
+///
+/// `roster_accounts` is the account key of every leaf in the epoch's roster
+/// (one entry per leaf, so an account with several devices appears several
+/// times; duplicates collapse). Entries that are not 32 bytes long — a leaf
+/// whose credential resolved to nothing — are ignored, and so is any account
+/// the table already ranks as owner or admin.
+///
+/// Like [`committer_rank`] this is a pure, total function of state every
+/// member holds identically (the authenticated role table and the roster at
+/// one epoch), so every peer derives the same rank for the same account; and
+/// like it, it ranks **account keys, never leaf indices** (C-68), so reusing a
+/// vacated leaf renumbers nobody. Ranks are a permutation: owner `0`, admins
+/// `1..=n`, member accounts `n + 1 ..= n + m`, no two accounts sharing one.
+///
+/// **Having a rank is not permission to commit.** A member account's rank only
+/// orders the members that may sweep **device admissions** (section 2.5a);
+/// which proposals a sweeper may carry is decided by
+/// `Group::stage_pending_proposals`, not here. `None` for an account that is
+/// neither in the table nor in the roster, or a wrong-length key.
+#[must_use]
+pub fn account_committer_rank<'a, I>(
+    table: &RoleTable,
+    roster_accounts: I,
+    account: &[u8],
+) -> Option<u32>
+where
+    I: IntoIterator<Item = &'a [u8]>,
+{
+    if let Some(rank) = committer_rank(table, account) {
+        return Some(rank);
+    }
+    if account.len() != PUBKEY_LEN {
+        return None;
+    }
+    let mut plain: Vec<&[u8]> = roster_accounts
+        .into_iter()
+        .filter(|a| a.len() == PUBKEY_LEN && committer_rank(table, a).is_none())
+        .collect();
+    plain.sort_unstable();
+    plain.dedup();
+    let position = plain.iter().position(|a| *a == account)?;
+    // Admins are capped at MAX_ADMINS and member accounts by the roster size,
+    // so these cannot overflow; written fallibly rather than asserted.
+    u32::try_from(table.admins().len())
+        .ok()?
+        .checked_add(1)?
+        .checked_add(u32::try_from(position).ok()?)
 }
 
 #[cfg(test)]
@@ -477,6 +533,53 @@ mod tests {
         let b = RoleTable::new(pk(9), vec![pk(2), pk(3), pk(1), pk(1)]);
         for key in [pk(9), pk(1), pk(2), pk(3), pk(7)] {
             assert_eq!(committer_rank(&a, &key), committer_rank(&b, &key));
+        }
+    }
+
+    #[test]
+    fn account_rank_puts_member_accounts_after_the_admins_in_key_order() {
+        // ADR-0050 section 2.5a: owner 0, admins 1..=n, then every other
+        // member account in bytewise key order, deduplicated, ignoring the
+        // owner/admins and any malformed (non-32-byte) entry.
+        let t = RoleTable::new(pk(9), vec![pk(4), pk(2)]);
+        let roster: Vec<Vec<u8>> = vec![
+            pk(7).to_vec(),
+            pk(9).to_vec(), // owner
+            pk(5).to_vec(),
+            pk(2).to_vec(), // admin
+            pk(7).to_vec(), // a second leaf of the same account
+            vec![1, 2, 3],  // a leaf that resolved to nothing
+            pk(1).to_vec(),
+        ];
+        let rank = |k: &[u8]| account_committer_rank(&t, roster.iter().map(Vec::as_slice), k);
+        assert_eq!(rank(&pk(9)), Some(0), "owner");
+        assert_eq!(rank(&pk(2)), Some(1), "first admin");
+        assert_eq!(
+            rank(&pk(4)),
+            Some(2),
+            "second admin, even if not in the roster"
+        );
+        assert_eq!(rank(&pk(1)), Some(3), "first member account");
+        assert_eq!(rank(&pk(5)), Some(4));
+        assert_eq!(rank(&pk(7)), Some(5), "two leaves, one rank");
+        assert_eq!(rank(&pk(8)), None, "not in the roster");
+        assert_eq!(rank(&[1, 2, 3]), None, "wrong length");
+
+        // Permutation: the ranks of the distinct accounts are 0..=5, no gaps.
+        let mut ranks: Vec<u32> = [pk(9), pk(2), pk(4), pk(1), pk(5), pk(7)]
+            .iter()
+            .filter_map(|k| rank(k))
+            .collect();
+        ranks.sort_unstable();
+        assert_eq!(ranks, (0..=5).collect::<Vec<_>>());
+
+        // Independent of the order the roster is listed in.
+        let reversed: Vec<&[u8]> = roster.iter().rev().map(Vec::as_slice).collect();
+        for k in [pk(1), pk(5), pk(7)] {
+            assert_eq!(
+                account_committer_rank(&t, reversed.iter().copied(), &k),
+                rank(&k)
+            );
         }
     }
 

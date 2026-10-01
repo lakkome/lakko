@@ -104,7 +104,7 @@ export function mergeForegroundSlot(
   });
   const lastViewed = maxBigintString(slot?.lastViewedMessageId, newest);
   // The feed's seen ids above the new watermark survive the view's write;
-  // the ones it now covers are dropped (ADR-0058 section 5).
+  // the ones it now covers are dropped (ADR-0061 section 5).
   const through = lastViewed === undefined ? null : BigInt(lastViewed);
   const feedSeen = (slot?.feedSeen ?? []).filter((id) => {
     try {
@@ -179,7 +179,7 @@ export function summarizeGroupSlot(
       // Unparseable: ignore, keep the synced position.
     }
   }
-  // ADR-0058 section 5 - a message the feed showed is not unread.
+  // ADR-0061 section 5 - a message the feed showed is not unread.
   const feedSeen = new Set(slot?.feedSeen ?? []);
   let unread = 0;
   for (const m of messages) {
@@ -271,4 +271,18 @@ export function eventToPersistedMessage(
     attachments: [],
     createdAt: e.createdAt,
   };
+}
+
+/**
+ * The highest DS message id in a slot, or `null` for an empty one. What "Mark
+ * all as read" (`docs/ux/chat-folders.md` 2.2) moves the read cursor to - the
+ * same cursor opening the chat moves.
+ */
+export function newestMessageId(slot: PersistedGroup | undefined): bigint | null {
+  let best: bigint | null = null;
+  for (const m of slot?.messages ?? []) {
+    const id = idOf(m);
+    if (id !== null && (best === null || id > best)) best = id;
+  }
+  return best;
 }

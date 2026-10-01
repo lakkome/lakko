@@ -3,7 +3,7 @@
 
 /**
  * IndexedDB-backed encrypted store for the per-account channel-post log
- * (ADR-0058 section 3). Same shape as `channels/channel-log-store.ts`: one
+ * (ADR-0061 section 3). Same shape as `channels/channel-log-store.ts`: one
  * row per account, the JSON payload (`channel-post-log.ts`) sealed with
  * AES-GCM under the device root key.
  *

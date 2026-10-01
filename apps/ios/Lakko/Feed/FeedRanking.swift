@@ -12,7 +12,7 @@ struct RankedFeedItem: Equatable {
     var key: String { ref.key }
 }
 
-/// The one ranking, reached through the UniFFI core (ADR-0058). Mirror of web
+/// The one ranking, reached through the UniFFI core (ADR-0061). Mirror of web
 /// `feed/feed-ranking.ts`.
 ///
 /// The order lives in `lakko-feed` so web, iOS and Android draw the same

@@ -677,7 +677,7 @@ public class ChatViewModel(
         }
     }
 
-    /** `true` when this conversation is a group (ADR-0060, read from the
+    /** `true` when this conversation is a group (ADR-0062, read from the
      *  group itself) — the call button then routes through the SFU
      *  group-call path, even for a two-person group; a one-to-one stays on
      *  the 1x1 P2P call. A group this device cannot classify yet (no
@@ -1827,7 +1827,7 @@ public class ChatViewModel(
         repo.oneToOnePeerKey(groupIdHex)?.let { me.lakko.app.auth.base64UrlEncodeNoPad(it) }
 
     /**
-     * UX section 3 — the conversation kind, read from the group (ADR-0060):
+     * UX section 3 — the conversation kind, read from the group (ADR-0062):
      * fixed by its creator, the same on every member's device.
      */
     public fun conversationKind(): me.lakko.app.chat.ConversationKind =
@@ -2596,7 +2596,7 @@ public class ChatViewModel(
         val own = repo.ownMemberIdentity(groupIdHex)
         val others = typingMembers.filter { it != own }
         if (others.isEmpty()) return null
-        // 1×1 (ADR-0060 kind): the only other person is the typist, so a
+        // 1×1 (ADR-0062 kind): the only other person is the typist, so a
         // single other typist needs no name. A two-person GROUP still names.
         val isOneToOne = repo.conversationKind(groupIdHex) == me.lakko.app.chat.ConversationKind.Chat
         if (others.size == 1) {
@@ -3324,7 +3324,7 @@ public class ChatViewModel(
 
         /** Finished takes waiting to be read by their upload (see
          *  [sendRecordedTake]). */
-        private const val MEDIA_OUTBOX_DIR: String = "chat-media-outbox"
+        internal const val MEDIA_OUTBOX_DIR: String = "chat-media-outbox"
     }
 
     /** VM-local composer + transient flags. Persistent timeline

@@ -251,7 +251,7 @@ mod tests {
             .connect(&url)
             .await
             .expect("connect test DB");
-        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        crate::anon_token_route_tests::migrate_once(&pool).await;
 
         // A first row under a fresh id.
         let first = insert_with_fresh_id("group_invites", |id| {

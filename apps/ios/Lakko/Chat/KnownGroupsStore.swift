@@ -120,7 +120,7 @@ public final class KnownGroupsStore {
 
     /// Wipe the entire set for `accountIdB64` from **both** the shared
     /// suite and `.standard`. Called from
-    /// ``ChatRepository/forgetDevice()`` — same posture as the
+    /// ``AccountLocalDataWipe`` — same posture as the
     /// ``IdentitySnapshotStore/deleteSnapshot(accountIdB64:)``
     /// wipe (per-account, best-effort, no error surfaced if the
     /// row is already absent).

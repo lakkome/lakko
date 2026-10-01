@@ -49,14 +49,17 @@ fn prune_envelope_map_to_n(map: &mut BTreeMap<u32, Vec<u8>>, keep_n: usize) {
     }
 }
 
-/// 32-byte subscriber X25519 public key, used as the
-/// subscriber's identifier on the wire. Stored as 64-char
-/// lowercase hex in URLs; this type is the parsed binary
-/// form. The server NEVER does Diffie-Hellman against this
-/// key — it only matches identities in the registry. The
-/// publisher derives the per-subscriber HPKE envelope
-/// using this same pubkey (see
-/// [`lakko_channels::subscribe::seal_seed`]).
+/// 32-byte subscriber Ed25519 public key (ADR-0060), used
+/// as the subscriber's identifier on the wire. Stored as
+/// 64-char lowercase hex in URLs; this type is the parsed
+/// binary form. The server NEVER does Diffie-Hellman against
+/// this key — it only matches identities in the registry and
+/// verifies the subscriber's member-card signatures under it.
+/// The publisher seals the per-subscriber seed envelope to
+/// its X25519 image (see
+/// [`lakko_channels::subscribe::seal_seed`]). The
+/// registration route refuses a key that is not a valid
+/// Ed25519 point of full order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SubscriberId([u8; 32]);
 
@@ -94,7 +97,7 @@ impl SubscriberId {
     }
 
     /// Borrow the underlying bytes — the subscriber's
-    /// X25519 public key, ready for
+    /// Ed25519 public key, ready for
     /// `lakko_channels::subscribe::seal_seed`.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -318,6 +321,26 @@ pub enum StorageError {
     /// The operator blocked this channel from the directory.
     #[error("channel is blocked from the directory")]
     ListingBlocked,
+    /// A member card names an epoch greater than the channel's
+    /// `current_epoch` (ADR-0060): a card is sealed under a seed a reader
+    /// already holds, never a future one.
+    #[error("member card epoch {got} is in the future (current epoch is {current})")]
+    MemberCardEpochInFuture {
+        /// The channel's live epoch at refusal time.
+        current: u32,
+        /// The epoch the card carries.
+        got: u32,
+    },
+    /// A member card names an epoch lower than the card it would replace
+    /// (ADR-0060): a card only ever moves forward, so a replayed old card
+    /// cannot roll a subscriber's profile back to a retired seed.
+    #[error("member card epoch {got} is older than the stored card's {stored}")]
+    MemberCardStale {
+        /// The stored card's epoch.
+        stored: u32,
+        /// The epoch the refused card carries.
+        got: u32,
+    },
     /// Database-level failure — connection lost, query
     /// timeout, constraint violation, anything sqlx
     /// surfaces. The string carries the underlying
@@ -629,6 +652,63 @@ pub trait ChannelStore: Send + Sync {
         channel: ChannelId,
         target_epoch: u32,
     ) -> Result<u32, StorageError>;
+
+    /// Store `(channel, subscriber)`'s member card (ADR-0060), replacing the
+    /// previous one. `epoch` is the card's clear epoch, read by the caller;
+    /// the card itself is opaque.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`], [`StorageError::UnknownSubscriber`],
+    /// [`StorageError::MemberCardEpochInFuture`] (`epoch > current_epoch`),
+    /// [`StorageError::MemberCardStale`] (`epoch` below the stored card's).
+    async fn put_member_card(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        epoch: u32,
+        card: Vec<u8>,
+    ) -> Result<(), StorageError>;
+
+    /// Delete `(channel, subscriber)`'s member card. Idempotent: an absent
+    /// card (or subscriber) is not an error.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`].
+    async fn delete_member_card(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<(), StorageError>;
+
+    /// A page of member cards, ascending by subscriber key, starting
+    /// strictly after `after` (from the beginning when `None`), at most
+    /// `limit`.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`].
+    async fn list_member_cards(
+        &self,
+        channel: ChannelId,
+        after: Option<SubscriberId>,
+        limit: usize,
+    ) -> Result<Vec<(SubscriberId, Vec<u8>)>, StorageError>;
+
+    /// Remove `(channel, subscriber)` (ADR-0060 unsubscribe): the subscriber
+    /// row, every retained seed envelope, the member card and any staged
+    /// envelope for it, in one step. Idempotent: an absent subscriber is not
+    /// an error.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownChannel`].
+    async fn unsubscribe(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<(), StorageError>;
 }
 
 /// In-memory state container. Cheap to clone — the inner
@@ -700,6 +780,9 @@ struct Inner {
     /// torn rotation is observable mid-stage) and re-staging
     /// the same key is an idempotent overwrite (resumability).
     staged_envelopes: HashMap<(ChannelId, u32), HashMap<SubscriberId, Vec<u8>>>,
+    /// Channel id → (subscriber → (epoch, opaque member card)), ADR-0060.
+    /// A `BTreeMap` so a page in subscriber-key order is a range scan.
+    member_cards: HashMap<ChannelId, BTreeMap<SubscriberId, (u32, Vec<u8>)>>,
     /// Channel id → owner key (ADR-0059 section 1).
     owners: HashMap<ChannelId, [u8; OWNER_PUBKEY_LEN]>,
     /// Channel id → (subscriber → first registration time). Kept across
@@ -955,6 +1038,9 @@ impl ChannelStore for InMemoryChannelStore {
             guard.envelopes.remove(&(channel, sub));
             if let Some(map) = guard.registered_at.get_mut(&channel) {
                 map.remove(&sub);
+            }
+            if let Some(cards) = guard.member_cards.get_mut(&channel) {
+                cards.remove(&sub);
             }
         }
         Ok(removed)
@@ -1501,6 +1587,110 @@ impl ChannelStore for InMemoryChannelStore {
             .moderation
             .insert(channel, (blocked, reason.to_string(), now_ms));
         Ok(())
+    }
+
+    async fn put_member_card(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        epoch: u32,
+        card: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        if !guard
+            .subscribers
+            .get(&channel)
+            .is_some_and(|set| set.contains_key(&subscriber))
+        {
+            return Err(StorageError::UnknownSubscriber);
+        }
+        let current = guard.current_epoch.get(&channel).copied().unwrap_or(0);
+        if epoch > current {
+            return Err(StorageError::MemberCardEpochInFuture {
+                current,
+                got: epoch,
+            });
+        }
+        let cards = guard.member_cards.entry(channel).or_default();
+        if let Some((stored, _)) = cards.get(&subscriber) {
+            if epoch < *stored {
+                return Err(StorageError::MemberCardStale {
+                    stored: *stored,
+                    got: epoch,
+                });
+            }
+        }
+        cards.insert(subscriber, (epoch, card));
+        Ok(())
+    }
+
+    async fn delete_member_card(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        if let Some(cards) = guard.member_cards.get_mut(&channel) {
+            cards.remove(&subscriber);
+        }
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        if let Some(set) = guard.subscribers.get_mut(&channel) {
+            set.remove(&subscriber);
+        }
+        guard.envelopes.remove(&(channel, subscriber));
+        if let Some(cards) = guard.member_cards.get_mut(&channel) {
+            cards.remove(&subscriber);
+        }
+        // The SQL store loses `registered_at` with the subscriber row; keep
+        // the directory growth signal the same in both stores (ADR-0059).
+        if let Some(map) = guard.registered_at.get_mut(&channel) {
+            map.remove(&subscriber);
+        }
+        for ((staged_channel, _), staged) in &mut guard.staged_envelopes {
+            if *staged_channel == channel {
+                staged.remove(&subscriber);
+            }
+        }
+        Ok(())
+    }
+
+    async fn list_member_cards(
+        &self,
+        channel: ChannelId,
+        after: Option<SubscriberId>,
+        limit: usize,
+    ) -> Result<Vec<(SubscriberId, Vec<u8>)>, StorageError> {
+        use std::ops::Bound;
+        let guard = self.inner.read().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        let Some(cards) = guard.member_cards.get(&channel) else {
+            return Ok(Vec::new());
+        };
+        let lower = after.map_or(Bound::Unbounded, Bound::Excluded);
+        Ok(cards
+            .range((lower, Bound::Unbounded))
+            .take(limit)
+            .map(|(sub, (_, card))| (*sub, card.clone()))
+            .collect())
     }
 }
 
@@ -2586,5 +2776,103 @@ mod tests {
         assert!(s.consume_owner_nonce([1; 16], 10).await.unwrap());
         assert!(!s.consume_owner_nonce([1; 16], 11).await.unwrap());
         assert_eq!(s.prune_owner_nonces_older_than(11).await.unwrap(), 1);
+    }
+
+    // ADR-0060 - member cards.
+
+    async fn member_store() -> InMemoryChannelStore {
+        let s = InMemoryChannelStore::new();
+        s.create(cid(0x70), OWNER).await.unwrap();
+        for b in [1u8, 2, 3] {
+            s.subscribe(cid(0x70), sid(b), 0).await.unwrap();
+        }
+        s
+    }
+
+    #[tokio::test]
+    async fn member_cards_page_in_subscriber_order() {
+        let s = member_store().await;
+        for b in [3u8, 1, 2] {
+            s.put_member_card(cid(0x70), sid(b), 0, vec![b; 40])
+                .await
+                .unwrap();
+        }
+        let first = s.list_member_cards(cid(0x70), None, 2).await.unwrap();
+        assert_eq!(
+            first.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            vec![sid(1), sid(2)]
+        );
+        let rest = s
+            .list_member_cards(cid(0x70), Some(sid(2)), 2)
+            .await
+            .unwrap();
+        assert_eq!(rest, vec![(sid(3), vec![3u8; 40])]);
+        assert!(s
+            .list_member_cards(cid(0x70), Some(sid(3)), 2)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_member_card_is_bounded_by_the_epochs() {
+        let s = member_store().await;
+        assert!(matches!(
+            s.put_member_card(cid(0x70), sid(1), 1, vec![1; 40]).await,
+            Err(StorageError::MemberCardEpochInFuture { current: 0, got: 1 })
+        ));
+        s.rotate(cid(0x70), vec![], 80).await.unwrap();
+        s.rotate(cid(0x70), vec![], 80).await.unwrap();
+        s.put_member_card(cid(0x70), sid(1), 2, vec![2; 40])
+            .await
+            .unwrap();
+        assert!(matches!(
+            s.put_member_card(cid(0x70), sid(1), 1, vec![1; 40]).await,
+            Err(StorageError::MemberCardStale { stored: 2, got: 1 })
+        ));
+        // Same epoch replaces (a profile edit within the epoch).
+        s.put_member_card(cid(0x70), sid(1), 2, vec![9; 40])
+            .await
+            .unwrap();
+        assert_eq!(
+            s.list_member_cards(cid(0x70), None, 10).await.unwrap(),
+            vec![(sid(1), vec![9; 40])]
+        );
+        assert!(matches!(
+            s.put_member_card(cid(0x70), sid(9), 0, vec![1; 40]).await,
+            Err(StorageError::UnknownSubscriber)
+        ));
+        assert!(matches!(
+            s.put_member_card(cid(0x71), sid(1), 0, vec![1; 40]).await,
+            Err(StorageError::UnknownChannel)
+        ));
+    }
+
+    #[tokio::test]
+    async fn member_cards_go_with_delete_and_with_the_subscriber_prune() {
+        let s = member_store().await;
+        s.put_member_card(cid(0x70), sid(1), 0, vec![1; 40])
+            .await
+            .unwrap();
+        s.put_member_card(cid(0x70), sid(2), 0, vec![2; 40])
+            .await
+            .unwrap();
+        s.delete_member_card(cid(0x70), sid(1)).await.unwrap();
+        s.delete_member_card(cid(0x70), sid(1)).await.unwrap();
+        s.touch_subscriber_activity(cid(0x70), sid(2), 10)
+            .await
+            .unwrap();
+        s.prune_subscribers_older_than(5).await.unwrap();
+        // sid(2) was touched at 10 and survives; its card stays.
+        assert_eq!(
+            s.list_member_cards(cid(0x70), None, 10).await.unwrap(),
+            vec![(sid(2), vec![2; 40])]
+        );
+        s.prune_subscribers_older_than(11).await.unwrap();
+        assert!(s
+            .list_member_cards(cid(0x70), None, 10)
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

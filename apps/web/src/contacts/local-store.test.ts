@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Unit tests for the G-4 (ADR-0016) account-pubkey PIN store and
- * the v1 -> v2 localStorage migration in `local-store.ts`.
+ * Unit tests for the per-account contact store `local-store.ts`: the
+ * G-4 (ADR-0016) account-pubkey PIN store, the accepted list, and the
+ * rule that one browser's accounts never see each other's contacts.
  *
  * Runs under the default vitest `node` environment, which has no
  * `localStorage`; we install a minimal in-memory stub per test so
@@ -35,12 +36,17 @@ class MemoryStorage {
   }
 }
 
+/** The signed-in account most tests run as. */
+const OWNER = "b3duZXItYWNjb3VudC0wMDAwMA==";
+
 beforeEach(() => {
   (globalThis as unknown as { localStorage: Storage }).localStorage =
     new MemoryStorage() as unknown as Storage;
+  bindContactsAccount(OWNER);
 });
 
 afterEach(() => {
+  bindContactsAccount(null);
   delete (globalThis as unknown as { localStorage?: Storage }).localStorage;
   // Force a fresh module instance so the store has no cross-test
   // state (the module is stateless — all reads hit localStorage —
@@ -57,12 +63,18 @@ import {
   loadAccepted,
   upsertAccepted,
   peerContactByMemberPubkeys,
-  loadCursor,
   recordLogStatus,
   recordLogReset,
   readLogReset,
   recordLogVersion,
   readLogVersion,
+  bindContactsAccount,
+  boundContactsAccount,
+  clearAccountContacts,
+  loadRenames,
+  removeAccepted,
+  subscribeAcceptedChanged,
+  type AcceptedChange,
 } from "./local-store";
 
 const ACCT_A = "YWNjb3VudC1hLTAwMDAwMDAwMA=="; // arbitrary base64
@@ -177,10 +189,9 @@ describe("KT-log S4 — isReset marker on the pin record", () => {
   it("drops a junk (non-boolean) isReset on read (forward-compat guard)", () => {
     // Hand-craft a v2 row with a corrupt isReset value.
     localStorage.setItem(
-      "lakko.contacts.v2",
+      `lakko.contacts.v3.${OWNER}`,
       JSON.stringify({
-        v: 2,
-        cursor: 0,
+        v: 3,
         accepted: [],
         pins: {
           [ACCT_A]: {
@@ -253,10 +264,9 @@ describe("G-30 #2 — pinnedLogVersion on the pin record", () => {
 
   it("drops a junk (non-finite / negative / non-number) pinnedLogVersion on read", () => {
     localStorage.setItem(
-      "lakko.contacts.v2",
+      `lakko.contacts.v3.${OWNER}`,
       JSON.stringify({
-        v: 2,
-        cursor: 0,
+        v: 3,
         accepted: [],
         pins: {
           [ACCT_A]: {
@@ -280,41 +290,119 @@ describe("G-30 #2 — pinnedLogVersion on the pin record", () => {
   });
 });
 
-describe("v1 -> v2 localStorage migration", () => {
-  it("carries the v1 cursor + accepted forward into v2", () => {
-    // Seed a legacy v1 row directly.
-    const v1 = {
-      v: 1,
-      cursor: 42,
-      accepted: [
-        {
-          signaturePubkeyB64: "cHVia2V5",
-          displayName: "alice",
-          acceptedAtMs: 1700000000000,
-        },
-      ],
-    };
-    localStorage.setItem("lakko.contacts.v1", JSON.stringify(v1));
-    // No v2 row exists yet — the first read migrates additively.
-    expect(loadCursor()).toBe(42);
-    const accepted = loadAccepted();
-    expect(accepted).toHaveLength(1);
-    expect(accepted[0]?.displayName).toBe("alice");
-    // The pins map starts empty after a migration.
+describe("the contact list belongs to the signed-in account", () => {
+  const ACCOUNT_CARA = "Y2FyYS1hY2NvdW50LTAwMDAwMA==";
+  const ACCOUNT_EVE = "ZXZlLWFjY291bnQtMDAwMDAwMA==";
+  const dan = { signaturePubkeyB64: PUB_OLD, displayName: "Dan", acceptedAtMs: 1 };
+  const fay = { signaturePubkeyB64: PUB_NEW, displayName: "", acceptedAtMs: 2 };
+
+  it("two accounts on one browser never see each other's contacts, renames or pins", () => {
+    bindContactsAccount(ACCOUNT_CARA);
+    upsertAccepted(dan);
+    setPin(ACCT_A, PUB_OLD, 7);
+    recordLogStatus(ACCT_A, "confirmed");
+
+    bindContactsAccount(ACCOUNT_EVE);
+    expect(loadAccepted()).toEqual([]);
+    expect(loadRenames().size).toBe(0);
     expect(readPin(ACCT_A)).toBeUndefined();
+    upsertAccepted(fay);
+    setPin(ACCT_A, PUB_NEW, 1);
+
+    bindContactsAccount(ACCOUNT_CARA);
+    expect(loadAccepted().map((c) => c.displayName)).toEqual(["Dan"]);
+    expect(loadRenames().get(PUB_OLD)).toBe("Dan");
+    expect(readPin(ACCT_A)?.pinnedSignaturePubkeyB64).toBe(PUB_OLD);
+    expect(readPin(ACCT_A)?.rotationMarker).toBe(7);
+
+    bindContactsAccount(ACCOUNT_EVE);
+    expect(loadAccepted().map((c) => c.signaturePubkeyB64)).toEqual([PUB_NEW]);
+    expect(readPin(ACCT_A)?.pinnedSignaturePubkeyB64).toBe(PUB_NEW);
+    // Eve's own pin is not Cara's: a lower marker here is not refused.
+    expect(readPin(ACCT_A)?.rotationMarker).toBe(1);
   });
 
-  it("does not lose pins written after migration", () => {
-    localStorage.setItem(
-      "lakko.contacts.v1",
-      JSON.stringify({ v: 1, cursor: 7, accepted: [] }),
-    );
-    // Read once to migrate, then write a pin.
-    expect(loadCursor()).toBe(7);
+  it("an explicit owner reads and writes that account whatever is bound", () => {
+    bindContactsAccount(ACCOUNT_EVE);
+    upsertAccepted(dan, ACCOUNT_CARA);
+    expect(loadAccepted()).toEqual([]);
+    expect(loadAccepted(ACCOUNT_CARA)).toHaveLength(1);
+    expect(setPin(ACCT_A, PUB_OLD, 0, ACCOUNT_CARA)).toBe("set");
+    expect(readPin(ACCT_A)).toBeUndefined();
+    expect(readPin(ACCT_A, ACCOUNT_CARA)?.pinnedSignaturePubkeyB64).toBe(PUB_OLD);
+    removeAccepted(PUB_OLD, ACCOUNT_CARA);
+    expect(loadAccepted(ACCOUNT_CARA)).toEqual([]);
+  });
+
+  it("with no account bound a read is empty and a write writes nothing", () => {
+    upsertAccepted(dan);
     setPin(ACCT_A, PUB_OLD, 0);
-    expect(readPin(ACCT_A)?.pinnedSignaturePubkeyB64).toBe(PUB_OLD);
-    // Cursor is still intact after the pin write.
-    expect(loadCursor()).toBe(7);
+    bindContactsAccount(null);
+    expect(boundContactsAccount()).toBeNull();
+    expect(loadAccepted()).toEqual([]);
+    expect(readPin(ACCT_A)).toBeUndefined();
+    expect(upsertAccepted(fay)).toEqual([]);
+    expect(setPin(ACCT_B, PUB_NEW, 0)).toBe("no-account");
+    expect(recordLogStatus(ACCT_A, "confirmed")).toBe(false);
+    // Nothing reached a shared row: the only row is the owner's.
+    const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+    expect(keys).toEqual([`lakko.contacts.v3.${OWNER}`]);
+    bindContactsAccount(OWNER);
+    expect(loadAccepted().map((c) => c.signaturePubkeyB64)).toEqual([PUB_OLD]);
+    expect(readPin(ACCT_B)).toBeUndefined();
+  });
+
+  it("a read before any binding is empty, even with rows on the browser", () => {
+    upsertAccepted(dan);
+    bindContactsAccount(null);
+    expect(loadAccepted()).toEqual([]);
+    expect(loadRenames().size).toBe(0);
+  });
+
+  it("the retired device-wide row is never read", () => {
+    localStorage.setItem(
+      "lakko.contacts.v2",
+      JSON.stringify({ v: 2, cursor: 0, accepted: [dan], pins: {} }),
+    );
+    expect(loadAccepted()).toEqual([]);
+  });
+
+  it("forget device clears only the current account, and the retired rows", () => {
+    bindContactsAccount(ACCOUNT_CARA);
+    upsertAccepted(dan);
+    setPin(ACCT_A, PUB_OLD, 0);
+    bindContactsAccount(ACCOUNT_EVE);
+    upsertAccepted(fay);
+    localStorage.setItem("lakko.contacts.v2", "{}");
+    localStorage.setItem("lakko.contacts.v1", "{}");
+
+    clearAccountContacts();
+    expect(loadAccepted()).toEqual([]);
+    expect(loadAccepted(ACCOUNT_CARA)).toHaveLength(1);
+    expect(readPin(ACCT_A, ACCOUNT_CARA)).toBeDefined();
+    expect(localStorage.getItem("lakko.contacts.v2")).toBeNull();
+    expect(localStorage.getItem("lakko.contacts.v1")).toBeNull();
+
+    clearAccountContacts(ACCOUNT_CARA);
+    expect(loadAccepted(ACCOUNT_CARA)).toEqual([]);
+  });
+
+  it("a log out keeps the list for the next sign-in of the same account", () => {
+    upsertAccepted(dan);
+    bindContactsAccount(null);
+    bindContactsAccount(OWNER);
+    expect(loadAccepted().map((c) => c.displayName)).toEqual(["Dan"]);
+  });
+
+  it("listeners hear an account change apart from an edit", () => {
+    const seen: AcceptedChange[] = [];
+    const unsubscribe = subscribeAcceptedChanged((change) => seen.push(change));
+    upsertAccepted(dan);
+    bindContactsAccount(ACCOUNT_EVE);
+    bindContactsAccount(ACCOUNT_EVE); // no change, no notice
+    bindContactsAccount(null);
+    unsubscribe();
+    expect(seen).toEqual(["edited", "account-changed", "account-changed"]);
   });
 });
 

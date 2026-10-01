@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The channel-post log (ADR-0058 section 3): the posts of subscribed and
+ * The channel-post log (ADR-0061 section 3): the posts of subscribed and
  * own channels this device has decrypted, kept so the feed can rank them
  * without opening each channel.
  *
@@ -19,7 +19,7 @@
 
 /** Payload schema version this client writes. */
 export const CHANNEL_POST_LOG_VERSION = 1;
-/** Most posts kept per channel (chosen, ADR-0058 open question 1). */
+/** Most posts kept per channel (chosen, ADR-0061 open question 1). */
 export const CHANNEL_POST_CAP = 500;
 /** The server's post retention; older posts are dropped from the log. */
 export const CHANNEL_POST_RETENTION_MS = 30 * 86_400_000;

@@ -142,6 +142,23 @@ struct NewChannelScreen: View {
                 // device has published to `id` before (nil for a fresh id).
                 existingSigningSeed: state.persistedPublisherSigningSeed(channelId: id)
             )
+            // ADR-0057 — the publisher journal is claimed with this account's
+            // root BEFORE the channel is announced; a channel whose journal
+            // could not be claimed is not added.
+            let publisherGroup = try CoPublisher.openPublisherGroup(identity: identity, channelIdHex: id)
+            let signer = try publisherGroup.dsAccessSigner(identity: identity)
+            let groupId = try publisherGroup.groupId()
+            do {
+                try await JournalOwnership.claimOrReset(
+                    root: try CoPublisher.rootSigner(identity: identity, publisherGroup: publisherGroup),
+                    journalId: groupId, epoch: signer.epoch(), epochKey: signer.verifyingKey(),
+                    ds: DsClient())
+                JournalFoundingMarks.shared.clear(journalIdHex: DsClient.pseudonymHex(groupId))
+            } catch {
+                NSLog("Channels: publisher journal claim failed: %@", String(describing: error))
+                errorMessage = "Could not create the channel. Try again."
+                return
+            }
             state.addChannel(.init(
                 id: id,
                 localName: name.trimmingCharacters(in: .whitespaces),

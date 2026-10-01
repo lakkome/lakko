@@ -87,7 +87,7 @@ const POLICY_REQUIRE_ATTESTED_REMOVALS: u8 = 1;
 /// Lakko group that carries one of our custom GroupContext-extension policies.
 /// Lists **all** Lakko extension types — the DeviceGroup removal-policy
 /// `0xFF01` (G-13, ADR-0015), the conversation-group role table `0xFF02`
-/// (ADR-0022) and the conversation kind `0xFF03` (ADR-0060) — because OpenMLS validates that every member's leaf advertises
+/// (ADR-0022) and the conversation kind `0xFF03` (ADR-0062) — because OpenMLS validates that every member's leaf advertises
 /// each GroupContext extension type a group it joins has in use, and a single
 /// device leaf / KeyPackage may join either kind of group. Declaring both is
 /// harmless for a group that uses neither (it simply never carries them).
@@ -100,7 +100,7 @@ pub(crate) fn lakko_leaf_capabilities(cs: Ciphersuite) -> Capabilities {
         Some(&[
             ExtensionType::Unknown(DEVICE_POLICY_EXTENSION_TYPE),
             ExtensionType::Unknown(crate::group_roles::ROLE_EXTENSION_TYPE),
-            // ADR-0060 — the conversation-kind extension every conversation
+            // ADR-0062 — the conversation-kind extension every conversation
             // group carries and lists in its `required_capabilities`, so a
             // leaf that does not advertise it cannot be added to one.
             ExtensionType::Unknown(crate::group_kind::GROUP_KIND_EXTENSION_TYPE),
@@ -560,6 +560,18 @@ impl DeviceGroup {
         self.inner.members()
     }
 
+    /// Whether THIS device is still a member of its account's DeviceGroup.
+    ///
+    /// `false` once a commit that removes this device's own leaf has been
+    /// applied: the group is then frozen at the removing epoch and nothing
+    /// new can be decrypted in it (see [`crate::group::Group::is_active`]).
+    /// A client shows the "This device was removed" state on it rather than
+    /// polling a journal it can no longer read.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.inner.is_active()
+    }
+
     /// Leaf index of THIS device inside the DeviceGroup.
     ///
     /// UI uses this to render the "(this device)" badge next
@@ -669,7 +681,9 @@ impl DeviceGroup {
     /// # Errors
     ///
     /// - [`Error::Codec`] when the proto encode fails (practically
-    ///   unreachable — every field is fixed-shape).
+    ///   unreachable — every field is fixed-shape), or when a
+    ///   [`DeviceGroupBody::ServiceEnvelope`] is empty or longer than
+    ///   [`MAX_SERVICE_ENVELOPE_LEN`] (nothing is encrypted).
     /// - [`Error::Message`] / [`Error::Group`] for OpenMLS-side
     ///   encryption or wire-encode failures.
     pub fn create_devicegroup_message(
@@ -680,6 +694,7 @@ impl DeviceGroup {
     ) -> Result<Vec<u8>> {
         use prost::Message as _;
 
+        body.check_bounds()?;
         let proto_body = body.into_proto();
         let payload = lakko_proto::mls_app::devicegroup::v1::DeviceGroupPayload {
             hlc,
@@ -708,6 +723,13 @@ impl DeviceGroup {
     /// - [`Error::Unsupported`] when the payload's `body` is
     ///   absent or a variant this build doesn't recognise (an
     ///   older client reading a future-version payload).
+    /// - [`Error::PayloadBounds`] when a `FolderChanges` or
+    ///   `StateSnapshot` breaks an ADR-0058 section 4 bound. The whole
+    ///   payload is refused; the next write of those registers from any
+    ///   device supersedes it.
+    /// - [`Error::Codec`] when a service envelope is empty or longer
+    ///   than [`MAX_SERVICE_ENVELOPE_LEN`]: the whole payload is
+    ///   refused, never truncated.
     pub fn parse_devicegroup_payload(bytes: &[u8]) -> Result<ParsedDeviceGroupPayload> {
         use prost::Message as _;
 
@@ -716,7 +738,8 @@ impl DeviceGroup {
         let body = payload
             .body
             .ok_or(Error::Unsupported("DeviceGroupPayload missing body"))?;
-        let parsed_body = DeviceGroupBody::from_proto(body);
+        let parsed_body = DeviceGroupBody::from_proto(body)?;
+        parsed_body.check_bounds()?;
         Ok(ParsedDeviceGroupPayload {
             hlc: payload.hlc,
             sender_leaf: payload.sender_leaf,
@@ -740,8 +763,23 @@ pub struct ParsedDeviceGroupPayload {
     /// epochs.
     pub sender_leaf: u32,
     /// Concrete payload — one of `ReadCursor` / `DraftUpdate`
-    /// / `ThreadFlags` / `ConversationOrder`.
+    /// / `ThreadFlags` / `ConversationOrder` / `FolderChanges` /
+    /// `StateSnapshot` / `ServiceEnvelope`.
     pub body: DeviceGroupBody,
+}
+
+impl ParsedDeviceGroupPayload {
+    /// Every register this payload writes, as stamped
+    /// [`lakko_sync::synced::SyncEntry`] values ready for
+    /// [`lakko_sync::SyncedState::apply`] (ADR-0058 section 3).
+    ///
+    /// The four older kinds take their stamp from the envelope
+    /// ([`Self::hlc`]); `FolderChanges` and `StateSnapshot` carry a stamp
+    /// per register and the envelope stamp is ignored for them.
+    #[must_use]
+    pub fn stamped_entries(&self) -> Vec<(u64, lakko_sync::synced::SyncEntry)> {
+        self.body.stamped_entries(self.hlc)
+    }
 }
 
 /// Typed body of a DeviceGroup application payload. Wraps the
@@ -807,12 +845,119 @@ pub enum DeviceGroupBody {
         /// top-to-bottom.
         group_ids: Vec<Vec<u8>>,
     },
+    /// A live chat-folder edit (ADR-0058): only the registers that
+    /// changed, each with its own stamp. Bounds-checked on decode.
+    FolderChanges(lakko_sync::synced::FolderChanges),
+    /// One part of the catch-up re-send of the sender's whole folded
+    /// state (ADR-0058 section 5), every entry with its original stamp.
+    /// Bounds-checked on decode.
+    StateSnapshot(lakko_sync::synced::StateSnapshot),
+    /// An opaque `lakko-contacts` envelope the owner's devices
+    /// exchange ([ADR-0060](../../../docs/adr/0060-scoped-discovery.md)
+    /// section 7: the Visibility setting and the ReachState
+    /// counters). This layer bounds its length to 1 to
+    /// [`MAX_SERVICE_ENVELOPE_LEN`] bytes and never interprets it;
+    /// the client dispatches the bytes.
+    ServiceEnvelope {
+        /// The envelope bytes, domain separator included.
+        envelope: Vec<u8>,
+    },
 }
 
+/// Longest `lakko-contacts` envelope a DeviceGroup
+/// [`DeviceGroupBody::ServiceEnvelope`] carries (384 KiB).
+///
+/// Sized above the largest envelope `lakko-contacts` composes for this
+/// carrier: a Visibility setting holds at most 1024 chosen scopes of at
+/// most 64 bytes (67 619 bytes in all) and a ReachState at most 4096
+/// entries of at most 70 bytes (286 752 bytes in all). The DS journal
+/// accepts 1 MiB per message, so the MLS framing fits beside it. A test
+/// in `lakko-ffi-uniffi` pins this against the `lakko-contacts` maxima,
+/// since `lakko-mls` does not depend on `lakko-contacts`.
+pub const MAX_SERVICE_ENVELOPE_LEN: usize = 384 * 1024;
+
 impl DeviceGroupBody {
-    fn into_proto(self) -> lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body {
+    /// Every register this body writes, stamped. `envelope_hlc` stamps the
+    /// four older kinds; the two ADR-0058 kinds carry their own stamps.
+    #[must_use]
+    pub fn stamped_entries(&self, envelope_hlc: u64) -> Vec<(u64, lakko_sync::synced::SyncEntry)> {
+        use lakko_sync::synced::{
+            ConversationOrderEntry, DraftEntry, FlagsEntry, ReadCursorEntry, SyncEntry,
+        };
+        match self {
+            Self::ReadCursor {
+                group_id,
+                up_to_message_id,
+                read_at_ms,
+            } => vec![(
+                envelope_hlc,
+                SyncEntry::ReadCursor(ReadCursorEntry {
+                    group_id: group_id.clone(),
+                    up_to_message_id: up_to_message_id.clone(),
+                    read_at_ms: *read_at_ms,
+                }),
+            )],
+            Self::Draft {
+                group_id,
+                text,
+                reply_to_id,
+            } => vec![(
+                envelope_hlc,
+                SyncEntry::Draft(DraftEntry {
+                    group_id: group_id.clone(),
+                    text: text.clone(),
+                    reply_to_id: reply_to_id.clone(),
+                }),
+            )],
+            Self::Flags {
+                group_id,
+                pinned,
+                muted,
+                archived,
+                unread_override,
+            } => vec![(
+                envelope_hlc,
+                SyncEntry::Flags(FlagsEntry {
+                    group_id: group_id.clone(),
+                    pinned: *pinned,
+                    muted: *muted,
+                    archived: *archived,
+                    unread_override: *unread_override,
+                }),
+            )],
+            Self::Order { group_ids } => vec![(
+                envelope_hlc,
+                SyncEntry::ConversationOrder(ConversationOrderEntry {
+                    group_ids: group_ids.clone(),
+                }),
+            )],
+            Self::FolderChanges(c) => c.stamped_entries(),
+            Self::StateSnapshot(s) => s.stamped_entries(),
+            // Not a synced register: the client dispatches the bytes.
+            Self::ServiceEnvelope { .. } => Vec::new(),
+        }
+    }
+
+    /// Refuse a body whose variable part breaks its documented bound.
+    /// Only the service envelope carries one today.
+    fn check_bounds(&self) -> Result<()> {
+        if let Self::ServiceEnvelope { envelope } = self {
+            if envelope.is_empty() || envelope.len() > MAX_SERVICE_ENVELOPE_LEN {
+                return Err(Error::Codec(format!(
+                    "DeviceGroup service envelope is {} bytes, expected 1 to {MAX_SERVICE_ENVELOPE_LEN}",
+                    envelope.len()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn into_proto(
+        self,
+    ) -> lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body {
         use lakko_proto::mls_app::devicegroup::v1::{
-            device_group_payload::Body, ConversationOrder, DraftUpdate, ReadCursor, ThreadFlags,
+            device_group_payload::Body, ConversationOrder, DraftUpdate, ReadCursor,
+            ServiceEnvelope, ThreadFlags,
         };
         match self {
             Self::ReadCursor {
@@ -847,16 +992,28 @@ impl DeviceGroupBody {
                 unread_override,
             }),
             Self::Order { group_ids } => Body::Order(ConversationOrder { group_ids }),
+            Self::FolderChanges(c) => {
+                Body::FolderChanges(crate::device_group_sync::folder_changes_to_proto(&c))
+            },
+            Self::StateSnapshot(s) => {
+                Body::StateSnapshot(crate::device_group_sync::state_snapshot_to_proto(&s))
+            },
+            Self::ServiceEnvelope { envelope } => {
+                Body::ServiceEnvelope(ServiceEnvelope { envelope })
+            },
         }
     }
 
-    /// Infallible — every proto `Body` variant maps onto a
-    /// concrete `Self` case. A future proto extension that adds
-    /// a variant we don't recognise would surface earlier as a
-    /// prost-decode failure, not here.
-    fn from_proto(body: lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body) -> Self {
+    /// Every proto `Body` variant maps onto a concrete `Self` case; a
+    /// variant a future build adds is skipped by prost as an unknown field
+    /// and surfaces as a missing body ([`Error::Unsupported`]). The two
+    /// ADR-0058 kinds are bounds-checked here and refused whole
+    /// ([`Error::PayloadBounds`]) on any violation.
+    fn from_proto(
+        body: lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body,
+    ) -> Result<Self> {
         use lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body;
-        match body {
+        Ok(match body {
             Body::ReadCursor(b) => Self::ReadCursor {
                 group_id: b.group_id,
                 up_to_message_id: b.up_to_message_id,
@@ -877,7 +1034,16 @@ impl DeviceGroupBody {
             Body::Order(b) => Self::Order {
                 group_ids: b.group_ids,
             },
-        }
+            Body::FolderChanges(c) => {
+                Self::FolderChanges(crate::device_group_sync::folder_changes_from_proto(c)?)
+            },
+            Body::StateSnapshot(s) => {
+                Self::StateSnapshot(crate::device_group_sync::state_snapshot_from_proto(s)?)
+            },
+            Body::ServiceEnvelope(b) => Self::ServiceEnvelope {
+                envelope: b.envelope,
+            },
+        })
     }
 }
 
@@ -1621,13 +1787,21 @@ mod tests {
         // removal. OpenMLS surfaces a "removed self" outcome
         // as a normal Commit — the next state query reports
         // the leaf gone.
+        assert!(
+            group_b.is_active(),
+            "B is active until it applies its removal"
+        );
         let incoming = group_b.process_incoming(&id_b, &commit_bytes).unwrap();
         assert!(matches!(incoming, Incoming::Commit));
+        // The removed device knows it was removed; the remover does not
+        // think it was.
+        assert!(!group_b.is_active(), "B is inactive after its own removal");
+        assert!(group_a.is_active(), "the remover stays active");
     }
 
     #[test]
     fn devicegroup_payload_each_variant_roundtrips() {
-        // Smoke-test all four variants survive the
+        // Smoke-test every variant survives the
         // proto-encode + proto-decode trip via the typed
         // `DeviceGroupBody` wrappers. Doesn't need a real MLS
         // group — encode + decode round-trips the bytes
@@ -1656,6 +1830,27 @@ mod tests {
             DeviceGroupBody::Order {
                 group_ids: vec![vec![0xAA; 32], vec![0xBB; 32]],
             },
+            DeviceGroupBody::FolderChanges({
+                let mut c = lakko_sync::synced::FolderChanges::default();
+                c.push(
+                    11,
+                    lakko_sync::synced::SyncEntry::FolderMeta(lakko_sync::synced::FolderMeta {
+                        folder_id: [0x0F; 16],
+                        name: "Work".into(),
+                        include_kinds: lakko_sync::synced::INCLUDE_GROUPS,
+                        exclude_flags: lakko_sync::synced::EXCLUDE_ARCHIVED,
+                    }),
+                );
+                c.push(12, lakko_sync::synced::SyncEntry::FolderRemoved([0x0E; 16]));
+                c
+            }),
+            DeviceGroupBody::StateSnapshot(lakko_sync::synced::StateSnapshot {
+                entries: vec![],
+                conversation_order: None,
+                folders: lakko_sync::synced::FolderChanges::default(),
+                part: 0,
+                parts: 1,
+            }),
         ];
         for body in cases {
             let payload = lakko_proto::mls_app::devicegroup::v1::DeviceGroupPayload {
@@ -1669,6 +1864,169 @@ mod tests {
             assert_eq!(parsed.hlc, 7);
             assert_eq!(parsed.sender_leaf, 0);
             assert_eq!(parsed.body, body);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0060 section 7 — the ServiceEnvelope carrier
+    // -----------------------------------------------------------------
+
+    /// Encode a raw `DeviceGroupPayload` around a service envelope
+    /// without the compose-side bound, the shape a hostile peer device
+    /// or the zero-trust DS can put on the journal.
+    fn raw_service_payload(envelope: Vec<u8>) -> Vec<u8> {
+        use lakko_proto::mls_app::devicegroup::v1::{
+            device_group_payload::Body, DeviceGroupPayload, ServiceEnvelope,
+        };
+        use prost::Message as _;
+        let payload = DeviceGroupPayload {
+            hlc: 9,
+            sender_leaf: 1,
+            body: Some(Body::ServiceEnvelope(ServiceEnvelope { envelope })),
+        };
+        let mut buf = Vec::new();
+        payload.encode(&mut buf).expect("encode service payload");
+        buf
+    }
+
+    #[test]
+    fn service_envelope_round_trips_a_to_b_through_mls() {
+        let account = fixture_account_id();
+        let id_a = Identity::generate("device-A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let id_b = Identity::generate("device-B").unwrap();
+        let kp_b = id_b.create_key_package().unwrap();
+        let addition = group_a.add_device(&id_a, kp_b).unwrap();
+        let welcome_bytes = crate::group::encode_message(&addition.welcome).unwrap();
+        let mut group_b = DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
+
+        let body = DeviceGroupBody::ServiceEnvelope {
+            envelope: b"lakko/visibility/v1\x00 opaque to lakko-mls".to_vec(),
+        };
+        let wire = group_a
+            .create_devicegroup_message(&id_a, body.clone(), 77)
+            .expect("compose");
+        let bytes = match group_b.process_incoming(&id_b, &wire).expect("process") {
+            Incoming::Application { bytes, .. } => bytes,
+            other => panic!("expected Application, got {other:?}"),
+        };
+        let parsed = DeviceGroup::parse_devicegroup_payload(&bytes).expect("parse");
+        assert_eq!(parsed.hlc, 77);
+        assert_eq!(parsed.sender_leaf, 0);
+        assert_eq!(parsed.body, body);
+    }
+
+    #[test]
+    fn service_envelope_bounds_are_enforced_on_parse() {
+        // Empty: refused as a whole.
+        let err = DeviceGroup::parse_devicegroup_payload(&raw_service_payload(Vec::new()))
+            .expect_err("an empty service envelope is refused");
+        assert!(matches!(err, Error::Codec(_)), "got {err:?}");
+
+        // One past the maximum: refused as a whole, never truncated.
+        let err = DeviceGroup::parse_devicegroup_payload(&raw_service_payload(vec![
+            0x5a;
+            MAX_SERVICE_ENVELOPE_LEN
+                + 1
+        ]))
+        .expect_err("an oversized service envelope is refused");
+        assert!(matches!(err, Error::Codec(_)), "got {err:?}");
+
+        // Exactly the maximum and exactly one byte: accepted.
+        for len in [1, MAX_SERVICE_ENVELOPE_LEN] {
+            let parsed =
+                DeviceGroup::parse_devicegroup_payload(&raw_service_payload(vec![0x5a; len]))
+                    .expect("in-bound envelope parses");
+            assert_eq!(
+                parsed.body,
+                DeviceGroupBody::ServiceEnvelope {
+                    envelope: vec![0x5a; len]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn service_envelope_bounds_are_enforced_on_compose() {
+        let account = fixture_account_id();
+        let id_a = Identity::generate("device-A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        for envelope in [Vec::new(), vec![0u8; MAX_SERVICE_ENVELOPE_LEN + 1]] {
+            let err = group_a
+                .create_devicegroup_message(&id_a, DeviceGroupBody::ServiceEnvelope { envelope }, 1)
+                .expect_err("an out-of-bound envelope is refused before encryption");
+            assert!(matches!(err, Error::Codec(_)), "got {err:?}");
+        }
+    }
+
+    #[test]
+    fn service_envelope_rides_field_20() {
+        // The body's field number is the wire contract with the other
+        // branches that claim 14-19: tag = (20 << 3) | 2 = 0xa2 0x01.
+        let bytes = raw_service_payload(vec![0x01]);
+        let tag_at = bytes
+            .windows(2)
+            .position(|w| w == [0xa2, 0x01])
+            .expect("field 20, wire type 2");
+        // Inner message: length 3 = field 1 (0x0a), length 1, the byte.
+        assert_eq!(&bytes[tag_at + 2..], &[0x03, 0x0a, 0x01, 0x01]);
+    }
+
+    proptest::proptest! {
+        /// Any in-bound envelope round-trips byte for byte, and whatever
+        /// its content (another body's encoding included) it never
+        /// parses as another body: the carrier does not interpret it.
+        #[test]
+        fn service_envelope_round_trips_and_never_parses_as_another_body(
+            envelope in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..2048),
+            hlc in proptest::prelude::any::<u64>(),
+            sender_leaf in proptest::prelude::any::<u32>(),
+        ) {
+            use lakko_proto::mls_app::devicegroup::v1::{
+                device_group_payload::Body, DeviceGroupPayload, ServiceEnvelope,
+            };
+            use prost::Message as _;
+            let payload = DeviceGroupPayload {
+                hlc,
+                sender_leaf,
+                body: Some(Body::ServiceEnvelope(ServiceEnvelope { envelope: envelope.clone() })),
+            };
+            let mut buf = Vec::new();
+            payload.encode(&mut buf).unwrap();
+            let parsed = DeviceGroup::parse_devicegroup_payload(&buf).unwrap();
+            proptest::prop_assert_eq!(parsed.hlc, hlc);
+            proptest::prop_assert_eq!(parsed.sender_leaf, sender_leaf);
+            proptest::prop_assert_eq!(parsed.body, DeviceGroupBody::ServiceEnvelope { envelope });
+        }
+
+        /// An envelope whose bytes are another body's full encoding is
+        /// still delivered verbatim as a service envelope.
+        #[test]
+        fn a_nested_body_encoding_stays_a_service_envelope(
+            group_id in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..64),
+            read_at_ms in proptest::prelude::any::<u64>(),
+        ) {
+            use prost::Message as _;
+            let inner = lakko_proto::mls_app::devicegroup::v1::DeviceGroupPayload {
+                hlc: 1,
+                sender_leaf: 0,
+                body: Some(
+                    DeviceGroupBody::ReadCursor {
+                        group_id,
+                        up_to_message_id: vec![1],
+                        read_at_ms,
+                    }
+                    .into_proto(),
+                ),
+            };
+            let mut nested = Vec::new();
+            inner.encode(&mut nested).unwrap();
+            let parsed =
+                DeviceGroup::parse_devicegroup_payload(&raw_service_payload(nested.clone())).unwrap();
+            proptest::prop_assert_eq!(
+                parsed.body,
+                DeviceGroupBody::ServiceEnvelope { envelope: nested }
+            );
         }
     }
 }

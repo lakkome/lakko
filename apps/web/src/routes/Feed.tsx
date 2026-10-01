@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The Feed destination (`docs/ux/feed.md`, ADR-0058).
+ * The Feed destination (`docs/ux/feed.md`, ADR-0061).
  *
  * Messages from the person's groups and posts from their channels, ranked on
  * this device by the one rule engine in the core. What is here: the preset
@@ -11,7 +11,7 @@
  * first-run states. Channel posts come from the channel-post log that
  * `ChannelPostSync` fills in the foreground.
  *
- * Seen (ADR-0058 section 5): a group message fully on screen for
+ * Seen (ADR-0061 section 5): a group message fully on screen for
  * `FEED_SEEN_DWELL_MS` joins its group's seen set; when that makes the set
  * contiguous further than before, the group gets a read receipt and the
  * other devices a read cursor at the new watermark, never past a message
@@ -122,8 +122,8 @@ import { createDiscoverModel, DiscoverCardView, DiscoverView } from "../discover
 import { useSharedChannels } from "../discover/SharedChannelsContext";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
+import { readFeedSelection, writeFeedSelection } from "../feed/feed-selection-store";
 
-const PRESET_STORAGE_KEY = "lakko.feed.preset";
 const BANNER_STORAGE_KEY = "lakko.feed.device-banner-dismissed";
 /** Within this many pixels of the top, new items are shown at once;
  *  further down they wait behind the pill so the list does not move under
@@ -150,11 +150,8 @@ function writeStorage(key: string, value: string): void {
  *  for a saved feed. */
 type Selection = FeedPresetKey | "discover" | `custom:${string}`;
 
-/** Where a new saved feed asks to be selected (the import route sets it). */
-export const FEED_SELECTION_STORAGE_KEY = PRESET_STORAGE_KEY;
-
-function initialSelection(): Selection {
-  const stored = readStorage(PRESET_STORAGE_KEY);
+function initialSelection(accountId: string | null): Selection {
+  const stored = readFeedSelection(accountId);
   if (stored !== null && stored.startsWith("custom:")) return stored as Selection;
   if (stored === "discover") return "discover";
   return FEED_PRESETS.some((p) => p.key === stored) ? (stored as FeedPresetKey) : "latest";
@@ -186,10 +183,14 @@ export default function Feed(): JSX.Element {
     void loadWasm().then((w) => setCore(() => w));
   });
 
-  const [selection, setSelection] = createSignal<Selection>(initialSelection());
+  const sessionAccountId = (): string | null => {
+    const s = auth.state();
+    return s.kind === "session" ? s.account.accountId : null;
+  };
+  const [selection, setSelection] = createSignal<Selection>(initialSelection(sessionAccountId()));
   const choose = (key: Selection): void => {
     setSelection(key);
-    writeStorage(PRESET_STORAGE_KEY, key);
+    writeFeedSelection(sessionAccountId(), key);
   };
 
   // ----- Saved feeds (UX spec section 4.1) ---------------------------------
@@ -597,7 +598,7 @@ export default function Feed(): JSX.Element {
     setExpanded(next);
   };
 
-  // ----- Seen (ADR-0058 section 5) -----------------------------------------
+  // ----- Seen (ADR-0061 section 5) -----------------------------------------
 
   // Publishes the read receipts only. Its echoes are shared with every other
   // ChatClient on the page.

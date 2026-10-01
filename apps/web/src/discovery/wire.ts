@@ -33,7 +33,8 @@ export interface OprfRequest {
 /** Response body of `POST /discovery/oprf`. */
 export interface OprfResponse {
   /** base64(EvaluationElement<Ristretto255-SHA512>). Feed to
-   *  `blinder.finalize(evaluated)` to recover the OPRF hash. */
+   *  `blinder.finalize(evaluated)`; send its `lookupKey` to discovery and
+   *  keep its `output` on the device (ADR-0060 section 5). */
   evaluated: string;
 }
 
@@ -46,8 +47,8 @@ export interface RegisterRequest {
   /** base64(account_id) — raw 16 bytes, same shape as
    *  `auth/wire.ts`. */
   account_id: string;
-  /** base64(VOPRF output) — exactly 64 bytes, the OPRF hash the
-   *  client just computed via `blinder.finalize`. */
+  /** base64(lookup key) — exactly 64 bytes, `blinder.finalize(..).lookupKey`.
+   *  Never the raw OPRF output, which keys sealed records (ADR-0060 §5). */
   oprf_hash: string;
 }
 
@@ -72,6 +73,9 @@ export interface LookupRequest {
  *  client surfaces that as a `null` rather than an error class. */
 export interface LookupResponse {
   account_id: string;
+  /** base64 of the account's public record (ADR-0060 section 5); opened with
+   *  the username's OPRF `output`, never sent anywhere. */
+  public_record_b64?: string;
 }
 
 // ----------------------------------------------------------------------------
@@ -164,16 +168,24 @@ export interface KeyPackageFetchResponse {
 // /discovery/invite   (services/discovery/src/invite.rs — Phase 1.18d1)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/invite`. The server runs
- *  `lakko_contacts::invite::decode_and_verify` over the decoded
- *  bytes and rejects junk uploads at ingress, so the only way a
- *  POST succeeds is if `capability` is a real, signature-valid
- *  invite the client just composed. */
+/** Body of `POST /discovery/invite` (sealed links, ADR-0028 amendment of
+ *  2026-09-28). The server stores the sealed blob opaque: it cannot open it
+ *  (the secret rides only in the link's fragment), so what it needs from the
+ *  capability arrives in clear fields. */
 export interface InviteUploadRequest {
-  /** Standard-alphabet base64 of `wasm.InviteCapability.compose(...)`
-   *  output — same wire format as 1.18a / 1.18b / 1.18c. Server
-   *  caps decoded size at 2048 bytes. */
-  capability: string;
+  /** Standard-alphabet base64 of `InviteLinkMint.sealed`. */
+  sealed: string;
+  /** Standard-alphabet base64 of `InviteLinkMint.issuerPubkey` (32 bytes),
+   *  the key an owner-signed revoke verifies against. */
+  issuer_pubkey: string;
+  /** The capability's `expiry_ms` (`0` = never expires). */
+  expiry_ms: number;
+  /** The capability's `max_uses` sentinel. */
+  max_uses: number;
+  /** The capability's label, for the owner's own list. `/i/` only. */
+  label?: string;
+  /** The capability's referral flag, for the owner's own list. `/i/` only. */
+  bootstrap_referral?: boolean;
 }
 
 /** Response body of `POST /discovery/invite`. */
@@ -192,7 +204,9 @@ export interface InviteUploadResponse {
  *  `services/discovery/src/invite.rs::fetch` for why we don't
  *  use 410). */
 export interface InviteFetchResponse {
-  capability: string;
+  /** Standard-alphabet base64 of the stored sealed blob; opened with the
+   *  link secret from the fragment (`XCapability.openLink`). */
+  sealed: string;
 }
 
 /** Body of `POST /discovery/invite/{blob_id_b64url}/consume`
@@ -228,20 +242,18 @@ export interface InviteConsumeResponse {
   already_consumed: boolean;
 }
 
-/** Body of `POST /discovery/group-invite` (ADR-0028, G-3). Mirror of
- *  [`InviteUploadRequest`] but carries an extra `max_uses` field: a
- *  `GroupInviteCapability` does NOT embed `max_uses` in its signed wire (it
- *  conveys only `group_id` + `issuer_pubkey` + `expiry_ms`), so the uploader
- *  supplies the SOFT consume ceiling out-of-band. It is an anti-spam throttle,
- *  not an access control — the security boundary is the admin approval gate
- *  (ADR-0027). The response reuses [`InviteUploadResponse`] (`blob_id`). */
+/** Body of `POST /discovery/group-invite` and `POST /discovery/call-invite`
+ *  (sealed links, ADR-0028 amendment of 2026-09-28). `max_uses` is a SOFT
+ *  consume ceiling for `/g/` (not part of the signed capability, not an
+ *  access control); for `/c/` it is the capability's own sentinel. */
 export interface GroupInviteUploadRequest {
-  /** Standard-alphabet base64 of `wasm.composeGroupInviteCapability(...)`
-   *  output. Server runs `decode_and_verify` at ingress + caps decoded size at
-   *  512 bytes. */
-  capability: string;
-  /** SOFT consume ceiling — `0` = single-use, `0xFFFFFFFF` = unlimited, any
-   *  other N = at most N consumes. NOT part of the signed capability. */
+  /** Standard-alphabet base64 of `InviteLinkMint.sealed`. */
+  sealed: string;
+  /** Standard-alphabet base64 of `InviteLinkMint.issuerPubkey` (32 bytes). */
+  issuer_pubkey: string;
+  /** The capability's `expiry_ms` (`0` = never expires). */
+  expiry_ms: number;
+  /** `0` = single-use, `0xFFFFFFFF` = unlimited, any other N = at most N. */
   max_uses: number;
 }
 
@@ -339,8 +351,8 @@ export interface InviteOwnerListResponse {
  *  via a UNIQUE on `oprf_hash`; a repeat of the same hash with a
  *  different channel id is 409 Conflict. */
 export interface ChannelRegisterRequest {
-  /** base64(VOPRF output) — exactly 64 bytes, from
-   *  `blinder.finalize`. */
+  /** base64(lookup key) — exactly 64 bytes,
+   *  `blinder.finalize(..).lookupKey` (ADR-0060 section 5). */
   oprf_hash: string;
   /** base64(channel_id) — raw 16 bytes (ADR-0010 §"Wire
    *  surfaces"). */

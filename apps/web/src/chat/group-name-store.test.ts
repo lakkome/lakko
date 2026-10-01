@@ -44,7 +44,7 @@ function verdict(over: Partial<Parameters<typeof groupNameVerdict>[0]>): ReturnT
 }
 
 describe("groupNameVerdict — the ADR-0051 §2 matrix", () => {
-  it("a one-to-one drops every name, even the owner's and an identical one (ADR-0060 §7)", () => {
+  it("a one-to-one drops every name, even the owner's and an identical one (ADR-0062 §7)", () => {
     expect(verdict({ kind: "chat" })).toBe("reject-one-to-one");
     expect(verdict({ kind: "chat", incoming: { name: "Trio", updatedAtMs: 100n } })).toBe(
       "reject-one-to-one",

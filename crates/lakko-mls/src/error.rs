@@ -66,6 +66,11 @@ pub enum Error {
         /// The human-readable sentence, for logs and stacks.
         detail: String,
     },
+
+    /// A DeviceGroup `FolderChanges` or `StateSnapshot` payload broke an
+    /// ADR-0058 section 4 bound and was refused whole (never truncated).
+    #[error("device-group payload out of bounds: {0}")]
+    PayloadBounds(lakko_sync::synced::BoundsError),
 }
 
 impl Error {

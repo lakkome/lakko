@@ -41,6 +41,12 @@ afterEach(() => {
 const ID = new Uint8Array(6).fill(0x2a);
 const ACCOUNT = new Uint8Array(16).fill(0x01);
 const CAP = new Uint8Array(160).fill(0x41);
+const UPLOAD = {
+  sealed: CAP,
+  issuerPubkey: new Uint8Array(32).fill(0x02),
+  expiryMs: 0n,
+  maxUses: 5,
+};
 
 /** Stub `fetch`: every request answers the given status (with an optional
  *  JSON body). No route asks for a proof of work any more (ADR-0054 S3). */
@@ -113,12 +119,12 @@ describe("upload returns an 8-character id", () => {
 
   it("decodes the fresh 8-character id to 6 bytes", async () => {
     stubFetch(200, { blob_id: base64UrlEncodeNoPad(ID) });
-    await expect(client.uploadGroupInvite(CAP, 5)).resolves.toEqual(ID);
+    await expect(client.uploadGroupInvite(UPLOAD)).resolves.toEqual(ID);
   });
 
   it("refuses the old 43-character id from a server", async () => {
     stubFetch(200, { blob_id: base64UrlEncodeNoPad(new Uint8Array(32)) });
-    await expect(client.uploadGroupInvite(CAP, 5)).rejects.toBeInstanceOf(DiscoveryHttpError);
+    await expect(client.uploadGroupInvite(UPLOAD)).rejects.toBeInstanceOf(DiscoveryHttpError);
   });
 });
 
@@ -153,6 +159,7 @@ describe("the surfaces say 'try again later'", () => {
     stubFetch(429);
     const result = await acceptCallInviteFromSlug({
       slug: base64UrlEncodeNoPad(ID),
+      hash: `#${base64UrlEncodeNoPad(new Uint8Array(12).fill(0x05))}`,
       discoveryClient: new DiscoveryClient("https://d.test", { tokens: fakeTokenPool().pool }),
       joinerAccountId: ACCOUNT,
       // The fetch refuses before the identity is touched.

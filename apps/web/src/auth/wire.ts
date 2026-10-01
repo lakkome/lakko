@@ -428,16 +428,17 @@ export interface PasskeyVaultGetResponse {
 }
 
 // ----------------------------------------------------------------------------
-// Device requests — ADR-0049 section 2 (services/auth/src/device_request.rs)
+// Device requests — ADR-0049 section 2 as amended 2026-09-28, the device link
+// (services/auth/src/device_request.rs). The request id is base64url without
+// padding (it rides in bearer-route paths); every exchange value is standard
+// base64. The server relays these values and cannot open any of them.
 // ----------------------------------------------------------------------------
 
-/** `POST /device/request` request body. Anonymous (no proof of work since ADR-0054 S4). */
+/** `POST /device/request` request body. Anonymous. */
 export interface DeviceRequestCreateRequest {
   /** base64url (no pad) of the 32-byte login handle of the typed username
    *  (ADR-0056). Never an account id. */
   handle: string;
-  /** Standard base64 of the pairing payload (the bytes the QR carries). */
-  pairing_payload_b64: string;
 }
 
 /** `POST /device/request` response body. */
@@ -451,17 +452,47 @@ export interface DeviceRequestStatusRequest {
   request_id_b64: string;
 }
 export interface DeviceRequestStatusResponse {
+  /** `false` after a decline or expiry (indistinguishable by design). */
   pending: boolean;
+  pake_b_b64: string | null;
+  outcome: DeviceRequestOutcome | null;
+  confirm_b_b64: string | null;
+}
+
+/** The old device's decision on a request. */
+export type DeviceRequestOutcome = "accepted" | "wrong_code";
+
+/** `POST /device/request/payload` request body. Anonymous. */
+export interface DeviceRequestPayloadRequest {
+  request_id_b64: string;
+  pake_a_b64: string;
+  sealed_payload_b64: string;
+  confirm_a_b64: string;
 }
 
 /** `GET /device/requests` response body. */
 export interface DeviceRequestsListResponse {
   request: {
     request_id_b64: string;
-    pairing_payload_b64: string;
     created_at_ms: number;
+    pake_b_b64: string | null;
+    pake_a_b64: string | null;
+    sealed_payload_b64: string | null;
+    confirm_a_b64: string | null;
+    outcome: DeviceRequestOutcome | null;
   } | null;
 }
+
+/** `POST /device/requests/{id}/pake` request body. Bearer. */
+export interface DeviceRequestAnswerRequest {
+  pake_b_b64: string;
+}
+
+/** `POST /device/requests/{id}/result` request body. Bearer. `confirm_b_b64`
+ *  goes with `accepted` and never with `wrong_code`. */
+export type DeviceRequestResultRequest =
+  | { outcome: "accepted"; confirm_b_b64: string }
+  | { outcome: "wrong_code" };
 
 // ----------------------------------------------------------------------------
 // /auth/login-handle   (ADR-0054 S5, sign in by name)

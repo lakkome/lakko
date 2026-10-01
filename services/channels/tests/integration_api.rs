@@ -337,7 +337,9 @@ async fn fetch_respects_limit() {
     assert_eq!(body["posts"].as_array().unwrap().len(), 3);
 }
 
-const SUB_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+// ADR-0060: a subscriber key is a valid Ed25519 public key (the RFC 8032
+// section 7.1 test 2 and test 1 keys, in ascending order).
+const SUB_HEX: &str = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
 
 #[tokio::test]
 async fn subscribe_to_unknown_channel_is_404() {
@@ -511,6 +513,34 @@ async fn bad_subscriber_id_is_400() {
     assert_eq!(body["code"].as_str().unwrap(), "bad-subscriber-id");
 }
 
+#[tokio::test]
+async fn a_subscriber_key_that_is_not_a_full_order_ed25519_point_is_400() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .send()
+        .await
+        .unwrap();
+    // The identity point (order 1), and y = 2 (not on the curve).
+    let identity = format!("01{}", "00".repeat(31));
+    let off_curve = format!("02{}", "00".repeat(31));
+    for bad in [identity, off_curve] {
+        let resp = client
+            .post(format!(
+                "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
+            ))
+            .json(&json!({ "subscriber_pubkey_hex": bad }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["code"].as_str().unwrap(), "bad-subscriber-id");
+    }
+}
+
 /// SubscribeRequest's expected envelope length must match
 /// `lakko_channels::subscribe::SEED_ENVELOPE_LEN`. Compile-
 /// time assertion so a future bump in either crate is
@@ -518,7 +548,7 @@ async fn bad_subscriber_id_is_400() {
 const _ASSERT_ENVELOPE_LEN: () =
     assert!(lakko_svc_channels::api::EXPECTED_ENVELOPE_LEN == lakko_channels::SEED_ENVELOPE_LEN);
 
-const SUB_HEX_B: &str = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+const SUB_HEX_B: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 
 async fn create_channel_with_two_subs(client: &reqwest::Client, addr: SocketAddr) {
     client
@@ -1510,7 +1540,7 @@ async fn items_carry_the_band_not_the_count_and_unknown_topics_file_under_other(
                 "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
             ))
             .header(TOKEN_HEADER, subscribe_token())
-            .json(&json!({ "subscriber_pubkey_hex": hex::encode([i; 32]) }))
+            .json(&json!({ "subscriber_pubkey_hex": hex::encode(lakko_crypto::signing::SigningKey::from_seed(&[i; 32]).verifying_key().to_bytes()) }))
             .send()
             .await
             .unwrap();

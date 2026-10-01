@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! ADR-0060 — a conversation's kind is set at creation, and a one-to-one keeps
+//! ADR-0062 — a conversation's kind is set at creation, and a one-to-one keeps
 //! its two people.
 //!
 //! Drives the public API only. The peer-commit-gate half (a commit built

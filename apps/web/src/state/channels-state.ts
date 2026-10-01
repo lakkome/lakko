@@ -30,7 +30,7 @@
  * hydration restores it before re-opening any publisher keys.
  */
 
-import { createSignal, type Accessor } from "solid-js";
+import { createSignal, untrack, type Accessor } from "solid-js";
 
 import type { ChannelPublisherKeys, ChannelSubscriberKeys, WasmIdentity } from "../channels/composer";
 import type { ChannelHandle, ChannelPostView } from "../channels/api";
@@ -44,7 +44,12 @@ import {
 import { deleteChannelLog, loadChannelLog, saveChannelLog } from "../channels/channel-log-store";
 import { deleteChannelPostLog } from "../feed/channel-post-log-store";
 import { channelIdFromHex } from "../channels/composer";
-import { issueAndAdvance, loadAllCounters, seedCounter } from "../channels/publish-counter-store";
+import {
+  clearPublishCountersForAccount,
+  issueAndAdvance,
+  loadAllCounters,
+  seedCounter,
+} from "../channels/publish-counter-store";
 import { base64Encode } from "../auth/account-id";
 import { loadWasm } from "../wasm";
 
@@ -74,16 +79,21 @@ interface ChannelsStateInternal {
    *  `message_counter = previous + 1`. FOREVER monotone —
    *  NOT reset on epoch rotation (the `epoch_id` is folded
    *  into the post AEAD's HKDF, so a rotation already
-   *  disambiguates the key + nonce). Seeded at startup from
-   *  the persisted floor (`publish-counter-store.ts`) and
-   *  written through on every `nextCounter`, so a page
-   *  reload resumes the floor instead of rewinding to 0 and
-   *  re-using an AEAD `(key, nonce)` under the reload-stable
-   *  channel seed. */
+   *  disambiguates the key + nonce). Account data: loaded
+   *  from the session account's persisted floors when its
+   *  channels session hydrates (`publish-counter-store.ts`),
+   *  written through on every `nextCounter`, and dropped from
+   *  memory when the session ends, so a page reload resumes
+   *  the floor instead of rewinding to 0 under the
+   *  reload-stable channel seed and sender key, and another
+   *  account signed in next never starts from this one's
+   *  floor. */
   readonly counterByChannel: Accessor<ReadonlyMap<string, bigint>>;
-  /** Per-channel subscriber-side X25519 keypair the
+  /** Per-channel subscriber-side Ed25519 keypair the
    *  device generated for joining a channel as a
-   *  reader (Phase 4b G4-3c). Persisted in the encrypted
+   *  reader (Phase 4b G4-3c; Ed25519 since ADR-0060, so it
+   *  can sign member-card requests - a publisher holds one
+   *  too, for its own member card). Persisted in the encrypted
    *  channel log so a page reload does not lose the secret
    *  half (and with it, access to undecoded posts on the
    *  channel). */
@@ -137,7 +147,7 @@ const [keysByChannel, setKeysByChannel] = createSignal<
 >(new Map());
 const [counterByChannel, setCounterByChannel] = createSignal<
   ReadonlyMap<string, bigint>
->(loadAllCounters());
+>(new Map());
 const [subscriberKeysByChannel, setSubscriberKeysByChannel] = createSignal<
   ReadonlyMap<string, ChannelSubscriberKeys>
 >(new Map());
@@ -178,6 +188,10 @@ interface PersistSink {
 }
 
 let sink: PersistSink | null = null;
+/** The account whose publish counters the in-memory map holds, set when
+ *  its hydration starts and cleared with the session. `null` falls back
+ *  to the signed-in account bound in `contacts/local-store.ts`. */
+let counterOwner: string | null = null;
 /** The last provider snapshot this session captured or restored. Reused
  *  when `snapshotProvider` yields `null` so a flush that races a logout
  *  never overwrites a good snapshot with nothing. */
@@ -281,8 +295,18 @@ export interface HydrateChannelsArgs {
   readonly isCurrent?: () => boolean;
 }
 
+function isStale(args: HydrateChannelsArgs): boolean {
+  return args.isCurrent !== undefined && !args.isCurrent();
+}
+
+function releaseWaiters(): void {
+  const waiters = hydrationWaiters;
+  hydrationWaiters = [];
+  for (const w of waiters) w();
+}
+
 /**
- * Load the per-account channel log, restore the PublisherGroup provider
+ * Load the per-account channel log and publish counters, restore the PublisherGroup provider
  * into `identity`, fill the in-memory state and arm write-through.
  *
  * Merges rather than replaces: a mutation that landed before this
@@ -307,6 +331,17 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
     // eslint-disable-next-line no-console
     console.warn("channel log load failed; starting empty", err);
   }
+
+  // A hydration whose session ended while the row was loading touches no
+  // in-memory state: a logout or account switch has already cleared it,
+  // and filling it now would hand the old account's channels, publisher
+  // keys and publish counters to the next session. It arms nothing and
+  // writes nothing; it only releases anyone still waiting on it.
+  if (isStale(args)) {
+    releaseWaiters();
+    return;
+  }
+  counterOwner = args.accountIdB64;
 
   // 1. The provider snapshot, gated on the leaf key (mirrors
   //    `chat/rehydrate.ts`): a snapshot from another account identity
@@ -360,11 +395,26 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
     return next;
   });
 
+  // The account's publish counters. A value that landed in memory before
+  // this settled is at least the floor it was seeded from; the larger of
+  // the two wins, so neither can rewind.
+  const storedCounters = loadAllCounters(args.accountIdB64);
+  setCounterByChannel((map) => {
+    const next = new Map<string, bigint>(storedCounters);
+    for (const [id, value] of map) {
+      const held = next.get(id);
+      if (held === undefined || value > held) next.set(id, value);
+    }
+    return next;
+  });
+
   // 3. Publisher keys: re-derive the content seed from the restored group.
   if (providerRestored && stored.publisherSigningSeeds.size > 0) {
     try {
       const wasm = await loadWasm();
       for (const [id, signingKeySeed] of stored.publisherSigningSeeds) {
+        // The wasm load suspended: the session may have ended since.
+        if (isStale(args)) break;
         if (keysByChannel().has(id)) continue;
         try {
           const group = wasm.PublisherGroup.load(args.identity, channelIdFromHex(id));
@@ -400,12 +450,10 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
 
   // 5. Arm write-through and settle. Write back once so the merged view
   //    (and a fresh provider snapshot) is on disk. A hydration whose
-  //    session ended while it was loading arms nothing and writes nothing;
-  //    it only releases anyone still waiting on it.
-  if (args.isCurrent !== undefined && !args.isCurrent()) {
-    const waiters = hydrationWaiters;
-    hydrationWaiters = [];
-    for (const w of waiters) w();
+  //    session ended during step 3 arms nothing and writes nothing; it
+  //    only releases anyone still waiting on it.
+  if (isStale(args)) {
+    releaseWaiters();
     return;
   }
   sink = {
@@ -431,9 +479,12 @@ export function markChannelsHydrationUnavailable(): void {
 /**
  * Drop the in-memory channel state for the session that just ended
  * (logout, account switch). Flushes a pending write first so the last
- * mutation lands. Leaves the encrypted row AND the publish counters on
- * disk: the row is per account and unreadable without the device key,
- * and a publish counter must never rewind under a live seed.
+ * mutation lands. Drops the in-memory publish counters too, so the next
+ * account never starts from this one's floor. Leaves the encrypted row
+ * AND the persisted publish counters on disk: both are per account, the
+ * row is unreadable without the device key, and the counter must stay
+ * for as long as the signing seeds in that row do (it is what keeps a
+ * later post under the same sender key from rewinding).
  */
 export function clearChannelsSession(): Promise<void> {
   const pending = flushPending();
@@ -444,6 +495,8 @@ export function clearChannelsSession(): Promise<void> {
   setPostsByChannel(new Map());
   setEpochByChannel(new Map());
   setKeysByChannel(new Map());
+  setCounterByChannel(new Map());
+  counterOwner = null;
   setSubscriberKeysByChannel(new Map());
   setSubscribedSeedsByChannel(new Map());
   setMetaByChannel(new Map());
@@ -452,17 +505,22 @@ export function clearChannelsSession(): Promise<void> {
 }
 
 /**
- * The `forgetDevice` half: drop the in-memory state AND the account's
- * encrypted row. The publish counters (`publish-counter-store.ts`) are
- * deliberately left: they are keyed by channel id, not account, so
- * wiping them could rewind another account's counter on this browser,
- * and a counter that is too high is always safe.
+ * The Forget device / Delete account half: drop the in-memory state, the
+ * account's encrypted row (which holds its publisher signing seeds) and
+ * then the account's publish counters. The counters go only after the row
+ * is deleted: the sender key is in the post KDF and is random and
+ * unrecoverable, so once its seed is gone the next post signs with a new
+ * key and a counter restarting from 0 cannot collide, while a counter
+ * removed beside a seed that survived (a failed delete) could rewind
+ * under it. If the row delete throws, the counters stay. Another
+ * account's counters are untouched.
  */
 export async function wipeChannelsForAccount(accountIdB64: string): Promise<void> {
   await clearChannelsSession();
   await deleteChannelLog(accountIdB64);
-  // The decrypted posts the feed ranks (ADR-0058 section 3) go with it.
+  // The decrypted posts the feed ranks (ADR-0061 section 3) go with it.
   await deleteChannelPostLog(accountIdB64);
+  clearPublishCountersForAccount(accountIdB64);
 }
 
 // ---------------------------------------------------------
@@ -506,13 +564,13 @@ export const channelsActions = {
       next.delete(channelId);
       return next;
     });
-    // Clear only the in-memory counter — the PERSISTED floor is
-    // deliberately kept. Un-follow does NOT destroy the PublisherGroup
-    // (the seed source persists in the account identity's provider), so
-    // re-joining the same channel later re-derives the SAME seed; the
-    // counter must resume, not rewind to 0, or the AEAD `(key, nonce)`
-    // reuses. `setKeys` re-seeds the in-memory value from the persisted
-    // floor.
+    // Clear only the in-memory counter — the account's PERSISTED floor
+    // is deliberately kept. Un-follow does not destroy the PublisherGroup
+    // (it persists in the account identity's provider), so re-joining the
+    // same channel re-derives the SAME seed; keeping the floor means the
+    // counter can never rewind under a seed and sender key that come back
+    // (a counter that is too high is always safe). `setKeys` re-seeds the
+    // in-memory value from the persisted floor.
     setCounterByChannel((map) => {
       const next = new Map(map);
       next.delete(channelId);
@@ -565,7 +623,9 @@ export const channelsActions = {
    *  an existing channel keeps its floor. It must NOT clobber
    *  a persisted counter to 0 — the channel content seed is
    *  STABLE across a reload / re-open (it re-derives from the
-   *  persistent PublisherGroup MLS exporter), so rewinding the
+   *  persistent PublisherGroup MLS exporter) and so is the sender
+   *  key (its signing seed is persisted with the account's
+   *  channel log), so rewinding the
    *  counter to 0 would re-use an AEAD `(key, nonce)` under
    *  the same seed + epoch (catastrophic keystream reuse).
    *  Mirrors the publisher-seed reuse-else-generate pattern.
@@ -580,7 +640,7 @@ export const channelsActions = {
     });
     setCounterByChannel((map) => {
       const next = new Map(map);
-      next.set(channelId, seedCounter(map.get(channelId), channelId));
+      next.set(channelId, seedCounter(map.get(channelId), channelId, counterOwner ?? undefined));
       return next;
     });
     schedulePersist();
@@ -600,19 +660,23 @@ export const channelsActions = {
    *  never hand out `value` again. Burning a counter value is safe;
    *  re-issuing one re-uses the AEAD nonce (catastrophic), so the
    *  store is advanced first and the caller composes with the returned
-   *  (pre-increment) `value`. */
+   *  (pre-increment) `value`. The floor is the session account's;
+   *  with no account to persist under this throws and issues
+   *  nothing (`issueAndAdvance`). */
   nextCounter(channelId: string): bigint {
-    let value = 0n;
+    const issued = issueAndAdvance(
+      untrack(counterByChannel).get(channelId),
+      channelId,
+      counterOwner ?? undefined,
+    );
     setCounterByChannel((map) => {
-      const issued = issueAndAdvance(map.get(channelId), channelId);
-      value = issued.value;
       const next = new Map(map);
       next.set(channelId, issued.advanced);
       return next;
     });
-    return value;
+    return issued.value;
   },
-  /** Install / replace the subscriber-side X25519 keypair
+  /** Install / replace the subscriber-side Ed25519 keypair
    *  the device generated when joining `channelId` as a
    *  reader. Persisted so a reload does not strand the user
    *  without the secret needed to open future envelopes. */

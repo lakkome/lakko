@@ -37,7 +37,7 @@ import {
 } from "../calls/call-history";
 import { callRowLabel } from "../calls/call-log";
 import { useCallLog } from "../calls/CallLogContext";
-import { callLinkSlug } from "../calls/call-link-slug";
+import { callLinkTarget } from "../calls/call-link-slug";
 import { newCallId, newCallStart } from "../calls/new-call";
 import { useCallHost } from "../calls/CallHostContext";
 import { useChats } from "../chat/ChatContext";
@@ -126,13 +126,13 @@ export default function Calls(): JSX.Element {
   /** Open a link somebody sent that did not open by itself. */
   function joinByLink(e: SubmitEvent): void {
     e.preventDefault();
-    const slug = callLinkSlug(joinInput());
-    if (slug === null) {
+    const target = callLinkTarget(joinInput());
+    if (target === null) {
       setJoinError("That does not look like a call link. Paste the whole link and try again.");
       return;
     }
     setJoinError(null);
-    navigate(paths.joinCall(slug));
+    navigate(`${paths.joinCall(target.slug)}${target.hash}`);
   }
 
   /** The row opens the conversation; the button places the call. Two

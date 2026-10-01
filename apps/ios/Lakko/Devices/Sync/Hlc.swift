@@ -43,4 +43,23 @@ public enum Hlc {
         }
         return lastWallMs &* 1000 &+ counter
     }
+
+    /// Move the clock past `hlc`, so the next ``mint()`` is strictly greater.
+    ///
+    /// The receive half of a hybrid logical clock. Needed since ADR-0058: a
+    /// state restored from disk or a backup, or folded from another device
+    /// whose wall clock runs ahead, carries stamps this process never minted,
+    /// and a local write stamped below one of them would lose to it.
+    public static func observe(_ hlc: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        let wallMs = hlc / 1000
+        let count = hlc % 1000
+        if wallMs > lastWallMs {
+            lastWallMs = wallMs
+            counter = count
+        } else if wallMs == lastWallMs, count > counter {
+            counter = count
+        }
+    }
 }

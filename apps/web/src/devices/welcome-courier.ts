@@ -54,7 +54,7 @@ export async function publishWelcome(
   options: { ds?: DsClient } = {},
 ): Promise<void> {
   const ds = options.ds ?? new DsClient();
-  await ds.publishMailbox(rendezvousPseudonym, welcomeBytes);
+  await ds.publishRendezvous(rendezvousPseudonym, welcomeBytes);
 }
 
 /** Result of [`pollForWelcome`]. */
@@ -124,7 +124,7 @@ export async function pollForWelcome(
     );
     let result;
     try {
-      result = await ds.fetchMailbox(rendezvousPseudonym, {
+      result = await ds.fetchRendezvous(rendezvousPseudonym, {
         after: cursor,
         limit: 1,
         waitSecs,
@@ -193,7 +193,7 @@ export async function publishHistoryBundle(
   options: { ds?: DsClient } = {},
 ): Promise<void> {
   const ds = options.ds ?? new DsClient();
-  await ds.publishMailbox(rendezvousPseudonym, sealedBytes);
+  await ds.publishRendezvous(rendezvousPseudonym, sealedBytes);
 }
 
 /** Result of [`pollForHistoryBundle`]. */
@@ -238,7 +238,7 @@ export async function pollForHistoryBundle(
     );
     let result;
     try {
-      result = await ds.fetchMailbox(rendezvousPseudonym, {
+      result = await ds.fetchRendezvous(rendezvousPseudonym, {
         after: cursor,
         limit: 1,
         waitSecs,

@@ -18,6 +18,7 @@
 pub mod ciphersuite;
 pub mod device_binding;
 pub mod device_group;
+pub mod device_group_sync;
 pub mod error;
 pub mod group;
 pub mod group_kind;
@@ -33,7 +34,7 @@ pub mod refusal;
 pub mod welcome_rendezvous;
 
 pub use device_binding::{account_key_of_credential, DeviceBinding, DEVICE_BINDING_LEN};
-pub use device_group::{AccountId, DeviceGroup};
+pub use device_group::{AccountId, DeviceGroup, MAX_SERVICE_ENVELOPE_LEN};
 pub use error::{Error, Result};
 pub use group::{
     epoch_after_message, epoch_of_message, is_external_join_proposal_for, Group, Incoming,
@@ -41,7 +42,7 @@ pub use group::{
 };
 pub use group_kind::{GroupKind, GROUP_KIND_BODY_LEN};
 pub use group_proposals::{ProposalKind, ProposalRecord};
-pub use group_roles::{committer_rank, OutgoingOwner, Role, RoleTable};
+pub use group_roles::{account_committer_rank, committer_rank, OutgoingOwner, Role, RoleTable};
 pub use identity::Identity;
 pub use publisher_group::{
     channel_id_from_group_id, ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN,
@@ -99,6 +100,49 @@ pub mod fuzz_api {
     #[must_use]
     pub fn parse_devicegroup_payload(bytes: &[u8]) -> bool {
         crate::DeviceGroup::parse_devicegroup_payload(bytes).is_ok()
+    }
+
+    /// ADR-0058 oracle over the same parser: `true` unless the decoder
+    /// ACCEPTED a `FolderChanges` / `StateSnapshot` that breaks a section 4
+    /// bound, or accepted one whose registers the fold then refuses. The
+    /// harness asserts it, so a decoder that lets an out-of-bounds register
+    /// through fails the fuzz run instead of reaching a client's state.
+    #[must_use]
+    pub fn devicegroup_payload_accepted_within_bounds(bytes: &[u8]) -> bool {
+        use crate::device_group::DeviceGroupBody;
+        let Ok(parsed) = crate::DeviceGroup::parse_devicegroup_payload(bytes) else {
+            return true;
+        };
+        let bounded = match &parsed.body {
+            DeviceGroupBody::FolderChanges(c) => c.validate().is_ok(),
+            DeviceGroupBody::StateSnapshot(s) => s.validate().is_ok(),
+            _ => true,
+        };
+        if !bounded {
+            return false;
+        }
+        let mut state = lakko_sync::SyncedState::new();
+        parsed
+            .stamped_entries()
+            .into_iter()
+            .all(|(hlc, entry)| state.apply(hlc, entry).is_ok())
+    }
+
+    /// `true` unless `bytes` parse as a DeviceGroup payload whose
+    /// service envelope (ADR-0060 section 7) breaks its bound. The
+    /// `devicegroup_payload` fuzz target asserts it: an accepted
+    /// service envelope is always 1 to `MAX_SERVICE_ENVELOPE_LEN` bytes.
+    #[must_use]
+    pub fn devicegroup_service_envelope_within_bounds(bytes: &[u8]) -> bool {
+        match crate::DeviceGroup::parse_devicegroup_payload(bytes) {
+            Ok(parsed) => match parsed.body {
+                crate::device_group::DeviceGroupBody::ServiceEnvelope { envelope } => {
+                    !envelope.is_empty() && envelope.len() <= crate::MAX_SERVICE_ENVELOPE_LEN
+                },
+                _ => true,
+            },
+            Err(_) => true,
+        }
     }
 
     /// Try to decode a Welcome rendezvous envelope
@@ -194,7 +238,7 @@ pub mod fuzz_api {
         crate::group_roles::RoleTable::decode(bytes).is_ok()
     }
 
-    /// Decode the ADR-0060 `0xFF03` group-kind body (`GroupKind::decode`). The
+    /// Decode the ADR-0062 `0xFF03` group-kind body (`GroupKind::decode`). The
     /// bytes are attacker-touchable: the kind travels inside every Welcome a
     /// group founder can craft, and `join_from_welcome` decodes it before the
     /// group is kept. Returns `true` on a successful decode, and **panics**

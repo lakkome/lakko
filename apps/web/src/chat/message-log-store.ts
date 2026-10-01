@@ -236,7 +236,7 @@ export interface PersistedGroup {
    */
   readonly lastViewedMessageId?: string;
   /**
-   * ADR-0058 section 5 - incoming messages above `lastViewedMessageId` the
+   * ADR-0061 section 5 - incoming messages above `lastViewedMessageId` the
    * feed kept on screen long enough to count as seen (stringified ids). Folded
    * into `lastViewedMessageId` once contiguous, so it only ever holds the
    * gaps. See `feed/feed-seen.ts`.

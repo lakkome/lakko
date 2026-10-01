@@ -5,6 +5,7 @@
  * Error copy for the Contacts screens. Moved out of `routes/Contacts.tsx`
  * unchanged so the list, detail and invite panels share one formatter.
  */
+import { SEARCH_NOT_FOUND } from "../search/search-state";
 import { anonTokenMessage } from "../tokens/token-copy";
 import { ContactsError, SupersessionRefused } from "./client";
 import { supersessionRefusedMessage } from "./supersession-message";
@@ -35,7 +36,10 @@ export function formatContactsError(err: unknown, peerLabel?: string): string {
       case "no-identity-secrets":
         return "Sign in again to continue.";
       case "username-unknown":
-        return `No account is registered as @${err.variant.username}.`;
+        // `docs/ux/who-can-find-me.md` section 6.1: the same answer whether
+        // the account does not exist or does not let this person find it
+        // (ADR-0060), so it never names the account as unregistered.
+        return SEARCH_NOT_FOUND;
       case "no-identity-bundle":
         return "This person has not finished setting up Lakko yet. Try again later.";
       case "wrapped":

@@ -658,10 +658,11 @@ final class MultiJoinerCall {
             // JOURNAL (standing-gated in `ChatRepository.receivePin`), never
             // the SFU signal-relay. Out of place here — drop.
             break
-        case .registrarSeed:
-            // ADR-0057 — a registrar seed rides the GROUP JOURNAL, sealed to
-            // one member's account key, never the SFU signal-relay. Out of
-            // place here — drop.
+        case .introductionOffer, .introductions, .visibility, .reachState,
+             .committerDelegation, .registrarSeed:
+            // ADR-0060 (and the ADR-0057 registrar seed) — group-journal /
+            // DeviceGroup envelopes, never the SFU signal-relay. Out of place
+            // here — drop.
             break
         case .sharedChannels:
             // ADR-0059 — a shared-channels list rides the GROUP JOURNAL and

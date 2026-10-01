@@ -708,7 +708,8 @@ impl ParsedBody {
         self.reply_excerpt.clone()
     }
 
-    /// `"chat" | "edit" | "delete" | "reaction" | "typing" | "read-receipt"`.
+    /// `"chat" | "edit" | "delete" | "reaction" | "typing" | "read-receipt" |
+    /// "service-envelope"` (the last never rendered).
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
         self.kind.to_string()
@@ -816,6 +817,7 @@ pub fn compose_read_receipt_envelope(up_to: i64) -> Result<Vec<u8>, JsError> {
 /// ambiguous op degrades to `"chat"`.
 #[wasm_bindgen(js_name = parseBodyEnvelope)]
 #[must_use]
+#[allow(clippy::too_many_lines)] // one struct literal per body kind
 pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
     match inner::parse_body(bytes) {
         inner::MessageBody::Chat {
@@ -900,6 +902,21 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             text: String::new(),
             attachments: Vec::new(),
             target: Some(up_to),
+            emoji: None,
+            is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
+        },
+        // A Lakko service envelope this build did not recognise: never render.
+        inner::MessageBody::ServiceEnvelope => ParsedBody {
+            kind: "service-envelope",
+            text: String::new(),
+            attachments: Vec::new(),
+            target: None,
             emoji: None,
             is_typing: None,
             reply_to: None,

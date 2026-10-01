@@ -67,7 +67,8 @@ pub fn decode_profile_envelope(plaintext: Vec<u8>) -> Result<(), FfiError> {
         .map_err(|err| FfiError::Contacts(err.to_string()))
 }
 
-/// Shortest well-formed profile envelope in bytes (no name, no username).
+/// Shortest well-formed profile envelope in bytes (no name, no username, no
+/// account id, no certificate, no grants).
 ///
 /// Derived from the core's constants, so a wire revision moves it here
 /// automatically. Shape-parallel to `committer_beacon_envelope_len`.
@@ -77,7 +78,8 @@ pub fn profile_envelope_min_len() -> u32 {
     u32::try_from(PROFILE_ENVELOPE_MIN_LEN).unwrap_or(u32::MAX)
 }
 
-/// Longest well-formed profile envelope in bytes (maximal name and username).
+/// Longest well-formed profile envelope in bytes (maximal name and username,
+/// an account id, a username certificate and two reach grants).
 ///
 /// A pre-filter bound that is too LOW fails in the dangerous direction — it
 /// stops suppressing long profiles — which is why it is exported and pinned
@@ -92,6 +94,7 @@ pub fn profile_envelope_max_len() -> u32 {
 mod tests {
     use super::*;
     use lakko_contacts::profile::{compose_profile, Profile, PROFILE_ENVELOPE_DOMAIN_V1};
+    use lakko_contacts::reach::{ReachClass, ReachGrant};
 
     fn profile(name: Option<&str>, username: Option<&str>) -> Profile {
         Profile {
@@ -99,6 +102,8 @@ mod tests {
             username: username.map(str::to_string),
             updated_at_ms: 1_700_000_000_000,
             account_id: None,
+            username_certificate: None,
+            grants: Vec::new(),
         }
     }
 
@@ -124,15 +129,13 @@ mod tests {
     /// Pinned as the reason the module exists: without this arm the NSE
     /// renders a profile — the sender's name included — as chat text.
     #[test]
-    fn an_unfiltered_profile_would_otherwise_render_as_chat_text() {
+    fn an_unfiltered_profile_is_never_chat_text() {
         let wire = compose_profile(&profile(Some("Alice"), Some("alice"))).unwrap();
-        match lakko_attachments::parse_body(&wire) {
-            lakko_attachments::MessageBody::Chat { text, .. } => assert!(
-                text.starts_with("lakko/profile/v1"),
-                "the lossy fallback is what this arm pre-empts",
-            ),
-            other => panic!("expected the lossy Chat fallback, got {other:?}"),
-        }
+        assert_eq!(
+            lakko_attachments::parse_body(&wire),
+            lakko_attachments::MessageBody::ServiceEnvelope,
+            "a service envelope is never chat text, even with this arm absent",
+        );
         decode_profile_envelope(wire).expect("the filter arm must recognise it");
     }
 
@@ -157,16 +160,27 @@ mod tests {
     /// silently narrowing the NSE peek.
     #[test]
     fn golden_pins_the_swift_prefilter_shape() {
-        assert_eq!(profile_envelope_min_len(), 29);
-        assert_eq!(profile_envelope_max_len(), 332);
+        // Profile v3 (ADR-0060): the certificate and two reach grants widen
+        // the range at both ends.
+        assert_eq!(profile_envelope_min_len(), 31);
+        assert_eq!(profile_envelope_max_len(), 561);
         let smallest = compose_profile(&profile(None, None)).unwrap();
-        assert_eq!(smallest.len(), 29);
+        assert_eq!(smallest.len(), 31);
         assert_eq!(smallest[0], 0x6c);
         let name = format!("{}\u{20AC}", "\u{1F600}".repeat(63));
         let mut maximal = profile(Some(&name), Some(&"a".repeat(32)));
         maximal.account_id = Some([7; 16]);
+        maximal.username_certificate = Some(vec![9; 153]);
+        maximal.grants = [ReachClass::Group, ReachClass::Member]
+            .into_iter()
+            .map(|class| ReachGrant {
+                class,
+                version: 1,
+                seed: lakko_crypto::SecretBytes::new([3; 32]),
+            })
+            .collect();
         let largest = compose_profile(&maximal).unwrap();
-        assert_eq!(largest.len(), 332);
+        assert_eq!(largest.len(), 561);
         decode_profile_envelope(largest).expect("the maximal envelope decodes");
     }
 

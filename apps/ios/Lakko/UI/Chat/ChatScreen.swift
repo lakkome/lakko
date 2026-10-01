@@ -2809,6 +2809,9 @@ struct MembersSheet: View {
                         viewModel: viewModel,
                         canRename: sections.contains(.renameGroup))
                 }
+                // `docs/ux/who-can-find-me.md` section 5 — present only while
+                // the setting includes groups at all.
+                MembersCanFindMeSection(groupIdHex: viewModel.groupIdHex)
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees
                 // the add affordance; a plain member's add would be refused.
                 if sections.contains(.addMember) {

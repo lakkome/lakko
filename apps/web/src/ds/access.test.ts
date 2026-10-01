@@ -21,16 +21,14 @@ import {
   DsAccessRegistry,
   GroupNotClaimedError,
   dsClockSkewNotice,
-  healAfterApply,
   isClockSkewed,
   knockToJoin,
   parseHttpDate,
   registerBeforePublish,
   type EpochRegistrar,
   type KnockPorts,
-  type ProofSigner,
 } from "./access";
-import { fakeSigner } from "./access-test-doubles";
+import { fakeRegistrarAuthority, fakeRootAuthority, fakeSigner } from "./access-test-doubles";
 
 beforeAll(async () => {
   const wasmPath = fileURLToPath(
@@ -84,13 +82,11 @@ describe("the wasm signer the client drives", () => {
     account.free();
   });
 
-  it("a group signer moves with the epoch and its claim body names that epoch", () => {
+  it("a group signer proves requests at its epoch (ADR-0057: it registers nothing)", () => {
     const id = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x24));
     const group = new wasm.Group(id, wasm.GroupKind.Group);
     const s0 = group.dsAccessSigner(id);
-    const claim = JSON.parse(s0.groupClaimBodyJson()) as { epoch: number; access_pk_b64: string };
-    expect(BigInt(claim.epoch)).toBe(s0.epoch);
-    expect(typeof claim.access_pk_b64).toBe("string");
+    expect(s0.verifyingKey().length).toBe(32);
     const header = s0.sign("GET", "/ds/group/aa/messages", "after=0&wait=25", new Uint8Array(0));
     expect(header.startsWith(`v1.${s0.epoch}.`)).toBe(true);
     // No staged sweep: nothing to register ahead of a publish.
@@ -146,13 +142,37 @@ describe("DsAccessRegistry", () => {
     expect(reg.mailboxSigner(new Uint8Array(32).fill(0x01))).toBeNull();
   });
 
-  it("claims each group once per session", () => {
+  it("ADR-0057: the authority is the root when a source says this account owns the journal", () => {
     const reg = new DsAccessRegistry();
     const gid = new Uint8Array([4]);
-    expect(reg.markClaimAttempt(gid)).toBe(true);
-    expect(reg.markClaimAttempt(gid)).toBe(false);
+    expect(reg.journalAuthority(gid).kind).toBe("none");
+    const factory = {
+      root: vi.fn(() => fakeRootAuthority()),
+      registrar: vi.fn(() => fakeRegistrarAuthority()),
+    };
+    reg.setAuthorityFactory(factory);
+    // No owner source: the registrar seed (or none).
+    expect(reg.journalAuthority(gid).kind).toBe("registrar");
+    const off = reg.registerOwnerSource((g) => (g[0] === 4 ? true : null));
+    expect(reg.ownsJournal(gid)).toBe(true);
+    expect(reg.journalAuthority(gid).kind).toBe("root");
+    expect(reg.ownsJournal(new Uint8Array([5]))).toBe(false);
+    off();
+    expect(reg.journalAuthority(gid).kind).toBe("registrar");
+  });
+
+  it("an owner source that says `false` stops the search: not the owner", () => {
+    const reg = new DsAccessRegistry();
+    reg.registerOwnerSource(() => false);
+    reg.registerOwnerSource(() => true);
+    expect(reg.ownsJournal(new Uint8Array([1]))).toBe(false);
+  });
+
+  it("sign-out clears the factory: no authority", () => {
+    const reg = new DsAccessRegistry();
+    reg.setAuthorityFactory({ root: () => fakeRootAuthority(), registrar: () => fakeRegistrarAuthority() });
     reg.clear();
-    expect(reg.markClaimAttempt(gid)).toBe(true);
+    expect(reg.journalAuthority(new Uint8Array([1])).kind).toBe("none");
   });
 });
 
@@ -179,59 +199,44 @@ describe("contract point 5 — the clock", () => {
 });
 
 function recordingRegistrar(fail = false): EpochRegistrar & {
-  readonly calls: Array<{ next: bigint; signedBy: bigint | null }>;
+  readonly calls: Array<{ epoch: bigint; revoke: number }>;
 } {
-  const calls: Array<{ next: bigint; signedBy: bigint | null }> = [];
+  const calls: Array<{ epoch: bigint; revoke: number }> = [];
   return {
     calls,
-    registerGroupEpoch: vi.fn(async (_g: Uint8Array, next: ProofSigner, by: ProofSigner | null) => {
-      calls.push({ next: next.epoch, signedBy: by === null ? null : by.epoch });
+    registerGroupEpoch: vi.fn(async (_g: Uint8Array, epoch: bigint, _k: Uint8Array, revoke?: readonly Uint8Array[]) => {
+      calls.push({ epoch, revoke: revoke?.length ?? 0 });
       if (fail) throw new Error("401 proof required");
     }),
   };
 }
 
-describe("contract point 3 — register before publish", () => {
-  it("registers N+1 proven under N", async () => {
+describe("contract point 3 — register before publish (ADR-0057: signed by the authority)", () => {
+  it("registers N+1's key; the key of the epoch left proves nothing", async () => {
     const r = recordingRegistrar();
-    await registerBeforePublish(r, new Uint8Array([1]), fakeSigner(5n), fakeSigner(6n));
-    expect(r.calls).toEqual([{ next: 6n, signedBy: 5n }]);
+    await registerBeforePublish(r, new Uint8Array([1]), fakeSigner(6n));
+    expect(r.calls).toEqual([{ epoch: 6n, revoke: 0 }]);
+  });
+
+  it("carries the revocation list", async () => {
+    const r = recordingRegistrar();
+    await registerBeforePublish(r, new Uint8Array([1]), fakeSigner(6n), [new Uint8Array(32)]);
+    expect(r.calls).toEqual([{ epoch: 6n, revoke: 1 }]);
   });
 
   it("a refusal propagates, so the caller aborts", async () => {
     const r = recordingRegistrar(true);
-    await expect(
-      registerBeforePublish(r, new Uint8Array([1]), fakeSigner(5n), fakeSigner(6n)),
-    ).rejects.toThrow(/proof required/);
+    await expect(registerBeforePublish(r, new Uint8Array([1]), fakeSigner(6n))).rejects.toThrow(
+      /proof required/,
+    );
   });
 
   it("an underivable next key aborts without a request", async () => {
     const r = recordingRegistrar();
-    await expect(
-      registerBeforePublish(r, new Uint8Array([1]), fakeSigner(5n), null),
-    ).rejects.toThrow(/could not be derived/);
+    await expect(registerBeforePublish(r, new Uint8Array([1]), null)).rejects.toThrow(
+      /could not be derived/,
+    );
     expect(r.calls).toEqual([]);
-  });
-});
-
-describe("contract point 4 — heal on apply", () => {
-  it("registers the new epoch under the pre-batch key when the batch moved it", async () => {
-    const r = recordingRegistrar();
-    expect(await healAfterApply(r, new Uint8Array([1]), fakeSigner(5n), fakeSigner(7n))).toBe(true);
-    expect(r.calls).toEqual([{ next: 7n, signedBy: 5n }]);
-  });
-
-  it("does nothing when the epoch did not move", async () => {
-    const r = recordingRegistrar();
-    expect(await healAfterApply(r, new Uint8Array([1]), fakeSigner(5n), fakeSigner(5n))).toBe(false);
-    expect(r.calls).toEqual([]);
-  });
-
-  it("swallows a refusal (someone registered first)", async () => {
-    const r = recordingRegistrar(true);
-    await expect(
-      healAfterApply(r, new Uint8Array([1]), fakeSigner(5n), fakeSigner(6n)),
-    ).resolves.toBe(true);
   });
 });
 

@@ -16,14 +16,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("../wasm", () => ({
   loadWasm: async () => ({
     composeGroupInviteCapabilityWithPreview: () => ({
-      wire: new Uint8Array(160).fill(0x41),
-      linkKey: new Uint8Array(12).fill(0x07),
+      sealed: new Uint8Array(160).fill(0x41),
+      linkSecret: new Uint8Array(12).fill(0x07),
+      issuerPubkey: new Uint8Array(32).fill(0x09),
+      free: () => {},
     }),
     // The widths the real core exports (ADR-0028 short-link amendment).
     inviteBlobIdLen: () => 6,
     inviteBlobIdUrlLen: () => 8,
-    groupInviteLinkSecretLen: () => 12,
-    groupInviteLinkSecretUrlLen: () => 16,
+    inviteLinkSecretLen: () => 12,
+    inviteLinkSecretUrlLen: () => 16,
   }),
 }));
 
@@ -39,20 +41,41 @@ const ACCOUNT = { ed25519Seed: new Uint8Array(32) } as unknown as WasmIdentity;
 const GROUP = { groupId: new Uint8Array(32).fill(3) } as unknown as WasmGroup;
 const PREVIEW = { memberCount: 3 };
 
+let uploaded: unknown[] = [];
+
 function clientWith(upload: () => Promise<Uint8Array>): ContactsClient {
-  const discovery = { uploadGroupInvite: vi.fn(upload) } as unknown as DiscoveryClient;
+  const discovery = {
+    uploadGroupInvite: vi.fn(async (body: unknown) => {
+      uploaded.push(body);
+      return upload();
+    }),
+  } as unknown as DiscoveryClient;
   return new ContactsClient(discovery, undefined, { accountIdentityProvider: () => ACCOUNT });
 }
 
 afterEach(() => {
   vi.restoreAllMocks();
+  uploaded = [];
 });
 
 describe("createGroupInviteLink — pointer, inline, or an error", () => {
   it("returns the short pointer link when the upload lands", async () => {
     const client = clientWith(async () => new Uint8Array(6).fill(0xff));
-    const link = await client.createGroupInviteLink(null, GROUP, 0n, "https://x.test", PREVIEW);
+    const link = await client.createGroupInviteLink(null, GROUP, 0n, "https://x.test", PREVIEW, 7);
     expect(link).toBe("https://x.test/g/________#BwcHBwcHBwcHBwcH");
+  });
+
+  it("uploads the sealed blob and the clear fields, never the link secret", async () => {
+    const client = clientWith(async () => new Uint8Array(6).fill(0xff));
+    await client.createGroupInviteLink(null, GROUP, 1234n, "https://x.test", PREVIEW, 7);
+    expect(uploaded).toEqual([
+      {
+        sealed: new Uint8Array(160).fill(0x41),
+        issuerPubkey: new Uint8Array(32).fill(0x09),
+        expiryMs: 1234n,
+        maxUses: 7,
+      },
+    ]);
   });
 
   it("falls back to the inline link on a transport failure", async () => {
@@ -61,8 +84,10 @@ describe("createGroupInviteLink — pointer, inline, or an error", () => {
       throw new DiscoveryNetworkError("/discovery/group-invite", new TypeError("offline"));
     });
     const link = await client.createGroupInviteLink(null, GROUP, 0n, "https://x.test", PREVIEW);
-    const slug = link.split("/g/")[1]?.split("#")[0] ?? "";
-    expect(slug.length).toBeGreaterThan(43);
+    const [slug, fragment] = (link.split("/g/")[1] ?? "").split("#");
+    expect((slug ?? "").length).toBeGreaterThan(43);
+    // The inline sealed form carries the secret too; without it nothing opens.
+    expect(fragment).toBe("BwcHBwcHBwcHBwcH");
   });
 
   it("surfaces a server refusal and logs its status, never the capability", async () => {

@@ -82,6 +82,7 @@ const SECTION_NAMES = [
   "subscriber-count",
   "manage-channel",
   "unsubscribe",
+  "channel-members",
 ] as const;
 
 /**

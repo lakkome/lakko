@@ -19,6 +19,7 @@ import "./styles.css";
 import { registerServiceWorker } from "./sw/register";
 import { runBootUpdateCheck } from "./update/release-check";
 import { bootstrapTheme } from "./ui/theme";
+import { installOriginHistory } from "./routes/origin-history";
 
 const root = document.getElementById("root");
 if (root === null) {
@@ -32,6 +33,11 @@ if (root === null) {
 // theme. Synchronous reads of localStorage + a single
 // setAttribute; ~0.5 ms typical.
 bootstrapTheme();
+
+// The address bar shows the origin only: read the entry path (an invite
+// link, a notification's `/?wake=`) and clear the URL before any screen
+// renders. `routes/origin-history.ts`.
+installOriginHistory();
 
 render(() => <App />, root);
 

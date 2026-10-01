@@ -10,8 +10,9 @@
 //! Discovery clients submit a blinded element through
 //! `/discovery/oprf` (namespace-agnostic — same endpoint
 //! used by `@username` lookup), apply the static `K`,
-//! finalise locally, and present the OPRF output to one
-//! of the endpoints in this module.
+//! finalise locally, and present the lookup key derived from
+//! the OPRF output (`lakko_discovery_client::discovery_lookup_key`)
+//! to one of the endpoints in this module.
 //!
 //! ## Why a separate table
 //!
@@ -77,9 +78,8 @@ fn decode_fixed<const N: usize>(
 /// Body for [`register`].
 #[derive(Deserialize)]
 pub(crate) struct RegisterChannelRequest {
-    /// Base64-encoded VOPRF output (64 bytes for
-    /// Ristretto255-SHA512). Client computes locally after
-    /// a `/discovery/oprf` round-trip.
+    /// Base64-encoded 64-byte lookup key, derived client-side from
+    /// the OPRF output of a `/discovery/oprf` round-trip.
     pub(crate) oprf_hash: String,
     /// Base64-encoded 16-byte channel id pseudonym.
     pub(crate) channel_id: String,

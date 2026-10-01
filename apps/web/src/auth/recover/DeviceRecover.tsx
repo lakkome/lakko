@@ -116,7 +116,7 @@ export function DeviceRecover(props: {
   return (
     <div class="lk-stack">
       <p class="lk-muted">
-        Enter your username, then confirm on a device that is still logged in and compare
+        Enter your username, then open Lakko on a device that is still logged in and type
         the code it shows. Nothing is sent that Lakko's servers can read. No camera needed; a
         QR code is there if you prefer.
       </p>

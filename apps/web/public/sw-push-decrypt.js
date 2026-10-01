@@ -140,12 +140,22 @@ function ringVerdict(wasm, muted, offerAgeMs) {
 
 /**
  * @typedef {object} PushWake
- * @property {string | null} deviceHex   Device pseudonym (unused here — routing only).
+ * @property {string | null} deviceHex   Device pseudonym that subscribed (`d`). The
+ *   wake gate ({@link wakeBoundAccount}) handles a wake only when it equals the
+ *   pseudonym bound to the signed-in account.
  * @property {string | null} groupHex    64 lowercase-hex chars. Post-ADR-0042
  *   (Sprint 3) this is the OPAQUE 32-byte `push_gid`; a legacy wake carries
  *   the raw 32-byte group_id. Either way the shape is identical — the
  *   `lookupRoute` reverse-map (Sprint 4) disambiguates.
  * @property {number | null} pointer     DS message id of the message that triggered the wake.
+ */
+
+/**
+ * The `(device pseudonym, account)` pair the app recorded when it registered
+ * this browser for push (`src/push/group-routing-store.ts`, `wake_binding`).
+ * @typedef {object} WakeBinding
+ * @property {string} devicePseudonymHex  64 hex chars.
+ * @property {string} accountId           base64(account_id).
  */
 
 /**
@@ -216,6 +226,15 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   well-formed list; `wrongDomain` is the only "not a list" answer. Used
  *   ONLY to classify the row out of the preview path — the SW never stores
  *   a received list (C-59). Optional so an older deps object still loads.
+ * @property {(bytes: Uint8Array) => any} [dispatchIncomingEnvelope]
+ *   ADR-0060 — the core's service-envelope dispatcher, whose `kind` names the
+ *   scoped-discovery envelopes (introduction offer / bundle, visibility,
+ *   reach state, committer delegation) and the ADR-0057 registrar seed. Used
+ *   ONLY to classify the row out of the preview path — the SW keeps no
+ *   grant, record or delegation (C-59). Optional so an older deps object
+ *   still loads.
+ * @property {Record<string, number>} [IncomingEnvelopeKind]
+ *   The dispatcher's kind enum (the same wasm namespace).
  * @property {(bytes: Uint8Array) => any} [parseCallSignaling]
  *   Phase 3a3 — the prost `CallSignalingPayload` codec. THROWS on bytes that
  *   are not one. Used to tell an OFFER (ring) and an END (stop ringing) apart
@@ -224,6 +243,14 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   media flags to shape a notification and never applies, answers or stores
  *   anything (C-59). Optional — absent means every call frame is suppressed,
  *   i.e. exactly the pre-ring behaviour.
+ * @property {(bytes: Uint8Array) => any} [decodeRegistrarSeedEnvelope]
+ *   ADR-0057 — the fail-closed registrar-seed-envelope codec (the seed stays
+ *   sealed). THROWS when the bytes are not that envelope. Used ONLY to
+ *   classify the row out of the preview path — the SW never opens or keeps a
+ *   registrar seed (C-59). Optional so an older deps object still loads.
+ * @property {() => number} [registrarSeedEnvelopeLen]
+ *   ADR-0057 — the one on-wire length of a registrar-seed envelope, read from
+ *   the FFI. Optional; absent means the arm is off.
  * @property {() => number} [committerBeaconEnvelopeLen]
  *   ADR-0045 — the exact on-wire length of a beacon envelope, read from
  *   the FFI rather than hand-copied into each client (the drift class
@@ -238,15 +265,20 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * the test wires spies and asserts zero calls.
  *
  * @typedef {object} DecryptPushDeps
- * @property {(pushGidHex: string) => Promise<{ accountId: string, groupIdB64: string } | null>} [lookupRoute]
- *   ADR-0042 Sprint 4 — READ-ONLY reverse-map of an opaque `push_gid`
- *   (lowercase hex) to the owning `(accountId, base64 group_id)` via the
- *   plaintext `lakko-push-routing`/`routes` IDB index. `null` on a miss
- *   (legacy wake / not-yet-provisioned group). Optional so older deps
- *   objects keep working; any throw is treated as a miss (fail-closed).
- * @property {(groupHex: string) => Promise<ResolvedAccount | null>} resolveAccount
- *   Match `groupHex` to a locally-stored account+group (returns null if none).
- *   The LEGACY fallback path — runs only when `lookupRoute` misses.
+ * @property {() => Promise<WakeBinding | null>} [readWakeBinding]
+ *   READ-ONLY: the binding row. ABSENT or `null` means no account is signed in
+ *   for push on this browser, and no wake is decrypted — the gate
+ *   ({@link wakeBoundAccount}) fails closed. Any throw reads as `null`.
+ * @property {(accountId: string, pushGidHex: string) => Promise<{ accountId: string, groupIdB64: string } | null>} [lookupRoute]
+ *   ADR-0042 — READ-ONLY reverse-map of `(bound account, opaque push_gid)`
+ *   (lowercase hex) to the base64 group_id via the plaintext
+ *   `lakko-push-routing`/`account_routes` IDB index. `null` on a miss; a row
+ *   naming another account is a miss. Optional so older deps objects keep
+ *   working; any throw is treated as a miss (fail-closed).
+ * @property {(accountId: string, groupHex: string) => Promise<ResolvedAccount | null>} resolveAccount
+ *   Match `groupHex` to a group the BOUND account knows (returns null if
+ *   none). The LEGACY fallback path — runs only when `lookupRoute` misses,
+ *   and never searches another account's groups.
  * @property {(accountId: string) => Promise<any | null>} getDeviceKey
  *   The non-extractable AES-GCM device root CryptoKey, or null.
  * @property {(accountId: string, deviceKey: any) => Promise<Uint8Array | null>} getIdentitySeed
@@ -337,6 +369,89 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  * @param {DecryptPushDeps} deps
  * @returns {Promise<PushPreview | null>}
  */
+/**
+ * The wake gate (ADR-0042, "A wake is shown only for the signed-in
+ * account"): the account a wake may be handled as, or `null`.
+ *
+ * A wake is handled only when a binding exists and the wake's `d` equals
+ * the bound device pseudonym (case-insensitive hex, both 64 chars). The
+ * pseudonym is minted per sign-in and the binding is cleared first at Log
+ * out and Forget device, so a wake for a signed-out account, or for another
+ * account that once used this browser, never passes. The account used is
+ * always the binding's, never a route row's or a scan's.
+ *
+ * Pure; exported for `public/sw.js` (which mirrors it inline so a classic
+ * worker applies the same rule) and the tests. The two must stay in step.
+ *
+ * @param {PushWake | null | undefined} wake
+ * @param {WakeBinding | null | undefined} binding
+ * @returns {string | null}
+ */
+export function wakeBoundAccount(wake, binding) {
+  if (wake === null || wake === undefined || binding === null || binding === undefined) {
+    return null;
+  }
+  if (typeof binding.accountId !== "string" || binding.accountId.length === 0) return null;
+  const bound = normalisedPseudonymHex(binding.devicePseudonymHex);
+  const presented = normalisedPseudonymHex(wake.deviceHex);
+  if (bound === null || presented === null || bound !== presented) return null;
+  return binding.accountId;
+}
+
+/**
+ * Resolve a wake's `g` to a group of the BOUND account, or `null` when it
+ * names none of its groups. First the account-scoped reverse map (an opaque
+ * `push_gid`), then the legacy read of `g` as a raw group id among the
+ * account's own known groups. Another account's route row, or another
+ * account's group, is a miss.
+ *
+ * Exported for `public/sw.js`, which mirrors the same two reads inline so a
+ * classic service worker (no dynamic import) applies the same rule; the two
+ * must stay in step.
+ *
+ * @param {string} wakeHex  64 lowercase hex chars.
+ * @param {string} accountId  the bound account.
+ * @param {Pick<DecryptPushDeps, "lookupRoute" | "resolveAccount">} deps
+ * @returns {Promise<{ groupIdBytes: Uint8Array, groupHex: string } | null>}
+ */
+export async function resolveWakeTarget(wakeHex, accountId, deps) {
+  if (typeof deps.lookupRoute === "function") {
+    let route = null;
+    try {
+      route = await deps.lookupRoute(accountId, wakeHex);
+    } catch {
+      route = null; // lookup error → legacy path → nothing at worst
+    }
+    if (
+      route !== null &&
+      route !== undefined &&
+      route.accountId === accountId &&
+      typeof route.groupIdB64 === "string"
+    ) {
+      const bytes = base64DecodeQuietly(route.groupIdB64);
+      if (bytes !== null && bytes.length === 32) {
+        return { groupIdBytes: bytes, groupHex: bytesToHex(bytes) };
+      }
+      // A malformed route row falls through to the legacy path below.
+    }
+  }
+  let account = null;
+  try {
+    account = await deps.resolveAccount(accountId, wakeHex);
+  } catch {
+    account = null;
+  }
+  if (
+    account === null ||
+    account === undefined ||
+    account.accountId !== accountId ||
+    !(account.groupIdBytes instanceof Uint8Array)
+  ) {
+    return null;
+  }
+  return { groupIdBytes: account.groupIdBytes, groupHex: wakeHex };
+}
+
 export async function decryptPushPreview(wake, deps) {
   // 1. Only GroupMessage wakes carry a group + pointer. A Wakeup /
   //    MailboxMessage wake (no groupHex / no pointer) is not handled in
@@ -365,41 +480,24 @@ export async function decryptPushPreview(wake, deps) {
   //    treat-`g`-as-group_id path, and ANY lookup error degrades the
   //    same way (fail-closed: worst case is the generic notification).
   //    The lookup is a READ; this path never writes push-routing state.
-  let accountId = null;
-  let groupIdBytes = null;
-  let groupHex = wakeHex; // becomes the REAL group hex on a route hit
-  if (typeof deps.lookupRoute === "function") {
-    let route = null;
+  //
+  //    ADR-0042 (amended 2026-09-30): ONLY as the bound account. The gate
+  //    runs first; the reverse map and the legacy scan are asked about that
+  //    account alone.
+  let binding = null;
+  if (typeof deps.readWakeBinding === "function") {
     try {
-      route = await deps.lookupRoute(wakeHex);
+      binding = await deps.readWakeBinding();
     } catch {
-      route = null; // lookup error → legacy path → generic at worst
-    }
-    if (
-      route !== null &&
-      route !== undefined &&
-      typeof route.accountId === "string" &&
-      typeof route.groupIdB64 === "string"
-    ) {
-      const bytes = base64DecodeQuietly(route.groupIdB64);
-      if (bytes !== null && bytes.length === 32) {
-        accountId = route.accountId;
-        groupIdBytes = bytes;
-        groupHex = bytesToHex(bytes);
-      }
-      // A malformed route row falls through to the legacy path below.
+      binding = null;
     }
   }
-
-  //    Legacy fallback: treat `g` as the raw group_id hex. (Also
-  //    validates it is a group we actually know — a stray wake → null.)
-  if (accountId === null) {
-    const account = await deps.resolveAccount(wakeHex);
-    if (account === null || account === undefined) return null;
-    accountId = account.accountId;
-    groupIdBytes = account.groupIdBytes;
-    groupHex = wakeHex;
-  }
+  const accountId = wakeBoundAccount(wake, binding);
+  if (accountId === null) return null;
+  const target = await resolveWakeTarget(wakeHex, accountId, deps);
+  if (target === null) return null;
+  const groupIdBytes = target.groupIdBytes;
+  const groupHex = target.groupHex;
 
   // 3. The device root key (a non-extractable CryptoKey handle usable
   //    for AES-GCM decrypt without extraction). No key → can't unwrap
@@ -797,10 +895,10 @@ function callNoticeFrom(wasm, processed, message, groupHex, nowMs) {
  * kinds before its chat parse; this is the background mirror of that
  * same two-step peek, in the same order.
  *
- * Seven kinds, each its own arm below: call signaling, the ADR-0042 /
- * ADR-0044 push-routing secret, the ADR-0045 committer beacon, the
- * ADR-0048 profile, the ADR-0048 profile request, the ADR-0051 group name
- * and the ADR-0052 shared pin. Each arm is a cheap byte peek gating an
+ * Nine arms below: call signaling, the ADR-0042 / ADR-0044 push-routing
+ * secret, the ADR-0045 committer beacon, the ADR-0048 profile, the ADR-0048
+ * profile request, the ADR-0051 group name, the ADR-0052 shared pin, the
+ * ADR-0057 registrar seed, and the ADR-0060 scoped-discovery envelopes. Each arm is a cheap byte peek gating an
  * authoritative codec.
  *
  * Classification ONLY — no writes, no cursor advance (C-59 / ADR-0041).
@@ -831,6 +929,11 @@ function isServiceEnvelope(wasm, bytes) {
   if (isPinEnvelope(wasm, bytes)) return true;
   // 8. Shared channels (ADR-0059 section 6).
   if (isSharedChannelsEnvelope(wasm, bytes)) return true;
+  // 9. Registrar seed (ADR-0057).
+  if (isRegistrarSeedEnvelope(wasm, bytes)) return true;
+
+  // 10. Scoped discovery (ADR-0060).
+  if (isScopedDiscoveryEnvelope(wasm, bytes)) return true;
   return false;
 }
 
@@ -868,6 +971,87 @@ function isSharedChannelsEnvelope(wasm, bytes) {
   }
   freeQuietly(decoded);
   return true;
+}
+
+/**
+ * First byte of the ADR-0057 registrar-seed domain separator (`'l'`). Its own
+ * constant, like the ones below.
+ */
+const REGISTRAR_SEED_FIRST_BYTE = 0x6c;
+
+/**
+ * Arm 9 of {@link isServiceEnvelope} — the ADR-0057 registrar-seed envelope a
+ * group's owner sends one member. Fixed length (read from
+ * `registrarSeedEnvelopeLen()`, never written down here), so the peek is the
+ * length and the first byte, and the codec confirms. Without the length there
+ * is no safe suppress, so the arm is off rather than guessing.
+ *
+ * Classification ONLY: the SW never opens the seed and never stores it (C-59).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isRegistrarSeedEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== REGISTRAR_SEED_FIRST_BYTE) return false;
+  if (typeof wasm.registrarSeedEnvelopeLen !== "function") return false;
+  let expected;
+  try {
+    expected = wasm.registrarSeedEnvelopeLen();
+  } catch {
+    return false;
+  }
+  if (typeof expected !== "number" || bytes.length !== expected) return false;
+  if (typeof wasm.decodeRegistrarSeedEnvelope !== "function") return false;
+  let decoded;
+  try {
+    decoded = wasm.decodeRegistrarSeedEnvelope(bytes);
+  } catch {
+    return false;
+  }
+  freeQuietly(decoded);
+  return true;
+}
+
+/**
+ * The dispatcher kinds arm 10 suppresses. Each carries secrets (a delegation,
+ * an introduction record, a registrar seed) or DeviceGroup-only state, and
+ * would otherwise be previewed as a notification body of domain bytes.
+ */
+const SCOPED_DISCOVERY_KINDS = [
+  "IntroductionOffer",
+  "Introductions",
+  "Visibility",
+  "ReachState",
+  "CommitterDelegation",
+  "RegistrarSeed",
+];
+
+/**
+ * Arm 10 of {@link isServiceEnvelope} — the ADR-0060 scoped-discovery
+ * envelopes, classified by the core's `dispatchIncomingEnvelope` (which
+ * answers `IntroMessage` for anything it does not recognise). Same cheap
+ * first-byte peek as the other `lakko/...` arms. Classification ONLY (C-59).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isScopedDiscoveryEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== 0x6c) return false;
+  if (typeof wasm.dispatchIncomingEnvelope !== "function" || wasm.IncomingEnvelopeKind === undefined) {
+    return false;
+  }
+  let env;
+  try {
+    env = wasm.dispatchIncomingEnvelope(bytes);
+  } catch {
+    return false;
+  }
+  const kind = env === null || env === undefined ? undefined : env.kind;
+  freeQuietly(env);
+  const kinds = /** @type {Record<string, number>} */ (wasm.IncomingEnvelopeKind);
+  return SCOPED_DISCOVERY_KINDS.some((name) => kinds[name] !== undefined && kinds[name] === kind);
 }
 
 /**
@@ -1092,29 +1276,54 @@ export function senderNameFromProfileRow(payload, senderKeyB64) {
  * the decrypted cross-device sync row the app wrote
  * (`src/devices/sync/sync-state-idb.ts` + `sync-state-store.ts`)?
  *
- * The wire shape is that module's: `{ v: 1, f: { <groupHex>: { m: boolean } } }`,
- * where the key is the lowercase hex of the REAL DS `group_id` (the same
- * `groupIdHex` the app uses everywhere) and `m` is the mute flag. Short keys
- * because the app rewrites that row on every keystroke of a draft.
+ * The row's shape is that module's: `{ v: 2, s: <base64>, p: [...] }`, where
+ * `s` is `SyncedState.toBytes()` - the ADR-0058 fold, shared with iOS and
+ * Android - and `p` the folder edits not yet sent (not read here). The mute
+ * flag is read out of the fold through the wasm core the worker already
+ * loaded, keyed on the REAL DS `group_id`, given here as lowercase hex.
  *
- * Anything else — a schema this build does not know, no entry for the group,
- * a flag that is not a boolean — is `false`, NOT muted. This is the one read
- * on the push path that fails toward ringing; see `lookupMuted` on
+ * Anything else — a schema this build does not know, bytes the fold refuses,
+ * no flags for the group, a malformed id — is `false`, NOT muted. This is the
+ * one read on the push path that fails toward ringing; see `lookupMuted` on
  * {@link DecryptPushDeps} for why that direction is the safe one here.
  *
- * Pure; exported for `sw.js` and the tests.
+ * Pure apart from the wasm read; exported for `sw.js` and the tests.
  *
  * @param {any} payload
  * @param {string} groupHex
+ * @param {any} wasm the wasm namespace (`SyncedState`)
  * @returns {boolean}
  */
-export function mutedFromSyncStateRow(payload, groupHex) {
-  if (payload === null || typeof payload !== "object" || payload.v !== 1) return false;
-  const flags = payload.f;
-  if (flags === null || typeof flags !== "object") return false;
-  const entry = flags[groupHex];
-  if (entry === null || typeof entry !== "object") return false;
-  return entry.m === true;
+export function mutedFromSyncStateRow(payload, groupHex, wasm) {
+  if (payload === null || typeof payload !== "object" || payload.v !== 2) return false;
+  if (typeof payload.s !== "string" || payload.s.length === 0) return false;
+  if (typeof groupHex !== "string" || groupHex.length === 0 || groupHex.length % 2 !== 0) {
+    return false;
+  }
+  if (!/^[0-9a-f]+$/.test(groupHex)) return false;
+  if (wasm === null || typeof wasm !== "object" || typeof wasm.SyncedState !== "function") {
+    return false;
+  }
+  let state = null;
+  try {
+    const raw = atob(payload.s);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+    const groupId = new Uint8Array(groupHex.length / 2);
+    for (let i = 0; i < groupId.length; i += 1) {
+      groupId[i] = parseInt(groupHex.slice(i * 2, i * 2 + 2), 16);
+    }
+    state = wasm.SyncedState.fromBytes(bytes);
+    const flags = state.flags(groupId);
+    if (flags === undefined || flags === null) return false;
+    const muted = flags.muted === true;
+    if (typeof flags.free === "function") flags.free();
+    return muted;
+  } catch {
+    return false;
+  } finally {
+    if (state !== null && typeof state.free === "function") state.free();
+  }
 }
 
 /**
@@ -1256,6 +1465,11 @@ function previewFromProcessed(wasm, processed) {
   }
   try {
     const kind = parsed.kind;
+    // A `lakko/…` service envelope none of the arms of `isServiceEnvelope`
+    // recognised (a newer version of a known kind, or an unknown kind): the
+    // core classifies it rather than degrading it to lossy-UTF-8 chat text.
+    // Never a preview — null keeps an older real row, or the generic banner.
+    if (kind === "service-envelope") return null;
     // A normal chat message → its text (or an attachment hint).
     if (kind === "chat") {
       const text = typeof parsed.text === "string" ? parsed.text : "";
@@ -1291,6 +1505,17 @@ function bytesToBase64(bytes) {
 }
 
 /** `true` when every char of `s` is a lowercase hex digit. */
+/**
+ * A 64-char hex pseudonym, lowercased, or `null` for anything else.
+ * @param {unknown} s
+ * @returns {string | null}
+ */
+function normalisedPseudonymHex(s) {
+  if (typeof s !== "string" || s.length !== 64) return null;
+  const lower = s.toLowerCase();
+  return isHex(lower) ? lower : null;
+}
+
 function isHex(s) {
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);

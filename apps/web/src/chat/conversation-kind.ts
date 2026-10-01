@@ -5,7 +5,7 @@
  * Chats and Groups are two lists over the same conversation store, split by
  * kind (docs/ux/client-redesign.md section 3).
  *
- * Since ADR-0060 the kind is not derived here. The creator writes it into the
+ * Since ADR-0062 the kind is not derived here. The creator writes it into the
  * group's GroupContext (`0xFF03`) and every member's device reads it with
  * `Group.groupKind()`, so it is the same answer on every device and never
  * changes: a two-person group is a group, and a one-to-one never becomes a
@@ -59,7 +59,7 @@ export function conversationKindOf(group: HasGroupKind): ConversationKind {
 }
 
 /** Whether a group-name envelope (ADR-0051) may be applied: never in a
- *  one-to-one, which has no group name (ADR-0060 section 7). */
+ *  one-to-one, which has no group name (ADR-0062 section 7). */
 export function acceptsGroupName(kind: ConversationKind): boolean {
   return kind === "group";
 }

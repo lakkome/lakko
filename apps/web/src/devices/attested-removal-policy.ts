@@ -19,6 +19,7 @@ import {
 } from "./lifecycle";
 import { takeSigner } from "../ds/access";
 import { encodeJournalEntry } from "./journal-envelope";
+import { announceDeviceGroupChangedHere } from "./sync/growth";
 import { DsClient } from "../ds/client";
 
 /**
@@ -55,12 +56,16 @@ export async function enableAttestedRemovalsIfNeeded(args: {
       const ds = new DsClient();
       // ADR-0053 contract point 3 — register before the publish.
       await registerDeviceGroupEpochOrThrow(ds, ensured.group, ensured.identity, signerN);
+      // G-7 — on disk before the publish, and the sync runtime's long-lived
+      // handle (now an epoch behind) reloaded before it can see the commit
+      // and write its stale state over this one (see `remove.ts`).
+      await persistDeviceGroupSnapshot(ensured.identity, args.accountIdB64, args.deviceKey);
+      announceDeviceGroupChangedHere({});
       // The policy commit removes nothing, so it carries no attestation.
       await ds.publishGroup(groupId, encodeJournalEntry(commit, null), { signer: signerN });
     } finally {
       signerN?.free();
     }
-    await persistDeviceGroupSnapshot(ensured.identity, args.accountIdB64, args.deviceKey);
   } finally {
     ensured.group.free();
     ensured.identity.free();

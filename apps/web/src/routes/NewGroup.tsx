@@ -79,7 +79,7 @@ export default function NewGroup(): JSX.Element {
         secrets,
         accountIdBytesFromHex(first.accountIdHex as string),
         base64Decode(first.signaturePubkeyB64),
-        // ADR-0060 — a group from the start, even while it holds two people.
+        // ADR-0062 — a group from the start, even while it holds two people.
         "group",
       );
       const active = chats.add({

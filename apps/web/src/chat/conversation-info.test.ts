@@ -198,6 +198,7 @@ describe("the vocabulary that crosses the boundary", () => {
       "subscriber-count",
       "manage-channel",
       "unsubscribe",
+      "channel-members",
     ];
     for (const name of branchedOn) expect([...produced]).toContain(name);
   });

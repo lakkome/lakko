@@ -81,9 +81,15 @@ final class SendEpochStraddleTests: XCTestCase {
         private static var _heldFetchCount = 0
         private static var _holdFromFetch = Int.max
         private static var _failPublishes = false
+        /// The host of the current fixture's DS. A repository left over from
+        /// an earlier test (its background work, e.g. a push-routing broadcast
+        /// that lands after that test finished) talks to its own host, and its
+        /// publishes must never reach this test's journal.
+        private static var _host = ""
 
-        static func reset() {
+        static func reset(host: String = "") {
             lock.lock(); defer { lock.unlock() }
+            _host = host
             _journal.removeAll()
             _nextId = 0
             _fetchCount = 0
@@ -144,6 +150,21 @@ final class SendEpochStraddleTests: XCTestCase {
 
         override func startLoading() {
             let isPublish = request.httpMethod == "POST"
+            // ADR-0057 statements (a registration, a probe, a registrar set, a
+            // push binding) are PUTs: answered 204 and never counted as a
+            // journal read, so they cannot take the verdict read's place in
+            // `holdFetches(fromNumber:)`. A stale fixture's request is
+            // answered the same way and recorded nowhere.
+            Self.lock.lock()
+            let stale = !Self._host.isEmpty && request.url?.host != Self._host
+            Self.lock.unlock()
+            if stale || request.httpMethod == "PUT" {
+                let response = HTTPURLResponse(
+                    url: request.url!, statusCode: 204, httpVersion: "HTTP/1.1", headerFields: [:])!
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocolDidFinishLoading(self)
+                return
+            }
             let body = Self.bodyData(of: request) ?? Data()
             // Never park on `startLoading`'s own queue: `URLSession` may invoke
             // it on a shared internal queue, so blocking there would serialize
@@ -274,11 +295,12 @@ final class SendEpochStraddleTests: XCTestCase {
         snapshotStore.putSnapshot(accountIdB64: accountIdB64, blob: snapshotBlob)
         knownGroupsStore.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
 
-        JournalURLProtocol.reset()
+        let host = "fx-\(UUID().uuidString.lowercased()).invalid"
+        JournalURLProtocol.reset(host: host)
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [JournalURLProtocol.self]
         let session = URLSession(configuration: config)
-        let ds = DsClient(baseURL: "http://127.0.0.1:9", session: session)
+        let ds = DsClient(baseURL: "http://\(host)", session: session)
 
         let outboxDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("straddle-\(UUID().uuidString)")

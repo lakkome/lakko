@@ -84,20 +84,24 @@ class DsWakeTest {
 
     private val groupId = ByteArray(32) { (it + 1).toByte() }
 
-    private fun client(replies: List<Pair<HttpStatusCode, String>>, seen: MutableList<Seen>): DsClient {
+    private fun client(
+        replies: List<Pair<HttpStatusCode, String>>,
+        seen: MutableList<Seen>,
+        registry: DsSignerRegistry = DsSignerRegistry(),
+    ): DsClient {
         var index = 0
         val engine = MockEngine { request ->
             seen += Seen(request.method, request.url.encodedPath, request.headers[DS_WAKE_HEADER])
             val (status, body) = replies[index++]
             respond(body, status, headersOf(HttpHeaders.ContentType, "application/json"))
         }
-        return DsClient(baseUrl = "https://test.invalid", engine = engine, signers = DsSignerRegistry())
+        return DsClient(baseUrl = "https://test.invalid", engine = engine, signers = registry)
     }
 
     private class Signer : DsJournalSigner {
         override val epoch: ULong = 1uL
         override fun sign(method: String, path: String, query: String, body: ByteArray): String = "proof"
-        override fun groupClaimBody(): String = """{"epoch":1,"access_pk_b64":"k"}"""
+        override val verifyingKey: ByteArray = ByteArray(32)
         override fun mailboxClaimBody(): String = """{"identity_pk_b64":"k"}"""
     }
 
@@ -122,23 +126,37 @@ class DsWakeTest {
     }
 
     @Test
-    fun `the header rides the retry after a refusal and never the claim`() = runTest {
+    fun `the header rides the retry after the owner's claim`() = runTest {
+        // ADR-0057 — the claim is the owner's root statement, run by the
+        // journal source's hook (not a request this client builds); the
+        // publish retried after it carries the wake again.
         val seen = mutableListOf<Seen>()
+        val registry = DsSignerRegistry()
+        var claims = 0
+        registry.install(
+            dsGroupKey(groupId),
+            object : DsSignerSource {
+                override fun epoch(): ULong = 1uL
+                override fun derive(): DsJournalSigner = Signer()
+                override val ownerClaim: (suspend () -> Boolean) = {
+                    claims += 1
+                    true
+                }
+            },
+        )
         val replies = listOf(
             HttpStatusCode.Unauthorized to "",
-            HttpStatusCode.NoContent to "",
             HttpStatusCode.OK to published,
         )
-        client(replies, seen).use {
-            it.publishGroup(groupId, byteArrayOf(1), signer = Signer(), wake = DsWake(zeros, DsWakeKind.CALL))
+        client(replies, seen, registry).use {
+            it.publishGroup(groupId, byteArrayOf(1), wake = DsWake(zeros, DsWakeKind.CALL))
         }
-        assertEquals(3, seen.size)
+        assertEquals(1, claims)
+        assertEquals(2, seen.size)
         assertEquals(HttpMethod.Post, seen[0].method)
         assertEquals("A".repeat(43) + ";call", seen[0].wake)
-        assertEquals(HttpMethod.Put, seen[1].method)
-        assertNull("the claim is not a publish", seen[1].wake)
-        assertEquals(HttpMethod.Post, seen[2].method)
-        assertEquals("A".repeat(43) + ";call", seen[2].wake)
+        assertEquals(HttpMethod.Post, seen[1].method)
+        assertEquals("A".repeat(43) + ";call", seen[1].wake)
     }
 
     @Test

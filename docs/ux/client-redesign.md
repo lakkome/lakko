@@ -180,7 +180,7 @@ Five primary destinations, in this order, on every client:
 
 Chats and Groups are two lists over the same conversation store, split by
 kind. The kind is set when the conversation is created and never changes
-([ADR-0060](../adr/0060-conversation-kind.md)): a conversation started with
+([ADR-0062](../adr/0062-conversation-kind.md)): a conversation started with
 one person (contact accept, New chat) is a chat, a conversation started
 through the new-group flow is a group - even while it has two people. Every
 device reads the kind from the conversation itself, so it is the same on
@@ -365,6 +365,13 @@ differences are the title, the compose action and the row title rule.
   verification surface.
 - Invite links are managed in a sheet ("Invite links": active links with
   copy, share and revoke), never as a textarea with a raw URL.
+- Since links are sealed (2026-09-28) the server's list never holds a
+  link's secret. The device that created a link keeps the secret for the
+  account (with the other per-account secrets, surviving a restart), so it
+  can copy and share the link later. A row whose secret this device does not
+  hold shows, in place of Copy and Share, one line:
+  `Created on another device. Copy it there, or revoke it here.` Revoke
+  stays.
 
 ### 5.4 Channels
 
@@ -434,7 +441,7 @@ differences are the title, the compose action and the row title rule.
   derived from member names when the group has none.
 - Delivery state per own message (sent, read) as today.
 - A conversation kind (chat or group) per conversation, read from the
-  conversation itself where its creator set it (ADR-0060), so the two lists
+  conversation itself where its creator set it (ADR-0062), so the two lists
   split the same way on every device without a server change.
 - Device rows with a human label (platform and model, or a user-set name)
   and an added date; the leaf index and key stay internal.

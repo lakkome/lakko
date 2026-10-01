@@ -92,7 +92,7 @@ public enum DevicePushId {
     }
 
     /// Drop the persisted pseudonym. Called by
-    /// ``AuthRepository/forgetDevice()`` and by the
+    /// ``AuthRepository/endSessionAfterLocalWipe()`` and by the
     /// unsubscribe-from-push orchestrator.
     public static func clear() {
         var query = baseQuery()

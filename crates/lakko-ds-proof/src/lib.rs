@@ -16,17 +16,31 @@
 //!
 //! ```text
 //! X-Lakko-DS-Proof: v1.<epoch>.<unix_ms>.<nonce_b64url>.<sig_b64url>
+//! X-Lakko-DS-Proof: v1.<epoch>.<unix_ms>.<nonce_b64url>.<sig_b64url>.<reach_pk_b64url>
 //! ```
 //!
 //! `epoch` and `unix_ms` are ASCII decimals, the nonce is 16 bytes and the
-//! signature 64, both base64url without padding.
+//! signature 64, both base64url without padding. The sixth field is present
+//! exactly when `epoch` is [`REACH_EPOCH`] (a reach proof, [ADR-0060]) and
+//! carries the signer's 32-byte Ed25519 public key; a reach proof without it,
+//! or any other proof with it, does not parse.
 //!
 //! # Canonical bytes
 //!
 //! ```text
 //! "lakko/ds/proof/v1" || 0x00 || method || 0x00 || canonical_path || 0x00
 //!   || query || 0x00 || BLAKE3(body) || epoch(8 BE) || unix_ms(8 BE) || nonce(16)
+//!   [ || reach_pk(32) ]   -- a reach proof only
 //! ```
+//!
+//! **Why a reach proof names its key.** A closed mailbox may hold thousands
+//! of reach keys; without a hint the server would try each one. The key is
+//! inside the signed bytes, so it cannot be swapped for another registered
+//! key, and [`verify`] refuses a reach proof whose named key is not the key it
+//! is checked under. The server looks up exactly that key and verifies once.
+//! The field was put in the one proof header rather than a second header so a
+//! reach proof stays one self-contained value that parses or does not; a
+//! group or identity-key proof is byte-for-byte what it was before.
 //!
 //! `canonical_path` is the service path (`/ds/group/<hex>/messages`), never
 //! an nginx prefix, so web and native sign the same bytes. The NUL separators
@@ -44,16 +58,29 @@
 //! Key resolution and the nonce replay cache are the server's, since both
 //! are state; this crate is pure.
 //!
+//! # Reach proofs and delegations ([ADR-0060] section 2)
+//!
+//! A write to a claimed, closed identity mailbox is signed not by the
+//! identity key but by a **reach key** the owner registered
+//! ([`DsProofSigner::for_reach`]). Its proofs carry [`REACH_EPOCH`]
+//! (`u64::MAX`) in the epoch field, a value no group reaches and distinct
+//! from the identity-key mailbox proof's [`MAILBOX_EPOCH`] (0), so the server
+//! can never confuse which key table a proof must be checked against. A reach
+//! key holder may also hand one write to another key through a
+//! [`Delegation`] (module [`delegation`], which states the server contract).
+//!
 //! # Ownership statements ([ADR-0057])
 //!
 //! Who may register a journal's epoch keys is a second, separate surface:
 //! the [`statement`] module - the root and registrar seed derivations and
-//! the signed statements (claim, root reset, register epoch, registrar
-//! management, root transfer, push binding) the DS routes take as bodies.
+//! the signed statements (claim, root reset, register epoch in append or
+//! replace mode, registrar management, the whole registrar set, root
+//! transfer, push binding) the DS routes take as bodies.
 //!
 //! [ADR-0057]: ../../../docs/adr/0057-journal-ownership.md
 //!
 //! [ADR-0053]: ../../../docs/adr/0053-ds-journal-authorisation.md
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 
 #![forbid(unsafe_code)]
 
@@ -61,9 +88,9 @@ pub mod statement;
 
 pub use statement::{
     journal_registrar_seed, journal_root_seed, push_binding_key, sign_statement,
-    statement_signing_key, Rank, RegistrarChange, RegistrarEntry, SignedStatement, StatementBody,
-    StatementError, StatementKind, StatementSigner, JOURNAL_ID_LEN, MAX_LIST_ENTRIES,
-    MAX_STATEMENT_LEN, ROOT_RANK_BYTE, STATEMENT_DOMAIN,
+    statement_signing_key, Rank, RegisterMode, RegistrarChange, RegistrarEntry, SignedStatement,
+    StatementBody, StatementError, StatementKind, StatementSigner, JOURNAL_ID_LEN,
+    MAX_LIST_ENTRIES, MAX_REGISTRARS, MAX_STATEMENT_LEN, ROOT_RANK_BYTE, STATEMENT_DOMAIN,
 };
 
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD};
@@ -72,6 +99,15 @@ use lakko_contacts::IdentityPseudonym;
 use lakko_crypto::hash;
 
 pub use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey};
+
+pub mod committer;
+pub mod delegation;
+
+pub use committer::{check_committer_delegations, delegation_for, CommitterDelegationCheckError};
+pub use delegation::{
+    sign_delegation, verify_delegated_proof, verify_delegation, Delegation, DelegationError,
+    DELEGATION_HEADER_NAME, DELEGATION_LEN, MAX_DELEGATION_TTL_MS,
+};
 
 /// The request header the proof travels in (lowercase, as HTTP/2 carries it).
 pub const PROOF_HEADER_NAME: &str = "x-lakko-ds-proof";
@@ -87,6 +123,14 @@ pub const SIGNATURE_LEN: usize = 64;
 pub const PROOF_WINDOW_MS: u64 = 120_000;
 /// The epoch label a mailbox proof carries (a mailbox has no epochs).
 pub const MAILBOX_EPOCH: u64 = 0;
+/// The epoch label a reach-key proof carries ([ADR-0060] section 2).
+///
+/// A delegate's proof carries it too. `u64::MAX`: never a group epoch, never
+/// [`MAILBOX_EPOCH`], so a server cannot check a reach proof against the
+/// wrong key table.
+///
+/// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+pub const REACH_EPOCH: u64 = u64::MAX;
 /// Upper bound on the header's length; anything longer is refused unparsed.
 pub const MAX_HEADER_LEN: usize = 256;
 
@@ -106,6 +150,9 @@ pub struct RequestParts<'a> {
     pub body: &'a [u8],
 }
 
+/// Length of the reach public key a reach proof names.
+pub const REACH_KEY_LEN: usize = 32;
+
 /// A parsed proof header.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof {
@@ -117,6 +164,11 @@ pub struct Proof {
     pub nonce: [u8; NONCE_LEN],
     /// Ed25519 over the canonical bytes.
     pub signature: [u8; SIGNATURE_LEN],
+    /// The signer's public key, present exactly when `epoch` is
+    /// [`REACH_EPOCH`]: which reach key (or, for a delegated write, which
+    /// delegate key) the server must check the proof under. Bound by the
+    /// signature.
+    pub reach_key: Option<[u8; REACH_KEY_LEN]>,
 }
 
 /// Why a proof was refused. Every variant is a refusal; the server maps all of
@@ -138,12 +190,17 @@ pub enum ProofError {
 }
 
 /// The bytes a proof signs. Total and allocation-bounded by the inputs.
+///
+/// `reach_key` is the key a reach proof names; it is appended after the nonce
+/// when present. [`sign`] passes it exactly for [`REACH_EPOCH`], and
+/// [`verify`] refuses a proof that does not.
 #[must_use]
 pub fn canonical_bytes(
     req: &RequestParts<'_>,
     epoch: u64,
     unix_ms: u64,
     nonce: &[u8; NONCE_LEN],
+    reach_key: Option<&[u8; REACH_KEY_LEN]>,
 ) -> Vec<u8> {
     let digest = hash::blake3(req.body);
     let mut out = Vec::with_capacity(
@@ -155,7 +212,8 @@ pub fn canonical_bytes(
             + 4
             + 8
             + 8
-            + NONCE_LEN,
+            + NONCE_LEN
+            + REACH_KEY_LEN,
     );
     out.extend_from_slice(CANONICAL_DOMAIN);
     out.push(SEP);
@@ -169,10 +227,14 @@ pub fn canonical_bytes(
     out.extend_from_slice(&epoch.to_be_bytes());
     out.extend_from_slice(&unix_ms.to_be_bytes());
     out.extend_from_slice(nonce);
+    if let Some(key) = reach_key {
+        out.extend_from_slice(key);
+    }
     out
 }
 
-/// Sign a request under `key` for `epoch`.
+/// Sign a request under `key` for `epoch`. A reach proof ([`REACH_EPOCH`])
+/// names `key`'s public half, inside the signed bytes.
 #[must_use]
 pub fn sign(
     key: &SigningKey,
@@ -181,20 +243,24 @@ pub fn sign(
     unix_ms: u64,
     nonce: [u8; NONCE_LEN],
 ) -> Proof {
-    let bytes = canonical_bytes(req, epoch, unix_ms, &nonce);
+    let reach_key = (epoch == REACH_EPOCH).then(|| key.verifying_key().to_bytes());
+    let bytes = canonical_bytes(req, epoch, unix_ms, &nonce, reach_key.as_ref());
     Proof {
         epoch,
         unix_ms,
         nonce,
         signature: key.sign(&bytes).to_bytes(),
+        reach_key,
     }
 }
 
 /// Verify `proof` over `req` under `key`, with `now_ms` the verifier's clock.
 ///
 /// Checks the window before the signature so a stale proof costs no
-/// signature verification. Resolving `key` from `proof.epoch` and refusing a
-/// replayed nonce are the caller's.
+/// signature verification. Resolving `key` from `proof.epoch` (or, for a
+/// reach proof, from `proof.reach_key`) and refusing a replayed nonce are the
+/// caller's. A reach proof must name exactly `key`; any other proof must name
+/// none.
 ///
 /// # Errors
 ///
@@ -208,7 +274,21 @@ pub fn verify(
     if now_ms.abs_diff(proof.unix_ms) > PROOF_WINDOW_MS {
         return Err(ProofError::OutsideWindow);
     }
-    let bytes = canonical_bytes(req, proof.epoch, proof.unix_ms, &proof.nonce);
+    let named_key_matches = match (proof.epoch == REACH_EPOCH, proof.reach_key) {
+        (true, Some(named)) => named == key.to_bytes(),
+        (false, None) => true,
+        _ => false,
+    };
+    if !named_key_matches {
+        return Err(ProofError::BadSignature);
+    }
+    let bytes = canonical_bytes(
+        req,
+        proof.epoch,
+        proof.unix_ms,
+        &proof.nonce,
+        proof.reach_key.as_ref(),
+    );
     let signature =
         Signature::from_bytes(&proof.signature).map_err(|_| ProofError::BadSignature)?;
     key.verify(&bytes, &signature)
@@ -219,18 +299,25 @@ impl Proof {
     /// The header value.
     #[must_use]
     pub fn encode(&self) -> String {
-        format!(
+        let mut out = format!(
             "{VERSION}.{}.{}.{}.{}",
             self.epoch,
             self.unix_ms,
             URL_SAFE_NO_PAD.encode(self.nonce),
             URL_SAFE_NO_PAD.encode(self.signature),
-        )
+        );
+        if let Some(key) = self.reach_key {
+            out.push('.');
+            out.push_str(&URL_SAFE_NO_PAD.encode(key));
+        }
+        out
     }
 
     /// Parse a header value. Bounded (`MAX_HEADER_LEN`) and fail-closed:
     /// five dot-separated fields, decimal epoch and time, a 16-byte nonce and
-    /// a 64-byte signature in base64url without padding, nothing else.
+    /// a 64-byte signature in base64url without padding - plus, exactly when
+    /// the epoch is [`REACH_EPOCH`], a sixth: the 32-byte reach key. Nothing
+    /// else.
     ///
     /// # Errors
     ///
@@ -246,6 +333,7 @@ impl Proof {
         let unix_ms = parts.next().ok_or(ProofError::Malformed)?;
         let nonce = parts.next().ok_or(ProofError::Malformed)?;
         let signature = parts.next().ok_or(ProofError::Malformed)?;
+        let reach_key = parts.next();
         if parts.next().is_some() {
             return Err(ProofError::Malformed);
         }
@@ -253,6 +341,20 @@ impl Proof {
             return Err(ProofError::UnknownVersion);
         }
         let epoch = parse_decimal(epoch)?;
+        let reach_key = match (epoch == REACH_EPOCH, reach_key) {
+            (true, Some(field)) => {
+                let bytes = URL_SAFE_NO_PAD
+                    .decode(field)
+                    .map_err(|_| ProofError::Malformed)?;
+                let key: [u8; REACH_KEY_LEN] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| ProofError::Malformed)?;
+                Some(key)
+            },
+            (false, None) => None,
+            _ => return Err(ProofError::Malformed),
+        };
         let unix_ms = parse_decimal(unix_ms)?;
         let nonce_bytes = URL_SAFE_NO_PAD
             .decode(nonce)
@@ -273,6 +375,7 @@ impl Proof {
             unix_ms,
             nonce,
             signature,
+            reach_key,
         })
     }
 }
@@ -349,6 +452,21 @@ impl DsProofSigner {
         }
     }
 
+    /// A reach-key signer ([ADR-0060] section 2), at [`REACH_EPOCH`]: signs a
+    /// write to a closed identity mailbox with a reach key the owner
+    /// registered. A [`Delegation`]'s delegate signs with this too, over its
+    /// own delegate seed. Its proofs name the signing key (the reach key, or
+    /// the delegate key) automatically.
+    ///
+    /// [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+    #[must_use]
+    pub fn for_reach(reach_seed: &[u8; 32]) -> Self {
+        Self {
+            epoch: REACH_EPOCH,
+            key: SigningKey::from_seed(reach_seed),
+        }
+    }
+
     /// The epoch this signer proves membership at.
     #[must_use]
     pub const fn epoch(&self) -> u64 {
@@ -371,6 +489,11 @@ impl DsProofSigner {
     /// The JSON body of `PUT /ds/group/{hex}/access` registering this signer's
     /// key: `{"epoch":<n>,"access_pk_b64":"<standard base64>"}`. Defined here
     /// so no client spells the field names itself.
+    ///
+    /// **Superseded by ADR-0057; the Delivery Service no longer accepts this
+    /// body** (`PUT .../access` now takes a signed statement, and an epoch
+    /// key registers nothing). Kept only until the clients move to the
+    /// statement signers; do not add a caller.
     #[must_use]
     pub fn group_claim_body_json(&self) -> String {
         format!(
@@ -405,7 +528,14 @@ pub mod fuzz_api {
     use super::{Proof, RequestParts, SigningKey};
 
     /// Parse the bytes as a header and, when they parse, verify the result
-    /// against a fixed key and request. `true` when the parse succeeds.
+    /// against a fixed key and request, and (for a reach proof) against the
+    /// key the proof names. Asserts that a parsed proof re-encodes to a value
+    /// that parses back to itself, and that a reach proof names a key exactly
+    /// when its epoch is the reach epoch. `true` when the parse succeeds.
+    ///
+    /// # Panics
+    ///
+    /// When either assertion fails - the fuzzer's finding.
     #[must_use]
     pub fn parse_and_verify(data: &[u8]) -> bool {
         let Ok(text) = core::str::from_utf8(data) else {
@@ -414,6 +544,14 @@ pub mod fuzz_api {
         let Ok(proof) = Proof::parse(text) else {
             return false;
         };
+        assert!(
+            Proof::parse(&proof.encode()).as_ref() == Ok(&proof),
+            "encode/parse not stable"
+        );
+        assert!(
+            (proof.epoch == super::REACH_EPOCH) == proof.reach_key.is_some(),
+            "a reach key on a non-reach proof, or a reach proof without one"
+        );
         let key = SigningKey::from_seed(&[0x5Au8; 32]).verifying_key();
         let req = RequestParts {
             method: "GET",
@@ -422,7 +560,58 @@ pub mod fuzz_api {
             body: &[],
         };
         let _ = super::verify(&proof, &req, &key, proof.unix_ms);
+        if let Some(named) = proof.reach_key {
+            if let Ok(named) = super::VerifyingKey::from_bytes(&named) {
+                let _ = super::verify(&proof, &req, &named, proof.unix_ms);
+            }
+        }
         true
+    }
+
+    /// Parse the bytes as a delegation and verify whatever parses.
+    ///
+    /// Raw, and as a header value when they are UTF-8, against a fixed
+    /// mailbox and clock. Asserts round-trip stability: a delegation that decodes
+    /// re-encodes to the identical bytes and header text. `true` when either
+    /// form parses.
+    ///
+    /// # Panics
+    ///
+    /// When the round trip is not stable - the fuzzer's finding.
+    #[must_use]
+    pub fn delegation_parse(data: &[u8]) -> bool {
+        const MAILBOX: [u8; 32] = [0x10; 32];
+        const NOW_MS: u64 = 1_700_000_000_000;
+        let mut parsed = false;
+        if let Ok(d) = super::Delegation::decode(data) {
+            parsed = true;
+            assert!(d.encode().as_slice() == data, "decode/encode not stable");
+            let _ = super::verify_delegation(&d, &MAILBOX, NOW_MS);
+            let _ = super::verify_delegation(&d, &d.mailbox, d.expires_at_ms.saturating_sub(1));
+            // Step 4 against a fixed delegate's proof: it verifies only when
+            // the fuzzed delegation names that delegate.
+            let delegate = super::DsProofSigner::for_reach(&[0x5Bu8; 32]);
+            let req = RequestParts {
+                method: "POST",
+                canonical_path: "/ds/mailbox/00/messages",
+                query: "",
+                body: b"welcome",
+            };
+            let proof = delegate.sign_at(&req, NOW_MS, [0x5Cu8; super::NONCE_LEN]);
+            let outcome = super::verify_delegated_proof(&d, &proof, &req, NOW_MS);
+            assert!(
+                outcome.is_ok() == (d.delegate_pk == delegate.verifying_key().to_bytes()),
+                "a delegated proof verified for a delegate it does not name"
+            );
+        }
+        if let Ok(text) = core::str::from_utf8(data) {
+            if let Ok(d) = super::Delegation::parse_header_value(text) {
+                parsed = true;
+                assert!(d.to_header_value() == text, "header round trip not stable");
+                let _ = super::verify_delegation(&d, &MAILBOX, NOW_MS);
+            }
+        }
+        parsed
     }
 
     /// Decode the bytes as an ADR-0057 ownership statement and, when they
@@ -573,7 +762,7 @@ mod tests {
             query: "after=0&wait=25",
             body: b"",
         };
-        let bytes = canonical_bytes(&r, 3, 1_700_000_000_000, &[0xABu8; NONCE_LEN]);
+        let bytes = canonical_bytes(&r, 3, 1_700_000_000_000, &[0xABu8; NONCE_LEN], None);
         // domain, NUL, method, NUL, path, NUL, query, NUL, blake3(""), epoch, ms, nonce
         let expected_len = CANONICAL_DOMAIN.len()
             + 1
@@ -644,6 +833,161 @@ mod tests {
             &signer.mailbox_pseudonym(),
             &signer.verifying_key()
         ));
+    }
+
+    #[test]
+    fn a_reach_proof_carries_the_reach_epoch() {
+        let signer = DsProofSigner::for_reach(&[0x65u8; 32]);
+        assert_eq!(signer.epoch(), REACH_EPOCH);
+        assert_ne!(REACH_EPOCH, MAILBOX_EPOCH);
+        let r = req(b"contact request");
+        let proof = signer.sign_at(&r, 1_000_000, [0x12u8; NONCE_LEN]);
+        assert_eq!(proof.epoch, u64::MAX);
+        let parsed = Proof::parse(&proof.encode()).unwrap();
+        assert_eq!(parsed.epoch, REACH_EPOCH);
+        verify(&parsed, &r, &signer.verifying_key(), 1_000_000).unwrap();
+        // The same key's proof under the mailbox label does not verify as a
+        // reach proof: the epoch is bound.
+        let mut relabelled = parsed;
+        relabelled.epoch = MAILBOX_EPOCH;
+        assert_eq!(
+            verify(&relabelled, &r, &signer.verifying_key(), 1_000_000),
+            Err(ProofError::BadSignature)
+        );
+    }
+
+    const GOLDEN_REACH_CANONICAL_BLAKE3: &str =
+        "c529bd512e98d4e95d4bbad64fd43ec183e4dbb93589ae58c473e813af091a0b";
+
+    #[test]
+    fn a_reach_proof_names_its_key_inside_the_signed_bytes() {
+        let r = RequestParts {
+            method: "POST",
+            canonical_path: "/ds/mailbox/00/messages",
+            query: "",
+            body: b"",
+        };
+        let key = [0xCDu8; REACH_KEY_LEN];
+        let bytes = canonical_bytes(
+            &r,
+            REACH_EPOCH,
+            1_700_000_000_000,
+            &[0xABu8; NONCE_LEN],
+            Some(&key),
+        );
+        let without = canonical_bytes(
+            &r,
+            REACH_EPOCH,
+            1_700_000_000_000,
+            &[0xABu8; NONCE_LEN],
+            None,
+        );
+        assert_eq!(bytes.len(), without.len() + REACH_KEY_LEN);
+        assert_eq!(&bytes[bytes.len() - REACH_KEY_LEN..], &key);
+        assert_eq!(hex(&hash::blake3(&bytes)), GOLDEN_REACH_CANONICAL_BLAKE3);
+
+        // The header carries the key as a sixth field.
+        let signer = DsProofSigner::for_reach(&[0x66u8; 32]);
+        let proof = signer.sign_at(&r, 1_000_000, [0x13u8; NONCE_LEN]);
+        let vk = signer.verifying_key();
+        assert_eq!(proof.reach_key, Some(vk.to_bytes()));
+        let header = proof.encode();
+        assert_eq!(header.split('.').count(), 6);
+        assert!(header.ends_with(&URL_SAFE_NO_PAD.encode(vk.to_bytes())));
+        assert!(header.len() <= MAX_HEADER_LEN);
+        let parsed = Proof::parse(&header).unwrap();
+        assert_eq!(parsed, proof);
+        verify(&parsed, &r, &vk, 1_000_000).unwrap();
+
+        // Swapping the named key for another (even a registered one) breaks
+        // the proof: it names a key it is not checked under, or a key whose
+        // signature it does not carry.
+        let other = SigningKey::from_seed(&[0x67u8; 32]).verifying_key();
+        let mut swapped = parsed.clone();
+        swapped.reach_key = Some(other.to_bytes());
+        assert_eq!(
+            verify(&swapped, &r, &other, 1_000_000),
+            Err(ProofError::BadSignature)
+        );
+        assert_eq!(
+            verify(&swapped, &r, &vk, 1_000_000),
+            Err(ProofError::BadSignature)
+        );
+        // Checked under a key it does not name.
+        assert_eq!(
+            verify(&parsed, &r, &other, 1_000_000),
+            Err(ProofError::BadSignature)
+        );
+        // A reach proof with the key stripped.
+        let mut stripped = parsed;
+        stripped.reach_key = None;
+        assert_eq!(
+            verify(&stripped, &r, &vk, 1_000_000),
+            Err(ProofError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn the_reach_key_field_is_present_exactly_on_reach_proofs() {
+        let r = req(b"x");
+        let reach = DsProofSigner::for_reach(&[0x68u8; 32]).sign_at(&r, 5, [1u8; NONCE_LEN]);
+        let header = reach.encode();
+        let (five, _) = header.rsplit_once('.').unwrap();
+        // A reach proof without the key.
+        assert_eq!(Proof::parse(five), Err(ProofError::Malformed));
+        // A group proof with one.
+        let group = sign(&key(), &r, 7, 5, [2u8; NONCE_LEN]).encode();
+        let key_field = URL_SAFE_NO_PAD.encode([0u8; REACH_KEY_LEN]);
+        assert_eq!(
+            Proof::parse(&format!("{group}.{key_field}")),
+            Err(ProofError::Malformed)
+        );
+        // A key field of the wrong length, or a seventh field.
+        assert_eq!(
+            Proof::parse(&format!("{five}.AAAA")),
+            Err(ProofError::Malformed)
+        );
+        assert_eq!(
+            Proof::parse(&format!("{header}.{key_field}")),
+            Err(ProofError::Malformed)
+        );
+        // A group proof's header is unchanged: five fields.
+        assert_eq!(group.split('.').count(), 5);
+    }
+
+    #[test]
+    fn a_delegate_writes_with_a_reach_signer_over_its_own_seed() {
+        let mailbox = mailbox_pseudonym(&SigningKey::from_seed(&[0x70u8; 32]).verifying_key());
+        let reach_seed = [0x71u8; 32];
+        let delegate = DsProofSigner::for_reach(&[0x72u8; 32]);
+        let d = sign_delegation(
+            &reach_seed,
+            &mailbox,
+            &delegate.verifying_key().to_bytes(),
+            1_000_000 + 60_000,
+            [0x73u8; NONCE_LEN],
+        );
+        verify_delegation(&d, &mailbox, 1_000_000).unwrap();
+        let r = req(b"welcome");
+        let proof = delegate.sign_at(&r, 1_000_000, [0x74u8; NONCE_LEN]);
+        let delegate_vk = VerifyingKey::from_bytes(&d.delegate_pk).unwrap();
+        verify(&proof, &r, &delegate_vk, 1_000_000).unwrap();
+        // The delegate's proof names the delegate key.
+        assert_eq!(proof.reach_key, Some(d.delegate_pk));
+        verify_delegated_proof(&d, &proof, &r, 1_000_000).unwrap();
+        // A proof by the issuer itself is not the delegate's.
+        let issuer_proof =
+            DsProofSigner::for_reach(&reach_seed).sign_at(&r, 1_000_000, [0x75u8; NONCE_LEN]);
+        assert_eq!(
+            verify_delegated_proof(&d, &issuer_proof, &r, 1_000_000),
+            Err(DelegationError::NotTheDelegate)
+        );
+        assert_eq!(
+            d.issuer_pk,
+            DsProofSigner::for_reach(&reach_seed)
+                .verifying_key()
+                .to_bytes()
+        );
     }
 
     #[test]

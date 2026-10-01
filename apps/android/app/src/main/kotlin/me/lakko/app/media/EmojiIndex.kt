@@ -139,7 +139,7 @@ public fun searchEmoji(dataset: EmojiDataset, query: String, limit: Int = 200): 
         .map { it.entry }
 }
 
-// ----- per-device preferences (pure half; storage is MediaPrefs) -------------
+// ----- per-account preferences (pure half; storage is MediaPrefs) ------------
 
 /** §4 — the Recent row holds up to this many. */
 public const val MAX_RECENT_EMOJI: Int = 24
@@ -166,7 +166,7 @@ public fun decodeRecent(stored: String?): List<String> {
         .take(MAX_RECENT_EMOJI)
 }
 
-/** Base emoji -> the tone variant chosen for it on this device. */
+/** Base emoji -> the tone variant the signed-in account chose for it. */
 public typealias TonePrefs = Map<String, String>
 
 /** Record [variant] as the default for [entry]. Choosing the base emoji itself

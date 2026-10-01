@@ -17,7 +17,10 @@
 
 import { loadWasm, type Wasm } from "../wasm";
 import { rethrowAsLegacyChannel } from "./legacy-v1";
+import { isStaleSubscriberKey } from "./member-card-rules";
 import { DsClient } from "../ds/client";
+import { claimOrReset } from "../ds/ownership";
+import { boundContactsAccount } from "../contacts/local-store";
 
 /** wasm-bindgen-generated Identity handle. Re-exported
  *  here as a type-only alias so caller signatures stay
@@ -153,34 +156,10 @@ export async function freshPublisherKeys(
   // load-or-create dance in `crates/lakko-mls`; the seed
   // is stable across page reloads for the same identity +
   // channel id.
-  let publisher;
-  try {
-    publisher = wasm.PublisherGroup.openOrCreate(identity, channelId);
-  } catch (err) {
-    // Retired v1 state refuses here and cannot be repaired.
-    rethrowAsLegacyChannel(err);
-  }
+  const publisher = await openOrFoundPublisherGroup(wasm, identity, channelId);
   let seed: Uint8Array;
   try {
     seed = publisher.channelSeed(identity);
-    // ADR-0053 contract point 2 — claim the PublisherGroup journal at
-    // creation (and idempotently on every later open). Unsigned: the first
-    // registration of an unclaimed journal; re-sending a key the journal
-    // already holds is answered without a proof. Fired, not awaited, and
-    // logged on failure: channel publishing never waits on the DS.
-    try {
-      const claimSigner = publisher.dsAccessSigner(identity);
-      void new DsClient()
-        .claimGroupWith(publisher.groupId(), claimSigner, null)
-        .catch((err: unknown) => {
-          // eslint-disable-next-line no-console
-          console.warn("ds: PublisherGroup claim failed; retried on the next open", err);
-        })
-        .finally(() => claimSigner.free());
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("ds: PublisherGroup access key unavailable; not claimed", err);
-    }
   } finally {
     publisher.free();
   }
@@ -320,7 +299,7 @@ export async function decodeAndDecryptPost(
 // ---------------------------------------------------------
 
 /**
- * Subscriber-side X25519 keypair. The public half is what
+ * Subscriber-side Ed25519 keypair. The public half is what
  * gets registered on `POST /v1/channels/:id/subscribers`;
  * the secret half stays on the device + unwraps the per-
  * subscriber HPKE seed envelopes the publisher fans out
@@ -332,13 +311,15 @@ export async function decodeAndDecryptPost(
  * into IndexedDB encrypted under the device-group key.
  */
 export interface ChannelSubscriberKeys {
-  /** 32-byte X25519 secret. */
+  /** 32-byte Ed25519 seed (ADR-0060: the seed envelope's X25519 key is
+   *  derived from it inside the core). */
   readonly secret: Uint8Array;
-  /** 32-byte X25519 public. */
+  /** 32-byte Ed25519 public key - what the channel registers, and what
+   *  member-card requests are signed under. */
   readonly public: Uint8Array;
 }
 
-/** Build a fresh X25519 keypair for joining a channel as
+/** Build a fresh Ed25519 keypair for joining a channel as
  *  a subscriber. Backed by `crypto.getRandomValues` via
  *  the `getrandom + js` feature on the wasm side. */
 export async function freshSubscriberKeys(): Promise<ChannelSubscriberKeys> {
@@ -355,8 +336,27 @@ export async function freshSubscriberKeys(): Promise<ChannelSubscriberKeys> {
 }
 
 /**
+ * `true` when `keys` is an ADR-0060 Ed25519 key pair: its stored public
+ * half is the Ed25519 public key of its secret. A pair stored before the
+ * flag day is an X25519 pair and fails this; the caller regenerates it and
+ * registers the new public key (no migration - nothing is deployed).
+ */
+export async function isCurrentSubscriberKey(keys: ChannelSubscriberKeys): Promise<boolean> {
+  const wasm = await loadWasm();
+  let kp: InstanceType<Wasm["ChannelSubscriberKeypair"]> | null = null;
+  try {
+    kp = new wasm.ChannelSubscriberKeypair(keys.secret);
+    return !isStaleSubscriberKey(keys.public, kp.public());
+  } catch {
+    return false;
+  } finally {
+    kp?.free();
+  }
+}
+
+/**
  * Seal a 32-byte content-key seed against a subscriber's
- * X25519 public key. Returns the 80-byte wire bytes ready
+ * Ed25519 public key (sealed to its X25519 image). Returns the 80-byte wire bytes ready
  * to base64url-encode and `POST
  * /v1/channels/:id/subscribers/:pk/envelope`.
  *
@@ -430,4 +430,163 @@ export function utf8Encode(s: string): Uint8Array {
  *  list rendering loop. */
 export function utf8Decode(bytes: Uint8Array): string {
   return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+}
+
+/**
+ * ADR-0057 obligations 1 + 7 — open the channel's PublisherGroup, and when
+ * this call FOUNDS it (no persisted group for the channel: a first open, or a
+ * re-found after a lost-state recovery), claim its journal with the channel
+ * owner's ROOT; a 409 (the deterministic id already carries an older group's
+ * chain) becomes a root RESET. A loaded group claims nothing here: a reset of
+ * a live chain would drop every epoch this device has not seen, and an
+ * unclaimed journal is claimed by the owner's first refused request.
+ *
+ * FAIL-CLOSED (the second security pass, finding 3): the claim is awaited and
+ * must land before the handle is returned, so no channel is announced (the
+ * handle registered, the channel created on the service, a post published)
+ * for a journal somebody else could claim first. A failed claim frees the
+ * handle and throws. The founded group stays in the provider (it cannot be
+ * deleted), so an "unconfirmed founding" marker for its id is kept until a
+ * claim lands: the next open of that channel claims again instead of taking
+ * the loaded group as claimed. Throws what `openOrCreate` throws too (a
+ * retired v1 group, surfaced as the legacy-channel copy). The caller owns
+ * the handle.
+ */
+export async function openOrFoundPublisherGroup(
+  wasm: Wasm,
+  identity: WasmIdentity,
+  channelId: Uint8Array,
+  storage: UnconfirmedFoundingStorage | null = defaultFoundingStorage(),
+  owner: string | null = boundContactsAccount(),
+): Promise<InstanceType<Wasm["PublisherGroup"]>> {
+  let existed = false;
+  try {
+    const loaded = wasm.PublisherGroup.load(identity, channelId);
+    existed = loaded !== undefined;
+    loaded?.free();
+  } catch {
+    existed = false;
+  }
+  let publisher: InstanceType<Wasm["PublisherGroup"]>;
+  try {
+    publisher = wasm.PublisherGroup.openOrCreate(identity, channelId);
+  } catch (err) {
+    // Retired v1 state refuses here and cannot be repaired.
+    rethrowAsLegacyChannel(err);
+  }
+  const groupId = publisher.groupId();
+  const key = foundingKey(owner, groupId);
+  if (!existed || isUnconfirmedFounding(storage, key)) {
+    markUnconfirmedFounding(storage, key);
+    try {
+      const epochSigner = publisher.dsAccessSigner(identity);
+      const root = wasm.dsJournalRootSigner(identity, groupId);
+      try {
+        await claimOrReset(new DsClient(), groupId, root, epochSigner.epoch, epochSigner.verifyingKey());
+      } finally {
+        epochSigner.free();
+        root.free();
+      }
+      clearUnconfirmedFounding(storage, key);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ds: PublisherGroup claim failed; the channel is not opened", err);
+      try {
+        publisher.free();
+      } catch {
+        /* already freed */
+      }
+      throw err;
+    }
+  }
+  return publisher;
+}
+
+/**
+ * Where the unconfirmed-founding marker lives (group ids only).
+ *
+ * One marker per (account, group):
+ * `lakko/publisher-group-unclaimed/v2/<accountIdB64>/<groupIdHex>`. The
+ * founded group sits in that ACCOUNT's provider and the claim is made with
+ * that account's root, so the marker is the account's: the v1 row, keyed by
+ * the group alone, let a second account signed in on the same browser clear
+ * the first account's marker by claiming the same channel, after which the
+ * first took its never-claimed group as claimed (2026-09-30). The account is
+ * the `owner` argument of {@link openOrFoundPublisherGroup} (default: the
+ * signed-in account bound through `bindContactsAccount`). With no account
+ * there is nowhere to record a confirmation, so every open claims again
+ * (fail-closed; a same-root claim is idempotent) and nothing is written.
+ * Forget device drops the account's markers
+ * ({@link clearUnconfirmedFoundingsForAccount}).
+ */
+export interface UnconfirmedFoundingStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+const FOUNDING_PREFIX = "lakko/publisher-group-unclaimed/v2/";
+/** The retired device-wide markers (`<prefix><groupIdHex>`). Never read;
+ *  dropped by Forget device. */
+const RETIRED_FOUNDING_PREFIX = "lakko/publisher-group-unclaimed/v1/";
+
+function defaultFoundingStorage(): UnconfirmedFoundingStorage | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** The marker key, or `null` with no account. */
+function foundingKey(owner: string | null, groupId: Uint8Array): string | null {
+  if (owner === null || owner.length === 0) return null;
+  let hex = "";
+  for (let i = 0; i < groupId.length; i++) hex += (groupId[i] ?? 0).toString(16).padStart(2, "0");
+  return `${FOUNDING_PREFIX}${owner}/${hex}`;
+}
+
+/** Forget device: drop every unconfirmed-founding marker of `accountIdB64`
+ *  and the retired device-wide ones. Another account's are left alone. */
+export function clearUnconfirmedFoundingsForAccount(accountIdB64: string): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const own = `${FOUNDING_PREFIX}${accountIdB64}/`;
+    const doomed: string[] = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i);
+      if (k !== null && (k.startsWith(own) || k.startsWith(RETIRED_FOUNDING_PREFIX))) doomed.push(k);
+    }
+    for (const k of doomed) localStorage.removeItem(k);
+  } catch {
+    /* storage unavailable: nothing to clear */
+  }
+}
+
+function isUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: string | null): boolean {
+  // No account: nothing could have recorded a confirmation, so claim again.
+  if (key === null) return true;
+  try {
+    return storage?.getItem(key) !== null && storage?.getItem(key) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+function markUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: string | null): void {
+  if (key === null) return;
+  try {
+    storage?.setItem(key, "1");
+  } catch {
+    /* best effort */
+  }
+}
+
+function clearUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: string | null): void {
+  if (key === null) return;
+  try {
+    storage?.removeItem(key);
+  } catch {
+    /* best effort */
+  }
 }

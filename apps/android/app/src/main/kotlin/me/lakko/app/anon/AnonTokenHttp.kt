@@ -282,8 +282,9 @@ public object UniffiAnonTokenCore : AnonTokenCore {
 
 /**
  * The one pool the app spends from. `AuthRepository` installs the session
- * source and the on-disk store when it is built and clears the pool on logout
- * / forget-device; a process that has no repository (a cold FCM token refresh)
+ * source and the on-disk store when it is built, releases the memory on
+ * logout ([releaseSession], the account's tokens stay on disk) and the wipe
+ * removes one account's tokens ([forgetAccount]); a process that has no repository (a cold FCM token refresh)
  * has no session, so its token routes fail and push registration retries at
  * the next launch.
  */
@@ -297,9 +298,9 @@ public object AnonTokens {
     /** Forwards to whatever store is installed when it is used, so the store
      *  can be installed after the pool was built. */
     private val installedStore: AnonTokenStore = object : AnonTokenStore {
-        override fun load(): PersistedAnonPool? = storeRef.load()
+        override fun load(accountKey: String): PersistedAnonPool? = storeRef.load(accountKey)
         override fun save(pool: PersistedAnonPool) = storeRef.save(pool)
-        override fun clear() = storeRef.clear()
+        override fun delete(accountKey: String) = storeRef.delete(accountKey)
     }
 
     @Volatile
@@ -326,11 +327,21 @@ public object AnonTokens {
         sessionSource = source
     }
 
-    /** Drop every pooled token, persisted ones included (a pool never built
-     *  holds none in memory, but a previous launch may have left some on disk). */
-    public fun clear() {
+    /** Log out: drop the tokens held in memory. The account's persisted
+     *  tokens stay for its next sign-in (maintainer decision, 2026-10-01). */
+    public fun releaseSession() {
+        poolRef?.releaseSession()
+    }
+
+    /** The Forget device / Delete account wipe: remove [accountKey]'s tokens,
+     *  held and persisted (a pool never built holds none in memory, but a
+     *  previous launch may have left some on disk). Other accounts' stay. */
+    public fun forgetAccount(accountKey: String) {
+        // The session keys the pool with standard base64; the wipe may hold
+        // another spelling of the same id.
+        val key = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountKey)
         val pool = poolRef
-        if (pool != null) pool.clear() else runCatching { storeRef.clear() }
+        if (pool != null) pool.forgetAccount(key) else runCatching { storeRef.delete(key) }
     }
 
     /** What the spending clients use by default. Nothing native is touched
@@ -343,8 +354,8 @@ public object AnonTokens {
         override suspend fun takeDetached(session: AnonSession, context: AnonTokenContext): PooledAnonToken =
             pool().takeDetached(session, context)
 
-        override fun clear() {
-            AnonTokens.clear()
+        override fun releaseSession() {
+            AnonTokens.releaseSession()
         }
     }
 }

@@ -16,9 +16,10 @@
 //! |---|---|---|
 //! | `claim` | anyone, first time | the signer becomes the root, one epoch |
 //! | `reset` | the root | replaces the chain (and the registrar set when sent) |
-//! | `access` | root or registrar | registers an epoch, revokes lower ranks |
+//! | `access` | root or registrar | appends or replaces an epoch, revokes lower ranks |
 //! | `registrars` | the root | adds, re-ranks, removes registrars |
-//! | `root` | the root | names a new root |
+//! | `registrars-set` | the root | replaces the whole registrar set |
+//! | `root` | the root | names a new root (naming itself: a `204` no-op, the "am I still the root?" probe) |
 //! | `push-binding` | root or admin | binds the journal to one `push_gid` |
 //!
 //! **Order of checks.** Shape first (`400`: a body that does not decode, a
@@ -31,17 +32,34 @@
 //! rank does not reach, `409` when the statement conflicts with the state).
 //! A refusal after the nonce commits, so the nonce stays spent.
 //!
-//! **The epoch rule** (`access`), with `latest` the newest registered epoch:
+//! **The epoch rule** (`access`), with `latest` the newest registered epoch
+//! and ranks member 1, admin 2, root 3 (a claim or reset registers as the
+//! root). A statement says which of two things it does (the 2026-09-28
+//! security pass: without it, a lagging root device's ordinary registration
+//! truncated epochs other devices had legitimately advanced):
 //!
-//! - re-sending the key already registered at `e` changes nothing;
-//! - `e == latest + 1`: any registrar or the root;
-//! - `e <= latest`: allowed when every epoch registered at `e` or above was
-//!   registered by a strictly lower rank than the signer's, or the signer is
-//!   the root; the epochs above `e` are dropped. This is the ADR's "replace
-//!   `latest`" widened to a suffix, so an evictee that raced **two** epochs
-//!   ahead is still replaced by the admin or root committer's `N+1` in one
-//!   step (with `e == latest` it is exactly the ADR's rule);
-//! - anything else (a skip past `latest + 1`): the root only.
+//! - **Append** `e`: re-sending the key already registered at `e` changes
+//!   nothing (`204`); otherwise `e` must be `latest + 1` (`409`). A
+//!   **member** may append `e` only when `e <= H + 1`, `H` the highest epoch
+//!   registered by an admin or the root (`403`): a member's self-service
+//!   commit cannot chain two epochs beyond the last admin or root
+//!   registration, so a member cannot push the real keys out of the write
+//!   tier and the read tail with keys only it holds. The cost, stated: a
+//!   member's second self-service commit in a row waits for an admin or the
+//!   owner to register an epoch first (the pending proposal waits for the
+//!   sweep).
+//! - **Replace** `e`: a member never replaces (`403`; there is no lower rank
+//!   to replace). For `e <= latest`: every epoch strictly above `e` must have
+//!   been registered by a strictly lower rank than the signer's, and the
+//!   registration at `e`, if any, by a strictly lower rank or with the same
+//!   key (`403` otherwise); the epochs above `e` are dropped and `e` is
+//!   written (or kept). The root follows the same rule - there is no root
+//!   override - so a lagging root device can never truncate what another
+//!   root device registered; replacing a root registration is a reset. This
+//!   is how an admin at epoch `N` whose append of `N + 1` met a
+//!   member-registered fake `N + 1` drops it: `Replace(N, its own key)`.
+//!   `e == latest + 1` has nothing to drop and is an append; a skip past
+//!   `latest + 1` is the root's (`403` for a registrar).
 //!
 //! Revocations ride the same statement and the same transaction: each named
 //! key that is a registrar must hold a strictly lower rank than the signer,
@@ -64,8 +82,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use lakko_ds_proof::statement::{push_binding_key, KEY_LEN};
 use lakko_ds_proof::{
-    Rank, RegistrarChange, RegistrarEntry, SignedStatement, StatementBody, StatementKind,
-    ROOT_RANK_BYTE,
+    Rank, RegisterMode, RegistrarChange, RegistrarEntry, SignedStatement, StatementBody,
+    StatementKind, MAX_REGISTRARS, ROOT_RANK_BYTE,
 };
 use serde::Deserialize;
 use sqlx::mysql::{MySqlConnection, MySqlDatabaseError};
@@ -76,10 +94,6 @@ use crate::access::{
 };
 use crate::journal::{self, PSEUDONYM_LEN};
 use crate::AppState;
-
-/// Most registrars one journal holds. A bound on the rows a root can make
-/// the server keep, not a group-size policy: chosen, not measured.
-pub(crate) const MAX_REGISTRARS: usize = 4096;
 
 /// MariaDB's duplicate-key error number.
 const ER_DUP_ENTRY: u16 = 1062;
@@ -177,6 +191,7 @@ statement_route!(put_register, StatementKind::RegisterEpoch);
 statement_route!(put_registrars, StatementKind::Registrars);
 statement_route!(put_root, StatementKind::RootTransfer);
 statement_route!(put_push_binding, StatementKind::PushBinding);
+statement_route!(put_registrars_set, StatementKind::RegistrarsSet);
 
 async fn handle(
     state: &AppState,
@@ -271,7 +286,11 @@ async fn decide(
         StatementKind::Reset | StatementKind::Registrars | StatementKind::RootTransfer => {
             standing == Standing::Root
         },
-        StatementKind::RegisterEpoch | StatementKind::PushBinding => {
+        // A registrar sending a registrars set is heard and refused (403):
+        // it is someone to this journal, only not the root.
+        StatementKind::RegisterEpoch
+        | StatementKind::PushBinding
+        | StatementKind::RegistrarsSet => {
             matches!(standing, Standing::Root | Standing::Registrar(_))
         },
     };
@@ -307,12 +326,23 @@ async fn decide(
         StatementBody::RegisterEpoch {
             epoch,
             epoch_key,
+            mode,
             revoke,
         } => {
-            apply_register(
-                &mut *conn, group_id, signer, standing, *epoch, epoch_key, revoke,
-            )
-            .await
+            let registration = Registration {
+                signer,
+                standing,
+                epoch: *epoch,
+                epoch_key,
+                mode: *mode,
+            };
+            apply_register(&mut *conn, group_id, &registration, revoke).await
+        },
+        StatementBody::RegistrarsSet { registrars } => {
+            if standing != Standing::Root {
+                return Ok(Err(forbidden("the registrar set is the root's")));
+            }
+            replace_registrars(&mut *conn, group_id, registrars).await
         },
         StatementBody::Registrars { changes } => {
             manage_registrars(&mut *conn, group_id, signer, changes).await
@@ -398,21 +428,56 @@ async fn latest_epoch(
     Ok(row.0)
 }
 
-/// The highest rank that registered any epoch at or above `from`.
-async fn highest_rank_from(
+/// The highest rank that registered any epoch strictly above `above`
+/// (0 when none).
+async fn highest_rank_above(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
-    from: u64,
+    above: u64,
 ) -> Result<u8, HandlerError> {
     let row: (Option<u8>,) = sqlx::query_as(
-        "SELECT MAX(registered_rank) FROM ds_group_access WHERE group_id = ? AND epoch >= ?",
+        "SELECT MAX(registered_rank) FROM ds_group_access WHERE group_id = ? AND epoch > ?",
     )
     .bind(&group_id[..])
-    .bind(from)
+    .bind(above)
     .fetch_one(&mut *conn)
     .await
     .map_err(registration_db_error("load suffix ranks"))?;
     Ok(row.0.unwrap_or(0))
+}
+
+/// The key and rank registered at `epoch`.
+async fn registration_at(
+    conn: &mut MySqlConnection,
+    group_id: &[u8; PSEUDONYM_LEN],
+    epoch: u64,
+) -> Result<Option<([u8; KEY_LEN], u8)>, HandlerError> {
+    let row: Option<(Vec<u8>, u8)> = sqlx::query_as(
+        "SELECT access_pk, registered_rank FROM ds_group_access WHERE group_id = ? AND epoch = ?",
+    )
+    .bind(&group_id[..])
+    .bind(epoch)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(registration_db_error("load registration"))?;
+    Ok(row.and_then(|(pk, rank)| key_of(&pk).map(|k| (k, rank))))
+}
+
+/// The highest epoch registered by an admin or the root (a claim and a reset
+/// register as the root): `H` of the member append limit.
+async fn highest_admin_epoch(
+    conn: &mut MySqlConnection,
+    group_id: &[u8; PSEUDONYM_LEN],
+) -> Result<Option<u64>, HandlerError> {
+    let row: (Option<u64>,) = sqlx::query_as(
+        "SELECT MAX(epoch) FROM ds_group_access WHERE group_id = ? AND registered_rank >= ?",
+    )
+    .bind(&group_id[..])
+    .bind(Rank::Admin.to_byte())
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(registration_db_error("load admin epoch"))?;
+    Ok(row.0)
 }
 
 // ============================================================================
@@ -543,17 +608,101 @@ async fn apply_reset(
     Ok(Ok(()))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// One register-epoch statement, as the rules read it.
+struct Registration<'a> {
+    signer: &'a [u8; KEY_LEN],
+    standing: Standing,
+    epoch: u64,
+    epoch_key: &'a [u8; KEY_LEN],
+    mode: RegisterMode,
+}
+
+/// What a registration does to the chain once the rules allow it.
+enum EpochWrite {
+    /// The key is already there; nothing to write.
+    Keep,
+    /// Write `epoch`.
+    Write,
+    /// Drop every epoch above `epoch`, then write it.
+    TruncateAndWrite,
+}
+
+/// The epoch rule of the module doc: `Ok(write)` or the refusal.
+async fn epoch_rule(
+    conn: &mut MySqlConnection,
+    group_id: &[u8; PSEUDONYM_LEN],
+    reg: &Registration<'_>,
+) -> Result<Result<EpochWrite, HandlerError>, HandlerError> {
+    let signer_rank = reg.standing.rank_byte();
+    let epoch = reg.epoch;
+    let at = registration_at(&mut *conn, group_id, epoch).await?;
+    let latest = latest_epoch(&mut *conn, group_id).await?;
+    let next = latest.and_then(|l| l.checked_add(1));
+    match reg.mode {
+        RegisterMode::Append => {
+            if at.is_some_and(|(key, _)| key == *reg.epoch_key) {
+                return Ok(Ok(EpochWrite::Keep));
+            }
+            if next != Some(epoch) {
+                return Ok(Err(conflict(
+                    "an append registers the next epoch only; replacing is a replace",
+                )));
+            }
+            if reg.standing == Standing::Registrar(Rank::Member) {
+                let limit = highest_admin_epoch(&mut *conn, group_id)
+                    .await?
+                    .and_then(|h| h.checked_add(1));
+                if limit.map_or(true, |l| epoch > l) {
+                    return Ok(Err(forbidden(
+                        "a member may not register past one epoch above the last admin or root \
+                         registration",
+                    )));
+                }
+            }
+            Ok(Ok(EpochWrite::Write))
+        },
+        RegisterMode::Replace => {
+            if reg.standing == Standing::Registrar(Rank::Member) {
+                return Ok(Err(forbidden("a member does not replace a registration")));
+            }
+            match latest {
+                Some(l) if epoch <= l => {
+                    let above = highest_rank_above(&mut *conn, group_id, epoch).await?;
+                    let at_ok = at.map_or(true, |(key, rank)| {
+                        rank < signer_rank || key == *reg.epoch_key
+                    });
+                    if above >= signer_rank || !at_ok {
+                        return Ok(Err(forbidden(
+                            "an epoch registered by an equal or higher rank is not replaced",
+                        )));
+                    }
+                    let unchanged = at.is_some_and(|(key, _)| key == *reg.epoch_key);
+                    Ok(Ok(match (unchanged, epoch < l) {
+                        (true, false) => EpochWrite::Keep,
+                        (false, false) => EpochWrite::Write,
+                        (_, true) => EpochWrite::TruncateAndWrite,
+                    }))
+                },
+                _ if next == Some(epoch) => Ok(Ok(EpochWrite::Write)),
+                _ => {
+                    if reg.standing == Standing::Root {
+                        Ok(Ok(EpochWrite::Write))
+                    } else {
+                        Ok(Err(forbidden("a skip past the next epoch is the root's")))
+                    }
+                },
+            }
+        },
+    }
+}
+
 async fn apply_register(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
-    signer: &[u8; KEY_LEN],
-    standing: Standing,
-    epoch: u64,
-    epoch_key: &[u8; KEY_LEN],
+    reg: &Registration<'_>,
     revoke: &[[u8; KEY_LEN]],
 ) -> Decision {
-    let signer_rank = standing.rank_byte();
+    let signer_rank = reg.standing.rank_byte();
     // Revocations first: all or nothing, decided before any write.
     let mut revoked = Vec::with_capacity(revoke.len());
     for key in revoke {
@@ -567,43 +716,34 @@ async fn apply_register(
         }
     }
 
-    let unchanged = access_key_at(&mut *conn, group_id, epoch).await? == Some(*epoch_key);
-    if !unchanged {
-        let latest = latest_epoch(&mut *conn, group_id).await?;
-        let is_root = standing == Standing::Root;
-        let truncate = match latest {
-            Some(l) if l.checked_add(1) == Some(epoch) => false,
-            Some(l) if epoch <= l => {
-                let suffix_rank = highest_rank_from(&mut *conn, group_id, epoch).await?;
-                if !is_root && suffix_rank >= signer_rank {
-                    return Ok(Err(forbidden(
-                        "an epoch registered by an equal or higher rank is not replaced",
-                    )));
-                }
-                true
-            },
-            _ => {
-                if !is_root {
-                    return Ok(Err(conflict(
-                        "epoch must be the next one, or replace what a lower rank registered",
-                    )));
-                }
-                false
-            },
-        };
-        if truncate {
+    let write = match epoch_rule(&mut *conn, group_id, reg).await? {
+        Ok(write) => write,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
+    if !matches!(write, EpochWrite::Keep) {
+        if matches!(write, EpochWrite::TruncateAndWrite) {
             sqlx::query("DELETE FROM ds_group_access WHERE group_id = ? AND epoch > ?")
                 .bind(&group_id[..])
-                .bind(epoch)
+                .bind(reg.epoch)
                 .execute(&mut *conn)
                 .await
                 .map_err(registration_db_error("drop replaced epochs"))?;
         }
-        insert_epoch(conn, group_id, epoch, epoch_key, signer, signer_rank).await?;
+        insert_epoch(
+            conn,
+            group_id,
+            reg.epoch,
+            reg.epoch_key,
+            reg.signer,
+            signer_rank,
+        )
+        .await?;
         // Bound the read tier below the newest epoch; the journal pruner
         // ages out the rest. The floor is computed here so no epoch
         // arithmetic runs in SQL.
-        let newest = latest_epoch(&mut *conn, group_id).await?.unwrap_or(epoch);
+        let newest = latest_epoch(&mut *conn, group_id)
+            .await?
+            .unwrap_or(reg.epoch);
         if let Some(floor) = newest.checked_sub(MAX_RETAINED_EPOCHS) {
             sqlx::query("DELETE FROM ds_group_access WHERE group_id = ? AND epoch <= ?")
                 .bind(&group_id[..])
@@ -615,6 +755,29 @@ async fn apply_register(
     }
     for key in &revoked {
         delete_registrar(conn, group_id, key).await?;
+    }
+    Ok(Ok(()))
+}
+
+/// The root replaces the whole registrar set: every registrar not listed
+/// goes, every listed one is written at its rank. Idempotent (re-sending the
+/// same set is a `204` that changes nothing). The codec already refused a
+/// set naming the root, a repeated key and more than [`MAX_REGISTRARS`].
+async fn replace_registrars(
+    conn: &mut MySqlConnection,
+    group_id: &[u8; PSEUDONYM_LEN],
+    registrars: &[RegistrarEntry],
+) -> Decision {
+    if registrars.len() > MAX_REGISTRARS {
+        return Ok(Err(conflict("too many registrars on this journal")));
+    }
+    sqlx::query("DELETE FROM ds_group_registrars WHERE group_id = ?")
+        .bind(&group_id[..])
+        .execute(&mut *conn)
+        .await
+        .map_err(registration_db_error("replace registrar set"))?;
+    for entry in registrars {
+        upsert_registrar(conn, group_id, &entry.key, entry.rank).await?;
     }
     Ok(Ok(()))
 }
@@ -760,6 +923,7 @@ mod tests {
     use crate::test_support::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use lakko_ds_proof::statement::{StatementSigner, MAX_LIST_ENTRIES};
+    use lakko_ds_proof::RegisterMode;
     use lakko_ds_proof::SigningKey;
     use sqlx::MySqlPool;
 
@@ -926,11 +1090,13 @@ mod tests {
         assert_eq!(read_as(&app, &j.gid, &key(2), 2).await, StatusCode::OK);
     }
 
-    /// ADR-0057 Context, attack 1: an evicted member extends the chain with
-    /// keys only it holds (here two epochs ahead). The admin committer's
-    /// registration of the real next epoch replaces the whole fake suffix and
-    /// revokes the evictee in the same transaction; the evictee can then
-    /// neither register nor read under its fake keys.
+    /// ADR-0057 Context, attack 1, and the 2026-09-28 security pass finding
+    /// 1: an evicted member extends the chain with keys only it holds. It can
+    /// append one epoch past the last admin or root registration and no
+    /// further, so the real keys stay in the write tier; the admin
+    /// committer's replace of that epoch drops the fake and revokes the
+    /// evictee in the same transaction, after which the evictee can neither
+    /// register nor read under its fake key.
     #[tokio::test]
     async fn an_evictee_cannot_keep_the_journal() {
         let Some((app, pool)) = app().await else {
@@ -944,11 +1110,17 @@ mod tests {
         );
         assert_eq!(
             register(&app, &j.gid, &j.member, 3, &fake3, &[]).await,
-            StatusCode::NO_CONTENT
+            StatusCode::FORBIDDEN,
+            "a member does not chain past the last admin or root epoch"
         );
+        // The admin's ordinary append meets the fake; a replace drops it.
         let real2 = key(0x22);
         assert_eq!(
             register(&app, &j.gid, &j.admin, 2, &real2, &[&j.member]).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            replace(&app, &j.gid, &j.admin, 2, &real2, &[&j.member]).await,
             StatusCode::NO_CONTENT
         );
         assert_eq!(epochs(&pool, &j.gid).await, vec![(1, 3), (2, 2)]);
@@ -959,10 +1131,6 @@ mod tests {
         );
         assert_eq!(
             register(&app, &j.gid, &j.member, 3, &fake3, &[]).await,
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            read_as(&app, &j.gid, &fake3, 3).await,
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
@@ -977,9 +1145,254 @@ mod tests {
         );
     }
 
+    /// Security pass finding 1, the freeze: a member-rank registrar tries to
+    /// chain `latest + 1` registrations with keys only it holds. The second
+    /// link is refused for it and for every other member, the admin and root
+    /// epochs stay in the write tier, and once an admin registers the next
+    /// epoch a member may append one past it again.
+    #[tokio::test]
+    async fn a_member_cannot_chain_the_real_keys_out_of_the_write_tier() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        let j = journal(&app, 0x70).await;
+        assert_eq!(
+            register(&app, &j.gid, &j.member, 2, &key(0xF2), &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        for (member, k) in [(&j.member, 0xF3), (&j.member2, 0xE3)] {
+            assert_eq!(
+                register(&app, &j.gid, member, 3, &key(k), &[]).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+        // A skip or a replace is no way around it for a member.
+        assert_eq!(
+            replace(&app, &j.gid, &j.member, 3, &key(0xF3), &[]).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            register(&app, &j.gid, &j.member, 4, &key(0xF4), &[]).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(epochs(&pool, &j.gid).await, vec![(1, 3), (2, 1)]);
+        // The root's epoch is still in the write tier: a member of epoch 1
+        // publishes.
+        let (status, _) = send(
+            &app,
+            Req {
+                method: "POST",
+                uri: &members_uri(&j.gid),
+                body: b"ciphertext".to_vec(),
+                proof: Some((&key(1), 1)),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        // An admin registration lifts the limit by one.
+        assert_eq!(
+            register(&app, &j.gid, &j.admin, 3, &key(0x33), &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            register(&app, &j.gid, &j.member2, 4, &key(0x34), &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            register(&app, &j.gid, &j.member, 5, &key(0x35), &[]).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    /// The coordinator's amendment to the replace rule: an admin at epoch N
+    /// (registered by an admin) whose append of N+1 met a member's fake N+1
+    /// drops it by replacing N with the key already there; it cannot drop
+    /// what another admin registered above N.
+    #[tokio::test]
+    async fn an_admin_drops_a_fake_next_epoch_by_replacing_its_own() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        let j = journal(&app, 0x71).await;
+        let admin2 = fresh_signer(0x71);
+        assert_eq!(
+            set_registrars(&app, &j.gid, &j.root, &[(&admin2, Some(Rank::Admin))]).await,
+            StatusCode::NO_CONTENT
+        );
+        let real2 = key(0x42);
+        assert_eq!(
+            register(&app, &j.gid, &admin2, 2, &real2, &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            register(&app, &j.gid, &j.member, 3, &key(0xF3), &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            register(&app, &j.gid, &j.admin, 3, &key(0x43), &[]).await,
+            StatusCode::CONFLICT
+        );
+        // Another key at N is an equal rank's registration: refused.
+        assert_eq!(
+            replace(&app, &j.gid, &j.admin, 2, &key(0x52), &[]).await,
+            StatusCode::FORBIDDEN
+        );
+        // The same key at N: the fake above is dropped, N kept.
+        assert_eq!(
+            replace(&app, &j.gid, &j.admin, 2, &real2, &[&j.member]).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(epochs(&pool, &j.gid).await, vec![(1, 3), (2, 2)]);
+        assert_eq!(read_as(&app, &j.gid, &real2, 2).await, StatusCode::OK);
+        assert_eq!(
+            register(&app, &j.gid, &j.admin, 3, &key(0x43), &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        // Now an admin epoch sits above 2: the other admin cannot drop it.
+        assert_eq!(
+            replace(&app, &j.gid, &admin2, 2, &real2, &[]).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(epochs(&pool, &j.gid).await, vec![(1, 3), (2, 2), (3, 2)]);
+    }
+
+    /// Security pass finding 7: a lagging root device's ordinary append of
+    /// an epoch that is no longer the next one is a 409 and truncates
+    /// nothing; a replace cannot drop what another root device registered.
+    #[tokio::test]
+    async fn a_lagging_root_does_not_truncate() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        let j = journal(&app, 0x72).await;
+        for (e, k) in [(2, 0x52), (3, 0x53)] {
+            assert_eq!(
+                register(&app, &j.gid, &j.root, e, &key(k), &[]).await,
+                StatusCode::NO_CONTENT
+            );
+        }
+        // The lagging device still thinks the chain ends at 1.
+        assert_eq!(
+            register(&app, &j.gid, &j.root, 2, &key(0x62), &[]).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            replace(&app, &j.gid, &j.root, 2, &key(0x62), &[]).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(epochs(&pool, &j.gid).await, vec![(1, 3), (2, 3), (3, 3)]);
+        // Re-sending what is there stays a no-op for either mode.
+        assert_eq!(
+            register(&app, &j.gid, &j.root, 2, &key(0x52), &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            replace(&app, &j.gid, &j.root, 3, &key(0x53), &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(epochs(&pool, &j.gid).await, vec![(1, 3), (2, 3), (3, 3)]);
+        // The root may still replace a lower rank's suffix.
+        assert_eq!(
+            register(&app, &j.gid, &j.admin, 4, &key(0x54), &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            replace(&app, &j.gid, &j.root, 3, &key(0x53), &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(epochs(&pool, &j.gid).await, vec![(1, 3), (2, 3), (3, 3)]);
+    }
+
+    /// Security pass finding 2: the root replaces the whole registrar set; a
+    /// registrar it no longer lists stops being heard at once, whatever the
+    /// owner's device remembers.
+    #[tokio::test]
+    async fn a_registrars_set_removes_every_unlisted_registrar() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        let j = journal(&app, 0x73).await;
+        let set = |signer: &StatementSigner, entries: Vec<RegistrarEntry>| {
+            let app = app.clone();
+            let gid = j.gid;
+            let signer = signer.clone();
+            async move {
+                send_statement(
+                    &app,
+                    &gid,
+                    &signer,
+                    StatementBody::RegistrarsSet {
+                        registrars: entries,
+                    },
+                )
+                .await
+            }
+        };
+        let only_admin = vec![RegistrarEntry {
+            key: j.admin.public_key(),
+            rank: Rank::Admin,
+        }];
+        // Only the root: a registrar is heard and refused, a stranger is not
+        // heard.
+        let only_member = vec![RegistrarEntry {
+            key: j.member.public_key(),
+            rank: Rank::Admin,
+        }];
+        assert_eq!(
+            set(&j.admin, only_member.clone()).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            set(&fresh_signer(0x73), only_member).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(registrar_count(&pool, &j.gid).await, 3);
+        assert_eq!(
+            set(&j.root, only_admin.clone()).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(registrar_count(&pool, &j.gid).await, 1);
+        for member in [&j.member, &j.member2] {
+            assert_eq!(
+                register(&app, &j.gid, member, 2, &key(0x82), &[]).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            register(&app, &j.gid, &j.admin, 2, &key(0x82), &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        // The same set again changes nothing; a new rank is written.
+        assert_eq!(set(&j.root, only_admin).await, StatusCode::NO_CONTENT);
+        assert_eq!(registrar_count(&pool, &j.gid).await, 1);
+        assert_eq!(
+            set(
+                &j.root,
+                vec![RegistrarEntry {
+                    key: j.admin.public_key(),
+                    rank: Rank::Member,
+                }]
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            replace(&app, &j.gid, &j.admin, 2, &key(0x92), &[]).await,
+            StatusCode::FORBIDDEN,
+            "demoted to member: no replace"
+        );
+        // Empty removes all.
+        assert_eq!(set(&j.root, vec![]).await, StatusCode::NO_CONTENT);
+        assert_eq!(registrar_count(&pool, &j.gid).await, 0);
+        assert_eq!(
+            register(&app, &j.gid, &j.admin, 3, &key(0x83), &[]).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
     /// ADR-0057 Context, attack 2: a member pre-registers N+1 to block its
-    /// own removal. The admin's sweep registration replaces it; an equal
-    /// rank cannot, and a rank never replaces what a higher one registered.
+    /// own removal. The admin's sweep replaces it; a member never replaces,
+    /// and a rank never replaces what an equal or higher one registered.
     #[tokio::test]
     async fn a_pre_registration_does_not_block_a_sweep() {
         let Some((app, pool)) = app().await else {
@@ -990,36 +1403,38 @@ mod tests {
             register(&app, &j.gid, &j.member, 2, &key(0xF2), &[]).await,
             StatusCode::NO_CONTENT
         );
-        // Equal rank: refused.
+        // Another member: an append of a taken epoch conflicts, a replace is
+        // not a member's.
         assert_eq!(
             register(&app, &j.gid, &j.member2, 2, &key(0x32), &[]).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            replace(&app, &j.gid, &j.member2, 2, &key(0x32), &[]).await,
             StatusCode::FORBIDDEN
         );
         // Higher rank: replaced.
         assert_eq!(
-            register(&app, &j.gid, &j.admin, 2, &key(0x42), &[&j.member]).await,
+            replace(&app, &j.gid, &j.admin, 2, &key(0x42), &[&j.member]).await,
             StatusCode::NO_CONTENT
         );
         assert_eq!(epochs(&pool, &j.gid).await, vec![(1, 3), (2, 2)]);
-        // An admin does not replace another admin's (or its own rank's)
-        // registration, nor the root's; the root replaces anything.
+        // The root replaces the admin's; the admin does not replace the
+        // root's, at that epoch or below it.
         assert_eq!(
-            register(&app, &j.gid, &j.member2, 2, &key(0x52), &[]).await,
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            register(&app, &j.gid, &j.root, 2, &key(0x62), &[]).await,
+            replace(&app, &j.gid, &j.root, 2, &key(0x62), &[]).await,
             StatusCode::NO_CONTENT
         );
         assert_eq!(
-            register(&app, &j.gid, &j.admin, 2, &key(0x72), &[]).await,
+            replace(&app, &j.gid, &j.admin, 2, &key(0x72), &[]).await,
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            register(&app, &j.gid, &j.admin, 1, &key(0x73), &[]).await,
+            replace(&app, &j.gid, &j.admin, 1, &key(0x73), &[]).await,
             StatusCode::FORBIDDEN,
             "a suffix containing a root registration is the root's"
         );
+        assert_eq!(epochs(&pool, &j.gid).await, vec![(1, 3), (2, 3)]);
     }
 
     /// ADR-0057 Context, attack 3: a group with a deterministic id is
@@ -1120,13 +1535,20 @@ mod tests {
             return;
         };
         let j = journal(&app, 0x65).await;
-        // A skip past latest + 1 is the root's.
+        // A skip past latest + 1 is never an append, and as a replace it
+        // is the root's.
+        for signer in [&j.admin, &j.root] {
+            assert_eq!(
+                register(&app, &j.gid, signer, 5, &key(5), &[]).await,
+                StatusCode::CONFLICT
+            );
+        }
         assert_eq!(
-            register(&app, &j.gid, &j.admin, 5, &key(5), &[]).await,
-            StatusCode::CONFLICT
+            replace(&app, &j.gid, &j.admin, 5, &key(5), &[]).await,
+            StatusCode::FORBIDDEN
         );
         assert_eq!(
-            register(&app, &j.gid, &j.root, 5, &key(5), &[]).await,
+            replace(&app, &j.gid, &j.root, 5, &key(5), &[]).await,
             StatusCode::NO_CONTENT
         );
         // Revoking an equal rank refuses the whole statement: no epoch, no
@@ -1203,7 +1625,7 @@ mod tests {
         assert_eq!(transfer(j.root.clone()).await, StatusCode::NO_CONTENT);
         // The old root is a stranger now; the new one holds every power.
         assert_eq!(
-            register(&app, &j.gid, &j.root, 9, &key(9), &[]).await,
+            replace(&app, &j.gid, &j.root, 9, &key(9), &[]).await,
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
@@ -1211,13 +1633,47 @@ mod tests {
             StatusCode::NO_CONTENT
         );
         assert_eq!(
-            register(&app, &j.gid, &new_root, 9, &key(9), &[]).await,
+            replace(&app, &j.gid, &new_root, 9, &key(9), &[]).await,
             StatusCode::NO_CONTENT
         );
         assert_eq!(
             claim(&app, &j.gid, &j.root, 1, &key(1)).await,
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// A root transfer naming the current root is the clients' probe "am I
+    /// still the root?": 204 and nothing changes for the root, the uniform
+    /// 401 for a key that is not (or no longer) the root.
+    #[tokio::test]
+    async fn a_transfer_to_the_current_root_is_a_probe() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        let j = journal(&app, 0x74).await;
+        let probe = |signer: &StatementSigner, named: &StatementSigner| {
+            let app = app.clone();
+            let gid = j.gid;
+            let signer = signer.clone();
+            let new_root = named.public_key();
+            async move {
+                send_statement(
+                    &app,
+                    &gid,
+                    &signer,
+                    StatementBody::RootTransfer { new_root },
+                )
+                .await
+            }
+        };
+        assert_eq!(probe(&j.root, &j.root).await, StatusCode::NO_CONTENT);
+        assert_eq!(probe(&j.root, &j.root).await, StatusCode::NO_CONTENT);
+        assert_eq!(probe(&j.admin, &j.admin).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(registrar_count(&pool, &j.gid).await, 3);
+        let new_root = fresh_signer(0x74);
+        assert_eq!(probe(&j.root, &new_root).await, StatusCode::NO_CONTENT);
+        assert_eq!(probe(&j.root, &j.root).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(probe(&new_root, &new_root).await, StatusCode::NO_CONTENT);
     }
 
     fn wake_value(push_gid: [u8; 32]) -> String {
@@ -1385,6 +1841,7 @@ mod tests {
                 StatementBody::RegisterEpoch {
                     epoch: 2,
                     epoch_key: key(2).verifying_key().to_bytes(),
+                    mode: RegisterMode::Append,
                     revoke: vec![],
                 },
                 now_ms(),
@@ -1419,6 +1876,7 @@ mod tests {
                 StatementBody::RegisterEpoch {
                     epoch: 2,
                     epoch_key: key(2).verifying_key().to_bytes(),
+                    mode: RegisterMode::Append,
                     revoke: vec![],
                 },
                 now_ms(),
@@ -1442,6 +1900,7 @@ mod tests {
                 StatementBody::RegisterEpoch {
                     epoch: 2,
                     epoch_key: key(2).verifying_key().to_bytes(),
+                    mode: RegisterMode::Append,
                     revoke: vec![],
                 },
                 now_ms() - lakko_ds_proof::PROOF_WINDOW_MS - 1_000,
@@ -1480,7 +1939,7 @@ mod tests {
             "a refused claim left a row"
         );
         assert_eq!(
-            claim(&app, &gid, &root, MAX_ACCESS_EPOCH, &key(1)).await,
+            claim(&app, &gid, &root, MAX_ACCESS_EPOCH - 1, &key(1)).await,
             StatusCode::NO_CONTENT
         );
         assert_eq!(

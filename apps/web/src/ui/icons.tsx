@@ -73,6 +73,8 @@ const PATHS = {
   hand: `<path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V11M11 10.5V4.5a1.5 1.5 0 0 1 3 0V11M14 11V6a1.5 1.5 0 0 1 3 0v7.5"/><path d="M17 13.5V9.5a1.5 1.5 0 0 1 3 0V15a6 6 0 0 1-6 6h-2a6 6 0 0 1-4.8-2.4L4 14.6a1.5 1.5 0 0 1 2.4-1.8L8 14.6"/>`,
   mail: `<rect x="3" y="5.5" width="18" height="13" rx="2"/><path d="m3.5 7.5 8.5 6 8.5-6"/>`,
   lines: `<path d="M5 7h14M5 12h10M5 17h7"/>`,
+  folder: `<path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>`,
+  grip: `<circle cx="9" cy="6.5" r="1.3"/><circle cx="15" cy="6.5" r="1.3"/><circle cx="9" cy="12" r="1.3"/><circle cx="15" cy="12" r="1.3"/><circle cx="9" cy="17.5" r="1.3"/><circle cx="15" cy="17.5" r="1.3"/>`,
   phoneEnd: `<path d="M3.5 13.5c4.7-4.7 12.3-4.7 17 0l-1.6 2.2a1.6 1.6 0 0 1-2 .5l-2.4-1.2a1.6 1.6 0 0 1-.9-1.6v-1.4a11 11 0 0 0-3.2 0v1.4a1.6 1.6 0 0 1-.9 1.6l-2.4 1.2a1.6 1.6 0 0 1-2-.5z"/>`,
   // The in-call Speaker control (docs/ux/calls.md section 4.1). `channels`
   // draws the same idea for a subscriber list; a call control needs its own

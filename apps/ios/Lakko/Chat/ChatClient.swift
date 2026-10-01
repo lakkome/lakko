@@ -633,6 +633,19 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
+            // ADR-0057 — a registrar-seed envelope from the journal root.
+            // Sniffed before the chat parser for the same reason as the arms
+            // above: the lossy-UTF-8 fallback would otherwise render it as a
+            // bubble reading `lakko/ds-registrar-seed/v1` plus binary. Fixed
+            // length; the FFI decode is the verdict.
+            if Self.looksLikeRegistrarSeed(data) {
+                return .registrarSeed(
+                    messageId: messageId,
+                    plaintext: data,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
+            }
             // ADR-0023 — the identity that leaf names, resolved HERE because
             // here is where the roster is the one the message was sealed
             // under. Every downstream attribution reads this, never the leaf.
@@ -654,6 +667,19 @@ public final class ChatClient {
                 return .profile(
                     messageId: messageId,
                     profile: profile,
+                    senderKey: senderKey,
+                    createdAt: createdAt
+                )
+            }
+            // ADR-0060 — the five "who can find me" service envelopes
+            // (introduction offer, introductions bundle, visibility setting,
+            // reach state, committer delegation). Never a timeline row, and
+            // after the identity resolution: each is bound to exactly the
+            // sender the leaf names in this epoch (C-68).
+            if let scoped = ScopedDiscoveryEnvelope.decode(data) {
+                return .scopedDiscovery(
+                    messageId: messageId,
+                    envelope: scoped,
                     senderKey: senderKey,
                     createdAt: createdAt
                 )
@@ -789,6 +815,13 @@ public final class ChatClient {
                     senderKey: senderKey,
                     createdAt: createdAt
                 )
+            case .serviceEnvelope:
+                // A service envelope the sniffs above did not recognise (a
+                // newer version from a client ahead of this one). Never
+                // rendered: without this arm it would be text, and with the
+                // pre-2026-09-29 parser it WAS a bubble of domain text and
+                // binary.
+                return .serviceEnvelope(messageId: messageId, createdAt: createdAt)
             }
         case .commit:
             return .system(
@@ -938,7 +971,11 @@ public final class ChatClient {
             updatedAtMs: decoded.updatedAtMs,
             // Envelope v2 — the sender's account id, or `nil` when it sent
             // none; what a group-call tile is matched on (ADR-0021).
-            accountId: decoded.accountId
+            accountId: decoded.accountId,
+            // Envelope v3 (ADR-0060) — the username certificate and the reach
+            // grants of this conversation.
+            usernameCertificate: decoded.usernameCertificate,
+            grants: decoded.grants
         )
     }
 
@@ -1047,6 +1084,26 @@ public final class ChatClient {
     /// fail-closed on an unknown schema version — a v2 request this build
     /// cannot read falls through to the chat parser like any other
     /// unrecognised plaintext rather than being swallowed here.
+    /// ADR-0057 — the registrar-seed envelope's exact length, read from the
+    /// FFI (`registrarSeedEnvelopeLen()`, 173) rather than written as a local
+    /// literal: a stale number fails in the dangerous direction.
+    private static let registrarSeedLen = Int(registrarSeedEnvelopeLen())
+
+    /// First byte of the ADR-0057 registrar-seed domain (`'l'`). Decides
+    /// nothing on its own.
+    private static let registrarSeedFirstByte: UInt8 = 0x6C
+
+    /// ADR-0057 — is this application plaintext a registrar-seed envelope?
+    /// Exact length plus the first domain byte, then the strict FFI decode
+    /// (domain, version, rank, lengths) as the verdict; the seed itself stays
+    /// sealed until the repository's gate passes.
+    static func looksLikeRegistrarSeed(_ bytes: Data) -> Bool {
+        guard bytes.count == registrarSeedLen,
+              bytes.first == registrarSeedFirstByte
+        else { return false }
+        return (try? decodeRegistrarSeedEnvelope(plaintext: bytes)) != nil
+    }
+
     static func looksLikeProfileRequest(_ bytes: Data) -> Bool {
         guard bytes.count == profileRequestLen,
               bytes.first == profileRequestFirstByte
@@ -1173,6 +1230,15 @@ public enum IncomingChatEvent: Equatable {
     /// `group.pendingExternalJoins()`, is the source of truth; this event is
     /// the nudge that a new request landed).
     case externalJoinRequest(messageId: Int64, joinerSignatureKey: Data, retained: Bool, createdAt: String)
+    /// ADR-0060 — one of the five "who can find me" service envelopes. Never
+    /// a timeline bubble. `senderKey` is the MLS sender resolved at receipt
+    /// (C-68); a `nil` sender makes the receive side drop it.
+    case scopedDiscovery(
+        messageId: Int64,
+        envelope: ScopedDiscoveryEnvelope,
+        senderKey: MemberIdentity?,
+        createdAt: String
+    )
     /// ADR-0048 — a member's profile (display name + claimed username).
     /// Never a timeline bubble. `senderKey` is the MLS sender leaf resolved to
     /// a signature key at receipt (C-68); a `nil` sender means the profile has
@@ -1304,6 +1370,28 @@ public enum IncomingChatEvent: Equatable {
         record: ProposalRecord,
         createdAt: String
     )
+
+    /// ADR-0057 — the journal root handed a member its DS registrar seed,
+    /// sealed to that member's account X25519 key. Never a timeline row. The
+    /// whole plaintext rides onward (the repository decodes, gates on the
+    /// addressee and on the sender being the OWNER, then opens it) with the
+    /// MLS-authenticated `senderLeaf` for that gate.
+    case registrarSeed(
+        messageId: Int64,
+        plaintext: Data,
+        senderLeaf: UInt32?,
+        createdAt: String
+    )
+
+    /// A Lakko service envelope none of the arms above recognised: the
+    /// plaintext opens with `lakko/` and is not a chat envelope, most often a
+    /// newer version of a profile, group name, pin or beacon envelope from a
+    /// client ahead of this one (seen live 2026-09-29 when a profile v3 reached
+    /// v2 clients and rendered as a bubble of domain text and binary). The core
+    /// parser classifies it (`MessageBodyKind.serviceEnvelope`); it is NEVER a
+    /// timeline row, a chat-list preview or an unread message, and nothing is
+    /// carried onward because this build cannot read it.
+    case serviceEnvelope(messageId: Int64, createdAt: String)
 }
 
 /// ADR-0024 — an inbound ephemeral chat-status signal lifted out of

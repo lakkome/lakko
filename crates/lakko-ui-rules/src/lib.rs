@@ -29,6 +29,8 @@
 pub mod call_bar;
 pub mod capture;
 pub mod conversation;
+pub mod folder;
 pub mod info;
 pub mod lookup;
 pub mod ring;
+pub mod visibility;

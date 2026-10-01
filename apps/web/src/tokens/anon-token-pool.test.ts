@@ -67,7 +67,7 @@ describe("refill and take", () => {
 
   it("without a session there is nothing to draw with: fails without a request", async () => {
     const { pool, issuer } = fakeTokenPool();
-    pool.clear();
+    pool.unbind();
     await expect(pool.take("discovery-lookup")).rejects.toBeInstanceOf(AnonTokenUnavailableError);
     expect(issuer).toHaveLength(0);
   });
@@ -232,29 +232,29 @@ describe("spend: drop a refused token and retry ONCE", () => {
   });
 });
 
-describe("clearing on logout and account switch", () => {
-  it("signing out keeps the held tokens for the push unregister; clearIfNoSession then drops them", async () => {
+describe("letting go of the account on logout and account switch", () => {
+  it("signing out keeps the held tokens for the push unregister; unbindIfNoSession then drops them", async () => {
     const { pool } = fakeTokenPool();
     await pool.take("push-register");
     pool.setSessionToken(null);
     expect(pool.size("push-register")).toBe(REFILL_BATCH["push-register"] - 1);
     const held = await pool.take("push-register");
     expect(held.headerValue).toBe("tok-2");
-    pool.clearIfNoSession();
+    pool.unbindIfNoSession();
     expect(pool.size("push-register")).toBe(0);
     await expect(pool.take("push-register")).rejects.toBeInstanceOf(AnonTokenUnavailableError);
   });
 
-  it("clearIfNoSession leaves a session installed in the meantime alone", async () => {
+  it("unbindIfNoSession leaves a session installed in the meantime alone", async () => {
     const { pool } = fakeTokenPool();
     pool.setSessionToken(null);
     pool.setSessionToken("v1.QUNDT1VOVA.0.tag");
     await pool.take("discovery-lookup");
-    pool.clearIfNoSession();
+    pool.unbindIfNoSession();
     expect(pool.size("discovery-lookup")).toBe(REFILL_BATCH["discovery-lookup"] - 1);
   });
 
-  it("another account's session clears the pool", async () => {
+  it("another account's session drops the held tokens from memory", async () => {
     const { pool } = fakeTokenPool();
     await pool.take("discovery-lookup");
     pool.setSessionToken("v1.QU5PVEhFUg.0.tag");
@@ -268,12 +268,24 @@ describe("clearing on logout and account switch", () => {
     expect(pool.size("discovery-lookup")).toBe(REFILL_BATCH["discovery-lookup"] - 1);
   });
 
-  it("a refill that lands after a clear is thrown away", async () => {
+  it("a refill that lands after an unbind is thrown away", async () => {
     const { pool } = fakeTokenPool();
     const pending = pool.take("invite-consume").catch((e: unknown) => e);
-    pool.clear();
+    pool.unbind();
     const outcome = await pending;
     expect(outcome).toBeInstanceOf(AnonTokenUnavailableError);
+    expect(pool.size("invite-consume")).toBe(0);
+  });
+
+  it("a take started under one account never hands a token over under another", async () => {
+    const { pool } = fakeTokenPool();
+    // The first take waits for a refill drawn for account A ...
+    const pending = pool.take("invite-consume").catch((e: unknown) => e);
+    // ... and account B signs in before it lands.
+    pool.setSessionToken("v1.QU5PVEhFUg.0.tag");
+    const outcome = await pending;
+    expect(outcome).toBeInstanceOf(AnonTokenUnavailableError);
+    // B starts from its own (empty) bucket, not from A's batch.
     expect(pool.size("invite-consume")).toBe(0);
   });
 });

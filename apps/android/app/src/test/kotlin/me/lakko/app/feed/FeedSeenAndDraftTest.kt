@@ -10,7 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** ADR-0058 section 5 (seen) and section 6 (own feeds, sharing). */
+/** ADR-0061 section 5 (seen) and section 6 (own feeds, sharing). */
 class FeedSeenAndDraftTest {
     /** The core's rule, restated for the host suite: the highest id with
      *  every listed id at or below it seen. */

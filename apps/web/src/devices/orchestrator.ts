@@ -21,6 +21,8 @@
  * walks to the other device); the scanner side is a single
  * acknowledged transaction (scan happens, ack happens, done).
  */
+import { announceDeviceGroupChangedHere } from "./sync/growth";
+import { resendServiceEnvelopes } from "../reach/service-envelope-outbox";
 import { loadWasm } from "../wasm";
 import type {
   DeviceGroup as WasmDeviceGroup,
@@ -296,7 +298,7 @@ export async function prepareJoinFlow(args: {
               opts.welcomeCursor,
             );
             if (bundle !== null) {
-              const applied = applyStateBundle(bundle);
+              const applied = applyStateBundle(bundle, args.accountIdB64);
               // eslint-disable-next-line no-console
               console.info(`state bundle: ${applied.contacts} contacts, ${applied.pins} pins`);
             }
@@ -673,7 +675,7 @@ export async function prepareAnonymousJoinFlow(args: {
         }
       }
       if (pendingState !== null) {
-        const applied = applyStateBundle(pendingState);
+        const applied = applyStateBundle(pendingState, account.b64);
         pendingState = null;
         // eslint-disable-next-line no-console
         console.info(`state bundle: ${applied.contacts} contacts, ${applied.pins} pins`);
@@ -776,6 +778,17 @@ export async function runScanFlow(args: {
   // BEFORE the create call. Freed with the ephemeral group below.
   const signerN = takeSigner(() => ensured.group.dsAccessSigner(ensured.identity));
   try {
+    // ADR-0058 section 5.1 — who was a member before this add, for the
+    // growth re-send the sync runtime runs once the add is on disk.
+    let priorLeaves: number[] = [];
+    try {
+      priorLeaves = ensured.group
+        .devices()
+        .map((m: { leafIndex: number }) => m.leafIndex)
+        .sort((a: number, b: number) => a - b);
+    } catch {
+      priorLeaves = [];
+    }
     const addition = ensured.group.addDeviceFromWire(
       ensured.identity,
       decoded.keyPackage,
@@ -801,6 +814,22 @@ export async function runScanFlow(args: {
       args.deviceKey,
     );
 
+    // The sync runtime holds a long-lived handle that is now an epoch
+    // behind. Tell it BEFORE the commit is published, so it stops before it
+    // can see the commit and write its stale state over this one, reloads,
+    // and - if this device is the lowest prior leaf - re-sends the account's
+    // synced state to the new device (ADR-0058 section 5.1).
+    if (priorLeaves.length > 0) {
+      try {
+        announceDeviceGroupChangedHere({
+          growth: { priorLeaves, ownLeaf: ensured.group.ownLeafIndex() },
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("DeviceGroup growth announce failed", err);
+      }
+    }
+
     // Push the Welcome to the rendezvous mailbox the joining
     // device is polling.
     await publishWelcome(decoded.rendezvousPseudonym, addition.welcome);
@@ -824,6 +853,14 @@ export async function runScanFlow(args: {
       encodeJournalEntry(addition.commit, null),
       { signer: signerN },
     );
+
+    // ADR-0060 section 7 - the setting and the key versions, for the device
+    // just admitted, now that the commit is on the journal. Sent by the sync
+    // runtime through its own handle, reloaded from the snapshot persisted
+    // above: sealing them here, on this second handle of the same
+    // DeviceGroup, reused the sync handle's sender generations (seen live
+    // 2026-09-30, SecretReuseError on the new device).
+    resendServiceEnvelopes();
 
     // Phase 2a3d8-ui — best-effort history catch-up bundle.
     // Read the local message log, derive the post-add
@@ -899,7 +936,7 @@ export async function runScanFlow(args: {
       try {
         const wasm = await loadWasm();
         const snapshot = await loadMlsSnapshot(args.accountIdB64, args.deviceKey);
-        const bundle = buildStateBundle(snapshot?.knownGroupIds ?? []);
+        const bundle = buildStateBundle(snapshot?.knownGroupIds ?? [], args.accountIdB64);
         key = ensured.group.exportSecret(
           ensured.identity,
           STATE_EXPORTER_LABEL,

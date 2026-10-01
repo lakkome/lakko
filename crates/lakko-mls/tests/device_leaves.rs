@@ -420,11 +420,21 @@ fn only_the_lowest_leaf_of_a_ranked_account_acts_and_peers_agree() {
         acting.signature_public_key() < idle.signature_public_key(),
         "the acting device is the lowest leaf key"
     );
-    // Every peer ranks the same device.
+    // Every peer ranks the same device. Since ADR-0050 section 2.5a a plain
+    // member account is ranked after the admins (here: none), in bytewise
+    // account-key order among the plain accounts {bob, charlie}.
+    let bob_rank = if account_key(&s.b) < account_key(&s.c) {
+        1
+    } else {
+        2
+    };
     for g in [&s.b_g, &s.c1_g] {
         assert_eq!(g.committer_rank_of(acting.signature_public_key()), Some(0));
         assert_eq!(g.committer_rank_of(idle.signature_public_key()), None);
-        assert_eq!(g.committer_rank_of(s.b.signature_public_key()), None);
+        assert_eq!(
+            g.committer_rank_of(s.b.signature_public_key()),
+            Some(bob_rank)
+        );
     }
 }
 
@@ -439,8 +449,14 @@ fn a_self_service_only_pending_set_is_sweepable_by_its_own_account() {
         .propose_add_member_from_wire(&s.c1, &kp_wire(&c2))
         .expect("own device");
     deliver(&p, &mut [(&s.a1, &mut s.a1_g), (&s.b, &mut s.b_g)]);
-    // Now charlie ranks right after the (zero) admins: 1.
-    assert_eq!(s.c1_g.own_committer_rank(&s.c1), Some(1));
+    // Now charlie holds its account rank (ADR-0050 section 2.5a): after the
+    // (zero) admins, in bytewise account-key order among {bob, charlie}.
+    let charlie_rank = if account_key(&s.c) < account_key(&s.b) {
+        1
+    } else {
+        2
+    };
+    assert_eq!(s.c1_g.own_committer_rank(&s.c1), Some(charlie_rank));
     // And charlie's sweep lands on every peer.
     let sweep = s
         .c1_g
@@ -457,22 +473,36 @@ fn a_self_service_only_pending_set_is_sweepable_by_its_own_account() {
     // Once swept, charlie is a plain member again.
     assert_eq!(s.c1_g.own_committer_rank(&s.c1), None);
 
-    // A set that mixes in someone else's request is NOT self-sweepable.
+    // A set that mixes in someone else's request: since ADR-0050 section 2.5a
+    // charlie keeps its rank (it still holds its own device's Add), but its
+    // sweep carries only that Add and leaves the owner's add of a stranger
+    // out. (Before 2.5a the mixed set gave charlie no rank at all.)
     let d = account(0x99);
     let p = s
         .a1_g
         .propose_add_member_from_wire(&s.a1, &kp_wire(&d))
         .expect("owner proposes a stranger");
     let c3 = device(&s.c, 0xC3);
-    let p2 = s
+    let _p2 = s
         .c1_g
         .propose_add_member_from_wire(&s.c1, &kp_wire(&c3))
         .expect("own device");
     s.c1_g
         .process_incoming_verifying_roles(&s.c1, &p)
         .expect("c1 stores the owner's add");
-    let _ = p2;
-    assert_eq!(s.c1_g.own_committer_rank(&s.c1), None);
+    assert_eq!(s.c1_g.own_committer_rank(&s.c1), Some(charlie_rank));
+    let sweep = s
+        .c1_g
+        .commit_pending_proposals(&s.c1)
+        .expect("charlie sweeps")
+        .expect("carried");
+    assert_eq!(sweep.swept.len(), 1, "only charlie's own device");
+    assert!(s.c1_g.pending_proposals().is_empty());
+    assert!(!s
+        .c1_g
+        .members()
+        .iter()
+        .any(|m| m.signature_public_key == d.signature_public_key()));
 }
 
 // ============================================================================

@@ -201,7 +201,7 @@ enum GroupCallHostRules {
     /// A call already running anywhere withdraws them: returning to the chat of a
     /// live group call shows that call (the root presentation), never offers to
     /// start a second one. A group call already in progress in this chat is
-    /// JOINED, never shadowed by a new one; otherwise a group (ADR-0060 kind,
+    /// JOINED, never shadowed by a new one; otherwise a group (ADR-0062 kind,
     /// any size — a two-person group included) starts an SFU call and a
     /// one-to-one a 1x1 P2P call.
     static func chatCallAction(

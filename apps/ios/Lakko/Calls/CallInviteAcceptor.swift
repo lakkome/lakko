@@ -68,6 +68,9 @@ public enum CallInviteAcceptor {
         /// down. "Try again later", never "invalid".
         case rateLimited
         case malformedSlug(reason: String)
+        /// ADR-0028 amendment 2026-09-28 — the fragment secret is missing or
+        /// malformed, or the blob does not open under it.
+        case damaged
         case signatureFailure(reason: String)
         case failed(message: String)
     }
@@ -112,17 +115,24 @@ public enum CallInviteAcceptor {
         discoveryClient: DiscoveryClient,
         nowMs: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000)
     ) async -> Result {
-        // ---- 1. Parse slug -----------------------------------
+        // ---- 1. Parse slug + fragment ------------------------
+        // `slug` is the link token `slug#fragment`: the secret the capability
+        // is sealed under rides the fragment.
+        let parts = InviteLinkSecret.split(slug)
         let parsed: CallInviteUrl.ParsedCallInvite
         do {
-            parsed = try CallInviteUrl.parseCallInviteSlug(slug)
+            parsed = try CallInviteUrl.parseCallInviteSlug(parts.base)
         } catch {
             return .malformedSlug(reason: (error as? LocalizedError)?.errorDescription
                 ?? String(describing: error))
         }
 
+        guard let linkSecret = InviteLinkSecret.read(parts.fragment) else {
+            return .damaged
+        }
+
         // ---- 2. Pointer branch: fetch bytes -----------------
-        let capabilityBytes: Data
+        let sealed: Data
         var blobId: Data? = nil
         switch parsed {
         case .pointer(let id):
@@ -133,7 +143,7 @@ public enum CallInviteAcceptor {
                 ) else {
                     return .notFound
                 }
-                capabilityBytes = fetched
+                sealed = fetched
             } catch let error as DiscoveryClientError {
                 if case let .http(status, _, _) = error, status == 404 {
                     return .notFound
@@ -147,17 +157,18 @@ public enum CallInviteAcceptor {
                     ?? String(describing: error))
             }
         case .inline(let bytes):
-            capabilityBytes = bytes
+            sealed = bytes
         }
 
-        // ---- 3. decodeAndVerify -----------------------------
+        // ---- 3. open (decrypt + verify) ---------------------
         let capability: CallInviteCapability
         do {
-            capability = try CallInviteCapability.decodeAndVerify(wire: capabilityBytes)
+            capability = try CallInviteCapability.openLink(sealed: sealed, linkSecret: linkSecret)
         } catch {
-            return .signatureFailure(reason: (error as? LocalizedError)?.errorDescription
-                ?? String(describing: error))
+            return .damaged
         }
+        // The joiner tag is computed over the PLAINTEXT capability.
+        let capabilityBytes = capability.wire()
 
         // ---- 4. Expiry filter --------------------------------
         if !capability.isValidNow(nowMs: nowMs) {

@@ -50,7 +50,7 @@ describe("conversationKindOf", () => {
   });
 });
 
-describe("acceptsGroupName (ADR-0060 section 7)", () => {
+describe("acceptsGroupName (ADR-0062 section 7)", () => {
   it("a one-to-one never takes a group name", () => {
     expect(acceptsGroupName("chat")).toBe(false);
   });

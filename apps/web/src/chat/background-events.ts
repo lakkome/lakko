@@ -28,6 +28,7 @@
  *   | group-name            | the gated group-name store    | no                      |
  *   | pin                   | the gated pin store           | no                      |
  *   | shared-channels       | the shared-channels store     | no                      |
+ *   | serviceEnvelope       | dropped (never rendered)      | no                      |
  *
  * Typing is in-memory state in the chat view, so handing it over matches what
  * the chat would have shown had it been open this session. Read receipts are
@@ -89,6 +90,8 @@ export interface BackgroundEventPlan {
   readonly pins: readonly Of<"pin">[];
   /** ADR-0059 section 6 — members' shared channel lists. */
   readonly sharedChannels: readonly Of<"shared-channels">[];
+  /** ADR-0060 — scoped-discovery service envelopes, for their handlers. */
+  readonly scoped: readonly Of<"scopedDiscovery">[];
   /** Proposals the receipt gate STORED; a refused one is a pending request
    *  nowhere. */
   readonly storedProposals: readonly Of<"membershipProposal">[];
@@ -109,6 +112,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
   const groupNames: Of<"group-name">[] = [];
   const pins: Of<"pin">[] = [];
   const sharedChannels: Of<"shared-channels">[] = [];
+  const scoped: Of<"scopedDiscovery">[] = [];
   const readReceipts: Of<"op">[] = [];
   const messageOps: MessageOpEvent[] = [];
   const storedProposals: Of<"membershipProposal">[] = [];
@@ -167,6 +171,17 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
       case "shared-channels":
         sharedChannels.push(e);
         break;
+      case "scopedDiscovery":
+        scoped.push(e);
+        break;
+      case "registrarSeed":
+        // ADR-0057 — consumed at receipt by the chat client and never handed
+        // on; a stray one is dropped here rather than rendered.
+        break;
+      case "serviceEnvelope":
+        // An unrecognised `lakko/…` service envelope: dropped at receipt by
+        // the chat client; a stray one is dropped here, never rendered.
+        break;
       default: {
         const unhandled: never = e;
         throw new Error(
@@ -188,6 +203,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
     groupNames,
     pins,
     sharedChannels,
+    scoped,
     storedProposals,
     sawCommit,
   };

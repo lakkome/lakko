@@ -19,7 +19,7 @@ const DAY_MS: u64 = 24 * 3600 * 1000;
 #[test]
 fn the_spent_set_migration_is_the_shared_crate_schema_byte_for_byte() {
     assert_eq!(
-        include_str!("../migrations/0006_anon_token_spent.sql"),
+        include_str!("../migrations/0008_anon_token_spent.sql"),
         lakko_anon_token_server::SPENT_SET_MIGRATION_SQL
     );
 }

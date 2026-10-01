@@ -563,6 +563,61 @@ private fun committerBeaconArm(bytes: ByteArray): Boolean =
     looksLikeCommitterBeacon(bytes, committerBeaconEnvelopeLength, ::decodesAsCommitterBeacon)
 
 /**
+ * ADR-0057 — the registrar-seed envelope's first byte (`l` of its domain
+ * separator), the cheap half of the peek; disjoint from a chat envelope's `{`.
+ */
+private const val REGISTRAR_SEED_FIRST_BYTE: Int = 0x6C
+
+/** The on-wire registrar-seed envelope length, from the core, read lazily for
+ *  the same reason as [committerBeaconEnvelopeLength]; `-1` (matches nothing,
+ *  so the payload falls through, fail-closed) when the core is not loaded —
+ *  which is also what keeps every host test that never names this arm off the
+ *  native library. */
+private val registrarSeedEnvelopeLength: Int by lazy {
+    try {
+        uniffi.lakko_ffi_uniffi.registrarSeedEnvelopeLen().toInt()
+    } catch (_: Throwable) {
+        -1
+    }
+}
+
+/**
+ * ADR-0057 obligation 4 — does this application plaintext classify as a
+ * registrar-seed envelope? The exact length and the first byte, then the
+ * authoritative fail-closed decode (the seed itself stays sealed). Pure over
+ * its two injected facts, so a host test drives it without the `.so`; the
+ * same shape as [looksLikeCommitterBeacon], and reused by the background
+ * push filter so the envelope never becomes a notification body either.
+ */
+internal fun looksLikeRegistrarSeedEnvelope(
+    bytes: ByteArray,
+    envelopeLen: Int,
+    decodesAsRegistrarSeed: (ByteArray) -> Boolean,
+): Boolean {
+    if (bytes.size != envelopeLen || bytes.isEmpty()) return false
+    if ((bytes[0].toInt() and 0xFF) != REGISTRAR_SEED_FIRST_BYTE) return false
+    return decodesAsRegistrarSeed(bytes)
+}
+
+/** The authoritative registrar-seed decode, reported as a boolean. */
+internal fun decodesAsRegistrarSeed(bytes: ByteArray): Boolean =
+    try {
+        uniffi.lakko_ffi_uniffi.decodeRegistrarSeedEnvelope(bytes)
+        true
+    } catch (_: Throwable) {
+        false
+    }
+
+/** The production registrar-seed arm (peek sized by the FFI constant, then
+ *  the FFI decode). */
+internal fun registrarSeedArm(bytes: ByteArray): Boolean {
+    // The first byte before the length: only an `l`-prefixed payload may
+    // touch the lazily-read core constant.
+    if (bytes.isEmpty() || (bytes[0].toInt() and 0xFF) != REGISTRAR_SEED_FIRST_BYTE) return false
+    return looksLikeRegistrarSeedEnvelope(bytes, registrarSeedEnvelopeLength, ::decodesAsRegistrarSeed)
+}
+
+/**
  * ADR-0048 — the frozen profile-envelope domain separator,
  * `lakko/profile/v1` followed by one NUL byte. Built programmatically: a raw
  * NUL in a source file makes git treat it as binary.
@@ -684,6 +739,7 @@ internal fun toEvent(
     isProfileRequest: (ByteArray) -> Boolean = ::decodesAsProfileRequest,
     decodePin: (ByteArray) -> FfiPinOp? = ::decodePinOrNull,
     decodeSharedChannels: (ByteArray) -> me.lakko.app.discover.SharedList? = ::decodeSharedListOrNull,
+    isRegistrarSeed: (ByteArray) -> Boolean = ::registrarSeedArm,
 ): IncomingChatEvent =
     when (processed) {
         is ProcessedMessage.Application -> {
@@ -787,6 +843,18 @@ internal fun toEvent(
                     senderLeaf = processed.senderLeaf,
                     createdAt = createdAt,
                 )
+            } else if (me.lakko.app.reach.scopedEnvelopeKindOf(processed.data) != null) {
+                // ADR-0060 — a scoped-discovery service envelope. Never a
+                // timeline bubble: every domain ends in a NUL byte, so the
+                // prefix is a complete classification, and one that does not
+                // decode is dropped by the repository rather than rendered.
+                IncomingChatEvent.ScopedDiscovery(
+                    messageId = messageId,
+                    kind = me.lakko.app.reach.scopedEnvelopeKindOf(processed.data)!!,
+                    bytes = processed.data,
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
             } else if (looksLikeProfileEnvelope(processed.data)) {
                 // ADR-0048 — a member's profile. Never a timeline bubble.
                 // The sender is resolved to its signature KEY here, one line
@@ -856,6 +924,19 @@ internal fun toEvent(
                 IncomingChatEvent.ProfileRequest(
                     messageId = messageId,
                     wellFormed = isProfileRequest(processed.data),
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
+            } else if (isRegistrarSeed(processed.data)) {
+                // ADR-0057 obligation 4 — the owner handing ONE member its
+                // registrar seed, sealed to that member's account key. Never a
+                // timeline bubble. The sender is resolved to its account KEY
+                // here (C-68): the repository keeps the seed only when that key
+                // is the owner's in the live role table and the envelope names
+                // this account; the envelope names no sender of its own.
+                IncomingChatEvent.RegistrarSeed(
+                    messageId = messageId,
+                    envelope = processed.data,
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
@@ -964,6 +1045,16 @@ internal fun toEvent(
                         upTo = body.target ?: 0L,
                         senderLeaf = senderLeaf,
                         senderKey = senderKey,
+                        createdAt = createdAt,
+                    )
+                    // A `lakko/`-domain envelope none of the arms above
+                    // recognised: an unknown kind, or a known domain whose body
+                    // this build cannot decode (a newer version from a client
+                    // on another build). The core classifies it instead of
+                    // degrading it to lossy-UTF-8 chat text, and it is DROPPED:
+                    // never a bubble, never a chat-list preview line.
+                    MessageBodyKind.SERVICE_ENVELOPE -> IncomingChatEvent.ServiceEnvelope(
+                        messageId = messageId,
                         createdAt = createdAt,
                     )
                 }
@@ -1151,6 +1242,15 @@ public sealed interface IncomingChatEvent {
          *  key handed a departed member's whole read history to whoever was
          *  added into their slot. `null` ⇒ dropped. */
         val senderKey: MemberIdentity?,
+        val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** A service envelope the core recognised by its `lakko/` domain but
+     *  that no arm here decodes (an unknown kind, or a version this build
+     *  cannot read). Machine-to-machine: consumed as a no-op, never a
+     *  timeline row and never a preview. */
+    public data class ServiceEnvelope(
+        val messageId: Long,
         val createdAt: String,
     ) : IncomingChatEvent
 
@@ -1422,6 +1522,18 @@ public sealed interface IncomingChatEvent {
         val createdAt: String,
     ) : IncomingChatEvent
 
+    /** ADR-0057 obligation 4 — a registrar-seed envelope (the owner appointing
+     *  one member as a registrar of the group's journal). Never a timeline
+     *  bubble. [envelope] is the whole plaintext (the seed stays sealed until
+     *  the repository's gate opens it); [senderKey] is the sender's account
+     *  key resolved at receipt (C-68). */
+    public class RegistrarSeed(
+        public val messageId: Long,
+        public val envelope: ByteArray,
+        public val senderKey: MemberIdentity?,
+        public val createdAt: String,
+    ) : IncomingChatEvent
+
     /** ADR-0048 trigger 4 — a member's "introduce yourselves" request. Never a
      *  timeline bubble. Consumes a DS [messageId] like any other application
      *  row so the poll cursor advances past it.
@@ -1441,6 +1553,19 @@ public sealed interface IncomingChatEvent {
         val wellFormed: Boolean,
         val senderKey: MemberIdentity?,
         val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** ADR-0060 — one of the scoped-discovery service envelopes
+     *  (introduction offer / bundle, committer delegation; a Visibility or
+     *  ReachState that reached a conversation is dropped by the repository). Never a timeline row. [senderKey] is the
+     *  sender's account key resolved at receipt (C-68); [bytes] the whole
+     *  plaintext, decoded by the repository. */
+    public class ScopedDiscovery(
+        public val messageId: Long,
+        public val kind: me.lakko.app.reach.ScopedEnvelopeKind,
+        public val bytes: ByteArray,
+        public val senderKey: MemberIdentity?,
+        public val createdAt: String,
     ) : IncomingChatEvent
 }
 

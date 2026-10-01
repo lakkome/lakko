@@ -416,6 +416,11 @@ pub enum MessageBodyKind {
     Typing,
     /// ADR-0024 — a read receipt: read up to `target` (inclusive).
     ReadReceipt,
+    /// A Lakko service envelope this build did not recognise (a newer
+    /// profile, group-name, pin or beacon version). Never render it; drop it
+    /// like any other service envelope. Appended last so every earlier
+    /// variant keeps its ordinal.
+    ServiceEnvelope,
 }
 
 /// Output of [`parse_body_envelope`]: the classified message body
@@ -515,6 +520,7 @@ pub fn compose_read_receipt_envelope(up_to: i64) -> Result<Vec<u8>, FfiError> {
 /// [`parse_envelope`].
 #[uniffi::export]
 #[must_use]
+#[allow(clippy::too_many_lines)] // one struct literal per body kind
 pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
     match inner::parse_body(&bytes) {
         inner::MessageBody::Chat {
@@ -599,6 +605,20 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             text: String::new(),
             attachments: Vec::new(),
             target: Some(up_to),
+            emoji: None,
+            is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
+        },
+        inner::MessageBody::ServiceEnvelope => ParsedBody {
+            kind: MessageBodyKind::ServiceEnvelope,
+            text: String::new(),
+            attachments: Vec::new(),
+            target: None,
             emoji: None,
             is_typing: None,
             reply_to: None,

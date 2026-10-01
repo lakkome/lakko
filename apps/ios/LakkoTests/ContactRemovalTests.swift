@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import XCTest
 @testable import Lakko
 
@@ -14,25 +15,37 @@ import XCTest
 @MainActor
 final class ContactRemovalTests: XCTestCase {
 
-    /// The repository rehydrates its accepted list from this store at init,
-    /// and writes back through `state`'s `didSet`, so seeding it is how a
-    /// test hands the repository contacts, and reading it back is how the
-    /// test sees whether the removal was persisted rather than only dropped
-    /// from memory.
-    private static let acceptedDefaultsKey = "lakko.contacts.accepted.v1"
+    /// The repository rehydrates the bound account's accepted list from the
+    /// store when it binds, and writes back through `state`'s `didSet`, so
+    /// seeding it is how a test hands the repository contacts, and reading it
+    /// back is how the test sees whether the removal was persisted rather
+    /// than only dropped from memory. An isolated suite keeps the real
+    /// `UserDefaults` out of it.
+    private let account = "removal-test-account"
+    private var suiteName = ""
 
     override func setUp() {
         super.setUp()
-        UserDefaults.standard.removeObject(forKey: Self.acceptedDefaultsKey)
+        suiteName = "contact-removal-\(UUID().uuidString)"
+        AcceptedContactsStore.defaults = UserDefaults(suiteName: suiteName)!
     }
 
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: Self.acceptedDefaultsKey)
+        UserDefaults().removePersistentDomain(forName: suiteName)
+        AcceptedContactsStore.defaults = .standard
         super.tearDown()
     }
 
+    private func seed(_ contacts: [AcceptedContact]) {
+        AcceptedContactsStore.save(contacts, accountIdB64: account)
+    }
+
+    private func persisted() -> [AcceptedContact] {
+        AcceptedContactsStore.load(accountIdB64: account)
+    }
+
     func testRemovingAContactDropsItFromTheListAndLeavesTheRest() {
-        AcceptedContactsStore.save([contact(1, byte: 0xA1), contact(2, byte: 0xB2)])
+        seed([contact(1, byte: 0xA1), contact(2, byte: 0xB2)])
         let repository = makeRepository()
         XCTAssertEqual(repository.state.accepted.count, 2)
 
@@ -44,12 +57,12 @@ final class ContactRemovalTests: XCTestCase {
     /// The list is what the app rehydrates from on the next launch, so a
     /// removal that only happened in memory would come back.
     func testARemovalIsPersisted() {
-        AcceptedContactsStore.save([contact(1, byte: 0xA1), contact(2, byte: 0xB2)])
+        seed([contact(1, byte: 0xA1), contact(2, byte: 0xB2)])
         let repository = makeRepository()
 
         repository.removeContact(messageId: 1)
 
-        XCTAssertEqual(AcceptedContactsStore.load().map(\.request.messageId), [2])
+        XCTAssertEqual(persisted().map(\.request.messageId), [2])
     }
 
     /// The removal is confined to the accepted list: it reads and rewrites
@@ -66,7 +79,7 @@ final class ContactRemovalTests: XCTestCase {
             request: request(1, byte: 0xA1), groupIdHex: "beef", displayName: "Ada")
         let other = AcceptedContact(
             request: request(2, byte: 0xB2), groupIdHex: "cafe", displayName: nil)
-        AcceptedContactsStore.save([withChat, other])
+        seed([withChat, other])
         let repository = makeRepository()
 
         repository.removeContact(messageId: 1)
@@ -80,7 +93,7 @@ final class ContactRemovalTests: XCTestCase {
     /// A removal that names nobody must not disturb the list — the control can
     /// be tapped twice, and the second tap is a no-op rather than a rewrite.
     func testRemovingAContactThatIsNotThereChangesNothing() {
-        AcceptedContactsStore.save([contact(1, byte: 0xA1)])
+        seed([contact(1, byte: 0xA1)])
         let repository = makeRepository()
 
         repository.removeContact(messageId: 99)
@@ -88,7 +101,7 @@ final class ContactRemovalTests: XCTestCase {
         repository.removeContact(messageId: 1)
 
         XCTAssertTrue(repository.state.accepted.isEmpty)
-        XCTAssertTrue(AcceptedContactsStore.load().isEmpty)
+        XCTAssertTrue(persisted().isEmpty)
     }
 
     // MARK: - Fixtures
@@ -98,7 +111,8 @@ final class ContactRemovalTests: XCTestCase {
             authRepository: AuthRepository(
                 authClientFactory: { AuthClient(baseURL: "http://auth.test") },
                 persistence: NoSessionPersistence(),
-                nowMs: { 1_000_000 }))
+                nowMs: { 1_000_000 }),
+            accountBinding: Just<String?>(account).eraseToAnyPublisher())
     }
 
     private func request(_ messageId: Int64, byte: UInt8) -> IncomingContactRequest {

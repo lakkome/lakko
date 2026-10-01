@@ -10,7 +10,7 @@ import org.junit.Test
 import uniffi.lakko_ffi_uniffi.GroupKind
 
 /**
- * ADR-0060 — the list kind is read from the group's GroupContext, never
+ * ADR-0062 — the list kind is read from the group's GroupContext, never
  * derived from the people count. The kind itself (and the one-to-one
  * membership rule) is asserted in Rust (`crates/lakko-mls/tests/one_to_one.rs`);
  * this host suite has no native library, so it covers the client mapping.

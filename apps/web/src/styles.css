@@ -1064,7 +1064,8 @@ a.lk-row.active {
   flex-direction: column;
   gap: 14px;
 }
-.auth-card form button.primary {
+.auth-card form button.primary,
+.auth-card > button.primary {
   min-height: 44px;
   margin-top: 4px;
 }
@@ -1961,7 +1962,8 @@ a.ghost.small.lk-wide-only {
   border-color: var(--danger);
   background: var(--danger-soft);
 }
-/* Comparison code for the another-device confirmation (ADR-0049). */
+/* The device-link code (ADR-0049 section 2, amended 2026-09-28): shown on
+   the signed-in device, typed on the new one. */
 .lk-sas-code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 34px;
@@ -1969,6 +1971,13 @@ a.ghost.small.lk-wide-only {
   letter-spacing: 0.08em;
   color: var(--accent);
   margin: 4px 0 8px;
+}
+input.lk-sas-code {
+  display: block;
+  width: 100%;
+  max-width: 10ch;
+  margin: 4px auto 8px;
+  text-align: center;
 }
 /* The conversation-info layer (docs/ux/conversation-info.md section 3): a
    centred card over the conversation, which stays where it is behind it.
@@ -6211,4 +6220,287 @@ html[data-call-bar] body {
   cursor: pointer;
   color: var(--surface-muted);
   font-size: 14px;
+}
+
+/* ---------- Chat folders (docs/ux/chat-folders.md) ---------- */
+
+/* The folder bar: one horizontal strip of tabs between the search field and
+   the list. Accent label + accent underline on the selected tab; no fills,
+   no icons. */
+.lk-folder-bar {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 0 12px;
+  margin: 0 0 4px;
+  border-bottom: 1px solid var(--surface-border);
+  flex: 0 0 auto;
+}
+.lk-folder-bar::-webkit-scrollbar {
+  display: none;
+}
+.lk-folder-tab {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--surface-muted);
+  min-height: 36px;
+  padding: 0 10px;
+  border-bottom: 2px solid transparent;
+  gap: 6px;
+}
+.lk-folder-tab:hover:not(:disabled) {
+  background: transparent;
+  color: var(--surface-fg);
+}
+.lk-folder-tab.selected {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.lk-folder-tab-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--surface-muted);
+}
+.lk-folder-tab.selected .lk-folder-tab-count {
+  color: var(--accent);
+}
+
+/* The empty folder: one muted line and Edit folder. */
+.lk-folder-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 32px 16px;
+  color: var(--surface-muted);
+  font-size: 14px;
+}
+.lk-folder-empty p {
+  margin: 0;
+}
+
+/* The row menu's Add-to-folder submenu. */
+.lk-menu-subanchor {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+.lk-menu-subanchor > button {
+  justify-content: flex-start;
+}
+.lk-menu-subanchor > button > svg:last-child {
+  margin-left: auto;
+}
+.lk-menu.lk-menu-sub {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 4px);
+  right: auto;
+  max-height: 60vh;
+  overflow-y: auto;
+  z-index: 32;
+}
+@media (max-width: 640px) {
+  .lk-menu.lk-menu-sub {
+    position: static;
+    box-shadow: none;
+    border: none;
+    padding: 0 0 0 12px;
+  }
+}
+.lk-menu-check {
+  width: 16px;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.lk-menu-note {
+  margin: 0;
+  padding: 2px 10px 6px;
+  font-size: 12px;
+  color: var(--surface-muted);
+  max-width: 240px;
+  white-space: normal;
+}
+
+/* The editor and the chat picker. */
+.lk-folder-editor,
+.lk-folder-picker {
+  width: min(480px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.lk-picker-backdrop {
+  z-index: 61;
+}
+.lk-folder-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lk-folder-section h3 {
+  margin: 8px 0 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--surface-muted);
+}
+.lk-folder-count {
+  margin: 0 0 4px;
+  font-size: 13px;
+  color: var(--surface-muted);
+}
+.lk-folder-toggle {
+  min-height: 36px;
+  align-items: center;
+}
+.lk-folder-toggle > input[type="checkbox"] {
+  margin: 0;
+}
+.lk-folder-hand-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  font-size: 14px;
+}
+.lk-folder-hand-row > .lk-ellipsis {
+  flex: 1;
+  min-width: 0;
+}
+.lk-folder-add {
+  align-self: flex-start;
+}
+.lk-folder-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+.lk-folder-delete {
+  border-top: 1px solid var(--surface-border);
+  padding-top: 12px;
+}
+button.lk-folder-danger {
+  color: var(--danger);
+}
+.lk-folder-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 13px;
+}
+.lk-folder-picker-list {
+  overflow-y: auto;
+  max-height: 55vh;
+}
+.lk-folder-picker-list .lk-row.pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Settings > Chat folders. */
+.lk-folder-intro,
+.lk-folder-pending {
+  margin: 0;
+  font-size: 14px;
+  color: var(--surface-muted);
+}
+.lk-folder-row {
+  align-items: center;
+}
+.lk-folder-row.fixed {
+  opacity: 0.8;
+}
+.lk-folder-row.drag-over {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.lk-folder-handle {
+  width: 24px;
+  display: inline-flex;
+  justify-content: center;
+  color: var(--surface-muted);
+  cursor: grab;
+  flex: 0 0 auto;
+}
+.lk-folder-row.fixed .lk-folder-handle {
+  cursor: default;
+}
+.lk-folder-row-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border: none;
+  background: transparent;
+  padding: 6px 0;
+  min-height: 0;
+}
+.lk-folder-row-open:hover:not(:disabled) {
+  background: transparent;
+}
+button.lk-folder-new {
+  padding: 0;
+  color: var(--accent);
+  justify-content: flex-start;
+  align-self: flex-start;
+}
+
+/* Settings > Privacy > Who can find me (docs/ux/who-can-find-me.md section 3):
+   radio and check rows, the parts indented under Some people, the form
+   indented under its part. */
+.lk-privacy-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.lk-privacy-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--surface-muted);
+}
+.lk-privacy-group {
+  display: flex;
+  flex-direction: column;
+}
+.lk-privacy-choice {
+  cursor: pointer;
+  align-items: flex-start;
+}
+.lk-privacy-choice > input,
+.lk-privacy-choice-label > input {
+  margin: 3px 0 0;
+  flex: 0 0 auto;
+  padding: 0;
+  min-height: 0;
+  width: auto;
+}
+.lk-privacy-choice-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  font-weight: 400;
+}
+.lk-privacy-nested {
+  display: flex;
+  flex-direction: column;
+  padding-left: 28px;
+  border-top: 1px solid var(--surface-border);
+}
+.lk-privacy-disclosure {
+  display: inline-flex;
+  align-items: center;
+  color: var(--surface-muted);
 }

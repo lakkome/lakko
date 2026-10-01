@@ -5,11 +5,14 @@
  * ADR-0048 §3 — username verification.
  *
  * A received profile's `username` is the sender's CLAIM. It is shown only
- * after this module has resolved it through discovery —
- * `lookup(username) -> account_id -> identityFetch -> signature_pubkey` — and
- * found that key equal to the sender's authenticated key. Discovery never
- * learns plaintext usernames, so it cannot sign a binding; what it can do is
- * answer the same lookup anyone could, and the comparison is local.
+ * after this module has resolved it and found it bound to the sender's
+ * authenticated key. Since ADR-0060 section 5 the resolution is the
+ * discovery-signed username certificate the sender's own profile carries,
+ * checked against the lookup key of `OPRF(username)` and the account id the profile claims
+ * (`verifyUsernameBinding`, the key pinned or fetched once) — no lookup, so a
+ * person hidden from lookups keeps a verifiable username, and no endpoint
+ * confirms a guessed username for a known account. The resolver lives in
+ * `ProfileContext.tsx`; this module owns the states and the cache.
  *
  * ## States and what is cached
  *
@@ -55,9 +58,11 @@ export type UsernameResolution =
   | { readonly kind: "unregistered" };
 
 export interface UsernameVerifierDeps {
-  /** Resolve a canonical username through discovery. Throws on a failure that
-   *  says nothing about the answer (network, proof-of-work). */
-  resolve(username: string): Promise<UsernameResolution>;
+  /** Resolve a canonical username claimed by `keyB64`. ADR-0060: by the
+   *  discovery-signed username certificate the person's profile carries (one
+   *  OPRF evaluation, no lookup). Throws on a failure that says nothing about
+   *  the answer (network, tokens). */
+  resolve(username: string, keyB64: string): Promise<UsernameResolution>;
   /** The core's `validateUsername`: returns the normalised form or throws. */
   validate(username: string): string;
   /** Persisted result for a claim, or `undefined`. */
@@ -158,7 +163,7 @@ export class UsernameVerifier {
       let resolution: UsernameResolution;
       try {
         this.lookups += 1;
-        resolution = await this.deps.resolve(canonical);
+        resolution = await this.deps.resolve(canonical, keyB64);
       } catch {
         this.deps.record(keyB64, username, { state: "error", checkedAtMs: this.deps.now() });
         return "error";

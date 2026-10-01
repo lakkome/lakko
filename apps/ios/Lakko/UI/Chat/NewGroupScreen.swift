@@ -144,7 +144,7 @@ struct NewGroupScreen: View {
             groupIdHex = try await chatRepository.startGroupWith(
                 recipientAccountId: firstAccountId,
                 recipientSignaturePubkey: first.request.fromPubkey,
-                // ADR-0060 — a group, fixed in the GroupContext, even while
+                // ADR-0062 — a group, fixed in the GroupContext, even while
                 // it still has two people.
                 kind: .group
             )

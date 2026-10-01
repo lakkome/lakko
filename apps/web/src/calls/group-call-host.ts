@@ -209,7 +209,7 @@ export interface ChatCallAffordanceInput {
   readonly callInProgress: boolean;
   /** This chat has a live group-call record. */
   readonly liveCallInThisChat: boolean;
-  /** Set when the conversation was created as a group (ADR-0060), whatever
+  /** Set when the conversation was created as a group (ADR-0062), whatever
    *  its people count; a two-person group calls over the SFU too. */
   readonly isGroup: boolean;
 }
@@ -221,7 +221,7 @@ export interface ChatCallAffordanceInput {
  * group call must show that call (the host's overlay), never offer to start a
  * second one. A group call already in progress in this chat is JOINED, never
  * shadowed by a new one; otherwise a group starts an SFU call and a one-to-one
- * a 1x1 P2P call. The kind is the conversation's own (ADR-0060), never the
+ * a 1x1 P2P call. The kind is the conversation's own (ADR-0062), never the
  * people count, so a group of two still calls as a group.
  */
 export function chatCallAffordance(input: ChatCallAffordanceInput): ChatCallAffordance {

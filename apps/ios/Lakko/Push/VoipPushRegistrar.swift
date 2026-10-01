@@ -52,7 +52,15 @@ final class VoipPushRegistrar: NSObject {
     /// Kick the receive path for a wake, so the offer behind it is fetched and
     /// decrypted. Set by the composition root; a registrar with no wake hook
     /// still rings (the placeholder), it just never learns who is calling.
-    var onWake: ((VoipWakePayload) -> Void)?
+    ///
+    /// Handed the resolved target — the BOUND account and the real group id —
+    /// and only for a wake that passed the account gate
+    /// (``decide(_:binding:routes:defaults:)``). A refused wake fetches nothing.
+    var onWake: ((VoipWakeTarget) -> Void)?
+
+    /// The `(device pseudonym, account)` binding (ADR-0042, amended
+    /// 2026-09-30) every wake is checked against.
+    private let bindingStore: PushAccountBindingStore
 
     private let provider: CallKitProvider
     private let registry: CallKitCallRegistry
@@ -67,11 +75,13 @@ final class VoipPushRegistrar: NSObject {
     init(
         provider: CallKitProvider = .shared,
         registry: CallKitCallRegistry? = nil,
-        client: PushClient = PushClient()
+        client: PushClient = PushClient(),
+        bindingStore: PushAccountBindingStore = .live
     ) {
         self.provider = provider
         self.registry = registry ?? .shared
         self.client = client
+        self.bindingStore = bindingStore
         super.init()
     }
 
@@ -170,9 +180,29 @@ final class VoipPushRegistrar: NSObject {
     /// gets its report; the person gets no call screen and no ringtone; and the
     /// call is still recorded, because the app's own receive path is running
     /// and ``CallHost`` files the history row when the offer lands.
+    ///
+    /// ## A wake for no one here is reported and ended the same way
+    ///
+    /// ADR-0042 (amended 2026-09-30): a wake is acted on only for the account
+    /// this device's push pseudonym is bound to, and only when the wake's `d`
+    /// is that pseudonym. Apple's rule does not bend for a wake that is not
+    /// ours, so it too is reported — as the nameless placeholder — and ended in
+    /// the same completion handler. Unlike a muted call nothing is fetched: the
+    /// wake belongs to no account signed in here, so there is nothing to
+    /// record and no name to show.
     private func handleIncoming(payload: [AnyHashable: Any], completion: @escaping () -> Void) {
         let wake = VoipWakePayload.parse(payload)
-        let silent = Self.wakeIsMuted(wake)
+        let decision = Self.decide(wake, binding: bindingStore.current())
+        let endAtOnce: Bool
+        switch decision {
+        case .refuse:
+            endAtOnce = true
+            Self.log.info("voip wake not for the signed-in account: ending the placeholder")
+        case .silent:
+            endAtOnce = true
+        case .ring:
+            endAtOnce = false
+        }
         let uuid = UUID()
         if let superseded = registry.placeholderReported(uuid) {
             // A previous wake's call never materialised. Ending it here keeps
@@ -187,7 +217,7 @@ final class VoipPushRegistrar: NSObject {
                 // so neither may we — and nothing needs ending.
                 Self.log.error("voip call report failed: \(error.localizedDescription)")
             }
-            if error != nil || silent {
+            if error != nil || endAtOnce {
                 // A hop rather than `assumeIsolated`: this completion runs on
                 // CallKit's own queue, and everything inside touches
                 // main-actor state. Only `completion()` below is
@@ -195,7 +225,8 @@ final class VoipPushRegistrar: NSObject {
                 Task { @MainActor in
                     guard let self else { return }
                     if error == nil {
-                        // A muted conversation. The report has landed, so the
+                        // A muted conversation, or a wake for no account
+                        // signed in here. The report has landed, so the
                         // platform rule is satisfied; take the call straight
                         // back down. `.unanswered` rather than
                         // `.declinedElsewhere` — nobody refused this call, it
@@ -211,13 +242,26 @@ final class VoipPushRegistrar: NSObject {
         // The fetch is started AFTER the report, never before: nothing here may
         // delay the report, and this work continues perfectly well once the
         // handler has returned. It runs for a muted conversation too — that is
-        // what records the call.
-        onWake?(wake)
+        // what records the call — and never for a refused wake.
+        switch decision {
+        case .ring(let target?), .silent(let target):
+            onWake?(target)
+        case .ring(nil), .refuse:
+            break
+        }
     }
 
-    /// Is the conversation this wake points at muted?
+    /// What to do with a VoIP wake, decided from the wake alone at report time.
     ///
-    /// `docs/ux/calls.md` section 2.1, through the one rule
+    /// First the account gate (ADR-0042, amended 2026-09-30): the wake's `d`
+    /// must equal the device pseudonym bound to the signed-in account
+    /// (``PushAccountBinding/boundAccount(wakeDevicePseudonymHex:binding:)``),
+    /// else ``VoipWakeDecision/refuse``. Every later read is for that bound
+    /// account and no other: the reverse index is looked up for
+    /// `(bound account, push_gid)`, a row another account wrote is a miss, and
+    /// the mute flag is the bound account's.
+    ///
+    /// Then the mute rule, `docs/ux/calls.md` section 2.1, through the one rule
     /// (`LakkoCore.ringDecision`). The age argument is `0` and that is not a
     /// placeholder: a VoIP wake carries an opaque routing id and a journal
     /// pointer and NO timestamp (invariants #2 and #5), so the only thing
@@ -227,22 +271,31 @@ final class VoipPushRegistrar: NSObject {
     /// on the real row, and ``armPlaceholderTimeout(uuid:)`` if the row never
     /// arrives.
     ///
-    /// Every failure to resolve the conversation answers "not muted", so the
-    /// call rings: an unknown wake must ring rather than be swallowed.
-    /// `defaults` is the App Group suite the mute mirror lives in, a parameter
-    /// only so a test can supply its own.
-    static func wakeIsMuted(
+    /// For a wake that passed the gate, every failure to resolve the
+    /// conversation answers "not muted", so the call rings: a wake for the
+    /// signed-in account must ring rather than be swallowed. A route miss
+    /// falls back to reading `g` as a raw group id (the pre-ADR-0042 wake),
+    /// still for the bound account. `defaults` is the App Group suite the mute
+    /// mirror lives in, a parameter only so a test can supply its own.
+    static func decide(
         _ wake: VoipWakePayload,
+        binding: PushAccountBinding?,
         routes: PushRoutingStore = PushRoutingStore(),
         defaults: UserDefaults? = SharedStorage.sharedDefaults()
-    ) -> Bool {
-        guard let wakeHex = wake.groupHex else { return false }
-        // ADR-0042 — `g` is an opaque `push_gid`; the reverse index turns it
-        // back into the real group. A miss falls back to reading it as a raw
-        // group id, which is what the pre-Sprint-3 wake carried.
-        let groupIdHex = routes.lookupRoute(pushGidHex: wakeHex)?.groupIdHex ?? wakeHex
-        let muted = ConversationMuteMirror.isMuted(groupIdHex: groupIdHex, defaults: defaults)
+    ) -> VoipWakeDecision {
+        guard let accountIdB64 = PushAccountBinding.boundAccount(
+            wakeDevicePseudonymHex: wake.devicePseudonymHex, binding: binding) else {
+            return .refuse
+        }
+        guard let wakeHex = wake.groupHex?.lowercased() else { return .ring(nil) }
+        let groupIdHex = routes.lookupRoute(accountIdB64: accountIdB64, pushGidHex: wakeHex)
+            ?? wakeHex
+        let target = VoipWakeTarget(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        let muted = ConversationMuteMirror.isMuted(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex, defaults: defaults)
         return LakkoCore.ringDecision(muted: muted, offerAgeMs: 0) == .silent
+            ? .silent(target)
+            : .ring(target)
     }
 
     private func armPlaceholderTimeout(uuid: UUID) {
@@ -258,6 +311,31 @@ final class VoipPushRegistrar: NSObject {
             self.provider.reportEnded(uuid: uuid, reason: .unanswered)
         }
     }
+}
+
+// MARK: - Wake decision
+
+/// Where a VoIP wake points, once it is known to be for the signed-in account.
+struct VoipWakeTarget: Equatable {
+    /// The account the wake is bound to (``PushAccountBinding``).
+    let accountIdB64: String
+    /// The real group id (reverse-mapped from the wake's `push_gid`, or the
+    /// raw `g` of a pre-ADR-0042 wake).
+    let groupIdHex: String
+}
+
+/// What ``VoipPushRegistrar`` does with a VoIP wake. Every case reports a call
+/// to CallKit first — Apple's rule — and differs in what follows.
+enum VoipWakeDecision: Equatable {
+    /// Not for the signed-in account: no binding, no `d`, or a `d` that is not
+    /// the bound pseudonym. The nameless placeholder is ended at once and
+    /// nothing is fetched.
+    case refuse
+    /// Ring, and fetch the offer. `nil` when the wake names no conversation.
+    case ring(VoipWakeTarget?)
+    /// The conversation is muted: ended at once, but still fetched, so the
+    /// call is recorded.
+    case silent(VoipWakeTarget)
 }
 
 // MARK: - PKPushRegistryDelegate

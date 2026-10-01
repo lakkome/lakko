@@ -69,7 +69,7 @@ class ConversationInfoTest {
 
     @Test
     fun `a two-person group opens the group`() {
-        // ADR-0060 — the kind is read from the group, never from the people
+        // ADR-0062 — the kind is read from the group, never from the people
         // count, so a group that has not grown yet is still a group.
         val info = conversationInfo(
             kind = ConversationKind.Group,

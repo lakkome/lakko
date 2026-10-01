@@ -49,6 +49,19 @@
 //!    then stays until it expires so the new device can read the outcome.
 //! 7. **`DELETE /device/requests/{id}`** — bearer. Decline ("It is not me").
 //!
+//! **The guess budget across requests** (security pass finding 6) is the
+//! server's too. Every `wrong_code` the account's device records is logged
+//! (`device_link_wrong_codes`); enough of them in a window suspend the
+//! account's device requests ([`crate::limits::DeviceLinkTier`], defaults 3
+//! in 24 h for 1 h, 6 in 24 h for 24 h). While suspended, route 1 still
+//! answers exactly as it always does, but files the request under the
+//! handle's stand-in - nobody polls it, so the requester sees a request
+//! nobody answers, which is also what an unknown name sees; route 2 shows the
+//! account nothing, and route 3 refuses (`404`) a request it still holds.
+//! Route 1 runs the same queries on every path (the suspension lookup
+//! included, which for a stand-in never matches), so a suspension cannot be
+//! told apart from an unanswered request.
+//!
 //! Every value is opaque here (invariant #2): SPAKE2 messages, a MAC and an
 //! AEAD ciphertext under a key only the two devices hold. No new social-graph
 //! edge is materialised (invariant #5).
@@ -215,10 +228,14 @@ pub(crate) async fn create(
     )
     .await?;
     // A bound handle names its account; an unbound one its stand-in, which
-    // is stored the same way and answered by nobody (ADR-0056).
-    let account_id = crate::login_handle::resolve(&state.db, &pepper, &handle)
-        .await?
-        .account_id;
+    // is stored the same way and answered by nobody (ADR-0056). A suspended
+    // account's request goes to the stand-in too: same answer, no prompt.
+    let resolved = crate::login_handle::resolve(&state.db, &pepper, &handle).await?;
+    let account_id = if suspended(&state.db, &resolved.account_id).await? {
+        resolved.stand_in
+    } else {
+        resolved.account_id
+    };
     let mut request_id = [0u8; REQUEST_ID_LEN];
     OsRng.fill_bytes(&mut request_id);
 
@@ -344,12 +361,72 @@ pub(crate) async fn payload(
     })
 }
 
-/// `GET /device/requests` — the open request for this account.
+/// Whether the account's device requests are suspended (the guess budget
+/// is spent). A stand-in never is.
+async fn suspended(pool: &sqlx::MySqlPool, account_id: &[u8; 16]) -> Result<bool, ApiError> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM device_link_suspensions \
+         WHERE account_id = ? AND suspended_until > NOW(3)",
+    )
+    .bind(account_id.as_slice())
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiError::Db)?;
+    Ok(row.is_some())
+}
+
+/// Log one wrong code for `account_id` inside `tx` and, when a tier of the
+/// guess budget is reached, suspend the account's device requests (never
+/// shortening a suspension already running). Returns the suspension set, in
+/// seconds, if any.
+async fn record_wrong_code(
+    tx: &mut sqlx::MySqlConnection,
+    tiers: &[crate::limits::DeviceLinkTier],
+    account_id: &[u8; 16],
+) -> Result<Option<u32>, sqlx::Error> {
+    sqlx::query("INSERT INTO device_link_wrong_codes (account_id) VALUES (?)")
+        .bind(account_id.as_slice())
+        .execute(&mut *tx)
+        .await?;
+    let mut suspend: Option<u32> = None;
+    for tier in tiers {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM device_link_wrong_codes \
+             WHERE account_id = ? AND at > NOW(3) - INTERVAL ? SECOND",
+        )
+        .bind(account_id.as_slice())
+        .bind(i64::from(tier.wrong_codes.window_secs))
+        .fetch_one(&mut *tx)
+        .await?;
+        if count >= i64::from(tier.wrong_codes.limit) {
+            suspend = Some(suspend.map_or(tier.suspend_secs, |s| s.max(tier.suspend_secs)));
+        }
+    }
+    if let Some(secs) = suspend {
+        sqlx::query(
+            "INSERT INTO device_link_suspensions (account_id, suspended_until) \
+             VALUES (?, NOW(3) + INTERVAL ? SECOND) \
+             ON DUPLICATE KEY UPDATE \
+               suspended_until = GREATEST(suspended_until, VALUES(suspended_until))",
+        )
+        .bind(account_id.as_slice())
+        .bind(i64::from(secs))
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(suspend)
+}
+
+/// `GET /device/requests` — the open request for this account, none while
+/// its device requests are suspended.
 #[axum::debug_handler]
 pub(crate) async fn list(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
 ) -> Result<Json<ListRes>, ApiError> {
+    if suspended(&state.db, &auth.0).await? {
+        return Ok(Json(ListRes { request: None }));
+    }
     #[allow(clippy::type_complexity)]
     let row: Option<(
         Vec<u8>,
@@ -392,6 +469,11 @@ pub(crate) async fn answer(
 ) -> Result<Response, ApiError> {
     let request_id = decode_request_id(&request_id_b64)?;
     let pake_b = decode_blob(&req.pake_b_b64, 1, MAX_PAKE_LEN, "pake_b_b64")?;
+    // A suspended account is shown no request; one it still holds is not
+    // answered either.
+    if suspended(&state.db, &auth.0).await? {
+        return Ok(refusal(StatusCode::NOT_FOUND, CODE_NOT_FOUND));
+    }
     let written = sqlx::query(
         "UPDATE device_requests SET pake_b = ? \
          WHERE account_id = ? AND request_id = ? AND expires_at > NOW(3) AND pake_b IS NULL",
@@ -440,6 +522,9 @@ pub(crate) async fn result(
             ))
         },
     };
+    // The outcome and, for a wrong code, the guess budget land together or
+    // not at all: a failure leaves the outcome unset, so the device retries.
+    let mut tx = state.db.begin().await.map_err(ApiError::Db)?;
     let written = sqlx::query(
         "UPDATE device_requests SET outcome = ?, confirm_b = ? \
          WHERE account_id = ? AND request_id = ? AND expires_at > NOW(3) \
@@ -449,18 +534,34 @@ pub(crate) async fn result(
     .bind(confirm_b.as_deref())
     .bind(auth.0.as_slice())
     .bind(request_id.as_slice())
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(ApiError::Db)?
     .rows_affected();
     if written == 1 {
+        let suspended_secs = if outcome == OUTCOME_WRONG_CODE {
+            record_wrong_code(&mut tx, state.limits.device_link(), &auth.0)
+                .await
+                .map_err(ApiError::Db)?
+        } else {
+            None
+        };
+        tx.commit().await.map_err(ApiError::Db)?;
         tracing::info!(
             account_id = %URL_SAFE_NO_PAD.encode(auth.0),
             outcome = outcome_name(outcome).unwrap_or("?"),
             "device-request: decided"
         );
+        if let Some(secs) = suspended_secs {
+            tracing::info!(
+                account_id = %URL_SAFE_NO_PAD.encode(auth.0),
+                suspend_secs = secs,
+                "device-request: guess budget spent, requests suspended"
+            );
+        }
         return Ok(Json(serde_json::json!({})).into_response());
     }
+    drop(tx);
     let row: Option<(i64, i64)> = sqlx::query_as(
         "SELECT sealed_payload IS NOT NULL, outcome IS NOT NULL FROM device_requests \
          WHERE account_id = ? AND request_id = ? AND expires_at > NOW(3)",
@@ -625,6 +726,413 @@ mod device_request_e2e_tests {
         STANDARD.encode(bytes)
     }
 
+    /// An app state over `pool` with `limits`, and a bearer for `account_id`.
+    fn test_state(
+        pool: &sqlx::MySqlPool,
+        account_id: &[u8; 16],
+        limits: crate::limits::Limits,
+    ) -> (crate::AppState, String) {
+        let token_secret = lakko_auth_token::TokenSecret::new(vec![7u8; 64]).expect("token secret");
+        let state = crate::AppState {
+            db: pool.clone(),
+            opaque_setup: Arc::new(ServerSetup::<crate::opaque::LakkoCipherSuite>::new(
+                &mut OsRng,
+            )),
+            session_token_secret: Arc::new(token_secret.clone()),
+            session_token_ttl_ms: 86_400_000,
+            webauthn: None,
+            webauthn_action_core: None,
+            call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
+            attest_key: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xCD; 32])),
+            turn: None,
+            totp_enc_key: None,
+            recovery_contact_pepper: None,
+            vault_enc_key: None,
+            otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
+            throttle: crate::throttle::ThrottleConfig::disabled(),
+            backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
+            anon_tokens: None,
+            handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
+            limits: Arc::new(limits),
+        };
+        let now_ms = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(i64::MAX);
+        let bearer = format!(
+            "Bearer {}",
+            token_secret
+                .issue(account_id, now_ms + 3_600_000)
+                .expect("token")
+        );
+        (state, bearer)
+    }
+
+    /// One request that ends in a wrong code: the new device asks, the old
+    /// device answers, the new device guesses, the old device records
+    /// `wrong_code`. The server relays opaque bytes, so none of them needs to
+    /// be a real SPAKE2 value. Returns the status of the result post.
+    async fn wrong_code_round(
+        state: &crate::AppState,
+        handle_b64: &str,
+        bearer: &str,
+    ) -> StatusCode {
+        let (st, v) = json_req(
+            state,
+            Method::POST,
+            "/device/request",
+            None,
+            Some(serde_json::json!({ "handle": handle_b64 })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let id = v["request_id_b64"].as_str().unwrap().to_string();
+        let (st, _) = json_req(
+            state,
+            Method::POST,
+            &format!("/device/requests/{id}/pake"),
+            Some(bearer),
+            Some(serde_json::json!({ "pake_b_b64": b64(&[0x42; 33]) })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = json_req(
+            state,
+            Method::POST,
+            "/device/request/payload",
+            None,
+            Some(serde_json::json!({
+                "request_id_b64": id,
+                "pake_a_b64": b64(&[0x41; 33]),
+                "sealed_payload_b64": b64(&[1; 64]),
+                "confirm_a_b64": b64(&[2; 32]),
+            })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        json_req(
+            state,
+            Method::POST,
+            &format!("/device/requests/{id}/result"),
+            Some(bearer),
+            Some(serde_json::json!({ "outcome": "wrong_code" })),
+        )
+        .await
+        .0
+    }
+
+    /// Where the database filed the request `id_b64`.
+    async fn filed_under(pool: &sqlx::MySqlPool, id_b64: &str) -> Vec<u8> {
+        let (account,): (Vec<u8>,) =
+            sqlx::query_as("SELECT account_id FROM device_requests WHERE request_id = ?")
+                .bind(URL_SAFE_NO_PAD.decode(id_b64).unwrap())
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        account
+    }
+
+    /// Security pass finding 6: the guess budget across requests is the
+    /// server's. Three wrong codes suspend the account's device requests for
+    /// the short tier; a suspended request is invisible to the account and
+    /// looks to the requester exactly like one nobody answers; the
+    /// suspension ends; three more within the window trip the long tier;
+    /// wrong codes that fell out of the window no longer count.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn wrong_codes_suspend_the_accounts_device_requests() {
+        let Ok(url) = std::env::var("LAKKO_AUTH_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping wrong_codes_suspend_the_accounts_device_requests: \
+                 LAKKO_AUTH_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect");
+        crate::MIGRATIONS.run(&pool).await.expect("migrate");
+        let account_id: [u8; 16] = *Uuid::now_v7().as_bytes();
+        sqlx::query("INSERT INTO accounts (id) VALUES (?)")
+            .bind(account_id.as_slice())
+            .execute(&pool)
+            .await
+            .expect("insert account");
+        let (handle, handle_b64) = crate::login_handle::random_handle();
+        crate::login_handle::bind_for_test(&pool, &account_id, &handle).await;
+        let (state, bearer) = test_state(
+            &pool,
+            &account_id,
+            crate::limits::Limits::defaults()
+                .with_ip_window(
+                    crate::limits::Category::DeviceRequest,
+                    crate::limits::Window::new(1000, 3600),
+                )
+                .with_name_window(
+                    crate::limits::Scope::DeviceRequestTarget,
+                    crate::limits::Window::new(1000, 600),
+                ),
+        );
+        let tiers = state.limits.device_link().to_vec();
+        assert_eq!(
+            (tiers[0].wrong_codes.limit, tiers[0].wrong_codes.window_secs),
+            (3, 86_400)
+        );
+        assert_eq!(
+            (tiers[0].suspend_secs, tiers[1].suspend_secs),
+            (3600, 86_400)
+        );
+        assert_eq!(tiers[1].wrong_codes.limit, 6);
+        let suspended_for = || {
+            let pool = pool.clone();
+            async move {
+                let row: Option<(i64,)> = sqlx::query_as(
+                    "SELECT CAST(TIMESTAMPDIFF(SECOND, NOW(3), suspended_until) AS SIGNED) \
+                     FROM device_link_suspensions \
+                     WHERE account_id = ? AND suspended_until > NOW(3)",
+                )
+                .bind(account_id.as_slice())
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+                row.map(|(s,)| s)
+            }
+        };
+        let list = || {
+            let state = state.clone();
+            let bearer = bearer.clone();
+            async move {
+                let (st, v) =
+                    json_req(&state, Method::GET, "/device/requests", Some(&bearer), None).await;
+                assert_eq!(st, StatusCode::OK);
+                v["request"].clone()
+            }
+        };
+
+        // Two wrong codes: still open.
+        for _ in 0..2 {
+            assert_eq!(
+                wrong_code_round(&state, &handle_b64, &bearer).await,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(suspended_for().await, None);
+        // The third suspends for the short tier.
+        assert_eq!(
+            wrong_code_round(&state, &handle_b64, &bearer).await,
+            StatusCode::OK
+        );
+        let secs = suspended_for().await.expect("suspended");
+        assert!((3500..=3600).contains(&secs), "{secs}");
+
+        // A request now is answered exactly like any other, but filed under
+        // the stand-in: the account is shown nothing.
+        let (st, v) = json_req(
+            &state,
+            Method::POST,
+            "/device/request",
+            None,
+            Some(serde_json::json!({ "handle": handle_b64 })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let suspended_id = v["request_id_b64"].as_str().unwrap().to_string();
+        let (ghost_handle, ghost_b64) = crate::login_handle::random_handle();
+        let (gst, gv) = json_req(
+            &state,
+            Method::POST,
+            "/device/request",
+            None,
+            Some(serde_json::json!({ "handle": ghost_b64 })),
+        )
+        .await;
+        assert_eq!(gst, st);
+        let keys = |v: &serde_json::Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&v), keys(&gv));
+        assert_eq!(v["expires_in_secs"], gv["expires_in_secs"]);
+        let ghost_id = gv["request_id_b64"].as_str().unwrap().to_string();
+        assert_eq!(
+            status_of(&state, &suspended_id).await,
+            status_of(&state, &ghost_id).await
+        );
+        assert_eq!(status_of(&state, &suspended_id).await["pending"], true);
+        let early = |id: &str| {
+            serde_json::json!({
+                "request_id_b64": id,
+                "pake_a_b64": b64(&[0x41; 33]),
+                "sealed_payload_b64": b64(&[1; 64]),
+                "confirm_a_b64": b64(&[2; 32]),
+            })
+        };
+        let a = json_req(
+            &state,
+            Method::POST,
+            "/device/request/payload",
+            None,
+            Some(early(&suspended_id)),
+        )
+        .await;
+        let b = json_req(
+            &state,
+            Method::POST,
+            "/device/request/payload",
+            None,
+            Some(early(&ghost_id)),
+        )
+        .await;
+        assert_eq!(a, b);
+        assert_eq!(a.1["error"], CODE_NOT_READY);
+        let stand_in =
+            crate::login_handle::resolve(&pool, &crate::login_handle::TEST_PEPPER, &handle)
+                .await
+                .unwrap()
+                .stand_in;
+        assert_eq!(filed_under(&pool, &suspended_id).await, stand_in.to_vec());
+        assert!(
+            list().await.is_null(),
+            "a suspended account is shown nothing"
+        );
+        let (st, v) = json_req(
+            &state,
+            Method::POST,
+            &format!("/device/requests/{suspended_id}/pake"),
+            Some(&bearer),
+            Some(serde_json::json!({ "pake_b_b64": b64(&[0x42; 33]) })),
+        )
+        .await;
+        assert_eq!(
+            (st, v["error"].as_str()),
+            (StatusCode::NOT_FOUND, Some(CODE_NOT_FOUND))
+        );
+
+        // The suspension ends (stood in for by moving its end into the
+        // past): requests reach the account again.
+        sqlx::query(
+            "UPDATE device_link_suspensions SET suspended_until = NOW(3) - INTERVAL 1 SECOND \
+             WHERE account_id = ?",
+        )
+        .bind(account_id.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (_, v) = json_req(
+            &state,
+            Method::POST,
+            "/device/request",
+            None,
+            Some(serde_json::json!({ "handle": handle_b64 })),
+        )
+        .await;
+        let back_id = v["request_id_b64"].as_str().unwrap().to_string();
+        assert_eq!(filed_under(&pool, &back_id).await, account_id.to_vec());
+        assert_eq!(list().await["request_id_b64"], back_id);
+
+        // Each further wrong code in the window re-suspends for the short
+        // tier; the sixth trips the long one.
+        for n in 4..=5 {
+            sqlx::query(
+                "UPDATE device_link_suspensions SET suspended_until = NOW(3) - INTERVAL 1 SECOND \
+                 WHERE account_id = ?",
+            )
+            .bind(account_id.as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                wrong_code_round(&state, &handle_b64, &bearer).await,
+                StatusCode::OK
+            );
+            let secs = suspended_for().await.expect("suspended");
+            assert!((3500..=3600).contains(&secs), "wrong code {n}: {secs}");
+        }
+        sqlx::query(
+            "UPDATE device_link_suspensions SET suspended_until = NOW(3) - INTERVAL 1 SECOND \
+             WHERE account_id = ?",
+        )
+        .bind(account_id.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            wrong_code_round(&state, &handle_b64, &bearer).await,
+            StatusCode::OK
+        );
+        let secs = suspended_for().await.expect("suspended");
+        assert!((86_300..=86_400).contains(&secs), "{secs}");
+
+        // The window expires: wrong codes older than it no longer count, so
+        // one more after the suspension ends does not suspend again.
+        sqlx::query(
+            "UPDATE device_link_wrong_codes SET at = at - INTERVAL 2 DAY WHERE account_id = ?",
+        )
+        .bind(account_id.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE device_link_suspensions SET suspended_until = NOW(3) - INTERVAL 1 SECOND \
+             WHERE account_id = ?",
+        )
+        .bind(account_id.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            wrong_code_round(&state, &handle_b64, &bearer).await,
+            StatusCode::OK
+        );
+        assert_eq!(suspended_for().await, None);
+        assert!(!list().await.is_null());
+
+        // Only the wrong code recorded after the window moved is counted.
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM device_link_wrong_codes \
+             WHERE account_id = ? AND at > NOW(3) - INTERVAL 1 DAY",
+        )
+        .bind(account_id.as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+
+        // Deleting the account takes its budget rows with it.
+        let ghost_stand_in =
+            crate::login_handle::resolve(&pool, &crate::login_handle::TEST_PEPPER, &ghost_handle)
+                .await
+                .unwrap()
+                .stand_in;
+        sqlx::query("DELETE FROM device_requests WHERE account_id IN (?, ?, ?)")
+            .bind(account_id.as_slice())
+            .bind(stand_in.as_slice())
+            .bind(ghost_stand_in.as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM accounts WHERE id = ?")
+            .bind(account_id.as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (left,): (i64,) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM device_link_wrong_codes WHERE account_id = ?) + \
+                    (SELECT COUNT(*) FROM device_link_suspensions WHERE account_id = ?)",
+        )
+        .bind(account_id.as_slice())
+        .bind(account_id.as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(left, 0);
+    }
+
     fn unb64(v: &serde_json::Value) -> Vec<u8> {
         STANDARD.decode(v.as_str().unwrap()).unwrap()
     }
@@ -652,43 +1160,13 @@ mod device_request_e2e_tests {
         let (handle, handle_b64) = crate::login_handle::random_handle();
         crate::login_handle::bind_for_test(&pool, &account_id, &handle).await;
 
-        let token_secret = lakko_auth_token::TokenSecret::new(vec![7u8; 64]).expect("token secret");
-        let state = crate::AppState {
-            db: pool.clone(),
-            opaque_setup: Arc::new(ServerSetup::<crate::opaque::LakkoCipherSuite>::new(
-                &mut OsRng,
-            )),
-            session_token_secret: Arc::new(token_secret.clone()),
-            session_token_ttl_ms: 86_400_000,
-            webauthn: None,
-            webauthn_action_core: None,
-            call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
-            attest_key: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xCD; 32])),
-            turn: None,
-            totp_enc_key: None,
-            recovery_contact_pepper: None,
-            vault_enc_key: None,
-            otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
-            throttle: crate::throttle::ThrottleConfig::disabled(),
-            backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
-            anon_tokens: None,
-            handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
-            limits: Arc::new(crate::limits::Limits::defaults().with_ip_window(
+        let (state, bearer) = test_state(
+            &pool,
+            &account_id,
+            crate::limits::Limits::defaults().with_ip_window(
                 crate::limits::Category::DeviceRequest,
                 crate::limits::Window::new(100, 3600),
-            )),
-        };
-        let now_ms = i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis()),
-        )
-        .unwrap_or(i64::MAX);
-        let bearer = format!(
-            "Bearer {}",
-            token_secret
-                .issue(&account_id, now_ms + 3_600_000)
-                .expect("token")
+            ),
         );
         let mut rng = OsRng;
         let payload = vec![0x5Au8; 300];

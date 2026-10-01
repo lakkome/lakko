@@ -67,7 +67,7 @@ final class SupersessionTests: XCTestCase {
     // MARK: - Sprint 2i: PeerPinStore
 
     func testPinStoreTofuThenReadBack() {
-        let store = PeerPinStore(defaults: freshDefaults())
+        let store = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let acct = base64Encode(Data(repeating: 0xA1, count: 16))
 
         XCTAssertNil(store.readPin(accountIdB64: acct))
@@ -90,21 +90,21 @@ final class SupersessionTests: XCTestCase {
         let suite = "lakko.test.pins.persist.\(UUID().uuidString)"
         let acct = base64Encode(Data(repeating: 0xB2, count: 16))
 
-        let first = PeerPinStore(defaults: freshDefaults(suite))
+        let first = PeerPinStore(defaults: freshDefaults(suite), ownerAccountIdB64: "test-owner")
         first.setPin(
             accountIdB64: acct,
             pinnedSignaturePubkeyB64: "PUBKEY_PERSIST",
             rotationMarker: 42
         )
 
-        let second = PeerPinStore(defaults: UserDefaults(suiteName: suite)!)
+        let second = PeerPinStore(defaults: UserDefaults(suiteName: suite)!, ownerAccountIdB64: "test-owner")
         let pin = second.readPin(accountIdB64: acct)
         XCTAssertEqual(pin?.pinnedSignaturePubkeyB64, "PUBKEY_PERSIST")
         XCTAssertEqual(pin?.rotationMarker, 42)
     }
 
     func testPinStoreMonotonicMarker() {
-        let store = PeerPinStore(defaults: freshDefaults())
+        let store = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let acct = base64Encode(Data(repeating: 0xC3, count: 16))
 
         // Initial pin at marker 100.
@@ -153,7 +153,7 @@ final class SupersessionTests: XCTestCase {
     }
 
     func testPinStoreRemove() {
-        let store = PeerPinStore(defaults: freshDefaults())
+        let store = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let acct = base64Encode(Data(repeating: 0xD4, count: 16))
         store.setPin(
             accountIdB64: acct,
@@ -172,7 +172,7 @@ final class SupersessionTests: XCTestCase {
     /// Build a `ContactsClient` over an isolated pin suite so the
     /// verify tests don't share state.
     private func clientWithFreshPins() -> (ContactsClient, PeerPinStore) {
-        let store = PeerPinStore(defaults: freshDefaults())
+        let store = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let client = ContactsClient(pinStore: store)
         return (client, store)
     }

@@ -222,6 +222,21 @@ export function TimelineBubble(
       // pushed into `rows()`. Defensive.
       return null;
     }
+    if (ev.kind === "scopedDiscovery") {
+      // ADR-0060 — dispatched to its handler by the receive loop, never
+      // pushed into `rows()`. Defensive.
+      return null;
+    }
+    if (ev.kind === "registrarSeed") {
+      // ADR-0057 — consumed at receipt by the chat client, never a row.
+      // Defensive.
+      return null;
+    }
+    if (ev.kind === "serviceEnvelope") {
+      // An unrecognised `lakko/…` service envelope, dropped at receipt by the
+      // chat client and never a bubble. Defensive.
+      return null;
+    }
     if (ev.kind === "membershipProposal") {
       // ADR-0045 UX section 10 — a request is not something that HAPPENED to
       // the group; only outcomes belong in the timeline. The receive loop

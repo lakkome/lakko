@@ -45,10 +45,15 @@ public final class PushSubscriber {
     public static let shared = PushSubscriber()
 
     private let client: PushClient
+    private let bindingStore: PushAccountBindingStore
     private var pendingContinuation: CheckedContinuation<Data, Error>?
 
-    public init(client: PushClient = PushClient()) {
+    public init(
+        client: PushClient = PushClient(),
+        bindingStore: PushAccountBindingStore = .live
+    ) {
         self.client = client
+        self.bindingStore = bindingStore
     }
 
     // MARK: - Subscribe
@@ -66,7 +71,18 @@ public final class PushSubscriber {
     /// register error). Callers treat any error as "push not
     /// available, fall back to foreground polling"; auth flows
     /// should `try?` this so a failure doesn't block sign-in.
-    public func subscribe() async throws -> SubscribeResult {
+    ///
+    /// ADR-0042 (amended 2026-09-30) — the pseudonym is registered FOR
+    /// `accountIdB64`, and that pairing is recorded
+    /// (``PushAccountBindingStore``) before the token reaches push-gw, so the
+    /// first wake already finds it. `stillSignedIn` is asked immediately
+    /// before the write, after the awaits above it: a Log out that ran while
+    /// this subscribe was waiting for its APNs token has already cleared the
+    /// binding, and a late subscribe must not put it back.
+    public func subscribe(
+        accountIdB64: String,
+        stillSignedIn: @MainActor () -> Bool
+    ) async throws -> SubscribeResult {
         // (1) Authorization prompt. If the user has previously
         // denied, the system returns `false` without showing
         // the prompt again — we surface this as
@@ -89,6 +105,10 @@ public final class PushSubscriber {
         } catch {
             throw PushSubscribeError.deviceIdUnavailable(error)
         }
+        guard stillSignedIn() else {
+            throw PushSubscribeError.signedOut
+        }
+        bindingStore.bind(devicePseudonym: pseudonym, accountIdB64: accountIdB64)
 
         do {
             try await client.register(
@@ -220,10 +240,13 @@ public enum PushSubscribeError: Error {
     /// `PushClient.register` rejected the upload (server
     /// failure / no anonymous token / network).
     case registerFailed(Error)
-    /// Two ``PushSubscriber/subscribe()`` calls overlapped.
-    /// Only one register can be in flight at a time — the OS
-    /// callback can't distinguish two parked continuations.
+    /// Two ``PushSubscriber/subscribe(accountIdB64:stillSignedIn:)``
+    /// calls overlapped. Only one register can be in flight at a time —
+    /// the OS callback can't distinguish two parked continuations.
     case concurrentSubscribe
+    /// The account signed out while the subscribe was waiting; nothing was
+    /// bound or registered.
+    case signedOut
 }
 
 extension PushSubscribeError: LocalizedError {
@@ -239,6 +262,8 @@ extension PushSubscribeError: LocalizedError {
             return "Push gateway register failed: \(e)"
         case .concurrentSubscribe:
             return "Another push subscribe is already in flight"
+        case .signedOut:
+            return "Signed out before the push subscribe finished"
         }
     }
 }

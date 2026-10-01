@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,8 +61,18 @@ public fun ProfileSettingsScreen(
     onSaved: (OwnProfile) -> Unit,
     onBack: () -> Unit,
 ) {
+    // Keyed on [current]: the base a save is computed from is always the
+    // stored profile, a name adopted from another device included.
+    var saved by remember(current) { mutableStateOf(current) }
+    // A name set on another of the account's devices (ADR-0048 section 4a)
+    // replaces the field only while the person has not edited it.
+    var mirroredName by remember { mutableStateOf(current?.displayName ?: "") }
     var nameInput by remember { mutableStateOf(current?.displayName ?: "") }
-    var saved by remember { mutableStateOf(current) }
+    LaunchedEffect(current?.displayName) {
+        val incoming = current?.displayName ?: ""
+        nameInput = me.lakko.app.profile.followSavedName(nameInput, mirroredName, incoming)
+        mirroredName = incoming
+    }
     var confirmation by remember { mutableStateOf<String?>(null) }
     val check = checkDisplayName(nameInput)
     val error = (check as? DisplayNameCheck.Invalid)?.problem?.copy
@@ -130,6 +141,8 @@ public fun ProfileSettingsScreen(
                 if (updated != null) {
                     onSaved(updated)
                     saved = updated
+                    mirroredName = updated.displayName ?: ""
+                    nameInput = mirroredName
                 }
                 confirmation = PROFILE_SAVED_COPY
             },

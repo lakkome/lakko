@@ -54,8 +54,8 @@ Invited by <fingerprint>            (small, muted, one line)
   `Invited by`, so a person who was told the digits out of band can still
   compare them. It is never the only thing on the page when a preview exists.
 
-**Without a preview** (a link minted without one, or a link whose fragment was
-lost - a chat app that strips fragments, a hand-typed URL):
+**Without a preview** (a link minted without one; since 2026-09-28 a link
+whose fragment was lost is no longer this state, it is damaged - below):
 
 ```
 You are invited to a group
@@ -65,16 +65,18 @@ Invited by <fingerprint>
 
 Nothing invents a name. The page does not say why the preview is missing.
 
-**Damaged link** (amended 2026-09-28, short links): the fragment is present but
-malformed, or present while the capability carries no preview, or the preview
-does not open under it - a wrong or truncated key, a tampered link, or a
-capability a server swapped in under a live short id (the preview key is bound
-to the group id and the issuer, so a swapped capability never opens). The page
-refuses: `This invite link is damaged. Ask for a new link.` and nothing else.
-There is no preview-less fallback once a fragment is present; before the short
-ids this read "identical to without a preview", which was safe only while the
-id was a hash of the capability. A malformed fragment is refused before any
-request is made.
+**Damaged link** (amended 2026-09-28, sealed links): the fragment is
+missing, malformed (not 16 base64url characters), or does not open the link -
+since the sealed-link amendment of ADR-0028 the whole capability is encrypted
+under the fragment's secret, so a lost fragment (a chat app that strips
+fragments, a hand-typed URL), a wrong or truncated secret, a tampered link, or
+a blob a server swapped in under a live short id all fail the same way, and so
+does a present preview that does not open. The page refuses: `This invite link
+is damaged. Ask for a new link.` and nothing else - no fingerprint, no
+`Request to join`, because nothing was opened. A missing or malformed fragment
+is refused before any request is made. **The same state and the same sentence
+apply to every link kind** - `/i/` (`This invite link is damaged. Ask for a
+new link.`) and `/c/` (see [`call-links.md`](call-links.md) section 5).
 
 **Too many requests** (the ledger answered 429 on fetch or consume, any link
 kind): `Too many requests from this network right now. Try again in a minute.`
@@ -95,9 +97,10 @@ the join lands.
 
 `https://lakko.me/g/<slug>#<link secret, base64url, 16 chars>` for both the
 pointer form (`<slug>` = the ledger id, 8 chars) and the inline form (`<slug>` =
-the whole capability). A pointer link is therefore about 45 characters
-(ADR-0028 amendment of 2026-09-27). `Copy link` copies the fragment with it. A link without
-a fragment still works; it only loses the preview.
+the whole SEALED capability, base64url). A pointer link is therefore about 45
+characters (ADR-0028 amendment of 2026-09-27). `Copy link` copies the fragment
+with it, and must: since 2026-09-28 a link without its fragment opens nothing
+and is shown as damaged. The same shape holds for `/i/` and `/c/`.
 
 ## 5. Copy rules
 
@@ -110,7 +113,9 @@ device wrote them, unlinked, with no verification mark (the same rule as the
 
 - On mint: the group's name (empty = none), the issuer's own profile display
   name (empty = none), the member count - all already on the device.
-- On open: the capability's `hasPreview`, and `openPreview(linkKey)` giving
+- On open: `GroupInviteCapability.openLink(sealed, linkSecret)` (a refusal is
+  the damaged state), then the capability's `hasPreview`, and
+  `openPreview(linkSecret)` giving
   `groupName?`, `inviterName?`, `memberCount`, or nothing when the fragment is
   absent; a present fragment whose preview does not open is the damaged state
   (section 3), not an absent preview.

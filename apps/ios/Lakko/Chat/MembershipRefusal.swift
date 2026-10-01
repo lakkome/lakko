@@ -192,15 +192,15 @@ public let deviceLimitReachedMessage = "Up to 8 devices per account. Remove one 
 public let deviceBindingInvalidMessage =
     "Something is wrong with this device's key. Remove it from Devices and add it again."
 
-/// ADR-0060 — a chat (one-to-one) is always the same two people. No screen
+/// ADR-0062 — a chat (one-to-one) is always the same two people. No screen
 /// offers add / remove / leave on a chat, so this is reached only by a stale
 /// view; stated as the standing rule. Same copy as web and Android.
 public let oneToOneMembershipFixedMessage = "A chat is always the same two people."
 
-/// ADR-0060 — a chat has no owner or admins. Same copy as web and Android.
+/// ADR-0062 — a chat has no owner or admins. Same copy as web and Android.
 public let oneToOneHasNoRolesMessage = "A chat has no admins."
 
-/// ADR-0060 — a change that would alter or drop the conversation's kind,
+/// ADR-0062 — a change that would alter or drop the conversation's kind,
 /// refused by the peer gate. Same copy as web and Android.
 public let groupKindChangedMessage = "This change can't be made to this conversation."
 
@@ -424,7 +424,7 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
             case .SweepAlreadyStaged: return .sweepAlreadyStaged
             case .MembershipDeviceBindingInvalid: return .deviceBindingInvalid
             case .MembershipDeviceLimitReached: return .deviceLimitReached
-            // ADR-0060 — the conversation-kind refusals.
+            // ADR-0062 — the conversation-kind refusals.
             case .MembershipOneToOneMembershipFixed: return .oneToOneMembershipFixed
             case .MembershipOneToOneHasNoRoles: return .oneToOneHasNoRoles
             case .MembershipGroupKindChanged: return .groupKindChanged
@@ -439,8 +439,15 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 .UsernameEmpty, .UsernameTooShort, .UsernameTooLong, .UsernameInvalidCharacters,
                 .DisplayNameLineBreak, .DisplayNameControlOrFormatCharacter,
                 .DisplayNameTooLong, .DisplayNameTooManyBytes, .ChannelMeta,
-                .AnonToken, .AnonTokenAlreadyFinalized, .DeviceLinkWrongCode, .DeviceLink,
-                .InviteLinkDamaged, .FeedRule, .ChannelListing, .ChannelCoPublisherBinding:
+                .AnonToken, .AnonTokenAlreadyFinalized,
+                // ADR-0058 synced state; the 2026-09-28 device link and
+                // sealed invite links; ADR-0060 scoped discovery.
+                .DeviceGroupPayloadRefused, .SyncedState, .DeviceLinkWrongCode, .DeviceLink,
+                .InviteLinkDamaged, .Reach, .Introduction, .Visibility, .UsernameCertificate,
+                .CommitterDelegation,
+                // ADR-0061 feed rules; ADR-0059 channel listings and
+                // co-publisher bindings.
+                .FeedRule, .ChannelListing, .ChannelCoPublisherBinding:
                 return nil
             }
         }

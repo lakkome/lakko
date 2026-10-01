@@ -176,7 +176,7 @@ public object PairingOrchestrator {
             group = joined
             // ADR-0050 — a device joining by pairing is admitted to the
             // account's chats by the scanning device; say so until they land.
-            StateBundle.markRestored(context)
+            StateBundle.markRestored(context, account.accountIdB64)
             DeviceGroupLifecycle.persistSnapshot(
                 context = context,
                 identity = identity,
@@ -276,7 +276,7 @@ public object PairingOrchestrator {
                                     DeviceIdentityStore.putDeviceIdentitySeed(context, accountIdB64, seed)
                                     // ADR-0050 — the scanning device admits this one to
                                     // the account's chats; say so until they land.
-                                    StateBundle.markRestored(context)
+                                    StateBundle.markRestored(context, accountIdB64)
                                     DeviceGroupLifecycle.persistSnapshot(
                                         context = context,
                                         identity = identity,
@@ -367,7 +367,7 @@ public object PairingOrchestrator {
             val bundle = bundles.stateBundle
             if (bundle != null) {
                 try {
-                    val (contacts, pins) = StateBundle.apply(context, bundle)
+                    val (contacts, pins) = StateBundle.apply(context, accountIdB64, bundle)
                     android.util.Log.i("PairingOrchestrator", "state bundle: $contacts contacts, $pins pins")
                 } catch (cause: Throwable) {
                     android.util.Log.w("PairingOrchestrator", "state bundle apply failed", cause)
@@ -422,7 +422,7 @@ public object PairingOrchestrator {
                     )
                     val bundle = StateBundle.decode(openWithKey(key, sealed))
                     if (bundle != null) {
-                        val (contacts, pins) = StateBundle.apply(context, bundle)
+                        val (contacts, pins) = StateBundle.apply(context, accountIdB64, bundle)
                         android.util.Log.i(
                             "PairingOrchestrator",
                             "state bundle: $contacts contacts, $pins pins",
@@ -661,6 +661,22 @@ public object PairingOrchestrator {
         seed.fill(0)
 
         try {
+            // ADR-0057 finding 3 — no Welcome for a DeviceGroup whose founding
+            // claim has not landed: claim first, fail closed.
+            DsClient().use { ds ->
+                DeviceGroupJournalAccess.claimFoundingIfUnconfirmed(
+                    context = context,
+                    accountIdB64 = accountIdB64,
+                    group = ensured.group,
+                    identity = ensured.identity,
+                    ds = ds,
+                )
+            }
+            // ADR-0058 section 5.1 — the members before the add, so the sync
+            // runtime can decide whether this device re-sends its state.
+            val leavesBeforeAdd = runCatching {
+                ensured.group.devices().map { it.leafIndex }
+            }.getOrNull()
             val signerBeforeCommit = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity)
             val addition = ensured.group.addDeviceFromWire(
                 identity = ensured.identity,
@@ -676,6 +692,7 @@ public object PairingOrchestrator {
                     groupId = ensured.group.groupId(),
                     before = signerBeforeCommit,
                     after = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity),
+                    root = DeviceGroupJournalAccess.rootOf(context, accountIdB64, ensured.group.groupId()),
                 )
             }
 
@@ -718,6 +735,16 @@ public object PairingOrchestrator {
                     payload = envelope,
                     signer = commitSigner,
                 )
+            }
+
+            // ADR-0058 section 5.1 — this device never receives its own commit
+            // back, so tell the sync runtime: it reopens its DeviceGroup handle
+            // at the new epoch and, when it is the lowest prior leaf, re-sends
+            // the folded state (folders, pins, drafts) the new device cannot
+            // decrypt from the journal.
+            if (leavesBeforeAdd != null) {
+                me.lakko.app.devices.sync.DeviceGroupSyncRepository.active
+                    ?.onLocalDeviceAdded(leavesBeforeAdd)
             }
 
             // Phase 2a3d8-ui — best-effort history catch-up
@@ -801,7 +828,7 @@ public object PairingOrchestrator {
                 var key: ByteArray? = null
                 try {
                     val known = me.lakko.app.chat.KnownGroupsStore(context).load(accountIdB64)
-                    val bundle = StateBundle.build(context, known)
+                    val bundle = StateBundle.build(context, accountIdB64, known)
                     key = ensured.group.exportSecret(
                         ensured.identity,
                         StateBundle.EXPORTER_LABEL,
@@ -818,6 +845,15 @@ public object PairingOrchestrator {
                     key?.fill(0)
                 }
             }
+
+            // ADR-0060 section 7 — the admitted device takes this account's
+            // "who can find me" setting and reach-key versions, each with its
+            // ORIGINAL stamp. Sent by the sync runtime through its own handle,
+            // which `onLocalDeviceAdded` reopened at the post-add epoch above:
+            // sealing them here, on this second handle of the same DeviceGroup,
+            // reused the sync handle's sender generations (seen live on web
+            // 2026-09-30, SecretReuseError on the new device). Best-effort.
+            me.lakko.app.reach.ReachManager.get(context).resendToDevices()
 
             return ScanResult(
                 memberCount = if (ensured.bootstrapped) 2 else 0,

@@ -12,32 +12,30 @@
 //! schema dep (prost / serde-binary) that would force every
 //! caller through a wider attack surface.
 //!
-//! Two versions are recognised on decode:
+//! One version is recognised on decode: the current one. Lakko has no
+//! deployment and no stored backups, so an older payload is refused rather
+//! than migrated (ADR-0058 bumped the version to 5 and dropped the v1-v4
+//! readers).
 //!
-//! ### v2 (current, Phase 2a3d1)
+//! ### v5 (ADR-0058)
 //!
 //! ```text
-//! u8           payload version (= 2)
+//! u8           payload version (= 5)
 //! [16 bytes]   account_id (UUIDv7 raw)
 //! u64be        created_at_ms (the wall-clock at upload time)
 //! [32 bytes]   ed25519_seed (the identity signing seed)
 //! u32be        accepted_contacts_count
 //! [..]         accepted_contacts_count × AcceptedContactRecord
 //! u32be        mls_snapshots_count (per-group; reserved, emit 0)
-//! [..]         mls_snapshots_count × { 32-byte group_id, u32be length, bytes }
+//! [..]         mls_snapshots_count × { u32be len, group_id, u32be len, bytes }
 //! u32be        whole_storage_snapshot_length
 //! [..]         whole_storage_snapshot_length bytes
+//! u32be        known_group_ids_count
+//! [..]         known_group_ids_count × { u32be len (<= MAX_GROUP_ID_LEN), bytes }
+//! u32be        synced_state_length
+//! [..]         synced_state_length bytes: `lakko_sync::SyncedState::to_bytes`
+//!              (empty = no synced state held)
 //! ```
-//!
-//! ### v1 (Phase 2a1; accepted on decode for forward compat)
-//!
-//! Same as v2, minus the trailing `whole_storage_snapshot`
-//! length + bytes. Decoder folds v1 → `whole_storage_snapshot:
-//! Vec::new()` so the inner type carries one shape regardless
-//! of which version was on the wire. v1 producers are
-//! Phase 2a1 clients that pre-date the snapshot work — they
-//! still upload, the restore path on a newer client simply
-//! has nothing to feed into `Identity::restore_storage`.
 //!
 //! Each [`AcceptedContactRecord`]:
 //!
@@ -46,12 +44,9 @@
 //! [32 bytes]   x25519_pubkey
 //! u16be        display_name length (UTF-8 bytes, ≤ MAX_DISPLAY_NAME_LEN)
 //! [..]         display_name bytes
-//! u8           account_id presence (v3+ only): 0 = absent, 1 = present
+//! u8           account_id presence: 0 = absent, 1 = present
 //! [16 bytes]   account_id (only when the presence byte is 1)
 //! ```
-//!
-//! The trailing `account_id` (ADR-0021) is written only by v3+ producers;
-//! v1/v2 records end after the display name and decode to `None`.
 //!
 //! ## What's stored, what's not
 //!
@@ -65,8 +60,13 @@
 //!   - `accepted_contacts` — the local address book. Public bytes
 //!     only (pubkeys + display name); no secret material.
 //!   - `mls_snapshots` — per-group OpenMLS provider state. Reserved
-//!     in v1 — written as zero entries until 2a3 wires the
+//!     — written as zero entries until 2a3 wires the
 //!     DeviceGroup-side snapshot publishing.
+//!   - `synced_state` — the account's folded DeviceGroup state (ADR-0058:
+//!     chat folders, pins, mutes, archive, read cursors, drafts,
+//!     conversation order), so a restore with no other device alive seeds
+//!     the fold from it. Validated on encode and decode through
+//!     `lakko_sync::SyncedState::from_bytes`, fail closed.
 //!
 //! Not stored (intentional):
 //!   - Message history. Flows through the 2a3d DeviceGroup
@@ -81,24 +81,9 @@
 
 use crate::error::{BackupError, Result};
 
-/// Current payload schema version emitted on encode. v3 adds an
-/// optional per-contact `account_id` (ADR-0021) after each contact's
-/// display name, so a restored contact can be matched to an SFU
-/// group-call roster tag. v1/v2 backups (no account_id) still decode.
-pub const PAYLOAD_VERSION: u8 = 4;
-
-/// ADR-0021 schema — per-contact account_id, no known-group tail. Accepted on
-/// decode; `known_group_ids` maps to an empty `Vec`.
-const PAYLOAD_VERSION_V3: u8 = 3;
-
-/// Phase 2a3d1 schema — whole-storage snapshot tail, no per-contact
-/// account_id. Accepted on decode; contacts map to `account_id: None`.
-const PAYLOAD_VERSION_V2: u8 = 2;
-
-/// Phase 2a1 schema. Accepted on decode for forward
-/// compatibility; mapped to a v2-shaped `BackupPayload` with
-/// `whole_storage_snapshot: Vec::new()`.
-const PAYLOAD_VERSION_V1: u8 = 1;
+/// The payload schema version: the only one emitted and the only one
+/// accepted. v5 adds the ADR-0058 synced-state tail.
+pub const PAYLOAD_VERSION: u8 = 5;
 
 /// Account-id length (UUIDv7 raw, mirrors
 /// `lakko_contacts::ACCOUNT_ID_LEN`).
@@ -136,9 +121,8 @@ pub struct AcceptedContactRecord {
     /// User-chosen display name (UTF-8). Empty string is valid;
     /// `MAX_DISPLAY_NAME_LEN` bytes max.
     pub display_name: String,
-    /// Sender's 16-byte account_id (ADR-0021), when known. Persisted
-    /// from v3; `None` for a contact restored from a v1/v2 backup or
-    /// accepted before the account_id was learned. Lets a restored
+    /// Sender's 16-byte account_id (ADR-0021), when known. `None` for a
+    /// contact accepted before the account_id was learned. Lets a restored
     /// contact resolve to an SFU group-call roster `peer_tag`.
     pub account_id: Option<[u8; ACCOUNT_ID_LEN]>,
 }
@@ -172,8 +156,7 @@ pub struct BackupPayload {
     /// lands with the same group state the upload-side device
     /// had at backup time.
     ///
-    /// Empty `Vec` when no snapshot was published yet. v1-shaped
-    /// payloads decode to `Vec::new()` here.
+    /// Empty `Vec` when no snapshot was published yet.
     pub whole_storage_snapshot: Vec<u8>,
     /// The MLS `group_id`s this device knew about at backup time.
     ///
@@ -184,10 +167,16 @@ pub struct BackupPayload {
     /// brought back only the snapshot therefore landed a device holding every
     /// group and showing none of them.
     ///
-    /// Empty `Vec` for a v1, v2 or v3 payload, and for a device that knew no
-    /// groups - the two are indistinguishable here, and neither is a reason to
-    /// fail a restore.
+    /// Empty `Vec` for a device that knew no groups.
     pub known_group_ids: Vec<Vec<u8>>,
+    /// The folded DeviceGroup state (ADR-0058 section 5.2), as
+    /// `lakko_sync::SyncedState::to_bytes` wrote it. Empty = none held.
+    ///
+    /// Bytes rather than the typed state so this crate's value stays a plain
+    /// codec record; [`Self::encode`] and [`Self::decode`] both run
+    /// `SyncedState::from_bytes` over it, so a payload carrying a state the
+    /// fold would refuse is refused whole.
+    pub synced_state: Vec<u8>,
 }
 
 impl BackupPayload {
@@ -267,6 +256,17 @@ impl BackupPayload {
             out.extend_from_slice(id);
         }
 
+        // v5 tail — the ADR-0058 synced state.
+        check_synced_state(&self.synced_state)?;
+        let state_len = u32::try_from(self.synced_state.len()).map_err(|_| {
+            BackupError::InvalidPayload(format!(
+                "synced_state length {} overflows u32",
+                self.synced_state.len(),
+            ))
+        })?;
+        out.extend_from_slice(&state_len.to_be_bytes());
+        out.extend_from_slice(&self.synced_state);
+
         Ok(out)
     }
 
@@ -282,15 +282,9 @@ impl BackupPayload {
         let mut cur = wire;
 
         let version = take_u8(&mut cur)?;
-        if version != PAYLOAD_VERSION
-            && version != PAYLOAD_VERSION_V3
-            && version != PAYLOAD_VERSION_V2
-            && version != PAYLOAD_VERSION_V1
-        {
+        if version != PAYLOAD_VERSION {
             return Err(BackupError::InvalidPayload(format!(
-                "unsupported payload version {version} (expected one of \
-                 {PAYLOAD_VERSION_V1}, {PAYLOAD_VERSION_V2}, {PAYLOAD_VERSION_V3}, \
-                 {PAYLOAD_VERSION})",
+                "unsupported payload version {version} (expected {PAYLOAD_VERSION})",
             )));
         }
 
@@ -313,10 +307,7 @@ impl BackupPayload {
         ) as usize;
         let mut accepted_contacts = Vec::with_capacity(contact_count);
         for _ in 0..contact_count {
-            accepted_contacts.push(decode_contact(
-                &mut cur,
-                version == PAYLOAD_VERSION || version == PAYLOAD_VERSION_V3,
-            )?);
+            accepted_contacts.push(decode_contact(&mut cur)?);
         }
 
         let snapshot_count = u32::from_be_bytes(
@@ -329,52 +320,43 @@ impl BackupPayload {
             mls_snapshots.push(decode_snapshot(&mut cur)?);
         }
 
-        // Phase 2a3d1 — v2 tails carry a whole-storage snapshot;
-        // v1 tails do not. Distinguish on the version we read at
-        // the head, NOT on remaining-bytes heuristics — a v1
-        // producer never wrote the field, while a v2 producer
-        // always writes at least the 4-byte length prefix
-        // (which may be 0 for an empty snapshot).
-        let whole_storage_snapshot = if version == PAYLOAD_VERSION_V1 {
-            Vec::new()
-        } else {
-            let snapshot_len = u32::from_be_bytes(
-                take_n(&mut cur, 4)?
-                    .try_into()
-                    .expect("take_n(4) length pinned"),
-            ) as usize;
-            take_n(&mut cur, snapshot_len)?.to_vec()
-        };
+        let snapshot_len = u32::from_be_bytes(
+            take_n(&mut cur, 4)?
+                .try_into()
+                .expect("take_n(4) length pinned"),
+        ) as usize;
+        let whole_storage_snapshot = take_n(&mut cur, snapshot_len)?.to_vec();
 
-        // Same rule as the snapshot tail: decided on the version read at the
-        // head, never on remaining-bytes heuristics.
-        let known_group_ids = if version == PAYLOAD_VERSION {
-            let count = u32::from_be_bytes(
+        let count = u32::from_be_bytes(
+            take_n(&mut cur, 4)?
+                .try_into()
+                .expect("take_n(4) length pinned"),
+        ) as usize;
+        // Grown rather than pre-sized: the count is read off the wire, and
+        // reserving for it would let a malformed payload ask for an
+        // allocation no real backup needs.
+        let mut known_group_ids = Vec::new();
+        for _ in 0..count {
+            let len = u32::from_be_bytes(
                 take_n(&mut cur, 4)?
                     .try_into()
                     .expect("take_n(4) length pinned"),
             ) as usize;
-            // Grown rather than pre-sized: the count is read off the wire, and
-            // reserving for it would let a malformed payload ask for an
-            // allocation no real backup needs.
-            let mut ids = Vec::new();
-            for _ in 0..count {
-                let len = u32::from_be_bytes(
-                    take_n(&mut cur, 4)?
-                        .try_into()
-                        .expect("take_n(4) length pinned"),
-                ) as usize;
-                if len > MAX_GROUP_ID_LEN {
-                    return Err(BackupError::InvalidPayload(format!(
-                        "group_id length {len} exceeds MAX_GROUP_ID_LEN {MAX_GROUP_ID_LEN}",
-                    )));
-                }
-                ids.push(take_n(&mut cur, len)?.to_vec());
+            if len > MAX_GROUP_ID_LEN {
+                return Err(BackupError::InvalidPayload(format!(
+                    "group_id length {len} exceeds MAX_GROUP_ID_LEN {MAX_GROUP_ID_LEN}",
+                )));
             }
-            ids
-        } else {
-            Vec::new()
-        };
+            known_group_ids.push(take_n(&mut cur, len)?.to_vec());
+        }
+
+        let state_len = u32::from_be_bytes(
+            take_n(&mut cur, 4)?
+                .try_into()
+                .expect("take_n(4) length pinned"),
+        ) as usize;
+        let synced_state = take_n(&mut cur, state_len)?.to_vec();
+        check_synced_state(&synced_state)?;
 
         if !cur.is_empty() {
             return Err(BackupError::InvalidPayload(format!(
@@ -391,8 +373,19 @@ impl BackupPayload {
             mls_snapshots,
             whole_storage_snapshot,
             known_group_ids,
+            synced_state,
         })
     }
+}
+
+/// Refuse synced-state bytes the fold would refuse. Empty is "none held".
+fn check_synced_state(bytes: &[u8]) -> Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    lakko_sync::SyncedState::from_bytes(bytes)
+        .map(|_| ())
+        .map_err(|e| BackupError::InvalidPayload(format!("synced_state refused: {e}")))
 }
 
 // ============================================================================
@@ -415,9 +408,8 @@ fn encode_contact(out: &mut Vec<u8>, c: &AcceptedContactRecord) -> Result<()> {
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(name_bytes);
 
-    // v3 — optional account_id: a 1-byte presence flag, then 16 bytes
-    // when present. (Always emitted; `encode` only ever writes the
-    // current PAYLOAD_VERSION = v3.)
+    // Optional account_id: a 1-byte presence flag, then 16 bytes when
+    // present.
     match c.account_id {
         Some(id) => {
             out.push(1);
@@ -428,7 +420,7 @@ fn encode_contact(out: &mut Vec<u8>, c: &AcceptedContactRecord) -> Result<()> {
     Ok(())
 }
 
-fn decode_contact(cur: &mut &[u8], with_account_id: bool) -> Result<AcceptedContactRecord> {
+fn decode_contact(cur: &mut &[u8]) -> Result<AcceptedContactRecord> {
     let mut ed25519_pubkey = [0u8; PUBKEY_LEN];
     ed25519_pubkey.copy_from_slice(take_n(cur, PUBKEY_LEN)?);
 
@@ -447,24 +439,19 @@ fn decode_contact(cur: &mut &[u8], with_account_id: bool) -> Result<AcceptedCont
         .map_err(|e| BackupError::InvalidPayload(format!("display_name not utf-8: {e}")))?
         .to_owned();
 
-    // v3 — optional account_id (presence flag + 16 bytes). Absent on
-    // v1/v2 records, where `with_account_id` is false → `None`.
-    let account_id = if with_account_id {
-        match take_u8(cur)? {
-            0 => None,
-            1 => {
-                let mut id = [0u8; ACCOUNT_ID_LEN];
-                id.copy_from_slice(take_n(cur, ACCOUNT_ID_LEN)?);
-                Some(id)
-            },
-            other => {
-                return Err(BackupError::InvalidPayload(format!(
-                    "invalid account_id presence byte {other} (expected 0 or 1)",
-                )));
-            },
-        }
-    } else {
-        None
+    // Optional account_id (presence flag + 16 bytes).
+    let account_id = match take_u8(cur)? {
+        0 => None,
+        1 => {
+            let mut id = [0u8; ACCOUNT_ID_LEN];
+            id.copy_from_slice(take_n(cur, ACCOUNT_ID_LEN)?);
+            Some(id)
+        },
+        other => {
+            return Err(BackupError::InvalidPayload(format!(
+                "invalid account_id presence byte {other} (expected 0 or 1)",
+            )));
+        },
     };
 
     Ok(AcceptedContactRecord {
@@ -550,23 +537,8 @@ mod tests {
             mls_snapshots: vec![(b"group-id-bytes".to_vec(), b"opaque-snapshot".to_vec())],
             whole_storage_snapshot: b"opaque-whole-storage-blob".to_vec(),
             known_group_ids: vec![vec![7u8; 32], vec![9u8; 32]],
+            synced_state: Vec::new(),
         }
-    }
-
-    /// A v3 payload: everything v4 carries except the group index. Built by
-    /// encoding a v4 one and rewriting the version byte + dropping the tail,
-    /// so the fixture cannot drift from the encoder it is testing against.
-    fn v3_wire_of(payload: &BackupPayload) -> Vec<u8> {
-        let mut wire = payload.encode().unwrap();
-        // The v4 tail is `count(4)` plus, per id, `len(4) + bytes`.
-        let tail: usize = 4 + payload
-            .known_group_ids
-            .iter()
-            .map(|id| 4 + id.len())
-            .sum::<usize>();
-        wire.truncate(wire.len() - tail);
-        wire[0] = PAYLOAD_VERSION_V3;
-        wire
     }
 
     #[test]
@@ -577,30 +549,47 @@ mod tests {
     }
 
     #[test]
-    fn a_v3_payload_decodes_with_no_group_index() {
-        // The version at the head decides, never a remaining-bytes heuristic:
-        // a v3 producer never wrote the tail at all.
-        let payload = sample_payload();
-        let decoded = BackupPayload::decode(&v3_wire_of(&payload)).unwrap();
-        assert!(decoded.known_group_ids.is_empty());
-        // Everything v3 did carry survives, including the per-contact account
-        // id that arrived in that version.
-        assert_eq!(decoded.accepted_contacts, payload.accepted_contacts);
-        assert_eq!(
-            decoded.whole_storage_snapshot,
-            payload.whole_storage_snapshot
-        );
+    fn an_older_payload_version_is_refused() {
+        for old in 1..PAYLOAD_VERSION {
+            let mut wire = sample_payload().encode().unwrap();
+            wire[0] = old;
+            assert!(BackupPayload::decode(&wire).is_err(), "v{old} decoded");
+        }
     }
 
     #[test]
-    fn the_group_index_is_what_a_restore_cannot_recover_from_the_snapshot() {
-        // The reason this field exists: the whole-storage snapshot holds every
-        // group, but nothing can enumerate them out of it, so a payload that
-        // carries the snapshot alone restores a device that shows no chats.
-        let payload = sample_payload();
-        let v3 = BackupPayload::decode(&v3_wire_of(&payload)).unwrap();
-        assert!(!v3.whole_storage_snapshot.is_empty());
-        assert!(v3.known_group_ids.is_empty());
+    fn the_synced_state_round_trips_and_a_bad_one_is_refused() {
+        use lakko_sync::synced::{FolderMeta, SyncEntry, SyncedState, INCLUDE_GROUPS};
+        let mut state = SyncedState::new();
+        state
+            .apply(
+                7,
+                SyncEntry::FolderMeta(FolderMeta {
+                    folder_id: [3; 16],
+                    name: "Work".into(),
+                    include_kinds: INCLUDE_GROUPS,
+                    exclude_flags: 0,
+                }),
+            )
+            .unwrap();
+        let mut payload = sample_payload();
+        payload.synced_state = state.to_bytes();
+        let decoded = BackupPayload::decode(&payload.encode().unwrap()).unwrap();
+        assert_eq!(
+            SyncedState::from_bytes(&decoded.synced_state).unwrap(),
+            state
+        );
+
+        payload.synced_state = vec![9, 9, 9];
+        assert!(payload.encode().is_err());
+        // Hand-built, because the encoder refuses to produce one.
+        let mut good = sample_payload();
+        good.synced_state = Vec::new();
+        let mut wire = good.encode().unwrap();
+        wire.truncate(wire.len() - 4);
+        wire.extend_from_slice(&3u32.to_be_bytes());
+        wire.extend_from_slice(&[9, 9, 9]);
+        assert!(BackupPayload::decode(&wire).is_err());
     }
 
     #[test]
@@ -612,13 +601,16 @@ mod tests {
 
     #[test]
     fn an_over_long_group_id_is_refused_on_decode() {
-        // Hand-built, because the encoder refuses to produce one.
-        let payload = sample_payload();
-        let mut wire = v3_wire_of(&payload);
-        wire[0] = PAYLOAD_VERSION;
+        // Hand-built, because the encoder refuses to produce one: strip the
+        // group and state tails and write an over-long id.
+        let mut payload = sample_payload();
+        payload.known_group_ids = Vec::new();
+        let mut wire = payload.encode().unwrap();
+        wire.truncate(wire.len() - 8);
         wire.extend_from_slice(&1u32.to_be_bytes());
         wire.extend_from_slice(&u32::try_from(MAX_GROUP_ID_LEN + 1).unwrap().to_be_bytes());
         wire.extend_from_slice(&[0u8; MAX_GROUP_ID_LEN + 1]);
+        wire.extend_from_slice(&0u32.to_be_bytes());
         assert!(BackupPayload::decode(&wire).is_err());
     }
 
@@ -626,7 +618,7 @@ mod tests {
     fn a_truncated_group_tail_is_refused_rather_than_read_short() {
         let payload = sample_payload();
         let wire = payload.encode().unwrap();
-        for cut in 1..=(4 + 32) {
+        for cut in 1..=(4 + 32 + 4) {
             assert!(
                 BackupPayload::decode(&wire[..wire.len() - cut]).is_err(),
                 "a wire cut {cut} bytes short decoded"
@@ -652,68 +644,11 @@ mod tests {
             mls_snapshots: vec![],
             whole_storage_snapshot: Vec::new(),
             known_group_ids: Vec::new(),
+            synced_state: Vec::new(),
         };
         let wire = payload.encode().unwrap();
         let decoded = BackupPayload::decode(&wire).unwrap();
         assert_eq!(decoded, payload);
-    }
-
-    /// Phase 2a3d1 — a v1-shaped wire payload (no
-    /// `whole_storage_snapshot` tail) decodes as a v2-shaped
-    /// `BackupPayload` with an empty snapshot. Guarantees
-    /// forward compat for backups uploaded by Phase 2a1
-    /// clients.
-    #[test]
-    fn v1_payload_decodes_with_empty_snapshot() {
-        // Build the v1 bytes by hand — fixture mirrors the
-        // sample_payload() shape minus the trailing snapshot
-        // length + bytes.
-        let mut wire = Vec::new();
-        wire.push(PAYLOAD_VERSION_V1);
-        wire.extend_from_slice(&[0xA1; ACCOUNT_ID_LEN]);
-        wire.extend_from_slice(&1_700_000_000_000u64.to_be_bytes());
-        wire.extend_from_slice(&[0x42; SEED_LEN]);
-        wire.extend_from_slice(&0u32.to_be_bytes()); // contact_count = 0
-        wire.extend_from_slice(&0u32.to_be_bytes()); // snapshot_count = 0
-                                                     // NO whole_storage_snapshot tail.
-
-        let decoded = BackupPayload::decode(&wire).expect("v1 decode");
-        assert_eq!(decoded.account_id, [0xA1; ACCOUNT_ID_LEN]);
-        assert_eq!(decoded.created_at_ms, 1_700_000_000_000);
-        assert_eq!(decoded.ed25519_seed, [0x42; SEED_LEN]);
-        assert!(decoded.accepted_contacts.is_empty());
-        assert!(decoded.mls_snapshots.is_empty());
-        assert!(
-            decoded.whole_storage_snapshot.is_empty(),
-            "v1 payload should fold to an empty snapshot field"
-        );
-    }
-
-    #[test]
-    fn v2_payload_decodes_contact_without_account_id() {
-        // ADR-0021 backwards-compat: a v2 backup (no per-contact
-        // account_id byte) must still restore — the contact's account_id
-        // folds to None and the v2 whole-storage-snapshot tail is read.
-        let mut wire = Vec::new();
-        wire.push(PAYLOAD_VERSION_V2);
-        wire.extend_from_slice(&[0xB2; ACCOUNT_ID_LEN]);
-        wire.extend_from_slice(&1_700_000_000_000u64.to_be_bytes());
-        wire.extend_from_slice(&[0x42; SEED_LEN]);
-        wire.extend_from_slice(&1u32.to_be_bytes()); // contact_count = 1
-                                                     // One contact — v2 layout has NO account_id byte after the name.
-        wire.extend_from_slice(&[0x01; PUBKEY_LEN]);
-        wire.extend_from_slice(&[0x02; PUBKEY_LEN]);
-        wire.extend_from_slice(&5u16.to_be_bytes());
-        wire.extend_from_slice(b"alice");
-        wire.extend_from_slice(&0u32.to_be_bytes()); // snapshot_count = 0
-        wire.extend_from_slice(&3u32.to_be_bytes()); // whole_storage_len = 3
-        wire.extend_from_slice(b"abc");
-
-        let decoded = BackupPayload::decode(&wire).expect("v2 decode");
-        assert_eq!(decoded.accepted_contacts.len(), 1);
-        assert_eq!(decoded.accepted_contacts[0].display_name, "alice");
-        assert_eq!(decoded.accepted_contacts[0].account_id, None);
-        assert_eq!(decoded.whole_storage_snapshot, b"abc");
     }
 
     #[test]
@@ -764,6 +699,7 @@ mod tests {
             mls_snapshots: vec![],
             whole_storage_snapshot: Vec::new(),
             known_group_ids: Vec::new(),
+            synced_state: Vec::new(),
         };
         let err = payload.encode().unwrap_err();
         assert!(matches!(err, BackupError::InvalidPayload(_)));
@@ -784,6 +720,7 @@ mod tests {
             mls_snapshots: vec![],
             whole_storage_snapshot: Vec::new(),
             known_group_ids: Vec::new(),
+            synced_state: Vec::new(),
         };
         let wire = payload.encode().unwrap();
         let decoded = BackupPayload::decode(&wire).unwrap();

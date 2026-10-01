@@ -13,6 +13,9 @@
 //! Nothing here touches a screen, a store or the network. A client maps what
 //! it already holds into these types, asks, and renders the answer.
 
+use crate::scoped_discovery::{FfiGroupsForm, FfiScopeId, FfiVisibilityMode, FfiVisibilitySetting};
+use crate::FfiError;
+use lakko_contacts::visibility::{ScopeId as RustScopeId, VisibilitySetting as RustSetting};
 use lakko_ui_rules::call_bar::{
     call_bar_status as rust_call_bar_status, call_bar_visibility as rust_call_bar_visibility,
     CallBar as RustCallBar, CallBarPhase as RustCallBarPhase, CallBarStatus as RustCallBarStatus,
@@ -21,6 +24,11 @@ use lakko_ui_rules::capture::call_holds_capture as rust_call_holds_capture;
 use lakko_ui_rules::conversation::{
     order_conversations as rust_order_conversations, ConversationKind as RustConversationKind,
     ConversationRow as RustConversationRow,
+};
+use lakko_ui_rules::folder::{
+    folder_matches as rust_folder_matches,
+    order_conversations_in_folder as rust_order_conversations_in_folder,
+    FolderRule as RustFolderRule,
 };
 use lakko_ui_rules::info::{
     channel_info_sections as rust_channel_info_sections,
@@ -33,9 +41,15 @@ use lakko_ui_rules::info::{
 use lakko_ui_rules::lookup::{
     bare_name as rust_bare_name, looks_like_a_name as rust_looks_like_a_name,
 };
+
 use lakko_ui_rules::ring::{
     remaining_ring_ms as rust_remaining_ring_ms, ring_decision as rust_ring_decision,
     RingDecision as RustRingDecision, CALL_RING_WINDOW_MS,
+};
+use lakko_ui_rules::visibility::{
+    choose_mode as rust_choose_mode, exclude_scope_under_all as rust_exclude_scope_under_all,
+    set_contacts_of_contacts as rust_set_contacts_of_contacts, set_groups as rust_set_groups,
+    set_groups_form as rust_set_groups_form, set_scope_chosen as rust_set_scope_chosen,
 };
 
 /// Which screen a conversation row opens.
@@ -70,6 +84,7 @@ impl From<ConversationKind> for RustConversationKind {
 /// reads six fields and nothing else, so an avatar, a preview, an unread count
 /// and a handle to open all stay on the client side where they already are.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ConversationRow {
     /// Stable within a kind; `(kind, id)` is unique in the list.
     pub id: String,
@@ -88,6 +103,15 @@ pub struct ConversationRow {
     /// Archived by this person. Sinks below everything, including something
     /// newer.
     pub archived: bool,
+    /// Muted by this person. Read only by a folder's Muted exclude toggle
+    /// (ADR-0058); the list order ignores it. Defaults to `false`, so
+    /// existing initializer calls stay source-compatible.
+    #[uniffi(default = false)]
+    pub muted: bool,
+    /// Something unread in it, or a manual "mark as unread" - what the
+    /// unread badge means. Read only by a folder's Read exclude toggle.
+    #[uniffi(default = false)]
+    pub has_unread: bool,
 }
 
 impl From<ConversationRow> for RustConversationRow {
@@ -99,8 +123,63 @@ impl From<ConversationRow> for RustConversationRow {
             last_activity_ms: r.last_activity_ms,
             pinned: r.pinned,
             archived: r.archived,
+            muted: r.muted,
+            has_unread: r.has_unread,
         }
     }
+}
+
+/// A chat folder's rule in row terms (ADR-0058 section 6).
+///
+/// `include_kinds` / `exclude_flags` are the folder's meta-register bits as
+/// the synced state returns them (include: bit0 one-to-one, bit1 groups,
+/// bit2 channels; exclude: bit0 muted, bit1 read, bit2 archived).
+/// `included` / `excluded` are the [`ConversationRow::id`]s the client maps
+/// the folder's hand-added and hand-excluded references to.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FolderRule {
+    /// Kind toggles.
+    pub include_kinds: u32,
+    /// Exclude toggles.
+    pub exclude_flags: u32,
+    /// Row ids added by hand.
+    pub included: Vec<String>,
+    /// Row ids excluded by hand.
+    pub excluded: Vec<String>,
+}
+
+impl From<FolderRule> for RustFolderRule {
+    fn from(r: FolderRule) -> Self {
+        Self {
+            include_kinds: r.include_kinds,
+            exclude_flags: r.exclude_flags,
+            included: r.included,
+            excluded: r.excluded,
+        }
+    }
+}
+
+/// Whether `row` is in the folder: excluded by hand beats everything; then
+/// included by kind toggle or by hand; then not muted / read / archived
+/// while the matching exclude toggle is on (`docs/ux/chat-folders.md` 3.2).
+#[uniffi::export]
+#[must_use]
+pub fn folder_matches(folder: FolderRule, row: ConversationRow) -> bool {
+    rust_folder_matches(&folder.into(), &row.into())
+}
+
+/// Order a folder's rows: the folder's own pins first in their stored order
+/// (`folder_pins` are row ids; unknown ids skipped), then the
+/// [`order_conversations`] rule with the global pin ignored. Returns input
+/// indices, every row exactly once.
+#[uniffi::export]
+#[must_use]
+pub fn order_conversations_in_folder(
+    rows: Vec<ConversationRow>,
+    folder_pins: Vec<String>,
+) -> Vec<u32> {
+    let rust: Vec<RustConversationRow> = rows.into_iter().map(Into::into).collect();
+    rust_order_conversations_in_folder(&rust, &folder_pins)
 }
 
 /// Order the one conversation list: pinned first, archived last, newest
@@ -212,6 +291,10 @@ pub enum InfoSection {
     ManageChannel,
     /// Stop following a channel.
     Unsubscribe,
+    /// The channel's member list, for its readers (ADR-0060 section 3,
+    /// UX `who-can-find-me.md` 6.3). Appended last: uniffi decodes by
+    /// ordinal.
+    ChannelMembers,
 }
 
 impl From<RustInfoSection> for InfoSection {
@@ -236,6 +319,7 @@ impl From<RustInfoSection> for InfoSection {
             RustInfoSection::SubscriberCount => Self::SubscriberCount,
             RustInfoSection::ManageChannel => Self::ManageChannel,
             RustInfoSection::Unsubscribe => Self::Unsubscribe,
+            RustInfoSection::ChannelMembers => Self::ChannelMembers,
         }
     }
 }
@@ -509,9 +593,130 @@ pub fn call_holds_capture(call_is_live: bool, unanswered_incoming_ring: bool) ->
     rust_call_holds_capture(call_is_live, unanswered_incoming_ring)
 }
 
+// ============================================================================
+// "Who can find me" — the Settings transitions (UX section 11, ADR-0060 §7)
+// ============================================================================
+//
+// Each takes the current setting and returns the next one; none stamps
+// `updated_at_ms` (the caller does, then composes the envelope). Every result
+// satisfies the setting's rule, so a client never has to decide what a tap on
+// the last part means.
+
+/// Choose one of the three positions. Leaving Some people remembers its
+/// parts; coming back restores them (or the default parts when none were
+/// remembered).
+#[uniffi::export]
+#[must_use]
+pub fn choose_visibility_mode(
+    setting: FfiVisibilitySetting,
+    mode: FfiVisibilityMode,
+) -> FfiVisibilitySetting {
+    rust_choose_mode(&setting.into(), mode.into()).into()
+}
+
+/// Switch part 2.1 (contacts of my contacts). Turning the last part off
+/// moves to Nobody; turning a part on from Nobody or Everyone moves to Some
+/// people.
+#[uniffi::export]
+#[must_use]
+pub fn set_contacts_of_contacts(setting: FfiVisibilitySetting, on: bool) -> FfiVisibilitySetting {
+    rust_set_contacts_of_contacts(&setting.into(), on).into()
+}
+
+/// Switch part 2.2 (groups and channels), keeping its form. Same position
+/// rules as [`set_contacts_of_contacts`].
+#[uniffi::export]
+#[must_use]
+pub fn set_groups_visible(setting: FfiVisibilitySetting, on: bool) -> FfiVisibilitySetting {
+    rust_set_groups(&setting.into(), on).into()
+}
+
+/// All groups and channels, or only the chosen ones. No effect unless part
+/// 2.2 is on.
+#[uniffi::export]
+#[must_use]
+pub fn set_groups_form(setting: FfiVisibilitySetting, form: FfiGroupsForm) -> FfiVisibilitySetting {
+    rust_set_groups_form(&setting.into(), form.into()).into()
+}
+
+/// Exclude one group or channel while "all" is on: the form becomes "only
+/// the ones I choose" with every other scope in `all_scopes` chosen.
+///
+/// # Errors
+///
+/// [`FfiError::Visibility`] `scopeIdLength` / `tooManyChosen`.
+#[uniffi::export]
+pub fn exclude_scope_under_all(
+    setting: FfiVisibilitySetting,
+    all_scopes: Vec<FfiScopeId>,
+    excluded: FfiScopeId,
+) -> Result<FfiVisibilitySetting, FfiError> {
+    let all: Vec<RustScopeId> = all_scopes.into_iter().map(Into::into).collect();
+    let s: RustSetting = setting.into();
+    Ok(rust_exclude_scope_under_all(&s, &all, &excluded.into())?.into())
+}
+
+/// Choose or unchoose one group or channel in the chosen list.
+///
+/// # Errors
+///
+/// [`FfiError::Visibility`] `scopeIdLength` / `tooManyChosen`.
+#[uniffi::export]
+pub fn set_scope_chosen(
+    setting: FfiVisibilitySetting,
+    scope: FfiScopeId,
+    on: bool,
+) -> Result<FfiVisibilitySetting, FfiError> {
+    Ok(rust_set_scope_chosen(&setting.into(), &scope.into(), on)?.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visibility_transitions_cross_the_boundary_intact() {
+        use crate::scoped_discovery::{default_visibility_setting, FfiScopeKind};
+        let s = default_visibility_setting();
+        let nobody = choose_visibility_mode(s.clone(), FfiVisibilityMode::Nobody);
+        assert_eq!(nobody.mode, FfiVisibilityMode::Nobody);
+        assert!(nobody.last_contacts_of_contacts);
+        let back = choose_visibility_mode(nobody, FfiVisibilityMode::Some);
+        assert_eq!(back, s);
+
+        let off = set_contacts_of_contacts(set_groups_visible(s.clone(), false), false);
+        assert_eq!(
+            off.mode,
+            FfiVisibilityMode::Nobody,
+            "the last part off is Nobody"
+        );
+
+        let scope = |b: u8| FfiScopeId {
+            kind: FfiScopeKind::Group,
+            id: vec![b; 8],
+        };
+        let excluded =
+            exclude_scope_under_all(s.clone(), vec![scope(1), scope(2)], scope(2)).unwrap();
+        assert_eq!(excluded.groups, Some(FfiGroupsForm::Chosen));
+        assert_eq!(excluded.chosen, vec![scope(1)]);
+        let chosen = set_scope_chosen(excluded, scope(3), true).unwrap();
+        assert_eq!(chosen.chosen, vec![scope(1), scope(3)]);
+        assert_eq!(
+            set_groups_form(chosen, FfiGroupsForm::All).groups,
+            Some(FfiGroupsForm::All)
+        );
+        assert!(matches!(
+            set_scope_chosen(
+                s,
+                FfiScopeId {
+                    kind: FfiScopeKind::Channel,
+                    id: vec![]
+                },
+                true
+            ),
+            Err(FfiError::Visibility(_))
+        ));
+    }
 
     fn row(id: &str, kind: ConversationKind, at: Option<i64>) -> ConversationRow {
         ConversationRow {
@@ -521,7 +726,42 @@ mod tests {
             last_activity_ms: at,
             pinned: false,
             archived: false,
+            muted: false,
+            has_unread: false,
         }
+    }
+
+    #[test]
+    fn the_folder_rule_crosses_the_boundary() {
+        let rule = FolderRule {
+            include_kinds: 0b100,
+            exclude_flags: 0b010,
+            included: vec!["g".into()],
+            excluded: vec!["c2".into()],
+        };
+        let mut unread = row("c1", ConversationKind::Channel, Some(1));
+        unread.has_unread = true;
+        assert!(folder_matches(rule.clone(), unread.clone()));
+        // Read is excluded while the Read toggle is on.
+        assert!(!folder_matches(
+            rule.clone(),
+            row("c1", ConversationKind::Channel, Some(1))
+        ));
+        let mut hand = row("g", ConversationKind::Group, Some(1));
+        hand.has_unread = true;
+        assert!(folder_matches(rule.clone(), hand));
+        let mut excluded = row("c2", ConversationKind::Channel, Some(1));
+        excluded.has_unread = true;
+        assert!(!folder_matches(rule, excluded));
+
+        let rows = vec![
+            row("a", ConversationKind::Chat, Some(1)),
+            row("b", ConversationKind::Chat, Some(2)),
+        ];
+        assert_eq!(
+            order_conversations_in_folder(rows, vec!["a".into()]),
+            vec![0, 1]
+        );
     }
 
     #[test]
@@ -546,6 +786,12 @@ mod tests {
             subscriber_count_known: false,
         })
         .contains(&InfoSection::Unsubscribe));
+        assert!(channel_info_sections(ChannelInfoCapabilities {
+            is_publisher: true,
+            is_subscriber: false,
+            subscriber_count_known: true,
+        })
+        .contains(&InfoSection::ChannelMembers));
         assert_eq!(info_target(ConversationKind::Chat), InfoTarget::Person);
     }
 
