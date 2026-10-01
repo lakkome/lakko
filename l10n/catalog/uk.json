@@ -2522,6 +2522,10 @@
       "text": "Відкріпити",
       "status": "machine"
     },
+    "chat.message.unsupported": {
+      "text": "Для цього повідомлення потрібна новіша версія Lakko.",
+      "status": "machine"
+    },
     "chat.not_found.back": {
       "text": "Назад до чатів",
       "status": "machine"
@@ -3798,6 +3802,10 @@
       "text": "Очікування",
       "status": "machine"
     },
+    "contacts.mailbox.chat_join_failed": {
+      "text": "З вами почали чат, але на цьому пристрої його не вдалося відкрити. Попросіть співрозмовника додати вас знову.",
+      "status": "machine"
+    },
     "contacts.mailbox.join_failed": {
       "text": "Вас додали до групи, але запрошення не вдалося відкрити на цьому пристрої. Попросіть того, хто вас додав, зробити це ще раз.",
       "status": "machine"
@@ -3996,6 +4004,10 @@
     },
     "device_link.error.timeout": {
       "text": "Інший пристрій не відповів вчасно. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "device_link.error.wrong_account": {
+      "text": "Інший пристрій відповів від імені іншого облікового запису. На цьому пристрої нічого не змінилося.",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {

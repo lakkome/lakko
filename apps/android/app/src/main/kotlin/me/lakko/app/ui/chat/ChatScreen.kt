@@ -1770,7 +1770,9 @@ internal fun Bubble(
         val metaSlot = me.lakko.app.media.bubbleMetaSlot(soleBubble)
         val mediaOnly = metaSlot == me.lakko.app.media.BubbleMetaSlot.MEDIA_PILL
         val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE || mediaOnly
-        val menuAvailable = actionsAvailable && hasId && !msg.deleted
+        // ADR-0061 section 6 — a newer-version row has no content this build
+        // can read, so nothing to copy, edit, quote or forward: no menu.
+        val menuAvailable = actionsAvailable && hasId && !msg.deleted && msg.unsupportedVersion == null
         val openMenu: (() -> Unit)? = if (menuAvailable) {
             { menuOpen = true }
         } else {
@@ -1820,6 +1822,15 @@ internal fun Bubble(
                         // ADR-0023 — muted tombstone, no text / attachments.
                         Text(
                             text = t("chat.message.deleted"),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = contentColor.copy(alpha = 0.6f),
+                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                        )
+                    } else if (msg.unsupportedVersion != null) {
+                        // ADR-0061 section 6 — a message from a newer wire
+                        // version: the client's own sentence, never core text.
+                        Text(
+                            text = t(UNSUPPORTED_MESSAGE_KEY),
                             style = MaterialTheme.typography.bodyMedium,
                             color = contentColor.copy(alpha = 0.6f),
                             fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
@@ -4174,7 +4185,9 @@ private fun MembersSheet(
  * one mark from the next.
  */
 private fun selectionRowLabel(msg: ChatMessage): String =
-    msg.text.ifEmpty {
+    if (msg.unsupportedVersion != null) {
+        me.lakko.app.l10n.Localization.strings.value[UNSUPPORTED_MESSAGE_KEY]
+    } else msg.text.ifEmpty {
         msg.attachments.firstOrNull()
             ?.let { mediaPreviewLabel(PreviewAttachment(kind = it.kind, mime = it.mime)) }
             ?: me.lakko.app.l10n.Localization.strings.value["chat.reply.fallback_excerpt"]

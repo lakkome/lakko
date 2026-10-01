@@ -38,6 +38,8 @@ export interface NotificationWords {
   decline: string;
   incomingCall: string;
   newMessage: string;
+  /** ADR-0061 section 6 — the body for a message from a newer Lakko. */
+  unsupportedMessage: string;
   /** Entry `i` is the attachment-only preview line for `i + 1` attachments. */
   attachments: string[];
 }
@@ -55,6 +57,7 @@ export function renderNotificationStrings(): NotificationWords {
     decline: t("call.incoming.decline"),
     incomingCall: t("call.notification.incoming"),
     newMessage: t("notification.message.new"),
+    unsupportedMessage: t("chat.message.unsupported"),
     attachments,
   };
 }

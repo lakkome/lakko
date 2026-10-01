@@ -24,8 +24,10 @@ enum UnreadCounting {
     /// The number of user-visible incoming messages in a batch.
     static func incomingMessages(in events: [IncomingChatEvent]) -> Int {
         events.reduce(0) { acc, event in
-            if case .application = event { return acc + 1 }
-            return acc
+            switch event {
+            case .application, .unsupported: return acc + 1
+            default: return acc
+            }
         }
     }
 

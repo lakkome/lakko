@@ -5,11 +5,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   authLimitMessage,
+  deviceRestoreErrorMessage,
+  identityRestoreErrorMessage,
   isSignupRateLimited,
   loginErrorMessage,
   passkeyErrorMessage,
   recoveryCodeSendLimited,
   recoverErrorMessage,
+  screenText,
   signupErrorMessage,
   tooManyAttempts,
   tooManyAttemptsMessage,
@@ -182,5 +185,48 @@ describe("ADR-0054 S4 limits (docs/ux/anti-abuse.md section 2)", () => {
   it("a non-limit error is not claimed", () => {
     expect(authLimitMessage(new AuthHttpError(401, "/x", "{}"))).toBeNull();
     expect(authLimitMessage(new Error("x"))).toBeNull();
+  });
+});
+
+describe("restore identity checks render from their kind (ADR-0061 section 6)", () => {
+  // Shaped like `AuthContext`'s classes (matched on `name`), with a `message`
+  // that is NOT the screen sentence, so a pass-through of the English would
+  // fail these assertions.
+  const mismatch = (source?: "phrase" | "device"): Error =>
+    Object.assign(new Error("Diagnostic for the logs."), {
+      name: "SupersessionPhraseMismatch",
+      ...(source === undefined ? {} : { source }),
+    });
+  const unavailable = (kind: "missing" | "unreachable"): Error =>
+    Object.assign(new Error("Diagnostic for the logs."), {
+      name: "IdentityVerificationUnavailable",
+      kind,
+    });
+  const PHRASE = "That recovery phrase doesn't match this account's identity. Check the phrase, or pair an existing device instead.";
+  const DEVICE =
+    "The identity received from your other device doesn't match this account's published identity — refusing to use it.";
+
+  it("follows the source the mismatch carries, whichever form shows it", () => {
+    expect(screenText(mismatch("device"))).toBe(DEVICE);
+    expect(screenText(mismatch("phrase"))).toBe(PHRASE);
+    expect(identityRestoreErrorMessage(mismatch("device"))).toBe(DEVICE);
+    expect(deviceRestoreErrorMessage(mismatch("phrase"))).toBe(PHRASE);
+    // The three-word form reaches the same check through screenText.
+    expect(wordVaultErrorMessage(mismatch("phrase"), null)).toBe(PHRASE);
+    expect(recoverErrorMessage(mismatch("device"))).toBe(DEVICE);
+  });
+
+  it("falls back to the form's own source when the error carries none", () => {
+    expect(identityRestoreErrorMessage(mismatch())).toBe(PHRASE);
+    expect(deviceRestoreErrorMessage(mismatch())).toBe(DEVICE);
+  });
+
+  it("says why the identity could not be checked", () => {
+    expect(screenText(unavailable("missing"))).toBe(
+      "No published identity was found to verify the recovered identity. Try again, or restore from a device that still has your account.",
+    );
+    expect(wordVaultErrorMessage(unavailable("unreachable"), null)).toBe(
+      "Could not reach the directory to verify the recovered identity. Check your connection and try again.",
+    );
   });
 });

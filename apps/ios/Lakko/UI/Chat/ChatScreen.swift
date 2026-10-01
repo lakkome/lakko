@@ -1899,7 +1899,12 @@ struct MessageRow: View {
     /// message that is not a tombstone, and only once its send is complete:
     /// a row still sending or one that failed has nothing on the server to
     /// forward yet.
-    private var canForward: Bool { canReact && message.ack == .sent }
+    ///
+    /// ADR-0061 section 6 — not on a message from a newer version: this build
+    /// holds none of its content, so a forward would carry nothing.
+    private var canForward: Bool {
+        canReact && message.ack == .sent && message.unsupportedVersion == nil
+    }
 
     /// Section 8 — Select is offered on the rows the mode can select, which is
     /// the Forward gate (landed, not a tombstone, send complete).
@@ -2167,6 +2172,12 @@ struct MessageRow: View {
                 if message.deleted {
                     // Muted tombstone — no original text / attachments.
                     Label(l10n.t("chat.message.deleted"), systemImage: "trash")
+                        .font(.body.italic())
+                        .opacity(0.7)
+                } else if message.unsupportedVersion != nil {
+                    // ADR-0061 section 6 — a message from a newer version of
+                    // Lakko. The core hands no text; the sentence is ours.
+                    Label(l10n.t("chat.message.unsupported"), systemImage: "arrow.down.app")
                         .font(.body.italic())
                         .opacity(0.7)
                 } else {

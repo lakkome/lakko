@@ -22,6 +22,7 @@
  * Pure orchestration over injected steps, so the ordering is pinned by a
  * test (`device-restore-name-check.test.ts`).
  */
+import { KeyedError } from "../l10n/keyed-error";
 
 /** The name resolves to another account, or to none. */
 export const TYPED_NAME_OTHER_ACCOUNT =
@@ -31,19 +32,24 @@ export const TYPED_NAME_OTHER_ACCOUNT =
 export const TYPED_NAME_CHECK_UNAVAILABLE =
   "Could not reach Lakko. Check your connection and try again.";
 
-/** The typed name does not resolve to the redeemed account. */
-export class TypedNameOtherAccount extends Error {
+/** The typed name does not resolve to the redeemed account. Keyed
+ *  (ADR-0061 section 6): the screen renders `device_link.error.name_other_account`
+ *  in the current language; {@link TYPED_NAME_OTHER_ACCOUNT} is its English. */
+export class TypedNameOtherAccount extends KeyedError {
   override name = "TypedNameOtherAccount";
   constructor() {
-    super(TYPED_NAME_OTHER_ACCOUNT);
+    super("device_link.error.name_other_account");
   }
 }
 
-/** The typed name could not be checked; nothing landed. */
-export class TypedNameCheckUnavailable extends Error {
+/** The typed name could not be checked; nothing landed. Keyed as the app's
+ *  generic network failure (`common.error.offline`), whose English is
+ *  {@link TYPED_NAME_CHECK_UNAVAILABLE}. */
+export class TypedNameCheckUnavailable extends KeyedError {
   override name = "TypedNameCheckUnavailable";
   constructor(cause: unknown) {
-    super(TYPED_NAME_CHECK_UNAVAILABLE, { cause });
+    super("common.error.offline");
+    this.cause = cause;
   }
 }
 

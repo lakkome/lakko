@@ -121,6 +121,7 @@ public enum SharedStorage {
         "call.log.missed",
         "chat.media.voice_message",
         "chat.media.video_message",
+        "chat.message.unsupported",
         "notification.message.new",
     ]
 

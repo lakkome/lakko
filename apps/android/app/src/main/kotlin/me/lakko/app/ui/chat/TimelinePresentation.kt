@@ -146,9 +146,12 @@ public fun previewLine(
     deleted: Boolean,
     author: PreviewAuthor?,
     strings: Strings = Localization.strings.value,
+    unsupported: Boolean = false,
 ): String {
     val body = when {
         deleted -> strings["chat.message.deleted"]
+        // ADR-0061 section 6 — a message from a newer wire version.
+        unsupported -> strings[UNSUPPORTED_MESSAGE_KEY]
         text.isNotBlank() -> text.trim().replace(Regex("\\s+"), " ")
         attachments.isNotEmpty() -> {
             val first = mediaPreviewLabel(attachments.first(), strings)
@@ -171,6 +174,14 @@ public fun previewLine(
         is PreviewAuthor.Named -> strings.format("chats.preview.sender", mapOf("name" to author.name, "text" to body))
     }
 }
+
+/**
+ * ADR-0061 section 6 — the catalog key every surface (bubble, conversation
+ * row, notification) renders for a chat envelope from a newer wire version.
+ * The core hands such a row over with empty text; no core prose reaches the
+ * screen.
+ */
+public const val UNSUPPORTED_MESSAGE_KEY: String = "chat.message.unsupported"
 
 /** Whose message a preview line quotes: rendered as `You: ...` / `Anna: ...`. */
 public sealed interface PreviewAuthor {

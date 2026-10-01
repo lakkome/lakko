@@ -2522,6 +2522,10 @@
       "text": "Sabitlemeyi kaldır",
       "status": "machine"
     },
+    "chat.message.unsupported": {
+      "text": "Bu mesaj için Lakko'nun daha yeni bir sürümü gerekiyor.",
+      "status": "machine"
+    },
     "chat.not_found.back": {
       "text": "Sohbetlere dön",
       "status": "machine"
@@ -3798,6 +3802,10 @@
       "text": "Bekliyor",
       "status": "machine"
     },
+    "contacts.mailbox.chat_join_failed": {
+      "text": "Biri seninle sohbet başlattı ama sohbet bu cihazda açılamadı. Seni yeniden eklemesini iste.",
+      "status": "machine"
+    },
     "contacts.mailbox.join_failed": {
       "text": "Bir gruba eklendiniz, ancak davet bu cihazda açılamadı. Sizi ekleyen kişiden yeniden eklemesini isteyin.",
       "status": "machine"
@@ -3996,6 +4004,10 @@
     },
     "device_link.error.timeout": {
       "text": "Diğer cihaz zamanında yanıt vermedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "device_link.error.wrong_account": {
+      "text": "Diğer cihaz başka bir hesap adına yanıt verdi. Bu cihazda hiçbir şey değiştirilmedi.",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {

@@ -104,6 +104,7 @@ export const NOTIFICATION_STRINGS_EN = Object.freeze({
   decline: "Decline",
   incomingCall: "Incoming call",
   newMessage: "New message",
+  unsupportedMessage: "This message needs a newer version of Lakko.",
   /** @type {readonly string[]} */
   attachments: Object.freeze([]),
 });
@@ -148,12 +149,12 @@ const MAX_NOTIFICATION_STRING = 200;
  * `attachments` is kept entry by entry: a malformed entry is dropped to an
  * empty string, which {@link attachmentsLine} reads as English.
  *
- * @returns {{ voiceCall: string, videoCall: string, accept: string, decline: string, incomingCall: string, newMessage: string, attachments: string[] }}
+ * @returns {{ voiceCall: string, videoCall: string, accept: string, decline: string, incomingCall: string, newMessage: string, unsupportedMessage: string, attachments: string[] }}
  */
 export function notificationStrings(raw) {
   /** @type {Record<string, unknown>} */
   const source = typeof raw === "object" && raw !== null ? /** @type {Record<string, unknown>} */ (raw) : {};
-  /** @param {"voiceCall" | "videoCall" | "accept" | "decline" | "incomingCall" | "newMessage"} key */
+  /** @param {"voiceCall" | "videoCall" | "accept" | "decline" | "incomingCall" | "newMessage" | "unsupportedMessage"} key */
   const pick = (key) => {
     const v = source[key];
     return typeof v === "string" && v.length > 0 && v.length <= MAX_NOTIFICATION_STRING
@@ -167,6 +168,7 @@ export function notificationStrings(raw) {
     decline: pick("decline"),
     incomingCall: pick("incomingCall"),
     newMessage: pick("newMessage"),
+    unsupportedMessage: pick("unsupportedMessage"),
     attachments: Array.isArray(source.attachments)
       ? source.attachments
           .slice(0, NOTIFICATION_ATTACHMENT_COUNTS)

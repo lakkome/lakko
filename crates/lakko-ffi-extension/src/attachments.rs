@@ -35,6 +35,11 @@ pub enum MessageBodyKind {
     /// like any other service envelope. Appended last so every earlier
     /// variant keeps its ordinal.
     ServiceEnvelope,
+    /// ADR-0061 section 6 — a chat envelope from a newer wire version; the
+    /// version rides `target` and `text` is empty. The extension renders its
+    /// own catalog word for the notification, never core prose. Appended
+    /// last so every earlier variant keeps its ordinal.
+    Unsupported,
 }
 
 /// A decoded attachment reference (ADR-0023).
@@ -114,7 +119,8 @@ pub struct ParsedBody {
     /// Attachment references (chat only; empty otherwise).
     pub attachments: Vec<AttachmentRef>,
     /// The DS `messageId` the op acts on (`None` for `Chat`/`Typing`;
-    /// for `ReadReceipt` it is the read-up-to watermark).
+    /// for `ReadReceipt` it is the read-up-to watermark; for `Unsupported`
+    /// the envelope's wire version).
     pub target: Option<i64>,
     /// The reaction emoji (`Some` only for `Reaction`).
     pub emoji: Option<String>,
@@ -179,6 +185,14 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             text: String::new(),
             attachments: Vec::new(),
             target: Some(up_to),
+            emoji: None,
+            is_typing: None,
+        },
+        inner::MessageBody::Unsupported { version } => ParsedBody {
+            kind: MessageBodyKind::Unsupported,
+            text: String::new(),
+            attachments: Vec::new(),
+            target: Some(i64::from(version)),
             emoji: None,
             is_typing: None,
         },
@@ -254,5 +268,13 @@ mod tests {
         assert_eq!(got.duration_ms, Some(4200));
         assert_eq!(got.waveform, Some(vec![9, 8, 7]));
         assert!(got.thumb.is_none());
+    }
+
+    #[test]
+    fn newer_wire_version_is_unsupported_with_no_text() {
+        let body = parse_body_envelope(br#"{"v":7,"text":"future"}"#.to_vec());
+        assert_eq!(body.kind, MessageBodyKind::Unsupported);
+        assert_eq!(body.target, Some(7));
+        assert!(body.text.is_empty());
     }
 }

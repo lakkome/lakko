@@ -145,6 +145,11 @@ export function pairingText(message: string): string | null {
 export function screenText(err: unknown): string | null {
   const keyed = keyedErrorText(err);
   if (keyed !== null) return keyed;
+  // The identity checks of a restore carry English `message`s for the logs;
+  // whichever form shows them (the three words, a recovery form), they render
+  // from their kind (ADR-0061 section 6).
+  const check = identityCheckMessage(err);
+  if (check !== null) return check;
   const rule = usernameRuleText(err);
   if (rule !== null) return rule;
   const pairing = err instanceof Error ? pairingText(err.message) : null;
@@ -209,11 +214,18 @@ export function recoverErrorMessage(err: unknown): string {
  * The identity checks of a restore (ADR-0017): the phrase or the identity
  * from another device must match the account's published identity. Matched
  * on the error's `name` so this pure module does not import `AuthContext`.
- * `source` picks the mismatch sentence: a typed phrase or another device.
+ * The mismatch sentence follows the `source` the error carries (a typed
+ * phrase or another device); `fallback` is the form's own source, for an
+ * error that carries none.
  */
-function identityCheckMessage(err: unknown, source: "phrase" | "device"): string | null {
+function identityCheckMessage(
+  err: unknown,
+  fallback: "phrase" | "device" = "phrase",
+): string | null {
   if (!(err instanceof Error)) return null;
   if (err.name === "SupersessionPhraseMismatch") {
+    const carried = (err as { source?: unknown }).source;
+    const source = carried === "device" || carried === "phrase" ? carried : fallback;
     return source === "device"
       ? t("device_link.error.identity_mismatch")
       : t("restore_identity.error.phrase_mismatch");

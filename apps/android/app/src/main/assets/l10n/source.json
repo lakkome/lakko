@@ -2571,6 +2571,10 @@
       "text": "Unpin",
       "comment": "Message menu item: remove the pin from the message."
     },
+    "chat.message.unsupported": {
+      "text": "This message needs a newer version of Lakko.",
+      "comment": "Shown in place of a message the sender's newer app wrote in a format this version cannot read: in the timeline, as the chat list preview and as the notification body."
+    },
     "chat.not_found.back": {
       "text": "Back to Chats",
       "comment": "Link back to the conversation list."
@@ -3858,6 +3862,10 @@
       "text": "Waiting",
       "comment": "Status line of a sent contact request not yet accepted."
     },
+    "contacts.mailbox.chat_join_failed": {
+      "text": "Someone started a chat with you, but it could not be opened on this device. Ask them to add you again.",
+      "comment": "Banner on the contacts screen when a chat invitation (MLS Welcome) from a contact arrived but could not be opened on this device."
+    },
     "contacts.mailbox.join_failed": {
       "text": "You were added to a group, but the invitation could not be opened on this device. Ask the person who added you to add you again.",
       "comment": "Banner shown when a group invitation (MLS Welcome) arrived but could not be opened."
@@ -4070,6 +4078,11 @@
     "device_link.error.timeout": {
       "text": "The other device did not answer in time. Try again.",
       "comment": "Nobody confirmed on another device in time."
+    },
+    "device_link.error.wrong_account": {
+      "text": "The other device answered for a different account. Nothing was changed on this device.",
+      "comment": "Restoring from another device: the device that answered belongs to a different account than the one this device asked for, so nothing was saved.",
+      "security_critical": true
     },
     "device_link.pairing.needs_username": {
       "text": "Set a username first to add another device.",

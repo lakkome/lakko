@@ -1404,7 +1404,7 @@ function isCommitterBeaconEnvelope(wasm, bytes) {
  *
  * @param {DecryptWasm} wasm
  * @param {any} processed
- * @param {{ attachments: readonly string[] }} words
+ * @param {{ attachments: readonly string[], unsupportedMessage: string }} words
  * @returns {string | null}
  */
 function previewFromProcessed(wasm, processed, words) {
@@ -1435,6 +1435,11 @@ function previewFromProcessed(wasm, processed, words) {
     // core classifies it rather than degrading it to lossy-UTF-8 chat text.
     // Never a preview — null keeps an older real row, or the generic banner.
     if (kind === "service-envelope") return null;
+    // ADR-0061 section 6 — a chat message from a newer Lakko whose wire
+    // version this build cannot read. It is a message, so it is the preview,
+    // in the words the page stored; never the core's English placeholder.
+    // (`notificationStrings` falls back to English word by word.)
+    if (kind === "unsupported") return words.unsupportedMessage;
     // A normal chat message → its text (or an attachment hint).
     if (kind === "chat") {
       const text = typeof parsed.text === "string" ? parsed.text : "";

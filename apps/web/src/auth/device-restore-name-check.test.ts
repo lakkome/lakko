@@ -7,6 +7,7 @@
  * redeem answered for. Every other outcome refuses before anything is
  * persisted, zeroes the transferred seed and drops the session.
  */
+import { deviceRestoreErrorMessage } from "./auth-error-copy";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -72,6 +73,9 @@ describe("runNameCheckedDeviceRestore", () => {
     const h = harness(async () => OTHER);
     const err = await h.run().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TypedNameOtherAccount);
+    // ADR-0061 section 6 — rendered from its key, not passed through as English.
+    expect((err as TypedNameOtherAccount).key).toBe("device_link.error.name_other_account");
+    expect(deviceRestoreErrorMessage(err)).toBe(TYPED_NAME_OTHER_ACCOUNT);
     expect((err as Error).message).toBe(TYPED_NAME_OTHER_ACCOUNT);
     expect((err as Error).message).toBe(
       "The name you typed belongs to a different account. Nothing was changed on this device.",
@@ -109,6 +113,8 @@ describe("runNameCheckedDeviceRestore", () => {
       });
       const err = await h.run().catch((e: unknown) => e);
       expect(err).toBeInstanceOf(TypedNameCheckUnavailable);
+      expect((err as TypedNameCheckUnavailable).key).toBe("common.error.offline");
+      expect((err as Error).cause).toBeDefined();
       expect((err as Error).message).toBe(TYPED_NAME_CHECK_UNAVAILABLE);
       expect(h.land).not.toHaveBeenCalled();
       expect(h.dropSession).toHaveBeenCalledTimes(1);

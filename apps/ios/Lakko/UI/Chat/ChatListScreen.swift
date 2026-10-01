@@ -1009,6 +1009,7 @@ public final class ChatListViewModel: ObservableObject {
             },
             direction: last.direction,
             deleted: last.deleted,
+            unsupported: last.unsupportedVersion != nil,
             isGroup: isGroup,
             senderName: senderName)
     }

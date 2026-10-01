@@ -93,12 +93,17 @@ public enum ChatListFormatting {
         attachmentLabels: [String],
         direction: Direction,
         deleted: Bool,
+        unsupported: Bool = false,
         isGroup: Bool,
         senderName: String?
     ) -> String {
         let body: String
         if deleted {
             body = Localization.text("chat.message.deleted")
+        } else if unsupported {
+            // ADR-0061 section 6 — a message from a newer version of Lakko;
+            // its text is empty and the sentence is the client's own.
+            body = Localization.text("chat.message.unsupported")
         } else if let call = CallTranscriptRow.parse(text) {
             // `docs/ux/calls.md` section 6 — the list shows the call the way
             // the conversation does, never the stored marker.

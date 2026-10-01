@@ -2522,6 +2522,10 @@
       "text": "अनपिन करें",
       "status": "machine"
     },
+    "chat.message.unsupported": {
+      "text": "इस मैसेज के लिए Lakko का नया वर्शन चाहिए।",
+      "status": "machine"
+    },
     "chat.not_found.back": {
       "text": "चैट पर वापस जाएँ",
       "status": "machine"
@@ -3798,6 +3802,10 @@
       "text": "इंतज़ार में",
       "status": "machine"
     },
+    "contacts.mailbox.chat_join_failed": {
+      "text": "किसी ने आपसे चैट शुरू की, लेकिन वह इस डिवाइस पर नहीं खुल सकी। उनसे आपको फिर से जोड़ने के लिए कहें।",
+      "status": "machine"
+    },
     "contacts.mailbox.join_failed": {
       "text": "आपको एक ग्रुप में जोड़ा गया, लेकिन इस डिवाइस पर इनवाइट नहीं खुल सका। जिसने आपको जोड़ा था, उससे फिर से जोड़ने को कहें।",
       "status": "machine"
@@ -3996,6 +4004,10 @@
     },
     "device_link.error.timeout": {
       "text": "दूसरे डिवाइस ने समय पर जवाब नहीं दिया। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "device_link.error.wrong_account": {
+      "text": "दूसरे डिवाइस ने किसी दूसरे अकाउंट की ओर से जवाब दिया। इस डिवाइस पर कुछ नहीं बदला गया।",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {

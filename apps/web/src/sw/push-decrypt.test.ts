@@ -336,6 +336,25 @@ describe("decryptPushPreview — happy path", () => {
     expect(out?.body).toBe("Отправлено 2 вложения");
   });
 
+  it("says a newer-version message needs an update, in the stored words (ADR-0061 section 6)", async () => {
+    const unsupported = { kind: "unsupported", text: "", target: 9, unsupportedVersion: 9 };
+    const english = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({ messages: [msg(42, unsupported)] })),
+    });
+    expect((await decryptPushPreview(wake(), english.deps))?.body).toBe(
+      "This message needs a newer version of Lakko.",
+    );
+    const stored = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({
+        messages: [msg(41, { kind: "chat", text: "older", attachmentCount: 0 }), msg(42, unsupported)],
+      })),
+      notificationWords: { unsupportedMessage: "Обновите Lakko, чтобы прочитать это сообщение." },
+    });
+    const out = await decryptPushPreview(wake(), stored.deps);
+    expect(out?.body).toBe("Обновите Lakko, чтобы прочитать это сообщение.");
+    expect(out?.body).not.toContain("[unsupported");
+  });
+
   it("uses the app's persisted cursor as the READ-ONLY fetch start", async () => {
     const { deps, dsFetchGroup } = baseDeps({
       startCursor: vi.fn(async () => 30),

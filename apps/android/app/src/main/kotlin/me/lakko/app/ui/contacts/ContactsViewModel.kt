@@ -585,7 +585,7 @@ public data class ContactsUiState(
     val activeInvitesError: UiText?,
     val revokingActiveInviteSlug: String?,
     val refreshing: Boolean,
-    val refreshError: String?,
+    val refreshError: me.lakko.app.contacts.InboxError?,
     val requiresReauth: Boolean,
 )
 

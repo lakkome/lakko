@@ -117,6 +117,7 @@ final class UnrecognisedServiceEnvelopeTests: XCTestCase {
             case .typing: kind = .typing
             case .readReceipt: kind = .readReceipt
             case .serviceEnvelope: kind = .serviceEnvelope
+            case .unsupported: kind = .unsupported
             }
             return NseProcessedRow(kind: kind, text: body.text, attachmentCount: body.attachments.count)
         }

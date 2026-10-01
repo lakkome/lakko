@@ -102,12 +102,14 @@ public enum PairingOrchestrator {
         /// belongs to.
         case wrongAccount
 
+        /// ADR-0061 section 6 — rendered by kind from the catalog, never as
+        /// English prose (``AuthErrorCopy/deviceRestore(_:)`` reads it).
         public var errorDescription: String? {
             switch self {
             case .noAccess:
-                return "The other device linked this one but the sign-in could not be completed. Try again."
+                return Localization.text("device_link.error.not_let_in")
             case .wrongAccount:
-                return "The other device belongs to a different account. Try again with the right username."
+                return Localization.text("device_link.error.wrong_account")
             }
         }
     }

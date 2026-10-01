@@ -2522,6 +2522,10 @@
       "text": "取消置顶",
       "status": "machine"
     },
+    "chat.message.unsupported": {
+      "text": "此消息需要更新版本的 Lakko。",
+      "status": "machine"
+    },
     "chat.not_found.back": {
       "text": "返回聊天列表",
       "status": "machine"
@@ -3798,6 +3802,10 @@
       "text": "等待中",
       "status": "machine"
     },
+    "contacts.mailbox.chat_join_failed": {
+      "text": "有人与你开始了聊天，但无法在此设备上打开。请让对方重新添加你。",
+      "status": "machine"
+    },
     "contacts.mailbox.join_failed": {
       "text": "你已被加入一个群组，但此设备无法打开该邀请。请让添加你的人重新添加你。",
       "status": "machine"
@@ -3996,6 +4004,10 @@
     },
     "device_link.error.timeout": {
       "text": "另一台设备未及时响应。请重试。",
+      "status": "machine"
+    },
+    "device_link.error.wrong_account": {
+      "text": "另一台设备以另一个账户的身份作出了回应。此设备上未做任何更改。",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {

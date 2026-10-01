@@ -2522,6 +2522,10 @@
       "text": "Desafixar",
       "status": "machine"
     },
+    "chat.message.unsupported": {
+      "text": "Esta mensagem precisa de uma versão mais nova do Lakko.",
+      "status": "machine"
+    },
     "chat.not_found.back": {
       "text": "Voltar às conversas",
       "status": "machine"
@@ -3798,6 +3802,10 @@
       "text": "Aguardando",
       "status": "machine"
     },
+    "contacts.mailbox.chat_join_failed": {
+      "text": "Alguém começou uma conversa com você, mas ela não pôde ser aberta neste dispositivo. Peça para essa pessoa adicionar você de novo.",
+      "status": "machine"
+    },
     "contacts.mailbox.join_failed": {
       "text": "Você foi adicionado a um grupo, mas o convite não pôde ser aberto neste dispositivo. Peça a quem adicionou você para adicionar de novo.",
       "status": "machine"
@@ -3996,6 +4004,10 @@
     },
     "device_link.error.timeout": {
       "text": "O outro dispositivo não respondeu a tempo. Tente novamente.",
+      "status": "machine"
+    },
+    "device_link.error.wrong_account": {
+      "text": "O outro dispositivo respondeu por outra conta. Nada foi alterado neste dispositivo.",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {

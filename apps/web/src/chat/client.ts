@@ -185,6 +185,11 @@ export type IncomingChatEvent =
        *  original author's name and / or the origin reference, as the
        *  forwarder wrote them. Absent on a plain message. */
       forward?: ForwardRef;
+      /** ADR-0061 section 6 — set when the sender's newer Lakko wrote this
+       *  message in a wire version this build cannot read: the envelope's
+       *  version. `text` is empty and there are no attachments; every screen
+       *  draws `chat.message.unsupported` in its place. */
+      unsupportedVersion?: number;
     }
   | {
       /** ADR-0023 / ADR-0024 — an edit / delete / reaction op OR a
@@ -1597,6 +1602,21 @@ export async function toEvent(
     // `lakko/profile/v1` plus binary before the core classified it).
     if (body.kind === "service-envelope") {
       return { kind: "serviceEnvelope", messageId, createdAt };
+    }
+    // ADR-0061 section 6 — a chat message from a newer Lakko. It keeps its
+    // place in the timeline as a row of its own; the words are the catalog's.
+    if (body.kind === "unsupported") {
+      return {
+        kind: "application",
+        messageId,
+        text: "",
+        attachments: [],
+        plaintext: "",
+        senderLeaf,
+        senderKey,
+        createdAt,
+        unsupportedVersion: body.version,
+      };
     }
     if (body.kind === "chat") {
       return {

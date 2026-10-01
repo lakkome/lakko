@@ -11,7 +11,6 @@ import uniffi.lakko_ffi_uniffi.ThumbRef
 import uniffi.lakko_ffi_uniffi.composeEnvelope as ffiComposeEnvelope
 import uniffi.lakko_ffi_uniffi.decryptAttachment as ffiDecryptAttachment
 import uniffi.lakko_ffi_uniffi.encryptAttachment as ffiEncryptAttachment
-import uniffi.lakko_ffi_uniffi.parseEnvelope as ffiParseEnvelope
 
 /**
  * Chat attachment bridge — picked-file bytes ↔ UniFFI encryption
@@ -26,8 +25,8 @@ import uniffi.lakko_ffi_uniffi.parseEnvelope as ffiParseEnvelope
  *      `PickVisualMedia`) — surfaces a content-URI; the screen
  *      layer resolves it to raw bytes + MIME + display name.
  *   2. **`uniffi.lakko_ffi_uniffi`** — `encryptAttachment` /
- *      `decryptAttachment` / `composeEnvelope` / `parseEnvelope`
- *      free functions, exposed in 1.19b.
+ *      `decryptAttachment` / `composeEnvelope` free functions,
+ *      exposed in 1.19b.
  *   3. **`StorageClient`** — `lakko-svc-storage` HTTP wrapper
  *      added in 1.19c1 that PUTs / GETs ciphertext blobs by
  *      content hash.
@@ -41,8 +40,8 @@ import uniffi.lakko_ffi_uniffi.parseEnvelope as ffiParseEnvelope
  *   * [downloadAndDecrypt] — `StorageClient.getBlob` →
  *     `decryptAttachment` → plaintext bytes.
  *
- * Plus [composeEnvelopeBytes] + [parseEnvelopeBytes] friendly
- * wrappers around the UniFFI free functions (rename-shadowed
+ * Plus the [composeEnvelopeBytes] friendly wrapper around the
+ * UniFFI free function (rename-shadowed
  * at the top of this file so callers don't have to disambiguate
  * the bare names).
  *
@@ -269,36 +268,12 @@ public object AttachmentBridge {
         attachments: List<AttachmentRef>,
     ): ByteArray = ffiComposeEnvelope(text = text, attachments = attachments)
 
-    /**
-     * Parse an incoming MLS Application-message body. Returns
-     * the canonical `(text, attachments)` pair from the UniFFI
-     * envelope decoder.
-     *
-     * **Never throws.** Legacy pre-1.19 plain-UTF-8 bytes
-     * collapse to `(text = <utf-8 lossy>, attachments = [])`,
-     * unknown-version envelopes collapse to
-     * `(text = "[unsupported v\$N message]", attachments = [])`,
-     * malformed individual refs are silently skipped. Same
-     * posture as the UniFFI `parse_envelope` documented
-     * fallback paths (1.19a + 1.19b).
-     */
-    public fun parseEnvelopeBytes(
-        bytes: ByteArray,
-    ): ParsedEnvelopeView {
-        val parsed = ffiParseEnvelope(bytes = bytes)
-        return ParsedEnvelopeView(
-            text = parsed.text,
-            attachments = parsed.attachments,
-        )
-    }
-
-    /** Plain-data envelope-parse output, decoupled from the
-     *  UniFFI `ParsedEnvelope` record so call sites can drop
-     *  the FFI import on the read path. */
-    public data class ParsedEnvelopeView(
-        val text: String,
-        val attachments: List<AttachmentRef>,
-    )
+    // There is deliberately no `parseEnvelope` wrapper here. Its fallback
+    // turned a newer-wire-version envelope into the core's English text
+    // "[unsupported vN message]", which would have reached the screen
+    // (ADR-0061 section 6). The receive path parses through
+    // `parseBodyEnvelope`, whose `UNSUPPORTED` kind carries no text and is
+    // rendered from the catalog (`chat.message.unsupported`).
 
     /**
      * Format an attachment size for UI display — `42 B`,

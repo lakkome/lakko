@@ -906,6 +906,7 @@ internal fun rowPreview(
         deleted = last.deleted,
         author = previewPrefix(last.direction, isGroup, senderName),
         strings = strings,
+        unsupported = last.unsupportedVersion != null,
     )
     return line.ifEmpty { noMessages }
 }

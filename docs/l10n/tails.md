@@ -35,10 +35,20 @@ ADR-0061 S5. The strings the five batches left in English, or held as text that 
 
 None is `security_critical`.
 
+## Web, after the remainder pass
+
+- Restore identity checks (`SupersessionPhraseMismatch`, `IdentityVerificationUnavailable`) render from their kind wherever they surface, through `screenText`: the three-word form and the recovery forms used to pass the English `message` through. The mismatch error carries its `source` (phrase or another device), replacing the English `mismatchMessage` argument.
+- The typed-name check of a device restore (`TypedNameOtherAccount`, `TypedNameCheckUnavailable`) is keyed: `device_link.error.name_other_account` and `common.error.offline`.
+
+## Android, after the remainder pass
+
+- Newer-wire-version messages: `MessageBodyKind.UNSUPPORTED` becomes a timeline row carrying `unsupportedVersion` (persisted in the message log, empty text); the bubble, the conversation-row preview, the selection label and the background notification (`ProcessedKind.UNSUPPORTED`) draw `chat.message.unsupported`. Such a row has no action menu (nothing to copy, edit, quote or forward). The unused `AttachmentBridge.parseEnvelopeBytes` wrapper, the only Android path to the core's "[unsupported vN message]" text, is removed.
+- A join answered for a different account throws `JoinWrongAccount` and renders `device_link.error.wrong_account` on the restore panel and the code panel.
+- The contacts inbox error is held as a kind (`InboxError`): a poll failure renders `contacts.mailbox.poll_failed`, a Welcome that could not be joined renders the new `contacts.mailbox.chat_join_failed` (it used to read as the poll failure). `contacts.mailbox.join_failed` says "added to a group" and does not fit a one-to-one chat, so it was not reused.
+
 ## Still not on screen
 
-- "[unsupported vN message]" comes from the Rust core as bubble text on every client.
-- Android: a join answered for a different account shows the generic `device_link.error.generic`; there is no key for that case.
+- "[unsupported vN message]" comes from the Rust core as bubble text. Closed on web and Android (iOS is its own pass): `parseBodyEnvelope` returns `{kind: "unsupported", version}`, the timeline keeps the message as a row with `unsupportedVersion` (persisted) and draws `chat.message.unsupported` in the bubble and the chat list preview, and the service worker's notification body reads the same key from the stored words (`unsupportedMessage`). The legacy `parseEnvelope` (no production caller on web) returns empty text instead of the placeholder.
 - iOS Info.plist permission strings (need `InfoPlist.strings`).
 - A reply or forward author snapshot of "You" / "Member" travels in the sender's interface language.
 - Clock digits stay Western on every language.

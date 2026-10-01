@@ -265,6 +265,7 @@ export function TimelineBubble(
         tone={own ? "outgoing" : "incoming"}
         reply={ev.reply}
         forward={ev.forward}
+        unsupported={ev.unsupportedVersion !== undefined}
         {...props}
       />
     );
@@ -340,6 +341,10 @@ function ChatBubbleBody(
     /** ADR-0052 decision 2 — the forward attribution this message carries,
      *  drawn as one muted line above the content. A label, never a person. */
     forward?: ForwardRef | undefined;
+    /** ADR-0061 section 6 — a message from a newer Lakko this build cannot
+     *  read: the bubble says so in the catalog's words, in the language
+     *  current when drawn. */
+    unsupported?: boolean | undefined;
     /** The local short time (`17:21`), or the pending / failed word. */
     time: string;
     /** The sender's name above the bubble, or `null` (a 1x1, a run, own). */
@@ -743,6 +748,9 @@ function ChatBubbleBody(
                       </button>
                     );
                   }}
+                </Show>
+                <Show when={props.unsupported === true}>
+                  <div class="lk-bubble-deleted">{t("chat.message.unsupported")}</div>
                 </Show>
                 <Show when={displayText().length > 0}>
                   <div class="lk-bubble-text">

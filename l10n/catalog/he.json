@@ -2522,6 +2522,10 @@
       "text": "ביטול הצמדה",
       "status": "machine"
     },
+    "chat.message.unsupported": {
+      "text": "כדי להציג את ההודעה הזו צריך גרסה חדשה יותר של Lakko.",
+      "status": "machine"
+    },
     "chat.not_found.back": {
       "text": "חזרה לצ׳אטים",
       "status": "machine"
@@ -3798,6 +3802,10 @@
       "text": "ממתינה",
       "status": "machine"
     },
+    "contacts.mailbox.chat_join_failed": {
+      "text": "מישהו התחיל איתך צ'אט, אבל לא ניתן היה לפתוח אותו במכשיר הזה. אפשר לבקש ממנו להוסיף אותך שוב.",
+      "status": "machine"
+    },
     "contacts.mailbox.join_failed": {
       "text": "צורפתם לקבוצה, אבל לא ניתן היה לפתוח את ההזמנה במכשיר הזה. בקשו ממי שצירף אתכם לצרף אתכם שוב.",
       "status": "machine"
@@ -3996,6 +4004,10 @@
     },
     "device_link.error.timeout": {
       "text": "המכשיר האחר לא ענה בזמן. נסו שוב.",
+      "status": "machine"
+    },
+    "device_link.error.wrong_account": {
+      "text": "המכשיר האחר ענה בשם חשבון אחר. שום דבר לא השתנה במכשיר הזה.",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {

@@ -200,6 +200,7 @@ private fun deviceLinkFailureCopy(cause: Throwable): UiText {
         if (http.status == HTTP_UNAVAILABLE) return UiText("device_link.error.ask_unavailable")
     }
     if (cause is me.lakko.app.auth.AuthNetworkError) return UiText("device_link.code.unreachable")
+    if (cause is me.lakko.app.devices.JoinWrongAccount) return UiText("device_link.error.wrong_account")
     return UiText("device_link.error.generic")
 }
 

@@ -147,6 +147,10 @@ public enum NseProcessedKind: Equatable {
     /// it is never a preview, so an older real message stays the preview or the
     /// handler falls back to its generic banner.
     case serviceEnvelope
+    /// ADR-0061 section 6 — a chat message from a newer wire version than
+    /// this build reads (`MessageBodyKind.unsupported`). It IS a message, so
+    /// it previews — as the catalog sentence, never as core prose.
+    case unsupported
     /// An incoming call offer, and whether the caller asked for video.
     case callOffer(video: Bool)
     /// A call ended (cancelled, declined, answered elsewhere, timed out).
@@ -673,6 +677,13 @@ func nseWord(_ key: String, english: String) -> String {
     nseNotificationWordLookup(key) ?? english
 }
 
+/// ADR-0061 section 6 — the preview of a message written in a newer chat
+/// wire version, in the interface language (English when the app has not
+/// stored the word).
+public func nseUnsupportedMessageLine() -> String {
+    nseWord("chat.message.unsupported", english: "This message needs a newer version of Lakko.")
+}
+
 /// "Sent an attachment" / "Sent N attachments" in the interface language.
 ///
 /// The extension has no plural rules, so the app stores one rendered line per
@@ -813,6 +824,10 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     // profile v3 reached v2 clients). Never rendered, whatever text it carries.
     case .serviceEnvelope:
         return nil
+    // A message from a newer version of Lakko: a real message, previewed as
+    // the client's own sentence in the interface language.
+    case .unsupported:
+        return nseUnsupportedMessageLine()
     // A call is not a message preview — it is its own outcome, decided by the
     // caller before this function is reached.
     case .callOffer, .callEnd:

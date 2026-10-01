@@ -74,6 +74,10 @@ const IV_LEN = 12;
  *
  * v5 adds [`PersistedMessage.forward`] (ADR-0052 decision 2). A row without
  * it reads as a message that was not forwarded, which is exactly what it was.
+ *
+ * [`PersistedMessage.unsupportedVersion`] (ADR-0061 section 6) is optional
+ * without a version bump: a row without it is an ordinary message, and an
+ * older build reading a row with it shows the empty text it stores.
  */
 export const MESSAGE_LOG_VERSION = 5;
 
@@ -186,6 +190,13 @@ export interface PersistedMessage {
    * Absent on a message that was not forwarded and on a row written before v5.
    */
   readonly forward?: PersistedForward;
+  /**
+   * ADR-0061 section 6 — the message came from a newer Lakko in a wire
+   * version this build cannot read; the value is that version. `text` is
+   * empty and there are no attachments; the bubble and the chat list preview
+   * draw `chat.message.unsupported`, in the language current when drawn.
+   */
+  readonly unsupportedVersion?: number;
 }
 
 /** ADR-0052 decision 2 — a persisted forward attribution. */

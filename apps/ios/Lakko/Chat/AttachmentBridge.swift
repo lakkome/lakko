@@ -29,7 +29,7 @@ import LakkoCore
 ///   * **Download** (`downloadAndDecrypt`) — `StorageClient.getBlob`
 ///     → `decryptAttachment` → plaintext bytes.
 ///
-/// Plus `composeEnvelopeBytes` + `parseEnvelopeBytes` that wrap
+/// Plus `composeEnvelopeBytes` + `parseBodyEnvelopeBytes` that wrap
 /// the UniFFI free functions with friendlier ergonomics
 /// (`Data` body inputs).
 ///
@@ -266,24 +266,6 @@ public enum AttachmentBridge {
         try composeEnvelope(text: text, attachments: attachments)
     }
 
-    /// Parse an incoming MLS Application-message body. Returns
-    /// the canonical `(text, attachments)` pair from the
-    /// UniFFI envelope decoder.
-    ///
-    /// **Never throws.** Legacy pre-1.19 plain-UTF-8 bytes
-    /// collapse to `(text: <utf-8 lossy>, attachments: [])`,
-    /// unknown-version envelopes collapse to
-    /// `(text: "[unsupported v$N message]", attachments: [])`,
-    /// malformed individual refs are silently skipped. Same
-    /// posture as the UniFFI `parse_envelope` documented
-    /// fallback paths (1.19a + 1.19b).
-    public static func parseEnvelopeBytes(
-        _ bytes: Data
-    ) -> (text: String, attachments: [AttachmentRef]) {
-        let parsed = parseEnvelope(bytes: bytes)
-        return (parsed.text, parsed.attachments)
-    }
-
     /// ADR-0023 — parse an incoming MLS Application-message body
     /// into the structured `MessageBody` shape (chat / edit /
     /// delete / reaction). Wraps the UniFFI `parseBodyEnvelope`
@@ -291,9 +273,12 @@ public enum AttachmentBridge {
     /// `kind` discriminator + the per-kind fields.
     ///
     /// **Never throws.** The Rust parser is bounded + fail-closed:
-    /// a malformed, ambiguous (more than one op field set), or
-    /// unknown-version envelope degrades to `.chat` with the raw
-    /// text, never panics. The chat receive loop branches on
+    /// a malformed or ambiguous (more than one op field set)
+    /// envelope degrades to `.chat`, never panics. An envelope from a
+    /// newer wire version is `.unsupported` with no text (ADR-0061
+    /// section 6): the client draws `chat.message.unsupported`. This is
+    /// the only body parser the app uses; the legacy `parseEnvelope`
+    /// (which writes English placeholder prose) is never called. The chat receive loop branches on
     /// `kind` to fold ops into their target rather than rendering
     /// them as bubbles.
     public static func parseBodyEnvelopeBytes(_ bytes: Data) -> ParsedBody {

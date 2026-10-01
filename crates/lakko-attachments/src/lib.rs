@@ -1226,6 +1226,17 @@ pub enum MessageBody {
     /// message is a JSON envelope and opens with `{`, so no chat message is
     /// ever classified here.
     ServiceEnvelope,
+    /// A JSON chat envelope whose `v` is not [`WIRE_VERSION`]: a message
+    /// from a client on a newer wire version. It carries no text for this
+    /// build to show; the client renders its own catalog sentence in the
+    /// interface language (ADR-0061 section 6). **Never shown as chat
+    /// text** — before this variant the core put the English placeholder
+    /// `[unsupported vN message]` into a `Chat` body and it reached the
+    /// bubble on every client.
+    Unsupported {
+        /// The envelope's wire version, as sent.
+        version: u8,
+    },
 }
 
 /// The prefix every Lakko service envelope's domain separator opens with
@@ -1496,7 +1507,11 @@ pub fn compose_read_receipt(up_to: i64) -> Result<Vec<u8>, AttachmentError> {
 /// with simple test harnesses that don't bother to wrap.
 ///
 /// If the JSON parses but the `v` field is not [`WIRE_VERSION`],
-/// returns the placeholder `("[unsupported v$N message]", [])`.
+/// returns the placeholder `("[unsupported v$N message]", [])`. This
+/// legacy entry point keeps that English placeholder because the
+/// `parse_envelope` FFI functions still call it; a renderer should use
+/// [`parse_body`], which classifies the case as
+/// [`MessageBody::Unsupported`] and carries no core prose (ADR-0061).
 /// Future versions land via new `WIRE_VERSION` values; v1 clients
 /// surface the placeholder rather than mis-rendering.
 #[must_use]
@@ -1523,8 +1538,9 @@ pub fn parse(bytes: &[u8]) -> (String, Vec<AttachmentRef>) {
 ///
 /// Fail-safe like [`parse`]: a non-JSON body becomes a bare-UTF-8
 /// [`MessageBody::Chat`], except a Lakko service envelope, which becomes
-/// [`MessageBody::ServiceEnvelope`] and is never rendered; a wrong-`v` envelope becomes a placeholder
-/// chat; an ambiguous or malformed op (more than one op field, or a
+/// [`MessageBody::ServiceEnvelope`] and is never rendered; a wrong-`v`
+/// envelope becomes [`MessageBody::Unsupported`] (no core text — the client
+/// renders its own); an ambiguous or malformed op (more than one op field, or a
 /// reaction without a valid emoji) degrades to chat. The caller's
 /// author-only gate (ADR-0023) decides whether to apply an op — this
 /// function only frames it.
@@ -1532,12 +1548,8 @@ pub fn parse(bytes: &[u8]) -> (String, Vec<AttachmentRef>) {
 pub fn parse_body(bytes: &[u8]) -> MessageBody {
     match serde_json::from_slice::<Envelope>(bytes) {
         Ok(env) if env.v == WIRE_VERSION => env.into_body(),
-        Ok(env) => MessageBody::Chat {
-            text: format!("[unsupported v{} message]", env.v),
-            attachments: Vec::new(),
-            reply: None,
-            forward: None,
-        },
+        // A newer wire version: the client renders its own sentence.
+        Ok(env) => MessageBody::Unsupported { version: env.v },
         // A service envelope nobody recognised is dropped, never shown.
         Err(_) if is_service_envelope(bytes) => MessageBody::ServiceEnvelope,
         Err(_) => MessageBody::Chat {
@@ -1759,6 +1771,8 @@ pub mod fuzz_api {
             },
             // Never rendered; a service envelope must never be chat.
             MessageBody::ServiceEnvelope => assert!(super::is_service_envelope(bytes)),
+            // Only a JSON envelope of another wire version lands here.
+            MessageBody::Unsupported { version } => assert_ne!(version, super::WIRE_VERSION),
         }
         !refs.is_empty()
     }
@@ -2014,11 +2028,27 @@ mod tests {
     }
 
     #[test]
-    fn unknown_version_body_is_chat_placeholder() {
+    fn unknown_version_body_is_unsupported() {
         let evil = br#"{"v":99,"edit_of":1,"text":"future"}"#;
-        match parse_body(evil) {
-            MessageBody::Chat { text, .. } => assert_eq!(text, "[unsupported v99 message]"),
-            other => panic!("expected placeholder chat, got {other:?}"),
+        assert_eq!(parse_body(evil), MessageBody::Unsupported { version: 99 });
+    }
+
+    #[test]
+    fn a_wrong_version_envelope_never_yields_chat_text() {
+        // ADR-0061 section 6: no core prose reaches a bubble. Every
+        // non-v1 version, with or without text / ops, is Unsupported.
+        for v in (0u8..=255).filter(|v| *v != WIRE_VERSION) {
+            for json in [
+                format!(r#"{{"v":{v}}}"#),
+                format!(r#"{{"v":{v},"text":"hello"}}"#),
+                format!(r#"{{"v":{v},"react_to":1,"emoji":"x"}}"#),
+            ] {
+                assert_eq!(
+                    parse_body(json.as_bytes()),
+                    MessageBody::Unsupported { version: v },
+                    "{json}"
+                );
+            }
         }
     }
 

@@ -357,6 +357,12 @@ public data class PersistedMessage(
      * The name is stored as it arrived — a snapshot, never re-resolved.
      */
     val forward: PersistedForward? = null,
+    /**
+     * ADR-0061 section 6 — the wire version of a chat envelope this build
+     * could not read; the row's [text] is empty and the UI renders its own
+     * catalog sentence. Nullable with a default like [reply].
+     */
+    val unsupportedVersion: Long? = null,
 ) {
     /** Explicit companion so the conversion helpers below can
      *  attach as `PersistedMessage.Companion.from(msg)`. */
@@ -523,6 +529,7 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
                 )
             }
         },
+        unsupportedVersion = if (msg.deleted) null else msg.unsupportedVersion,
     )
 
 /** Inverse — reconstruct a runtime [ChatMessage] from the JSON
@@ -564,6 +571,7 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
                 originMessageId = it.originMessageId,
             )
         },
+        unsupportedVersion = unsupportedVersion,
     )
 }
 

@@ -236,7 +236,7 @@ public interface PendingJoin {
  *   session and no account id when the redeem failed (the caller refuses a
  *   seed-only restore); the full outcome, whose `persistJoin` writes what
  *   [JoinByNameSteps.bindAs] held.
- * @throws IllegalStateException on a group mismatch.
+ * @throws JoinWrongAccount on a group mismatch.
  */
 public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.JoinRecoveryOutcome? {
     val sealed = steps.pollRecoveryRow() ?: return null
@@ -254,7 +254,7 @@ public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.Jo
             // a seed-only outcome and the person retries with a fresh code.
             JoinByNameResult.RedeemFailed ->
                 PairingOrchestrator.JoinRecoveryOutcome(parsed.phraseSeed, null, null, null)
-            JoinByNameResult.WrongGroup -> throw IllegalStateException(JOIN_WRONG_ACCOUNT_COPY)
+            JoinByNameResult.WrongGroup -> throw JoinWrongAccount()
             is JoinByNameResult.Joined -> {
                 val pending = steps.bindAs(result.accountId)
                 PairingOrchestrator.JoinRecoveryOutcome(
@@ -278,3 +278,12 @@ public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.Jo
  *  the group it joined. */
 public const val JOIN_WRONG_ACCOUNT_COPY: String =
     "Could not confirm the account on the other device. Try again."
+
+/**
+ * The fresh device's refusal when the redeemed account's DeviceGroup is not
+ * the group it joined. Its own kind so the screen renders it from the catalog
+ * (`device_link.error.wrong_account`, ADR-0061 section 6) rather than from
+ * this English [message], which stays for logs only. Still an
+ * [IllegalStateException] for callers that catch that.
+ */
+public class JoinWrongAccount : IllegalStateException(JOIN_WRONG_ACCOUNT_COPY)

@@ -729,7 +729,7 @@ public class ContactsRepository(
                     // cursor for the rest of the events.
                     // `joinGroupFromWelcome` republishes this device's
                     // KeyPackage after every attempt, success or failure.
-                    var joinFailure: String? = null
+                    var joinFailure: InboxError? = null
                     for (welcome in welcomes) {
                         if (chatRepo != null) {
                             try {
@@ -761,7 +761,7 @@ public class ContactsRepository(
                                 // Welcome, which shares this mailbox and is
                                 // opened by the channel screen instead.
                                 if (!me.lakko.app.channels.CoPublisher.awaitingCoPublishWelcome()) {
-                                    joinFailure = WELCOME_JOIN_FAILED_MESSAGE
+                                    joinFailure = InboxError.WELCOME_JOIN_FAILED
                                 }
                             }
                         }
@@ -818,7 +818,7 @@ public class ContactsRepository(
                             // it within seconds) until the user refreshes by hand.
                             lastError = joinFailure
                                 ?: state.lastError.takeIf {
-                                    !isManualRefresh && it == WELCOME_JOIN_FAILED_MESSAGE
+                                    !isManualRefresh && it == InboxError.WELCOME_JOIN_FAILED
                                 },
                         )
                     }
@@ -844,7 +844,7 @@ public class ContactsRepository(
                 // (a `LaunchedEffect` loop) retries on the next iteration.
                 Log.w(TAG, "contacts inbox: poll failed", e)
                 mutableState.update {
-                    it.copy(refreshing = false, lastError = INBOX_FETCH_FAILURE_MESSAGE)
+                    it.copy(refreshing = false, lastError = InboxError.POLL_FAILED)
                 }
             }
         }
@@ -1562,16 +1562,28 @@ public class ContactsRepository(
 // State shape
 // =============================================================================
 
-/** Inline inbox error shown when a Welcome from a peer could not be joined. */
+/** Log tag. */
 private const val TAG = "ContactsRepository"
 
-/** Shown in place of a transport error when the inbox poll fails. */
-internal const val INBOX_FETCH_FAILURE_MESSAGE: String =
-    "Couldn't check for new contact requests. Trying again."
+/**
+ * What went wrong on the inbox, held as a kind so the screen renders the
+ * matching sentence in the interface language (ADR-0061 section 6). The two
+ * used to share one `String` slot that the screen rendered as the poll
+ * failure whatever it held, so a Welcome that could not be joined read
+ * "Couldn't check for new contact requests".
+ */
+public enum class InboxError(
+    /** The catalog key the contacts screen renders. */
+    public val key: String,
+) {
+    /** The inbox poll failed; the app retries by itself. */
+    POLL_FAILED("contacts.mailbox.poll_failed"),
 
-internal const val WELCOME_JOIN_FAILED_MESSAGE: String =
-    "Someone started a chat with you, but it could not be opened on this " +
-        "device. Ask them to add you again."
+    /** A Welcome from a peer arrived but could not be joined on this device:
+     *  a chat someone started that will never appear unless they add this
+     *  user again. */
+    WELCOME_JOIN_FAILED("contacts.mailbox.chat_join_failed"),
+}
 
 /** Snapshot of every field the [me.lakko.app.ui.contacts.ContactsScreen]
  *  renders. */
@@ -1605,9 +1617,9 @@ public data class ContactsState(
      *  the screen surfaces a "re-enter your password" panel
      *  instead of the normal contacts list. */
     val requiresReauth: Boolean = false,
-    /** Last error from a refresh / send attempt, for inline
-     *  display. `null` clears on the next successful call. */
-    val lastError: String? = null,
+    /** Last inbox error, for inline display, as a kind (see
+     *  [InboxError]). `null` clears on the next successful call. */
+    val lastError: InboxError? = null,
 )
 
 /**

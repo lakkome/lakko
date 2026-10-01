@@ -8578,6 +8578,8 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
         createdAt: m.createdAt,
         ...(reply === undefined ? {} : { reply }),
         ...(forward === undefined ? {} : { forward }),
+        // ADR-0061 section 6 — a message from a newer Lakko stays one.
+        ...(typeof m.unsupportedVersion === "number" ? { unsupportedVersion: m.unsupportedVersion } : {}),
       },
     };
   }

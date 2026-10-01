@@ -231,13 +231,21 @@ export interface SignupOutcome {
  *  refuse rather than cache a forked identity that would break
  *  every contact's pin. */
 export class SupersessionPhraseMismatch extends Error {
-  constructor(message?: string) {
+  /** Where the refused seed came from: a typed (or three-word) phrase, or
+   *  another device. The screen renders its sentence from this (ADR-0061
+   *  section 6: `restore_identity.error.phrase_mismatch` or
+   *  `device_link.error.identity_mismatch`); `message` is for the logs. */
+  readonly source: "phrase" | "device";
+  constructor(source: "phrase" | "device" = "phrase") {
     super(
-      message ??
-        "That recovery phrase doesn't match this account's identity. " +
-          "Check the phrase, or pair an existing device instead.",
+      source === "device"
+        ? "The identity received from your other device doesn't match " +
+            "this account's published identity — refusing to use it."
+        : "That recovery phrase doesn't match this account's identity. " +
+            "Check the phrase, or pair an existing device instead.",
     );
     this.name = "SupersessionPhraseMismatch";
+    this.source = source;
   }
 }
 
@@ -2195,9 +2203,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         discovery,
         accountIdBytes: pending.accountIdBytes,
         accountIdentitySeed: phraseSeed,
-        mismatchMessage:
-          "The identity received from your other device doesn't match " +
-          "this account's published identity — refusing to use it.",
+        source: "device",
       });
 
       // ADR-0018 factor (c): a TOTP-recovered fresh browser parked
@@ -2391,9 +2397,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             discovery,
             accountIdBytes,
             accountIdentitySeed: phraseSeed,
-            mismatchMessage:
-              "The identity received from your other device doesn't match " +
-              "this account's published identity — refusing to use it.",
+            source: "device",
           }),
         attachSession: (token) => anonTokens.setSessionToken(token),
         dropSession: () => {
@@ -3483,9 +3487,9 @@ async function verifySeedAgainstPublishedIdentity(args: {
   readonly discovery: DiscoveryClient;
   readonly accountIdBytes: Uint8Array;
   readonly accountIdentitySeed: Uint8Array;
-  /** Override for the mismatch error text — the pairing path says
-   *  "received from your other device" instead of "phrase". */
-  readonly mismatchMessage?: string;
+  /** Where the seed came from, carried on the mismatch error so the screen
+   *  says "phrase" or "your other device". Defaults to the phrase. */
+  readonly source?: "phrase" | "device";
 }): Promise<void> {
   const derivedIdentity = args.wasm.Identity.fromSeed(
     args.accountIdentitySeed,
@@ -3507,7 +3511,7 @@ async function verifySeedAgainstPublishedIdentity(args: {
     const published = base64Decode(bundle.signature_pubkey);
     if (!bytesEqual(published, derivedPubkey)) {
       args.accountIdentitySeed.fill(0);
-      throw new SupersessionPhraseMismatch(args.mismatchMessage);
+      throw new SupersessionPhraseMismatch(args.source ?? "phrase");
     }
   } catch (err) {
     if (

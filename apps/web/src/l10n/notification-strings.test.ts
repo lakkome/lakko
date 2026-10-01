@@ -35,6 +35,7 @@ describe("notification words for the service worker", () => {
       decline: "Decline",
       incomingCall: "Incoming call",
       newMessage: "New message",
+      unsupportedMessage: "This message needs a newer version of Lakko.",
     });
     expect(attachments).toHaveLength(NOTIFICATION_ATTACHMENT_COUNTS);
     expect(attachmentsLine(words, 1)).toBe("Sent an attachment");

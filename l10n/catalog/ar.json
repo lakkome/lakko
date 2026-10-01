@@ -2522,6 +2522,10 @@
       "text": "إلغاء التثبيت",
       "status": "machine"
     },
+    "chat.message.unsupported": {
+      "text": "تحتاج هذه الرسالة إلى إصدار أحدث من Lakko.",
+      "status": "machine"
+    },
     "chat.not_found.back": {
       "text": "العودة إلى الدردشات",
       "status": "machine"
@@ -3798,6 +3802,10 @@
       "text": "بانتظار الرد",
       "status": "machine"
     },
+    "contacts.mailbox.chat_join_failed": {
+      "text": "بدأ أحدهم محادثة معك، لكن تعذّر فتحها على هذا الجهاز. اطلب منه إضافتك مرة أخرى.",
+      "status": "machine"
+    },
     "contacts.mailbox.join_failed": {
       "text": "أُضفت إلى مجموعة، لكن تعذّر فتح الدعوة على هذا الجهاز. اطلب ممن أضافك أن يضيفك مجددًا.",
       "status": "machine"
@@ -3996,6 +4004,10 @@
     },
     "device_link.error.timeout": {
       "text": "لم يستجب الجهاز الآخر في الوقت المحدد. حاول مجددًا.",
+      "status": "machine"
+    },
+    "device_link.error.wrong_account": {
+      "text": "استجاب الجهاز الآخر باسم حساب مختلف. لم يتغيّر شيء على هذا الجهاز.",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {

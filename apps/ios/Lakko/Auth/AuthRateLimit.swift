@@ -257,6 +257,14 @@ enum AuthErrorCopy {
         if let check = identityCheck(error, fromDevice: true) { return check }
         if let refusal = error as? TypedNameCheckRefusal { return refusal.errorDescription ?? offline }
         if error is DeviceRestoreNotLetIn { return t("device_link.error.not_let_in") }
+        // ADR-0056 — a join by name that landed in another account's
+        // DeviceGroup, or whose grant could not be redeemed.
+        if let join = error as? PairingOrchestrator.JoinByNameError {
+            switch join {
+            case .wrongAccount: return t("device_link.error.wrong_account")
+            case .noAccess: return t("device_link.error.not_let_in")
+            }
+        }
         if let common = shared(error) { return common }
         return t("device_link.error.generic")
     }

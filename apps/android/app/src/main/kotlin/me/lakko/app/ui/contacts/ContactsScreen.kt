@@ -262,11 +262,12 @@ public fun ContactsScreen(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                     )
                 }
-                if (state.refreshError != null) {
-                    // The transport detail stays out of the copy (UX section 6).
+                state.refreshError?.let { inboxError ->
+                    // The transport detail stays out of the copy (UX section 6);
+                    // the sentence follows the error's kind (ADR-0061 section 6).
                     item(key = "refresh-error") {
                         Text(
-                            text = t("contacts.mailbox.poll_failed"),
+                            text = t(inboxError.key),
                             color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),

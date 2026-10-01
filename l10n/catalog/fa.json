@@ -2522,6 +2522,10 @@
       "text": "برداشتن سنجاق",
       "status": "machine"
     },
+    "chat.message.unsupported": {
+      "text": "این پیام به نسخه‌ی جدیدتر Lakko نیاز دارد.",
+      "status": "machine"
+    },
     "chat.not_found.back": {
       "text": "بازگشت به گفتگوها",
       "status": "machine"
@@ -3798,6 +3802,10 @@
       "text": "در انتظار",
       "status": "machine"
     },
+    "contacts.mailbox.chat_join_failed": {
+      "text": "کسی با شما گفت‌وگویی شروع کرد، اما در این دستگاه باز نشد. از او بخواهید دوباره شما را اضافه کند.",
+      "status": "machine"
+    },
     "contacts.mailbox.join_failed": {
       "text": "شما به یک گروه اضافه شدید، اما دعوت در این دستگاه باز نشد. از کسی که شما را اضافه کرد بخواهید دوباره اضافه‌تان کند.",
       "status": "machine"
@@ -3996,6 +4004,10 @@
     },
     "device_link.error.timeout": {
       "text": "دستگاه دیگر به‌موقع پاسخ نداد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "device_link.error.wrong_account": {
+      "text": "دستگاه دیگر از طرف حساب دیگری پاسخ داد. در این دستگاه چیزی تغییر نکرد.",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {
