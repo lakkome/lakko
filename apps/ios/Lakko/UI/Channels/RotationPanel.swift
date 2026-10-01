@@ -162,7 +162,9 @@ final class RotationPanelModel: ObservableObject {
             refreshStatus()
         } catch {
             NSLog("Channels: manual rotation failed: %@", String(describing: error))
-            self.error = .key("channels.rotation.error.refresh")
+            self.error = ChannelsErrorCopy.text(
+                for: error, prefixKey: "channels.rotation.error.refresh_prefix",
+                fallbackKey: "channels.rotation.error.refresh")
         }
     }
 
@@ -242,7 +244,8 @@ final class RotationPanelModel: ObservableObject {
         Task { @MainActor in
             do {
                 try await ChannelMetaRecord.post(
-                    state: state, client: client, channelId: channelId, meta: record)
+                    state: state, client: client, channelId: channelId, meta: record,
+                    accountIdentity: identity)
             } catch {
                 NSLog("Channels: post-rotation metadata re-issue failed: %@", String(describing: error))
             }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import XCTest
 @testable import Lakko
 
@@ -8,16 +9,34 @@ import XCTest
 /// group title (docs/ux/client-redesign.md sections 3 and 5.1).
 final class ConversationTitleTests: XCTestCase {
 
-    func testTwoPeopleAreAChatMoreAreAGroup() {
-        XCTAssertEqual(ConversationKind.of(peopleCount: 2), .chat)
-        XCTAssertEqual(ConversationKind.of(peopleCount: 3), .group)
-        XCTAssertEqual(ConversationKind.of(peopleCount: 7), .group)
+    // MARK: - Conversation kind (ADR-0062)
+
+    /// The kind is read from the group, never from a count: what the creator
+    /// passed to `Group.create` is what `groupKind()` answers, through the
+    /// real FFI boundary.
+    func testTheKindIsWhatTheCreatorFixedInTheGroup() throws {
+        let identity = try Identity.fromSeed(seed: Data(repeating: 0x21, count: 64))
+        let oneToOne = try Group.create(identity: identity, kind: .oneToOne)
+        let group = try Group.create(identity: identity, kind: .group)
+        XCTAssertEqual(try oneToOne.groupKind(), .oneToOne)
+        XCTAssertEqual(try group.groupKind(), .group)
+        XCTAssertEqual(ConversationKind.of(groupKind: try oneToOne.groupKind()), .chat)
+        XCTAssertEqual(
+            ConversationKind.of(groupKind: try group.groupKind()), .group,
+            "a group is a group while it holds one or two people")
     }
 
-    func testUnreadableOrLonelyRosterListsUnderChats() {
-        XCTAssertEqual(ConversationKind.of(peopleCount: nil), .chat)
-        XCTAssertEqual(ConversationKind.of(peopleCount: 1), .chat)
-        XCTAssertEqual(ConversationKind.of(peopleCount: 0), .chat)
+    func testAGroupWithoutAReadableKindCountsAsAGroup() {
+        XCTAssertEqual(ConversationKind.of(groupKind: .oneToOne), .chat)
+        XCTAssertEqual(ConversationKind.of(groupKind: .group), .group)
+        XCTAssertEqual(ConversationKind.of(groupKind: nil), .group)
+    }
+
+    /// ADR-0062 section 7 — a group-name envelope in a one-to-one is dropped.
+    func testAGroupNameAppliesOnlyOutsideAOneToOne() {
+        XCTAssertFalse(ConversationKind.acceptsGroupName(groupKind: .oneToOne))
+        XCTAssertTrue(ConversationKind.acceptsGroupName(groupKind: .group))
+        XCTAssertTrue(ConversationKind.acceptsGroupName(groupKind: nil))
     }
 
     func testGroupTitleJoinsUpToThreeNames() {

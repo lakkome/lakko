@@ -277,7 +277,7 @@ final class SplitPollSerializationTests: XCTestCase {
         let founder = try Identity.fromSeed(seed: seed)
         var hexes: [String] = []
         for _ in 0..<groupCount {
-            let group = try Group.create(identity: founder)
+            let group = try Group.create(identity: founder, kind: .group)
             hexes.append(DsClient.pseudonymHex(try group.groupId()))
         }
         let snapshotBlob = try founder.snapshotStorage()

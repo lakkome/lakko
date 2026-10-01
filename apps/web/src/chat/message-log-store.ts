@@ -246,6 +246,13 @@ export interface PersistedGroup {
    * `background-log.ts`.
    */
   readonly lastViewedMessageId?: string;
+  /**
+   * ADR-0063 section 5 - incoming messages above `lastViewedMessageId` the
+   * feed kept on screen long enough to count as seen (stringified ids). Folded
+   * into `lastViewedMessageId` once contiguous, so it only ever holds the
+   * gaps. See `feed/feed-seen.ts`.
+   */
+  readonly feedSeen?: readonly string[];
 }
 
 /** Wire shape of the encrypted blob, post-decrypt + JSON-parse. */

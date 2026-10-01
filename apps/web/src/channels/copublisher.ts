@@ -39,6 +39,19 @@
  * `rotation-cron`, but WITHOUT a second `rotate()` (the Add already advanced the
  * epoch; the reseal binds to the post-approve epoch the co-publisher joins at).
  *
+ * **Co-publisher keys (ADR-0059 section 1, 2026-09-29).** A co-publisher
+ * cannot derive the owner key, so its rotation fanout reads the subscriber
+ * list with a key of its own the owner appoints on `services/channels`. The
+ * joiner sends that key with its knock as a binding signed by its account
+ * identity key; the owner reads it off the knock queue (`pollCoPublisherJournal`)
+ * and appoints it after approving (`approveCoPublisher`) only when the
+ * binding's account key IS the joiner key it approved, so neither the DS nor
+ * another knocker can substitute a key. Only the owner can appoint: when a
+ * co-publisher approves another, the approve and reseal still run (under the
+ * approver's own appointed key) but the newcomer is not appointed, and its
+ * rotation fanout is refused until the owner appoints it (not built: this
+ * client has no path that notices a co-publisher it did not approve).
+ *
  * The end-to-end correctness of the reseal under a real 2-publisher topology
  * (the co-publisher derives the same post-approve seed the subscribers were
  * resealed to) needs a live 2-publisher e2e against a deployed channels backend
@@ -62,8 +75,10 @@ import { takeKnockReadSlot } from "../chat/knock-cursor";
 import { base64Encode } from "../auth/account-id";
 import { withGroupMlsLock } from "../mls/group-lock";
 import {
+  appointCoPublisher,
   fetchEpoch,
   listSubscribers,
+  rememberPublisherRole,
   rotateChannel,
   type RotateBatchEntry,
 } from "./api";
@@ -177,6 +192,70 @@ export async function createCoPublisherLink(
   }
 }
 
+/** Co-publisher keys read off knock queues, keyed `groupIdB64:joinerKeyHex`
+ *  (ADR-0059 section 1). Each value was verified under the joiner's account
+ *  key, which is the key it is filed under; the approve looks it up by the
+ *  joiner key it approves. In memory: the knock queue is re-read from the
+ *  start every poll, so a reload refills it. */
+const copublisherBindings = new Map<string, Uint8Array>();
+/** Joiners approved before their binding was read, keyed like the map above,
+ *  with what the appointment needs. Appointed when the binding arrives. */
+const awaitingBinding = new Map<string, { identity: Identity; channelIdHex: string }>();
+
+function bindingKey(groupIdB64: string, joinerKey: Uint8Array): string {
+  return `${groupIdB64}:${bytesToHex(joinerKey)}`;
+}
+
+/** Record a knock row that is a co-publisher binding for this channel. */
+function recordBinding(
+  wasm: Wasm,
+  groupIdB64: string,
+  channelIdHex: string,
+  payload: Uint8Array,
+): string | null {
+  let binding: Wasm["ChannelCoPublisherBinding"]["prototype"];
+  try {
+    binding = wasm.decodeChannelCoPublisherBinding(payload);
+  } catch {
+    return null;
+  }
+  try {
+    if (bytesToHex(binding.channelId) !== channelIdHex.toLowerCase()) return null;
+    const key = bindingKey(groupIdB64, binding.accountPubkey);
+    copublisherBindings.set(key, binding.copublisherPubkey);
+    return key;
+  } finally {
+    binding.free();
+  }
+}
+
+/** Appoint the co-publisher key bound to `joinerKey`, when its binding has
+ *  been read; otherwise remember to do it when it arrives. Never throws: a
+ *  refused appointment (this account is not the owner, the cap is reached,
+ *  the service is down) is logged and leaves the co-publisher unable to read
+ *  the subscriber list until the owner appoints it. */
+async function appointBound(
+  identity: Identity,
+  groupIdB64: string,
+  joinerKey: Uint8Array,
+  channelIdHex: string,
+  apiBase?: string,
+): Promise<void> {
+  const key = bindingKey(groupIdB64, joinerKey);
+  const copublisherKey = copublisherBindings.get(key);
+  if (copublisherKey === undefined) {
+    awaitingBinding.set(key, { identity, channelIdHex });
+    return;
+  }
+  awaitingBinding.delete(key);
+  try {
+    await appointCoPublisher(channelIdHex, identity, copublisherKey, apiBase);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("co-publisher: appointing the key failed; only the owner can appoint", err);
+  }
+}
+
 /** Poll the PublisherGroup's DS journal and apply incoming MLS messages
  *  (external-join proposals from prospective co-publishers + any co-publisher
  *  commits) via the role-gated path. Surfaces external-join proposals into the
@@ -240,7 +319,22 @@ export async function pollCoPublisherJournal(
       }
     }
     if (knocks !== null) {
+      const channelIdHex = bytesToHex(publisherGroup.channelId());
       for (const k of knocks.messages) {
+        // ADR-0059 — a co-publisher binding rides beside the proposal. It is
+        // not an MLS message, so it is read here and never processed.
+        const bound = recordBinding(wasm, groupIdB64, channelIdHex, k.payload);
+        if (bound !== null) {
+          const waiting = awaitingBinding.get(bound);
+          if (waiting !== undefined) {
+            const joinerHex = bound.slice(bound.indexOf(":") + 1);
+            const joiner = hexToBytes(joinerHex);
+            if (joiner !== null) {
+              void appointBound(waiting.identity, groupIdB64, joiner, waiting.channelIdHex);
+            }
+          }
+          continue;
+        }
         try {
           // Surfaces an external-join proposal into the retained pending set.
           // `processKnock`, never `processIncomingVerifyingRoles`: the knock
@@ -331,6 +425,10 @@ export async function approveCoPublisher(
       signerN?.free();
     }
     await resealSubscribers(publisherGroup, identity, channelIdHex, apiBase);
+    // ADR-0059 — appoint the newcomer's co-publisher key so its own rotation
+    // fanout can read the subscriber list. After the load-bearing reseal, and
+    // never failing the approve.
+    await appointBound(identity, base64Encode(groupId), proposalRef, channelIdHex, apiBase);
   });
 }
 
@@ -397,6 +495,10 @@ export async function requestToCoPublish(
     throw new Error("co-publisher link does not target a channel PublisherGroup");
   }
   const channelIdHex = bytesToHex(channelIdBytes);
+  // ADR-0059 section 1 — this account's co-publisher key for the channel,
+  // signed by its account identity key (the key the owner approves), rides
+  // beside the proposal so the owner can appoint it. Not on the empty probe.
+  const binding = wasm.composeChannelCoPublisherBinding(identity, channelIdBytes);
   // ADR-0060 section 6 (C-69) — the owner writes the Welcome to this
   // account's closed mailbox under our `reply` grant, which rides the signed
   // attribution. Registered before the knock; closed when the Welcome joins.
@@ -412,7 +514,8 @@ export async function requestToCoPublish(
     replyGrant.free();
   }
   await knockToJoin({
-    knock: (payloads) => ds.knock(groupId, payloads),
+    knock: (payloads) =>
+      ds.knock(groupId, payloads.length === 0 ? payloads : [...payloads, binding]),
     buildProposal: (epoch) => identity.createExternalJoinProposal(groupId, epoch),
     // Self-signed join attribution (OQ2): advisory for the approval, and the
     // only carrier of our reply grant.
@@ -486,7 +589,11 @@ export async function pollForCoPublishWelcome(
   // (now-joined) group, derives the shared content-key seed, and reuses the
   // persisted per-device signing seed (or mints one) so this device can
   // publish.
-  return await freshPublisherKeys(identity, channelIdHex, existingSigningSeed);
+  const keys = await freshPublisherKeys(identity, channelIdHex, existingSigningSeed);
+  // ADR-0059 section 9: this account publishes here as a co-publisher, so
+  // its writes are signed with the co-publisher key from the first one.
+  await rememberPublisherRole(channelIdHex, identity, "copublisher");
+  return keys;
 }
 
 /**
@@ -510,7 +617,7 @@ async function resealSubscribers(
   if (!Number.isInteger(newServerEpoch) || newServerEpoch < 0) {
     throw new Error(`unexpected server epoch ${current.epoch}; cannot reseal`);
   }
-  const subs = await listSubscribers(channelIdHex, apiBase);
+  const subs = await listSubscribers(channelIdHex, identity, apiBase);
   const bytesByHex = new Map<string, Uint8Array>();
   for (const subscriberHex of subs.subscribers) {
     const subscriberBytes = hexToBytes(subscriberHex);
@@ -539,7 +646,7 @@ async function resealSubscribers(
     subscriber_pubkey_hex: s.subscriberHex,
     envelope_b64: base64Encode(s.value),
   }));
-  await rotateChannel(channelIdHex, batch, apiBase);
+  await rotateChannel(channelIdHex, batch, identity, apiBase);
 }
 
 // ---------------------------------------------------------

@@ -157,7 +157,11 @@ public enum HistoryBundleCodec {
             merged.sort { a, b in a.messageId < b.messageId }
             nextGroups[hex] = PersistedGroup(
                 cursor: slot.cursor,
-                messages: merged
+                messages: merged,
+                // ADR-0063 — the seen state is this device's, never the
+                // bundle's; carried through untouched.
+                lastViewedMessageId: slot.lastViewedMessageId,
+                feedSeen: slot.feedSeen
             )
         }
 

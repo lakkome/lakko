@@ -417,3 +417,40 @@ async fn the_gate_spends_once_and_accepts_the_previous_epoch() {
         TokenRejection::Expired
     );
 }
+
+#[tokio::test]
+async fn the_in_memory_gate_spends_once_like_the_database_one() {
+    let cfg = gate_config();
+    let master = cfg.master.clone();
+    let v = TokenVerifier::in_memory(Some(cfg));
+    let now = HIGH + 2_000_000;
+
+    let t = testing::mint_header(&master, TokenContext::ChannelSubscribe, now);
+    assert!(v
+        .spend_header_at(&header(&t), TokenContext::ChannelSubscribe, now)
+        .await
+        .is_ok());
+    assert_eq!(
+        v.spend_header_at(&header(&t), TokenContext::ChannelSubscribe, now)
+            .await
+            .unwrap_err(),
+        TokenRejection::Spent
+    );
+    // Spent next epoch as well: the previous epoch still verifies, and its
+    // spend is still remembered.
+    assert_eq!(
+        v.spend_header_at(&header(&t), TokenContext::ChannelSubscribe, now + 1)
+            .await
+            .unwrap_err(),
+        TokenRejection::Spent
+    );
+    // A dormant in-memory verifier refuses like the database one.
+    assert_eq!(
+        TokenVerifier::in_memory(None)
+            .spend_header_at(&header(&t), TokenContext::ChannelSubscribe, now)
+            .await
+            .unwrap_err(),
+        TokenRejection::Disabled
+    );
+    assert!(TokenVerifier::in_memory(None).spawn_pruner().is_none());
+}

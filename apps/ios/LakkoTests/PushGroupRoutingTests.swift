@@ -244,7 +244,7 @@ final class PushGroupRoutingTests: XCTestCase {
 
     /// A real MLS group whose founder (`identity`) is the ADR-0022 owner.
     private func makeOwnerGroup(_ identity: Identity) throws -> (Group, String) {
-        let group = try Group.create(identity: identity)
+        let group = try Group.create(identity: identity, kind: .group)
         let groupIdHex = PushGroupRouting.hex(try group.groupId())
         return (group, groupIdHex)
     }

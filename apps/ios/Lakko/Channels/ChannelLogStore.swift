@@ -293,6 +293,11 @@ public struct PersistedChannel: Codable, Equatable {
     public let sharedName: String?
     public let sharedDescription: String?
     public let sharedUpdatedAtMs: UInt64?
+    /// ADR-0059 metadata v2 — the record's topic, language and `listed`
+    /// flag. Optional for the same reason as the fields above.
+    public let sharedTopic: UInt8?
+    public let sharedLanguage: String?
+    public let sharedListed: Bool?
 
     public init(
         id: String,
@@ -302,7 +307,10 @@ public struct PersistedChannel: Codable, Equatable {
         handle: String,
         sharedName: String? = nil,
         sharedDescription: String? = nil,
-        sharedUpdatedAtMs: UInt64? = nil
+        sharedUpdatedAtMs: UInt64? = nil,
+        sharedTopic: UInt8? = nil,
+        sharedLanguage: String? = nil,
+        sharedListed: Bool? = nil
     ) {
         self.id = id
         self.localName = localName
@@ -312,6 +320,9 @@ public struct PersistedChannel: Codable, Equatable {
         self.sharedName = sharedName
         self.sharedDescription = sharedDescription
         self.sharedUpdatedAtMs = sharedUpdatedAtMs
+        self.sharedTopic = sharedTopic
+        self.sharedLanguage = sharedLanguage
+        self.sharedListed = sharedListed
     }
 
     public init(handle h: ChannelHandle) {
@@ -323,7 +334,10 @@ public struct PersistedChannel: Codable, Equatable {
             handle: h.handle,
             sharedName: h.sharedUpdatedAtMs > 0 ? h.sharedName : nil,
             sharedDescription: h.sharedUpdatedAtMs > 0 ? h.sharedDescription : nil,
-            sharedUpdatedAtMs: h.sharedUpdatedAtMs > 0 ? h.sharedUpdatedAtMs : nil
+            sharedUpdatedAtMs: h.sharedUpdatedAtMs > 0 ? h.sharedUpdatedAtMs : nil,
+            sharedTopic: h.sharedUpdatedAtMs > 0 ? h.sharedTopic : nil,
+            sharedLanguage: h.sharedUpdatedAtMs > 0 ? h.sharedLanguage : nil,
+            sharedListed: h.sharedUpdatedAtMs > 0 ? h.sharedListed : nil
         )
     }
 
@@ -336,7 +350,10 @@ public struct PersistedChannel: Codable, Equatable {
             handle: handle,
             sharedName: sharedName ?? "",
             sharedDescription: sharedDescription ?? "",
-            sharedUpdatedAtMs: sharedUpdatedAtMs ?? 0
+            sharedUpdatedAtMs: sharedUpdatedAtMs ?? 0,
+            sharedTopic: sharedTopic ?? 0,
+            sharedLanguage: sharedLanguage.flatMap { DiscoverPrefs.isLanguage($0) ? $0 : nil } ?? "",
+            sharedListed: sharedListed ?? false
         )
     }
 }

@@ -144,6 +144,9 @@ class AnonTokenPoolTest {
                 AnonTokenContext.INVITE_CONSUME to 2,
                 AnonTokenContext.DS_KNOCK to 2,
                 AnonTokenContext.DISCOVERY_REGISTER to 1,
+                // ADR-0059 S2 contexts (`anonBatchPolicyFor`).
+                AnonTokenContext.CHANNEL_SUBSCRIBE to 2,
+                AnonTokenContext.DIRECTORY_SEARCH to 1,
             ),
             firstBatch,
         )

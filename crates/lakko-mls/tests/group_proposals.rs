@@ -15,8 +15,8 @@
 //! is provably measuring something real rather than passing vacuously.
 
 use lakko_mls::{
-    committer_rank, group, key_package, Group, Identity, Incoming, LeafNodeIndex, OutgoingOwner,
-    ProposalKind, RoleTable,
+    committer_rank, group, key_package, Group, GroupKind, Identity, Incoming, LeafNodeIndex,
+    OutgoingOwner, ProposalKind, RoleTable,
 };
 
 fn wire(msg: openmls::framing::MlsMessageOut) -> Vec<u8> {
@@ -64,7 +64,7 @@ fn scene(tag: u8) -> Scene {
     let bob = Identity::from_seed(&[0xB0 ^ tag; 64]).expect("bob");
     let charlie = Identity::from_seed(&[0xC0 ^ tag; 64]).expect("charlie");
 
-    let mut alice_g = Group::create(&alice).expect("alice creates group");
+    let mut alice_g = Group::create(&alice, GroupKind::Group).expect("alice creates group");
 
     let add_bob = alice_g
         .add_member_from_wire(&alice, &kp_wire(&bob))
@@ -799,7 +799,7 @@ fn abandoning_a_sweep_leaves_a_sibling_group_untouched() {
     let erin = Identity::from_seed(&[0xEFu8; 64]).expect("erin");
 
     // A second, unrelated group on the SAME two providers.
-    let mut alice_b = Group::create(&s.alice).expect("alice creates group B");
+    let mut alice_b = Group::create(&s.alice, GroupKind::Group).expect("alice creates group B");
     let add_bob_b = alice_b
         .add_member_from_wire(&s.alice, &kp_wire(&s.bob))
         .expect("alice adds bob to B");
@@ -2438,7 +2438,7 @@ fn a_knock_row_is_processed_only_when_it_is_an_external_join_proposal() {
         .expect("bob seals a message");
     let application = wire(application);
     // Another group's external-join proposal.
-    let other = Group::create(&stranger).expect("another group");
+    let other = Group::create(&stranger, GroupKind::Group).expect("another group");
     let foreign = Identity::from_seed(&[0x5Du8; 64])
         .expect("foreign")
         .create_external_join_proposal(&other.group_id(), other.epoch())

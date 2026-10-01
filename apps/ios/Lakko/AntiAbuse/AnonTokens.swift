@@ -27,6 +27,10 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
     case dsKnock = "ds-knock"
     /// push-gw register, unregister, group subscribe and group unsubscribe.
     case pushRegister = "push-register"
+    /// `POST /v1/channels/{id}/subscribers` (ADR-0059 section 4).
+    case channelSubscribe = "channel-subscribe"
+    /// `GET /v1/directory/search` (ADR-0059 section 5).
+    case directorySearch = "directory-search"
 
     /// Tokens asked for per issuance (ADR-0054 S5): a lookup is the common
     /// action; the others are rare, so a small batch leaves little unspent
@@ -38,6 +42,8 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
         case .inviteConsume: return 2
         case .dsKnock: return 2
         case .discoveryRegister: return 1
+        case .channelSubscribe: return 2
+        case .directorySearch: return 1
         }
     }
 
@@ -114,6 +120,12 @@ public enum AnonTokenCopy {
     public static var searchAllowanceUsed: String {
         Localization.text("tokens.lookup_allowance_used")
     }
+    /// Following a channel (ADR-0059 section 4, `docs/ux/feed.md` section 7).
+    public static var subscribeAllowanceUsed: String {
+        Localization.text("tokens.subscribe_allowance_used")
+    }
+    /// A Discover search (`docs/ux/feed.md` section 7).
+    public static var searchLimited: String { Localization.text("tokens.search_allowance_used") }
     /// Invite link, group link, channel name - allowance used up.
     public static var allowanceUsed: String {
         Localization.text("tokens.action_allowance_used")

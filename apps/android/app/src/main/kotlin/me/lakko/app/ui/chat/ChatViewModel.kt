@@ -679,12 +679,56 @@ public class ChatViewModel(
         }
     }
 
-    /** `true` when this chat has >2 MLS members — the call button then
-     *  routes through the SFU group-call path; a 2-member chat stays on
-     *  the 1x1 P2P call. A `null` member count (no handle yet)
-     *  reads as a 1x1. */
+    /** `true` when this conversation is a group (ADR-0062, read from the
+     *  group itself) — the call button then routes through the SFU
+     *  group-call path, even for a two-person group; a one-to-one stays on
+     *  the 1x1 P2P call. A group this device cannot classify yet (no
+     *  handle) follows [me.lakko.app.chat.conversationKindOf]. */
     public val isGroupChat: Boolean
-        get() = (repo.memberCount(groupIdHex) ?: 0) > 2
+        get() = repo.conversationKind(groupIdHex) == me.lakko.app.chat.ConversationKind.Group
+
+    // --- ADR-0059 section 6: Share my channels with this group ---
+
+    /** Whether this conversation is a group (the switch is a group's). */
+    public fun isGroupConversation(): Boolean =
+        isGroupConversation(repo, groupIdHex)
+
+    /** The shared-channels row; the switch reads `groupIdHex in shareOn`. */
+    public val sharedChannelsRow: StateFlow<me.lakko.app.discover.SharedChannelsRow>
+        get() = repo.sharedChannels.row
+
+    private val mutableShareChannelsBusy = MutableStateFlow(false)
+    public val shareChannelsBusy: StateFlow<Boolean> = mutableShareChannelsBusy.asStateFlow()
+    private val mutableShareChannelsError = MutableStateFlow<UiText?>(null)
+    public val shareChannelsError: StateFlow<UiText?> = mutableShareChannelsError.asStateFlow()
+
+    /** Load the row for this account (the sheet calls it when shown). */
+    public fun openSharedChannels() {
+        viewModelScope.launch { runCatching { repo.sharedChannels.open() } }
+    }
+
+    /** Turn the switch on or off. It changes only once the send succeeded. */
+    public fun setShareChannels(on: Boolean) {
+        if (mutableShareChannelsBusy.value) return
+        mutableShareChannelsBusy.value = true
+        mutableShareChannelsError.value = null
+        viewModelScope.launch {
+            try {
+                repo.sharedChannels.setSharing(groupIdHex, on)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatViewModel", "share channels switch failed", cause)
+                mutableShareChannelsError.value = when ((cause as? me.lakko.app.discover.SharingRefused)?.reason) {
+                    me.lakko.app.discover.SharingRefused.Reason.SIGNED_OUT -> UiText("common.error.session_ended")
+                    me.lakko.app.discover.SharingRefused.Reason.NOT_A_MEMBER -> UiText("chat.ended.no_longer_member")
+                    null -> UiText("discover.share.error")
+                }
+            } finally {
+                mutableShareChannelsBusy.value = false
+            }
+        }
+    }
 
     // --- Group membership (A4) ---
 
@@ -1813,13 +1857,11 @@ public class ChatViewModel(
         repo.oneToOnePeerKey(groupIdHex)?.let { me.lakko.app.auth.base64UrlEncodeNoPad(it) }
 
     /**
-     * UX section 3 — the persisted conversation kind, derived once from the
-     * people count when this conversation has none yet.
+     * UX section 3 — the conversation kind, read from the group (ADR-0062):
+     * fixed by its creator, the same on every member's device.
      */
     public fun conversationKind(): me.lakko.app.chat.ConversationKind =
-        me.lakko.app.chat.ConversationKindStore.resolve(
-            repo.context, groupIdHex, repo.memberCount(groupIdHex),
-        )
+        repo.conversationKind(groupIdHex)
 
     /**
      * ADR-0045 / UX §5.2 — the identity treatment for a PROSPECTIVE member: a
@@ -1891,12 +1933,6 @@ public class ChatViewModel(
                         subjectAccountIdB64 = me.lakko.app.chat.outboxB64(accountId),
                     ),
                 ) { repo.addMemberToGroup(groupIdHex, accountId, signaturePubkey) }
-                // docs/ux/client-redesign.md section 3 — adding a person to a 1x1
-                // makes it a group for good (the add may be a proposal that is
-                // swept later, so the roster alone would not say so yet).
-                me.lakko.app.chat.ConversationKindStore.set(
-                    repo.context, groupIdHex, me.lakko.app.chat.ConversationKind.Group,
-                )
                 mutableAddMemberInput.value = ""
                 refreshMembers()
             } catch (e: Throwable) {
@@ -2595,9 +2631,9 @@ public class ChatViewModel(
         val own = repo.ownMemberIdentity(groupIdHex)
         val others = typingMembers.filter { it != own }
         if (others.isEmpty()) return null
-        // 1×1: the chat has exactly two members, so a single other
-        // typist needs no name.
-        val isOneToOne = (repo.memberCount(groupIdHex) ?: 0) <= 2
+        // 1×1 (ADR-0062 kind): the only other person is the typist, so a
+        // single other typist needs no name. A two-person GROUP still names.
+        val isOneToOne = repo.conversationKind(groupIdHex) == me.lakko.app.chat.ConversationKind.Chat
         if (others.size == 1) {
             if (isOneToOne) return UiText("chat.typing.one_to_one")
             val name = labelForIdentity(others.first())

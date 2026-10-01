@@ -193,6 +193,18 @@ public var deviceLimitReachedMessage: String {
 /// section 5: a client bug, one plain sentence rather than a screen).
 public var deviceBindingInvalidMessage: String { Localization.text("chat.refusal.device_binding") }
 
+/// ADR-0062 — a chat (one-to-one) is always the same two people. No screen
+/// offers add / remove / leave on a chat, so this is reached only by a stale
+/// view; stated as the standing rule. Same copy as web and Android.
+public var oneToOneMembershipFixedMessage: String { Localization.text("chat.refusal.one_to_one_fixed") }
+
+/// ADR-0062 — a chat has no owner or admins. Same copy as web and Android.
+public var oneToOneHasNoRolesMessage: String { Localization.text("chat.refusal.one_to_one_no_roles") }
+
+/// ADR-0062 — a change that would alter or drop the conversation's kind,
+/// refused by the peer gate. Same copy as web and Android.
+public var groupKindChangedMessage: String { Localization.text("chat.refusal.group_kind_changed") }
+
 public var retryWhenItLandsMessage: String { Localization.text("chat.refusal.retry_one") }
 
 /// ``pendingSetFullMessage``'s second half — plural, for a queue of them. Two
@@ -238,6 +250,9 @@ public let allMembershipRefusalReasons: [FfiRefusalReason] = [
     .sweepAlreadyStaged,
     .deviceBindingInvalid,
     .deviceLimitReached,
+    .oneToOneMembershipFixed,
+    .oneToOneHasNoRoles,
+    .groupKindChanged,
 ]
 
 /// The reasons that deliberately share §6's fail-closed row.
@@ -314,6 +329,9 @@ private func refusalCopy(_ reason: FfiRefusalReason) -> RefusalCopy {
         return RefusalCopy(pendingSetFullMessage, invitation: retryWhenTheyLandMessage)
     case .deviceLimitReached: return RefusalCopy(deviceLimitReachedMessage)
     case .deviceBindingInvalid: return RefusalCopy(deviceBindingInvalidMessage)
+    case .oneToOneMembershipFixed: return RefusalCopy(oneToOneMembershipFixedMessage)
+    case .oneToOneHasNoRoles: return RefusalCopy(oneToOneHasNoRolesMessage)
+    case .groupKindChanged: return RefusalCopy(groupKindChangedMessage)
 
     // The recorded collapses. Listed individually rather than as a `default`
     // so that adding a reason to the core forces a decision here.
@@ -406,6 +424,10 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
             case .SweepAlreadyStaged: return .sweepAlreadyStaged
             case .MembershipDeviceBindingInvalid: return .deviceBindingInvalid
             case .MembershipDeviceLimitReached: return .deviceLimitReached
+            // ADR-0062 — the conversation-kind refusals.
+            case .MembershipOneToOneMembershipFixed: return .oneToOneMembershipFixed
+            case .MembershipOneToOneHasNoRoles: return .oneToOneHasNoRoles
+            case .MembershipGroupKindChanged: return .groupKindChanged
 
             // Everything that is NOT a membership refusal. Enumerated rather
             // than defaulted, so a new `FfiError` variant has to be classified
@@ -423,8 +445,9 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 .DeviceGroupPayloadRefused, .SyncedState, .DeviceLinkWrongCode, .DeviceLink,
                 .InviteLinkDamaged, .Reach, .Introduction, .Visibility, .UsernameCertificate,
                 .CommitterDelegation,
-                // ADR-0061 interface localization.
-                .L10n:
+                // ADR-0063 feed rules; ADR-0059 channel listings and
+                // co-publisher bindings; ADR-0061 interface localization.
+                .FeedRule, .ChannelListing, .ChannelCoPublisherBinding, .L10n:
                 return nil
             }
         }

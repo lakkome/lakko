@@ -19,8 +19,6 @@ import me.lakko.app.channels.ChannelPublisherKeys
 import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.channels.CoPublishedJournals
 import me.lakko.app.chat.CommitOutboxStore
-import me.lakko.app.chat.ConversationKind
-import me.lakko.app.chat.ConversationKindStore
 import me.lakko.app.chat.DeviceReadmission
 import me.lakko.app.chat.GroupNameStore
 import me.lakko.app.chat.KnownGroupsStore
@@ -54,7 +52,6 @@ import me.lakko.app.profile.UsernameVerification
 import me.lakko.app.push.PushRouteStore
 import me.lakko.app.push.PushWakeBindingStore
 import me.lakko.app.ui.chat.FolderTabPrefs
-import me.lakko.app.ui.chat.GroupPresentationStore
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -266,8 +263,6 @@ class AccountLocalWipeTest {
             .putBoolean(acct, true).commit()
         // The stores that write for the bound account.
         AcceptedContactsStore.bind(raw)
-        ConversationKindStore.set(context, group, ConversationKind.Group)
-        GroupPresentationStore.markCreatedAsGroup(context, group)
         FolderTabPrefs.save(context, "ee".repeat(8))
         MediaPrefs(context).apply {
             recentEmoji = listOf("\uD83D\uDE00")
@@ -408,7 +403,7 @@ class AccountLocalWipeTest {
             "lakko-device-sync-pending", "lakko-media-prefs", "lakko-own-profile", "lakko-peer-profiles",
             "lakko-profile-requests", "lakko.notifications", "me.lakko.push-routing.v2", "me.lakko.push-routing.v1",
             "me.lakko.push-wake-binding.v1", "lakko-chat-folders", "lakko-group-presentation", "lakko-appearance",
-            "lakko.anticensorship", "lakko.release",
+            "lakko.anticensorship", "lakko.release", "lakko.feed",
         )
 
         /** The files [seed] writes a row naming the account into. */
@@ -419,7 +414,7 @@ class AccountLocalWipeTest {
             "lakko-pins", "lakko-read-watermarks", "lakko-group-calls", "lakko-peer-profiles", "lakko-own-profile",
             "lakko-profile-requests", "lakko-accepted-contacts", "lakko-contacts-inbox", "me.lakko.ds.co-published",
             "me.lakko.push-routing.v2", "me.lakko.push-routing.v1", "lakko-device-sync-pending",
-            "lakko-conversation-kind", "lakko-group-presentation", "lakko-chat-folders", "lakko-media-prefs",
+            "lakko-chat-folders", "lakko-media-prefs",
             CHANNEL_PUBLISHER_PREFS,
         )
 

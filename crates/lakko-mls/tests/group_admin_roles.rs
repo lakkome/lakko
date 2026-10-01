@@ -11,7 +11,7 @@
 //! by MLS, so the gate's `sender()`-derived role check is what enforces the
 //! policy; an offender's refused commit forks them out of the honest state.
 
-use lakko_mls::{group, key_package, Group, Identity, Incoming, RoleTable};
+use lakko_mls::{group, key_package, Group, GroupKind, Identity, Incoming, RoleTable};
 use openmls::extensions::{
     Extension, ExtensionType, Extensions, RequiredCapabilitiesExtension, UnknownExtension,
 };
@@ -20,6 +20,8 @@ use openmls::prelude::LeafNodeIndex;
 /// The `0xFF02` role-table extension type, restated locally — the constant is
 /// `pub(crate)` and this suite hand-builds an extension set a peer must judge.
 const ROLE_EXTENSION_TYPE: u16 = 0xFF02;
+/// The ADR-0062 conversation-kind extension type.
+const KIND_EXTENSION_TYPE: u16 = 0xFF03;
 
 /// The extension set `set_group_roles` builds, restated so a test can commit
 /// one that `set_group_roles` itself now refuses to build — the adversary seam
@@ -27,11 +29,18 @@ const ROLE_EXTENSION_TYPE: u16 = 0xFF02;
 fn role_extensions(table: &RoleTable) -> Extensions<openmls::group::GroupContext> {
     Extensions::from_vec(vec![
         Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
-            &[ExtensionType::Unknown(ROLE_EXTENSION_TYPE)],
+            &[
+                ExtensionType::Unknown(ROLE_EXTENSION_TYPE),
+                ExtensionType::Unknown(KIND_EXTENSION_TYPE),
+            ],
             &[],
             &[],
         )),
         Extension::Unknown(ROLE_EXTENSION_TYPE, UnknownExtension(table.encode())),
+        Extension::Unknown(
+            KIND_EXTENSION_TYPE,
+            UnknownExtension(GroupKind::Group.encode().to_vec()),
+        ),
     ])
     .expect("build role extensions")
 }
@@ -76,7 +85,7 @@ fn scene() -> Scene {
     let bob = Identity::from_seed(&[0xB0u8; 64]).expect("bob");
     let charlie = Identity::from_seed(&[0xC0u8; 64]).expect("charlie");
 
-    let mut alice_g = Group::create(&alice).expect("alice creates group");
+    let mut alice_g = Group::create(&alice, GroupKind::Group).expect("alice creates group");
 
     // alice (owner) adds bob; bob joins from the Welcome (carries the role table).
     let add_bob = alice_g

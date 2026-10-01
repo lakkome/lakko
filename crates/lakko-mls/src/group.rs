@@ -59,9 +59,12 @@ use tls_codec::{Deserialize as _, Serialize as _};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
+use crate::group_kind::{GroupKind, KindState, GROUP_KIND_EXTENSION_TYPE};
 use crate::group_proposals::{
-    account_key_at_leaf, authorise, classify, commit_effects, is_owner_response, leaves_of_account,
-    owner_survives, proposer_at, ProposalKind, ProposalRecord, Proposer, MAX_LEAVES_PER_ACCOUNT,
+    account_key_at_leaf, authorise, classify, commit_effects, group_kind_unchanged,
+    is_owner_response, leaves_of_account, one_to_one_allows, one_to_one_holds, owner_survives,
+    proposal_keeps_group_kind, proposer_at, CommitEffects, ProposalKind, ProposalRecord, Proposer,
+    MAX_LEAVES_PER_ACCOUNT,
 };
 use crate::group_roles::{OutgoingOwner, Role, RoleTable, ROLE_EXTENSION_TYPE};
 use crate::identity::Identity;
@@ -510,10 +513,18 @@ pub enum Incoming {
 impl Group {
     /// Create a new MLS group with the given identity as the founding member.
     ///
+    /// `kind` is written into the GroupContext as the `0xFF03` extension
+    /// ([ADR-0062]) and never changes: a [`GroupKind::OneToOne`] keeps its two
+    /// people for life, a [`GroupKind::Group`] follows the ordinary role and
+    /// proposal rules even while it holds two people. It is a required argument
+    /// so no caller can forget it.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Group`] for any OpenMLS-side failure.
-    pub fn create(identity: &Identity) -> Result<Self> {
+    ///
+    /// [ADR-0062]: ../../../docs/adr/0062-conversation-kind.md
+    pub fn create(identity: &Identity, kind: GroupKind) -> Result<Self> {
         // ADR-0022 (owner-bootstrap option A) — a conversation group is
         // role-enabled from creation with the creator as owner. The initial
         // GroupContext carries the `0xFF02` role table (owner = creator, no
@@ -528,9 +539,13 @@ impl Group {
             .account_public_key()
             .ok_or_else(|| Error::Group("identity signature key is not 32 bytes".into()))?;
         let initial = RoleTable::owner_only(owner);
+        // ADR-0062: the kind rides beside the role table, and both are named
+        // in `required_capabilities`, so a device that does not understand the
+        // kind cannot be added and so cannot fail to enforce it.
         let exts = Extensions::from_vec(vec![
-            role_required_capabilities(),
+            conversation_required_capabilities(),
             Extension::Unknown(ROLE_EXTENSION_TYPE, UnknownExtension(initial.encode())),
+            kind.extension(),
         ])
         .map_err(|e| Error::Group(format!("build role extensions: {e:?}")))?;
         let cfg = MlsGroupCreateConfig::builder()
@@ -658,6 +673,12 @@ impl Group {
             .build();
         let staged = StagedWelcome::new_from_welcome(&identity.provider, &cfg, welcome, None)
             .map_err(|e| Error::Group(format!("staged welcome: {e:?}")))?;
+        // ADR-0062: a conversation (a group carrying the ADR-0022 role table)
+        // must say what kind it is, readably, or it is not joined — checked
+        // before the group is written to storage, so a refused Welcome leaves
+        // nothing behind. A device that cannot classify a conversation must
+        // never have to guess (invariant #4 shape: refuse rather than degrade).
+        refuse_unclassifiable_conversation(staged.group_context().extensions())?;
         let inner = staged
             .into_group(&identity.provider)
             .map_err(|e| Error::Group(format!("welcome -> group: {e:?}")))?;
@@ -846,20 +867,29 @@ impl Group {
         self.refuse_if_proposals_pending("add_member")?;
         // ADR-0050: the direct path admits nothing the proposal path would
         // refuse — a leaf whose credential does not resolve to an account.
+        let mut added_accounts = Vec::with_capacity(key_packages.len());
         for key_package in &key_packages {
             let leaf = key_package.leaf_node();
-            if crate::device_binding::account_key_of_credential(
+            let Some(account) = crate::device_binding::account_key_of_credential(
                 leaf.credential().serialized_content(),
                 leaf.signature_key().as_slice(),
-            )
-            .is_none()
-            {
+            ) else {
                 return Err(Error::refused(
                     RefusalReason::DeviceBindingInvalid,
                     "add_member refused: the added leaf's device binding does not verify",
                 ));
-            }
+            };
+            added_accounts.push(Some(account.to_vec()));
         }
+        // ADR-0062: the local courtesy half of the one-to-one rule, before the
+        // commit is built. It is also the check that admits the founding
+        // commit of a one-to-one: the founder alone, plus one other person
+        // with any number of devices, plus the founder's own other devices.
+        one_to_one_holds(
+            &CommitEffects::direct(Vec::new(), added_accounts),
+            &self.members(),
+            self.group_kind(),
+        )?;
         let (commit, welcome, _group_info) = self
             .inner
             .add_members(&identity.provider, &identity.signature_keys, &key_packages)
@@ -971,6 +1001,13 @@ impl Group {
         leaf: LeafNodeIndex,
     ) -> Result<MlsMessageOut> {
         self.refuse_if_proposals_pending("remove_member")?;
+        // ADR-0062: removing a person's last leaf from a one-to-one is refused
+        // here, locally, before the commit is built; every peer refuses it too.
+        one_to_one_holds(
+            &CommitEffects::direct(vec![leaf.u32()], Vec::new()),
+            &self.members(),
+            self.group_kind(),
+        )?;
         let (commit, _welcome_for_external_joiners, _group_info) = self
             .inner
             .remove_members(&identity.provider, &identity.signature_keys, &[leaf])
@@ -1001,6 +1038,22 @@ impl Group {
         extensions: Extensions<GroupContext>,
     ) -> Result<MlsMessageOut> {
         self.refuse_if_proposals_pending("set_group_context_extensions")?;
+        // ADR-0062: a one-to-one's GroupContext is frozen from creation, and no
+        // rewrite anywhere may change a conversation's kind. Both are refused
+        // on every peer; refusing here keeps this device from merging a commit
+        // nobody else will.
+        if self.group_kind() == Some(GroupKind::OneToOne) {
+            return Err(Error::refused(
+                RefusalReason::OneToOneHasNoRoles,
+                "set_group_context_extensions refused: a one-to-one's GroupContext never changes",
+            ));
+        }
+        if !self.kind_state().preserved_by(&KindState::of(&extensions)) {
+            return Err(Error::refused(
+                RefusalReason::GroupKindChanged,
+                "set_group_context_extensions refused: it would change this conversation's kind",
+            ));
+        }
         let (commit, _welcome, _group_info) = self
             .inner
             .update_group_context_extensions(
@@ -1039,6 +1092,76 @@ impl Group {
     pub fn group_roles(&self) -> Option<RoleTable> {
         self.group_context_extension(ROLE_EXTENSION_TYPE)
             .and_then(|body| RoleTable::decode(&body).ok())
+    }
+
+    /// The conversation's kind, read from the `0xFF03` GroupContext extension
+    /// the creator wrote ([ADR-0062]). The same answer on every device of every
+    /// member, from the moment it joins, and it never changes.
+    ///
+    /// `None` only for a group that carries no kind at all — a
+    /// `PublisherGroup`, a `DeviceGroup`, or any other
+    /// [`Group::create_with_id`] group, none of which is a conversation. A
+    /// conversation without a readable kind is never joined
+    /// ([`Group::join_from_welcome`]) and no commit may remove or change it.
+    ///
+    /// [ADR-0062]: ../../../docs/adr/0062-conversation-kind.md
+    #[must_use]
+    pub fn group_kind(&self) -> Option<GroupKind> {
+        self.kind_state().kind()
+    }
+
+    /// The pre-merge group-kind facts the ADR-0062 gates compare a rewrite
+    /// against.
+    fn kind_state(&self) -> KindState {
+        KindState::of(self.inner.extensions())
+    }
+
+    /// The GroupContext extension list a role-table rewrite installs: the
+    /// current list **verbatim**, with only the `0xFF02` body replaced by
+    /// `roles` (ADR-0062 section 4).
+    ///
+    /// **The one place a rewrite's extension list is built**, used by
+    /// [`Group::set_group_roles`], [`Group::propose_group_roles`] and — through
+    /// them — both ownership-transfer paths, so the four cannot drift. A
+    /// `GroupContextExtensions` proposal replaces the WHOLE list, so anything a
+    /// rewrite fails to restate is deleted: before this helper each site
+    /// restated the two extensions it knew about, which would have dropped the
+    /// `0xFF03` kind on the first promotion and been refused by every peer.
+    /// Copying everything but the role table keeps the kind, the
+    /// `RequiredCapabilities` naming it, and any extension added later.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] if the rebuilt list is not a valid extension set.
+    fn role_rewrite_extensions(&self, roles: &RoleTable) -> Result<Extensions<GroupContext>> {
+        let role = Extension::Unknown(ROLE_EXTENSION_TYPE, UnknownExtension(roles.encode()));
+        let mut list = Vec::new();
+        let mut placed = false;
+        let mut has_required = false;
+        for ext in self.inner.extensions().iter() {
+            match ext {
+                Extension::Unknown(t, _) if *t == ROLE_EXTENSION_TYPE => {
+                    list.push(role.clone());
+                    placed = true;
+                },
+                other => {
+                    has_required |= matches!(other, Extension::RequiredCapabilities(_));
+                    list.push(other.clone());
+                },
+            }
+        }
+        if !placed {
+            list.push(role);
+        }
+        // A role table must stay in `required_capabilities` (OpenMLS refuses an
+        // extension a member's leaf does not advertise). Every conversation
+        // carries one from creation; this only covers a list that somehow
+        // lacks it.
+        if !has_required {
+            list.push(role_required_capabilities());
+        }
+        Extensions::from_vec(list)
+            .map_err(|e| Error::Group(format!("build role extensions: {e:?}")))
     }
 
     /// This member's role in the group, or `None` when the group has no role
@@ -1116,7 +1239,12 @@ impl Group {
             .iter()
             .any(|p| p.joiner_signature_key == joiner_signature_key);
         let already_a_member = self.joiner_is_already_a_member(&joiner_signature_key);
+        // ADR-0062: nobody joins a one-to-one from outside. The knock is
+        // consumed and surfaced as `retained: false` — the shape a full
+        // quarantine already has — so nothing is ever offered for approval.
+        let one_to_one = self.group_kind() == Some(GroupKind::OneToOne);
         if binding_resolves
+            && !one_to_one
             && !already_pending
             && !already_a_member
             && self.pending_external_joins.len() < MAX_PENDING_EXTERNAL_JOINS
@@ -1383,6 +1511,12 @@ impl Group {
         proposal_ref: &[u8],
     ) -> Result<Vec<u8>> {
         self.role_table_or_refuse("external join approve")?;
+        if self.group_kind() == Some(GroupKind::OneToOne) {
+            return Err(Error::refused(
+                RefusalReason::OneToOneMembershipFixed,
+                "external join approve refused: a one-to-one always has the same two people",
+            ));
+        }
         let key_package = self.pending_external_join_key_package(proposal_ref)?;
         // Preserve the typed reason rather than flattening it into prose.
         //
@@ -1499,6 +1633,7 @@ impl Group {
         roles: &RoleTable,
     ) -> Result<()> {
         let table = self.role_table_or_refuse("role-table change")?;
+        self.refuse_role_change_in_one_to_one("role-table change")?;
         // ADR-0050 section 2.3: the table names ACCOUNT keys, so compare the
         // account this device is bound to (its own key when unbound, Phase 1),
         // never the device's leaf key — which on a bound device is not in the
@@ -1547,13 +1682,9 @@ impl Group {
     pub fn set_group_roles(&mut self, identity: &Identity, roles: &RoleTable) -> Result<Vec<u8>> {
         self.refuse_unenforceable_role_table(identity, roles)?;
         // `set_group_context_extensions` replaces the whole extension set, so
-        // re-include the required-capabilities declaration alongside the new
-        // table (the role type must stay in required_capabilities).
-        let exts = Extensions::from_vec(vec![
-            role_required_capabilities(),
-            Extension::Unknown(ROLE_EXTENSION_TYPE, UnknownExtension(roles.encode())),
-        ])
-        .map_err(|e| Error::Group(format!("build role extensions: {e:?}")))?;
+        // the list is the current one verbatim with only the role table swapped
+        // (ADR-0062 — the kind and `required_capabilities` ride through).
+        let exts = self.role_rewrite_extensions(roles)?;
         let commit = self.set_group_context_extensions(identity, exts)?;
         encode_message(&commit)
     }
@@ -1593,6 +1724,18 @@ impl Group {
         })
     }
 
+    /// Refuse any role-table rewrite in a one-to-one (ADR-0062 section 5): it
+    /// has no roles to change, and its GroupContext is frozen from creation.
+    fn refuse_role_change_in_one_to_one(&self, op: &str) -> Result<()> {
+        if self.group_kind() == Some(GroupKind::OneToOne) {
+            return Err(Error::refused(
+                RefusalReason::OneToOneHasNoRoles,
+                format!("{op} refused: a one-to-one has no roles"),
+            ));
+        }
+        Ok(())
+    }
+
     /// Run the ADR-0045 rule locally for something *this* device is about to
     /// propose. A courtesy check that keeps our own store clean and gives the
     /// user an immediate error; the enforcing copies are the peers' receipt gate
@@ -1618,6 +1761,10 @@ impl Group {
                 Error::Group("proposal refused: identity signature key is not 32 bytes".into())
             })?,
         };
+        // ADR-0062 first: in a one-to-one a request that changes its people or
+        // its roles is not permitted at all, so saying "the queue is full" or
+        // "you are not an admin" instead would invite a pointless retry.
+        one_to_one_allows(self.group_kind(), &members, Some(proposer), kind)?;
         self.refuse_if_device_limit_reached(&members, kind)?;
         let capacity = pending_capacity(is_owner_response(&table, Some(proposer), kind));
         if self.inner.pending_proposals().count() >= capacity {
@@ -1749,13 +1896,9 @@ impl Group {
         // proposal, of which a role change is one.
         self.refuse_if_role_change_pending("role-table change")?;
         // As in `set_group_roles`: a GroupContextExtensions proposal replaces
-        // the WHOLE extension set, so the required-capabilities declaration has
-        // to be re-stated alongside the new table.
-        let exts = Extensions::from_vec(vec![
-            role_required_capabilities(),
-            Extension::Unknown(ROLE_EXTENSION_TYPE, UnknownExtension(roles.encode())),
-        ])
-        .map_err(|e| Error::Group(format!("build role extensions: {e:?}")))?;
+        // the WHOLE extension set, so it is the current list verbatim with only
+        // the role table swapped (ADR-0062).
+        let exts = self.role_rewrite_extensions(roles)?;
         let (proposal, _proposal_ref) = self
             .inner
             .propose_group_context_extensions(&identity.provider, exts, &identity.signature_keys)
@@ -1794,6 +1937,7 @@ impl Group {
         outgoing: OutgoingOwner,
     ) -> Result<RoleTable> {
         let table = self.role_table_or_refuse("ownership transfer")?;
+        self.refuse_role_change_in_one_to_one("ownership transfer")?;
         let own_account = identity.account_public_key().unwrap_or_default();
         if !table.is_owner(&own_account) {
             return Err(Error::refused(
@@ -2280,9 +2424,11 @@ impl Group {
         // owned by this frame, which is why `SweepContext` holds no reference
         // into `self`.
         let admission = self.admission_requirements(&removed_leaves);
+        let kind_before = self.kind_state();
         let ctx = SweepContext {
             table: &table,
             members: &members,
+            kind_before: &kind_before,
             role_change_survives,
             removed_leaves: &removed_leaves,
             admission: &admission,
@@ -2378,7 +2524,24 @@ impl Group {
         if candidates.is_empty() {
             return Ok(None);
         }
-        match self.stage_sweep_of(identity, &candidates) {
+        // The commit-wide rules first (ADR-0062): the enumeration judges each
+        // proposal alone, and two individually harmless ones — the two leaves
+        // of one person in a one-to-one — can together build a commit every
+        // peer refuses. A selection a peer would refuse is narrowed exactly as
+        // one the builder refuses, never published.
+        let admissible = {
+            let members = self.members();
+            let queued: Vec<QueuedProposal> = self.inner.pending_proposals().cloned().collect();
+            self.selection_is_admissible(&queued, &candidates, &members)
+        };
+        let first = if admissible {
+            self.stage_sweep_of(identity, &candidates)
+        } else {
+            Err(SweepAttemptError::Refused(Error::Group(
+                "sweep: the selection breaks a commit-wide rule a peer would apply".into(),
+            )))
+        };
+        match first {
             Ok(commit) => Ok(Some(commit)),
             // Anything that is not the builder refusing this selection is not
             // something a different selection can fix.
@@ -2568,11 +2731,34 @@ impl Group {
     ) -> bool {
         let mut trial = accepted.to_vec();
         trial.push(candidate.clone());
-        let owner = self.group_roles().map(|t| *t.owner()).unwrap_or_default();
-        if !selection_keeps_an_owner(queued, &trial, members, &owner) {
+        if !self.selection_is_admissible(queued, &trial, members) {
             return false;
         }
         self.sweep_selection_builds(identity, &trial)
+    }
+
+    /// `true` when committing exactly `selection` passes every commit-wide rule
+    /// a peer applies: it keeps an owner in the group
+    /// ([`crate::group_proposals::owner_survives`]), leaves the conversation's
+    /// kind as it was, and — in a one-to-one — keeps its two people
+    /// ([`crate::group_proposals::one_to_one_holds`], ADR-0062). The
+    /// per-proposal half is the enumeration's; these are the rules only the
+    /// whole selection can answer.
+    fn selection_is_admissible(
+        &self,
+        queued: &[QueuedProposal],
+        selection: &[ProposalRef],
+        members: &[MemberRecord],
+    ) -> bool {
+        let owner = self.group_roles().map(|t| *t.owner()).unwrap_or_default();
+        let effects = commit_effects(
+            queued
+                .iter()
+                .filter(|qp| selection.contains(qp.proposal_reference_ref())),
+        );
+        owner_survives(&effects, members, &owner).is_ok()
+            && group_kind_unchanged(&effects, &self.kind_state()).is_ok()
+            && one_to_one_holds(&effects, members, self.group_kind()).is_ok()
     }
 
     /// `true` when a sweep built by [`Group::stage_pending_proposals`] is
@@ -2797,7 +2983,7 @@ impl Group {
                 // an open (legacy) group, no enforcement.
                 if let Some(table) = self.group_roles() {
                     let members = self.members();
-                    authorise_role_commit(&table, &members, &staged)?;
+                    authorise_role_commit(&table, &members, &self.kind_state(), &staged)?;
                 }
                 self.inner
                     .merge_staged_commit(&identity.provider, *staged)
@@ -2851,6 +3037,14 @@ impl Group {
         };
         let members = self.members();
         let proposer = sender_leaf.and_then(|leaf| proposer_at(&members, leaf));
+        // ADR-0062: the early one-to-one answer, and no rewrite that changes
+        // the kind, in either kind of conversation. Neither is ever stored, so
+        // neither can sit in the pending set or reach a sweep.
+        if one_to_one_allows(self.group_kind(), &members, proposer, &kind).is_err()
+            || !proposal_keeps_group_kind(qp.proposal(), &self.kind_state())
+        {
+            return refused(kind);
+        }
         if authorise(&table, &members, proposer, &kind).is_err() {
             return refused(kind);
         }
@@ -3405,6 +3599,43 @@ fn role_required_capabilities() -> Extension {
     ))
 }
 
+/// The `required_capabilities` a conversation carries from [`Group::create`]:
+/// the ADR-0022 role table (`0xFF02`) and the ADR-0062 conversation kind
+/// (`0xFF03`). Naming the kind here means a device whose KeyPackage does not
+/// advertise it can never be added to a conversation, so every member's device
+/// understands — and enforces — the kind.
+fn conversation_required_capabilities() -> Extension {
+    Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+        &[
+            ExtensionType::Unknown(ROLE_EXTENSION_TYPE),
+            ExtensionType::Unknown(GROUP_KIND_EXTENSION_TYPE),
+        ],
+        &[],
+        &[],
+    ))
+}
+
+/// Refuse a Welcome into a conversation that does not say, readably, what kind
+/// it is (ADR-0062 section 3): a GroupContext carrying the ADR-0022 role table
+/// but no `0xFF03`, or an `0xFF03` body that does not decode. A group with no
+/// role table is not a conversation (`PublisherGroup`, `DeviceGroup`) and is
+/// not asked.
+fn refuse_unclassifiable_conversation(extensions: &Extensions<GroupContext>) -> Result<()> {
+    if extensions.unknown(ROLE_EXTENSION_TYPE).is_none() {
+        return Ok(());
+    }
+    let Some(body) = extensions.unknown(GROUP_KIND_EXTENSION_TYPE) else {
+        return Err(Error::Group(
+            "welcome refused: the conversation does not carry its kind".into(),
+        ));
+    };
+    GroupKind::decode(&body.0).map(|_| ()).map_err(|e| {
+        Error::Group(format!(
+            "welcome refused: unreadable conversation kind: {e}"
+        ))
+    })
+}
+
 /// `true` when a member that is neither owner nor admin may carry `qp` in a
 /// sweep (ADR-0050 section 2.5a) — when `qp` is either
 ///
@@ -3483,27 +3714,6 @@ impl SweepAttemptError {
     }
 }
 
-/// `true` when committing exactly `selection` leaves the group with an owner
-/// who is in it ([`crate::group_proposals::owner_survives`]).
-///
-/// The [`sweep_keeps`] clause-2 predicate asks the same question once, over the
-/// whole authorised set, because that is the set it expects to commit. The
-/// exclusion search cannot reuse that answer: it varies the set, and dropping
-/// an `Add` can strand a role change the earlier answer had blessed.
-fn selection_keeps_an_owner(
-    queued: &[QueuedProposal],
-    selection: &[ProposalRef],
-    members: &[MemberRecord],
-    current_owner: &[u8],
-) -> bool {
-    let effects = commit_effects(
-        queued
-            .iter()
-            .filter(|qp| selection.contains(qp.proposal_reference_ref())),
-    );
-    owner_survives(&effects, members, current_owner).is_ok()
-}
-
 // Counts every `CommitBuilder::build` the sweep path performs, in test builds
 // only. The cost of the exclusion search is a claim this crate makes in prose,
 // and a claim about a count is worth exactly as much as the counter that checks
@@ -3543,6 +3753,9 @@ struct SweepContext<'a> {
     table: &'a RoleTable,
     /// The pre-merge roster.
     members: &'a [MemberRecord],
+    /// The pre-merge group-kind facts (ADR-0062): a role change that would
+    /// install anything else is never swept.
+    kind_before: &'a KindState,
     /// Whether the authorised set's role change would leave the group with an
     /// owner inside it (`owner_survives`, computed once over the whole set).
     role_change_survives: bool,
@@ -3795,7 +4008,13 @@ fn sweep_keeps(ctx: &SweepContext<'_>, state: &mut SweepState, qp: &QueuedPropos
             true
         },
         ProposalKind::RoleChange => {
-            if !ctx.role_change_survives || state.role_change_taken {
+            // ADR-0062: no rewrite that changes the kind is ever swept, and in
+            // a one-to-one no rewrite is swept at all.
+            if !ctx.role_change_survives
+                || state.role_change_taken
+                || !proposal_keeps_group_kind(qp.proposal(), ctx.kind_before)
+                || ctx.kind_before.kind() == Some(GroupKind::OneToOne)
+            {
                 return false;
             }
             state.role_change_taken = true;
@@ -4075,17 +4294,20 @@ fn proposal_type_is_default(proposal_type: ProposalType) -> bool {
 fn authorise_role_commit(
     table: &RoleTable,
     members: &[MemberRecord],
+    kind_before: &KindState,
     staged: &StagedCommit,
 ) -> Result<()> {
-    // The one rule that is about the commit rather than about any one proposal:
-    // whatever else this commit does, it must not leave the group with an owner
-    // who is not in it. See `owner_survives` for the two ways that happens and
-    // why neither is visible to a per-proposal check.
-    owner_survives(
-        &commit_effects(staged.queued_proposals()),
-        members,
-        table.owner(),
-    )?;
+    let effects = commit_effects(staged.queued_proposals());
+    // The rules that are about the commit rather than about any one proposal.
+    // First: whatever else this commit does, it must not leave the group with
+    // an owner who is not in it. See `owner_survives` for the two ways that
+    // happens and why neither is visible to a per-proposal check.
+    owner_survives(&effects, members, table.owner())?;
+    // ADR-0062: no commit changes the conversation's kind, and a one-to-one's
+    // commit keeps its two people and rewrites nothing — judged against the
+    // pre-merge GroupContext, like the role table.
+    group_kind_unchanged(&effects, kind_before)?;
+    one_to_one_holds(&effects, members, kind_before.kind())?;
     for qp in staged.queued_proposals() {
         // The proposal's own author: the sender OpenMLS recorded for it. A
         // by-value proposal carries the committer; a by-reference one carries
@@ -4302,11 +4524,7 @@ impl Group {
         identity: &Identity,
         roles: &RoleTable,
     ) -> Result<Vec<u8>> {
-        let exts = Extensions::from_vec(vec![
-            role_required_capabilities(),
-            Extension::Unknown(ROLE_EXTENSION_TYPE, UnknownExtension(roles.encode())),
-        ])
-        .map_err(|e| Error::Group(format!("build role extensions: {e:?}")))?;
+        let exts = self.role_rewrite_extensions(roles)?;
         let (proposal, _proposal_ref) = self
             .inner
             .propose_group_context_extensions(&identity.provider, exts, &identity.signature_keys)
@@ -4449,7 +4667,7 @@ mod proposal_gate_tests {
         let bob = Identity::from_seed(&[0x50 ^ tag; 64]).expect("bob");
         let charlie = Identity::from_seed(&[0x60 ^ tag; 64]).expect("charlie");
 
-        let mut alice_g = Group::create(&alice).expect("create");
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
         let add_bob = alice_g
             .add_member_from_wire(&alice, &kp_wire(&bob))
             .expect("add bob");
@@ -5563,9 +5781,11 @@ mod proposal_gate_tests {
         members: &'a [MemberRecord],
         admission: &'a GroupAdmission,
     ) -> SweepContext<'a> {
+        static NO_KIND: std::sync::OnceLock<KindState> = std::sync::OnceLock::new();
         SweepContext {
             table,
             members,
+            kind_before: NO_KIND.get_or_init(KindState::default),
             role_change_survives: true,
             removed_leaves: &[],
             admission,
@@ -6650,7 +6870,7 @@ mod external_join_tests {
         // owner, so this is a role-enabled group and (since ADR-0045 S7) the
         // approve is a proposal the owner then sweeps.
         let alice = Identity::from_seed(&[0xA0u8; 64]).expect("alice");
-        let mut alice_g = Group::create(&alice).expect("create");
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
         let dave = Identity::from_seed(&[0xD0u8; 64]).expect("dave");
         let dave_pk = pk(&dave);
 
@@ -6728,7 +6948,7 @@ mod external_join_tests {
     #[test]
     fn pending_row_is_written_on_retain_and_removed_when_empty() {
         let alice = Identity::from_seed(&[0xA7u8; 64]).expect("alice");
-        let mut alice_g = Group::create(&alice).expect("create");
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
         let dave = Identity::from_seed(&[0xD7u8; 64]).expect("dave");
         let key = pending_external_joins_row_key(&alice_g.group_id());
         let has_row = |id: &Identity| {
@@ -6757,7 +6977,7 @@ mod external_join_tests {
     #[test]
     fn corrupt_pending_row_is_dropped_not_fatal() {
         let alice = Identity::from_seed(&[0xA8u8; 64]).expect("alice");
-        let alice_g = Group::create(&alice).expect("create");
+        let alice_g = Group::create(&alice, GroupKind::Group).expect("create");
         let gid = alice_g.group_id();
         let key = pending_external_joins_row_key(&gid);
         for garbage in [
@@ -6799,7 +7019,7 @@ mod external_join_tests {
     #[test]
     fn reject_removes_without_adding() {
         let alice = Identity::from_seed(&[0xA2u8; 64]).expect("alice");
-        let mut alice_g = Group::create(&alice).expect("create");
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
         let dave = Identity::from_seed(&[0xD2u8; 64]).expect("dave");
         let dave_pk = pk(&dave);
 
@@ -6825,7 +7045,7 @@ mod external_join_tests {
     #[test]
     fn external_join_dedup_by_signature_key() {
         let alice = Identity::from_seed(&[0xA3u8; 64]).expect("alice");
-        let mut alice_g = Group::create(&alice).expect("create");
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
         let dave = Identity::from_seed(&[0xD3u8; 64]).expect("dave");
 
         let p1 = external_join_proposal(&dave, &alice_g.group_id(), alice_g.epoch());
@@ -6839,7 +7059,7 @@ mod external_join_tests {
     #[test]
     fn approve_unknown_ref_errors() {
         let alice = Identity::from_seed(&[0xA4u8; 64]).expect("alice");
-        let mut alice_g = Group::create(&alice).expect("create");
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
         assert!(alice_g.approve_external_join(&alice, b"nope").is_err());
         assert!(alice_g.reject_external_join(&alice, b"nope").is_err());
     }
@@ -6849,7 +7069,7 @@ mod external_join_tests {
         // alice = owner, bob = plain member, role table set.
         let alice = Identity::from_seed(&[0xA5u8; 64]).expect("alice");
         let bob = Identity::from_seed(&[0xB5u8; 64]).expect("bob");
-        let mut alice_g = Group::create(&alice).expect("create");
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
 
         let add = alice_g
             .add_member_from_wire(&alice, &kp_wire(&bob))
@@ -6918,7 +7138,7 @@ mod external_join_tests {
     #[test]
     fn joiner_api_full_loop_proposes_approves_joins_via_rendezvous() {
         let alice = Identity::from_seed(&[0xA9u8; 64]).expect("alice");
-        let mut alice_g = Group::create(&alice).expect("create");
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
         let alice_pk = pk(&alice);
         let dave = Identity::from_seed(&[0xD9u8; 64]).expect("dave");
         let dave_pk = pk(&dave);
@@ -7023,7 +7243,7 @@ mod external_join_tests {
     #[test]
     fn a_planted_external_join_add_is_still_excluded_by_the_sweep() {
         let alice = Identity::from_seed(&[0xAAu8; 64]).expect("alice");
-        let mut alice_g = Group::create(&alice).expect("create");
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
         let stranger = Identity::from_seed(&[0xEAu8; 64]).expect("stranger");
         let stranger_pk = pk(&stranger);
 
@@ -7072,7 +7292,7 @@ mod external_join_tests {
     #[test]
     fn control_an_unfiltered_sweep_admits_the_planted_stranger() {
         let alice = Identity::from_seed(&[0xA6u8; 64]).expect("alice");
-        let mut alice_g = Group::create(&alice).expect("create");
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
         let stranger = Identity::from_seed(&[0xE6u8; 64]).expect("stranger");
         let stranger_pk = pk(&stranger);
 
@@ -7101,7 +7321,7 @@ mod external_join_tests {
         let stranger = Identity::from_seed(&[0xEBu8; 64]).expect("stranger");
         for (tag, gated) in [(0xABu8, false), (0xACu8, true)] {
             let alice = Identity::from_seed(&[tag; 64]).expect("alice");
-            let mut alice_g = Group::create(&alice).expect("create");
+            let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
             let external = external_join_proposal(&stranger, &alice_g.group_id(), alice_g.epoch());
             let incoming = if gated {
                 alice_g.process_incoming_verifying_roles(&alice, &external)
@@ -7189,7 +7409,7 @@ mod external_join_tests {
     #[test]
     fn the_direct_approve_refuses_a_group_that_has_a_committer() {
         let alice = Identity::from_seed(&[0xAEu8; 64]).expect("alice");
-        let mut alice_g = Group::create(&alice).expect("create");
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
         let dave = Identity::from_seed(&[0xDEu8; 64]).expect("dave");
         let dave_pk = pk(&dave);
         let req = external_join_proposal(&dave, &alice_g.group_id(), alice_g.epoch());
@@ -7222,7 +7442,7 @@ mod external_join_tests {
     #[test]
     fn an_approve_is_no_longer_blocked_by_a_pending_membership_proposal() {
         let alice = Identity::from_seed(&[0xAFu8; 64]).expect("alice");
-        let mut alice_g = Group::create(&alice).expect("create");
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
         let bob = Identity::from_seed(&[0xBFu8; 64]).expect("bob");
         let dave = Identity::from_seed(&[0xDFu8; 64]).expect("dave");
         let dave_pk = pk(&dave);
@@ -7265,7 +7485,7 @@ mod external_join_tests {
     #[test]
     fn epoch_of_message_reads_public_framing() {
         let alice = Identity::from_seed(&[0xE0u8; 64]).expect("alice");
-        let mut alice_g = Group::create(&alice).expect("create"); // epoch 0
+        let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create"); // epoch 0
         let bob = Identity::from_seed(&[0xE1u8; 64]).expect("bob");
 
         // An application message at epoch 0 reports epoch 0 from its framing.
@@ -7304,5 +7524,320 @@ mod external_join_tests {
         // Non-MLS / empty bytes → None (the caller treats this as epoch 0).
         assert_eq!(crate::epoch_of_message(&[0xFFu8; 12]), None);
         assert_eq!(crate::epoch_of_message(&[]), None);
+    }
+}
+
+/// ADR-0062 — the peer-side halves of the one-to-one rule and the kind's
+/// immutability, driven by a committer that skips every local check (the
+/// modified-client adversary of `proposal_gate_tests`), plus the
+/// `join_from_welcome` classification check.
+#[cfg(test)]
+mod one_to_one_gate_tests {
+    use super::*;
+    use crate::key_package;
+
+    fn wire(m: MlsMessageOut) -> Vec<u8> {
+        encode_message(&m).expect("encode")
+    }
+
+    fn kp_wire(id: &Identity) -> Vec<u8> {
+        key_package::serialize(&id.create_key_package().expect("kp")).expect("serialize kp")
+    }
+
+    fn kp(id: &Identity) -> KeyPackage {
+        key_package::deserialize(&kp_wire(id))
+            .expect("deserialize")
+            .validate(id.provider.crypto(), ProtocolVersion::Mls10)
+            .expect("validate")
+    }
+
+    fn device(owner: &Identity, tag: u8) -> Identity {
+        Identity::from_seed_bound(&[tag; 32], &owner.ed25519_seed_bytes(), 1_700_000_000)
+            .expect("bound device")
+    }
+
+    fn reason(e: &Error) -> Option<RefusalReason> {
+        e.refusal_reason()
+    }
+
+    impl Group {
+        /// **Adversary.** A direct add that skips `add_members`' local checks.
+        fn ungated_add_member(&mut self, identity: &Identity, kp: KeyPackage) -> MlsMessageOut {
+            let (commit, _w, _gi) = self
+                .inner
+                .add_members(&identity.provider, &identity.signature_keys, &[kp])
+                .expect("ungated add");
+            self.inner
+                .merge_pending_commit(&identity.provider)
+                .expect("merge");
+            commit
+        }
+
+        /// **Adversary.** A GroupContext rewrite that skips every local check.
+        fn ungated_set_extensions(
+            &mut self,
+            identity: &Identity,
+            exts: Extensions<GroupContext>,
+        ) -> MlsMessageOut {
+            let (commit, _w, _gi) = self
+                .inner
+                .update_group_context_extensions(&identity.provider, exts, &identity.signature_keys)
+                .expect("ungated rewrite");
+            self.inner
+                .merge_pending_commit(&identity.provider)
+                .expect("merge");
+            commit
+        }
+    }
+
+    /// a1 founds a one-to-one with bob (b1) and alice's second device a2.
+    struct Scene {
+        a1: Identity,
+        a2: Identity,
+        b1: Identity,
+        a1_g: Group,
+        a2_g: Group,
+        b1_g: Group,
+    }
+
+    fn scene(tag: u8) -> Scene {
+        let a = Identity::from_seed(&[0x10 ^ tag; 64]).expect("a");
+        let a1 = device(&a, 0x11 ^ tag);
+        let a2 = device(&a, 0x12 ^ tag);
+        let b = Identity::from_seed(&[0x20 ^ tag; 64]).expect("b");
+        let b1 = device(&b, 0x21 ^ tag);
+        let mut a1_g = Group::create(&a1, GroupKind::OneToOne).expect("found");
+        let add = a1_g
+            .add_members_from_wire(&a1, &[&kp_wire(&b1), &kp_wire(&a2)])
+            .expect("founding commit");
+        let welcome = wire(add.welcome);
+        let b1_g = Group::join_from_welcome(&welcome, &b1).expect("b1 joins");
+        let a2_g = Group::join_from_welcome(&welcome, &a2).expect("a2 joins");
+        Scene {
+            a1,
+            a2,
+            b1,
+            a1_g,
+            a2_g,
+            b1_g,
+        }
+    }
+
+    #[test]
+    fn the_receipt_gate_drops_a_third_persons_add_in_a_one_to_one() {
+        let mut s = scene(0x01);
+        let c = Identity::from_seed(&[0x31; 64]).expect("c");
+        let hostile = s
+            .a1_g
+            .ungated_propose_add(&s.a1, kp(&c))
+            .expect("the owner proposes without its local check");
+        let Incoming::Proposal(record) = s
+            .b1_g
+            .process_incoming_verifying_roles(&s.b1, &hostile)
+            .expect("b1 processes it")
+        else {
+            panic!("expected a proposal");
+        };
+        assert!(!record.stored, "a third person's add is never stored");
+        assert!(s.b1_g.pending_proposals().is_empty());
+    }
+
+    #[test]
+    fn the_sweep_never_carries_a_third_persons_add() {
+        let mut s = scene(0x02);
+        let c = Identity::from_seed(&[0x32; 64]).expect("c");
+        let hostile = s
+            .a1_g
+            .ungated_propose_add(&s.a1, kp(&c))
+            .expect("proposed ungated");
+        s.a2_g
+            .ungated_store(&s.a2, &hostile)
+            .expect("a2 stores it ungated");
+        // a2 is the owner account's device; its sweep must emit nothing.
+        let swept = s.a2_g.commit_pending_proposals(&s.a2).expect("sweep");
+        assert!(swept.is_none(), "the commit-wide rule excludes it");
+        assert_eq!(s.a2_g.members().len(), 3);
+    }
+
+    #[test]
+    fn the_peer_commit_gate_refuses_a_third_person_and_does_not_merge() {
+        let mut s = scene(0x03);
+        let c = Identity::from_seed(&[0x33; 64]).expect("c");
+        let commit = s.a1_g.ungated_add_member(&s.a1, kp(&c));
+        let epoch = s.b1_g.epoch();
+        let err = s
+            .b1_g
+            .process_incoming_verifying_roles(&s.b1, &wire(commit))
+            .expect_err("the peer refuses");
+        assert_eq!(reason(&err), Some(RefusalReason::OneToOneMembershipFixed));
+        assert_eq!(s.b1_g.epoch(), epoch, "a refused commit is not merged");
+        assert_eq!(s.b1_g.members().len(), 3);
+    }
+
+    #[test]
+    fn the_peer_commit_gate_refuses_removing_a_person() {
+        let mut s = scene(0x04);
+        let b1_leaf = s
+            .a1_g
+            .members()
+            .iter()
+            .find(|m| m.signature_public_key == s.b1.signature_public_key())
+            .expect("b1")
+            .leaf_index;
+        let commit = s
+            .a1_g
+            .ungated_remove_member(&s.a1, LeafNodeIndex::new(b1_leaf))
+            .expect("ungated remove");
+        let err = s
+            .a2_g
+            .process_incoming_verifying_roles(&s.a2, &wire(commit))
+            .expect_err("the peer refuses");
+        assert_eq!(reason(&err), Some(RefusalReason::OneToOneMembershipFixed));
+        assert_eq!(s.a2_g.members().len(), 3);
+    }
+
+    #[test]
+    fn the_peer_commit_gate_refuses_any_rewrite_in_a_one_to_one() {
+        let mut s = scene(0x05);
+        // Even a rewrite that keeps the kind byte-identical: a one-to-one's
+        // GroupContext is frozen from creation.
+        let exts = s
+            .a1_g
+            .role_rewrite_extensions(&s.a1_g.group_roles().expect("table"))
+            .expect("exts");
+        let commit = s.a1_g.ungated_set_extensions(&s.a1, exts);
+        let err = s
+            .b1_g
+            .process_incoming_verifying_roles(&s.b1, &wire(commit))
+            .expect_err("the peer refuses");
+        assert_eq!(reason(&err), Some(RefusalReason::OneToOneHasNoRoles));
+    }
+
+    fn group_pair(tag: u8) -> (Identity, Identity, Group, Group) {
+        let a = Identity::from_seed(&[0x40 ^ tag; 64]).expect("a");
+        let b = Identity::from_seed(&[0x50 ^ tag; 64]).expect("b");
+        let mut a_g = Group::create(&a, GroupKind::Group).expect("group");
+        let add = a_g.add_member_from_wire(&a, &kp_wire(&b)).expect("add");
+        let b_g = Group::join_from_welcome(&wire(add.welcome), &b).expect("join");
+        (a, b, a_g, b_g)
+    }
+
+    /// The owner's rewrite, with the `0xFF03` extension transformed by `f`.
+    fn rewrite_with_kind(
+        g: &Group,
+        f: impl Fn(Extension) -> Option<Extension>,
+    ) -> Extensions<GroupContext> {
+        let current = g
+            .role_rewrite_extensions(&g.group_roles().expect("table"))
+            .expect("exts");
+        let list: Vec<Extension> = current
+            .iter()
+            .cloned()
+            .filter_map(|e| match &e {
+                Extension::Unknown(t, _) if *t == GROUP_KIND_EXTENSION_TYPE => f(e),
+                _ => Some(e),
+            })
+            .collect();
+        Extensions::from_vec(list).expect("valid list")
+    }
+
+    #[test]
+    fn a_commit_that_changes_the_kind_is_refused_on_the_peer() {
+        let (a, b, mut a_g, mut b_g) = group_pair(0x06);
+        let exts = rewrite_with_kind(&a_g, |_| Some(GroupKind::OneToOne.extension()));
+        // The honest local path refuses it too.
+        let local = a_g
+            .set_group_context_extensions(&a, exts.clone())
+            .expect_err("local refusal");
+        assert_eq!(reason(&local), Some(RefusalReason::GroupKindChanged));
+        let commit = a_g.ungated_set_extensions(&a, exts);
+        let err = b_g
+            .process_incoming_verifying_roles(&b, &wire(commit))
+            .expect_err("the peer refuses");
+        assert_eq!(reason(&err), Some(RefusalReason::GroupKindChanged));
+        assert_eq!(b_g.group_kind(), Some(GroupKind::Group));
+    }
+
+    #[test]
+    fn a_commit_that_drops_the_kind_is_refused_on_the_peer() {
+        let (a, b, mut a_g, mut b_g) = group_pair(0x07);
+        let exts = rewrite_with_kind(&a_g, |_| None);
+        let commit = a_g.ungated_set_extensions(&a, exts);
+        let err = b_g
+            .process_incoming_verifying_roles(&b, &wire(commit))
+            .expect_err("the peer refuses");
+        assert_eq!(reason(&err), Some(RefusalReason::GroupKindChanged));
+        assert_eq!(b_g.group_kind(), Some(GroupKind::Group));
+    }
+
+    #[test]
+    fn the_receipt_gate_drops_a_proposal_that_changes_the_kind() {
+        let (a, b, a_g, mut b_g) = group_pair(0x08);
+        let exts = rewrite_with_kind(&a_g, |_| Some(GroupKind::OneToOne.extension()));
+        let mut a_g = a_g;
+        let (proposal, _r) = a_g
+            .inner
+            .propose_group_context_extensions(&a.provider, exts, &a.signature_keys)
+            .expect("ungated proposal");
+        let Incoming::Proposal(record) = b_g
+            .process_incoming_verifying_roles(&b, &wire(proposal))
+            .expect("processed")
+        else {
+            panic!("expected a proposal");
+        };
+        assert!(!record.stored, "a kind-changing rewrite is never stored");
+    }
+
+    /// Found a conversation-shaped group whose GroupContext carries the role
+    /// table and whatever `kind` says, add `joiner`, and return the Welcome.
+    fn welcome_into(kind: Option<Extension>, tag: u8) -> (Vec<u8>, Identity) {
+        let founder = Identity::from_seed(&[0x60 ^ tag; 64]).expect("founder");
+        let joiner = Identity::from_seed(&[0x70 ^ tag; 64]).expect("joiner");
+        let owner = founder.account_public_key().expect("key");
+        let mut exts = vec![
+            role_required_capabilities(),
+            Extension::Unknown(
+                ROLE_EXTENSION_TYPE,
+                UnknownExtension(RoleTable::owner_only(owner).encode()),
+            ),
+        ];
+        exts.extend(kind);
+        let cfg = MlsGroupCreateConfig::builder()
+            .ciphersuite(founder.ciphersuite())
+            .use_ratchet_tree_extension(true)
+            .capabilities(crate::device_group::lakko_leaf_capabilities(
+                founder.ciphersuite(),
+            ))
+            .with_group_context_extensions(Extensions::from_vec(exts).expect("exts"))
+            .build();
+        let mut g =
+            Group::create_inner(&founder, &cfg, &[tag; GROUP_ID_LEN], "test").expect("founded");
+        let add = g
+            .add_member_from_wire(&founder, &kp_wire(&joiner))
+            .expect("add");
+        (wire(add.welcome), joiner)
+    }
+
+    #[test]
+    fn a_conversation_welcome_without_a_kind_is_not_joined() {
+        let (welcome, joiner) = welcome_into(None, 0x09);
+        assert!(Group::join_from_welcome(&welcome, &joiner).is_err());
+    }
+
+    #[test]
+    fn a_conversation_welcome_with_an_unreadable_kind_is_not_joined() {
+        let bad = Extension::Unknown(
+            GROUP_KIND_EXTENSION_TYPE,
+            UnknownExtension(vec![0x01, 0x09]),
+        );
+        let (welcome, joiner) = welcome_into(Some(bad), 0x0A);
+        assert!(Group::join_from_welcome(&welcome, &joiner).is_err());
+    }
+
+    #[test]
+    fn control_a_welcome_with_a_readable_kind_is_joined() {
+        let (welcome, joiner) = welcome_into(Some(GroupKind::OneToOne.extension()), 0x0B);
+        let g = Group::join_from_welcome(&welcome, &joiner).expect("joins");
+        assert_eq!(g.group_kind(), Some(GroupKind::OneToOne));
     }
 }

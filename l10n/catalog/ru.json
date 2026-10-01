@@ -1194,6 +1194,10 @@
       "text": "Этот пост слишком длинный для публикации.",
       "status": "machine"
     },
+    "channels.error.publisher_refused": {
+      "text": "Этому устройству пока нельзя публиковать в этом канале. Соавтор сможет публиковать, когда устройство владельца закончит его добавлять.",
+      "status": "machine"
+    },
     "channels.error.refused": {
       "text": "Сервер отклонил запрос. Попробуйте позже.",
       "status": "machine"
@@ -1390,6 +1394,10 @@
       "text": "Не удалось сохранить.",
       "status": "machine"
     },
+    "channels.meta.error.sign_in": {
+      "text": "Войдите снова, чтобы сохранить изменения канала.",
+      "status": "machine"
+    },
     "channels.meta.saved": {
       "text": "Сохранено. Подписчики увидят новое название вместе со следующими постами.",
       "status": "machine"
@@ -1486,6 +1494,10 @@
       "text": "Не удалось опубликовать.",
       "status": "machine"
     },
+    "channels.publish.error.sign_in": {
+      "text": "Войдите снова, чтобы публиковать в этом канале.",
+      "status": "machine"
+    },
     "channels.rotation.desc": {
       "text": "Lakko сам обновляет защиту канала. Обновите её сейчас, если считаете, что устройство кого-то из подписчиков скомпрометировано.",
       "status": "machine"
@@ -1496,6 +1508,10 @@
     },
     "channels.rotation.error.refresh": {
       "text": "Не удалось обновить. Попробуйте чуть позже.",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh_prefix": {
+      "text": "Не удалось обновить.",
       "status": "machine"
     },
     "channels.rotation.never": {
@@ -1518,6 +1534,10 @@
       "text": "Защита",
       "status": "machine"
     },
+    "channels.row.new_posts_a11y": {
+      "text": "{count, plural, one {# новая публикация} few {# новые публикации} many {# новых публикаций} other {# новой публикации}}",
+      "status": "machine"
+    },
     "channels.row.own": {
       "text": "Ваш канал",
       "status": "machine"
@@ -1536,6 +1556,10 @@
     },
     "channels.subscribe.error.generic": {
       "text": "Не удалось подписаться. Попробуйте позже.",
+      "status": "machine"
+    },
+    "channels.subscribe.error.network": {
+      "text": "Не удалось подписаться на канал. Проверьте подключение и попробуйте ещё раз.",
       "status": "machine"
     },
     "channels.subscribe.error.prefix": {
@@ -2850,6 +2874,10 @@
       "text": "Это изменение запросить не удалось.",
       "status": "machine"
     },
+    "chat.refusal.group_kind_changed": {
+      "text": "Это изменение нельзя применить к этому разговору.",
+      "status": "machine"
+    },
     "chat.refusal.join_not_kept": {
       "text": "Запрос на вступление пришёл, когда ожидающих было уже слишком много, поэтому он не сохранён. Попросите человека отправить его позже.",
       "status": "machine"
@@ -2864,6 +2892,14 @@
     },
     "chat.refusal.not_owner": {
       "text": "Менять администраторов и передавать права владельца может только владелец группы.",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_fixed": {
+      "text": "В личном чате всегда одни и те же два человека.",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_no_roles": {
+      "text": "В личном чате нет администраторов.",
       "status": "machine"
     },
     "chat.refusal.owner_cannot_leave": {
@@ -3418,6 +3454,10 @@
       "text": "Свернуть",
       "status": "machine"
     },
+    "common.collapsed": {
+      "text": "Свёрнуто",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "Подтвердить",
       "status": "machine"
@@ -3528,6 +3568,10 @@
     },
     "common.expand": {
       "text": "Развернуть",
+      "status": "machine"
+    },
+    "common.expanded": {
+      "text": "Развёрнуто",
       "status": "machine"
     },
     "common.fact_pair": {
@@ -3668,6 +3712,10 @@
     },
     "common.try_again": {
       "text": "Повторить",
+      "status": "machine"
+    },
+    "common.undo": {
+      "text": "Отменить",
       "status": "machine"
     },
     "common.unknown": {
@@ -4242,6 +4290,322 @@
       "text": "Открыть камеру",
       "status": "machine"
     },
+    "discover.card.a11y": {
+      "text": "Рекомендуемый канал {name}",
+      "status": "machine"
+    },
+    "discover.card.following": {
+      "text": "Вы подписаны на этот канал",
+      "status": "machine"
+    },
+    "discover.card.hide_topic": {
+      "text": "Скрыть эту тему",
+      "status": "machine"
+    },
+    "discover.card.more": {
+      "text": "Ещё",
+      "status": "machine"
+    },
+    "discover.card.not_interested": {
+      "text": "Не интересно",
+      "status": "machine"
+    },
+    "discover.card.show_description": {
+      "text": "Показать описание",
+      "status": "machine"
+    },
+    "discover.card.subscribers": {
+      "text": "Подписчиков: {band}",
+      "status": "machine"
+    },
+    "discover.edit_topics": {
+      "text": "Изменить темы",
+      "status": "machine"
+    },
+    "discover.gone": {
+      "text": "Этот канал больше недоступен.",
+      "status": "machine"
+    },
+    "discover.language": {
+      "text": "Язык",
+      "status": "machine"
+    },
+    "discover.listing.checking": {
+      "text": "Проверяем, показывается ли канал в обзоре...",
+      "status": "machine"
+    },
+    "discover.listing.confirm_action": {
+      "text": "Показывать",
+      "status": "machine"
+    },
+    "discover.listing.confirm_body": {
+      "text": "Название, описание и число подписчиков канала сможет найти кто угодно. Публикации остаются зашифрованными.",
+      "status": "machine"
+    },
+    "discover.listing.confirm_title": {
+      "text": "Показывать этот канал в обзоре?",
+      "status": "machine"
+    },
+    "discover.listing.listed": {
+      "text": "Показывается",
+      "status": "machine"
+    },
+    "discover.listing.listed_notice": {
+      "text": "Канал добавлен в обзор. Подписчики узнают об этом со следующим обновлением канала.",
+      "status": "machine"
+    },
+    "discover.listing.needs_handle": {
+      "text": "Чтобы канал появился в обзоре, ему нужен @handle.",
+      "status": "machine"
+    },
+    "discover.listing.not_listed": {
+      "text": "Не показывается",
+      "status": "machine"
+    },
+    "discover.listing.owner_desc": {
+      "text": "Название, описание и число подписчиков канала из обзора может найти кто угодно. Публикации остаются зашифрованными.",
+      "status": "machine"
+    },
+    "discover.listing.refused": {
+      "text": "Не удалось добавить канал в обзор. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "discover.listing.remove_failed": {
+      "text": "Не удалось убрать канал из обзора. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "discover.listing.title": {
+      "text": "Показывать в обзоре",
+      "status": "machine"
+    },
+    "discover.listing.topic": {
+      "text": "Тема",
+      "status": "machine"
+    },
+    "discover.listing.update_failed": {
+      "text": "Сохранено. Не удалось обновить карточку в обзоре — сохраните ещё раз, чтобы повторить.",
+      "status": "machine"
+    },
+    "discover.listing.viewer_listed": {
+      "text": "Этот канал показывается в обзоре. Изменить это может только владелец канала.",
+      "status": "machine"
+    },
+    "discover.listing.viewer_not_listed": {
+      "text": "Этот канал не показывается в обзоре. Добавить его туда может только владелец канала.",
+      "status": "machine"
+    },
+    "discover.mix.label": {
+      "text": "Подмешивать случайные темы",
+      "status": "machine"
+    },
+    "discover.mix.off_line": {
+      "text": "Меньше трафика. Сервер Lakko будет точно знать, какие темы вы выбрали.",
+      "status": "machine"
+    },
+    "discover.nothing_yet": {
+      "text": "Рекомендаций пока нет. Выберите темы или попросите участников ваших групп поделиться своими каналами.",
+      "status": "machine"
+    },
+    "discover.pick.a11y": {
+      "text": "Выбор тем",
+      "status": "machine"
+    },
+    "discover.pick.body": {
+      "text": "Lakko загружает рекомендации по ним вперемешку с несколькими случайными темами, поэтому сервер Lakko не может точно узнать, какие темы вы выбрали. Он никогда не видит, какие каналы вы открываете.",
+      "status": "machine"
+    },
+    "discover.pick.title": {
+      "text": "Выберите несколько тем.",
+      "status": "machine"
+    },
+    "discover.reason.followed_by": {
+      "text": "{name} читает в группе «{group}»",
+      "status": "machine"
+    },
+    "discover.reason.followed_by_others": {
+      "text": "{count, plural, one {{name} и ещё # человек читают в группе «{group}»} few {{name} и ещё # человека читают в группе «{group}»} many {{name} и ещё # человек читают в группе «{group}»} other {{name} и ещё # человека читают в группе «{group}»}}",
+      "status": "machine"
+    },
+    "discover.reason.followed_count": {
+      "text": "{count, plural, one {Читает # человек в группе «{group}»} few {Читают # человека в группе «{group}»} many {Читают # человек в группе «{group}»} other {Читают # человека в группе «{group}»}}",
+      "status": "machine"
+    },
+    "discover.reason.group_fallback": {
+      "text": "одна из групп",
+      "status": "machine"
+    },
+    "discover.reason.popular": {
+      "text": "Популярно в теме «{topic}»",
+      "status": "machine"
+    },
+    "discover.reason.search": {
+      "text": "Подходит под ваш поиск",
+      "status": "machine"
+    },
+    "discover.search.action": {
+      "text": "Найти",
+      "status": "machine"
+    },
+    "discover.search.helper": {
+      "text": "Поисковые запросы отправляются на сервер Lakko.",
+      "status": "machine"
+    },
+    "discover.search.no_results": {
+      "text": "Каналы не найдены.",
+      "status": "machine"
+    },
+    "discover.search.placeholder": {
+      "text": "Поиск каналов",
+      "status": "machine"
+    },
+    "discover.search.searching": {
+      "text": "Поиск...",
+      "status": "machine"
+    },
+    "discover.search.too_short": {
+      "text": "Введите хотя бы 2 символа.",
+      "status": "machine"
+    },
+    "discover.settings": {
+      "text": "Настройки обзора",
+      "status": "machine"
+    },
+    "discover.share.error": {
+      "text": "Не удалось изменить. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "discover.share.label": {
+      "text": "Делиться моими каналами с этой группой",
+      "status": "machine"
+    },
+    "discover.share.line": {
+      "text": "Участники этой группы смогут видеть, какие каналы вы читаете. Сервер Lakko — нет.",
+      "status": "machine"
+    },
+    "discover.shared.desc": {
+      "text": "Группы, участники которых видят, какие каналы вы читаете. Сервер Lakko этого не видит.",
+      "status": "machine"
+    },
+    "discover.shared.empty": {
+      "text": "Вы не делитесь своими каналами ни с одной группой.",
+      "status": "machine"
+    },
+    "discover.shared.settings_sub": {
+      "text": "Группы, которые видят, какие каналы вы читаете",
+      "status": "machine"
+    },
+    "discover.shared.stop": {
+      "text": "Перестать делиться",
+      "status": "machine"
+    },
+    "discover.shared.stop_failed": {
+      "text": "Не удалось отключить. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "discover.shared.title": {
+      "text": "Каналы, которыми я делюсь",
+      "status": "machine"
+    },
+    "discover.topic.art_design": {
+      "text": "Искусство и дизайн",
+      "status": "machine"
+    },
+    "discover.topic.books": {
+      "text": "Книги",
+      "status": "machine"
+    },
+    "discover.topic.business": {
+      "text": "Бизнес",
+      "status": "machine"
+    },
+    "discover.topic.education": {
+      "text": "Образование",
+      "status": "machine"
+    },
+    "discover.topic.film_tv": {
+      "text": "Кино и сериалы",
+      "status": "machine"
+    },
+    "discover.topic.finance": {
+      "text": "Финансы",
+      "status": "machine"
+    },
+    "discover.topic.food": {
+      "text": "Еда",
+      "status": "machine"
+    },
+    "discover.topic.gaming": {
+      "text": "Игры",
+      "status": "machine"
+    },
+    "discover.topic.health": {
+      "text": "Здоровье",
+      "status": "machine"
+    },
+    "discover.topic.humour": {
+      "text": "Юмор",
+      "status": "machine"
+    },
+    "discover.topic.lifestyle": {
+      "text": "Образ жизни",
+      "status": "machine"
+    },
+    "discover.topic.local": {
+      "text": "Местное",
+      "status": "machine"
+    },
+    "discover.topic.music": {
+      "text": "Музыка",
+      "status": "machine"
+    },
+    "discover.topic.nature": {
+      "text": "Природа",
+      "status": "machine"
+    },
+    "discover.topic.news": {
+      "text": "Новости",
+      "status": "machine"
+    },
+    "discover.topic.other": {
+      "text": "Другое",
+      "status": "machine"
+    },
+    "discover.topic.photography": {
+      "text": "Фотография",
+      "status": "machine"
+    },
+    "discover.topic.politics": {
+      "text": "Политика",
+      "status": "machine"
+    },
+    "discover.topic.religion": {
+      "text": "Религия",
+      "status": "machine"
+    },
+    "discover.topic.science": {
+      "text": "Наука",
+      "status": "machine"
+    },
+    "discover.topic.software_development": {
+      "text": "Разработка ПО",
+      "status": "machine"
+    },
+    "discover.topic.sports": {
+      "text": "Спорт",
+      "status": "machine"
+    },
+    "discover.topic.technology": {
+      "text": "Технологии",
+      "status": "machine"
+    },
+    "discover.topic.travel": {
+      "text": "Путешествия",
+      "status": "machine"
+    },
+    "discover.unavailable": {
+      "text": "Рекомендации сейчас недоступны.",
+      "status": "machine"
+    },
     "display_name.error.control": {
       "text": "Удалите невидимые символы и символы направления текста",
       "status": "machine"
@@ -4268,6 +4632,542 @@
     },
     "ds.clock_skew": {
       "text": "Проверьте дату и время на этом устройстве.",
+      "status": "machine"
+    },
+    "feed.action.hide": {
+      "text": "Скрыть из лент",
+      "status": "machine"
+    },
+    "feed.action.hide_hint": {
+      "text": "Не показывать этот разговор в лентах",
+      "status": "machine"
+    },
+    "feed.attachments.count": {
+      "text": "{count, plural, one {# вложение} few {# вложения} many {# вложений} other {# вложения}}",
+      "status": "machine"
+    },
+    "feed.banner.dismiss": {
+      "text": "Понятно",
+      "status": "machine"
+    },
+    "feed.banner.local": {
+      "text": "Лента показывает сообщения, которые получило это устройство.",
+      "status": "machine"
+    },
+    "feed.divider.new": {
+      "text": "Новое",
+      "status": "machine"
+    },
+    "feed.edit": {
+      "text": "Изменить",
+      "status": "machine"
+    },
+    "feed.edit_feed": {
+      "text": "Изменить ленту",
+      "status": "machine"
+    },
+    "feed.editor.default_name": {
+      "text": "Моя лента",
+      "status": "machine"
+    },
+    "feed.editor.delete": {
+      "text": "Удалить ленту",
+      "status": "machine"
+    },
+    "feed.editor.delete_confirm": {
+      "text": "Удалить эту ленту?",
+      "status": "machine"
+    },
+    "feed.editor.fade": {
+      "text": "Как быстро старое уходит вниз",
+      "status": "machine"
+    },
+    "feed.editor.fade.day": {
+      "text": "День",
+      "status": "machine"
+    },
+    "feed.editor.fade.hours": {
+      "text": "Несколько часов",
+      "status": "machine"
+    },
+    "feed.editor.fade.week": {
+      "text": "Неделя",
+      "status": "machine"
+    },
+    "feed.editor.filters": {
+      "text": "Фильтры",
+      "status": "machine"
+    },
+    "feed.editor.for_me": {
+      "text": "Только упоминания меня, ответы мне и реакции на мои сообщения",
+      "status": "machine"
+    },
+    "feed.editor.hide_own": {
+      "text": "Скрывать мои сообщения",
+      "status": "machine"
+    },
+    "feed.editor.hide_words": {
+      "text": "Скрывать слова (по одному в строке)",
+      "status": "machine"
+    },
+    "feed.editor.icon": {
+      "text": "Значок",
+      "status": "machine"
+    },
+    "feed.editor.include_muted": {
+      "text": "Включать разговоры без звука",
+      "status": "machine"
+    },
+    "feed.editor.look_back": {
+      "text": "Глубина (дней)",
+      "status": "machine"
+    },
+    "feed.editor.look_back_count": {
+      "text": "{count, plural, one {За # день} few {За # дня} many {За # дней} other {За # дня}}",
+      "status": "machine"
+    },
+    "feed.editor.media_only": {
+      "text": "Только с фото или видео",
+      "status": "machine"
+    },
+    "feed.editor.membership.a11y": {
+      "text": "{name} в этой ленте",
+      "status": "machine"
+    },
+    "feed.editor.membership.never": {
+      "text": "Никогда",
+      "status": "machine"
+    },
+    "feed.editor.membership.only": {
+      "text": "Только",
+      "status": "machine"
+    },
+    "feed.editor.membership_hint": {
+      "text": "«Только» ограничивает ленту отмеченными разговорами; «Никогда» исключает разговор.",
+      "status": "machine"
+    },
+    "feed.editor.min_reactions": {
+      "text": "Не меньше реакций",
+      "status": "machine"
+    },
+    "feed.editor.name": {
+      "text": "Название",
+      "status": "machine"
+    },
+    "feed.editor.only_words": {
+      "text": "Только эти слова (по одному в строке)",
+      "status": "machine"
+    },
+    "feed.editor.preview": {
+      "text": "Предпросмотр",
+      "status": "machine"
+    },
+    "feed.editor.preview_pending": {
+      "text": "Предпросмотр появится, когда ленту можно будет сохранить.",
+      "status": "machine"
+    },
+    "feed.editor.slider.max": {
+      "text": "Очень",
+      "status": "machine"
+    },
+    "feed.editor.slider.min": {
+      "text": "Не учитывать",
+      "status": "machine"
+    },
+    "feed.editor.sources": {
+      "text": "Источники",
+      "status": "machine"
+    },
+    "feed.editor.sources.both": {
+      "text": "Всё",
+      "status": "machine"
+    },
+    "feed.editor.sources.channels": {
+      "text": "Все каналы",
+      "status": "machine"
+    },
+    "feed.editor.sources.groups": {
+      "text": "Все группы",
+      "status": "machine"
+    },
+    "feed.editor.start.blank": {
+      "text": "Пустая",
+      "status": "machine"
+    },
+    "feed.editor.start_from": {
+      "text": "Начать с",
+      "status": "machine"
+    },
+    "feed.editor.stripped_hint": {
+      "text": "Ленты, которыми поделились, приходят без конкретных разговоров. Выберите их ниже, чтобы настроить ленту под себя.",
+      "status": "machine"
+    },
+    "feed.editor.suggestions": {
+      "text": "Рекомендации",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.never": {
+      "text": "Никогда",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.rarely": {
+      "text": "Редко",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.sometimes": {
+      "text": "Иногда",
+      "status": "machine"
+    },
+    "feed.editor.suggestions_rate": {
+      "text": "Как часто показывать рекомендуемый канал",
+      "status": "machine"
+    },
+    "feed.editor.weight.from_contacts": {
+      "text": "От ваших контактов",
+      "status": "machine"
+    },
+    "feed.editor.weight.media": {
+      "text": "С фото или видео",
+      "status": "machine"
+    },
+    "feed.editor.weight.mentions": {
+      "text": "Упоминания вас",
+      "status": "machine"
+    },
+    "feed.editor.weight.reactions": {
+      "text": "Реакции",
+      "status": "machine"
+    },
+    "feed.editor.weight.recency": {
+      "text": "Новизна",
+      "status": "machine"
+    },
+    "feed.editor.weight.replies": {
+      "text": "Ответы",
+      "status": "machine"
+    },
+    "feed.editor.what_counts": {
+      "text": "Что важно",
+      "status": "machine"
+    },
+    "feed.empty.discover": {
+      "text": "Найти каналы",
+      "status": "machine"
+    },
+    "feed.empty.no_match": {
+      "text": "Нет сообщений, подходящих под эту ленту.",
+      "status": "machine"
+    },
+    "feed.empty.no_sources": {
+      "text": "Лента наполняется из ваших групп и каналов.",
+      "status": "machine"
+    },
+    "feed.empty.nothing_yet": {
+      "text": "Здесь пока пусто. Новые сообщения из ваших групп и каналов появятся здесь.",
+      "status": "machine"
+    },
+    "feed.end": {
+      "text": "Вы всё посмотрели.",
+      "status": "machine"
+    },
+    "feed.error.cannot_save_here": {
+      "text": "Это устройство сейчас не может это сохранить.",
+      "status": "machine"
+    },
+    "feed.error.delete": {
+      "text": "Не удалось удалить ленту. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "feed.error.no_device_key": {
+      "text": "Это устройство сейчас не может сохранять ленты.",
+      "status": "machine"
+    },
+    "feed.error.save": {
+      "text": "Не удалось сохранить ленту. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "feed.hidden.empty": {
+      "text": "Из ваших лент ничего не скрыто.",
+      "status": "machine"
+    },
+    "feed.hidden.show_again": {
+      "text": "Показывать снова",
+      "status": "machine"
+    },
+    "feed.hidden.title": {
+      "text": "Скрыто из лент",
+      "status": "machine"
+    },
+    "feed.hidden.toast": {
+      "text": "Скрыто из лент.",
+      "status": "machine"
+    },
+    "feed.icon.bell": {
+      "text": "Колокольчик",
+      "status": "machine"
+    },
+    "feed.icon.book": {
+      "text": "Книга",
+      "status": "machine"
+    },
+    "feed.icon.camera": {
+      "text": "Камера",
+      "status": "machine"
+    },
+    "feed.icon.code": {
+      "text": "Код",
+      "status": "machine"
+    },
+    "feed.icon.feed": {
+      "text": "Лента",
+      "status": "machine"
+    },
+    "feed.icon.flag": {
+      "text": "Флаг",
+      "status": "machine"
+    },
+    "feed.icon.globe": {
+      "text": "Глобус",
+      "status": "machine"
+    },
+    "feed.icon.heart": {
+      "text": "Сердце",
+      "status": "machine"
+    },
+    "feed.icon.lightning": {
+      "text": "Молния",
+      "status": "machine"
+    },
+    "feed.icon.music": {
+      "text": "Музыка",
+      "status": "machine"
+    },
+    "feed.icon.speech_bubble": {
+      "text": "Облачко реплики",
+      "status": "machine"
+    },
+    "feed.icon.star": {
+      "text": "Звезда",
+      "status": "machine"
+    },
+    "feed.import.a11y": {
+      "text": "Импорт ленты",
+      "status": "machine"
+    },
+    "feed.import.add": {
+      "text": "Добавить в мои ленты",
+      "status": "machine"
+    },
+    "feed.import.choose_file": {
+      "text": "Выбрать файл",
+      "status": "machine"
+    },
+    "feed.import.hint": {
+      "text": "Откройте ленту, которой с вами поделились, — файл .lakkofeed.",
+      "status": "machine"
+    },
+    "feed.import.refused": {
+      "text": "Lakko не может открыть этот файл как ленту.",
+      "status": "machine"
+    },
+    "feed.import.title": {
+      "text": "Добавить ленту, которой поделились",
+      "status": "machine"
+    },
+    "feed.item.reactions_a11y": {
+      "text": "Реакции",
+      "status": "machine"
+    },
+    "feed.menu.a11y": {
+      "text": "Меню ленты",
+      "status": "machine"
+    },
+    "feed.min_reactions_count": {
+      "text": "{count, plural, one {Не меньше # реакции} few {Не меньше # реакций} many {Не меньше # реакций} other {Не меньше # реакции}}",
+      "status": "machine"
+    },
+    "feed.new": {
+      "text": "Новая лента",
+      "status": "machine"
+    },
+    "feed.preset.discover": {
+      "text": "Обзор",
+      "status": "machine"
+    },
+    "feed.preset.for_me": {
+      "text": "Для меня",
+      "status": "machine"
+    },
+    "feed.preset.latest": {
+      "text": "Новое",
+      "status": "machine"
+    },
+    "feed.preset.popular": {
+      "text": "Популярное",
+      "status": "machine"
+    },
+    "feed.problem.conversations": {
+      "text": "Выбрано слишком много разговоров.",
+      "status": "machine"
+    },
+    "feed.problem.generic": {
+      "text": "Эту ленту нельзя сохранить в таком виде.",
+      "status": "machine"
+    },
+    "feed.problem.name": {
+      "text": "Дайте ленте название длиной до 64 символов.",
+      "status": "machine"
+    },
+    "feed.problem.no_kinds": {
+      "text": "Выберите группы, каналы или и то и другое.",
+      "status": "machine"
+    },
+    "feed.problem.stripped": {
+      "text": "В ленте, которой поделились, нельзя указывать разговоры.",
+      "status": "machine"
+    },
+    "feed.problem.too_large": {
+      "text": "Эта лента слишком большая, чтобы её сохранить.",
+      "status": "machine"
+    },
+    "feed.problem.weight": {
+      "text": "Значение ползунка вне допустимого диапазона.",
+      "status": "machine"
+    },
+    "feed.problem.window": {
+      "text": "Глубина — от 1 до 30 дней.",
+      "status": "machine"
+    },
+    "feed.problem.words": {
+      "text": "Проверьте списки слов: одно слово в строке, не больше 32 слов.",
+      "status": "machine"
+    },
+    "feed.refresh_failed": {
+      "text": "Не удалось проверить новые сообщения.",
+      "status": "machine"
+    },
+    "feed.replies.count": {
+      "text": "{count, plural, one {# ответ} few {# ответа} many {# ответов} other {# ответа}}",
+      "status": "machine"
+    },
+    "feed.share": {
+      "text": "Поделиться",
+      "status": "machine"
+    },
+    "feed.share.a11y": {
+      "text": "Поделиться лентой",
+      "status": "machine"
+    },
+    "feed.share.download": {
+      "text": "Скачать файл",
+      "status": "machine"
+    },
+    "feed.share.share_file": {
+      "text": "Поделиться файлом",
+      "status": "machine"
+    },
+    "feed.share.share_link": {
+      "text": "Поделиться ссылкой",
+      "status": "machine"
+    },
+    "feed.share.stripped": {
+      "text": "Выбранные вручную разговоры не передаются: другим они ни о чём не говорят.",
+      "status": "machine"
+    },
+    "feed.share.title": {
+      "text": "Поделиться «{name}»",
+      "status": "machine"
+    },
+    "feed.share.unshareable": {
+      "text": "Этой лентой нельзя поделиться в таком виде.",
+      "status": "machine"
+    },
+    "feed.show_new": {
+      "text": "{count, plural, one {Показать # новое} few {Показать # новых} many {Показать # новых} other {Показать # новых}}",
+      "status": "machine"
+    },
+    "feed.summary.factor.contacts": {
+      "text": "ваши контакты",
+      "status": "machine"
+    },
+    "feed.summary.factor.media": {
+      "text": "фото и видео",
+      "status": "machine"
+    },
+    "feed.summary.factor.mentions": {
+      "text": "упоминания вас",
+      "status": "machine"
+    },
+    "feed.summary.factor.reactions": {
+      "text": "реакции",
+      "status": "machine"
+    },
+    "feed.summary.factor.replies": {
+      "text": "ответы",
+      "status": "machine"
+    },
+    "feed.summary.for_me": {
+      "text": "Только то, что касается вас",
+      "status": "machine"
+    },
+    "feed.summary.hide_own": {
+      "text": "Скрывает ваши сообщения",
+      "status": "machine"
+    },
+    "feed.summary.hide_words": {
+      "text": "{count, plural, one {Скрывает # слово} few {Скрывает # слова} many {Скрывает # слов} other {Скрывает # слова}}",
+      "status": "machine"
+    },
+    "feed.summary.include_muted": {
+      "text": "Включает разговоры без звука",
+      "status": "machine"
+    },
+    "feed.summary.look_back": {
+      "text": "{count, plural, one {За последний # день} few {За последние # дня} many {За последние # дней} other {За последние # дня}}",
+      "status": "machine"
+    },
+    "feed.summary.newest_first": {
+      "text": "Сначала новые",
+      "status": "machine"
+    },
+    "feed.summary.only_words": {
+      "text": "Только сообщения со словами: {words}",
+      "status": "machine"
+    },
+    "feed.summary.ranks_by": {
+      "text": "Сортирует по новизне и по параметрам: {factors}",
+      "status": "machine"
+    },
+    "feed.summary.sources.both": {
+      "text": "Источники: все группы и каналы",
+      "status": "machine"
+    },
+    "feed.summary.sources.channels": {
+      "text": "Источники: все каналы",
+      "status": "machine"
+    },
+    "feed.summary.sources.groups": {
+      "text": "Источники: все группы",
+      "status": "machine"
+    },
+    "feed.switcher.a11y": {
+      "text": "Ленты",
+      "status": "machine"
+    },
+    "feed.title": {
+      "text": "Лента",
+      "status": "machine"
+    },
+    "feed.why.mentions": {
+      "text": "Вас упомянули",
+      "status": "machine"
+    },
+    "feed.why.popular": {
+      "text": "Популярно в {source}",
+      "status": "machine"
+    },
+    "feed.why.reply": {
+      "text": "Ответ на ваше сообщение",
       "status": "machine"
     },
     "folders.add_to_folder": {
@@ -4902,6 +5802,10 @@
       "text": "{count, plural, one {до # использования} few {до # использований} many {до # использований} other {до # использования}}",
       "status": "machine"
     },
+    "ios.document_type.feed": {
+      "text": "Лента Lakko",
+      "status": "machine"
+    },
     "ios.permission.camera": {
       "text": "Lakko использует камеру, чтобы сканировать QR-коды устройств, которые вы хотите привязать к аккаунту, передавать видео в звонках и записывать видеосообщения, которые вы решили отправить. Всё, что снимает камера, шифруется сквозным шифрованием на вашем устройстве перед отправкой.",
       "status": "machine"
@@ -4972,6 +5876,10 @@
     },
     "nav.contacts": {
       "text": "Контакты",
+      "status": "machine"
+    },
+    "nav.feed": {
+      "text": "Лента",
       "status": "machine"
     },
     "nav.rail_a11y": {
@@ -6244,6 +7152,14 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "Сегодня вы искали очень много людей. Попробуйте завтра.",
+      "status": "machine"
+    },
+    "tokens.search_allowance_used": {
+      "text": "Слишком много запросов. Попробуйте через минуту.",
+      "status": "machine"
+    },
+    "tokens.subscribe_allowance_used": {
+      "text": "Сегодня вы подписались на много каналов. Попробуйте завтра.",
       "status": "machine"
     },
     "update.available.message": {

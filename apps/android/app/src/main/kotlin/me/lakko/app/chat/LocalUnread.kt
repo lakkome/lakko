@@ -61,6 +61,16 @@ internal class LocalUnreadCounter {
         LocalUnread(count = entry?.count ?: 0, viewedThisSession = entry?.viewedThisSession == true)
     }
 
+    /** ADR-0063 section 5 — [seen] incoming messages of [groupIdHex] were
+     *  shown in the feed: they leave the local count. Never below zero. */
+    fun onSeenElsewhere(groupIdHex: String, seen: Int) {
+        if (seen <= 0) return
+        synchronized(lock) {
+            val current = entries[groupIdHex] ?: return
+            entries[groupIdHex] = current.copy(count = (current.count - seen).coerceAtLeast(0))
+        }
+    }
+
     /** Logout / forget device. */
     fun clear() {
         synchronized(lock) { entries.clear() }

@@ -325,7 +325,7 @@ mod tests {
             "invalid-window: epoch window must be at least one second"
         );
         assert_eq!(anon_token_header_name(), "x-lakko-anon-token");
-        assert_eq!(anon_token_contexts().len(), 5);
+        assert_eq!(anon_token_contexts().len(), 7);
         assert_eq!(anon_token_max_batch(), 32);
         assert!(anon_token_is_live(9, 10));
         assert!(!anon_token_is_live(8, 10));

@@ -16,6 +16,7 @@ import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.FfiGroupName
 import uniffi.lakko_ffi_uniffi.FfiPinOp
+import me.lakko.app.discover.decodeSharedListOrNull
 import uniffi.lakko_ffi_uniffi.FfiProfile
 import uniffi.lakko_ffi_uniffi.FfiPushRoutingSecret
 import uniffi.lakko_ffi_uniffi.Group
@@ -737,6 +738,7 @@ internal fun toEvent(
     decodeGroupName: (ByteArray) -> FfiGroupName? = ::decodeGroupNameOrNull,
     isProfileRequest: (ByteArray) -> Boolean = ::decodesAsProfileRequest,
     decodePin: (ByteArray) -> FfiPinOp? = ::decodePinOrNull,
+    decodeSharedChannels: (ByteArray) -> me.lakko.app.discover.SharedList? = ::decodeSharedListOrNull,
     isRegistrarSeed: (ByteArray) -> Boolean = ::registrarSeedArm,
 ): IncomingChatEvent =
     when (processed) {
@@ -892,6 +894,19 @@ internal fun toEvent(
                 IncomingChatEvent.Pin(
                     messageId = messageId,
                     pin = decodePin(processed.data),
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
+            } else if (me.lakko.app.discover.looksLikeSharedChannelsEnvelope(processed.data)) {
+                // ADR-0059 section 6 — the listed channels one member shares
+                // with this group. Never a timeline bubble. The sender is
+                // resolved to its account KEY here (C-68): a list speaks only
+                // for its sender and is filed under that key. A malformed
+                // envelope arrives as `list = null` and is consumed as a
+                // no-op; the chat parser never sees it.
+                IncomingChatEvent.SharedChannels(
+                    messageId = messageId,
+                    list = decodeSharedChannels(processed.data),
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
@@ -1512,6 +1527,18 @@ public sealed interface IncomingChatEvent {
     public data class Pin(
         val messageId: Long,
         val pin: FfiPinOp?,
+        val senderKey: MemberIdentity?,
+        val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** ADR-0059 section 6 — one member's shared channel list. Never a
+     *  timeline bubble and never persisted. [list] is `null` when the envelope
+     *  matched the domain but was malformed (consumed as a no-op).
+     *  [senderKey] is the sender's account key resolved at receipt (C-68);
+     *  `null` means the list is dropped. */
+    public data class SharedChannels(
+        val messageId: Long,
+        val list: me.lakko.app.discover.SharedList?,
         val senderKey: MemberIdentity?,
         val createdAt: String,
     ) : IncomingChatEvent

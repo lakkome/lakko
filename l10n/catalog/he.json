@@ -1194,6 +1194,10 @@
       "text": "הפוסט הזה ארוך מדי לפרסום.",
       "status": "machine"
     },
+    "channels.error.publisher_refused": {
+      "text": "המכשיר הזה עדיין לא מורשה לפרסם בערוץ הזה. מפרסם שותף יוכל לפרסם אחרי שהמכשיר של הבעלים יסיים להוסיף אותו.",
+      "status": "machine"
+    },
     "channels.error.refused": {
       "text": "השרת דחה את הבקשה. נסו שוב מאוחר יותר.",
       "status": "machine"
@@ -1390,6 +1394,10 @@
       "text": "לא ניתן היה לשמור.",
       "status": "machine"
     },
+    "channels.meta.error.sign_in": {
+      "text": "התחברו שוב כדי לשמור שינויים בערוץ הזה.",
+      "status": "machine"
+    },
     "channels.meta.saved": {
       "text": "נשמר. המנויים יראו את השם החדש עם הפוסטים הבאים.",
       "status": "machine"
@@ -1486,6 +1494,10 @@
       "text": "לא ניתן היה לפרסם.",
       "status": "machine"
     },
+    "channels.publish.error.sign_in": {
+      "text": "התחברו שוב כדי לפרסם בערוץ הזה.",
+      "status": "machine"
+    },
     "channels.rotation.desc": {
       "text": "Lakko מרעננת את ההגנה של הערוץ בעצמה. רעננו אותה עכשיו אם אתם חושבים שהמכשיר של אחד המנויים נפרץ.",
       "status": "machine"
@@ -1496,6 +1508,10 @@
     },
     "channels.rotation.error.refresh": {
       "text": "לא ניתן היה לרענן. נסו שוב בעוד רגע.",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh_prefix": {
+      "text": "הרענון נכשל.",
       "status": "machine"
     },
     "channels.rotation.never": {
@@ -1518,6 +1534,10 @@
       "text": "הגנה",
       "status": "machine"
     },
+    "channels.row.new_posts_a11y": {
+      "text": "{count, plural, one {פוסט חדש אחד} two {שני פוסטים חדשים} other {# פוסטים חדשים}}",
+      "status": "machine"
+    },
     "channels.row.own": {
       "text": "הערוץ שלכם",
       "status": "machine"
@@ -1536,6 +1556,10 @@
     },
     "channels.subscribe.error.generic": {
       "text": "לא ניתן היה להירשם. נסו שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "channels.subscribe.error.network": {
+      "text": "לא הצלחנו לעקוב אחרי הערוץ. בדקו את החיבור ונסו שוב.",
       "status": "machine"
     },
     "channels.subscribe.error.prefix": {
@@ -2850,6 +2874,10 @@
       "text": "לא ניתן היה לבקש את השינוי הזה.",
       "status": "machine"
     },
+    "chat.refusal.group_kind_changed": {
+      "text": "אי אפשר לבצע את השינוי הזה בשיחה הזו.",
+      "status": "machine"
+    },
     "chat.refusal.join_not_kept": {
       "text": "בקשת הצטרפות הגיעה כשכבר המתינו יותר מדי בקשות, ולכן היא לא נשמרה. בקשו מהאדם לשלוח אותה שוב מאוחר יותר.",
       "status": "machine"
@@ -2864,6 +2892,14 @@
     },
     "chat.refusal.not_owner": {
       "text": "רק הבעלים של הקבוצה יכולים לשנות מנהלים או להעביר את הבעלות.",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_fixed": {
+      "text": "צ'אט הוא תמיד בין אותם שני אנשים.",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_no_roles": {
+      "text": "לצ'אט אין מנהלים.",
       "status": "machine"
     },
     "chat.refusal.owner_cannot_leave": {
@@ -3418,6 +3454,10 @@
       "text": "כיווץ",
       "status": "machine"
     },
+    "common.collapsed": {
+      "text": "מכווץ",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "אישור",
       "status": "machine"
@@ -3528,6 +3568,10 @@
     },
     "common.expand": {
       "text": "הרחבה",
+      "status": "machine"
+    },
+    "common.expanded": {
+      "text": "מורחב",
       "status": "machine"
     },
     "common.fact_pair": {
@@ -3668,6 +3712,10 @@
     },
     "common.try_again": {
       "text": "ניסיון חוזר",
+      "status": "machine"
+    },
+    "common.undo": {
+      "text": "ביטול",
       "status": "machine"
     },
     "common.unknown": {
@@ -4242,6 +4290,322 @@
       "text": "פתיחת המצלמה",
       "status": "machine"
     },
+    "discover.card.a11y": {
+      "text": "ערוץ מוצע {name}",
+      "status": "machine"
+    },
+    "discover.card.following": {
+      "text": "אתם עוקבים אחרי הערוץ הזה",
+      "status": "machine"
+    },
+    "discover.card.hide_topic": {
+      "text": "הסתרת הנושא הזה",
+      "status": "machine"
+    },
+    "discover.card.more": {
+      "text": "עוד",
+      "status": "machine"
+    },
+    "discover.card.not_interested": {
+      "text": "לא מעניין אותי",
+      "status": "machine"
+    },
+    "discover.card.show_description": {
+      "text": "הצגת התיאור",
+      "status": "machine"
+    },
+    "discover.card.subscribers": {
+      "text": "{band} מנויים",
+      "status": "machine"
+    },
+    "discover.edit_topics": {
+      "text": "עריכת נושאים",
+      "status": "machine"
+    },
+    "discover.gone": {
+      "text": "הערוץ הזה כבר לא זמין.",
+      "status": "machine"
+    },
+    "discover.language": {
+      "text": "שפה",
+      "status": "machine"
+    },
+    "discover.listing.checking": {
+      "text": "בודקים אם הערוץ מוצג...",
+      "status": "machine"
+    },
+    "discover.listing.confirm_action": {
+      "text": "להציג",
+      "status": "machine"
+    },
+    "discover.listing.confirm_body": {
+      "text": "כל אחד יוכל למצוא את השם, התיאור ומספר המנויים של הערוץ. הפוסטים נשארים מוצפנים.",
+      "status": "machine"
+    },
+    "discover.listing.confirm_title": {
+      "text": "להציג את הערוץ הזה בגילוי?",
+      "status": "machine"
+    },
+    "discover.listing.listed": {
+      "text": "מוצג",
+      "status": "machine"
+    },
+    "discover.listing.listed_notice": {
+      "text": "מוצג. המנויים יידעו על כך בעדכון הבא של הערוץ.",
+      "status": "machine"
+    },
+    "discover.listing.needs_handle": {
+      "text": "כדי שערוץ יוצג בגילוי הוא צריך @handle.",
+      "status": "machine"
+    },
+    "discover.listing.not_listed": {
+      "text": "לא מוצג",
+      "status": "machine"
+    },
+    "discover.listing.owner_desc": {
+      "text": "כל אחד יכול למצוא את השם, התיאור ומספר המנויים של ערוץ שמוצג בגילוי. הפוסטים נשארים מוצפנים.",
+      "status": "machine"
+    },
+    "discover.listing.refused": {
+      "text": "לא הצלחנו להציג את הערוץ הזה. נסו שוב.",
+      "status": "machine"
+    },
+    "discover.listing.remove_failed": {
+      "text": "לא הצלחנו להסיר את הערוץ מהגילוי. נסו שוב.",
+      "status": "machine"
+    },
+    "discover.listing.title": {
+      "text": "הצגה בגילוי",
+      "status": "machine"
+    },
+    "discover.listing.topic": {
+      "text": "נושא",
+      "status": "machine"
+    },
+    "discover.listing.update_failed": {
+      "text": "נשמר. לא הצלחנו לעדכן את הרישום בגילוי; שמרו שוב כדי לנסות שוב.",
+      "status": "machine"
+    },
+    "discover.listing.viewer_listed": {
+      "text": "הערוץ הזה מוצג בגילוי. רק הבעלים של הערוץ יכולים לשנות זאת.",
+      "status": "machine"
+    },
+    "discover.listing.viewer_not_listed": {
+      "text": "הערוץ הזה לא מוצג בגילוי. רק הבעלים של הערוץ יכולים להציג אותו.",
+      "status": "machine"
+    },
+    "discover.mix.label": {
+      "text": "לערבב נושאים אקראיים",
+      "status": "machine"
+    },
+    "discover.mix.off_line": {
+      "text": "פחות נתונים. השרת של Lakko יראה בדיוק אילו נושאים בחרתם.",
+      "status": "machine"
+    },
+    "discover.nothing_yet": {
+      "text": "אין הצעות עדיין. בחרו נושאים, או בקשו מאנשים בקבוצות שלכם לשתף את הערוצים שלהם.",
+      "status": "machine"
+    },
+    "discover.pick.a11y": {
+      "text": "בחירת נושאים",
+      "status": "machine"
+    },
+    "discover.pick.body": {
+      "text": "Lakko מורידה הצעות בשבילם, מעורבבות עם כמה נושאים אקראיים, כך שהשרת של Lakko לא יכול לדעת בדיוק אילו בחרתם. הוא אף פעם לא רואה אילו ערוצים אתם פותחים.",
+      "status": "machine"
+    },
+    "discover.pick.title": {
+      "text": "בחרו כמה נושאים.",
+      "status": "machine"
+    },
+    "discover.reason.followed_by": {
+      "text": "{name} עוקב/ת ב-{group}",
+      "status": "machine"
+    },
+    "discover.reason.followed_by_others": {
+      "text": "{count, plural, one {{name} ועוד אדם אחד עוקבים ב-{group}} two {{name} ועוד שני אנשים עוקבים ב-{group}} other {{name} ועוד # אנשים עוקבים ב-{group}}}",
+      "status": "machine"
+    },
+    "discover.reason.followed_count": {
+      "text": "{count, plural, one {אדם אחד עוקב ב-{group}} two {שני אנשים עוקבים ב-{group}} other {# אנשים עוקבים ב-{group}}}",
+      "status": "machine"
+    },
+    "discover.reason.group_fallback": {
+      "text": "קבוצה",
+      "status": "machine"
+    },
+    "discover.reason.popular": {
+      "text": "פופולרי ב{topic}",
+      "status": "machine"
+    },
+    "discover.reason.search": {
+      "text": "מתאים לחיפוש שלכם",
+      "status": "machine"
+    },
+    "discover.search.action": {
+      "text": "חיפוש",
+      "status": "machine"
+    },
+    "discover.search.helper": {
+      "text": "החיפושים נשלחים לשרת של Lakko.",
+      "status": "machine"
+    },
+    "discover.search.no_results": {
+      "text": "לא נמצאו ערוצים.",
+      "status": "machine"
+    },
+    "discover.search.placeholder": {
+      "text": "חיפוש ערוצים",
+      "status": "machine"
+    },
+    "discover.search.searching": {
+      "text": "מחפשים...",
+      "status": "machine"
+    },
+    "discover.search.too_short": {
+      "text": "הקלידו לפחות 2 תווים.",
+      "status": "machine"
+    },
+    "discover.settings": {
+      "text": "הגדרות הגילוי",
+      "status": "machine"
+    },
+    "discover.share.error": {
+      "text": "לא הצלחנו לשנות. נסו שוב.",
+      "status": "machine"
+    },
+    "discover.share.label": {
+      "text": "לשתף את הערוצים שלי עם הקבוצה הזו",
+      "status": "machine"
+    },
+    "discover.share.line": {
+      "text": "אנשים בקבוצה הזו יכולים לראות אחרי אילו ערוצים אתם עוקבים. השרת של Lakko לא יכול.",
+      "status": "machine"
+    },
+    "discover.shared.desc": {
+      "text": "קבוצות שבהן אנשים יכולים לראות אחרי אילו ערוצים אתם עוקבים. השרת של Lakko לא יכול.",
+      "status": "machine"
+    },
+    "discover.shared.empty": {
+      "text": "אתם לא משתפים את הערוצים שלכם עם אף קבוצה.",
+      "status": "machine"
+    },
+    "discover.shared.settings_sub": {
+      "text": "קבוצות שיכולות לראות אחרי אילו ערוצים אתם עוקבים",
+      "status": "machine"
+    },
+    "discover.shared.stop": {
+      "text": "הפסקת השיתוף",
+      "status": "machine"
+    },
+    "discover.shared.stop_failed": {
+      "text": "לא הצלחנו לכבות את השיתוף. נסו שוב.",
+      "status": "machine"
+    },
+    "discover.shared.title": {
+      "text": "ערוצים שאני משתף/ת",
+      "status": "machine"
+    },
+    "discover.topic.art_design": {
+      "text": "אמנות ועיצוב",
+      "status": "machine"
+    },
+    "discover.topic.books": {
+      "text": "ספרים",
+      "status": "machine"
+    },
+    "discover.topic.business": {
+      "text": "עסקים",
+      "status": "machine"
+    },
+    "discover.topic.education": {
+      "text": "חינוך",
+      "status": "machine"
+    },
+    "discover.topic.film_tv": {
+      "text": "קולנוע וטלוויזיה",
+      "status": "machine"
+    },
+    "discover.topic.finance": {
+      "text": "פיננסים",
+      "status": "machine"
+    },
+    "discover.topic.food": {
+      "text": "אוכל",
+      "status": "machine"
+    },
+    "discover.topic.gaming": {
+      "text": "גיימינג",
+      "status": "machine"
+    },
+    "discover.topic.health": {
+      "text": "בריאות",
+      "status": "machine"
+    },
+    "discover.topic.humour": {
+      "text": "הומור",
+      "status": "machine"
+    },
+    "discover.topic.lifestyle": {
+      "text": "לייפסטייל",
+      "status": "machine"
+    },
+    "discover.topic.local": {
+      "text": "מקומי",
+      "status": "machine"
+    },
+    "discover.topic.music": {
+      "text": "מוזיקה",
+      "status": "machine"
+    },
+    "discover.topic.nature": {
+      "text": "טבע",
+      "status": "machine"
+    },
+    "discover.topic.news": {
+      "text": "חדשות",
+      "status": "machine"
+    },
+    "discover.topic.other": {
+      "text": "אחר",
+      "status": "machine"
+    },
+    "discover.topic.photography": {
+      "text": "צילום",
+      "status": "machine"
+    },
+    "discover.topic.politics": {
+      "text": "פוליטיקה",
+      "status": "machine"
+    },
+    "discover.topic.religion": {
+      "text": "דת",
+      "status": "machine"
+    },
+    "discover.topic.science": {
+      "text": "מדע",
+      "status": "machine"
+    },
+    "discover.topic.software_development": {
+      "text": "פיתוח תוכנה",
+      "status": "machine"
+    },
+    "discover.topic.sports": {
+      "text": "ספורט",
+      "status": "machine"
+    },
+    "discover.topic.technology": {
+      "text": "טכנולוגיה",
+      "status": "machine"
+    },
+    "discover.topic.travel": {
+      "text": "טיולים",
+      "status": "machine"
+    },
+    "discover.unavailable": {
+      "text": "ההצעות לא זמינות כרגע.",
+      "status": "machine"
+    },
     "display_name.error.control": {
       "text": "הסירו תווים בלתי נראים או תווי כיווניות טקסט",
       "status": "machine"
@@ -4268,6 +4632,542 @@
     },
     "ds.clock_skew": {
       "text": "בדקו את התאריך והשעה במכשיר הזה.",
+      "status": "machine"
+    },
+    "feed.action.hide": {
+      "text": "הסתרה מהפידים",
+      "status": "machine"
+    },
+    "feed.action.hide_hint": {
+      "text": "השתקת השיחה הזו בפידים",
+      "status": "machine"
+    },
+    "feed.attachments.count": {
+      "text": "{count, plural, one {קובץ מצורף אחד} two {שני קבצים מצורפים} other {# קבצים מצורפים}}",
+      "status": "machine"
+    },
+    "feed.banner.dismiss": {
+      "text": "הבנתי",
+      "status": "machine"
+    },
+    "feed.banner.local": {
+      "text": "הפיד מציג הודעות שהמכשיר הזה קיבל.",
+      "status": "machine"
+    },
+    "feed.divider.new": {
+      "text": "חדש",
+      "status": "machine"
+    },
+    "feed.edit": {
+      "text": "עריכה",
+      "status": "machine"
+    },
+    "feed.edit_feed": {
+      "text": "עריכת הפיד",
+      "status": "machine"
+    },
+    "feed.editor.default_name": {
+      "text": "הפיד שלי",
+      "status": "machine"
+    },
+    "feed.editor.delete": {
+      "text": "מחיקת הפיד",
+      "status": "machine"
+    },
+    "feed.editor.delete_confirm": {
+      "text": "למחוק את הפיד הזה?",
+      "status": "machine"
+    },
+    "feed.editor.fade": {
+      "text": "כמה מהר דברים דועכים",
+      "status": "machine"
+    },
+    "feed.editor.fade.day": {
+      "text": "יום",
+      "status": "machine"
+    },
+    "feed.editor.fade.hours": {
+      "text": "כמה שעות",
+      "status": "machine"
+    },
+    "feed.editor.fade.week": {
+      "text": "שבוע",
+      "status": "machine"
+    },
+    "feed.editor.filters": {
+      "text": "מסננים",
+      "status": "machine"
+    },
+    "feed.editor.for_me": {
+      "text": "רק מה שמזכיר אותי, עונה לי או מגיב להודעות שלי",
+      "status": "machine"
+    },
+    "feed.editor.hide_own": {
+      "text": "להסתיר את ההודעות שלי",
+      "status": "machine"
+    },
+    "feed.editor.hide_words": {
+      "text": "מילים להסתרה (אחת בכל שורה)",
+      "status": "machine"
+    },
+    "feed.editor.icon": {
+      "text": "סמל",
+      "status": "machine"
+    },
+    "feed.editor.include_muted": {
+      "text": "לכלול שיחות מושתקות",
+      "status": "machine"
+    },
+    "feed.editor.look_back": {
+      "text": "כמה ימים אחורה",
+      "status": "machine"
+    },
+    "feed.editor.look_back_count": {
+      "text": "{count, plural, one {יום אחד אחורה} two {יומיים אחורה} other {# ימים אחורה}}",
+      "status": "machine"
+    },
+    "feed.editor.media_only": {
+      "text": "רק עם תמונות או וידאו",
+      "status": "machine"
+    },
+    "feed.editor.membership.a11y": {
+      "text": "{name} בפיד הזה",
+      "status": "machine"
+    },
+    "feed.editor.membership.never": {
+      "text": "אף פעם",
+      "status": "machine"
+    },
+    "feed.editor.membership.only": {
+      "text": "רק",
+      "status": "machine"
+    },
+    "feed.editor.membership_hint": {
+      "text": "\"רק\" מגביל את הפיד לשיחות שסומנו כך; \"אף פעם\" משאיר שיחה בחוץ.",
+      "status": "machine"
+    },
+    "feed.editor.min_reactions": {
+      "text": "לפחות כמה תגובות אמוג'י",
+      "status": "machine"
+    },
+    "feed.editor.name": {
+      "text": "שם",
+      "status": "machine"
+    },
+    "feed.editor.only_words": {
+      "text": "רק המילים האלה (אחת בכל שורה)",
+      "status": "machine"
+    },
+    "feed.editor.preview": {
+      "text": "תצוגה מקדימה",
+      "status": "machine"
+    },
+    "feed.editor.preview_pending": {
+      "text": "התצוגה המקדימה תופיע כשאפשר יהיה לשמור את הפיד.",
+      "status": "machine"
+    },
+    "feed.editor.slider.max": {
+      "text": "הרבה",
+      "status": "machine"
+    },
+    "feed.editor.slider.min": {
+      "text": "להתעלם",
+      "status": "machine"
+    },
+    "feed.editor.sources": {
+      "text": "מקורות",
+      "status": "machine"
+    },
+    "feed.editor.sources.both": {
+      "text": "שניהם",
+      "status": "machine"
+    },
+    "feed.editor.sources.channels": {
+      "text": "כל הערוצים",
+      "status": "machine"
+    },
+    "feed.editor.sources.groups": {
+      "text": "כל הקבוצות",
+      "status": "machine"
+    },
+    "feed.editor.start.blank": {
+      "text": "ריק",
+      "status": "machine"
+    },
+    "feed.editor.start_from": {
+      "text": "להתחיל מ",
+      "status": "machine"
+    },
+    "feed.editor.stripped_hint": {
+      "text": "פידים משותפים מגיעים בלי שיחות מסוימות. בחרו כמה למטה כדי להתאים אותו לעצמכם.",
+      "status": "machine"
+    },
+    "feed.editor.suggestions": {
+      "text": "הצעות",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.never": {
+      "text": "אף פעם",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.rarely": {
+      "text": "לעיתים רחוקות",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.sometimes": {
+      "text": "לפעמים",
+      "status": "machine"
+    },
+    "feed.editor.suggestions_rate": {
+      "text": "באיזו תדירות מופיע ערוץ מוצע",
+      "status": "machine"
+    },
+    "feed.editor.weight.from_contacts": {
+      "text": "מאנשי הקשר שלכם",
+      "status": "machine"
+    },
+    "feed.editor.weight.media": {
+      "text": "יש תמונות או וידאו",
+      "status": "machine"
+    },
+    "feed.editor.weight.mentions": {
+      "text": "מזכירים אתכם",
+      "status": "machine"
+    },
+    "feed.editor.weight.reactions": {
+      "text": "תגובות אמוג'י",
+      "status": "machine"
+    },
+    "feed.editor.weight.recency": {
+      "text": "כמה חדש",
+      "status": "machine"
+    },
+    "feed.editor.weight.replies": {
+      "text": "תשובות",
+      "status": "machine"
+    },
+    "feed.editor.what_counts": {
+      "text": "מה חשוב",
+      "status": "machine"
+    },
+    "feed.empty.discover": {
+      "text": "גילוי ערוצים",
+      "status": "machine"
+    },
+    "feed.empty.no_match": {
+      "text": "אין הודעות שמתאימות לפיד הזה.",
+      "status": "machine"
+    },
+    "feed.empty.no_sources": {
+      "text": "הפיד מתמלא מהקבוצות והערוצים שלכם.",
+      "status": "machine"
+    },
+    "feed.empty.nothing_yet": {
+      "text": "אין כאן עדיין כלום. הודעות חדשות מהקבוצות והערוצים שלכם יופיעו כאן.",
+      "status": "machine"
+    },
+    "feed.end": {
+      "text": "ראיתם הכול.",
+      "status": "machine"
+    },
+    "feed.error.cannot_save_here": {
+      "text": "המכשיר הזה לא יכול לשמור את זה כרגע.",
+      "status": "machine"
+    },
+    "feed.error.delete": {
+      "text": "לא הצלחנו למחוק את הפיד. נסו שוב.",
+      "status": "machine"
+    },
+    "feed.error.no_device_key": {
+      "text": "המכשיר הזה לא יכול לשמור פידים כרגע.",
+      "status": "machine"
+    },
+    "feed.error.save": {
+      "text": "לא הצלחנו לשמור את הפיד. נסו שוב.",
+      "status": "machine"
+    },
+    "feed.hidden.empty": {
+      "text": "שום דבר לא מוסתר מהפידים שלכם.",
+      "status": "machine"
+    },
+    "feed.hidden.show_again": {
+      "text": "להציג שוב",
+      "status": "machine"
+    },
+    "feed.hidden.title": {
+      "text": "מוסתרים מהפידים",
+      "status": "machine"
+    },
+    "feed.hidden.toast": {
+      "text": "הוסתר מהפידים.",
+      "status": "machine"
+    },
+    "feed.icon.bell": {
+      "text": "פעמון",
+      "status": "machine"
+    },
+    "feed.icon.book": {
+      "text": "ספר",
+      "status": "machine"
+    },
+    "feed.icon.camera": {
+      "text": "מצלמה",
+      "status": "machine"
+    },
+    "feed.icon.code": {
+      "text": "קוד",
+      "status": "machine"
+    },
+    "feed.icon.feed": {
+      "text": "פיד",
+      "status": "machine"
+    },
+    "feed.icon.flag": {
+      "text": "דגל",
+      "status": "machine"
+    },
+    "feed.icon.globe": {
+      "text": "גלובוס",
+      "status": "machine"
+    },
+    "feed.icon.heart": {
+      "text": "לב",
+      "status": "machine"
+    },
+    "feed.icon.lightning": {
+      "text": "ברק",
+      "status": "machine"
+    },
+    "feed.icon.music": {
+      "text": "מוזיקה",
+      "status": "machine"
+    },
+    "feed.icon.speech_bubble": {
+      "text": "בועת דיבור",
+      "status": "machine"
+    },
+    "feed.icon.star": {
+      "text": "כוכב",
+      "status": "machine"
+    },
+    "feed.import.a11y": {
+      "text": "ייבוא פיד",
+      "status": "machine"
+    },
+    "feed.import.add": {
+      "text": "הוספה לפידים שלי",
+      "status": "machine"
+    },
+    "feed.import.choose_file": {
+      "text": "בחירת קובץ",
+      "status": "machine"
+    },
+    "feed.import.hint": {
+      "text": "פתחו פיד שמישהו שיתף אתכם כקובץ .lakkofeed.",
+      "status": "machine"
+    },
+    "feed.import.refused": {
+      "text": "הקובץ הזה אינו פיד ש-Lakko יכולה לפתוח.",
+      "status": "machine"
+    },
+    "feed.import.title": {
+      "text": "הוספת פיד משותף",
+      "status": "machine"
+    },
+    "feed.item.reactions_a11y": {
+      "text": "תגובות אמוג'י",
+      "status": "machine"
+    },
+    "feed.menu.a11y": {
+      "text": "תפריט הפיד",
+      "status": "machine"
+    },
+    "feed.min_reactions_count": {
+      "text": "{count, plural, one {לפחות תגובת אמוג'י אחת} two {לפחות שתי תגובות אמוג'י} other {לפחות # תגובות אמוג'י}}",
+      "status": "machine"
+    },
+    "feed.new": {
+      "text": "פיד חדש",
+      "status": "machine"
+    },
+    "feed.preset.discover": {
+      "text": "גילוי",
+      "status": "machine"
+    },
+    "feed.preset.for_me": {
+      "text": "בשבילי",
+      "status": "machine"
+    },
+    "feed.preset.latest": {
+      "text": "האחרונים",
+      "status": "machine"
+    },
+    "feed.preset.popular": {
+      "text": "פופולרי",
+      "status": "machine"
+    },
+    "feed.problem.conversations": {
+      "text": "נבחרו יותר מדי שיחות.",
+      "status": "machine"
+    },
+    "feed.problem.generic": {
+      "text": "אי אפשר לשמור את הפיד הזה כפי שהוא.",
+      "status": "machine"
+    },
+    "feed.problem.name": {
+      "text": "תנו לפיד שם של עד 64 תווים.",
+      "status": "machine"
+    },
+    "feed.problem.no_kinds": {
+      "text": "בחרו קבוצות, ערוצים או את שניהם.",
+      "status": "machine"
+    },
+    "feed.problem.stripped": {
+      "text": "בפיד המשותף הזה אי אפשר לציין גם שיחות.",
+      "status": "machine"
+    },
+    "feed.problem.too_large": {
+      "text": "הפיד הזה גדול מכדי לשמור אותו.",
+      "status": "machine"
+    },
+    "feed.problem.weight": {
+      "text": "אחד המחוונים מחוץ לטווח.",
+      "status": "machine"
+    },
+    "feed.problem.window": {
+      "text": "בחרו בין 1 ל-30 ימים אחורה.",
+      "status": "machine"
+    },
+    "feed.problem.words": {
+      "text": "בדקו את רשימות המילים: מילה אחת בכל שורה, עד 32 מילים.",
+      "status": "machine"
+    },
+    "feed.refresh_failed": {
+      "text": "לא הצלחנו לבדוק אם יש הודעות חדשות.",
+      "status": "machine"
+    },
+    "feed.replies.count": {
+      "text": "{count, plural, one {תשובה אחת} two {שתי תשובות} other {# תשובות}}",
+      "status": "machine"
+    },
+    "feed.share": {
+      "text": "שיתוף",
+      "status": "machine"
+    },
+    "feed.share.a11y": {
+      "text": "שיתוף הפיד",
+      "status": "machine"
+    },
+    "feed.share.download": {
+      "text": "הורדת הקובץ",
+      "status": "machine"
+    },
+    "feed.share.share_file": {
+      "text": "שיתוף הקובץ",
+      "status": "machine"
+    },
+    "feed.share.share_link": {
+      "text": "שיתוף הקישור",
+      "status": "machine"
+    },
+    "feed.share.stripped": {
+      "text": "שיחות מסוימות לא נכללות: אין להן משמעות למישהו אחר.",
+      "status": "machine"
+    },
+    "feed.share.title": {
+      "text": "שיתוף \"{name}\"",
+      "status": "machine"
+    },
+    "feed.share.unshareable": {
+      "text": "אי אפשר לשתף את הפיד הזה כפי שהוא.",
+      "status": "machine"
+    },
+    "feed.show_new": {
+      "text": "{count, plural, one {הצגת פריט חדש אחד} two {הצגת # פריטים חדשים} other {הצגת # פריטים חדשים}}",
+      "status": "machine"
+    },
+    "feed.summary.factor.contacts": {
+      "text": "אנשי הקשר שלכם",
+      "status": "machine"
+    },
+    "feed.summary.factor.media": {
+      "text": "תמונות ווידאו",
+      "status": "machine"
+    },
+    "feed.summary.factor.mentions": {
+      "text": "אזכורים שלכם",
+      "status": "machine"
+    },
+    "feed.summary.factor.reactions": {
+      "text": "תגובות אמוג'י",
+      "status": "machine"
+    },
+    "feed.summary.factor.replies": {
+      "text": "תשובות",
+      "status": "machine"
+    },
+    "feed.summary.for_me": {
+      "text": "רק מה שקשור אליכם",
+      "status": "machine"
+    },
+    "feed.summary.hide_own": {
+      "text": "מסתיר את ההודעות שלכם",
+      "status": "machine"
+    },
+    "feed.summary.hide_words": {
+      "text": "{count, plural, one {מסתיר מילה אחת} two {מסתיר שתי מילים} other {מסתיר # מילים}}",
+      "status": "machine"
+    },
+    "feed.summary.include_muted": {
+      "text": "כולל שיחות מושתקות",
+      "status": "machine"
+    },
+    "feed.summary.look_back": {
+      "text": "{count, plural, one {מציג יום אחד אחורה} two {מציג יומיים אחורה} other {מציג # ימים אחורה}}",
+      "status": "machine"
+    },
+    "feed.summary.newest_first": {
+      "text": "החדשים קודם",
+      "status": "machine"
+    },
+    "feed.summary.only_words": {
+      "text": "רק הודעות עם: {words}",
+      "status": "machine"
+    },
+    "feed.summary.ranks_by": {
+      "text": "מסודר לפי חדשות ולפי {factors}",
+      "status": "machine"
+    },
+    "feed.summary.sources.both": {
+      "text": "מקורות: כל הקבוצות והערוצים",
+      "status": "machine"
+    },
+    "feed.summary.sources.channels": {
+      "text": "מקורות: כל הערוצים",
+      "status": "machine"
+    },
+    "feed.summary.sources.groups": {
+      "text": "מקורות: כל הקבוצות",
+      "status": "machine"
+    },
+    "feed.switcher.a11y": {
+      "text": "פידים",
+      "status": "machine"
+    },
+    "feed.title": {
+      "text": "פיד",
+      "status": "machine"
+    },
+    "feed.why.mentions": {
+      "text": "מזכירים אתכם",
+      "status": "machine"
+    },
+    "feed.why.popular": {
+      "text": "פופולרי ב-{source}",
+      "status": "machine"
+    },
+    "feed.why.reply": {
+      "text": "תשובה להודעה שלכם",
       "status": "machine"
     },
     "folders.add_to_folder": {
@@ -4902,6 +5802,10 @@
       "text": "{count, plural, one {עד שימוש אחד} two {עד שני שימושים} other {עד # שימושים}}",
       "status": "machine"
     },
+    "ios.document_type.feed": {
+      "text": "פיד Lakko",
+      "status": "machine"
+    },
     "ios.permission.camera": {
       "text": "Lakko משתמשת במצלמה כדי לסרוק קודי QR ממכשירים שברצונך לקשר לחשבון, כדי לשדר וידאו בשיחות וכדי להקליט הודעות וידאו שבחרת לשלוח. כל מה שהמצלמה קולטת מוצפן מקצה לקצה במכשיר שלך לפני השליחה.",
       "status": "machine"
@@ -4972,6 +5876,10 @@
     },
     "nav.contacts": {
       "text": "אנשי קשר",
+      "status": "machine"
+    },
+    "nav.feed": {
+      "text": "פיד",
       "status": "machine"
     },
     "nav.rail_a11y": {
@@ -6244,6 +7152,14 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "חיפשתם היום הרבה אנשים. נסו שוב מחר.",
+      "status": "machine"
+    },
+    "tokens.search_allowance_used": {
+      "text": "יותר מדי חיפושים. נסו שוב בעוד דקה.",
+      "status": "machine"
+    },
+    "tokens.subscribe_allowance_used": {
+      "text": "נרשמתם להרבה ערוצים היום. נסו שוב מחר.",
       "status": "machine"
     },
     "update.available.message": {

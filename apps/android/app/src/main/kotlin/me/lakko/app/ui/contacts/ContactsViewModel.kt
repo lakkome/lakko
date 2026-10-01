@@ -467,13 +467,10 @@ public class ContactsViewModel(
                 chatRepo.startGroupWith(
                     recipientAccountId = pending.fromAccountId,
                     recipientSignaturePubkey = pending.fromPubkey,
-                ).also { hex ->
-                    // docs/ux/client-redesign.md section 3 — a 1x1 created from a
-                    // contact accept lists under Chats, whatever its roster does.
-                    me.lakko.app.chat.ConversationKindStore.set(
-                        chatRepo.context, hex, me.lakko.app.chat.ConversationKind.Chat,
-                    )
-                }
+                    // ADR-0062 — a contact accept creates a one-to-one, fixed
+                    // in the group: it lists under Chats on every device.
+                    kind = uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE,
+                )
             } catch (_: Throwable) {
                 // chat handshake failed — fall back to the
                 // local-marker path. The UI surfaces the

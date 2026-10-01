@@ -40,6 +40,10 @@ export type PostPlaintextClassifier = (plaintext: Uint8Array) => {
   readonly name: string | undefined;
   readonly description: string | undefined;
   readonly updatedAtMs: bigint | undefined;
+  /** ADR-0059 metadata v2 (absent on an older classifier double). */
+  readonly topic?: number | undefined;
+  readonly language?: string | undefined;
+  readonly listed?: boolean | undefined;
   free?(): void;
 };
 
@@ -58,7 +62,14 @@ export function toPostDecode(res: DecodedPostResult, classify: PostPlaintextClas
     if (c.kind === "meta" && c.name !== undefined && c.updatedAtMs !== undefined) {
       return {
         kind: "meta",
-        meta: { name: c.name, description: c.description ?? "", updatedAtMs: c.updatedAtMs },
+        meta: {
+          name: c.name,
+          description: c.description ?? "",
+          updatedAtMs: c.updatedAtMs,
+          ...(c.topic === undefined ? {} : { topic: c.topic }),
+          ...(c.language === undefined ? {} : { language: c.language }),
+          ...(c.listed === undefined ? {} : { listed: c.listed }),
+        },
       };
     }
     if (c.kind === "malformed") return { kind: "dropped" };

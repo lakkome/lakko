@@ -683,7 +683,7 @@ final class DsJournalAccessTests: XCTestCase {
     /// carries no device binding is named by its own key.
     func testThePendingJoinAccountKeyOfAnUnboundJoinerIsItsOwnKey() throws {
         let owner = try identity(12)
-        let group = try Group.create(identity: owner)
+        let group = try Group.create(identity: owner, kind: .group)
         let joiner = try identity(13)
         let proposal = try joiner.createExternalJoinProposal(
             groupId: try group.groupId(), epoch: try group.epoch())
@@ -706,7 +706,7 @@ final class DsJournalAccessTests: XCTestCase {
     /// and surfaces exactly as the ordinary receive path would surface it.
     func testProcessKnockAcceptsARealExternalJoinProposal() throws {
         let owner = try identity(1)
-        let group = try Group.create(identity: owner)
+        let group = try Group.create(identity: owner, kind: .group)
         let joiner = try identity(2)
         let proposal = try joiner.createExternalJoinProposal(
             groupId: try group.groupId(), epoch: try group.epoch())
@@ -723,8 +723,8 @@ final class DsJournalAccessTests: XCTestCase {
     /// A proposal crafted for ANOTHER group is refused and retains nothing.
     func testProcessKnockRefusesAProposalForAnotherGroup() throws {
         let owner = try identity(3)
-        let group = try Group.create(identity: owner)
-        let other = try Group.create(identity: try identity(4))
+        let group = try Group.create(identity: owner, kind: .group)
+        let other = try Group.create(identity: try identity(4), kind: .group)
         let joiner = try identity(5)
         let proposal = try joiner.createExternalJoinProposal(
             groupId: try other.groupId(), epoch: try other.epoch())
@@ -740,7 +740,7 @@ final class DsJournalAccessTests: XCTestCase {
     func testProcessKnockRefusesAMembersApplicationMessageWithoutApplyingIt() throws {
         let alice = try identity(6)
         let bob = try identity(7)
-        let aliceGroup = try Group.create(identity: alice)
+        let aliceGroup = try Group.create(identity: alice, kind: .group)
         let bobPackage = try bob.createKeyPackage()
         let added = try aliceGroup.addMemberFromWire(identity: alice, keyPackage: bobPackage)
         let bobGroup = try Group.joinFromWelcome(welcome: added.welcome, identity: bob)
@@ -761,7 +761,7 @@ final class DsJournalAccessTests: XCTestCase {
         let alice = try identity(8)
         let bob = try identity(9)
         let carol = try identity(10)
-        let aliceGroup = try Group.create(identity: alice)
+        let aliceGroup = try Group.create(identity: alice, kind: .group)
         let added = try aliceGroup.addMemberFromWire(
             identity: alice, keyPackage: try bob.createKeyPackage())
         let bobGroup = try Group.joinFromWelcome(welcome: added.welcome, identity: bob)
@@ -777,7 +777,7 @@ final class DsJournalAccessTests: XCTestCase {
     /// the knock poll.
     func testProcessKnockRefusesNonMlsBytes() throws {
         let owner = try identity(11)
-        let group = try Group.create(identity: owner)
+        let group = try Group.create(identity: owner, kind: .group)
         for bytes in [Data(), Data([0, 1, 0, 1]), Data("attribution".utf8)] {
             XCTAssertThrowsError(try group.processKnock(identity: owner, bytes: bytes))
         }
@@ -828,7 +828,7 @@ final class DsJournalAccessTests: XCTestCase {
     /// registered key it verifies against.
     func testTheRealGroupSignerProvesItsEpoch() throws {
         let owner = try identity(7)
-        let group = try Group.create(identity: owner)
+        let group = try Group.create(identity: owner, kind: .group)
         let signer = try group.dsAccessSigner(identity: owner)
         XCTAssertEqual(signer.epoch(), try group.epoch())
         let header = signer.sign(method: "GET", path: "/ds/group/ab/messages", query: "", body: Data())

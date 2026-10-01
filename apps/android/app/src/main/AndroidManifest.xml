@@ -165,6 +165,45 @@
                 <data android:pathPrefix="/g/" />
                 <!-- ADR-0032 (G-21/G-22) — multi-joiner call-invite links. -->
                 <data android:pathPrefix="/c/" />
+                <!-- ADR-0063 — a shared feed; the rule rides in the fragment. -->
+                <data android:pathPrefix="/feed/import" />
+            </intent-filter>
+
+            <!--
+              docs/ux/feed.md section 5 — a shared feed file opened from
+              another app ("Open with" in Files, mail, a messenger). Most
+              senders give a `.lakkofeed` file the generic binary type, so
+              that type is claimed along with Lakko's own; whether the bytes
+              are a feed is the core's to say on the import screen, which
+              refuses anything else whole ("This file isn't a feed Lakko can
+              open.").
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="application/vnd.lakko.feed" />
+            </intent-filter>
+            <!-- By name, for senders whose URI still carries it. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.lakkofeed" />
+                <data android:pathPattern=".*\\..*\\.lakkofeed" />
+                <data android:pathPattern=".*\\..*\\..*\\.lakkofeed" />
+            </intent-filter>
+            <!-- Shared to Lakko from another app's share sheet. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="application/vnd.lakko.feed" />
             </intent-filter>
         </activity>
 

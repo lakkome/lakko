@@ -185,28 +185,24 @@ final class GroupCallHostRulesTests: XCTestCase {
         let joinable = GroupCallAffordance.joinable(callId: callA, joinedCount: 2, video: false)
         XCTAssertEqual(
             GroupCallHostRules.chatCallAction(
-                membershipEnded: false, callInProgress: true, affordance: joinable, memberCount: 5),
+                membershipEnded: false, callInProgress: true, affordance: joinable, isGroup: true),
             .unavailable, "a call running anywhere withdraws them, even a joinable one here")
         XCTAssertEqual(
             GroupCallHostRules.chatCallAction(
-                membershipEnded: true, callInProgress: false, affordance: .none, memberCount: 5),
+                membershipEnded: true, callInProgress: false, affordance: .none, isGroup: true),
             .unavailable)
         XCTAssertEqual(
             GroupCallHostRules.chatCallAction(
-                membershipEnded: false, callInProgress: false, affordance: joinable, memberCount: 5),
+                membershipEnded: false, callInProgress: false, affordance: joinable, isGroup: true),
             .joinGroup(callId: callA))
         XCTAssertEqual(
             GroupCallHostRules.chatCallAction(
-                membershipEnded: false, callInProgress: false, affordance: .none, memberCount: 3),
-            .startGroup)
+                membershipEnded: false, callInProgress: false, affordance: .none, isGroup: true),
+            .startGroup, "a group of any size calls over the SFU (ADR-0062)")
         XCTAssertEqual(
             GroupCallHostRules.chatCallAction(
-                membershipEnded: false, callInProgress: false, affordance: .none, memberCount: 2),
-            .startOneToOne)
-        XCTAssertEqual(
-            GroupCallHostRules.chatCallAction(
-                membershipEnded: false, callInProgress: false, affordance: .none, memberCount: nil),
-            .startOneToOne)
+                membershipEnded: false, callInProgress: false, affordance: .none, isGroup: false),
+            .startOneToOne, "a one-to-one places a 1x1 call")
     }
 
     // MARK: Alone in the call (docs/ux/calls.md section 4.3)
@@ -1251,7 +1247,7 @@ final class ChatRepositoryMlsIdleTests: XCTestCase {
         let seed = Data(repeating: 0x11, count: 32)
         let founder = try Identity.fromSeed(seed: seed)
         let other = try Identity.fromSeed(seed: Data(repeating: 0x55, count: 32))
-        let created = try Group.create(identity: founder)
+        let created = try Group.create(identity: founder, kind: .group)
         _ = try created.addMemberFromWire(identity: founder, keyPackage: try other.createKeyPackage())
         let hex = DsClient.pseudonymHex(try created.groupId())
         let blob = try founder.snapshotStorage()

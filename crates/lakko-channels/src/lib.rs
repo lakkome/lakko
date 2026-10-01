@@ -44,6 +44,15 @@
 //!   [`classify_post_plaintext`]. `compose_channel_meta` /
 //!   `decode_channel_meta` / `channel_meta_is_newer`.
 //!
+//! ## What's also here (ADR-0059)
+//!
+//! - [`owner`] — the per-channel owner key
+//!   (`BLAKE3-derive-key("lakko/channels/owner/v1", account_seed ‖ channel_id)`)
+//!   and the owner request proof `services/channels` verifies.
+//! - [`listing`] — the public directory listing codec, the fixed topic list
+//!   and the language rule. [`meta`] is at schema version 2 (topic,
+//!   language, listed).
+//!
 //! ## What's also here (ADR-0060)
 //!
 //! - [`member_card`] — a subscriber's profile sealed under the channel's
@@ -96,18 +105,34 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod copublisher;
 pub mod epoch;
 pub mod error;
+pub mod listing;
 pub mod member_card;
 pub mod meta;
+pub mod owner;
 pub mod post;
 pub mod rotation_policy;
 pub mod seed;
 pub mod subscribe;
 pub mod unsubscribe;
 
+pub use copublisher::{
+    channel_copublisher_seed, compose_copublisher_binding, decode_copublisher_binding,
+    verify_copublisher_proof, ChannelCoPublisherSigner, CoPublisherBinding,
+    CoPublisherBindingError, CoPublisherProof, COPUBLISHER_BINDING_DOMAIN_V1,
+    COPUBLISHER_BINDING_LEN, COPUBLISHER_KEY_DOMAIN, COPUBLISHER_PROOF_DOMAIN,
+    COPUBLISHER_PROOF_HEADER_NAME, MAX_COPUBLISHERS,
+};
 pub use epoch::{EpochId, EPOCH_ID_LEN};
 pub use error::{ChannelError, Result};
+pub use listing::{
+    check_language, compose_channel_listing, decode_channel_listing, is_known_topic,
+    listing_is_newer, topic_name, ChannelListing, ChannelListingError, LanguageError,
+    CHANNEL_LISTING_DOMAIN_V1, CHANNEL_LISTING_MAX_LEN, CHANNEL_LISTING_MIN_LEN,
+    CHANNEL_LISTING_VERSION_V1, TOPICS, TOPIC_OTHER,
+};
 pub use member_card::{
     member_card_binding_bytes, member_card_epoch, member_card_signed_bytes, open_member_card,
     seal_member_card, sign_member_card_request, verify_member_card_request, OpenedMemberCard,
@@ -119,7 +144,12 @@ pub use member_card::{
 pub use meta::{
     channel_meta_is_newer, classify_post_plaintext, compose_channel_meta, decode_channel_meta,
     ChannelMeta, ChannelMetaError, ChannelMetaFieldError, PostContent, CHANNEL_META_DOMAIN_V1,
-    CHANNEL_META_MAX_LEN, CHANNEL_META_MIN_LEN, CHANNEL_META_VERSION_V1,
+    CHANNEL_META_MAX_LEN, CHANNEL_META_MIN_LEN, CHANNEL_META_VERSION_V2,
+};
+pub use owner::{
+    channel_owner_seed, verify_owner_proof, ChannelOwnerSigner, OwnerProof, OwnerProofError,
+    OwnerRequest, OWNER_KEY_DOMAIN, OWNER_PROOF_DOMAIN, OWNER_PROOF_HEADER_NAME,
+    OWNER_PROOF_WINDOW_MS,
 };
 pub use post::{
     compose_post, decode_post, verify_and_decrypt, ChannelPost, MAX_PLAINTEXT_LEN,

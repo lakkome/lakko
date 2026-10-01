@@ -40,6 +40,7 @@
  * tier (owner or admin) setting it again.
  */
 import { t } from "../l10n";
+import { acceptsGroupName, type ConversationKind } from "./conversation-kind";
 
 /** A stored or incoming shared name. `name === ""` means "cleared". */
 export interface StoredGroupName {
@@ -67,7 +68,11 @@ export type GroupNameVerdict =
   | "reject-unverifiable"
   /** Authorised, but not strictly newer than what is stored. Dropped —
    *  this is what keeps a growth re-send from clobbering a later rename. */
-  | "reject-stale";
+  | "reject-stale"
+  /** The conversation is a one-to-one (ADR-0062 section 7): it has no group
+   *  name, and applying one would retitle the person. Dropped whoever sent
+   *  it, before anything else is read. */
+  | "reject-one-to-one";
 
 /** `true` for every `accept-*` verdict. */
 export function groupNameVerdictAccepts(v: GroupNameVerdict): boolean {
@@ -98,11 +103,16 @@ function containsKey(keys: readonly Uint8Array[], key: Uint8Array): boolean {
  * | absent     | anyone            | none / older    | `accept-no-owner`       |
  * | any        | authorised        | newer or equal  | `reject-stale`          |
  *
+ * Ahead of the whole table: in a one-to-one (ADR-0062) every envelope is
+ * `reject-one-to-one`.
+ *
  * @param isNewer MUST be the wasm `groupNameIsNewer` export, threaded in so
  *   the order stays defined once in the core (strictly greater; equal is not
  *   newer).
  */
 export function groupNameVerdict(args: {
+  /** The conversation kind read from the group (ADR-0062). */
+  kind: ConversationKind;
   /** `group.roleTableOwner()` — `undefined` = legacy / open group. */
   ownerKey: Uint8Array | undefined;
   /** `group.roleTableAdmins()` sliced into 32-byte keys. Only consulted when
@@ -123,6 +133,8 @@ export function groupNameVerdict(args: {
   /** The canonical order from the wasm core. */
   isNewer: (incomingUpdatedAtMs: bigint, storedUpdatedAtMs: bigint) => boolean;
 }): GroupNameVerdict {
+  // (0) A one-to-one has no group name (ADR-0062 section 7).
+  if (!acceptsGroupName(args.kind)) return "reject-one-to-one";
   // (1) Idempotent case first: a re-observed identical name (a growth
   // re-send of exactly what is held) changes nothing, so it needs neither
   // authority nor ordering, and it must not fail a device whose table read

@@ -3,9 +3,9 @@
 
 /**
  * The conversation list, used twice (docs/ux/client-redesign.md section 5.1):
- * once as Chats (two people) and once as Groups (everyone else), split by the
- * persisted conversation kind (`chat/conversation-kind-store.ts`) over the one
- * store. One row per conversation: avatar, name (bold while unread), the time
+ * once as Chats (one-to-one) and once as Groups, split by the kind each
+ * conversation carries in its GroupContext (ADR-0062, `Group.groupKind()`)
+ * over the one store. One row per conversation: avatar, name (bold while unread), the time
  * of the last message, its preview with a sender prefix in a group, then a
  * muted icon, a pin icon and the unread badge. Pinned rows first, then by the
  * last message time. Pin / mute / archive as hover actions, a right-click
@@ -37,6 +37,7 @@ import { PeopleSearch } from "../search/PeopleSearch";
 import { rowHasUnread, type ConversationRow } from "./conversation-list";
 import { createConversationRows } from "./conversation-rows";
 import { uiRules } from "./ui-rules";
+import { badgeText } from "../feed/feed-marks";
 import { formatListTime } from "./list-time";
 import { rowMatchesQuery } from "./list-preview";
 import { showsEmptyState } from "./list-empty-state";
@@ -137,10 +138,12 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
  *
  * Deliberately short: the list says nothing about which kind a row is, so
  * this draws the same avatar, title and second line as every other row. What
- * it does NOT have is the unread badge, the pin / mute glyphs and the row
- * menu - those are keyed on a conversation group id a channel does not
- * carry, and giving a channel a badge that can never be non-zero would be a
- * worse lie than leaving it out.
+ * it does NOT have is the global pin / mute glyphs - those are keyed on a
+ * conversation group id a channel does not carry (the pin shown is the one
+ * inside the open folder). The badge is
+ * the channel's count of new posts (docs/ux/feed.md section 5, "Channel
+ * posts"): the posts newer than the newest one read, in the feed or in the
+ * channel, drawn like a chat's unread badge.
  */
 function ChannelRow(props: {
   row: ConversationRow;
@@ -169,7 +172,7 @@ function ChannelRow(props: {
       <Avatar label={props.row.title} id={props.row.id} />
       <div class="lk-row-body">
         <div class="lk-row-line">
-          <span class="lk-row-title">
+          <span class="lk-row-title" classList={{ unread: props.row.unread > 0 }}>
             <span class="lk-ellipsis">{props.row.title}</span>
           </span>
         </div>
@@ -178,6 +181,11 @@ function ChannelRow(props: {
           <span class="lk-row-trail">
             <Show when={props.pinned}>
               <Icon name="pin" size={14} title={t("chats.row.pinned")} />
+            </Show>
+            <Show when={props.row.unread > 0}>
+              <span class="lk-badge" title={t("channels.row.new_posts_a11y", { count: props.row.unread })}>
+                {badgeText(props.row.unread)}
+              </span>
             </Show>
           </span>
         </div>

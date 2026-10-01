@@ -10,23 +10,19 @@
  * same unread state - without a second copy of how a row is named. Must be
  * called inside a component (it reads contexts and owns effects).
  */
-import { createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
 import { t } from "../l10n";
-import { decideConversationKind, type ConversationKind } from "./conversation-kind";
+import { conversationKindOf, type ConversationKind } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
 import { channelRowModel } from "../channels/channel-row";
 import { channelsState } from "../state/channels-state";
+import { createChannelUnread } from "../feed/channel-unread";
 import { sortConversations, type ConversationRow } from "./conversation-list";
 import { uiRules } from "./ui-rules";
-import {
-  observeConversationKind,
-  persistedConversationKind,
-  subscribeConversationKindChanged,
-} from "./conversation-kind-store";
 import { groupTitle } from "./group-title";
 import { previewLine } from "./list-preview";
 import { memberNameOf } from "../profile/member-label";
@@ -66,27 +62,9 @@ export function createConversationRows() {
     onCleanup(unsubscribe);
   });
 
-  // docs/ux section 3 — the persisted kind. The effect records every
-  // conversation's kind at first sight (a Welcome, a restore) and the one
-  // allowed flip, chat -> group; the memo below reads what is stored.
-  const [kindVersion, setKindVersion] = createSignal(0);
-  onMount(() => {
-    const unsubscribe = subscribeConversationKindChanged(() => setKindVersion((v) => v + 1));
-    onCleanup(unsubscribe);
-  });
-  createEffect(() => {
-    const account = accountId();
-    if (account === null) return;
-    for (const g of chats.groups()) {
-      observeConversationKind(account, g.groupIdB64, peopleCountOf(g.group));
-    }
-  });
-  const kindOf = (g: ActiveGroup): ConversationKind => {
-    kindVersion();
-    const account = accountId();
-    const persisted = account === null ? null : persistedConversationKind(account, g.groupIdB64);
-    return decideConversationKind(persisted, peopleCountOf(g.group));
-  };
+  // docs/ux section 3 — the kind the conversation carries (ADR-0062). It is
+  // fixed at creation, so reading it from the group is all there is.
+  const kindOf = (g: ActiveGroup): ConversationKind => conversationKindOf(g.group);
 
   /** The other member's key in a 1x1 chat, else `null`. */
   const peerKeyOf = (g: ActiveGroup): string | null => {
@@ -226,6 +204,8 @@ export function createConversationRows() {
   /** A subscribed channel, in the shape the ordering takes. Its title,
    *  second line and time come from `channelRowModel`, which the Channels
    *  screen already uses - one vocabulary, not a second one. */
+  // docs/ux/feed.md section 5 — each channel row's count of new posts.
+  const channelUnread = createChannelUnread();
   const channelRows = (): readonly ConversationRow[] => {
     const meta = channelsState.metaByChannel();
     const posts = channelsState.postsByChannel();
@@ -251,7 +231,7 @@ export function createConversationRows() {
         // Nothing posted yet sorts by when it was added, the same way a chat
         // with no messages sorts by when it was created.
         lastActivityMs: lastPostMs ?? c.addedAtMs,
-        unread: 0,
+        unread: channelUnread()(c.id),
         pinned: false,
         muted: false,
         archived: false,

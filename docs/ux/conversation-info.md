@@ -101,6 +101,20 @@ not — which is the divergence this document exists to remove, and the
 question of which behaviour to keep is the maintainer's rather than whichever
 client happened to keep it.
 
+Since [ADR-0062](../adr/0062-conversation-kind.md) this is a rule of the
+conversation, not only of the screen. Whether a conversation is a one-to-one
+or a group is set when it is created and never changes, and it is read from
+the conversation itself, never from how many people are in it; a two-person
+group is a group on every member's device. A one-to-one is always the same
+two people: every member's device refuses a change that would add or remove a
+person, and nobody can leave it (`Delete this chat` removes it from this
+device only). Each person's own devices still join and leave as usual.
+
+What a person sees when a peer's device refuses: nothing, because no screen
+offers the action - there is no add, remove, invite link, role or `Leave` on
+a one-to-one. An invite-link request to join a one-to-one never appears on
+either side.
+
 ### 2.2 A group
 
 - Name, and the members' names when it has none.

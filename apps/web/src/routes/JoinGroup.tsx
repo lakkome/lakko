@@ -77,7 +77,6 @@ import {
   joinFailureNotice,
   type JoinFailureNotice,
 } from "./join-group-failure";
-import { recordConversationKind } from "../chat/conversation-kind-store";
 // ADR-0028 v2 — the sealed preview and the link key in the URL fragment
 // (docs/ux/group-invite-page.md). The copy lives in a plain module for the
 // same `vitest` reason as the wait copy above.
@@ -230,14 +229,8 @@ export default function JoinGroup() {
       // both stages and keeps running until the group lands or the page
       // unmounts.
       const groupIdB64 = base64Encode(groupId);
-      const finish = (active: { groupIdB64: string }): void => {
+      const finish = (_active: { groupIdB64: string }): void => {
         if (pollTimer !== undefined) clearInterval(pollTimer);
-        // docs/ux/client-redesign.md section 3 — a conversation joined
-        // through an invite link is a group whatever its size.
-        {
-          const s = auth.state();
-          if (s.kind === "session") recordConversationKind(s.account.accountId, active.groupIdB64, "group");
-        }
         setPhase("joined");
         // ADR-0060 section 6: the Welcome landed, so the single-use reply key
         // registered for this request goes.

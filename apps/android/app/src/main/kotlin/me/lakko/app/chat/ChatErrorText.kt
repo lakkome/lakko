@@ -30,6 +30,12 @@ internal enum class AllowanceKind(val key: String) {
 
     /** Invite links, group links, channel names. */
     ACTION("tokens.action_allowance_used"),
+
+    /** Following a channel (ADR-0059 section 4, docs/ux/feed.md section 7). */
+    SUBSCRIBE("tokens.subscribe_allowance_used"),
+
+    /** A Discover search (docs/ux/feed.md section 7). */
+    SEARCH("tokens.search_allowance_used"),
 }
 
 /** The token-pool sentence for [error], or `null` when the pool had nothing to do with it. */

@@ -56,6 +56,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "channel_listing_decode"
+path = "fuzz_targets/channel_listing_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "copublisher_binding_decode"
+path = "fuzz_targets/copublisher_binding_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "member_card_open"
 path = "fuzz_targets/member_card_open.rs"
 test = false

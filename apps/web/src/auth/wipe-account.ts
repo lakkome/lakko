@@ -62,7 +62,6 @@ import { clearLastObservedOwnerForAccount } from "../chat/ownership-transfer";
 import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearKnockCursorsForAccount } from "../chat/knock-cursor";
-import { clearConversationKinds } from "../chat/conversation-kind-store";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
 import { deletePinRow } from "../chat/pin-idb";
 import { deleteReadWatermarkRow } from "../chat/read-watermark-idb";
@@ -78,6 +77,10 @@ import { clearMemberBaselinesForAccount } from "../profile/membership-baseline";
 import { clearProfileRequestsForAccount } from "../profile/profile-request";
 import { clearGrantSignatures } from "../profile/grant-signatures";
 import { deleteReachRows } from "../reach/reach-store";
+import { deleteFeedState } from "../feed/feed-store";
+import { deleteFeedMarks } from "../feed/feed-marks-store";
+import { deleteDiscoverRows } from "../discover/discover-store";
+import { clearFeedSelection } from "../feed/feed-selection-store";
 import { deletePendingRootSeedRow, deleteRegistrarSeedRow } from "../ds/registrar-seed-idb";
 import { clearAppointmentRecords } from "../ds/appointments";
 import { clearRegistrarLists } from "../ds/registrar-list";
@@ -157,6 +160,15 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "pending-root-seeds", run: () => deletePendingRootSeedRow(accountIdB64) },
     { name: "pins", run: () => deletePinRow(accountIdB64) },
     { name: "reach", run: () => deleteReachRows(accountIdB64) },
+    // The person's own feeds on this device (ADR-0063 section 6).
+    { name: "feeds", run: () => deleteFeedState(accountIdB64) },
+    // What the feed remembers (docs/ux/feed.md section 5): hidden
+    // conversations, the "New" points, the channels' newest-read posts.
+    { name: "feed-marks", run: () => deleteFeedMarks(accountIdB64) },
+    // Discover (ADR-0059): picked topics, decoys, cached buckets,
+    // not-interested channels, the share switches and the lists members
+    // shared.
+    { name: "discover", run: () => deleteDiscoverRows(accountIdB64) },
     { name: "read-watermarks", run: () => deleteReadWatermarkRow(accountIdB64) },
     { name: "call-log", run: () => deleteCallLogRow(accountIdB64) },
     { name: "device-sync", run: () => deleteSyncState(accountIdB64) },
@@ -189,8 +201,14 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "committer-beacons", run: () => clearBeaconObservationsForAccount(accountIdB64) },
     { name: "last-observed-owner", run: () => clearLastObservedOwnerForAccount(accountIdB64) },
     { name: "leave-requested", run: () => clearLeaveRequestedForAccount(accountIdB64) },
-    { name: "conversation-kinds", run: () => clearConversationKinds(accountIdB64) },
+    // The per-account conversation-kind map of builds before ADR-0062 (the
+    // kind now lives in the group); nothing writes it any more.
+    {
+      name: "conversation-kinds-retired",
+      run: () => removeLocal(`lakko.conversation-kind.v1.${accountIdB64}`),
+    },
     { name: "folder-tab", run: () => clearSelectedTab(accountIdB64) },
+    { name: "feed-selection", run: () => clearFeedSelection(accountIdB64) },
     { name: "own-profile", run: () => clearOwnProfile(accountIdB64) },
     { name: "member-baseline", run: () => clearMemberBaselinesForAccount(accountIdB64) },
     { name: "profile-requests", run: () => clearProfileRequestsForAccount(accountIdB64) },

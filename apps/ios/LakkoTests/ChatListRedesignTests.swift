@@ -5,73 +5,10 @@ import XCTest
 @testable import Lakko
 
 /// The pure rules behind the Phase B list and timeline
-/// (docs/ux/client-redesign.md sections 5.1 and 5.2): the persisted
-/// conversation kind, the row time and preview, the date separators, the
-/// run grouping and the bubble time.
+/// (docs/ux/client-redesign.md sections 5.1 and 5.2): the row time and
+/// preview, the date separators, the run grouping and the bubble time. The
+/// conversation kind is ADR-0062's and is tested in `ConversationTitleTests`.
 final class ChatListRedesignTests: XCTestCase {
-
-    // MARK: - Conversation kind
-
-    func testFirstSightDerivesFromPeopleCountAndPersists() {
-        XCTAssertEqual(
-            ConversationKindDecision.resolve(stored: nil, peopleCount: 2),
-            .init(kind: .chat, persist: .chat))
-        XCTAssertEqual(
-            ConversationKindDecision.resolve(stored: nil, peopleCount: 3),
-            .init(kind: .group, persist: .group))
-    }
-
-    func testUnreadableRosterIsShownAsChatButNotPersisted() {
-        XCTAssertEqual(
-            ConversationKindDecision.resolve(stored: nil, peopleCount: nil),
-            .init(kind: .chat, persist: nil))
-    }
-
-    func testStoredKindWinsOverThePeopleCount() {
-        // A group made through the new-group flow with two people stays a group.
-        XCTAssertEqual(
-            ConversationKindDecision.resolve(stored: .group, peopleCount: 2),
-            .init(kind: .group, persist: nil))
-        XCTAssertEqual(
-            ConversationKindDecision.resolve(stored: .group, peopleCount: nil),
-            .init(kind: .group, persist: nil))
-        XCTAssertEqual(
-            ConversationKindDecision.resolve(stored: .chat, peopleCount: 2),
-            .init(kind: .chat, persist: nil))
-        XCTAssertEqual(
-            ConversationKindDecision.resolve(stored: .chat, peopleCount: nil),
-            .init(kind: .chat, persist: nil))
-    }
-
-    func testAChatFlipsToGroupAboveTwoPeopleNeverBack() {
-        XCTAssertEqual(
-            ConversationKindDecision.resolve(stored: .chat, peopleCount: 3),
-            .init(kind: .group, persist: .group))
-        XCTAssertEqual(
-            ConversationKindDecision.resolve(stored: .group, peopleCount: 1),
-            .init(kind: .group, persist: nil))
-    }
-
-    func testStoreIsPerAccountAndOneWay() throws {
-        let suite = "ChatListRedesignTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let store = ConversationKindStore(defaults: defaults)
-
-        XCTAssertNil(store.load(accountIdB64: "a", groupIdHex: "g1"))
-        store.record(accountIdB64: "a", groupIdHex: "g1", kind: .chat)
-        XCTAssertEqual(store.load(accountIdB64: "a", groupIdHex: "g1"), .chat)
-        XCTAssertNil(store.load(accountIdB64: "b", groupIdHex: "g1"))
-
-        store.record(accountIdB64: "a", groupIdHex: "g1", kind: .group)
-        XCTAssertEqual(store.load(accountIdB64: "a", groupIdHex: "g1"), .group)
-        // group -> chat is refused.
-        XCTAssertEqual(store.record(accountIdB64: "a", groupIdHex: "g1", kind: .chat), .group)
-        XCTAssertEqual(store.load(accountIdB64: "a", groupIdHex: "g1"), .group)
-
-        store.clear(accountIdB64: "a")
-        XCTAssertNil(store.load(accountIdB64: "a", groupIdHex: "g1"))
-    }
 
     // MARK: - Row time
 

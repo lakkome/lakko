@@ -23,6 +23,8 @@ import uniffi.lakko_ffi_uniffi.PublisherGroup
 import uniffi.lakko_ffi_uniffi.channelIdFromPublisherGroupId
 import uniffi.lakko_ffi_uniffi.composeGroupInviteCapability
 import uniffi.lakko_ffi_uniffi.composeGroupJoinAttribution
+import uniffi.lakko_ffi_uniffi.composeChannelCopublisherBinding
+import uniffi.lakko_ffi_uniffi.decodeChannelCopublisherBinding
 import uniffi.lakko_ffi_uniffi.publisherGroupOpenOrCreate
 import uniffi.lakko_ffi_uniffi.sealSubscriberSeedEnvelope
 
@@ -155,7 +157,12 @@ public object CoPublisher {
             // knock is an unauthenticated write, so a knocked commit or app
             // message must be refused before it is processed, never applied.
             // Attribution rows, stale proposals and garbage are refused too.
+            val channelId = publisherGroup.channelId()
             val drained = me.lakko.app.chat.drainKnockRows(knocks.messages, 0L) { bytes ->
+                // ADR-0059 — a co-publisher binding rides beside the proposal.
+                // It is not an MLS message: recorded here, then refused like
+                // any other non-proposal row.
+                recordCoPublisherBinding(publisherGroup.groupId(), channelId, bytes)
                 publisherGroup.processKnock(identity, bytes)
             }
             // ADR-0060 §6 — keep each joiner's reply key from its attribution.
@@ -320,6 +327,42 @@ public object CoPublisher {
             ?.let { me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(it.seed)) }
         ds.publishMailbox(joinerMailbox, wrapEnvelope(KIND_WELCOME, added.welcome), reach = reach)
         resealSubscribers(channelsClient, identity, publisherGroup, channelIdHex)
+        // ADR-0059 — appoint the newcomer's co-publisher key so its own
+        // rotation fanout can read the subscriber list. After the
+        // load-bearing reseal; never fails the approve. Only the owner can
+        // appoint: a co-publisher approving another gets a 401 here, logged.
+        val key = coPublisherBindings[bindingSlot(groupId, proposalRef)]
+        if (key == null) {
+            android.util.Log.w("CoPublisher", "ADR-0059: no binding read for the approved joiner; not appointed")
+        } else {
+            try {
+                channelsClient.setCoPublisherAppointment(true, channelIdHex, identity, key)
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                android.util.Log.w("CoPublisher", "ADR-0059: appointing the co-publisher key failed", e)
+            }
+        }
+    }
+
+    /** Co-publisher keys read off PublisherGroup knock queues (ADR-0059
+     *  section 1), filed under the joiner account key each binding was
+     *  verified under, so the approve looks one up by the joiner key it
+     *  approves. In memory: the knock queue is re-read from the start on
+     *  every poll, so a restart refills it. */
+    private val coPublisherBindings = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+
+    private fun bindingSlot(groupId: ByteArray, joinerKey: ByteArray): String =
+        ChannelsComposer.bytesToHex(groupId) + ":" + ChannelsComposer.bytesToHex(joinerKey)
+
+    private fun recordCoPublisherBinding(groupId: ByteArray, channelId: ByteArray, bytes: ByteArray) {
+        val binding = try {
+            decodeChannelCopublisherBinding(bytes)
+        } catch (_: Throwable) {
+            return
+        }
+        if (!binding.channelId.contentEquals(channelId)) return
+        coPublisherBindings[bindingSlot(groupId, binding.accountPubkey)] = binding.copublisherPubkey
     }
 
     /** Reject a pending co-publisher — no commit, no epoch advance, nothing on
@@ -419,10 +462,14 @@ public object CoPublisher {
         // arrives in this identity's own mailbox ([pollForCoPublishWelcome]).
         // A group whose owner has not claimed it yet refuses with
         // [GroupNotAcceptingRequests]; nothing was stored.
+        // ADR-0059 section 1 — this account's co-publisher key for the
+        // channel, signed by its account identity key (the key the owner
+        // approves), rides beside the proposal. Not on the empty probe.
+        val binding = composeChannelCopublisherBinding(identity, channelIdBytes)
         val replyGrant = registerReplyKey(ds, identity)
         runLinkJoinKnock(
             knock = { payloads ->
-                ds.knock(groupId, payloads).epoch
+                ds.knock(groupId, if (payloads.isEmpty()) payloads else payloads + listOf(binding)).epoch
             },
             buildProposal = { epoch -> identity.createExternalJoinProposal(groupId, epoch) },
             // ADR-0060 §6 — the reply key the owner writes the Welcome with,
@@ -497,6 +544,9 @@ public object CoPublisher {
             }
         }
         if (!joined) return null
+        // ADR-0059 section 9 — this account now publishes as a co-publisher;
+        // its signed writes go out once under that key.
+        ChannelPublisherRoles.rememberFor(identity, channelIdHex, ChannelPublisherRole.COPUBLISHER)
         // ADR-0057 — a co-publisher never claims the journal (idempotent with
         // the mark set when the request was sent).
         coPublished.mark(DsClient.pseudonymHex(groupId))
@@ -526,7 +576,22 @@ public object CoPublisher {
             throw CoPublisherException.UnexpectedServerEpoch(currentEpoch)
         }
         val newServerEpoch = currentEpoch + 1u
-        val subscribers = channelsClient.listSubscribers(channelIdHex)
+        // ADR-0059 section 9: the list and the rotate are signed with this
+        // account's publisher role, derived once for both.
+        ChannelPublisherSigners.derive(identity, channelIdHex).use { proofs ->
+            resealWith(channelsClient, proofs, channelIdBytes, newServerEpoch, newSeed, channelIdHex)
+        }
+    }
+
+    private suspend fun resealWith(
+        channelsClient: ChannelsClient,
+        proofs: ChannelPublisherProofs,
+        channelIdBytes: ByteArray,
+        newServerEpoch: UInt,
+        newSeed: ByteArray,
+        channelIdHex: String,
+    ) {
+        val subscribers = channelsClient.listSubscribersAsPublisher(channelIdHex, proofs)
         val batch = ArrayList<RotateBatchEntry>(subscribers.size)
         for (subscriberHex in subscribers) {
             val subscriberBytes = hexToBytes(subscriberHex)
@@ -544,7 +609,7 @@ public object CoPublisher {
                 ),
             )
         }
-        channelsClient.rotateChannel(channelIdHex, batch)
+        channelsClient.rotateChannel(channelIdHex, batch, proofs)
     }
 
     // -----------------------------------------------------------------

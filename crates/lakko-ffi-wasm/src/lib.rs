@@ -75,9 +75,11 @@ pub mod backup;
 pub mod channels;
 pub mod contacts;
 pub mod device_link;
+pub mod discover;
 pub mod discovery;
 pub mod ds_proof;
 pub mod ds_statement;
+pub mod feed;
 pub mod l10n;
 pub mod mls;
 pub mod mnemonic;
@@ -119,7 +121,7 @@ pub use contacts::{
     PerRelationship, StrangerInbox, WasmProfile,
 };
 pub use discovery::{login_handle, normalize_username, validate_username, OprfBlinder};
-pub use mls::{AddMember, Group, Identity, ProcessedMessage, ProcessedMessageKind};
+pub use mls::{AddMember, Group, GroupKind, Identity, ProcessedMessage, ProcessedMessageKind};
 pub use mnemonic::RecoveryMnemonic;
 pub use pow_solver::{PowProof, PowSolver};
 pub use presence::{current_epoch, derive_token, PresenceToken, PresenceTracker};

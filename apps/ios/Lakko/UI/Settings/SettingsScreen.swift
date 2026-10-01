@@ -136,6 +136,11 @@ struct SettingsScreen: View {
                     onOpen(.devices)
                 }
                 row(l10n.t("settings.recovery.title"), systemImage: "lifepreserver") { onOpen(.recoveryFactors) }
+                // ADR-0059 section 6 — every group the "Share my channels"
+                // switch is on in (docs/ux/feed.md 6.3).
+                row(l10n.t("discover.shared.title"), systemImage: "dot.radiowaves.left.and.right") {
+                    onOpen(.channelsIShare)
+                }
             }
 
             // `docs/ux/chat-folders.md` section 4 — between Notifications

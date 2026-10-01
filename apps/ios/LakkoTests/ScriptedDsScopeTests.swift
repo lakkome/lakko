@@ -125,7 +125,7 @@ final class ScriptedDsScopeTests: XCTestCase {
 
         let ownerSeed = Data(repeating: 0x21, count: 32)
         let owner = try Identity.fromSeed(seed: ownerSeed)
-        let group = try Group.create(identity: owner)
+        let group = try Group.create(identity: owner, kind: .group)
         let groupIdHex = DsClient.pseudonymHex(try group.groupId())
 
         var accountIdBytes = Data(count: 16)

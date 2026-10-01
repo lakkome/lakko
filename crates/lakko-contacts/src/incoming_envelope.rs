@@ -55,6 +55,8 @@
 //!    [`crate::registrar_seed::try_unwrap_registrar_seed`] (ADR-0048
 //!    trigger 4, ADR-0052, ADR-0057): service envelopes the caller acts
 //!    on and never renders. Then
+//!    [`crate::shared_channels::try_unwrap_shared_channels`] (ADR-0059
+//!    §6): the listed channels one member shares with the group, and
 //!    [`crate::committer_delegation::try_unwrap_committer_delegation`]
 //!    (ADR-0060 §6): a proposer's delegations for the committer that
 //!    sweeps its `Add`. Never rendered.
@@ -115,6 +117,7 @@ use crate::profile::{try_unwrap_profile, Profile, ProfileError};
 use crate::profile_request::{try_unwrap_profile_request, ProfileRequestError};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
 use crate::registrar_seed::{try_unwrap_registrar_seed, RegistrarSeedEnvelope, RegistrarSeedError};
+use crate::shared_channels::{try_unwrap_shared_channels, SharedChannels, SharedChannelsError};
 use crate::visibility::{
     try_unwrap_reach_state, try_unwrap_visibility, ReachState, VisibilityError, VisibilitySetting,
 };
@@ -258,6 +261,15 @@ pub enum IncomingEnvelope<'a> {
     /// revokes from when it commits that account's removal; it never opens
     /// the seed.
     RegistrarSeed(RegistrarSeedEnvelope),
+    /// The listed channels one member shares with the group (ADR-0059 §6),
+    /// already validated against every bound. Never a chat bubble. **The
+    /// caller stores it per member**, keyed on the sender's account key
+    /// resolved at receipt (C-68), keeps it only when
+    /// [`crate::shared_channels::shared_channels_is_newer`] than the list
+    /// stored for that member, under the per-group lock (C-62 sub-invariant
+    /// 5). Any member may send one; it speaks only for its sender. An empty
+    /// list means the sender stopped sharing.
+    SharedChannels(SharedChannels),
     /// A proposer's committer delegations (ADR-0060 §6), structurally
     /// checked only. Never a chat bubble. **The caller parses the blobs with
     /// `lakko_ds_proof::committer`** (each must name the added person's
@@ -326,6 +338,9 @@ pub enum DispatchError {
     /// The registrar-seed domain (ADR-0057) with a malformed payload.
     #[error(transparent)]
     RegistrarSeed(#[from] RegistrarSeedError),
+    /// The shared-channels domain (ADR-0059) with a malformed payload.
+    #[error(transparent)]
+    SharedChannels(#[from] SharedChannelsError),
     /// The committer-delegation domain (ADR-0060 §6) with a malformed
     /// payload.
     #[error(transparent)]
@@ -396,7 +411,11 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     if let Some(envelope) = try_unwrap_registrar_seed(plaintext)? {
         return Ok(IncomingEnvelope::RegistrarSeed(envelope));
     }
-    // 7e. Committer delegation — ADR-0060 §6.
+    // 7e. Shared channels — ADR-0059 §6.
+    if let Some(list) = try_unwrap_shared_channels(plaintext)? {
+        return Ok(IncomingEnvelope::SharedChannels(list));
+    }
+    // 7f. Committer delegation — ADR-0060 §6.
     if let Some(envelope) = try_unwrap_committer_delegation(plaintext)? {
         return Ok(IncomingEnvelope::CommitterDelegation(envelope));
     }
@@ -454,6 +473,28 @@ mod tests {
         assert!(matches!(
             dispatch_incoming_envelope(&wire[..wire.len() - 1]),
             Err(DispatchError::RegistrarSeed(_))
+        ));
+    }
+
+    #[test]
+    fn dispatches_shared_channels_and_never_renders_them() {
+        use crate::shared_channels::{compose_shared_channels, SharedChannel, SharedChannels};
+        let list = SharedChannels {
+            updated_at_ms: 7,
+            channels: vec![SharedChannel {
+                channel_id: [3; 16],
+                handle: "lakko_news".to_string(),
+                name: "Lakko News".to_string(),
+            }],
+        };
+        let wire = compose_shared_channels(&list).unwrap();
+        assert_eq!(
+            dispatch_incoming_envelope(&wire).unwrap(),
+            IncomingEnvelope::SharedChannels(list)
+        );
+        assert!(matches!(
+            dispatch_incoming_envelope(&wire[..wire.len() - 1]),
+            Err(DispatchError::SharedChannels(_))
         ));
     }
 

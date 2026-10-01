@@ -1229,6 +1229,10 @@
       "text": "This post is too long to publish.",
       "comment": "The channels server refused a post as too large."
     },
+    "channels.error.publisher_refused": {
+      "text": "This device is not allowed to publish to this channel yet. A co-publisher can publish once the owner's device has finished adding it.",
+      "comment": "The channels server refused a post, rotation or subscriber step because this device has not been confirmed as a publisher."
+    },
     "channels.error.refused": {
       "text": "The server refused the request. Try again later.",
       "comment": "The channels server refused a request for a reason with no message of its own."
@@ -1427,6 +1431,10 @@
       "text": "Could not save.",
       "comment": "First sentence of a failed save of a channel's details; the reason follows as a second sentence."
     },
+    "channels.meta.error.sign_in": {
+      "text": "Sign in again to save changes to this channel.",
+      "comment": "Saving a channel's name or description needs a signed-in account."
+    },
     "channels.meta.saved": {
       "text": "Saved. Subscribers see the new name with their next posts.",
       "comment": "A channel's name and description were saved."
@@ -1525,6 +1533,10 @@
       "text": "Could not publish.",
       "comment": "First sentence of a failed post; the reason follows as a second sentence."
     },
+    "channels.publish.error.sign_in": {
+      "text": "Sign in again to post to this channel.",
+      "comment": "Posting to a channel needs a signed-in account."
+    },
     "channels.rotation.desc": {
       "text": "Lakko refreshes the channel's protection on its own. Refresh it now if you think a subscriber's device was compromised.",
       "comment": "Description of the protection card: refreshing replaces the channel key.",
@@ -1537,6 +1549,10 @@
     "channels.rotation.error.refresh": {
       "text": "Could not refresh. Try again in a moment.",
       "comment": "A manual channel key rotation failed."
+    },
+    "channels.rotation.error.refresh_prefix": {
+      "text": "Could not refresh.",
+      "comment": "First sentence when refreshing a channel's protection failed; the reason follows."
     },
     "channels.rotation.never": {
       "text": "Not refreshed yet.",
@@ -1558,6 +1574,10 @@
       "text": "Protection",
       "comment": "Heading of the card that refreshes the channel's keys."
     },
+    "channels.row.new_posts_a11y": {
+      "text": "{count, plural, one {# new post} other {# new posts}}",
+      "comment": "Tooltip and accessible name of the count badge on a channel row."
+    },
     "channels.row.own": {
       "text": "Your channel",
       "comment": "Second line of a channel in the conversation list when this device publishes it and there is no handle or count to show."
@@ -1577,6 +1597,10 @@
     "channels.subscribe.error.generic": {
       "text": "Could not subscribe. Try again later.",
       "comment": "Subscribing to a channel failed."
+    },
+    "channels.subscribe.error.network": {
+      "text": "Could not follow the channel. Check your connection and try again.",
+      "comment": "Subscribing to a channel failed because the network or the anonymous allowance service was unavailable."
     },
     "channels.subscribe.error.prefix": {
       "text": "Could not subscribe.",
@@ -2899,6 +2923,10 @@
       "text": "This change could not be requested.",
       "comment": "A change to a group's membership or roles was refused for a reason that has no sentence of its own."
     },
+    "chat.refusal.group_kind_changed": {
+      "text": "This change can't be made to this conversation.",
+      "comment": "Refusal: the change would turn a one-to-one chat into a group or the reverse."
+    },
     "chat.refusal.join_not_kept": {
       "text": "A join request arrived while too many were already waiting, so it was not kept. Ask the person to send it again later.",
       "comment": "Shown to a group admin: a join request arrived when too many were waiting and was dropped; the person should send it again later."
@@ -2914,6 +2942,14 @@
     "chat.refusal.not_owner": {
       "text": "Only the group owner can change admins or transfer ownership.",
       "comment": "Refusal: only the group owner can make or remove admins or hand ownership to someone else."
+    },
+    "chat.refusal.one_to_one_fixed": {
+      "text": "A chat is always the same two people.",
+      "comment": "Refusal: nobody can be added to or removed from a one-to-one chat."
+    },
+    "chat.refusal.one_to_one_no_roles": {
+      "text": "A chat has no admins.",
+      "comment": "Refusal: a one-to-one chat has no owner or admin roles to change."
     },
     "chat.refusal.owner_cannot_leave": {
       "text": "The group owner cannot leave the group.",
@@ -3470,6 +3506,10 @@
       "text": "Collapse",
       "comment": "Accessibility label of the arrow that closes an expanded row."
     },
+    "common.collapsed": {
+      "text": "Collapsed",
+      "comment": "Accessibility value of a section that is closed."
+    },
     "common.confirm": {
       "text": "Confirm",
       "comment": "Button that confirms what the screen asks for."
@@ -3581,6 +3621,10 @@
     "common.expand": {
       "text": "Expand",
       "comment": "Accessibility label of the arrow that opens a collapsed row."
+    },
+    "common.expanded": {
+      "text": "Expanded",
+      "comment": "Accessibility value of a section that is open."
     },
     "common.fact_pair": {
       "text": "{first} · {second}",
@@ -3721,6 +3765,10 @@
     "common.try_again": {
       "text": "Try again",
       "comment": "Button that repeats an operation that failed."
+    },
+    "common.undo": {
+      "text": "Undo",
+      "comment": "Button in a short notice that reverses what was just done."
     },
     "common.unknown": {
       "text": "unknown",
@@ -4337,6 +4385,329 @@
       "text": "Open camera",
       "comment": "Button that starts the camera to scan a pairing code."
     },
+    "discover.card.a11y": {
+      "text": "Suggested channel {name}",
+      "comment": "Accessible name of a suggested-channel card; {name} is the channel name."
+    },
+    "discover.card.following": {
+      "text": "You follow this channel",
+      "comment": "Line on a suggested-channel card the reader already follows."
+    },
+    "discover.card.hide_topic": {
+      "text": "Hide this topic",
+      "comment": "Button that stops suggestions from the card's topic."
+    },
+    "discover.card.more": {
+      "text": "More",
+      "comment": "Button that expands a long description on a suggested-channel card."
+    },
+    "discover.card.not_interested": {
+      "text": "Not interested",
+      "comment": "Button that removes one suggested channel."
+    },
+    "discover.card.show_description": {
+      "text": "Show description",
+      "comment": "Button on a suggested-channel card that loads its description."
+    },
+    "discover.card.subscribers": {
+      "text": "{band} subscribers",
+      "comment": "Subscriber count on a suggested-channel card; {band} is a rounded range such as 10+ or 1k+."
+    },
+    "discover.edit_topics": {
+      "text": "Edit topics",
+      "comment": "Button in Discover settings that reopens the pick-topics card."
+    },
+    "discover.gone": {
+      "text": "This channel is no longer available.",
+      "comment": "A suggested channel could not be opened or subscribed to."
+    },
+    "discover.language": {
+      "text": "Language",
+      "comment": "Picker for the language of suggested channels (pick-topics card) or of one's own listed channel."
+    },
+    "discover.listing.checking": {
+      "text": "Checking whether this channel is listed...",
+      "comment": "Text of the 'List in Discover' card while it loads."
+    },
+    "discover.listing.confirm_action": {
+      "text": "List",
+      "comment": "Confirm button of the question before a channel is listed in Discover."
+    },
+    "discover.listing.confirm_body": {
+      "text": "Anyone can find this channel's name, description and subscriber count. Posts stay encrypted.",
+      "comment": "Body of the question before a channel is listed in Discover.",
+      "security_critical": true
+    },
+    "discover.listing.confirm_title": {
+      "text": "List this channel in Discover?",
+      "comment": "Question before a channel is listed in Discover."
+    },
+    "discover.listing.listed": {
+      "text": "Listed",
+      "comment": "State of the 'List in Discover' switch when on."
+    },
+    "discover.listing.listed_notice": {
+      "text": "Listed. Subscribers will learn it with the next channel update.",
+      "comment": "Notice after listing a channel whose server step did not answer cleanly but the listing is live."
+    },
+    "discover.listing.needs_handle": {
+      "text": "A channel needs an @handle to be listed in Discover.",
+      "comment": "The channel has no public @handle, so it cannot be listed. Keep @handle as is."
+    },
+    "discover.listing.not_listed": {
+      "text": "Not listed",
+      "comment": "State of the 'List in Discover' switch when off."
+    },
+    "discover.listing.owner_desc": {
+      "text": "Anyone can find a listed channel's name, description and subscriber count. Posts stay encrypted.",
+      "comment": "Text of the 'List in Discover' card for the channel's owner.",
+      "security_critical": true
+    },
+    "discover.listing.refused": {
+      "text": "Couldn't list this channel. Try again.",
+      "comment": "Listing a channel in Discover failed."
+    },
+    "discover.listing.remove_failed": {
+      "text": "Couldn't remove the listing. Try again.",
+      "comment": "Removing a channel from Discover failed."
+    },
+    "discover.listing.title": {
+      "text": "List in Discover",
+      "comment": "Card on a channel's manage screen that lists the channel in Discover."
+    },
+    "discover.listing.topic": {
+      "text": "Topic",
+      "comment": "Picker for the topic a channel is listed under."
+    },
+    "discover.listing.update_failed": {
+      "text": "Saved. The Discover listing could not be updated; save again to retry.",
+      "comment": "After saving a channel's name or description: saved, but the Discover listing was not updated."
+    },
+    "discover.listing.viewer_listed": {
+      "text": "This channel is listed in Discover. Only the channel's owner can change this.",
+      "comment": "Text of the 'List in Discover' card for a co-publisher."
+    },
+    "discover.listing.viewer_not_listed": {
+      "text": "This channel is not listed in Discover. Only the channel's owner can list it.",
+      "comment": "Text of the 'List in Discover' card for a co-publisher."
+    },
+    "discover.mix.label": {
+      "text": "Mix in random topics",
+      "comment": "Discover settings switch: fetch a few random topics with the picked ones."
+    },
+    "discover.mix.off_line": {
+      "text": "Uses less data. Lakko's server will see exactly which topics you picked.",
+      "comment": "Line under the 'Mix in random topics' switch while it is off.",
+      "security_critical": true
+    },
+    "discover.nothing_yet": {
+      "text": "No suggestions yet. Pick topics, or ask people in your groups to share their channels.",
+      "comment": "Empty Discover."
+    },
+    "discover.pick.a11y": {
+      "text": "Pick topics",
+      "comment": "Accessible name of the pick-topics card."
+    },
+    "discover.pick.body": {
+      "text": "Lakko downloads suggestions for them, mixed with a few random topics so Lakko's server can't tell exactly which ones you picked. It never sees which channels you open.",
+      "comment": "Text of the pick-topics card: what the server can and cannot learn.",
+      "security_critical": true
+    },
+    "discover.pick.title": {
+      "text": "Pick a few topics.",
+      "comment": "Heading of the card that asks which channel topics to suggest."
+    },
+    "discover.reason.followed_by": {
+      "text": "Followed by {name} in {group}",
+      "comment": "Reason line on a suggested-channel card; {name} is a contact, {group} a group name."
+    },
+    "discover.reason.followed_by_others": {
+      "text": "{count, plural, one {Followed by {name} and # other in {group}} other {Followed by {name} and # others in {group}}}",
+      "comment": "Reason line on a suggested-channel card; {name} is a contact, {count} how many more people, {group} a group name."
+    },
+    "discover.reason.followed_count": {
+      "text": "{count, plural, one {Followed by # person in {group}} other {Followed by # people in {group}}}",
+      "comment": "Reason line on a suggested-channel card when no follower is a contact; {group} is a group name."
+    },
+    "discover.reason.group_fallback": {
+      "text": "a group",
+      "comment": "Stands in for {group} in the reason line when the group has no name on this device."
+    },
+    "discover.reason.popular": {
+      "text": "Popular in {topic}",
+      "comment": "Reason line on a suggested-channel card; {topic} is a topic name."
+    },
+    "discover.reason.search": {
+      "text": "Matches your search",
+      "comment": "Reason line on a suggested-channel card found by search."
+    },
+    "discover.search.action": {
+      "text": "Search",
+      "comment": "Button beside the Discover search field."
+    },
+    "discover.search.helper": {
+      "text": "Searches are sent to Lakko's server.",
+      "comment": "Line under the Discover search field.",
+      "security_critical": true
+    },
+    "discover.search.no_results": {
+      "text": "No channels found.",
+      "comment": "A Discover search found nothing."
+    },
+    "discover.search.placeholder": {
+      "text": "Search channels",
+      "comment": "Placeholder and accessible name of the Discover search field."
+    },
+    "discover.search.searching": {
+      "text": "Searching...",
+      "comment": "Shown while a Discover search runs."
+    },
+    "discover.search.too_short": {
+      "text": "Type at least 2 characters.",
+      "comment": "A Discover search was too short."
+    },
+    "discover.settings": {
+      "text": "Discover settings",
+      "comment": "Disclosure in Discover that holds Edit topics and the random-topics switch."
+    },
+    "discover.share.error": {
+      "text": "Couldn't change this. Try again.",
+      "comment": "Turning 'Share my channels with this group' on or off failed."
+    },
+    "discover.share.label": {
+      "text": "Share my channels with this group",
+      "comment": "Switch in group info that shares the reader's listed channels with the group."
+    },
+    "discover.share.line": {
+      "text": "People in this group can see which channels you follow. Lakko's server cannot.",
+      "comment": "Line under the 'Share my channels with this group' switch.",
+      "security_critical": true
+    },
+    "discover.shared.desc": {
+      "text": "Groups where people can see which channels you follow. Lakko's server cannot.",
+      "comment": "Text at the top of the 'Channels I share' screen.",
+      "security_critical": true
+    },
+    "discover.shared.empty": {
+      "text": "You don't share your channels with any group.",
+      "comment": "Empty 'Channels I share' screen."
+    },
+    "discover.shared.settings_sub": {
+      "text": "Groups that can see which channels you follow",
+      "comment": "Second line of the 'Channels I share' row in Settings."
+    },
+    "discover.shared.stop": {
+      "text": "Stop sharing",
+      "comment": "Button beside a group on the 'Channels I share' screen."
+    },
+    "discover.shared.stop_failed": {
+      "text": "Couldn't turn sharing off. Try again.",
+      "comment": "Stopping sharing with a group failed."
+    },
+    "discover.shared.title": {
+      "text": "Channels I share",
+      "comment": "Settings row, and the screen it opens: the groups the reader shares their channels with."
+    },
+    "discover.topic.art_design": {
+      "text": "Art and Design",
+      "comment": "Channel topic."
+    },
+    "discover.topic.books": {
+      "text": "Books",
+      "comment": "Channel topic."
+    },
+    "discover.topic.business": {
+      "text": "Business",
+      "comment": "Channel topic."
+    },
+    "discover.topic.education": {
+      "text": "Education",
+      "comment": "Channel topic."
+    },
+    "discover.topic.film_tv": {
+      "text": "Film and TV",
+      "comment": "Channel topic."
+    },
+    "discover.topic.finance": {
+      "text": "Finance",
+      "comment": "Channel topic."
+    },
+    "discover.topic.food": {
+      "text": "Food",
+      "comment": "Channel topic."
+    },
+    "discover.topic.gaming": {
+      "text": "Gaming",
+      "comment": "Channel topic."
+    },
+    "discover.topic.health": {
+      "text": "Health",
+      "comment": "Channel topic."
+    },
+    "discover.topic.humour": {
+      "text": "Humour",
+      "comment": "Channel topic."
+    },
+    "discover.topic.lifestyle": {
+      "text": "Lifestyle",
+      "comment": "Channel topic."
+    },
+    "discover.topic.local": {
+      "text": "Local",
+      "comment": "Channel topic: about a town or region."
+    },
+    "discover.topic.music": {
+      "text": "Music",
+      "comment": "Channel topic."
+    },
+    "discover.topic.nature": {
+      "text": "Nature",
+      "comment": "Channel topic."
+    },
+    "discover.topic.news": {
+      "text": "News",
+      "comment": "Channel topic."
+    },
+    "discover.topic.other": {
+      "text": "Other",
+      "comment": "Channel topic."
+    },
+    "discover.topic.photography": {
+      "text": "Photography",
+      "comment": "Channel topic."
+    },
+    "discover.topic.politics": {
+      "text": "Politics",
+      "comment": "Channel topic."
+    },
+    "discover.topic.religion": {
+      "text": "Religion",
+      "comment": "Channel topic."
+    },
+    "discover.topic.science": {
+      "text": "Science",
+      "comment": "Channel topic."
+    },
+    "discover.topic.software_development": {
+      "text": "Software Development",
+      "comment": "Channel topic."
+    },
+    "discover.topic.sports": {
+      "text": "Sports",
+      "comment": "Channel topic."
+    },
+    "discover.topic.technology": {
+      "text": "Technology",
+      "comment": "Channel topic."
+    },
+    "discover.topic.travel": {
+      "text": "Travel",
+      "comment": "Channel topic."
+    },
+    "discover.unavailable": {
+      "text": "Suggestions aren't available right now.",
+      "comment": "Discover cannot reach the channel directory, or a search failed."
+    },
     "display_name.error.control": {
       "text": "Remove invisible or text-direction characters",
       "comment": "Shown under a name field that contains invisible or text-direction characters.",
@@ -4365,6 +4736,542 @@
     "ds.clock_skew": {
       "text": "Check this device's date and time.",
       "comment": "Shown when the server refused a request because this device's clock is wrong."
+    },
+    "feed.action.hide": {
+      "text": "Hide from feeds",
+      "comment": "Item in a Feed item's menu that hides its conversation from every feed on this device."
+    },
+    "feed.action.hide_hint": {
+      "text": "Mute this conversation in feeds",
+      "comment": "Tooltip / accessibility hint of 'Hide from feeds'."
+    },
+    "feed.attachments.count": {
+      "text": "{count, plural, one {# attachment} other {# attachments}}",
+      "comment": "Stands in for text in a Feed item whose message carries only attachments, when there are several."
+    },
+    "feed.banner.dismiss": {
+      "text": "Got it",
+      "comment": "Button that dismisses the one-time note at the top of the Feed."
+    },
+    "feed.banner.local": {
+      "text": "Your feed shows messages this device has received.",
+      "comment": "One-time note at the top of the Feed: it is built only from what reached this device."
+    },
+    "feed.divider.new": {
+      "text": "New",
+      "comment": "Divider in the Feed above the items that arrived since the reader last looked."
+    },
+    "feed.edit": {
+      "text": "Edit",
+      "comment": "Button under the feed switcher that opens the editor for the selected saved feed."
+    },
+    "feed.edit_feed": {
+      "text": "Edit feed",
+      "comment": "Title of the feed editor for an existing feed, and the button under 'No messages match this feed.' that opens it."
+    },
+    "feed.editor.default_name": {
+      "text": "My feed",
+      "comment": "Name a new feed starts with."
+    },
+    "feed.editor.delete": {
+      "text": "Delete feed",
+      "comment": "Destructive button at the bottom of the feed editor, and the confirm button of its question."
+    },
+    "feed.editor.delete_confirm": {
+      "text": "Delete this feed?",
+      "comment": "Question before a saved feed is deleted."
+    },
+    "feed.editor.fade": {
+      "text": "How fast things fade",
+      "comment": "Feed editor choice: how quickly older messages sink."
+    },
+    "feed.editor.fade.day": {
+      "text": "A day",
+      "comment": "Feed editor fade choice."
+    },
+    "feed.editor.fade.hours": {
+      "text": "A few hours",
+      "comment": "Feed editor fade choice."
+    },
+    "feed.editor.fade.week": {
+      "text": "A week",
+      "comment": "Feed editor fade choice."
+    },
+    "feed.editor.filters": {
+      "text": "Filters",
+      "comment": "Feed editor section of switches and word lists."
+    },
+    "feed.editor.for_me": {
+      "text": "Only what mentions me, replies to me or reacts to mine",
+      "comment": "Feed editor switch."
+    },
+    "feed.editor.hide_own": {
+      "text": "Hide my own messages",
+      "comment": "Feed editor switch."
+    },
+    "feed.editor.hide_words": {
+      "text": "Hide words (one per line)",
+      "comment": "Feed editor field: messages with these words are left out."
+    },
+    "feed.editor.icon": {
+      "text": "Icon",
+      "comment": "Label of the icon grid in the feed editor."
+    },
+    "feed.editor.include_muted": {
+      "text": "Include muted conversations",
+      "comment": "Feed editor switch: muted conversations also feed it."
+    },
+    "feed.editor.look_back": {
+      "text": "Look back (days)",
+      "comment": "Label of the number field in the feed editor: how many days back the feed reaches."
+    },
+    "feed.editor.look_back_count": {
+      "text": "{count, plural, one {Look back # day} other {Look back # days}}",
+      "comment": "Stepper label in the feed editor: how many days back the feed reaches."
+    },
+    "feed.editor.media_only": {
+      "text": "Only with photos or video",
+      "comment": "Feed editor switch, and the line for it in a shared feed's summary."
+    },
+    "feed.editor.membership.a11y": {
+      "text": "{name} in this feed",
+      "comment": "Accessible name of the per-conversation choice in the feed editor; {name} is the group or channel name."
+    },
+    "feed.editor.membership.never": {
+      "text": "Never",
+      "comment": "Per-conversation choice in the feed editor: this conversation never appears in the feed."
+    },
+    "feed.editor.membership.only": {
+      "text": "Only",
+      "comment": "Per-conversation choice in the feed editor: the feed takes only conversations marked so."
+    },
+    "feed.editor.membership_hint": {
+      "text": "\"Only\" limits the feed to the conversations marked so; \"Never\" leaves one out.",
+      "comment": "Feed editor note above the per-conversation choices. Use the same words as the translations of 'Only' and 'Never' in this editor."
+    },
+    "feed.editor.min_reactions": {
+      "text": "At least this many reactions",
+      "comment": "Label of the number field in the feed editor."
+    },
+    "feed.editor.name": {
+      "text": "Name",
+      "comment": "Label of the name field in the feed editor."
+    },
+    "feed.editor.only_words": {
+      "text": "Only these words (one per line)",
+      "comment": "Feed editor field: only messages with these words are kept."
+    },
+    "feed.editor.preview": {
+      "text": "Preview",
+      "comment": "Title of the live preview beside the feed editor."
+    },
+    "feed.editor.preview_pending": {
+      "text": "The preview appears once the feed can be saved.",
+      "comment": "Feed editor preview while the rules are not valid yet."
+    },
+    "feed.editor.slider.max": {
+      "text": "A lot",
+      "comment": "Label at the high end of a feed editor slider."
+    },
+    "feed.editor.slider.min": {
+      "text": "Ignore",
+      "comment": "Label at the low end of a feed editor slider."
+    },
+    "feed.editor.sources": {
+      "text": "Sources",
+      "comment": "Feed editor section: which groups and channels feed it."
+    },
+    "feed.editor.sources.both": {
+      "text": "Both",
+      "comment": "Feed editor source choice: groups and channels."
+    },
+    "feed.editor.sources.channels": {
+      "text": "All channels",
+      "comment": "Feed editor source choice: every channel, no groups."
+    },
+    "feed.editor.sources.groups": {
+      "text": "All groups",
+      "comment": "Feed editor source choice: every group, no channels."
+    },
+    "feed.editor.start.blank": {
+      "text": "Blank",
+      "comment": "Feed editor starting point with no rules taken from a built-in feed."
+    },
+    "feed.editor.start_from": {
+      "text": "Start from",
+      "comment": "Feed editor, new feed only: the rules to begin from (Blank or a built-in feed)."
+    },
+    "feed.editor.stripped_hint": {
+      "text": "Shared feeds arrive without specific conversations. Pick some below to make it yours.",
+      "comment": "Feed editor note on a feed imported from someone else."
+    },
+    "feed.editor.suggestions": {
+      "text": "Suggestions",
+      "comment": "Feed editor section about suggested channels shown between items."
+    },
+    "feed.editor.suggestions.never": {
+      "text": "Never",
+      "comment": "Feed editor choice: no suggested channels."
+    },
+    "feed.editor.suggestions.rarely": {
+      "text": "Rarely",
+      "comment": "Feed editor choice: suggested channels now and then."
+    },
+    "feed.editor.suggestions.sometimes": {
+      "text": "Sometimes",
+      "comment": "Feed editor choice: suggested channels more often."
+    },
+    "feed.editor.suggestions_rate": {
+      "text": "How often a suggested channel appears",
+      "comment": "Feed editor choice."
+    },
+    "feed.editor.weight.from_contacts": {
+      "text": "From your contacts",
+      "comment": "Feed editor slider: how much it counts that the author is a contact."
+    },
+    "feed.editor.weight.media": {
+      "text": "Has photos or video",
+      "comment": "Feed editor slider: how much photos or video count."
+    },
+    "feed.editor.weight.mentions": {
+      "text": "Mentions you",
+      "comment": "Feed editor slider: how much a mention of the reader counts."
+    },
+    "feed.editor.weight.reactions": {
+      "text": "Reactions",
+      "comment": "Feed editor slider: how much reactions count."
+    },
+    "feed.editor.weight.recency": {
+      "text": "How recent",
+      "comment": "Feed editor slider: how much newness counts."
+    },
+    "feed.editor.weight.replies": {
+      "text": "Replies",
+      "comment": "Feed editor slider: how much replies count."
+    },
+    "feed.editor.what_counts": {
+      "text": "What counts",
+      "comment": "Feed editor section of sliders that weigh what pushes a message up."
+    },
+    "feed.empty.discover": {
+      "text": "Discover channels",
+      "comment": "Button under the empty Feed that opens Discover."
+    },
+    "feed.empty.no_match": {
+      "text": "No messages match this feed.",
+      "comment": "Empty saved feed whose rules match nothing; also shown in the feed editor's preview."
+    },
+    "feed.empty.no_sources": {
+      "text": "Your feed fills up from your groups and channels.",
+      "comment": "Empty Feed when the reader is in no group and follows no channel."
+    },
+    "feed.empty.nothing_yet": {
+      "text": "Nothing here yet. New messages from your groups and channels will show up here.",
+      "comment": "Empty Feed when there are groups or channels but no messages yet."
+    },
+    "feed.end": {
+      "text": "You're up to date.",
+      "comment": "Line at the end of the Feed list."
+    },
+    "feed.error.cannot_save_here": {
+      "text": "This device can't save this right now.",
+      "comment": "Hiding a conversation from feeds or marking a channel read failed because this device's storage key is not available."
+    },
+    "feed.error.delete": {
+      "text": "Couldn't delete the feed. Try again.",
+      "comment": "Deleting a saved feed failed."
+    },
+    "feed.error.no_device_key": {
+      "text": "This device can't save feeds right now.",
+      "comment": "Saving a feed failed because this device's storage key is not available."
+    },
+    "feed.error.save": {
+      "text": "Couldn't save the feed. Try again.",
+      "comment": "Saving a feed (from the editor or the import screen) failed."
+    },
+    "feed.hidden.empty": {
+      "text": "Nothing is hidden from your feeds.",
+      "comment": "Empty list of conversations hidden from feeds."
+    },
+    "feed.hidden.show_again": {
+      "text": "Show again",
+      "comment": "Button beside a conversation in the hidden-from-feeds list that brings it back into feeds."
+    },
+    "feed.hidden.title": {
+      "text": "Hidden from feeds",
+      "comment": "Feed menu item that opens the list of conversations hidden from feeds, and the title of that list."
+    },
+    "feed.hidden.toast": {
+      "text": "Hidden from feeds.",
+      "comment": "Short notice after a conversation was hidden from feeds; an Undo button follows."
+    },
+    "feed.icon.bell": {
+      "text": "Bell",
+      "comment": "Accessible name of a feed icon."
+    },
+    "feed.icon.book": {
+      "text": "Book",
+      "comment": "Accessible name of a feed icon."
+    },
+    "feed.icon.camera": {
+      "text": "Camera",
+      "comment": "Accessible name of a feed icon."
+    },
+    "feed.icon.code": {
+      "text": "Code",
+      "comment": "Accessible name of a feed icon (angle brackets)."
+    },
+    "feed.icon.feed": {
+      "text": "Feed",
+      "comment": "Accessible name of a feed icon (stacked cards)."
+    },
+    "feed.icon.flag": {
+      "text": "Flag",
+      "comment": "Accessible name of a feed icon."
+    },
+    "feed.icon.globe": {
+      "text": "Globe",
+      "comment": "Accessible name of a feed icon."
+    },
+    "feed.icon.heart": {
+      "text": "Heart",
+      "comment": "Accessible name of a feed icon."
+    },
+    "feed.icon.lightning": {
+      "text": "Lightning",
+      "comment": "Accessible name of a feed icon."
+    },
+    "feed.icon.music": {
+      "text": "Music",
+      "comment": "Accessible name of a feed icon."
+    },
+    "feed.icon.speech_bubble": {
+      "text": "Speech bubble",
+      "comment": "Accessible name of a feed icon."
+    },
+    "feed.icon.star": {
+      "text": "Star",
+      "comment": "Accessible name of a feed icon."
+    },
+    "feed.import.a11y": {
+      "text": "Import feed",
+      "comment": "Accessible name of the import screen."
+    },
+    "feed.import.add": {
+      "text": "Add to my feeds",
+      "comment": "Import screen button that saves the shared feed."
+    },
+    "feed.import.choose_file": {
+      "text": "Choose file",
+      "comment": "Import screen button that opens the file picker."
+    },
+    "feed.import.hint": {
+      "text": "Open a feed someone shared with you as a .lakkofeed file.",
+      "comment": "Import screen before a file is chosen. Keep .lakkofeed as is."
+    },
+    "feed.import.refused": {
+      "text": "This file isn't a feed Lakko can open.",
+      "comment": "Import screen when the chosen file or link is not a valid feed."
+    },
+    "feed.import.title": {
+      "text": "Add a shared feed",
+      "comment": "Title of the screen that imports a feed someone shared, and the Feed menu item that opens it."
+    },
+    "feed.item.reactions_a11y": {
+      "text": "Reactions",
+      "comment": "Accessible name of the row of reaction counts under a Feed item."
+    },
+    "feed.menu.a11y": {
+      "text": "Feed menu",
+      "comment": "Accessible name of the more button at the top of the Feed and of the menu it opens."
+    },
+    "feed.min_reactions_count": {
+      "text": "{count, plural, one {At least # reaction} other {At least # reactions}}",
+      "comment": "Stepper label in the feed editor, and a line in a shared feed's summary."
+    },
+    "feed.new": {
+      "text": "New feed",
+      "comment": "Feed menu item and chip at the end of the feed switcher that create a feed of one's own; also the title of the editor while it creates one."
+    },
+    "feed.preset.discover": {
+      "text": "Discover",
+      "comment": "Chip in the feed switcher that shows suggested channels."
+    },
+    "feed.preset.for_me": {
+      "text": "For me",
+      "comment": "Built-in feed: messages that mention the reader, reply to them or react to theirs. Chip in the feed switcher and a starting point in the feed editor."
+    },
+    "feed.preset.latest": {
+      "text": "Latest",
+      "comment": "Built-in feed: newest messages first. Chip in the feed switcher and a starting point in the feed editor."
+    },
+    "feed.preset.popular": {
+      "text": "Popular",
+      "comment": "Built-in feed: messages with the most reactions and replies first. Chip in the feed switcher and a starting point in the feed editor."
+    },
+    "feed.problem.conversations": {
+      "text": "Too many conversations are picked.",
+      "comment": "Feed editor problem."
+    },
+    "feed.problem.generic": {
+      "text": "This feed can't be saved as it is.",
+      "comment": "Feed editor problem when no more specific reason is known."
+    },
+    "feed.problem.name": {
+      "text": "Give the feed a name of up to 64 characters.",
+      "comment": "Feed editor problem."
+    },
+    "feed.problem.no_kinds": {
+      "text": "Choose groups, channels or both.",
+      "comment": "Feed editor problem."
+    },
+    "feed.problem.stripped": {
+      "text": "This shared feed can't also name conversations.",
+      "comment": "Feed editor problem."
+    },
+    "feed.problem.too_large": {
+      "text": "This feed is too large to save.",
+      "comment": "Feed editor problem."
+    },
+    "feed.problem.weight": {
+      "text": "A slider is out of range.",
+      "comment": "Feed editor problem."
+    },
+    "feed.problem.window": {
+      "text": "Look back between 1 and 30 days.",
+      "comment": "Feed editor problem."
+    },
+    "feed.problem.words": {
+      "text": "Check the word lists: one word per line, up to 32 words.",
+      "comment": "Feed editor problem."
+    },
+    "feed.refresh_failed": {
+      "text": "Couldn't check for new messages.",
+      "comment": "Banner at the top of the Feed when the last check for new messages and posts failed; a Retry button follows."
+    },
+    "feed.replies.count": {
+      "text": "{count, plural, one {# reply} other {# replies}}",
+      "comment": "Toggle under a Feed item that shows or hides the replies folded under it."
+    },
+    "feed.share": {
+      "text": "Share",
+      "comment": "Button under the feed switcher that shares the selected saved feed as a link or file."
+    },
+    "feed.share.a11y": {
+      "text": "Share feed",
+      "comment": "Accessible name of the share dialog, and title of the system share sheet that sends the feed file."
+    },
+    "feed.share.download": {
+      "text": "Download file",
+      "comment": "Web share dialog button that downloads the feed as a .lakkofeed file."
+    },
+    "feed.share.share_file": {
+      "text": "Share file",
+      "comment": "Button in the share dialog that opens the system share sheet with the .lakkofeed file."
+    },
+    "feed.share.share_link": {
+      "text": "Share link",
+      "comment": "Button in the share dialog that opens the system share sheet with the feed link."
+    },
+    "feed.share.stripped": {
+      "text": "Specific conversations are left out: they mean nothing to anyone else.",
+      "comment": "Note in the share dialog: a shared feed carries its rules but not the conversations picked by hand."
+    },
+    "feed.share.title": {
+      "text": "Share \"{name}\"",
+      "comment": "Title of the dialog that shares a saved feed; {name} is the feed's name."
+    },
+    "feed.share.unshareable": {
+      "text": "This feed can't be shared as it is.",
+      "comment": "Share dialog when the saved feed cannot be encoded for sharing."
+    },
+    "feed.show_new": {
+      "text": "{count, plural, one {Show # new} other {Show # new}}",
+      "comment": "Floating button above the Feed when new items arrived while the reader scrolled; tapping it shows them. {count} is how many."
+    },
+    "feed.summary.factor.contacts": {
+      "text": "your contacts",
+      "comment": "Factor word inside 'Ranks by recency and {factors}'."
+    },
+    "feed.summary.factor.media": {
+      "text": "photos and video",
+      "comment": "Factor word inside 'Ranks by recency and {factors}'."
+    },
+    "feed.summary.factor.mentions": {
+      "text": "mentions of you",
+      "comment": "Factor word inside 'Ranks by recency and {factors}'."
+    },
+    "feed.summary.factor.reactions": {
+      "text": "reactions",
+      "comment": "Factor word inside 'Ranks by recency and {factors}'."
+    },
+    "feed.summary.factor.replies": {
+      "text": "replies",
+      "comment": "Factor word inside 'Ranks by recency and {factors}'."
+    },
+    "feed.summary.for_me": {
+      "text": "Only what is about you",
+      "comment": "Line in a shared feed's summary."
+    },
+    "feed.summary.hide_own": {
+      "text": "Hides your own messages",
+      "comment": "Line in a shared feed's summary."
+    },
+    "feed.summary.hide_words": {
+      "text": "{count, plural, one {Hides # word} other {Hides # words}}",
+      "comment": "Line in a shared feed's summary."
+    },
+    "feed.summary.include_muted": {
+      "text": "Includes muted conversations",
+      "comment": "Line in a shared feed's summary on the import screen."
+    },
+    "feed.summary.look_back": {
+      "text": "{count, plural, one {Looks back # day} other {Looks back # days}}",
+      "comment": "Line in a shared feed's summary."
+    },
+    "feed.summary.newest_first": {
+      "text": "Newest first",
+      "comment": "Line in a shared feed's summary when nothing but recency ranks it."
+    },
+    "feed.summary.only_words": {
+      "text": "Only messages with: {words}",
+      "comment": "Line in a shared feed's summary; {words} is the list of words, as written."
+    },
+    "feed.summary.ranks_by": {
+      "text": "Ranks by recency and {factors}",
+      "comment": "Line in a shared feed's summary; {factors} is a list of the factor words below (reactions, replies, ...)."
+    },
+    "feed.summary.sources.both": {
+      "text": "Sources: all groups and channels",
+      "comment": "Line in a shared feed's summary on the import screen."
+    },
+    "feed.summary.sources.channels": {
+      "text": "Sources: all channels",
+      "comment": "Line in a shared feed's summary on the import screen."
+    },
+    "feed.summary.sources.groups": {
+      "text": "Sources: all groups",
+      "comment": "Line in a shared feed's summary on the import screen."
+    },
+    "feed.switcher.a11y": {
+      "text": "Feeds",
+      "comment": "Accessible name of the row of chips that switches between feeds."
+    },
+    "feed.title": {
+      "text": "Feed",
+      "comment": "Title at the top of the Feed screen, and its accessible name."
+    },
+    "feed.why.mentions": {
+      "text": "Mentions you",
+      "comment": "Small line under a Feed item saying why it is there: it mentions the reader."
+    },
+    "feed.why.popular": {
+      "text": "Popular in {source}",
+      "comment": "Small line under a Feed item in the Popular feed; {source} is the group or channel name."
+    },
+    "feed.why.reply": {
+      "text": "Reply to your message",
+      "comment": "Small line under a Feed item saying why it is there: it replies to the reader."
     },
     "folders.add_to_folder": {
       "text": "Add to folder",
@@ -5011,6 +5918,10 @@
       "text": "{count, plural, one {up to # use} other {up to # uses}}",
       "comment": "Contact invite page, value of \"Uses allowed\"."
     },
+    "ios.document_type.feed": {
+      "text": "Lakko feed",
+      "comment": "iOS name of the .lakkofeed file type (Info.plist document type), shown in Files and share sheets."
+    },
     "ios.permission.camera": {
       "text": "Lakko uses the camera to scan QR codes from devices you want to link to your account, to capture video for in-call streams, and to record video messages you choose to send. Everything the camera captures is end-to-end encrypted on your device before it is sent.",
       "comment": "iOS system permission prompt for camera access (Info.plist usage description). iOS shows it in its own alert, in the language iOS uses for Lakko, the first time Lakko asks. It must say why Lakko needs the access. No placeholders."
@@ -5082,6 +5993,10 @@
     "nav.contacts": {
       "text": "Contacts",
       "comment": "Primary navigation: contacts."
+    },
+    "nav.feed": {
+      "text": "Feed",
+      "comment": "Navigation item (tab, rail, sidebar) that opens the Feed."
     },
     "nav.rail_a11y": {
       "text": "Primary",
@@ -6447,6 +7362,14 @@
     "tokens.lookup_allowance_used": {
       "text": "You have looked up a lot of people today. Try again tomorrow.",
       "comment": "Search for a username or channel refused because the account's daily allowance of lookups is used up."
+    },
+    "tokens.search_allowance_used": {
+      "text": "Too many searches. Try again in a minute.",
+      "comment": "The Discover channel search allowance is used up for now."
+    },
+    "tokens.subscribe_allowance_used": {
+      "text": "You've subscribed to a lot of channels today. Try again tomorrow.",
+      "comment": "The account's daily allowance of channel subscriptions is used up."
     },
     "update.available.message": {
       "text": "A new version of Lakko is available.",

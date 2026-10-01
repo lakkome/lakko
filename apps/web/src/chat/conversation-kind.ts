@@ -3,67 +3,63 @@
 
 /**
  * Chats and Groups are two lists over the same conversation store, split by
- * kind (docs/ux/client-redesign.md section 3): a conversation with exactly
- * two PEOPLE is a chat, anything else is a group.
+ * kind (docs/ux/client-redesign.md section 3).
  *
- * People are counted by account, not by device leaf (`peopleCountOf` in
- * `person-key.ts`), so a two-person chat where one person has three devices
- * stays a chat.
+ * Since ADR-0062 the kind is not derived here. The creator writes it into the
+ * group's GroupContext (`0xFF03`) and every member's device reads it with
+ * `Group.groupKind()`, so it is the same answer on every device and never
+ * changes: a two-person group is a group, and a one-to-one never becomes a
+ * group by growing (it cannot grow). The people count is for display only.
  *
- * The spec also says a group created through the new-group flow is a group
- * even while it has two people, and that a conversation never moves between
- * the two lists on its own. The store records no such flag, so the kind is
- * PERSISTED per conversation (`conversation-kind-store.ts`): the flow that
- * creates a conversation writes it (new group -> `group`, contact accept /
- * New chat -> `chat`), and a conversation first seen through a Welcome or a
- * restore derives it once from the people count. The one sanctioned change
- * is chat -> group, when more than two people are observed; group -> chat
- * never happens.
- *
- * Pure: no wasm, no Solid, no storage. The decision lives here so it can be
- * tested; the store only reads and writes what it decides.
+ * Pure: takes the value `groupKind()` returned, so it can be tested without
+ * the wasm core. The numeric values are the wasm `GroupKind` enum (the
+ * `0xFF03` wire bytes); `conversation-kind.test.ts` pins them against the
+ * real enum through the boundary.
  */
 
 export type ConversationKind = "chat" | "group";
 
-/** The kind of a conversation with `peopleCount` distinct people in it. */
-export function conversationKindOf(peopleCount: number): ConversationKind {
-  return peopleCount === 2 ? "chat" : "group";
-}
-
-/** Which list a conversation of `peopleCount` people belongs to. */
-export function belongsToList(peopleCount: number, list: ConversationKind): boolean {
-  return conversationKindOf(peopleCount) === list;
-}
+/** `GroupKind.OneToOne` in the wasm core. */
+export const GROUP_KIND_ONE_TO_ONE = 1;
+/** `GroupKind.Group` in the wasm core. */
+export const GROUP_KIND_GROUP = 2;
 
 /**
- * The kind to show and to keep, given what is persisted (`null` at first
- * sight) and the people count observed now.
+ * The list a conversation belongs to, from what `Group.groupKind()` returned.
  *
- *   - nothing persisted: derive from the count (2 = chat, else group);
- *   - `group` persisted: stays a group whatever the count;
- *   - `chat` persisted: stays a chat until MORE than two people are observed,
- *     then it is a group for good. A count below two (a torn roster read, a
- *     member who left) never flips a chat back into the Groups list.
+ * `undefined` is a group carrying no `0xFF03` at all. A conversation cannot be
+ * one (`join_from_welcome` refuses a role-table group without a kind, and
+ * every creation site passes one), so the only such objects are the
+ * non-conversation groups (`PublisherGroup`, `DeviceGroup`) and snapshots from
+ * before the flag day. Those read as `group`: a one-to-one is something its
+ * creator must have declared, and the group list never titles a conversation
+ * after one person.
  */
-export function decideConversationKind(
-  persisted: ConversationKind | null,
-  peopleCount: number,
-): ConversationKind {
-  if (persisted === null) return conversationKindOf(peopleCount);
-  if (persisted === "group") return "group";
-  return peopleCount > 2 ? "group" : "chat";
+export function conversationKindOfGroupKind(kind: number | undefined): ConversationKind {
+  return kind === GROUP_KIND_ONE_TO_ONE ? "chat" : "group";
+}
+
+/** Anything with the wasm `Group.groupKind()` accessor. */
+export interface HasGroupKind {
+  groupKind(): number | undefined;
 }
 
 /**
- * What to write when a flow states a kind outright: a group stays a group, a
- * chat may become a group, a group never becomes a chat. Returns the kind to
- * store (which may be the current one).
+ * The kind of a live group. A throwing read (a freed handle) answers `group`
+ * for the reason `conversationKindOfGroupKind` gives for `undefined`.
  */
-export function nextPersistedKind(
-  current: ConversationKind | null,
-  stated: ConversationKind,
-): ConversationKind {
-  if (current === "group") return "group";
-  return stated;
+export function conversationKindOf(group: HasGroupKind): ConversationKind {
+  let kind: number | undefined;
+  try {
+    kind = group.groupKind();
+  } catch {
+    kind = undefined;
+  }
+  return conversationKindOfGroupKind(kind);
+}
+
+/** Whether a group-name envelope (ADR-0051) may be applied: never in a
+ *  one-to-one, which has no group name (ADR-0062 section 7). */
+export function acceptsGroupName(kind: ConversationKind): boolean {
+  return kind === "group";
 }

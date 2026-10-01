@@ -4394,3 +4394,43 @@ and are this gap's accepted residual. Until it lands: a leaked `group_id` is a r
 metadata and a write of garbage, and a forward from a one-to-one should carry no origin
 (ADR-0052 amendment).
 
+
+### G-43: `services/channels` authorised no publisher operation - anyone who knew a `channel_id` could rotate, deliver envelopes and read the subscriber list - **CLOSED in code 2026-10-01 ([ADR-0059](../adr/0059-channel-discover.md) section 9); not walked live** (recorded 2026-09-28 while designing ADR-0059)
+
+**What the code does.** `create_channel` takes only `{channel_id}` and registers no key;
+publishing a post, `POST /rotate`, `/rotate/stage`, `/rotate/commit`, delivering a seed
+envelope, registering a subscriber and `GET /v1/channels/{id}/subscribers` take no
+session, no signature and no owner key (`services/channels/src/api.rs`, the router;
+`migrations/0001_init.sql`: `channels` is `id, current_epoch, next_cursor, created_at`).
+ADR-0010's planned publisher-only distribute route was never built. Checked in the
+tree on 2026-09-28; not measured against a deployment.
+
+**What it buys an attacker.** Not post content: every post is AEAD-sealed under the
+epoch seed and Ed25519-signed, and readers drop a post whose signature fails. It buys
+availability and metadata: a rotation or a staged commit nobody authorised advances the
+channel's epoch or files envelopes under it, which can leave subscribers without a seed
+they can open; the full subscriber key list and its size are public; and, because
+subscriber registration is free, the subscriber count is forgeable. A `channel_id` is
+public to anyone who resolves the channel's handle.
+
+**Closing.** ADR-0059 introduces a per-channel owner key registered at creation and uses
+it for the directory, the subscriber list and a token-gated subscribe. Gating publish,
+rotate and deliver on the same key (plus co-publisher keys the owner registers) is the
+remaining change and is not part of ADR-0059.
+
+**Closed (2026-10-01, ADR-0059 section 9).** `POST .../posts`, `POST .../rotate`,
+`POST .../rotate/stage`, `POST .../rotate/commit` and `POST .../subscribers/<key>/envelope`
+now go through `require_publisher` (`services/channels/src/owner_auth.rs`) before the body
+is parsed: an owner proof, or a proof by a co-publisher key the owner appointed, over the
+method, the service path, the query and the exact body bytes, inside the 120 s window,
+nonce consumed once; every refusal is `401 owner-proof-required`. An unknown channel now
+answers `401` instead of `404`. Web, iOS and Android sign all five writes and the subscriber
+list with the role the device holds for the channel (an in-memory cache: owner on create,
+co-publisher on a completed join, otherwise the first key the server accepts). Verified:
+`services/channels` integration tests (42, including a refusal matrix per route: no proof,
+foreign key, unappointed co-publisher, body mismatch, replay) and unit tests (72); the 6
+SQL-store tests skipped without `LAKKO_CHANNELS_TEST_DATABASE_URL`; web vitest for channels and
+discover (170); Android and iOS unit tests in scratch copies (this worktree does not compile
+natively until the sealed-invite-link bindings are ported). Not exercised against a deployed
+server. What remains open is the reads: posts, envelopes and the epoch stay readable by
+`channel_id`, which is acceptable because posts and envelopes are sealed.

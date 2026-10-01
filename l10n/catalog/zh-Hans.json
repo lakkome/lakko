@@ -1194,6 +1194,10 @@
       "text": "这条帖子太长，无法发布。",
       "status": "machine"
     },
+    "channels.error.publisher_refused": {
+      "text": "这台设备暂时还不能在此频道发布。所有者的设备完成添加后，共同发布者即可发布。",
+      "status": "machine"
+    },
     "channels.error.refused": {
       "text": "服务器拒绝了该请求。请稍后再试。",
       "status": "machine"
@@ -1390,6 +1394,10 @@
       "text": "无法保存。",
       "status": "machine"
     },
+    "channels.meta.error.sign_in": {
+      "text": "请重新登录以保存对此频道的更改。",
+      "status": "machine"
+    },
     "channels.meta.saved": {
       "text": "已保存。订阅者会在之后的帖子中看到新名称。",
       "status": "machine"
@@ -1486,6 +1494,10 @@
       "text": "无法发布。",
       "status": "machine"
     },
+    "channels.publish.error.sign_in": {
+      "text": "请重新登录以在此频道发布。",
+      "status": "machine"
+    },
     "channels.rotation.desc": {
       "text": "Lakko 会自动更新频道的保护。如果你认为某位订阅者的设备已被入侵，请立即更新。",
       "status": "machine"
@@ -1496,6 +1508,10 @@
     },
     "channels.rotation.error.refresh": {
       "text": "无法更新。请稍后再试。",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh_prefix": {
+      "text": "无法刷新。",
       "status": "machine"
     },
     "channels.rotation.never": {
@@ -1518,6 +1534,10 @@
       "text": "保护",
       "status": "machine"
     },
+    "channels.row.new_posts_a11y": {
+      "text": "{count, plural, other {# 条新帖子}}",
+      "status": "machine"
+    },
     "channels.row.own": {
       "text": "你的频道",
       "status": "machine"
@@ -1536,6 +1556,10 @@
     },
     "channels.subscribe.error.generic": {
       "text": "无法订阅。请稍后再试。",
+      "status": "machine"
+    },
+    "channels.subscribe.error.network": {
+      "text": "无法关注此频道。请检查网络连接后重试。",
       "status": "machine"
     },
     "channels.subscribe.error.prefix": {
@@ -2850,6 +2874,10 @@
       "text": "无法请求此变更。",
       "status": "machine"
     },
+    "chat.refusal.group_kind_changed": {
+      "text": "此更改无法应用于这个对话。",
+      "status": "machine"
+    },
     "chat.refusal.join_not_kept": {
       "text": "一条加入请求到达时，等待中的请求已经太多，因此未被保留。请让对方稍后重新发送。",
       "status": "machine"
@@ -2864,6 +2892,14 @@
     },
     "chat.refusal.not_owner": {
       "text": "只有群主可以更改管理员或转让群主身份。",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_fixed": {
+      "text": "单聊始终只有这两个人。",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_no_roles": {
+      "text": "单聊没有管理员。",
       "status": "machine"
     },
     "chat.refusal.owner_cannot_leave": {
@@ -3418,6 +3454,10 @@
       "text": "收起",
       "status": "machine"
     },
+    "common.collapsed": {
+      "text": "已收起",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "确认",
       "status": "machine"
@@ -3528,6 +3568,10 @@
     },
     "common.expand": {
       "text": "展开",
+      "status": "machine"
+    },
+    "common.expanded": {
+      "text": "已展开",
       "status": "machine"
     },
     "common.fact_pair": {
@@ -3668,6 +3712,10 @@
     },
     "common.try_again": {
       "text": "重试",
+      "status": "machine"
+    },
+    "common.undo": {
+      "text": "撤销",
       "status": "machine"
     },
     "common.unknown": {
@@ -4242,6 +4290,322 @@
       "text": "打开相机",
       "status": "machine"
     },
+    "discover.card.a11y": {
+      "text": "推荐频道 {name}",
+      "status": "machine"
+    },
+    "discover.card.following": {
+      "text": "你已关注此频道",
+      "status": "machine"
+    },
+    "discover.card.hide_topic": {
+      "text": "隐藏此主题",
+      "status": "machine"
+    },
+    "discover.card.more": {
+      "text": "更多",
+      "status": "machine"
+    },
+    "discover.card.not_interested": {
+      "text": "不感兴趣",
+      "status": "machine"
+    },
+    "discover.card.show_description": {
+      "text": "显示简介",
+      "status": "machine"
+    },
+    "discover.card.subscribers": {
+      "text": "{band} 位订阅者",
+      "status": "machine"
+    },
+    "discover.edit_topics": {
+      "text": "编辑主题",
+      "status": "machine"
+    },
+    "discover.gone": {
+      "text": "此频道已不可用。",
+      "status": "machine"
+    },
+    "discover.language": {
+      "text": "语言",
+      "status": "machine"
+    },
+    "discover.listing.checking": {
+      "text": "正在检查此频道是否已列出...",
+      "status": "machine"
+    },
+    "discover.listing.confirm_action": {
+      "text": "列出",
+      "status": "machine"
+    },
+    "discover.listing.confirm_body": {
+      "text": "任何人都能找到此频道的名称、简介和订阅人数。帖子仍然加密。",
+      "status": "machine"
+    },
+    "discover.listing.confirm_title": {
+      "text": "要在“发现”中列出此频道吗？",
+      "status": "machine"
+    },
+    "discover.listing.listed": {
+      "text": "已列出",
+      "status": "machine"
+    },
+    "discover.listing.listed_notice": {
+      "text": "已列出。订阅者会在下次频道更新时得知。",
+      "status": "machine"
+    },
+    "discover.listing.needs_handle": {
+      "text": "频道需要一个 @handle 才能在“发现”中列出。",
+      "status": "machine"
+    },
+    "discover.listing.not_listed": {
+      "text": "未列出",
+      "status": "machine"
+    },
+    "discover.listing.owner_desc": {
+      "text": "任何人都能找到已列出频道的名称、简介和订阅人数。帖子仍然加密。",
+      "status": "machine"
+    },
+    "discover.listing.refused": {
+      "text": "无法列出此频道。请重试。",
+      "status": "machine"
+    },
+    "discover.listing.remove_failed": {
+      "text": "无法移除列出。请重试。",
+      "status": "machine"
+    },
+    "discover.listing.title": {
+      "text": "在“发现”中列出",
+      "status": "machine"
+    },
+    "discover.listing.topic": {
+      "text": "主题",
+      "status": "machine"
+    },
+    "discover.listing.update_failed": {
+      "text": "已保存。“发现”中的信息未能更新；请再次保存以重试。",
+      "status": "machine"
+    },
+    "discover.listing.viewer_listed": {
+      "text": "此频道已在“发现”中列出。只有频道所有者可以更改。",
+      "status": "machine"
+    },
+    "discover.listing.viewer_not_listed": {
+      "text": "此频道未在“发现”中列出。只有频道所有者可以列出它。",
+      "status": "machine"
+    },
+    "discover.mix.label": {
+      "text": "混入随机主题",
+      "status": "machine"
+    },
+    "discover.mix.off_line": {
+      "text": "流量更少。Lakko 服务器将确切知道你选了哪些主题。",
+      "status": "machine"
+    },
+    "discover.nothing_yet": {
+      "text": "暂无推荐。选择一些主题，或请群组中的人分享他们的频道。",
+      "status": "machine"
+    },
+    "discover.pick.a11y": {
+      "text": "选择主题",
+      "status": "machine"
+    },
+    "discover.pick.body": {
+      "text": "Lakko 会下载这些主题的推荐，并混入几个随机主题，让 Lakko 服务器无法确切知道你选了哪些。它永远看不到你打开了哪些频道。",
+      "status": "machine"
+    },
+    "discover.pick.title": {
+      "text": "选择几个主题。",
+      "status": "machine"
+    },
+    "discover.reason.followed_by": {
+      "text": "{group} 中的 {name} 关注了它",
+      "status": "machine"
+    },
+    "discover.reason.followed_by_others": {
+      "text": "{count, plural, other {{group} 中的 {name} 和另外 # 人关注了它}}",
+      "status": "machine"
+    },
+    "discover.reason.followed_count": {
+      "text": "{count, plural, other {{group} 中有 # 人关注了它}}",
+      "status": "machine"
+    },
+    "discover.reason.group_fallback": {
+      "text": "某个群组",
+      "status": "machine"
+    },
+    "discover.reason.popular": {
+      "text": "在“{topic}”中很热门",
+      "status": "machine"
+    },
+    "discover.reason.search": {
+      "text": "符合你的搜索",
+      "status": "machine"
+    },
+    "discover.search.action": {
+      "text": "搜索",
+      "status": "machine"
+    },
+    "discover.search.helper": {
+      "text": "搜索内容会发送到 Lakko 服务器。",
+      "status": "machine"
+    },
+    "discover.search.no_results": {
+      "text": "未找到频道。",
+      "status": "machine"
+    },
+    "discover.search.placeholder": {
+      "text": "搜索频道",
+      "status": "machine"
+    },
+    "discover.search.searching": {
+      "text": "正在搜索...",
+      "status": "machine"
+    },
+    "discover.search.too_short": {
+      "text": "请至少输入 2 个字符。",
+      "status": "machine"
+    },
+    "discover.settings": {
+      "text": "发现设置",
+      "status": "machine"
+    },
+    "discover.share.error": {
+      "text": "无法更改。请重试。",
+      "status": "machine"
+    },
+    "discover.share.label": {
+      "text": "与此群组分享我的频道",
+      "status": "machine"
+    },
+    "discover.share.line": {
+      "text": "此群组中的人可以看到你关注了哪些频道。Lakko 服务器看不到。",
+      "status": "machine"
+    },
+    "discover.shared.desc": {
+      "text": "群组中的人可以看到你关注了哪些频道。Lakko 服务器看不到。",
+      "status": "machine"
+    },
+    "discover.shared.empty": {
+      "text": "你没有与任何群组分享你的频道。",
+      "status": "machine"
+    },
+    "discover.shared.settings_sub": {
+      "text": "可以看到你关注了哪些频道的群组",
+      "status": "machine"
+    },
+    "discover.shared.stop": {
+      "text": "停止分享",
+      "status": "machine"
+    },
+    "discover.shared.stop_failed": {
+      "text": "无法关闭分享。请重试。",
+      "status": "machine"
+    },
+    "discover.shared.title": {
+      "text": "我分享的频道",
+      "status": "machine"
+    },
+    "discover.topic.art_design": {
+      "text": "艺术与设计",
+      "status": "machine"
+    },
+    "discover.topic.books": {
+      "text": "图书",
+      "status": "machine"
+    },
+    "discover.topic.business": {
+      "text": "商业",
+      "status": "machine"
+    },
+    "discover.topic.education": {
+      "text": "教育",
+      "status": "machine"
+    },
+    "discover.topic.film_tv": {
+      "text": "影视",
+      "status": "machine"
+    },
+    "discover.topic.finance": {
+      "text": "金融",
+      "status": "machine"
+    },
+    "discover.topic.food": {
+      "text": "美食",
+      "status": "machine"
+    },
+    "discover.topic.gaming": {
+      "text": "游戏",
+      "status": "machine"
+    },
+    "discover.topic.health": {
+      "text": "健康",
+      "status": "machine"
+    },
+    "discover.topic.humour": {
+      "text": "幽默",
+      "status": "machine"
+    },
+    "discover.topic.lifestyle": {
+      "text": "生活方式",
+      "status": "machine"
+    },
+    "discover.topic.local": {
+      "text": "本地",
+      "status": "machine"
+    },
+    "discover.topic.music": {
+      "text": "音乐",
+      "status": "machine"
+    },
+    "discover.topic.nature": {
+      "text": "自然",
+      "status": "machine"
+    },
+    "discover.topic.news": {
+      "text": "新闻",
+      "status": "machine"
+    },
+    "discover.topic.other": {
+      "text": "其他",
+      "status": "machine"
+    },
+    "discover.topic.photography": {
+      "text": "摄影",
+      "status": "machine"
+    },
+    "discover.topic.politics": {
+      "text": "政治",
+      "status": "machine"
+    },
+    "discover.topic.religion": {
+      "text": "宗教",
+      "status": "machine"
+    },
+    "discover.topic.science": {
+      "text": "科学",
+      "status": "machine"
+    },
+    "discover.topic.software_development": {
+      "text": "软件开发",
+      "status": "machine"
+    },
+    "discover.topic.sports": {
+      "text": "体育",
+      "status": "machine"
+    },
+    "discover.topic.technology": {
+      "text": "科技",
+      "status": "machine"
+    },
+    "discover.topic.travel": {
+      "text": "旅行",
+      "status": "machine"
+    },
+    "discover.unavailable": {
+      "text": "推荐暂时不可用。",
+      "status": "machine"
+    },
     "display_name.error.control": {
       "text": "请删除不可见字符或文字方向控制字符",
       "status": "machine"
@@ -4268,6 +4632,542 @@
     },
     "ds.clock_skew": {
       "text": "请检查此设备的日期和时间。",
+      "status": "machine"
+    },
+    "feed.action.hide": {
+      "text": "从动态中隐藏",
+      "status": "machine"
+    },
+    "feed.action.hide_hint": {
+      "text": "在动态中静音此对话",
+      "status": "machine"
+    },
+    "feed.attachments.count": {
+      "text": "{count, plural, other {# 个附件}}",
+      "status": "machine"
+    },
+    "feed.banner.dismiss": {
+      "text": "知道了",
+      "status": "machine"
+    },
+    "feed.banner.local": {
+      "text": "你的动态显示这台设备收到的消息。",
+      "status": "machine"
+    },
+    "feed.divider.new": {
+      "text": "新内容",
+      "status": "machine"
+    },
+    "feed.edit": {
+      "text": "编辑",
+      "status": "machine"
+    },
+    "feed.edit_feed": {
+      "text": "编辑动态流",
+      "status": "machine"
+    },
+    "feed.editor.default_name": {
+      "text": "我的动态流",
+      "status": "machine"
+    },
+    "feed.editor.delete": {
+      "text": "删除动态流",
+      "status": "machine"
+    },
+    "feed.editor.delete_confirm": {
+      "text": "要删除此动态流吗？",
+      "status": "machine"
+    },
+    "feed.editor.fade": {
+      "text": "内容淡出速度",
+      "status": "machine"
+    },
+    "feed.editor.fade.day": {
+      "text": "一天",
+      "status": "machine"
+    },
+    "feed.editor.fade.hours": {
+      "text": "几个小时",
+      "status": "machine"
+    },
+    "feed.editor.fade.week": {
+      "text": "一周",
+      "status": "machine"
+    },
+    "feed.editor.filters": {
+      "text": "筛选",
+      "status": "machine"
+    },
+    "feed.editor.for_me": {
+      "text": "仅显示提到我、回复我或回应我的消息的内容",
+      "status": "machine"
+    },
+    "feed.editor.hide_own": {
+      "text": "隐藏我自己的消息",
+      "status": "machine"
+    },
+    "feed.editor.hide_words": {
+      "text": "隐藏词语（每行一个）",
+      "status": "machine"
+    },
+    "feed.editor.icon": {
+      "text": "图标",
+      "status": "machine"
+    },
+    "feed.editor.include_muted": {
+      "text": "包括已静音的对话",
+      "status": "machine"
+    },
+    "feed.editor.look_back": {
+      "text": "回溯天数",
+      "status": "machine"
+    },
+    "feed.editor.look_back_count": {
+      "text": "{count, plural, other {回溯 # 天}}",
+      "status": "machine"
+    },
+    "feed.editor.media_only": {
+      "text": "仅含照片或视频",
+      "status": "machine"
+    },
+    "feed.editor.membership.a11y": {
+      "text": "{name} 在此动态流中",
+      "status": "machine"
+    },
+    "feed.editor.membership.never": {
+      "text": "从不",
+      "status": "machine"
+    },
+    "feed.editor.membership.only": {
+      "text": "仅限",
+      "status": "machine"
+    },
+    "feed.editor.membership_hint": {
+      "text": "“仅限”让动态流只包含如此标记的对话；“从不”排除某个对话。",
+      "status": "machine"
+    },
+    "feed.editor.min_reactions": {
+      "text": "最少回应数",
+      "status": "machine"
+    },
+    "feed.editor.name": {
+      "text": "名称",
+      "status": "machine"
+    },
+    "feed.editor.only_words": {
+      "text": "仅限这些词语（每行一个）",
+      "status": "machine"
+    },
+    "feed.editor.preview": {
+      "text": "预览",
+      "status": "machine"
+    },
+    "feed.editor.preview_pending": {
+      "text": "动态流可以保存后会显示预览。",
+      "status": "machine"
+    },
+    "feed.editor.slider.max": {
+      "text": "很多",
+      "status": "machine"
+    },
+    "feed.editor.slider.min": {
+      "text": "忽略",
+      "status": "machine"
+    },
+    "feed.editor.sources": {
+      "text": "来源",
+      "status": "machine"
+    },
+    "feed.editor.sources.both": {
+      "text": "全部",
+      "status": "machine"
+    },
+    "feed.editor.sources.channels": {
+      "text": "所有频道",
+      "status": "machine"
+    },
+    "feed.editor.sources.groups": {
+      "text": "所有群组",
+      "status": "machine"
+    },
+    "feed.editor.start.blank": {
+      "text": "空白",
+      "status": "machine"
+    },
+    "feed.editor.start_from": {
+      "text": "起点",
+      "status": "machine"
+    },
+    "feed.editor.stripped_hint": {
+      "text": "分享的动态流不含具体对话。在下方选择一些，打造属于你的动态流。",
+      "status": "machine"
+    },
+    "feed.editor.suggestions": {
+      "text": "推荐",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.never": {
+      "text": "从不",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.rarely": {
+      "text": "很少",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.sometimes": {
+      "text": "有时",
+      "status": "machine"
+    },
+    "feed.editor.suggestions_rate": {
+      "text": "推荐频道出现的频率",
+      "status": "machine"
+    },
+    "feed.editor.weight.from_contacts": {
+      "text": "来自你的联系人",
+      "status": "machine"
+    },
+    "feed.editor.weight.media": {
+      "text": "含照片或视频",
+      "status": "machine"
+    },
+    "feed.editor.weight.mentions": {
+      "text": "提到你",
+      "status": "machine"
+    },
+    "feed.editor.weight.reactions": {
+      "text": "回应",
+      "status": "machine"
+    },
+    "feed.editor.weight.recency": {
+      "text": "新近程度",
+      "status": "machine"
+    },
+    "feed.editor.weight.replies": {
+      "text": "回复",
+      "status": "machine"
+    },
+    "feed.editor.what_counts": {
+      "text": "排序依据",
+      "status": "machine"
+    },
+    "feed.empty.discover": {
+      "text": "发现频道",
+      "status": "machine"
+    },
+    "feed.empty.no_match": {
+      "text": "没有符合此动态流的消息。",
+      "status": "machine"
+    },
+    "feed.empty.no_sources": {
+      "text": "你的动态来自你的群组和频道。",
+      "status": "machine"
+    },
+    "feed.empty.nothing_yet": {
+      "text": "这里还没有内容。来自你的群组和频道的新消息会显示在这里。",
+      "status": "machine"
+    },
+    "feed.end": {
+      "text": "你已看完所有内容。",
+      "status": "machine"
+    },
+    "feed.error.cannot_save_here": {
+      "text": "这台设备目前无法保存此内容。",
+      "status": "machine"
+    },
+    "feed.error.delete": {
+      "text": "无法删除动态流。请重试。",
+      "status": "machine"
+    },
+    "feed.error.no_device_key": {
+      "text": "这台设备目前无法保存动态流。",
+      "status": "machine"
+    },
+    "feed.error.save": {
+      "text": "无法保存动态流。请重试。",
+      "status": "machine"
+    },
+    "feed.hidden.empty": {
+      "text": "你的动态中没有隐藏任何内容。",
+      "status": "machine"
+    },
+    "feed.hidden.show_again": {
+      "text": "重新显示",
+      "status": "machine"
+    },
+    "feed.hidden.title": {
+      "text": "已从动态中隐藏",
+      "status": "machine"
+    },
+    "feed.hidden.toast": {
+      "text": "已从动态中隐藏。",
+      "status": "machine"
+    },
+    "feed.icon.bell": {
+      "text": "铃铛",
+      "status": "machine"
+    },
+    "feed.icon.book": {
+      "text": "书",
+      "status": "machine"
+    },
+    "feed.icon.camera": {
+      "text": "相机",
+      "status": "machine"
+    },
+    "feed.icon.code": {
+      "text": "代码",
+      "status": "machine"
+    },
+    "feed.icon.feed": {
+      "text": "动态",
+      "status": "machine"
+    },
+    "feed.icon.flag": {
+      "text": "旗帜",
+      "status": "machine"
+    },
+    "feed.icon.globe": {
+      "text": "地球",
+      "status": "machine"
+    },
+    "feed.icon.heart": {
+      "text": "爱心",
+      "status": "machine"
+    },
+    "feed.icon.lightning": {
+      "text": "闪电",
+      "status": "machine"
+    },
+    "feed.icon.music": {
+      "text": "音乐",
+      "status": "machine"
+    },
+    "feed.icon.speech_bubble": {
+      "text": "对话气泡",
+      "status": "machine"
+    },
+    "feed.icon.star": {
+      "text": "星星",
+      "status": "machine"
+    },
+    "feed.import.a11y": {
+      "text": "导入动态流",
+      "status": "machine"
+    },
+    "feed.import.add": {
+      "text": "添加到我的动态流",
+      "status": "machine"
+    },
+    "feed.import.choose_file": {
+      "text": "选择文件",
+      "status": "machine"
+    },
+    "feed.import.hint": {
+      "text": "打开别人以 .lakkofeed 文件分享给你的动态流。",
+      "status": "machine"
+    },
+    "feed.import.refused": {
+      "text": "此文件不是 Lakko 能打开的动态流。",
+      "status": "machine"
+    },
+    "feed.import.title": {
+      "text": "添加分享的动态流",
+      "status": "machine"
+    },
+    "feed.item.reactions_a11y": {
+      "text": "回应",
+      "status": "machine"
+    },
+    "feed.menu.a11y": {
+      "text": "动态菜单",
+      "status": "machine"
+    },
+    "feed.min_reactions_count": {
+      "text": "{count, plural, other {至少 # 个回应}}",
+      "status": "machine"
+    },
+    "feed.new": {
+      "text": "新建动态流",
+      "status": "machine"
+    },
+    "feed.preset.discover": {
+      "text": "发现",
+      "status": "machine"
+    },
+    "feed.preset.for_me": {
+      "text": "与我相关",
+      "status": "machine"
+    },
+    "feed.preset.latest": {
+      "text": "最新",
+      "status": "machine"
+    },
+    "feed.preset.popular": {
+      "text": "热门",
+      "status": "machine"
+    },
+    "feed.problem.conversations": {
+      "text": "选择的对话太多了。",
+      "status": "machine"
+    },
+    "feed.problem.generic": {
+      "text": "此动态流目前无法保存。",
+      "status": "machine"
+    },
+    "feed.problem.name": {
+      "text": "请为动态流取一个不超过 64 个字符的名称。",
+      "status": "machine"
+    },
+    "feed.problem.no_kinds": {
+      "text": "请选择群组、频道或两者。",
+      "status": "machine"
+    },
+    "feed.problem.stripped": {
+      "text": "此分享的动态流不能再指定对话。",
+      "status": "machine"
+    },
+    "feed.problem.too_large": {
+      "text": "此动态流太大，无法保存。",
+      "status": "machine"
+    },
+    "feed.problem.weight": {
+      "text": "有一个滑块超出范围。",
+      "status": "machine"
+    },
+    "feed.problem.window": {
+      "text": "回溯天数须在 1 到 30 天之间。",
+      "status": "machine"
+    },
+    "feed.problem.words": {
+      "text": "请检查词语列表：每行一个词，最多 32 个词。",
+      "status": "machine"
+    },
+    "feed.refresh_failed": {
+      "text": "无法检查新消息。",
+      "status": "machine"
+    },
+    "feed.replies.count": {
+      "text": "{count, plural, other {# 条回复}}",
+      "status": "machine"
+    },
+    "feed.share": {
+      "text": "分享",
+      "status": "machine"
+    },
+    "feed.share.a11y": {
+      "text": "分享动态流",
+      "status": "machine"
+    },
+    "feed.share.download": {
+      "text": "下载文件",
+      "status": "machine"
+    },
+    "feed.share.share_file": {
+      "text": "分享文件",
+      "status": "machine"
+    },
+    "feed.share.share_link": {
+      "text": "分享链接",
+      "status": "machine"
+    },
+    "feed.share.stripped": {
+      "text": "具体对话不会包含在内：它们对其他人没有意义。",
+      "status": "machine"
+    },
+    "feed.share.title": {
+      "text": "分享“{name}”",
+      "status": "machine"
+    },
+    "feed.share.unshareable": {
+      "text": "此动态流目前无法分享。",
+      "status": "machine"
+    },
+    "feed.show_new": {
+      "text": "{count, plural, other {显示 # 条新内容}}",
+      "status": "machine"
+    },
+    "feed.summary.factor.contacts": {
+      "text": "你的联系人",
+      "status": "machine"
+    },
+    "feed.summary.factor.media": {
+      "text": "照片和视频",
+      "status": "machine"
+    },
+    "feed.summary.factor.mentions": {
+      "text": "提到你",
+      "status": "machine"
+    },
+    "feed.summary.factor.reactions": {
+      "text": "回应",
+      "status": "machine"
+    },
+    "feed.summary.factor.replies": {
+      "text": "回复",
+      "status": "machine"
+    },
+    "feed.summary.for_me": {
+      "text": "仅限与你相关的内容",
+      "status": "machine"
+    },
+    "feed.summary.hide_own": {
+      "text": "隐藏你自己的消息",
+      "status": "machine"
+    },
+    "feed.summary.hide_words": {
+      "text": "{count, plural, other {隐藏 # 个词语}}",
+      "status": "machine"
+    },
+    "feed.summary.include_muted": {
+      "text": "包括已静音的对话",
+      "status": "machine"
+    },
+    "feed.summary.look_back": {
+      "text": "{count, plural, other {回溯 # 天}}",
+      "status": "machine"
+    },
+    "feed.summary.newest_first": {
+      "text": "最新的在前",
+      "status": "machine"
+    },
+    "feed.summary.only_words": {
+      "text": "仅限含有以下词语的消息：{words}",
+      "status": "machine"
+    },
+    "feed.summary.ranks_by": {
+      "text": "按新近程度及以下因素排序：{factors}",
+      "status": "machine"
+    },
+    "feed.summary.sources.both": {
+      "text": "来源：所有群组和频道",
+      "status": "machine"
+    },
+    "feed.summary.sources.channels": {
+      "text": "来源：所有频道",
+      "status": "machine"
+    },
+    "feed.summary.sources.groups": {
+      "text": "来源：所有群组",
+      "status": "machine"
+    },
+    "feed.switcher.a11y": {
+      "text": "动态流",
+      "status": "machine"
+    },
+    "feed.title": {
+      "text": "动态",
+      "status": "machine"
+    },
+    "feed.why.mentions": {
+      "text": "提到了你",
+      "status": "machine"
+    },
+    "feed.why.popular": {
+      "text": "在 {source} 中很热门",
+      "status": "machine"
+    },
+    "feed.why.reply": {
+      "text": "回复了你的消息",
       "status": "machine"
     },
     "folders.add_to_folder": {
@@ -4902,6 +5802,10 @@
       "text": "{count, plural, other {最多 # 次}}",
       "status": "machine"
     },
+    "ios.document_type.feed": {
+      "text": "Lakko 动态流",
+      "status": "machine"
+    },
     "ios.permission.camera": {
       "text": "Lakko 使用摄像头扫描你要关联到账户的设备上的二维码、在通话中传输视频，以及录制你选择发送的视频消息。摄像头捕获的所有内容在发送前都会在你的设备上进行端到端加密。",
       "status": "machine"
@@ -4972,6 +5876,10 @@
     },
     "nav.contacts": {
       "text": "联系人",
+      "status": "machine"
+    },
+    "nav.feed": {
+      "text": "动态",
       "status": "machine"
     },
     "nav.rail_a11y": {
@@ -6244,6 +7152,14 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "你今天查找的人太多了。请明天再试。",
+      "status": "machine"
+    },
+    "tokens.search_allowance_used": {
+      "text": "搜索次数过多。请一分钟后再试。",
+      "status": "machine"
+    },
+    "tokens.subscribe_allowance_used": {
+      "text": "你今天订阅了很多频道。请明天再试。",
       "status": "machine"
     },
     "update.available.message": {

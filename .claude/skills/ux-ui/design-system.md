@@ -166,11 +166,13 @@ names; iOS / Android use the same names.
 
 Top-level destinations, in this order, identical on the three clients:
 
-1. **Chats**: the home. Chat list (search, pinned, unread) + the open
-   conversation. Empty state: "No conversations yet" + "New chat".
-2. **Contacts**: accepted contacts, incoming requests, add by username,
+1. **Chats**: the home. Every conversation, one-to-one, groups and
+   channels, in one list (search, pinned, unread). Empty state: "No
+   conversations yet" + "New chat".
+2. **Feed**: messages and posts from groups and channels, ranked by
+   preset or personal rules, plus channel suggestions (`docs/ux/feed.md`).
+3. **Contacts**: accepted contacts, incoming requests, add by username,
    invite link.
-3. **Channels**: subscribed channels, discover / join, create.
 4. **Calls**: recent calls, "Create call link", join by link.
 5. **Settings**: Profile · Privacy · Security · Notifications · Chat folders ·
    Appearance · Language · Data · About.

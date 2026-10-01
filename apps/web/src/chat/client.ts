@@ -108,6 +108,7 @@ import { sniffProfileRequest } from "../profile/profile-request";
 import { sniffGroupName } from "./group-name-envelope";
 import type { StoredGroupName } from "./group-name-store";
 import { sniffPin } from "./pin-envelope";
+import { sniffSharedChannels, type SharedList } from "../discover/shared-channels";
 import { isRegistrarSeedEnvelope } from "./registrar-seed-envelope";
 import { deliverRegistrarSeed } from "../ds/registrar-seeds";
 import { noteOwnerTransition, readRoleTableOwner } from "../ds/root-handover";
@@ -466,6 +467,22 @@ export type IncomingChatEvent =
       /** The sender's ACCOUNT key resolved at receipt (C-68), the key the
        *  ADR-0022 role table names. `undefined` ⇒ unverifiable in a group
        *  with a role table, dropped. */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0059 section 6 — the listed channels one member shares with
+       *  this group. Never a timeline bubble: the receive loop files it
+       *  under `senderKey` in the shared-channels store (strictly newer
+       *  stamp per member) under the per-group lock. `list` is `undefined`
+       *  when the domain matched but the envelope failed its bounds: dropped. */
+      kind: "shared-channels";
+      messageId: number;
+      list: SharedList | undefined;
+      /** Diagnostic only. */
+      senderLeaf: number | undefined;
+      /** The sender's ACCOUNT key resolved at receipt (C-68) — the only key
+       *  a list may be filed under. `undefined` ⇒ dropped. */
       senderKey: MemberIdentity | undefined;
       createdAt: string;
     }
@@ -1572,6 +1589,23 @@ export async function toEvent(
           kind: "pin",
           messageId,
           pin: sniff.kind === "pin" ? sniff.value : undefined,
+          senderLeaf,
+          senderKey,
+          createdAt,
+        };
+      }
+    }
+    // ADR-0059 section 6 — a shared-channels list, before the chat parser
+    // for the same reason as the pin: the lossy-UTF-8 fallback would render
+    // it as a bubble carrying the domain string and channel names. A domain
+    // match that fails its bounds is dropped (`list: undefined`).
+    {
+      const sniff = sniffSharedChannels(await loadWasm(), bytes);
+      if (sniff.kind !== "none") {
+        return {
+          kind: "shared-channels",
+          messageId,
+          list: sniff.kind === "list" ? sniff.value : undefined,
           senderLeaf,
           senderKey,
           createdAt,

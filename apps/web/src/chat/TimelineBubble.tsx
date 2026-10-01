@@ -218,6 +218,11 @@ export function TimelineBubble(
       // `rows()`. Defensive.
       return null;
     }
+    if (ev.kind === "shared-channels") {
+      // ADR-0059 section 6 — filed in the shared-channels store, never
+      // pushed into `rows()`. Defensive.
+      return null;
+    }
     if (ev.kind === "scopedDiscovery") {
       // ADR-0060 — dispatched to its handler by the receive loop, never
       // pushed into `rows()`. Defensive.

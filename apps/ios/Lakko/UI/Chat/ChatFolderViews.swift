@@ -507,23 +507,31 @@ struct ChatFoldersSettingsScreen: View {
     let startInReorder: Bool
     @ObservedObject var viewModel: ChatListViewModel
     @ObservedObject var channels: ChannelsUiState
+    /// The channel unread counts the chat list shows (ADR-0063), so a
+    /// channel row in the folder editor's picker carries the same count.
+    @ObservedObject var feedReading: FeedReadingModel
     @EnvironmentObject private var sync: DeviceGroupSyncRepository
 
     @State private var editMode: EditMode
     @State private var editor: FolderEditorRequest?
     @ObservedObject private var l10n = Localization.shared
 
-    init(startInReorder: Bool, viewModel: ChatListViewModel, channels: ChannelsUiState) {
+    init(
+        startInReorder: Bool, viewModel: ChatListViewModel, channels: ChannelsUiState,
+        feedReading: FeedReadingModel
+    ) {
         self.startInReorder = startInReorder
         self.viewModel = viewModel
         self.channels = channels
+        self.feedReading = feedReading
         _editMode = State(initialValue: startInReorder ? .active : .inactive)
     }
 
     private var rows: [ConversationListRow] {
         ChatListScreen.allRows(
             viewModel: viewModel, channels: channels,
-            flags: sync.flags, readCursors: sync.readCursors)
+            flags: sync.flags, readCursors: sync.readCursors,
+            channelUnread: feedReading.channelUnread)
     }
 
     private var atLimit: Bool { sync.folders.count >= ChatFolders.maxFolders }

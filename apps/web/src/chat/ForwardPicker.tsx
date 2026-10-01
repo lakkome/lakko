@@ -38,8 +38,7 @@ import { Icon } from "../ui/icons";
 import { ModalLayer } from "../ui/ModalLayer";
 import { summarizeGroupSlot } from "./background-log";
 import { useChats, type ActiveGroup } from "./ChatContext";
-import { decideConversationKind } from "./conversation-kind";
-import { persistedConversationKind } from "./conversation-kind-store";
+import { conversationKindOf } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
 import {
   filterForwardRows,
@@ -52,7 +51,7 @@ import { groupTitle } from "./group-title";
 import { previewLine } from "./list-preview";
 import { readIsActive } from "./membership-ended";
 import { loadMessageLog, type PersistedGroup } from "./message-log-store";
-import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
+import { ownPersonKeyB64, personKeysOf } from "./person-key";
 import { uiRules } from "./ui-rules";
 import { t } from "../l10n";
 import { keyedErrorText } from "../l10n/keyed-error";
@@ -126,12 +125,10 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
   };
 
   const candidates = createMemo((): readonly ForwardCandidate[] => {
-    const account = accountId();
     const flagsMap = sync.flags();
     return chats.groups().map((g) => {
       const hex = syncGroupIdHex(g.group.groupId);
-      const persisted = account === null ? null : persistedConversationKind(account, g.groupIdB64);
-      const kind = decideConversationKind(persisted, peopleCountOf(g.group));
+      const kind = conversationKindOf(g.group);
       const summary = summarizeGroupSlot(logSlots()[hex], null);
       const line = previewLine({
         preview: summary.preview,

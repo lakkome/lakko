@@ -609,7 +609,7 @@ describe("ADR-0050 section 2.5a item 8 — the beacon ranks with the DEVICE iden
       account.ed25519Seed,
       1_700_000_000n,
     );
-    const group = new wasm.Group(device);
+    const group = new wasm.Group(device, wasm.GroupKind.Group);
     try {
       expect(deviceCommitterRank(group, device)).toBe(0);
       expect(group.ownCommitterRank(account)).toBeUndefined();

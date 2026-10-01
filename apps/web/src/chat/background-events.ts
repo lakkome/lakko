@@ -27,6 +27,7 @@
  *   | committerBeacon       | the beacon observation store  | no                      |
  *   | group-name            | the gated group-name store    | no                      |
  *   | pin                   | the gated pin store           | no                      |
+ *   | shared-channels       | the shared-channels store     | no                      |
  *   | serviceEnvelope       | dropped (never rendered)      | no                      |
  *
  * Typing is in-memory state in the chat view, so handing it over matches what
@@ -87,6 +88,8 @@ export interface BackgroundEventPlan {
   readonly groupNames: readonly Of<"group-name">[];
   /** ADR-0052 decision 3 — shared pins, for the role-gated receive. */
   readonly pins: readonly Of<"pin">[];
+  /** ADR-0059 section 6 — members' shared channel lists. */
+  readonly sharedChannels: readonly Of<"shared-channels">[];
   /** ADR-0060 — scoped-discovery service envelopes, for their handlers. */
   readonly scoped: readonly Of<"scopedDiscovery">[];
   /** Proposals the receipt gate STORED; a refused one is a pending request
@@ -108,6 +111,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
   const beacons: Of<"committerBeacon">[] = [];
   const groupNames: Of<"group-name">[] = [];
   const pins: Of<"pin">[] = [];
+  const sharedChannels: Of<"shared-channels">[] = [];
   const scoped: Of<"scopedDiscovery">[] = [];
   const readReceipts: Of<"op">[] = [];
   const messageOps: MessageOpEvent[] = [];
@@ -164,6 +168,9 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
       case "pin":
         pins.push(e);
         break;
+      case "shared-channels":
+        sharedChannels.push(e);
+        break;
       case "scopedDiscovery":
         scoped.push(e);
         break;
@@ -195,6 +202,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
     messageOps,
     groupNames,
     pins,
+    sharedChannels,
     scoped,
     storedProposals,
     sawCommit,

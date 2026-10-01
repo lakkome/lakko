@@ -284,6 +284,14 @@ private fun isServiceEnvelopeOtherThanCall(
     // read-only (C-59).
     if (me.lakko.app.reach.scopedEnvelopeKindOf(payload) != null) return true
 
+    // Kind 10 — ADR-0059 section 6, a member's shared channel list. The same
+    // NUL-terminated-prefix shape (`lakko/shared-channels/v1`), the same
+    // foreground peek. Unfiltered it would be previewed as a notification
+    // body reading the domain and the channel names. Suppressed only: filing
+    // a list is a WRITE, and this path is read-only (C-59); the foreground
+    // files it when it next reads the journal.
+    if (me.lakko.app.discover.looksLikeSharedChannelsEnvelope(payload)) return true
+
     return false
 }
 

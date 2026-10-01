@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 import SwiftUI
 
 /// Manage (UX spec section 5.4): subscribers, co-publishers and access
@@ -22,11 +23,18 @@ struct ChannelManageScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                ChannelNamePanel(channelId: channelId, state: state, client: client)
+                ChannelNamePanel(
+                    channelId: channelId, state: state, client: client,
+                    accountIdentitySeed: accountIdentitySeed)
+                // ADR-0059 — the owner's listing switch (docs/ux/feed.md 6.4).
+                ListInDiscoverPanel(
+                    channelId: channelId, state: state, client: client,
+                    accountIdentitySeed: accountIdentitySeed)
                 SubscribersPanel(
                     channelId: channelId,
                     state: state,
-                    client: client
+                    client: client,
+                    accountIdentitySeed: accountIdentitySeed
                 )
                 CoPublishersPanel(
                     channelId: channelId,
@@ -59,6 +67,7 @@ private struct ChannelNamePanel: View {
     let channelId: String
     @ObservedObject var state: ChannelsUiState
     let client: ChannelsClient
+    let accountIdentitySeed: Data
 
     @State private var name: String = ""
     @State private var description: String = ""
@@ -147,26 +156,42 @@ private struct ChannelNamePanel: View {
         error = nil
         savedFields = nil
         defer { busy = false }
+        // ADR-0059 — a rename keeps the channel's Discover fields.
         guard let meta = ChannelMetaRecord.fresh(
             name: name, description: description,
-            nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+            nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            keeping: channel?.sharedMeta)
         else {
             error = .key("channels.meta.error.name_empty")
             return
         }
         do {
-            try await ChannelMetaRecord.post(state: state, client: client, channelId: channelId, meta: meta)
+            let identity = try Identity.fromSeed(seed: accountIdentitySeed)
+            try await ChannelMetaRecord.post(
+                state: state, client: client, channelId: channelId, meta: meta, accountIdentity: identity)
             // Keep the local copy aligned so a device that never reads its own
             // record back (the publisher) still titles from what it sent.
             state.updateLocalMeta(
                 channelId: channelId, localName: meta.name, localDescription: meta.description)
             seededFrom = meta
             savedFields = (name, description)
+            // ADR-0059 — a listed channel's listing carries the name and
+            // description too; editing them updates it (UX spec 6.4).
+            if meta.listed {
+                do {
+                    try await ChannelListing.refreshAfterEdit(
+                        state: state, client: client, channelIdHex: channelId, identity: identity)
+                } catch {
+                    self.error = .key("discover.listing.update_failed")
+                }
+            }
         } catch let err as LegacyChannelError {
             error = UiText { err.message }
         } catch {
             NSLog("Channels: metadata record post failed: %@", String(describing: error))
-            self.error = .key("channels.meta.error.save")
+            self.error = ChannelsErrorCopy.text(
+                for: error, prefixKey: "channels.meta.error.save_prefix",
+                fallbackKey: "channels.meta.error.save")
         }
     }
 }

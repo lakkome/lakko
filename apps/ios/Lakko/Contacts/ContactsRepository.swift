@@ -1124,6 +1124,7 @@ public final class ContactsRepository: ObservableObject {
                 groupIdHex = try await chatRepository.startGroupWith(
                     recipientAccountId: inviterAccountId,
                     recipientSignaturePubkey: inviterSigPubkey,
+                    kind: .oneToOne,
                     recipientWriteAuth: DsMailboxWriteAuth(
                         reachSeed: capability.linkGrant().seed)
                 )

@@ -181,10 +181,15 @@ struct LakkoApp: App {
         self._callHost = StateObject(wrappedValue: host)
         self._groupCallHost = StateObject(wrappedValue: groupHost)
         self._linkCallHost = StateObject(wrappedValue: linkHost)
+        // `docs/ux/feed.md` — the Feed's "Couldn't check for new messages."
+        // state, fed by every check (the group sweep below, the channel post
+        // sync and pull to refresh). In memory, per account.
+        let feedRefresh = FeedRefreshCenter()
         self._foregroundReceive = StateObject(
             wrappedValue: ForegroundReceiveHolder(
                 scheduler: ForegroundReceiveScheduler.live(
-                    repository: chat, callHost: host, groupCallHost: groupHost)
+                    repository: chat, callHost: host, groupCallHost: groupHost,
+                    feedRefresh: feedRefresh)
             )
         )
         let sync = DeviceGroupSyncRepository()
@@ -276,7 +281,8 @@ struct LakkoApp: App {
             groupCallHost: groupHost,
             linkCallHost: linkHost,
             deviceGroupSync: sync,
-            inviteIntake: intake
+            inviteIntake: intake,
+            feedRefresh: feedRefresh
         )
     }
 
@@ -594,6 +600,8 @@ struct AppRoot: View, Equatable {
                 // forgetDevice) tears down the cross-device sync
                 // runtime so the next login bootstraps fresh.
                 services.deviceGroupSync.clear()
+                // No account, no feed checks to report.
+                services.feedRefresh.reset()
                 // ADR-0048 — no account, no own profile to publish.
                 ProfileDirectory.shared.deactivate()
                 // ADR-0060 — no account, no reach keys to register.
@@ -709,6 +717,9 @@ struct AppRoot: View, Equatable {
 /// stack. Calls is back, with the recent-call history it never had.
 enum SessionTab: Hashable {
     case chats
+    /// ADR-0063 — the on-device feed, second so it is one tap from the home
+    /// without displacing it (`docs/ux/feed.md` section 2).
+    case feed
     case contacts
     case calls
     case settings
@@ -743,6 +754,8 @@ enum TabRoute: Hashable {
     case addDevice
     case recoveryFactors
     case antiCensorship
+    /// ADR-0059 section 6 — Settings -> Security -> Channels I share.
+    case channelsIShare
     /// Settings > Language (ADR-0061).
     case language
     /// `docs/ux/chat-folders.md` section 4 — Settings > Chat folders, opened
@@ -801,9 +814,20 @@ private final class SessionModels: ObservableObject {
     /// the merged conversation list and the pushed channel screens have to read
     /// ONE store, and a `@StateObject` on a screen belongs to that screen.
     let channelsState: ChannelsUiState
+    /// ADR-0063 — the foreground channel-post sync and the Feed's model.
+    let channelPostSync: ChannelPostSync
+    let feedVM: FeedViewModel
+    /// `docs/ux/feed.md` section 5 — this device's feed reading state: hidden
+    /// conversations, last looks, channel read markers and counts.
+    let feedReading: FeedReadingModel
+    /// ADR-0059 — Discover's model (owned here so the Feed's model and the
+    /// shared-channels wiring below read one instance).
+    let discoverModel: DiscoverModel
     private var chatModels: [String: ChatViewModel] = [:]
+    private var sharedChannelsWatch: AnyCancellable?
 
-    init(services: AppServices, accountIdB64: String) {
+    init(services: AppServices, account: SessionAccount) {
+        let accountIdB64 = account.accountIdB64
         contactsVM = ContactsViewModel(
             repository: services.contactsRepository,
             chatRepository: services.chatRepository
@@ -812,6 +836,79 @@ private final class SessionModels: ObservableObject {
         // Bound at construction, so the persisted channel list and publisher
         // keys are loaded before the first body evaluation.
         channelsState = ChannelsUiState(accountIdB64: accountIdB64)
+        channelPostSync = ChannelPostSync(accountIdB64: accountIdB64, channels: channelsState)
+        // `docs/ux/feed.md` — every channel sync reports into the app-wide
+        // refresh state; another account's results are forgotten here.
+        let feedRefresh = services.feedRefresh
+        feedRefresh.bind(accountIdB64: accountIdB64)
+        channelPostSync.onSyncDone = { [weak feedRefresh] tally in
+            feedRefresh?.record(.channels, tally)
+        }
+        let reading = FeedReadingModel(accountIdB64: accountIdB64)
+        feedReading = reading
+        // A channel synced for the first time gets its read marker at the
+        // newest post it holds, so a fresh subscription shows no count.
+        channelPostSync.onSlotSynced = { [weak reading] channelId, slot in
+            reading?.update { $0.seedingChannelReads([channelId: slot]) }
+        }
+        reading.bind(postSync: channelPostSync, channels: channelsState)
+        let chatRepository = services.chatRepository
+        let channels = channelsState
+        let chatList = chatListVM
+        let contacts = services.contactsRepository
+        let hub = chatRepository.sharedChannels
+        // ADR-0059 section 6 — the listed channels this device follows, as the
+        // share rule reads them: subscribed (a subscriber key is held), listed
+        // by the channel's own metadata v2, under the handle it was found by.
+        hub.shareable = {
+            channels.channels.map { c in
+                SharedChannels.Shareable(
+                    channelIdHex: c.id,
+                    subscribed: channels.subscriberKeysByChannel[c.id] != nil,
+                    listed: c.sharedListed,
+                    handle: String(c.handle.trimmingCharacters(in: .whitespaces).drop(while: { $0 == "@" })),
+                    name: c.sharedMeta?.name ?? c.localName)
+            }
+        }
+        discoverModel = DiscoverModel(
+            accountIdB64: accountIdB64,
+            client: ChannelsClient(),
+            hub: hub,
+            deps: DiscoverModel.Deps(
+                liveGroups: {
+                    Set(chatRepository.state.threads
+                        .filter { !$0.membershipEnded && chatList.kind(of: $0.groupIdHex) == .group }
+                        .map(\.groupIdHex))
+                },
+                groupTitle: { chatList.title(groupIdHex: $0) },
+                contactName: { key in
+                    guard contacts.state.accepted.contains(where: { base64Encode($0.request.fromPubkey) == key })
+                    else { return nil }
+                    return ProfileDirectory.shared.resolve(signatureKeyB64: key)?.name
+                },
+                ownKeyB64: { chatRepository.ownPersonKeyB64() },
+                following: { Set(channels.channels.map(\.id)) },
+                publishing: { Set(channels.keysByChannel.keys) },
+                resolveHandle: { try await ChannelDiscovery.resolveChannelHandle($0) },
+                hiddenFromFeeds: { [weak reading] in Set(reading?.reading.hidden ?? []) }))
+        feedVM = FeedViewModel(
+            account: account,
+            chatRepository: services.chatRepository,
+            chatList: chatListVM,
+            channels: channelsState,
+            postSync: channelPostSync,
+            deviceGroupSync: services.deviceGroupSync,
+            contacts: services.contactsRepository,
+            discover: discoverModel,
+            reading: reading,
+            refreshCenter: feedRefresh)
+        // A change of the followed listed set (a subscribe, an unsubscribe, a
+        // channel becoming listed or unlisted): re-send to every group the
+        // switch is on in whose last list differs. Debounced, so a burst
+        // becomes one list (chosen, the web client's 3 s).
+        sharedChannelsWatch = channels.objectWillChange
+            .debounce(for: .seconds(3), scheduler: RunLoop.main)
+            .sink { _ in Task { @MainActor in await hub.resendChanged() } }
     }
 
     func chatViewModel(for groupIdHex: String, make: () -> ChatViewModel) -> ChatViewModel {
@@ -862,6 +959,7 @@ private struct SessionRoot: View, Equatable {
 
     @State private var selectedTab: SessionTab = .chats
     @State private var chatsPath: [TabRoute] = []
+    @State private var feedPath: [TabRoute] = []
     @State private var contactsPath: [TabRoute] = []
     @State private var callsPath: [TabRoute] = []
     @State private var settingsPath: [TabRoute] = []
@@ -871,8 +969,7 @@ private struct SessionRoot: View, Equatable {
         self.services = services
         self._inviteIntake = ObservedObject(wrappedValue: services.inviteIntake)
         self._models = StateObject(
-            wrappedValue: SessionModels(
-                services: services, accountIdB64: account.accountIdB64))
+            wrappedValue: SessionModels(services: services, account: account))
     }
 
     nonisolated static func == (lhs: SessionRoot, rhs: SessionRoot) -> Bool {
@@ -888,6 +985,7 @@ private struct SessionRoot: View, Equatable {
                 ChatListScreen(
                     viewModel: chatListVM,
                     channels: channelsState,
+                    feedReading: models.feedReading,
                     onOpen: { openConversation($0) },
                     onCreate: { create($0) },
                     onFoundChannel: { channelId, handle in
@@ -938,6 +1036,31 @@ private struct SessionRoot: View, Equatable {
             }
             .tabItem { Label(l10n.t("nav.chats"), systemImage: "bubble.left") }
             .tag(SessionTab.chats)
+
+            NavigationStack(path: $feedPath) {
+                FeedScreen(
+                    model: models.feedVM,
+                    onOpenGroup: { groupIdHex, messageId in
+                        chatViewModel(for: groupIdHex).requestJump(to: messageId)
+                        push(.chat(groupIdHex: groupIdHex), on: .feed)
+                    },
+                    onReplyGroup: { groupIdHex, messageId in
+                        let chat = chatViewModel(for: groupIdHex)
+                        chat.requestJump(to: messageId)
+                        chat.requestReply(to: messageId)
+                        push(.chat(groupIdHex: groupIdHex), on: .feed)
+                    },
+                    onOpenConversation: { push(.chat(groupIdHex: $0), on: .feed) },
+                    onOpenChannel: { push(.channel(channelId: $0), on: .feed) },
+                    onGoToChats: { selectedTab = .chats },
+                    onOpenFoundChannel: { channelId, handle in
+                        push(.channelFound(channelId: channelId, handle: handle), on: .feed)
+                    }
+                )
+                .navigationDestination(for: TabRoute.self) { routeView($0, tab: .feed) }
+            }
+            .tabItem { Label(l10n.t("nav.feed"), systemImage: "newspaper") }
+            .tag(SessionTab.feed)
 
             NavigationStack(path: $contactsPath) {
                 ContactsScreen(viewModel: contactsVM)
@@ -1008,6 +1131,27 @@ private struct SessionRoot: View, Equatable {
         .onChange(of: inviteIntake.pendingSlug) { _, _ in pushPendingDeepLinks() }
         .onChange(of: inviteIntake.pendingGroupJoinSlug) { _, _ in pushPendingDeepLinks() }
         .onChange(of: inviteIntake.pendingCallJoinSlug) { _, _ in pushPendingDeepLinks() }
+        // ADR-0063 — a shared feed link opens the import on the Feed tab.
+        .onChange(of: inviteIntake.pendingFeedImport) { _, _ in openPendingFeedImport() }
+        // ADR-0063 section 4 — channel posts join the foreground poll for the
+        // whole session, so the feed has them without opening each channel.
+        .task(id: account.accountIdB64) {
+            models.channelPostSync.start()
+            openPendingFeedImport()
+        }
+        // ADR-0059 section 4 — let new subscribers into every channel this
+        // device posts to while the app is in front, whatever screen is
+        // showing, not only while that channel's Manage screen is open. The
+        // task ends with the session root (sign-out, forget, account switch),
+        // and the shared state is dropped with it.
+        .task(id: account.accountIdB64) {
+            let admission = SubscriberAdmission.shared
+            admission.reset()
+            defer { admission.reset() }
+            await admission.runLoop(
+                channels: models.channelsState,
+                accountIdentitySeed: { authRepository.identitySecrets?.accountIdentitySeed })
+        }
         // A landing popped with the back gesture (not its own Done) drops the
         // parked slug, so the next tap of the same link opens it again; and a
         // chat popped from every stack releases its view model.
@@ -1264,9 +1408,6 @@ private struct SessionRoot: View, Equatable {
                 chatRepository: chatRepository,
                 onCreated: { groupIdHex, notice in
                     let model = chatViewModel(for: groupIdHex)
-                    // UX spec section 5.1 — made through the new-group flow:
-                    // a group, even while it still has two people.
-                    model.markConversationAsGroup()
                     if let notice { model.noteSetupNotice(notice) }
                     replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
                 }
@@ -1281,7 +1422,10 @@ private struct SessionRoot: View, Equatable {
                     channelId: channelId,
                     state: channelsState,
                     client: ChannelsClient(),
-                    accountIdentitySeed: seed)
+                    accountIdentitySeed: seed,
+                    onPostRead: { [feedReading = models.feedReading] in
+                        feedReading.advanceChannelRead($0, cursor: $1)
+                    })
             } else {
                 channelSeedMissing(l10n.t("channels.fallback_name"))
             }
@@ -1295,7 +1439,10 @@ private struct SessionRoot: View, Equatable {
                     state: channelsState,
                     client: ChannelsClient(),
                     accountIdentitySeed: seed,
-                    foundHandle: handle)
+                    foundHandle: handle,
+                    onPostRead: { [feedReading = models.feedReading] in
+                        feedReading.advanceChannelRead($0, cursor: $1)
+                    })
             } else {
                 channelSeedMissing(l10n.t("channels.fallback_name"))
             }
@@ -1402,11 +1549,19 @@ private struct SessionRoot: View, Equatable {
             RecoveryFactorsScreen(authRepository: authRepository)
         case .antiCensorship:
             AntiCensorshipSettingsView(manager: AntiCensorshipManager.shared)
+        case .channelsIShare:
+            ChannelsIShareScreen(
+                hub: chatRepository.sharedChannels,
+                title: { groupIdHex in
+                    chatRepository.state.threads.contains { $0.groupIdHex == groupIdHex }
+                        ? chatListVM.title(groupIdHex: groupIdHex) : nil
+                })
         case .language:
             LanguageScreen()
         case .chatFolders(let reorder):
             ChatFoldersSettingsScreen(
-                startInReorder: reorder, viewModel: chatListVM, channels: channelsState)
+                startInReorder: reorder, viewModel: chatListVM, channels: channelsState,
+                feedReading: models.feedReading)
         case .whoCanFindMe:
             WhoCanFindMeScreen(
                 reach: ReachCenter.shared,
@@ -1501,12 +1656,20 @@ private struct SessionRoot: View, Equatable {
     // MARK: - Path plumbing
 
     private var allPaths: [[TabRoute]] {
-        [chatsPath, contactsPath, callsPath, settingsPath]
+        [chatsPath, feedPath, contactsPath, callsPath, settingsPath]
+    }
+
+    /// Hand a parked `/feed/import#...` link to the Feed tab's import sheet.
+    private func openPendingFeedImport() {
+        guard let request = inviteIntake.takeFeedImport() else { return }
+        selectedTab = .feed
+        models.feedVM.importing = request
     }
 
     private func path(for tab: SessionTab) -> Binding<[TabRoute]> {
         switch tab {
         case .chats: return $chatsPath
+        case .feed: return $feedPath
         case .contacts: return $contactsPath
         case .calls: return $callsPath
         case .settings: return $settingsPath

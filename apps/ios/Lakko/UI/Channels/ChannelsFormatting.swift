@@ -247,6 +247,8 @@ enum ChannelsErrorCopy {
         case "post-too-large": return "channels.error.post_too_large"
         case "empty-post": return "channels.error.empty_post"
         case "envelope-not-ready": return "channels.error.not_let_in"
+        // G-43 — a publisher-signed write the server refused.
+        case ChannelsApiError.publisherRefusedCode: return "channels.error.publisher_refused"
         default: return "channels.error.refused"
         }
     }

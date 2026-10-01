@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn the_extension_signer_matches_the_full_surface_derivation() {
         let identity = MlsIdentity::generate("e").unwrap();
-        let group = MlsGroup::create(&identity).unwrap();
+        let group = MlsGroup::create(&identity, lakko_mls::GroupKind::Group).unwrap();
         let signer = group_signer(&group, &identity).unwrap();
         // The same exporter call the full surface makes yields the same key.
         let secret = group

@@ -84,7 +84,7 @@ describe("the wasm signer the client drives", () => {
 
   it("a group signer proves requests at its epoch (ADR-0057: it registers nothing)", () => {
     const id = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x24));
-    const group = new wasm.Group(id);
+    const group = new wasm.Group(id, wasm.GroupKind.Group);
     const s0 = group.dsAccessSigner(id);
     expect(s0.verifyingKey().length).toBe(32);
     const header = s0.sign("GET", "/ds/group/aa/messages", "after=0&wait=25", new Uint8Array(0));

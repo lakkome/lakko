@@ -22,9 +22,9 @@ import SwiftUI
 ///
 /// **The row says nothing about which kind it is.** No badge, no label, no
 /// differing avatar; the kind only routes a tap. A channel additionally draws
-/// no pin, mute, archive or unread mark, because those are keyed on a
-/// conversation id a channel does not carry — a badge that can never be
-/// non-zero would be a lie about what the app knows.
+/// no pin, mute or archive mark, because those are keyed on a conversation id
+/// a channel does not carry. Its unread badge is its count of new posts
+/// (`docs/ux/feed.md` section 5, "Channel posts"), kept on this device.
 ///
 /// Rendered as the root of the Chats tab's `NavigationStack`; tapping a row
 /// asks the host to push the screen that row's kind opens.
@@ -42,6 +42,10 @@ public struct ChatListScreen: View {
     /// groups. Observed rather than passed as a snapshot: a post arriving
     /// re-times a channel's row, and re-timing is re-ordering.
     @ObservedObject public var channels: ChannelsUiState
+    /// `docs/ux/feed.md` section 5 — each channel's count of new posts (posts
+    /// newer than the newest read, in the feed or the channel), drawn as the
+    /// row's unread badge.
+    @ObservedObject var feedReading: FeedReadingModel
     /// ADR-0061 — the title follows the interface language.
     @ObservedObject private var l10n = Localization.shared
     /// Open the conversation this row names, whichever kind it is.
@@ -74,9 +78,10 @@ public struct ChatListScreen: View {
     /// where the person already looks, and answerable without navigating.
     @EnvironmentObject private var callHost: CallHost
 
-    public init(
+    init(
         viewModel: ChatListViewModel,
         channels: ChannelsUiState,
+        feedReading: FeedReadingModel,
         onOpen: @escaping (ConversationListRow) -> Void,
         onCreate: @escaping (CreateChoice) -> Void,
         onFoundChannel: @escaping (String, String) -> Void,
@@ -86,6 +91,7 @@ public struct ChatListScreen: View {
     ) {
         self.viewModel = viewModel
         self.channels = channels
+        self.feedReading = feedReading
         self.onOpen = onOpen
         self.onCreate = onCreate
         self.onFoundChannel = onFoundChannel
@@ -223,7 +229,8 @@ public struct ChatListScreen: View {
             viewModel: viewModel,
             channels: channels,
             flags: deviceGroupSync.flags,
-            readCursors: deviceGroupSync.readCursors)
+            readCursors: deviceGroupSync.readCursors,
+            channelUnread: feedReading.channelUnread)
     }
 
     /// The merged list, ordered by the shared rule. One definition for the
@@ -232,10 +239,12 @@ public struct ChatListScreen: View {
         viewModel: ChatListViewModel,
         channels: ChannelsUiState,
         flags: [String: FlagsState],
-        readCursors: [String: ReadCursorState]
+        readCursors: [String: ReadCursorState],
+        channelUnread: [String: Int]
     ) -> [ConversationListRow] {
         let chatRows = Self.chatRows(viewModel: viewModel, flags: flags, readCursors: readCursors)
-        return ConversationList.sorted(chatRows + Self.channelRows(channels: channels))
+        return ConversationList.sorted(
+            chatRows + Self.channelRows(channels: channels, channelUnread: channelUnread))
     }
 
     /// The chat and group rows, in the shape the ordering takes. One
@@ -283,7 +292,9 @@ public struct ChatListScreen: View {
     /// added, the same way a chat with no messages sorts by when it was
     /// created; the alternative is a freshly subscribed channel invisible at
     /// the bottom of a long list until a fetch lands.
-    static func channelRows(channels: ChannelsUiState) -> [ConversationListRow] {
+    static func channelRows(
+        channels: ChannelsUiState, channelUnread: [String: Int]
+    ) -> [ConversationListRow] {
         let nowMs = ChatRepository.nowMs()
         return channels.channels.map { channel in
             let posts = channels.postsByChannel[channel.id] ?? []
@@ -303,7 +314,8 @@ public struct ChatListScreen: View {
                 kind: .channel,
                 title: model.title,
                 preview: model.secondLine,
-                lastActivityMs: lastPostMs ?? Int64(clamping: channel.addedAtMs))
+                lastActivityMs: lastPostMs ?? Int64(clamping: channel.addedAtMs),
+                unread: channelUnread[channel.id] ?? 0)
         }
     }
 
@@ -664,6 +676,9 @@ public struct ChatListScreen: View {
         let cursorId = Self.decodeBeI64(cursor.upToMessageId)
         return thread.messages.reduce(0) { acc, msg in
             if msg.direction == .outgoing { return acc }
+            // ADR-0063 section 5 — a message the feed showed is seen, even
+            // when it sits above messages that are not.
+            if thread.feedSeen.contains(msg.messageId) { return acc }
             if msg.messageId > cursorId { return acc + 1 }
             return acc
         }
@@ -951,21 +966,18 @@ public final class ChatListViewModel: ObservableObject {
         StateBundle.pendingKnownGroups(joinedGroupIdHexes: threads.map { $0.groupIdHex }) > 0
     }
 
-    /// The conversation's kind. Only routes a tap and picks the preview's
-    /// sender prefix; the list draws both the same.
-    ///
-    /// The decision — and the write it can make — lives on the repository,
-    /// because the Calls index asks the same question and two copies of a
-    /// decision that also writes would race each other.
+    /// The conversation's kind (ADR-0062, read from the group's own
+    /// GroupContext). Routes a tap, splits Chats from Groups and picks the
+    /// preview's sender prefix. A two-person group is a group here, on every
+    /// member's device.
     func kind(of groupIdHex: String) -> ConversationKind {
         repository.conversationKind(groupIdHex: groupIdHex)
     }
 
     /// The row title (ADR-0051 §5): the shared group name whenever the
-    /// conversation has one — whatever its kind or member count, since a
-    /// two-person conversation renamed from another client is still keyed as
-    /// a chat here — else the other person's resolved name (ADR-0048) for a
-    /// chat, else the members' names. Never a hex id (UX spec section 6).
+    /// conversation has one (only a group can: a name received in a
+    /// one-to-one is dropped, ADR-0062 §7) — else the other person's resolved
+    /// name (ADR-0048) for a one-to-one, else the members' names. Never a hex id (UX spec section 6).
     func title(groupIdHex: String) -> String {
         if let shared = repository.groupName(groupIdHex: groupIdHex) {
             return shared

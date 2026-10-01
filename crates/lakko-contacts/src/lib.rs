@@ -88,6 +88,7 @@ pub mod ack;
 pub mod call_invite;
 pub mod call_kp_forward;
 pub mod call_welcome;
+pub mod channel_text;
 pub mod committer_beacon;
 pub mod committer_delegation;
 pub mod envelope;
@@ -109,6 +110,7 @@ pub mod reach;
 pub mod registrar_seed;
 pub mod request;
 pub mod safety;
+pub mod shared_channels;
 pub mod username;
 pub mod visibility;
 
@@ -126,6 +128,10 @@ pub use call_kp_forward::{
 pub use call_welcome::{
     try_unwrap_call_welcome, wrap_call_welcome, CallWelcomeError, CALL_WELCOME_ENVELOPE_DOMAIN_V1,
     CALL_WELCOME_MIN_PAYLOAD_LEN,
+};
+pub use channel_text::{
+    check_description as check_channel_description, check_name as check_channel_name,
+    ChannelTextError,
 };
 pub use committer_beacon::{
     acting_committer_verdict, compose_committer_beacon, decode_committer_beacon,
@@ -220,6 +226,12 @@ pub use request::{
 pub use safety::{
     safety_number, safety_number_bytes, SAFETY_NUMBER_DIGITS, SAFETY_NUMBER_DIGITS_PER_GROUP,
     SAFETY_NUMBER_GROUPS,
+};
+pub use shared_channels::{
+    compose_shared_channels, decode_shared_channels, shared_channels_is_newer,
+    try_unwrap_shared_channels, SharedChannel, SharedChannels, SharedChannelsError,
+    SHARED_CHANNELS_ENVELOPE_DOMAIN_V1, SHARED_CHANNELS_ENVELOPE_MAX_LEN,
+    SHARED_CHANNELS_ENVELOPE_MIN_LEN, SHARED_CHANNELS_MAX, SHARED_CHANNELS_VERSION_V1,
 };
 pub use username::{
     check_canonical_username, login_handle, UsernameError, LOGIN_HANDLE_DOMAIN, LOGIN_HANDLE_LEN,

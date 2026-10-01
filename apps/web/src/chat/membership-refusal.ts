@@ -260,6 +260,15 @@ export const DEVICE_LIMIT_REACHED = (): string => t("chat.refusal.device_limit",
 /** ADR-0050 — a device whose binding the group refuses. */
 export const DEVICE_BINDING_INVALID = (): string => t("chat.refusal.device_binding");
 
+/** ADR-0062 — a one-to-one is always the same two people. No screen offers
+ *  an add, remove or leave there, so these are plain facts for a refusal
+ *  that should never be reached from the UI. */
+export const ONE_TO_ONE_MEMBERSHIP_FIXED = (): string => t("chat.refusal.one_to_one_fixed");
+/** ADR-0062 — a one-to-one has no admins and no ownership to hand over. */
+export const ONE_TO_ONE_HAS_NO_ROLES = (): string => t("chat.refusal.one_to_one_no_roles");
+/** ADR-0062 — a change that would alter what kind of conversation this is. */
+export const GROUP_KIND_CHANGED = (): string => t("chat.refusal.group_kind_changed");
+
 const TABLE: Readonly<Record<string, Copy>> = {
   addNotOwnerOrAdmin: { fact: ADD_NOT_OWNER_OR_ADMIN },
   removeNotOwnerOrAdmin: { fact: REMOVE_NOT_OWNER_OR_ADMIN },
@@ -276,6 +285,11 @@ const TABLE: Readonly<Record<string, Copy>> = {
   // client bug and gets the same plain sentence rather than a screen.
   deviceLimitReached: { fact: DEVICE_LIMIT_REACHED },
   deviceBindingInvalid: { fact: DEVICE_BINDING_INVALID },
+  // ADR-0062: neutral facts, no invitation — none of the three resolves by
+  // waiting (NotPermitted / NotPermitted / DoNotRetry in the core).
+  oneToOneMembershipFixed: { fact: ONE_TO_ONE_MEMBERSHIP_FIXED },
+  oneToOneHasNoRoles: { fact: ONE_TO_ONE_HAS_NO_ROLES },
+  groupKindChanged: { fact: GROUP_KIND_CHANGED },
 };
 
 /**

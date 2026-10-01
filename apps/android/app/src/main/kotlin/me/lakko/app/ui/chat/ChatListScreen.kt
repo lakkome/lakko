@@ -575,7 +575,32 @@ internal fun rememberConversationRows(
     // Channels are their own store, so they have to be mapped in. Their last
     // POST time becomes the same field as a chat's last MESSAGE time, or the
     // one ordering has nothing to order by.
-    val channelRows = remember(channelHandles, channelPosts, channelKeys, strings) {
+    // `docs/ux/feed.md` section 5, "Channel posts" — a channel's count of new
+    // posts: those newer than the newest one read, here, in the channel or in
+    // the feed. Counted over the channel-post log the feed keeps.
+    val listAccount = repository.currentAccountIdB64()
+    val channelPostsVersion by me.lakko.app.feed.FeedSealedStore.channelPostsChanged.collectAsStateWithLifecycle()
+    val channelPostCursors by androidx.compose.runtime.produceState(
+        initialValue = emptyMap<String, List<Long>>(),
+        listAccount,
+        channelPostsVersion,
+    ) {
+        val acct = listAccount
+        value = if (acct == null) {
+            emptyMap()
+        } else {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                me.lakko.app.feed.FeedSealedStore.loadChannelPostLog(context, acct).channels
+                    .mapValues { (_, slot) -> slot.posts.map { it.cursor } }
+            }
+        }
+    }
+    val readingFlow = remember(listAccount) {
+        listAccount?.let { me.lakko.app.feed.FeedReadingStore.flow(context, it) }
+            ?: MutableStateFlow(me.lakko.app.feed.FeedReading())
+    }
+    val reading by readingFlow.collectAsStateWithLifecycle()
+    val channelRows = remember(channelHandles, channelPosts, channelKeys, channelPostCursors, reading.channelRead, strings) {
         val now = System.currentTimeMillis()
         channelHandles.map { channel ->
             val model = channelRowModel(
@@ -596,9 +621,14 @@ internal fun rememberConversationRows(
                 preview = model.subtitle,
                 time = model.time,
                 lastActivityMs = model.sortMs,
-                // Unread, pinned, muted and archived are keyed on a
-                // conversation id a channel does not carry, so a channel row
-                // shows none of them (section 6.1).
+                // Pinned, muted and archived are keyed on a conversation id a
+                // channel does not carry, so a channel row shows none of them
+                // (section 6.1). Its count is the feed's channel read state.
+                unread = me.lakko.app.feed.channelUnreadCount(
+                    postCursors = channelPostCursors[channel.id].orEmpty(),
+                    readThrough = reading.channelRead[channel.id],
+                    own = channelKeys.containsKey(channel.id),
+                ),
             )
         }
     }
@@ -828,7 +858,7 @@ internal fun threadConversationRows(
     locale: Locale,
     strings: Strings = Localization.strings.value,
 ): List<ConversationListRow> = threads.map { thread ->
-    val kind = conversationKind(context, repository, thread.groupIdHex)
+    val kind = conversationKind(repository, thread.groupIdHex)
     // A call row IS the conversation's last event and belongs in the
     // preview; the receive loop's bookkeeping rows are not and never
     // did. Found live: a group whose only rows were commits showed the
@@ -922,9 +952,17 @@ internal fun rowPreview(
  *     the chat was not on screen ([ChatThread.localUnread]). Without it a chat
  *     with no cursor never showed a badge, whatever arrived. */
 internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
+    // ADR-0063 section 5 — a message the feed showed is read, whether or not
+    // the chat was opened: its id sits in `feedSeen` or under the feed's own
+    // watermark.
+    val feedThrough = thread.feedSeenThrough
     val cursorCount = cursor?.let { c ->
         val cursorId = decodeBeI64(c.upToMessageId)
-        thread.messages.count { m -> m.direction != Direction.Outgoing && m.messageId > cursorId }
+        thread.messages.count { m ->
+            m.direction != Direction.Outgoing && m.messageId > cursorId &&
+                m.messageId !in thread.feedSeen &&
+                (feedThrough == null || m.messageId > feedThrough)
+        }
     }
     return me.lakko.app.chat.combinedUnread(
         cursorCount = cursorCount,

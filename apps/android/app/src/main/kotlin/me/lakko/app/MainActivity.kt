@@ -23,10 +23,12 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.ChatBubble
+import androidx.compose.material.icons.filled.DynamicFeed
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.DynamicFeed
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
@@ -74,6 +76,7 @@ import me.lakko.app.auth.SessionAccount
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.InviteIntake
+import me.lakko.app.feed.reporting
 import me.lakko.app.push.LakkoMessagingService
 import me.lakko.app.push.PushIntake
 import me.lakko.app.ui.auth.LoginScreen
@@ -261,6 +264,8 @@ class MainActivity : ComponentActivity() {
         handleInviteIntent(intent)
         handleGroupJoinIntent(intent)
         handleCallJoinIntent(intent)
+        handleFeedImportIntent(intent)
+        handleFeedFileIntent(intent)
         handleWakeIntent(intent)
         handleCallRingIntent(intent)
 
@@ -346,6 +351,8 @@ class MainActivity : ComponentActivity() {
         handleInviteIntent(intent)
         handleGroupJoinIntent(intent)
         handleCallJoinIntent(intent)
+        handleFeedImportIntent(intent)
+        handleFeedFileIntent(intent)
         handleWakeIntent(intent)
         handleCallRingIntent(intent)
     }
@@ -406,6 +413,39 @@ class MainActivity : ComponentActivity() {
         // and never sent. A URL that lost it, or carries a wrong one, is
         // refused as damaged on the landing, not here.
         inviteIntake.publishGroupJoin(slug, uri.fragment?.takeIf { it.isNotBlank() })
+    }
+
+    /**
+     * ADR-0063 / `docs/ux/feed.md` section 4.1 — a shared feed link
+     * `https?://lakko.me/feed/import#<rule>`. The rule rides in the fragment,
+     * which is read here on the device and never sent anywhere.
+     */
+    private fun handleFeedImportIntent(intent: Intent) {
+        if (intent.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        val path = uri.path ?: return
+        if (path.trimEnd('/') != "/feed/import") return
+        me.lakko.app.ui.feed.FeedImportIntake.publish(uri.encodedFragment)
+    }
+
+    /**
+     * `docs/ux/feed.md` section 5 — a `.lakkofeed` file opened from Files,
+     * mail or a messenger ("Open with", or shared to Lakko). It lands on the
+     * same import screen as the link; whether the bytes are a feed is the
+     * core's to say there, with the same refusal.
+     */
+    private fun handleFeedFileIntent(intent: Intent) {
+        val uri: android.net.Uri = when (intent.action) {
+            Intent.ACTION_VIEW -> intent.data?.takeIf { it.scheme == "content" || it.scheme == "file" }
+            Intent.ACTION_SEND -> if (android.os.Build.VERSION.SDK_INT >= 33) {
+                intent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(Intent.EXTRA_STREAM)
+            }
+            else -> null
+        } ?: return
+        me.lakko.app.ui.feed.FeedImportIntake.publishFile(uri)
     }
 
     /**
@@ -967,6 +1007,34 @@ private fun SessionRoot(
         }
     }
 
+    // ADR-0059 section 6 — the channels this device can share in a group:
+    // subscribed, listed by their own metadata, with a handle. `null` while the
+    // channel list is not bound to the signed-in account, so a list read
+    // before loading never withdraws what was shared. Any change of the list,
+    // the subscriptions or a channel's metadata re-sends (debounced) to every
+    // group the switch is on in whose last list differs.
+    LaunchedEffect(channelsState, chatRepository) {
+        chatRepository.sharedChannels.shareable = shareable@{
+            val acct = chatRepository.currentAccountIdB64() ?: return@shareable null
+            if (channelsState.boundAccount != acct) return@shareable null
+            val subscribed = channelsState.subscriberKeysByChannel.value.keys
+            channelsState.channels.value.map { c ->
+                me.lakko.app.discover.ShareableChannel(
+                    channelIdHex = c.id,
+                    subscribed = c.id in subscribed,
+                    listed = c.sharedListed,
+                    handle = c.handle.takeIf { it.isNotEmpty() },
+                    name = c.sharedName.ifBlank { c.localName },
+                )
+            }
+        }
+        kotlinx.coroutines.flow.combine(
+            channelsState.channels,
+            channelsState.subscriberKeysByChannel,
+        ) { list, keys -> list to keys.keys }
+            .collect { chatRepository.sharedChannels.followedSetChanged() }
+    }
+
     // The app-level receive loop: every group long-polled while the app is in
     // the foreground, WHATEVER screen is showing. Call signaling (the 1x1 call
     // host), group-call records and the chat list's unread counts all come from
@@ -996,11 +1064,18 @@ private fun SessionRoot(
             try {
                 while (true) {
                     val startedAt = android.os.SystemClock.elapsedRealtime()
+                    // docs/ux/feed.md, "refresh failed (network)": every sweep
+                    // reports what it tried and what answered into the feed's
+                    // app-wide failure state, for the account it ran for. A
+                    // sweep that fails as a whole counts as not answered.
+                    val sweepAccount = chatRepository.currentAccountIdB64()
                     try {
-                        chatRepository.pollAllGroups(
-                            waitSecs = APP_LONG_POLL_SECS,
-                            exclude = chatRepository.screenPolledGroups.value,
-                        )
+                        chatRepository.feedRefresh.reporting(sweepAccount, me.lakko.app.feed.CheckKind.GROUPS) {
+                            chatRepository.pollAllGroups(
+                                waitSecs = APP_LONG_POLL_SECS,
+                                exclude = chatRepository.screenPolledGroups.value,
+                            )
+                        }
                     } catch (cancel: kotlinx.coroutines.CancellationException) {
                         throw cancel
                     } catch (_: Throwable) {
@@ -1155,6 +1230,62 @@ private fun SessionRoot(
         inviteIntake.consume()
     }
 
+    // ADR-0063 section 4 — channels join the foreground poll: while the app is
+    // started, the posts of every readable channel are filed into the
+    // channel-post log the feed ranks. At once on start (and on every return
+    // to the foreground), then every minute, and at once after this device
+    // publishes a post.
+    val channelPostSync = remember(channelsState, channelsClient) {
+        me.lakko.app.feed.ChannelPostSync(backupContext, channelsState, channelsClient)
+    }
+    val channelsBound by channelsState.channels.collectAsStateWithLifecycle()
+    LaunchedEffect(lifecycleOwner, channelPostSync, identitySecrets, channelsBound.isNotEmpty()) {
+        if (identitySecrets == null) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) {
+                // docs/ux/feed.md, "refresh failed (network)": each pass reports
+                // into the feed's app-wide failure state; a skipped pass says
+                // nothing.
+                val syncAccount = chatRepository.currentAccountIdB64()
+                chatRepository.feedRefresh.reporting(syncAccount, me.lakko.app.feed.CheckKind.CHANNELS) {
+                    channelPostSync.syncOnce()
+                }
+                // The interval, or sooner when this device just published.
+                me.lakko.app.feed.awaitChannelPostSyncTick()
+            }
+        }
+    }
+
+    // ADR-0059 section 4 — letting new subscribers in: while the app is
+    // started, every channel this device holds publisher keys for (owned or
+    // co-published) has the current seed sealed to each subscriber not yet
+    // let in, every 15 s whatever screen is showing. The channel screens poll
+    // the same shared state faster while open. Restarts when the set of
+    // publisher channels changes (keys re-open after bind); stops on sign-out.
+    val subscriberAdmission = remember(channelsState, channelsClient) {
+        me.lakko.app.channels.SubscriberAdmission.forChannels(channelsState, channelsClient)
+    }
+    val publisherChannels by channelsState.keysByChannel.collectAsStateWithLifecycle()
+    LaunchedEffect(lifecycleOwner, subscriberAdmission, identitySecrets, publisherChannels.keys) {
+        if (identitySecrets == null || publisherChannels.isEmpty()) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) {
+                if (channelsState.boundAccount != null) {
+                    subscriberAdmission.admitAll(channelsState.keysByChannel.value.keys.toList())
+                }
+                kotlinx.coroutines.delay(me.lakko.app.channels.SubscriberAdmission.APP_INTERVAL_MS)
+            }
+        }
+    }
+
+    // A tapped shared-feed link pushes the import screen.
+    val pendingFeedImport by me.lakko.app.ui.feed.FeedImportIntake.pending.collectAsStateWithLifecycle()
+    val pendingFeedFile by me.lakko.app.ui.feed.FeedImportIntake.pendingFile.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingFeedImport, pendingFeedFile) {
+        if (pendingFeedImport == null && pendingFeedFile == null) return@LaunchedEffect
+        navController.navigate(Routes.FEED_IMPORT) { launchSingleTop = true }
+    }
+
     // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link pushes the
     // group-join landing the same way.
     val pendingGroupJoin by inviteIntake.pendingGroupJoin.collectAsStateWithLifecycle()
@@ -1201,6 +1332,7 @@ private fun SessionRoot(
         // In-memory only, like chat.clear(): the persisted channel log and
         // the publisher provider snapshot stay for the next sign-in.
         channelsState.unbind()
+        subscriberAdmission.clear()
         chatRepository.clear()
         authRepository.logout()
     }
@@ -1218,6 +1350,7 @@ private fun SessionRoot(
         me.lakko.app.calls.AppCallHost.reset()
         contactsRepository.clear()
         channelsState.unbind()
+        subscriberAdmission.clear()
         chatRepository.forgetDevice()
         deviceGroupSync.clear()
         authRepository.forgetDevice()
@@ -1337,6 +1470,58 @@ private fun SessionRoot(
                             } else {
                                 navController.navigateToTab(Routes.CONTACTS)
                             }
+                        },
+                    )
+                }
+                // `docs/ux/feed.md` — the ranked feed of group messages and
+                // channel posts (ADR-0063).
+                composable(Routes.FEED) {
+                    me.lakko.app.ui.feed.FeedScreen(
+                        chatRepository = chatRepository,
+                        channels = channelsState,
+                        deviceGroupSync = deviceGroupSync,
+                        contactsRepository = contactsRepository,
+                        ownUsername = account.username
+                            .takeIf { it.isNotBlank() }
+                            ?.let { typed ->
+                                (me.lakko.app.profile.checkUsername(typed) as?
+                                    me.lakko.app.profile.UsernameCheck.Valid)?.normalized
+                            },
+                        onOpenGroupMessage = { hex, messageId ->
+                            me.lakko.app.chat.PendingMessageJump.publish(hex, messageId)
+                            navController.navigate(Routes.chat(hex))
+                        },
+                        onOpenChannel = { id -> navController.navigate(Routes.channel(id)) },
+                        onGoToChats = { navController.navigateToTab(Routes.CHATS) },
+                        channelsClient = channelsClient,
+                        // ADR-0059 — a card whose handle was verified opens the
+                        // ordinary subscribe route under that handle.
+                        onSubscribeChannel = { id, handle ->
+                            navController.navigate(Routes.channelSubscribe(id, handle))
+                        },
+                        // UX spec section 5 — the item menu's Forward opens the
+                        // chat's own picker.
+                        onForward = { navController.navigate(Routes.FORWARD) },
+                    )
+                }
+                composable(Routes.FEED_IMPORT) {
+                    val fragment = remember {
+                        me.lakko.app.ui.feed.FeedImportIntake.pending.value.also {
+                            me.lakko.app.ui.feed.FeedImportIntake.consume()
+                        }
+                    }
+                    val fileUri = remember {
+                        me.lakko.app.ui.feed.FeedImportIntake.pendingFile.value.also {
+                            me.lakko.app.ui.feed.FeedImportIntake.consumeFile()
+                        }
+                    }
+                    me.lakko.app.ui.feed.FeedImportScreen(
+                        accountIdB64 = chatRepository.currentAccountIdB64(),
+                        fragment = fragment,
+                        fileUri = fileUri,
+                        onDone = {
+                            navController.popBackStack()
+                            navController.navigateToTab(Routes.FEED)
                         },
                     )
                 }
@@ -1575,6 +1760,7 @@ private fun SessionRoot(
                         onOpenDevices = { navController.navigate(Routes.DEVICES) },
                         onOpenRecovery = { navController.navigate(Routes.RECOVERY) },
                         onOpenAntiCensorship = { navController.navigate(Routes.ANTI_CENSORSHIP) },
+                        onOpenChannelsIShare = { navController.navigate(Routes.CHANNELS_I_SHARE) },
                         onOpenLanguage = { navController.navigate(Routes.LANGUAGE) },
                         onOpenChatFolders = { navController.navigate(Routes.FOLDERS) },
                         onLogout = logout,
@@ -1596,7 +1782,8 @@ private fun SessionRoot(
                         val groups = chatState.threads
                             .filterNot { it.membershipEnded }
                             .filter {
-                                me.lakko.app.chat.ConversationKindStore.stored(ctx, it.groupIdHex) ==
+                                // ADR-0062 — the kind read from the group.
+                                chatRepository.conversationKind(it.groupIdHex) ==
                                     me.lakko.app.chat.ConversationKind.Group
                             }
                             .map { thread ->
@@ -1866,6 +2053,13 @@ private fun SessionRoot(
                         onBack = { navController.popBackStack() },
                     )
                 }
+                // ADR-0059 section 6 — Settings -> Security -> Channels I share.
+                composable(Routes.CHANNELS_I_SHARE) {
+                    me.lakko.app.ui.discover.ChannelsIShareScreen(
+                        chatRepository = chatRepository,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
                 composable(Routes.LANGUAGE) {
                     me.lakko.app.ui.settings.LanguageScreen(onBack = { navController.popBackStack() })
                 }
@@ -1941,10 +2135,15 @@ private const val APP_POLL_MIN_ITERATION_MS: Long = 1_000L
 /** Navigation routes of the session shell. */
 private object Routes {
     const val CHATS = "chats"
+    const val FEED = "feed"
     const val CONTACTS = "contacts"
     const val CALLS = "calls"
     const val SETTINGS = "settings"
-    val TOP_LEVEL: Set<String> = setOf(CHATS, CONTACTS, CALLS, SETTINGS)
+    val TOP_LEVEL: Set<String> = setOf(CHATS, FEED, CONTACTS, CALLS, SETTINGS)
+
+    /** `docs/ux/feed.md` section 4.1 — a shared feed; the rule rides the
+     *  [me.lakko.app.ui.feed.FeedImportIntake] slot, not the route. */
+    const val FEED_IMPORT = "feed_import"
 
     const val CHAT = "chat/{groupIdHex}"
     fun chat(groupIdHex: String): String = "chat/$groupIdHex"
@@ -1970,6 +2169,7 @@ private object Routes {
     const val DEVICES_ADD = "settings/devices/add"
     const val RECOVERY = "settings/recovery"
     const val ANTI_CENSORSHIP = "settings/anti_censorship"
+    const val CHANNELS_I_SHARE = "settings/channels_i_share"
     const val LANGUAGE = "settings/language"
     /** docs/ux/chat-folders.md section 4. */
     const val FOLDERS = "settings/folders"
@@ -2018,8 +2218,8 @@ private data class TabSpec(
 )
 
 /**
- * The four primary destinations, in the order every client shows them
- * (`docs/ux/navigation.md` section 1).
+ * The five primary destinations, in the order every client shows them
+ * (`docs/ux/navigation.md` section 1; Feed added by ADR-0063).
  *
  * Groups and Channels are gone as destinations: both are KINDS of conversation
  * inside Chats now, because a person does not think "I will go to the Groups
@@ -2033,6 +2233,8 @@ private data class TabSpec(
  */
 private val Tabs: List<TabSpec> = listOf(
     TabSpec(Routes.CHATS, "nav.chats", Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble),
+    // `docs/ux/feed.md` section 2 — second, one tap from the home.
+    TabSpec(Routes.FEED, "nav.feed", Icons.Outlined.DynamicFeed, Icons.Filled.DynamicFeed),
     TabSpec(Routes.CONTACTS, "nav.contacts", Icons.Outlined.People, Icons.Filled.People),
     TabSpec(Routes.CALLS, "nav.calls", Icons.Outlined.Call, Icons.Filled.Call),
     TabSpec(Routes.SETTINGS, "nav.settings", Icons.Outlined.Settings, Icons.Filled.Settings),

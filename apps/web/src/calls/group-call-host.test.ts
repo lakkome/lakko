@@ -180,14 +180,14 @@ function affordance(over: Partial<ChatCallAffordanceInput>): ChatCallAffordanceI
     membershipEnded: false,
     callInProgress: false,
     liveCallInThisChat: false,
-    memberCount: 2,
+    isGroup: false,
     ...over,
   };
 }
 
 describe("chatCallAffordance", () => {
   it("a call in progress anywhere hides the buttons, so a return to its chat never starts a second one", () => {
-    expect(chatCallAffordance(affordance({ callInProgress: true, memberCount: 5 }))).toBe(
+    expect(chatCallAffordance(affordance({ callInProgress: true, isGroup: true }))).toBe(
       "hidden",
     );
     expect(
@@ -202,16 +202,16 @@ describe("chatCallAffordance", () => {
     ).toBe("hidden");
   });
 
-  it("joins a call already in progress in this chat, even a two-member one", () => {
+  it("joins a call already in progress in this chat, even in a one-to-one", () => {
     expect(chatCallAffordance(affordance({ liveCallInThisChat: true }))).toBe("join-group");
-    expect(chatCallAffordance(affordance({ liveCallInThisChat: true, memberCount: 9 }))).toBe(
+    expect(chatCallAffordance(affordance({ liveCallInThisChat: true, isGroup: true }))).toBe(
       "join-group",
     );
   });
 
-  it("otherwise starts a group call for more than two members and a 1x1 call for two", () => {
-    expect(chatCallAffordance(affordance({ memberCount: 3 }))).toBe("start-group");
-    expect(chatCallAffordance(affordance({ memberCount: 2 }))).toBe("start-one-to-one");
+  it("otherwise starts a group call in a group, of any size, and a 1x1 call in a one-to-one", () => {
+    expect(chatCallAffordance(affordance({ isGroup: true }))).toBe("start-group");
+    expect(chatCallAffordance(affordance({ isGroup: false }))).toBe("start-one-to-one");
   });
 });
 

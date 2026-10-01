@@ -56,6 +56,7 @@ import {
   type ChannelPostView,
   channelErrorText,
 } from "../channels/api";
+import { requestChannelPostSync } from "../feed/ChannelPostSync";
 import {
   bytesToHex,
   composePost,
@@ -85,6 +86,7 @@ import { isHiddenPostDecode, PostCard, toPostDecode, type PostDecode } from "../
 import { PublishComposer } from "../channels/PublishComposer";
 import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
+import { markChannelRead } from "../feed/feed-marks-store";
 import { useChats } from "../chat/ChatContext";
 import {
   awaitChannelsHydration,
@@ -307,18 +309,36 @@ function PostList(props: {
   readonly decodedByCursor: ReadonlyMap<number, PostDecode>;
   readonly loading: boolean;
   readonly emptyText?: string;
+  /** The channel these posts are in: shown here, its newest post is read
+   *  (docs/ux/feed.md section 5, "Channel posts"). */
+  readonly channelId: string;
 }): JSX.Element {
+  const auth = useAuth();
   let scroller: HTMLDivElement | undefined;
   // ADR-0051 — a metadata record (and a malformed one) is never a card.
   const ordered = createMemo(() =>
     oldestFirst(props.posts).filter((p) => !isHiddenPostDecode(props.decodedByCursor.get(p.cursor))),
   );
+  /** The list opens at its end, so the newest post on screen is read; the
+   *  feed sees the same mark and stops counting it as new. */
+  const markNewestRead = (): void => {
+    const s = auth.state();
+    const newest = ordered().at(-1)?.cursor;
+    if (s.kind !== "session" || newest === undefined || document.visibilityState !== "visible") return;
+    void markChannelRead(s.account.accountId, props.channelId, newest).catch(() => undefined);
+  };
   createEffect(() => {
     void ordered().length;
     void props.decodedByCursor;
     queueMicrotask((): void => {
       if (scroller !== undefined) scroller.scrollTop = scroller.scrollHeight;
+      markNewestRead();
     });
+  });
+  onMount(() => {
+    const onVisible = (): void => markNewestRead();
+    document.addEventListener("visibilitychange", onVisible);
+    onCleanup(() => document.removeEventListener("visibilitychange", onVisible));
   });
   // The card times relabel themselves as the day turns.
   const [clock, setClock] = createSignal(new Date());
@@ -544,7 +564,9 @@ const NewChannel: Component = () => {
         }
       }
 
-      await createChannel(id);
+      // The channel is registered under the owner key this account derives
+      // for it (ADR-0059 section 1).
+      await createChannel(id, identity);
       channelsActions.addChannel({
         id,
         localName: name().trim(),
@@ -558,7 +580,7 @@ const NewChannel: Component = () => {
       // either way; a failed post is logged and the next Save or rotation
       // re-issues it.
       try {
-        await publishChannelMeta(id, { name: name(), description: description() });
+        await publishChannelMeta(id, { name: name(), description: description() }, identity);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("channel metadata record not posted at creation", err);
@@ -839,6 +861,7 @@ const JoinCoPublisher: Component = () => {
 
 const ChannelView: Component = () => {
   const params = useParams<{ id: string }>();
+  const chats = useChats();
   const navigate = useNavigate();
   const [publishBusy, setPublishBusy] = createSignal(false);
   const [publishError, setPublishError] = createLiveText();
@@ -907,14 +930,21 @@ const ChannelView: Component = () => {
       setPublishError(() => t("channels.publish.error.not_publisher"));
       return;
     }
+    const identity = chats.accountIdentity();
+    if (identity === null) {
+      setPublishError(() => t("channels.publish.error.sign_in"));
+      return;
+    }
     setPublishBusy(true);
     setPublishError(null);
     try {
       const epoch = channelsState.epochByChannel().get(params.id) ?? 0;
       const counter = channelsActions.nextCounter(params.id);
       const wire = await composePost(keys, params.id, epoch, counter, utf8Encode(text));
-      await publishPost(params.id, wire);
+      await publishPost(params.id, wire, identity);
       setComposeText("");
+      // The author's own post goes into the feed now, not at the next sync.
+      requestChannelPostSync();
       await refetch();
     } catch (err) {
       if (apiError.is(err)) {
@@ -1052,6 +1082,7 @@ const ChannelView: Component = () => {
           >
             <div class="lk-channel-posts" hidden={manageOpen()}>
               <PostList
+                channelId={params.id}
                 posts={data()?.posts ?? []}
                 decodedByCursor={decodedByCursor()}
                 loading={data.loading}
@@ -1142,16 +1173,34 @@ const ChannelSubscribe: Component = () => {
     });
   }
 
+  /** Whether this view has already spent its one `channel-subscribe` token.
+   *  At most one registration per open: a fresh subscribe IS that
+   *  registration, and the re-sync below re-registers only a device that did
+   *  not register this time. Without it the 3 s catch-up poll re-registered
+   *  on every tick while waiting for the publisher's fanout, draining the
+   *  token allowance in about a minute. */
+  let registeredThisView = false;
+
   /** Drive the registration + catch-up dance. Idempotent — the server treats
    *  a re-register of the same pubkey as a no-op, and re-running the
-   *  catch-up re-opens whatever the retained set currently is. */
+   *  catch-up re-opens whatever the retained set currently is. A registration
+   *  spends a `channel-subscribe` token (ADR-0059 section 4), so a channel
+   *  this device already follows with a key it already holds is not
+   *  registered again on every open; the re-sync path below re-registers
+   *  when the current epoch's seed is missing. */
   async function bootstrap_(): Promise<void> {
     setBootstrap("registering");
     setBootstrapError(null);
     try {
+      const alreadyFollowing =
+        channelsState.channels().some((c) => c.id === params.id) &&
+        channelsState.subscriberKeysByChannel().has(params.id);
       const kp = await ensureKeypair();
       const pubHex = bytesToHex(kp.public);
-      await subscribe(params.id, pubHex);
+      if (!alreadyFollowing) {
+        registeredThisView = true;
+        await subscribe(params.id, pubHex);
+      }
       rememberSubscribed();
 
       setBootstrap("polling");
@@ -1163,8 +1212,12 @@ const ChannelSubscribe: Component = () => {
         setBootstrap("active");
       }
     } catch (err) {
+      const tokenText = (): string | null =>
+        anonTokenMessage(err, t("channels.subscribe.error.network"));
       if (apiError.is(err)) {
         setBootstrapError(() => channelErrorText(err));
+      } else if (tokenText() !== null) {
+        setBootstrapError(() => tokenText() ?? "");
       } else {
         console.warn("[channels] subscribe failed", err);
         setBootstrapError(null);
@@ -1208,9 +1261,11 @@ const ChannelSubscribe: Component = () => {
     }
 
     const map = channelsState.subscribedSeedsByChannel().get(params.id);
-    if (map === undefined || !map.has(epochView.epoch)) {
+    if ((map === undefined || !map.has(epochView.epoch)) && !registeredThisView) {
       // Missing the current epoch's seed — re-register so the next rotation
-      // fanout reseals us. Idempotent; a failure here is non-fatal.
+      // fanout reseals us. Idempotent; a failure here is non-fatal. Once per
+      // view: the token is spent whether or not the request lands.
+      registeredThisView = true;
       try {
         await subscribe(params.id, pubHex);
       } catch (err) {
@@ -1376,6 +1431,7 @@ const ChannelSubscribe: Component = () => {
           </Match>
         </Switch>
         <PostList
+          channelId={params.id}
           posts={bootstrap() === "active" ? posts() : []}
           decodedByCursor={decodedByCursor()}
           loading={bootstrap() !== "active" && bootstrap() !== "error"}

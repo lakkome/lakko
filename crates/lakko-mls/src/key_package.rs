@@ -178,6 +178,7 @@ impl Identity {
             Some(&[
                 ExtensionType::Unknown(crate::device_group::DEVICE_POLICY_EXTENSION_TYPE),
                 ExtensionType::Unknown(crate::group_roles::ROLE_EXTENSION_TYPE),
+                ExtensionType::Unknown(crate::group_kind::GROUP_KIND_EXTENSION_TYPE),
             ]),
             None,
             None,
@@ -194,6 +195,7 @@ impl Identity {
             Some(&[
                 ExtensionType::Unknown(crate::device_group::DEVICE_POLICY_EXTENSION_TYPE),
                 ExtensionType::Unknown(crate::group_roles::ROLE_EXTENSION_TYPE),
+                ExtensionType::Unknown(crate::group_kind::GROUP_KIND_EXTENSION_TYPE),
             ]),
             None,
             Some(&[]),

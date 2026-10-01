@@ -94,6 +94,7 @@ import me.lakko.app.channels.ChannelKeyStore
 import me.lakko.app.channels.ChannelPublisherIdentity
 import me.lakko.app.channels.ChannelPublisherKeyStore
 import me.lakko.app.channels.ChannelPublisherKeys
+import me.lakko.app.channels.ChannelPublisherSigners
 import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsComposerException
@@ -106,6 +107,7 @@ import me.lakko.app.channels.PostView
 import me.lakko.app.channels.RotationCron
 import me.lakko.app.channels.SharedPreferencesChannelLogStore
 import me.lakko.app.channels.StoredRotationState
+import me.lakko.app.channels.SubscriberAdmission
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.ds.DsClient
 import me.lakko.app.l10n.LocalStrings
@@ -359,12 +361,17 @@ public fun NewChannelScreen(
                                     return@launch
                                 }
                             }
-                            client.createChannel(id)
                             // G-27 / ADR-0017: the channel content-key seed
                             // comes from a real MLS publisher group exporter,
                             // created in the shared publisher identity's
                             // provider and snapshotted with it so the seed
-                            // survives a relaunch.
+                            // survives a relaunch. The same identity derives
+                            // the owner key the channel is registered under
+                            // (ADR-0059 section 1).
+                            val owner = publisher.withIdentity(persist = false) { identity ->
+                                ChannelsClient.ownerSigner(identity, id)
+                            }
+                            owner.use { client.createChannel(id, it) }
                             val keys = publisher.withIdentity { identity ->
                                 ChannelsComposer.freshPublisherKeys(
                                     identity = identity,
@@ -492,7 +499,9 @@ public fun ChannelDetailScreen(
     var infoOpen by remember { mutableStateOf(false) }
     // Only a publisher ever lists subscribers, so only a publisher has a count
     // (section 2.3: "where the client has it").
-    val subscriberCount = SubscriberFanoutRegistry.subscriberCounts()[channelId]
+    val admission = remember(state, client) { SubscriberAdmission.forChannels(state, client) }
+    val admissions by admission.state.collectAsState()
+    val subscriberCount = admissions[channelId]?.subscribers?.size
 
     // ADR-0060 section 3 / UX 6.3 — the channel's member list, opened from
     // the `Members` row of channel info.
@@ -753,8 +762,16 @@ private fun OwnerChannelView(
                             messageCounter = counter,
                             plaintext = text.toByteArray(Charsets.UTF_8),
                         )
-                        client.publishPost(channelId, wire)
+                        val pub = state.publisher
+                            ?: throw IllegalStateException("channel publisher identity not available")
+                        // ADR-0059 section 9: signed with this account's role.
+                        ChannelPublisherSigners.derive(pub, channelId).use {
+                            client.publishPost(channelId, wire, it)
+                        }
                         composeText = ""
+                        // The author's own post goes into the feed now, not
+                        // at the next sync (ADR-0063).
+                        me.lakko.app.feed.requestChannelPostSync()
                         refresh()
                     } catch (e: Throwable) {
                         Log.w(TAG, "publish failed", e)
@@ -868,6 +885,9 @@ private fun PostList(
     emptyLine: String,
     modifier: Modifier = Modifier,
     statusLine: (@Composable () -> Unit)? = null,
+    /** `docs/ux/feed.md` section 5 — the newest readable post on screen, so
+     *  the channel's read marker can move to it. */
+    onShown: ((cursor: Long) -> Unit)? = null,
 ) {
     val zone = remember { ZoneId.systemDefault() }
     // ADR-0061: the date words and the date itself in the interface language.
@@ -876,8 +896,19 @@ private fun PostList(
     val ordered = remember(posts) { posts.sortedByDescending { it.serverTsMs } }
     val visible = ordered.filter { renderOf(it) != PostRender.Hidden }
     val now = System.currentTimeMillis()
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val readable = visible.filter { renderOf(it) is PostRender.Plain }.map { it.cursor.toLong() }.toSet()
+    if (onShown != null) {
+        LaunchedEffect(listState, readable) {
+            androidx.compose.runtime.snapshotFlow {
+                listState.layoutInfo.visibleItemsInfo.mapNotNull { (it.key as? Long)?.takeIf { k -> k in readable } }
+                    .maxOrNull()
+            }.collect { newest -> if (newest != null) onShown(newest) }
+        }
+    }
 
     LazyColumn(
+        state = listState,
         modifier = modifier.fillMaxWidth(),
         reverseLayout = true,
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
@@ -1211,9 +1242,10 @@ private fun SubscriberChannelView(
     state.subscribedSeedsByChannel.collectAsState()
     val postsByChannel by state.postsByChannel.collectAsState()
     val posts = postsByChannel[channelId] ?: emptyList()
-
     val context = LocalContext.current
+
     var bootstrap by remember(channelId) { mutableStateOf(SubscribeBootstrap.Registering) }
+    var subscribeFailure by remember(channelId) { mutableStateOf(UiText("channels.subscribe.error.prefix")) }
     var attempt by remember(channelId) { mutableIntStateOf(0) }
     val decodedByCursor = remember(channelId) { mutableStateMapOf<ULong, PostRender>() }
 
@@ -1231,6 +1263,14 @@ private fun SubscriberChannelView(
         )
         state.setSubscribedSeed(channelId, epoch, recovered)
     }
+
+    // Whether this open has already spent its one `channel-subscribe` token.
+    // At most one registration per open: a fresh subscribe IS that
+    // registration, and the re-sync in `catchUp` re-registers only a device
+    // that did not register this time. Without it the 3 s catch-up loop
+    // re-registered on every tick while waiting for the publisher's fanout,
+    // draining the token allowance in about a minute.
+    val registeredThisOpen = remember(channelId) { booleanArrayOf(false) }
 
     // ADR-0031 catch-up + re-sync: the retained set, the singular latest as a
     // fallback, and an idempotent re-subscribe when the current key is still
@@ -1270,7 +1310,9 @@ private fun SubscriberChannelView(
                     }
                 }
             }
-            if (state.subscribedSeeds(channelId)[currentEpoch] == null) {
+            if (state.subscribedSeeds(channelId)[currentEpoch] == null && !registeredThisOpen[0]) {
+                // Once per open: the token is spent whether or not it lands.
+                registeredThisOpen[0] = true
                 try {
                     client.subscribe(channelId, pubHex)
                 } catch (_: Throwable) {
@@ -1321,12 +1363,22 @@ private fun SubscriberChannelView(
     LaunchedEffect(channelId, attempt) {
         bootstrap = SubscribeBootstrap.Registering
         try {
-            val kp = state.subscriberKeysByChannel.value[channelId]
+            // A registration spends a `channel-subscribe` token (ADR-0059
+            // section 4): a channel this device already follows with a key
+            // it already holds is not registered again on every open; the
+            // catch-up re-registers when the current epoch's seed is missing.
+            val existingKeys = state.subscriberKeysByChannel.value[channelId]
+            val alreadyFollowing = existingKeys != null &&
+                state.channels.value.any { it.id == channelId }
+            val kp = existingKeys
                 ?: ChannelsComposer.freshSubscriberKeys().also {
                     state.setSubscriberKeys(channelId, it)
                 }
             val pubHex = ChannelsComposer.bytesToHex(kp.publicKey)
-            client.subscribe(channelId, pubHex)
+            if (!alreadyFollowing) {
+                registeredThisOpen[0] = true
+                client.subscribe(channelId, pubHex)
+            }
 
             if (state.subscribedSeeds(channelId).isNotEmpty()) {
                 bootstrap = SubscribeBootstrap.Active
@@ -1373,6 +1425,10 @@ private fun SubscriberChannelView(
             }
         } catch (e: Throwable) {
             Log.w(TAG, "subscribe failed", e)
+            // ADR-0059 section 4 — a used-up `channel-subscribe` allowance has
+            // its own line (docs/ux/feed.md section 7).
+            subscribeFailure = me.lakko.app.chat.anonTokenFailureText(e, me.lakko.app.chat.AllowanceKind.SUBSCRIBE)
+                ?: UiText("channels.subscribe.error.prefix")
             bootstrap = SubscribeBootstrap.Failed
         }
     }
@@ -1387,7 +1443,7 @@ private fun SubscriberChannelView(
         SubscribeBootstrap.Failed -> {
             {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    ErrorLine(UiText("channels.subscribe.error.prefix"))
+                    ErrorLine(subscribeFailure)
                     TextButton(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
                 }
             }
@@ -1403,6 +1459,14 @@ private fun SubscriberChannelView(
         emptyLine = t("channels.posts.empty"),
         statusLine = status,
         modifier = Modifier.fillMaxSize(),
+        // A post read here is read in the feed too, and the other way round.
+        onShown = { cursor ->
+            state.boundAccount?.let { acct ->
+                me.lakko.app.feed.FeedReadingStore.update(context, acct) {
+                    me.lakko.app.feed.advanceChannelRead(it, channelId, cursor)
+                }
+            }
+        },
     )
 }
 
@@ -1420,104 +1484,29 @@ private fun StatusLine(text: String) {
 // Subscriber key fan-out (owner side) — the headless part of the old panel
 // ============================================================================
 
-/** Fan-out cadence: the owner re-lists subscribers and seals the key for each new one. */
+/** Fan-out cadence while a channel screen is open (the session shell's own
+ *  loop runs every [SubscriberAdmission.APP_INTERVAL_MS]). */
 private const val SUBSCRIBERS_POLL_INTERVAL_MS: Long = 5_000L
 private const val SEED_WAIT_MS: Long = 3_000L
 private const val READER_REFRESH_MS: Long = 5_000L
 private const val EPOCH_RECHECK_EVERY_TICKS: Int = 6
 
-internal enum class DeliveryStatus { Sent, Failed }
-
-/** One channel's subscriber fan-out state, shared by the channel view and Manage. */
-internal class SubscriberFanout {
-    var subscribers by mutableStateOf<List<String>?>(null)
-    val statusByPk = mutableStateMapOf<String, DeliveryStatus>()
-}
-
 /**
- * Process-wide registry so the channel view and the Manage screen (which
- * replace each other in the composition) share one fan-out record per channel,
- * and the list can show a subscriber count the owner already learned.
- */
-internal object SubscriberFanoutRegistry {
-    private val byChannel = mutableStateMapOf<String, SubscriberFanout>()
-
-    fun forChannel(channelId: String): SubscriberFanout =
-        byChannel.getOrPut(channelId) { SubscriberFanout() }
-
-    /** Channel id -> known subscriber count (snapshot-read, so callers recompose). */
-    @Composable
-    fun subscriberCounts(): Map<String, Int> =
-        byChannel.entries.mapNotNull { (id, f) -> f.subscribers?.let { id to it.size } }.toMap()
-}
-
-/**
- * Seal the current channel key for [pubkeyHex] and file it at the current
- * epoch (ADR-0031 — never a future one). Returns the resulting status.
- */
-private suspend fun deliverKeyTo(
-    channelId: String,
-    pubkeyHex: String,
-    state: ChannelsUiState,
-    client: ChannelsClient,
-): DeliveryStatus {
-    val keys = state.keysByChannel.value[channelId] ?: return DeliveryStatus.Failed
-    val parsed = hexToBytesOrNull(pubkeyHex) ?: return DeliveryStatus.Failed
-    return try {
-        // The current server epoch — fetched here when nothing on this screen
-        // has learned it yet, so a delivery is never filed at a guessed 0.
-        val epoch = state.epochByChannel.value[channelId]
-            ?: client.fetchEpoch(channelId).also { state.setEpoch(channelId, it) }
-        val wire = ChannelsComposer.sealSubscriberSeedEnvelope(
-            subscriberPub = parsed,
-            channelIdHex = channelId,
-            epochId = epoch,
-            seed = keys.seed,
-        )
-        client.deliverEnvelope(channelId, pubkeyHex, wire, epoch = epoch.toInt())
-        DeliveryStatus.Sent
-    } catch (e: Throwable) {
-        Log.w(TAG, "key delivery failed", e)
-        DeliveryStatus.Failed
-    }
-}
-
-/**
- * The owner's fan-out loop: every 5 s re-list the subscribers and seal the
- * key for each one not yet delivered (or whose delivery failed). Sequential,
- * cancelled when the hosting screen leaves the composition.
+ * The channel screens' faster let-in poll: while the channel view or its
+ * Manage screen is open, every 5 s run the same pass the session shell runs
+ * every 15 s ([SubscriberAdmission]), so a subscriber who registers now is
+ * served within seconds. Cancelled when the hosting screen leaves the
+ * composition; the shared record of who was let in stays.
  */
 @Composable
 private fun SubscriberFanoutEffect(channelId: String, state: ChannelsUiState, client: ChannelsClient) {
-    val fanout = remember(channelId) { SubscriberFanoutRegistry.forChannel(channelId) }
-    LaunchedEffect(channelId) {
+    val admission = remember(state, client) { SubscriberAdmission.forChannels(state, client) }
+    LaunchedEffect(channelId, admission) {
         while (true) {
-            try {
-                fanout.subscribers = client.listSubscribers(channelId)
-            } catch (e: Throwable) {
-                Log.w(TAG, "list subscribers failed", e)
-            }
-            val list = fanout.subscribers
-            if (list != null) {
-                for (pk in list) {
-                    if (fanout.statusByPk[pk] != DeliveryStatus.Sent) {
-                        fanout.statusByPk[pk] = deliverKeyTo(channelId, pk, state, client)
-                    }
-                }
-            }
+            admission.admitNewSubscribers(channelId)
             delay(SUBSCRIBERS_POLL_INTERVAL_MS)
         }
     }
-}
-
-private fun hexToBytesOrNull(hex: String): ByteArray? {
-    if (hex.length % 2 != 0) return null
-    val out = ByteArray(hex.length / 2)
-    for (i in out.indices) {
-        val byte = hex.substring(i * 2, i * 2 + 2).toIntOrNull(16) ?: return null
-        out[i] = byte.toByte()
-    }
-    return out
 }
 
 // ============================================================================
@@ -1617,6 +1606,9 @@ public fun ChannelManageScreen(
         ) {
             openError?.let { ErrorLine(it) }
             channel?.let { ChannelDetailsCard(channel = it, state = state, client = client) }
+            // ADR-0059 / UX 6.4 — the owner lists the channel in Discover; a
+            // co-publisher sees the state only.
+            me.lakko.app.ui.discover.ListInDiscoverCard(channelId = channelId, state = state, client = client)
             SubscribersCard(channelId = channelId, state = state, client = client)
             CoPublishersCard(
                 channelId = channelId,
@@ -1726,7 +1718,22 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
                             updatedAtMs = System.currentTimeMillis().toULong(),
                         )
                         state.updateLocalMeta(channel.id, localName = trimmedName, localDescription = description.trim())
-                        saved = true
+                        // ADR-0059 — a listed channel's listing carries the name
+                        // and description too; editing them updates it (UX 6.4).
+                        var listingOk = true
+                        val pub = state.publisher
+                        if (pub != null) {
+                            try {
+                                me.lakko.app.discover.DiscoverListing.refreshListingAfterEdit(state, client, pub, channel.id)
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                Log.w(TAG, "listing not refreshed after edit", e)
+                                listingOk = false
+                                error = UiText("discover.listing.update_failed")
+                            }
+                        }
+                        if (listingOk) saved = true
                     } catch (e: uniffi.lakko_ffi_uniffi.FfiException.ChannelMeta) {
                         // The message opens with the frozen reason code; the
                         // screen reads the catalog sentence for it, never the prose.
@@ -1772,8 +1779,11 @@ private fun SectionCard(title: String, description: String? = null, content: @Co
 /** "Subscriber N" rows with their key-delivery state; never a key. */
 @Composable
 private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: ChannelsClient) {
-    val fanout = remember(channelId) { SubscriberFanoutRegistry.forChannel(channelId) }
-    val subs = fanout.subscribers
+    val admission = remember(state, client) { SubscriberAdmission.forChannels(state, client) }
+    val admissions by admission.state.collectAsState()
+    val entry = admissions[channelId]
+    val subs = entry?.subscribers
+    val epoch = state.epochByChannel.collectAsState().value[channelId]
     val scope = rememberCoroutineScope()
     SectionCard(
         title = subs?.let {
@@ -1795,7 +1805,9 @@ private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: C
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             else -> subs.forEachIndexed { index, pk ->
-                val status = fanout.statusByPk[pk]
+                // A key sealed for an older epoch is being let in again.
+                val st = entry?.statusByKey?.get(pk)
+                val status = st?.takeIf { epoch == null || it.epoch == epoch }?.status
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth(),
@@ -1805,17 +1817,13 @@ private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: C
                     Spacer(Modifier.width(12.dp))
                     Text(rowLabel, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
                     when (status) {
-                        DeliveryStatus.Sent -> Text(
+                        SubscriberAdmission.Status.Ready -> Text(
                             t("channels.subscribers.status.ready"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        DeliveryStatus.Failed -> TextButton(
-                            onClick = {
-                                scope.launch {
-                                    fanout.statusByPk[pk] = deliverKeyTo(channelId, pk, state, client)
-                                }
-                            },
+                        SubscriberAdmission.Status.Failed -> TextButton(
+                            onClick = { scope.launch { admission.admit(channelId, pk) } },
                         ) { Text(t("common.retry")) }
                         null -> Text(
                             t("channels.subscribers.status.setting_up"),

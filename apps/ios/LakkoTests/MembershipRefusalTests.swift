@@ -47,8 +47,8 @@ final class MembershipRefusalTests: XCTestCase {
         // step with the enum — nothing in Swift checks that, and every
         // property test over the set is vacuous for a case that is missing.
         // So it is checked by asking each entry to find itself, and by count.
-        XCTAssertEqual(allMembershipRefusalReasons.count, 20)
-        XCTAssertEqual(Set(allMembershipRefusalReasons).count, 20)
+        XCTAssertEqual(allMembershipRefusalReasons.count, 23)
+        XCTAssertEqual(Set(allMembershipRefusalReasons).count, 23)
 
         for reason in allMembershipRefusalReasons {
             let refusal = membershipRefusal(reason: reason, retryMaySucceed: real)
@@ -114,6 +114,11 @@ final class MembershipRefusalTests: XCTestCase {
         // Reachable from a stale Approve / Reject tap.
         XCTAssertEqual(say(.noSuchJoinRequest), "That join request is no longer waiting.")
         XCTAssertEqual(say(.joinerAlreadyAMember), "That person has already joined this group.")
+        // ADR-0062 — the conversation-kind refusals, the same copy as web and
+        // Android.
+        XCTAssertEqual(say(.oneToOneMembershipFixed), "A chat is always the same two people.")
+        XCTAssertEqual(say(.oneToOneHasNoRoles), "A chat has no admins.")
+        XCTAssertEqual(say(.groupKindChanged), "This change can't be made to this conversation.")
         // §6 row 5, widened: the core gives ONE reason to a role change and an
         // ownership transfer, because a transfer IS a role-table rewrite. A
         // string naming only admins would be wrong for half of what it covers.
@@ -222,6 +227,9 @@ final class MembershipRefusalTests: XCTestCase {
             (.SweepAlreadyStaged(message: "x"), .sweepAlreadyStaged),
             (.MembershipDeviceBindingInvalid(message: "x"), .deviceBindingInvalid),
             (.MembershipDeviceLimitReached(message: "x"), .deviceLimitReached),
+            (.MembershipOneToOneMembershipFixed(message: "x"), .oneToOneMembershipFixed),
+            (.MembershipOneToOneHasNoRoles(message: "x"), .oneToOneHasNoRoles),
+            (.MembershipGroupKindChanged(message: "x"), .groupKindChanged),
         ]
         XCTAssertEqual(pairs.count, allMembershipRefusalReasons.count)
         XCTAssertEqual(Set(pairs.map(\.1)), Set(allMembershipRefusalReasons))

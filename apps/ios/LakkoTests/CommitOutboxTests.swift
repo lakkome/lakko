@@ -300,7 +300,7 @@ final class CommitOutboxCommitPathAbortTests: XCTestCase {
     private func makeFixture(outboxDir: URL?) throws -> Fixture {
         let seed = Data(repeating: 0x11, count: 32)
         let founder = try Identity.fromSeed(seed: seed)
-        let group = try Group.create(identity: founder)
+        let group = try Group.create(identity: founder, kind: .group)
         let groupIdHex = DsClient.pseudonymHex(try group.groupId())
         let snapshotBlob = try founder.snapshotStorage()
 

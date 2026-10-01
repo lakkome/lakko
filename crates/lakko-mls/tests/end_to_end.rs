@@ -15,7 +15,7 @@
 //! 7. Alice and Charlie keep messaging after the removal.
 //! 8. Alice and Charlie's exporter outputs match for the same label/context.
 
-use lakko_mls::{group, key_package, Group, Identity, Incoming};
+use lakko_mls::{group, key_package, Group, GroupKind, Identity, Incoming};
 use openmls::prelude::LeafNodeIndex;
 
 /// Encode and decode an MLS message via the wire format helpers we expose.
@@ -32,7 +32,7 @@ const EXPORTER_LABEL: &str = "lakko/test/exporter";
 fn three_party_group_lifecycle_and_exporter_consistency() {
     // ---- 1. Alice creates a fresh group ------------------------------------
     let alice = Identity::generate("alice").expect("alice identity");
-    let mut alice_group = Group::create(&alice).expect("alice creates group");
+    let mut alice_group = Group::create(&alice, GroupKind::Group).expect("alice creates group");
     assert_eq!(alice_group.member_count(), 1);
     assert_eq!(alice_group.epoch(), 0);
 
@@ -223,7 +223,7 @@ fn snapshot_and_restore_round_trips_a_live_group() {
     let bob = Identity::generate("bob").expect("bob");
 
     // ---- 1. Alice creates a group, adds Bob ------------------------
-    let mut alice_group = Group::create(&alice).expect("alice creates");
+    let mut alice_group = Group::create(&alice, GroupKind::Group).expect("alice creates");
     let bob_kp = bob.create_key_package().expect("bob kp");
     let bob_kp_wire = key_package::serialize(&bob_kp).expect("serialize bob kp");
     let added = alice_group
@@ -296,7 +296,7 @@ fn group_load_returns_none_when_no_state_was_persisted() {
 #[test]
 fn restore_storage_rejects_truncated_snapshot() {
     let alice = Identity::from_seed(&[0xA3u8; 64]).expect("alice");
-    let alice_group = Group::create(&alice).expect("group");
+    let alice_group = Group::create(&alice, GroupKind::Group).expect("group");
     let snapshot = alice.snapshot_storage().expect("snapshot");
 
     // Lop off the trailing 5 bytes. The decoder MUST surface
@@ -327,7 +327,7 @@ fn restore_storage_rejects_truncated_snapshot() {
 fn members_enumerates_leaves_at_current_epoch() {
     let alice = Identity::from_seed(&[0xB0u8; 64]).expect("alice");
     let alice_pub = alice.signature_public_key().to_vec();
-    let mut alice_group = Group::create(&alice).expect("group");
+    let mut alice_group = Group::create(&alice, GroupKind::Group).expect("group");
 
     // One-of-one: a single leaf, Alice's, at index 0.
     let members = alice_group.members();

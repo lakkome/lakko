@@ -46,6 +46,8 @@ import type { PublisherGroupHandle } from "./publisher-group-handle";
 import { CoPublishersPanel } from "./CoPublishersPanel";
 import { RotationPanel } from "./RotationPanel";
 import { SubscribersPanel } from "./SubscribersPanel";
+import { ListInDiscover } from "../discover/ListInDiscover";
+import { refreshListingAfterEdit } from "../discover/listing";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { awaitChannelsHydration, channelsActions, channelsState } from "../state/channels-state";
@@ -57,6 +59,7 @@ import { awaitChannelsHydration, channelsActions, channelsState } from "../state
  * re-titles from the newest record; the `@handle` stays the unique thing.
  */
 function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Element {
+  const chats = useChats();
   const held = (): { name: string; description: string } => {
     const shared = channelsState.metaByChannel().get(props.channelIdHex);
     if (shared !== undefined) return { name: shared.name, description: shared.description };
@@ -91,12 +94,18 @@ function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Elem
       setError(CHANNEL_NEEDS_NAME);
       return;
     }
+    const id = chats.accountIdentity();
+    if (id === null) {
+      setError(() => t("channels.meta.error.sign_in"));
+      return;
+    }
     setBusy(true);
     try {
-      const meta = await publishChannelMeta(props.channelIdHex, {
-        name: name(),
-        description: description(),
-      });
+      const meta = await publishChannelMeta(
+        props.channelIdHex,
+        { name: name(), description: description() },
+        id,
+      );
       // The local fields follow, so a device that never reads its own posts
       // back still titles the row the same way.
       channelsActions.updateLocalMeta(props.channelIdHex, {
@@ -106,6 +115,13 @@ function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Elem
       setName(meta.name);
       setDescription(meta.description);
       setNotice(() => t("channels.meta.saved"));
+      // ADR-0059 — a listed channel's listing carries the name and
+      // description too; editing them updates it (UX spec 6.4).
+      try {
+        await refreshListingAfterEdit(props.channelIdHex, id);
+      } catch {
+        setNotice(() => t("discover.listing.update_failed"));
+      }
     } catch (err) {
       const code = channelMetaErrorCode(err);
       if (code !== undefined) setError(() => channelMetaErrorText(code));
@@ -237,7 +253,8 @@ export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Eleme
   return (
     <div class="lk-stack lk-channel-manage-body">
       <ChannelDetailsPanel channelIdHex={props.channelIdHex} />
-      <SubscribersPanel channelIdHex={props.channelIdHex} />
+      <ListInDiscover channelIdHex={props.channelIdHex} identity={identity()} />
+      <SubscribersPanel channelIdHex={props.channelIdHex} identity={identity()} />
       <Show
         when={group() !== null && identity() !== null}
         fallback={

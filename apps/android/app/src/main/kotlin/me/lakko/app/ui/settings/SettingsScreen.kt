@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Shield
@@ -90,6 +91,8 @@ public fun SettingsScreen(
     onOpenAntiCensorship: () -> Unit,
     onOpenLanguage: () -> Unit,
     onLogout: () -> Unit,
+    /** ADR-0059 section 6 — Security -> Channels I share. */
+    onOpenChannelsIShare: () -> Unit = {},
     onForgetDevice: () -> Unit,
     modifier: Modifier = Modifier,
     /** docs/ux/chat-folders.md section 4 — between Notifications and Appearance. */
@@ -189,6 +192,12 @@ public fun SettingsScreen(
                 Icons.Filled.Restore,
                 onOpenRecovery,
                 supporting = t("settings.security.recovery.sub"),
+            )
+            SettingsRow(
+                t("discover.shared.title"),
+                Icons.Filled.Share,
+                onOpenChannelsIShare,
+                supporting = t("discover.shared.settings_sub"),
             )
 
             SectionLabel(t("settings.section.folders"))

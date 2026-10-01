@@ -31,6 +31,9 @@ import { commitRotation, MAX_STAGE_CHUNK_ENTRIES, stageRotation } from "./api";
 import { stageAndCommitRotation } from "./rotation-cron";
 
 const CH = "00112233445566778899aabbccddeeff";
+/** The account identity the stage and commit calls are signed with; the
+ *  transport is mocked, so only its identity (pass-through) matters. */
+const ID = { tag: "account" } as unknown as Parameters<typeof stageAndCommitRotation>[3];
 
 function entry(i: number) {
   return {
@@ -55,7 +58,7 @@ describe("stageAndCommitRotation", () => {
       (_v, i) => entry(i),
     );
 
-    const epoch = await stageAndCommitRotation(CH, 7, batch);
+    const epoch = await stageAndCommitRotation(CH, 7, batch, ID);
 
     expect(epoch).toEqual({ epoch: 7 });
     expect(vi.mocked(stageRotation)).toHaveBeenCalledTimes(2);
@@ -69,36 +72,40 @@ describe("stageAndCommitRotation", () => {
     expect(call1[2]).toHaveLength(1);
     // Chunks partition the batch — no overlap, no gap.
     expect(call1[2][0]).toEqual(entry(MAX_STAGE_CHUNK_ENTRIES));
+    expect(call0[3]).toBe(ID);
+    expect(call1[3]).toBe(ID);
 
     expect(vi.mocked(commitRotation)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(commitRotation)).toHaveBeenCalledWith(CH, 7, undefined);
+    expect(vi.mocked(commitRotation)).toHaveBeenCalledWith(CH, 7, ID, undefined);
   });
 
   it("stages a small batch in a single chunk then commits", async () => {
     const batch = [entry(1), entry(2), entry(3)];
 
-    await stageAndCommitRotation(CH, 4, batch, "https://ch.example");
+    await stageAndCommitRotation(CH, 4, batch, ID, "https://ch.example");
 
     expect(vi.mocked(stageRotation)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(stageRotation)).toHaveBeenCalledWith(
       CH,
       4,
       batch,
+      ID,
       "https://ch.example",
     );
     expect(vi.mocked(commitRotation)).toHaveBeenCalledWith(
       CH,
       4,
+      ID,
       "https://ch.example",
     );
   });
 
   it("stages nothing for an empty batch but still commits (bumps the epoch)", async () => {
-    const epoch = await stageAndCommitRotation(CH, 1, []);
+    const epoch = await stageAndCommitRotation(CH, 1, [], ID);
 
     expect(vi.mocked(stageRotation)).not.toHaveBeenCalled();
     expect(vi.mocked(commitRotation)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(commitRotation)).toHaveBeenCalledWith(CH, 1, undefined);
+    expect(vi.mocked(commitRotation)).toHaveBeenCalledWith(CH, 1, ID, undefined);
     expect(epoch).toEqual({ epoch: 1 });
   });
 
@@ -108,7 +115,7 @@ describe("stageAndCommitRotation", () => {
       (_v, i) => entry(i),
     );
 
-    await stageAndCommitRotation(CH, 7, batch);
+    await stageAndCommitRotation(CH, 7, batch, ID);
 
     const stageOrders = vi.mocked(stageRotation).mock.invocationCallOrder;
     const commitOrder =
@@ -127,7 +134,7 @@ describe("stageAndCommitRotation", () => {
       .mockResolvedValueOnce({ targetEpoch: 7, staged: MAX_STAGE_CHUNK_ENTRIES })
       .mockRejectedValueOnce(new Error("stage chunk 2 dropped"));
 
-    await expect(stageAndCommitRotation(CH, 7, batch)).rejects.toThrow(
+    await expect(stageAndCommitRotation(CH, 7, batch, ID)).rejects.toThrow(
       "stage chunk 2 dropped",
     );
 

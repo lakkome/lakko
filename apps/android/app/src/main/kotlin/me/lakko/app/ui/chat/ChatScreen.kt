@@ -283,10 +283,12 @@ public fun ChatScreen(
     val peerName = remember(state.groupIdHex, state.messages.size, nameVersion, otherMembers) {
         viewModel.oneToOnePeerName()
     }
-    // UX section 3 — the persisted kind decides the header shape: a group made
-    // through the new-group flow is a group even while it still has two people.
+    // UX section 3 / ADR-0062 — the kind is read from the group and decides
+    // the header shape: a group made through the new-group flow is a group
+    // even while it still has two people, and a one-to-one never grows. Keyed
+    // on the roster only so a group loaded after first composition is read.
     val conversationKind = remember(state.groupIdHex, otherMembers) { viewModel.conversationKind() }
-    val isGroupChat = conversationKind == ConversationKind.Group || otherMembers.size > 1
+    val isGroupChat = conversationKind == ConversationKind.Group
     // UX 5.2 — the second header line of a 1x1 chat is the verified @username.
     val peerUsername = remember(state.groupIdHex, nameVersion, otherMembers) {
         viewModel.oneToOnePeerUsername()
@@ -312,7 +314,6 @@ public fun ChatScreen(
     ) {
         me.lakko.app.chat.conversationInfo(
             kind = conversationKind,
-            otherMemberCount = otherMembers.size,
             groupIdHex = state.groupIdHex,
             peerRouteKey = peerRouteKey,
             contacts = contactLinks,
@@ -396,6 +397,17 @@ public fun ChatScreen(
             msg.direction == Direction.Outgoing -> strings["chat.author.you"]
             !isGroupChat && peerName != null -> peerName
             else -> msg.authorKey?.let(viewModel::nameOf) ?: viewModel.nameOfKeyB64(null)
+        }
+    }
+    // docs/ux/feed.md section 5 — Reply chosen on a feed item: arm the reply
+    // strip once the timeline holds the row. A row this timeline never shows
+    // spends the request the first time the timeline is non-empty.
+    LaunchedEffect(state.messages) {
+        val pending = me.lakko.app.chat.PendingReplyArm.peek(state.groupIdHex) ?: return@LaunchedEffect
+        if (state.messages.isEmpty()) return@LaunchedEffect
+        me.lakko.app.chat.PendingReplyArm.take(state.groupIdHex)
+        state.messages.firstOrNull { it.messageId == pending }?.let { msg ->
+            viewModel.onReplyToMessage(msg, timelineAuthorLabel(msg))
         }
     }
     val maxBubbleWidth: Dp = (LocalConfiguration.current.screenWidthDp * 0.78f).dp
@@ -4004,6 +4016,13 @@ private fun MembersSheet(
                         }
                     }
                 }
+                // ADR-0059 section 6 — share the listed channels this person
+                // follows with this group. Not a block of the shared info rule
+                // (`lakko-ui-rules`), like web: shown in every group this
+                // device is still a member of.
+                if (!membershipEnded) {
+                    ShareChannelsSwitch(viewModel)
+                }
                 // ADR-0045 (UX §6.1.1) — THE EXIT BLOCK: one block at the
                 // panel's bottom whose meaning is *the exit*, holding two
                 // ROLE-DISJOINT controls of which exactly one is ever live.
@@ -4403,6 +4422,46 @@ private fun SelectionActionBar(
                         .semantics { liveRegion = LiveRegionMode.Polite },
                 )
             }
+        }
+    }
+}
+
+
+/**
+ * "Share my channels with this group" (docs/ux/feed.md 6.3, ADR-0059 section
+ * 6). Off by default. Turning it on sends this person's listed channels to the
+ * group, end-to-end encrypted; off sends an empty list. The switch changes only
+ * once the send succeeded. Mirror of web `ShareChannelsSwitch.tsx`.
+ */
+@Composable
+private fun ShareChannelsSwitch(viewModel: ChatViewModel) {
+    val isGroup = remember(viewModel.groupIdHex) { viewModel.isGroupConversation() }
+    if (!isGroup) return
+    LaunchedEffect(viewModel.groupIdHex) { viewModel.openSharedChannels() }
+    val row by viewModel.sharedChannelsRow.collectAsStateWithLifecycle()
+    val busy by viewModel.shareChannelsBusy.collectAsStateWithLifecycle()
+    val error by viewModel.shareChannelsError.collectAsStateWithLifecycle()
+    val on = viewModel.groupIdHex in row.shareOn
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                me.lakko.app.discover.DiscoverCopy.SHARE_CHANNELS_LABEL.text(),
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.weight(1f),
+            )
+            androidx.compose.material3.Switch(
+                checked = on,
+                enabled = !busy,
+                onCheckedChange = { viewModel.setShareChannels(it) },
+            )
+        }
+        Text(
+            me.lakko.app.discover.DiscoverCopy.SHARE_CHANNELS_LINE.text(),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        error?.let {
+            Text(it.text(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
     }
 }

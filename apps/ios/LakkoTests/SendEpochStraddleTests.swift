@@ -270,7 +270,7 @@ final class SendEpochStraddleTests: XCTestCase {
         let seed = Data(repeating: 0x11, count: 32)
         let founder = try Identity.fromSeed(seed: seed)
         let other = try Identity.fromSeed(seed: Data(repeating: 0x55, count: 32))
-        let group = try Group.create(identity: founder)
+        let group = try Group.create(identity: founder, kind: .group)
         // The founder is one-of-one before this, so the commit has no audience
         // and is dropped — exactly what `startGroupWith` does.
         let added = try group.addMemberFromWire(

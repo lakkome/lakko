@@ -654,7 +654,7 @@ final class OwnershipTransferTests: XCTestCase {
         // `Group.create` seeds the ADR-0022 role table, which is what routes
         // this group through ADR-0045's proposal path at all — and what gives
         // it an owner to transfer FROM.
-        let ownerGroup = try Group.create(identity: owner)
+        let ownerGroup = try Group.create(identity: owner, kind: .group)
         let addAlice = try ownerGroup.addMemberFromWire(
             identity: owner, keyPackage: try alice.createKeyPackage())
         let aliceGroup = try Group.joinFromWelcome(welcome: addAlice.welcome, identity: alice)

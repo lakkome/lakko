@@ -102,7 +102,7 @@ export function RotationPanel(props: {
         // (original stamp), so a late subscriber who holds only the newest
         // seeds still finds the channel's name. After the seed + epoch
         // refresh above, which is what the post is sealed with.
-        void republishChannelMeta(props.channelIdHex).catch((err: unknown) => {
+        void republishChannelMeta(props.channelIdHex, props.identity).catch((err: unknown) => {
           // eslint-disable-next-line no-console
           console.warn("post-rotation channel meta re-issue failed", err);
         });

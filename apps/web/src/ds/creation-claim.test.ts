@@ -72,7 +72,7 @@ describe("a conversation group: no Welcome before the claim lands", () => {
   it("204: the claim goes first, then the Welcome", async () => {
     const s = setup(204);
     try {
-      await s.client.startGroupWith(null, new Uint8Array(16).fill(1), new Uint8Array(32));
+      await s.client.startGroupWith(null, new Uint8Array(16).fill(1), new Uint8Array(32), "chat");
       expect(s.order).toEqual(["claim:claim", "welcome"]);
     } finally {
       s.free();
@@ -85,7 +85,7 @@ describe("a conversation group: no Welcome before the claim lands", () => {
       const s = setup(status);
       try {
         await expect(
-          s.client.startGroupWith(null, new Uint8Array(16).fill(1), new Uint8Array(32)),
+          s.client.startGroupWith(null, new Uint8Array(16).fill(1), new Uint8Array(32), "chat"),
         ).rejects.toBeDefined();
         expect(s.order).toEqual(["claim:claim"]);
         expect(s.ds.publishMailbox).not.toHaveBeenCalled();

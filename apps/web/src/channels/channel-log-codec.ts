@@ -98,6 +98,13 @@ export interface ChannelSharedMeta {
   readonly description: string;
   /** The record's `updated_at_ms` (a `u64`). */
   readonly updatedAtMs: bigint;
+  /** ADR-0059 metadata v2: the topic id; absent = Other (0). */
+  readonly topic?: number;
+  /** ADR-0059 metadata v2: the ISO 639 language; absent or empty = not set. */
+  readonly language?: string;
+  /** ADR-0059 metadata v2: the owner listed the channel in Discover. What
+   *  lets a member share only listed channels in a group (section 6). */
+  readonly listed?: boolean;
 }
 
 export interface PersistedChannelMeta {
@@ -106,6 +113,10 @@ export interface PersistedChannelMeta {
   readonly description: string;
   /** Decimal string — a `u64` does not survive `JSON.parse` as a number. */
   readonly updatedAtMs: string;
+  /** ADR-0059 v2 fields; absent in a row written before them. */
+  readonly topic?: number;
+  readonly language?: string;
+  readonly listed?: boolean;
 }
 
 /** Wire shape of the encrypted blob, post-decrypt + JSON-parse. */
@@ -234,6 +245,9 @@ export function encodeChannelLog(snapshot: ChannelLogSnapshot): ChannelLogPayloa
       name: m.name,
       description: m.description,
       updatedAtMs: m.updatedAtMs.toString(),
+      ...(m.topic === undefined ? {} : { topic: m.topic }),
+      ...(m.language === undefined ? {} : { language: m.language }),
+      ...(m.listed === undefined ? {} : { listed: m.listed }),
     });
   }
   return {
@@ -328,6 +342,13 @@ export function decodeChannelLog(payload: unknown): ChannelLogSnapshot | null {
       name: m.name,
       description: m.description,
       updatedAtMs: BigInt(m.updatedAtMs),
+      ...(typeof m.topic === "number" && Number.isInteger(m.topic) && m.topic >= 0 && m.topic <= 255
+        ? { topic: m.topic }
+        : {}),
+      ...(typeof m.language === "string" && /^([a-z]{2,3})?$/.test(m.language)
+        ? { language: m.language }
+        : {}),
+      ...(typeof m.listed === "boolean" ? { listed: m.listed } : {}),
     });
   }
 

@@ -201,16 +201,17 @@ enum GroupCallHostRules {
     /// A call already running anywhere withdraws them: returning to the chat of a
     /// live group call shows that call (the root presentation), never offers to
     /// start a second one. A group call already in progress in this chat is
-    /// JOINED, never shadowed by a new one; otherwise a group chat (more than two
-    /// members) starts an SFU call and a two-member chat a 1x1 P2P call.
+    /// JOINED, never shadowed by a new one; otherwise a group (ADR-0062 kind,
+    /// any size — a two-person group included) starts an SFU call and a
+    /// one-to-one a 1x1 P2P call.
     static func chatCallAction(
         membershipEnded: Bool,
         callInProgress: Bool,
         affordance: GroupCallAffordance,
-        memberCount: Int?
+        isGroup: Bool
     ) -> ChatCallAction {
         if membershipEnded || callInProgress { return .unavailable }
         if case .joinable(let callId, _, _) = affordance { return .joinGroup(callId: callId) }
-        return (memberCount ?? 0) > 2 ? .startGroup : .startOneToOne
+        return isGroup ? .startGroup : .startOneToOne
     }
 }

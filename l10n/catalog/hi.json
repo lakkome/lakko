@@ -1194,6 +1194,10 @@
       "text": "यह पोस्ट पब्लिश करने के लिए बहुत लंबी है।",
       "status": "machine"
     },
+    "channels.error.publisher_refused": {
+      "text": "इस डिवाइस को अभी इस चैनल में पोस्ट करने की अनुमति नहीं है। मालिक का डिवाइस जोड़ना पूरा कर ले, तब सह-प्रकाशक पोस्ट कर सकता है।",
+      "status": "machine"
+    },
     "channels.error.refused": {
       "text": "सर्वर ने अनुरोध अस्वीकार कर दिया। बाद में फिर से कोशिश करें।",
       "status": "machine"
@@ -1390,6 +1394,10 @@
       "text": "सेव नहीं हो सका।",
       "status": "machine"
     },
+    "channels.meta.error.sign_in": {
+      "text": "इस चैनल के बदलाव सेव करने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
     "channels.meta.saved": {
       "text": "सेव हो गया। सब्सक्राइबर को नया नाम उनकी अगली पोस्ट के साथ दिखेगा।",
       "status": "machine"
@@ -1486,6 +1494,10 @@
       "text": "पब्लिश नहीं हो सका।",
       "status": "machine"
     },
+    "channels.publish.error.sign_in": {
+      "text": "इस चैनल में पोस्ट करने के लिए फिर से साइन इन करें।",
+      "status": "machine"
+    },
     "channels.rotation.desc": {
       "text": "Lakko चैनल की सुरक्षा अपने-आप रिफ़्रेश करता है। अगर आपको लगता है कि किसी सब्सक्राइबर का डिवाइस हैक हो गया है, तो इसे अभी रिफ़्रेश करें।",
       "status": "machine"
@@ -1496,6 +1508,10 @@
     },
     "channels.rotation.error.refresh": {
       "text": "रिफ़्रेश नहीं हो सका। थोड़ी देर में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh_prefix": {
+      "text": "रीफ़्रेश नहीं हो सका।",
       "status": "machine"
     },
     "channels.rotation.never": {
@@ -1518,6 +1534,10 @@
       "text": "सुरक्षा",
       "status": "machine"
     },
+    "channels.row.new_posts_a11y": {
+      "text": "{count, plural, one {# नई पोस्ट} other {# नई पोस्ट}}",
+      "status": "machine"
+    },
     "channels.row.own": {
       "text": "आपका चैनल",
       "status": "machine"
@@ -1536,6 +1556,10 @@
     },
     "channels.subscribe.error.generic": {
       "text": "सब्सक्राइब नहीं हो सका। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "channels.subscribe.error.network": {
+      "text": "चैनल फ़ॉलो नहीं हो सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       "status": "machine"
     },
     "channels.subscribe.error.prefix": {
@@ -2850,6 +2874,10 @@
       "text": "इस बदलाव का अनुरोध नहीं किया जा सका।",
       "status": "machine"
     },
+    "chat.refusal.group_kind_changed": {
+      "text": "यह बदलाव इस बातचीत पर लागू नहीं हो सकता।",
+      "status": "machine"
+    },
     "chat.refusal.join_not_kept": {
       "text": "शामिल होने का एक अनुरोध तब आया जब पहले से बहुत सारे अनुरोध इंतज़ार में थे, इसलिए उसे नहीं रखा गया। उस व्यक्ति से बाद में फिर से भेजने को कहें।",
       "status": "machine"
@@ -2864,6 +2892,14 @@
     },
     "chat.refusal.not_owner": {
       "text": "सिर्फ़ ग्रुप का मालिक एडमिन बदल सकता है या मालिकाना हक सौंप सकता है।",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_fixed": {
+      "text": "चैट हमेशा उन्हीं दो लोगों के बीच होती है।",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_no_roles": {
+      "text": "चैट में कोई एडमिन नहीं होता।",
       "status": "machine"
     },
     "chat.refusal.owner_cannot_leave": {
@@ -3418,6 +3454,10 @@
       "text": "छोटा करें",
       "status": "machine"
     },
+    "common.collapsed": {
+      "text": "बंद",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "पुष्टि करें",
       "status": "machine"
@@ -3528,6 +3568,10 @@
     },
     "common.expand": {
       "text": "बड़ा करें",
+      "status": "machine"
+    },
+    "common.expanded": {
+      "text": "खुला हुआ",
       "status": "machine"
     },
     "common.fact_pair": {
@@ -3668,6 +3712,10 @@
     },
     "common.try_again": {
       "text": "फिर से कोशिश करें",
+      "status": "machine"
+    },
+    "common.undo": {
+      "text": "पहले जैसा करें",
       "status": "machine"
     },
     "common.unknown": {
@@ -4242,6 +4290,322 @@
       "text": "कैमरा खोलें",
       "status": "machine"
     },
+    "discover.card.a11y": {
+      "text": "सुझाया गया चैनल {name}",
+      "status": "machine"
+    },
+    "discover.card.following": {
+      "text": "आप इस चैनल को फ़ॉलो करते हैं",
+      "status": "machine"
+    },
+    "discover.card.hide_topic": {
+      "text": "यह विषय छिपाएँ",
+      "status": "machine"
+    },
+    "discover.card.more": {
+      "text": "और",
+      "status": "machine"
+    },
+    "discover.card.not_interested": {
+      "text": "दिलचस्पी नहीं",
+      "status": "machine"
+    },
+    "discover.card.show_description": {
+      "text": "विवरण दिखाएँ",
+      "status": "machine"
+    },
+    "discover.card.subscribers": {
+      "text": "{band} सब्सक्राइबर",
+      "status": "machine"
+    },
+    "discover.edit_topics": {
+      "text": "विषय बदलें",
+      "status": "machine"
+    },
+    "discover.gone": {
+      "text": "यह चैनल अब उपलब्ध नहीं है।",
+      "status": "machine"
+    },
+    "discover.language": {
+      "text": "भाषा",
+      "status": "machine"
+    },
+    "discover.listing.checking": {
+      "text": "देख रहे हैं कि यह चैनल खोज में है या नहीं...",
+      "status": "machine"
+    },
+    "discover.listing.confirm_action": {
+      "text": "दिखाएँ",
+      "status": "machine"
+    },
+    "discover.listing.confirm_body": {
+      "text": "कोई भी इस चैनल का नाम, विवरण और सब्सक्राइबर संख्या ढूँढ सकता है। पोस्ट एन्क्रिप्टेड रहती हैं।",
+      "status": "machine"
+    },
+    "discover.listing.confirm_title": {
+      "text": "इस चैनल को खोज में दिखाएँ?",
+      "status": "machine"
+    },
+    "discover.listing.listed": {
+      "text": "दिखाया जाता है",
+      "status": "machine"
+    },
+    "discover.listing.listed_notice": {
+      "text": "जोड़ दिया गया। सब्सक्राइबर को चैनल के अगले अपडेट के साथ पता चलेगा।",
+      "status": "machine"
+    },
+    "discover.listing.needs_handle": {
+      "text": "खोज में दिखने के लिए चैनल का @handle होना ज़रूरी है।",
+      "status": "machine"
+    },
+    "discover.listing.not_listed": {
+      "text": "नहीं दिखाया जाता",
+      "status": "machine"
+    },
+    "discover.listing.owner_desc": {
+      "text": "कोई भी खोज में दिखाए गए चैनल का नाम, विवरण और सब्सक्राइबर संख्या ढूँढ सकता है। पोस्ट एन्क्रिप्टेड रहती हैं।",
+      "status": "machine"
+    },
+    "discover.listing.refused": {
+      "text": "यह चैनल खोज में नहीं जोड़ा जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "discover.listing.remove_failed": {
+      "text": "खोज से हटाया नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "discover.listing.title": {
+      "text": "खोज में दिखाएँ",
+      "status": "machine"
+    },
+    "discover.listing.topic": {
+      "text": "विषय",
+      "status": "machine"
+    },
+    "discover.listing.update_failed": {
+      "text": "सेव हो गया। खोज वाली जानकारी अपडेट नहीं हो सकी; फिर से कोशिश करने के लिए दोबारा सेव करें।",
+      "status": "machine"
+    },
+    "discover.listing.viewer_listed": {
+      "text": "यह चैनल खोज में दिखाया जाता है। इसे सिर्फ़ चैनल का मालिक बदल सकता है।",
+      "status": "machine"
+    },
+    "discover.listing.viewer_not_listed": {
+      "text": "यह चैनल खोज में नहीं दिखाया जाता। इसे सिर्फ़ चैनल का मालिक जोड़ सकता है।",
+      "status": "machine"
+    },
+    "discover.mix.label": {
+      "text": "रैंडम विषय मिलाएँ",
+      "status": "machine"
+    },
+    "discover.mix.off_line": {
+      "text": "कम डेटा लगता है। Lakko का सर्वर ठीक-ठीक देख सकेगा कि आपने कौन-से विषय चुने।",
+      "status": "machine"
+    },
+    "discover.nothing_yet": {
+      "text": "अभी कोई सुझाव नहीं। विषय चुनें, या अपने ग्रुप के लोगों से अपने चैनल शेयर करने को कहें।",
+      "status": "machine"
+    },
+    "discover.pick.a11y": {
+      "text": "विषय चुनें",
+      "status": "machine"
+    },
+    "discover.pick.body": {
+      "text": "Lakko इनके लिए सुझाव डाउनलोड करता है, कुछ रैंडम विषयों के साथ मिलाकर, ताकि Lakko का सर्वर ठीक-ठीक न जान सके कि आपने कौन-से विषय चुने। वह कभी नहीं देखता कि आप कौन-से चैनल खोलते हैं।",
+      "status": "machine"
+    },
+    "discover.pick.title": {
+      "text": "कुछ विषय चुनें।",
+      "status": "machine"
+    },
+    "discover.reason.followed_by": {
+      "text": "{group} में {name} फ़ॉलो करते हैं",
+      "status": "machine"
+    },
+    "discover.reason.followed_by_others": {
+      "text": "{count, plural, one {{group} में {name} और # अन्य फ़ॉलो करते हैं} other {{group} में {name} और # अन्य फ़ॉलो करते हैं}}",
+      "status": "machine"
+    },
+    "discover.reason.followed_count": {
+      "text": "{count, plural, one {{group} में # व्यक्ति फ़ॉलो करता है} other {{group} में # लोग फ़ॉलो करते हैं}}",
+      "status": "machine"
+    },
+    "discover.reason.group_fallback": {
+      "text": "एक ग्रुप",
+      "status": "machine"
+    },
+    "discover.reason.popular": {
+      "text": "{topic} में लोकप्रिय",
+      "status": "machine"
+    },
+    "discover.reason.search": {
+      "text": "आपकी खोज से मेल खाता है",
+      "status": "machine"
+    },
+    "discover.search.action": {
+      "text": "खोजें",
+      "status": "machine"
+    },
+    "discover.search.helper": {
+      "text": "खोज Lakko के सर्वर पर भेजी जाती हैं।",
+      "status": "machine"
+    },
+    "discover.search.no_results": {
+      "text": "कोई चैनल नहीं मिला।",
+      "status": "machine"
+    },
+    "discover.search.placeholder": {
+      "text": "चैनल खोजें",
+      "status": "machine"
+    },
+    "discover.search.searching": {
+      "text": "खोज रहे हैं...",
+      "status": "machine"
+    },
+    "discover.search.too_short": {
+      "text": "कम से कम 2 अक्षर लिखें।",
+      "status": "machine"
+    },
+    "discover.settings": {
+      "text": "खोज की सेटिंग",
+      "status": "machine"
+    },
+    "discover.share.error": {
+      "text": "इसे बदला नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "discover.share.label": {
+      "text": "इस ग्रुप के साथ मेरे चैनल शेयर करें",
+      "status": "machine"
+    },
+    "discover.share.line": {
+      "text": "इस ग्रुप के लोग देख सकते हैं कि आप कौन-से चैनल फ़ॉलो करते हैं। Lakko का सर्वर नहीं देख सकता।",
+      "status": "machine"
+    },
+    "discover.shared.desc": {
+      "text": "वे ग्रुप जिनके लोग देख सकते हैं कि आप कौन-से चैनल फ़ॉलो करते हैं। Lakko का सर्वर नहीं देख सकता।",
+      "status": "machine"
+    },
+    "discover.shared.empty": {
+      "text": "आप अपने चैनल किसी ग्रुप के साथ शेयर नहीं करते।",
+      "status": "machine"
+    },
+    "discover.shared.settings_sub": {
+      "text": "वे ग्रुप जो देख सकते हैं कि आप कौन-से चैनल फ़ॉलो करते हैं",
+      "status": "machine"
+    },
+    "discover.shared.stop": {
+      "text": "शेयर करना बंद करें",
+      "status": "machine"
+    },
+    "discover.shared.stop_failed": {
+      "text": "शेयर करना बंद नहीं हो सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "discover.shared.title": {
+      "text": "मेरे शेयर किए चैनल",
+      "status": "machine"
+    },
+    "discover.topic.art_design": {
+      "text": "कला और डिज़ाइन",
+      "status": "machine"
+    },
+    "discover.topic.books": {
+      "text": "किताबें",
+      "status": "machine"
+    },
+    "discover.topic.business": {
+      "text": "बिज़नेस",
+      "status": "machine"
+    },
+    "discover.topic.education": {
+      "text": "शिक्षा",
+      "status": "machine"
+    },
+    "discover.topic.film_tv": {
+      "text": "फ़िल्म और टीवी",
+      "status": "machine"
+    },
+    "discover.topic.finance": {
+      "text": "वित्त",
+      "status": "machine"
+    },
+    "discover.topic.food": {
+      "text": "खाना",
+      "status": "machine"
+    },
+    "discover.topic.gaming": {
+      "text": "गेमिंग",
+      "status": "machine"
+    },
+    "discover.topic.health": {
+      "text": "स्वास्थ्य",
+      "status": "machine"
+    },
+    "discover.topic.humour": {
+      "text": "हास्य",
+      "status": "machine"
+    },
+    "discover.topic.lifestyle": {
+      "text": "लाइफ़स्टाइल",
+      "status": "machine"
+    },
+    "discover.topic.local": {
+      "text": "स्थानीय",
+      "status": "machine"
+    },
+    "discover.topic.music": {
+      "text": "संगीत",
+      "status": "machine"
+    },
+    "discover.topic.nature": {
+      "text": "प्रकृति",
+      "status": "machine"
+    },
+    "discover.topic.news": {
+      "text": "समाचार",
+      "status": "machine"
+    },
+    "discover.topic.other": {
+      "text": "अन्य",
+      "status": "machine"
+    },
+    "discover.topic.photography": {
+      "text": "फ़ोटोग्राफ़ी",
+      "status": "machine"
+    },
+    "discover.topic.politics": {
+      "text": "राजनीति",
+      "status": "machine"
+    },
+    "discover.topic.religion": {
+      "text": "धर्म",
+      "status": "machine"
+    },
+    "discover.topic.science": {
+      "text": "विज्ञान",
+      "status": "machine"
+    },
+    "discover.topic.software_development": {
+      "text": "सॉफ़्टवेयर डेवलपमेंट",
+      "status": "machine"
+    },
+    "discover.topic.sports": {
+      "text": "खेल",
+      "status": "machine"
+    },
+    "discover.topic.technology": {
+      "text": "टेक्नोलॉजी",
+      "status": "machine"
+    },
+    "discover.topic.travel": {
+      "text": "यात्रा",
+      "status": "machine"
+    },
+    "discover.unavailable": {
+      "text": "सुझाव अभी उपलब्ध नहीं हैं।",
+      "status": "machine"
+    },
     "display_name.error.control": {
       "text": "अदृश्य या टेक्स्ट-दिशा वाले अक्षर हटाएँ",
       "status": "machine"
@@ -4268,6 +4632,542 @@
     },
     "ds.clock_skew": {
       "text": "इस डिवाइस की तारीख और समय जाँचें।",
+      "status": "machine"
+    },
+    "feed.action.hide": {
+      "text": "फ़ीड से छिपाएँ",
+      "status": "machine"
+    },
+    "feed.action.hide_hint": {
+      "text": "इस बातचीत को फ़ीड में म्यूट करें",
+      "status": "machine"
+    },
+    "feed.attachments.count": {
+      "text": "{count, plural, one {# अटैचमेंट} other {# अटैचमेंट}}",
+      "status": "machine"
+    },
+    "feed.banner.dismiss": {
+      "text": "ठीक है",
+      "status": "machine"
+    },
+    "feed.banner.local": {
+      "text": "आपकी फ़ीड वे मैसेज दिखाती है जो इस डिवाइस को मिले हैं।",
+      "status": "machine"
+    },
+    "feed.divider.new": {
+      "text": "नया",
+      "status": "machine"
+    },
+    "feed.edit": {
+      "text": "एडिट करें",
+      "status": "machine"
+    },
+    "feed.edit_feed": {
+      "text": "फ़ीड एडिट करें",
+      "status": "machine"
+    },
+    "feed.editor.default_name": {
+      "text": "मेरी फ़ीड",
+      "status": "machine"
+    },
+    "feed.editor.delete": {
+      "text": "फ़ीड डिलीट करें",
+      "status": "machine"
+    },
+    "feed.editor.delete_confirm": {
+      "text": "यह फ़ीड डिलीट करें?",
+      "status": "machine"
+    },
+    "feed.editor.fade": {
+      "text": "पुराना कितनी जल्दी नीचे जाए",
+      "status": "machine"
+    },
+    "feed.editor.fade.day": {
+      "text": "एक दिन",
+      "status": "machine"
+    },
+    "feed.editor.fade.hours": {
+      "text": "कुछ घंटे",
+      "status": "machine"
+    },
+    "feed.editor.fade.week": {
+      "text": "एक हफ़्ता",
+      "status": "machine"
+    },
+    "feed.editor.filters": {
+      "text": "फ़िल्टर",
+      "status": "machine"
+    },
+    "feed.editor.for_me": {
+      "text": "सिर्फ़ वह जिसमें मेरा ज़िक्र हो, मुझे जवाब हो या मेरे मैसेज पर रिएक्शन हो",
+      "status": "machine"
+    },
+    "feed.editor.hide_own": {
+      "text": "मेरे अपने मैसेज छिपाएँ",
+      "status": "machine"
+    },
+    "feed.editor.hide_words": {
+      "text": "शब्द छिपाएँ (हर लाइन में एक)",
+      "status": "machine"
+    },
+    "feed.editor.icon": {
+      "text": "आइकन",
+      "status": "machine"
+    },
+    "feed.editor.include_muted": {
+      "text": "म्यूट की गई बातचीतें शामिल करें",
+      "status": "machine"
+    },
+    "feed.editor.look_back": {
+      "text": "कितने दिन पीछे तक",
+      "status": "machine"
+    },
+    "feed.editor.look_back_count": {
+      "text": "{count, plural, one {# दिन पीछे तक} other {# दिन पीछे तक}}",
+      "status": "machine"
+    },
+    "feed.editor.media_only": {
+      "text": "सिर्फ़ फ़ोटो या वीडियो वाले",
+      "status": "machine"
+    },
+    "feed.editor.membership.a11y": {
+      "text": "इस फ़ीड में {name}",
+      "status": "machine"
+    },
+    "feed.editor.membership.never": {
+      "text": "कभी नहीं",
+      "status": "machine"
+    },
+    "feed.editor.membership.only": {
+      "text": "सिर्फ़",
+      "status": "machine"
+    },
+    "feed.editor.membership_hint": {
+      "text": "\"सिर्फ़\" फ़ीड को ऐसे चिह्नित बातचीतों तक सीमित करता है; \"कभी नहीं\" किसी एक को बाहर रखता है।",
+      "status": "machine"
+    },
+    "feed.editor.min_reactions": {
+      "text": "कम से कम इतने रिएक्शन",
+      "status": "machine"
+    },
+    "feed.editor.name": {
+      "text": "नाम",
+      "status": "machine"
+    },
+    "feed.editor.only_words": {
+      "text": "सिर्फ़ ये शब्द (हर लाइन में एक)",
+      "status": "machine"
+    },
+    "feed.editor.preview": {
+      "text": "प्रीव्यू",
+      "status": "machine"
+    },
+    "feed.editor.preview_pending": {
+      "text": "फ़ीड सेव करने लायक होने पर प्रीव्यू दिखेगा।",
+      "status": "machine"
+    },
+    "feed.editor.slider.max": {
+      "text": "बहुत ज़्यादा",
+      "status": "machine"
+    },
+    "feed.editor.slider.min": {
+      "text": "अनदेखा करें",
+      "status": "machine"
+    },
+    "feed.editor.sources": {
+      "text": "स्रोत",
+      "status": "machine"
+    },
+    "feed.editor.sources.both": {
+      "text": "दोनों",
+      "status": "machine"
+    },
+    "feed.editor.sources.channels": {
+      "text": "सभी चैनल",
+      "status": "machine"
+    },
+    "feed.editor.sources.groups": {
+      "text": "सभी ग्रुप",
+      "status": "machine"
+    },
+    "feed.editor.start.blank": {
+      "text": "खाली",
+      "status": "machine"
+    },
+    "feed.editor.start_from": {
+      "text": "यहाँ से शुरू करें",
+      "status": "machine"
+    },
+    "feed.editor.stripped_hint": {
+      "text": "शेयर की गई फ़ीड खास बातचीतों के बिना आती हैं। इसे अपना बनाने के लिए नीचे कुछ चुनें।",
+      "status": "machine"
+    },
+    "feed.editor.suggestions": {
+      "text": "सुझाव",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.never": {
+      "text": "कभी नहीं",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.rarely": {
+      "text": "कभी-कभार",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.sometimes": {
+      "text": "कभी-कभी",
+      "status": "machine"
+    },
+    "feed.editor.suggestions_rate": {
+      "text": "सुझाया गया चैनल कितनी बार दिखे",
+      "status": "machine"
+    },
+    "feed.editor.weight.from_contacts": {
+      "text": "आपके कॉन्टैक्ट से",
+      "status": "machine"
+    },
+    "feed.editor.weight.media": {
+      "text": "फ़ोटो या वीडियो वाले",
+      "status": "machine"
+    },
+    "feed.editor.weight.mentions": {
+      "text": "आपका ज़िक्र",
+      "status": "machine"
+    },
+    "feed.editor.weight.reactions": {
+      "text": "रिएक्शन",
+      "status": "machine"
+    },
+    "feed.editor.weight.recency": {
+      "text": "कितना नया",
+      "status": "machine"
+    },
+    "feed.editor.weight.replies": {
+      "text": "जवाब",
+      "status": "machine"
+    },
+    "feed.editor.what_counts": {
+      "text": "क्या मायने रखता है",
+      "status": "machine"
+    },
+    "feed.empty.discover": {
+      "text": "चैनल खोजें",
+      "status": "machine"
+    },
+    "feed.empty.no_match": {
+      "text": "इस फ़ीड से कोई मैसेज मेल नहीं खाता।",
+      "status": "machine"
+    },
+    "feed.empty.no_sources": {
+      "text": "आपकी फ़ीड आपके ग्रुप और चैनलों से भरती है।",
+      "status": "machine"
+    },
+    "feed.empty.nothing_yet": {
+      "text": "यहाँ अभी कुछ नहीं है। आपके ग्रुप और चैनलों के नए मैसेज यहाँ दिखेंगे।",
+      "status": "machine"
+    },
+    "feed.end": {
+      "text": "आपने सब देख लिया है।",
+      "status": "machine"
+    },
+    "feed.error.cannot_save_here": {
+      "text": "यह डिवाइस अभी इसे सेव नहीं कर सकता।",
+      "status": "machine"
+    },
+    "feed.error.delete": {
+      "text": "फ़ीड डिलीट नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "feed.error.no_device_key": {
+      "text": "यह डिवाइस अभी फ़ीड सेव नहीं कर सकता।",
+      "status": "machine"
+    },
+    "feed.error.save": {
+      "text": "फ़ीड सेव नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "feed.hidden.empty": {
+      "text": "आपकी फ़ीड से कुछ भी छिपाया नहीं गया है।",
+      "status": "machine"
+    },
+    "feed.hidden.show_again": {
+      "text": "फिर से दिखाएँ",
+      "status": "machine"
+    },
+    "feed.hidden.title": {
+      "text": "फ़ीड से छिपाए गए",
+      "status": "machine"
+    },
+    "feed.hidden.toast": {
+      "text": "फ़ीड से छिपाया गया।",
+      "status": "machine"
+    },
+    "feed.icon.bell": {
+      "text": "घंटी",
+      "status": "machine"
+    },
+    "feed.icon.book": {
+      "text": "किताब",
+      "status": "machine"
+    },
+    "feed.icon.camera": {
+      "text": "कैमरा",
+      "status": "machine"
+    },
+    "feed.icon.code": {
+      "text": "कोड",
+      "status": "machine"
+    },
+    "feed.icon.feed": {
+      "text": "फ़ीड",
+      "status": "machine"
+    },
+    "feed.icon.flag": {
+      "text": "झंडा",
+      "status": "machine"
+    },
+    "feed.icon.globe": {
+      "text": "ग्लोब",
+      "status": "machine"
+    },
+    "feed.icon.heart": {
+      "text": "दिल",
+      "status": "machine"
+    },
+    "feed.icon.lightning": {
+      "text": "बिजली",
+      "status": "machine"
+    },
+    "feed.icon.music": {
+      "text": "संगीत",
+      "status": "machine"
+    },
+    "feed.icon.speech_bubble": {
+      "text": "बातचीत का बुलबुला",
+      "status": "machine"
+    },
+    "feed.icon.star": {
+      "text": "तारा",
+      "status": "machine"
+    },
+    "feed.import.a11y": {
+      "text": "फ़ीड इंपोर्ट करें",
+      "status": "machine"
+    },
+    "feed.import.add": {
+      "text": "मेरी फ़ीड में जोड़ें",
+      "status": "machine"
+    },
+    "feed.import.choose_file": {
+      "text": "फ़ाइल चुनें",
+      "status": "machine"
+    },
+    "feed.import.hint": {
+      "text": "किसी ने आपके साथ .lakkofeed फ़ाइल के रूप में जो फ़ीड शेयर की है, उसे खोलें।",
+      "status": "machine"
+    },
+    "feed.import.refused": {
+      "text": "यह फ़ाइल ऐसी फ़ीड नहीं है जिसे Lakko खोल सके।",
+      "status": "machine"
+    },
+    "feed.import.title": {
+      "text": "शेयर की गई फ़ीड जोड़ें",
+      "status": "machine"
+    },
+    "feed.item.reactions_a11y": {
+      "text": "रिएक्शन",
+      "status": "machine"
+    },
+    "feed.menu.a11y": {
+      "text": "फ़ीड मेन्यू",
+      "status": "machine"
+    },
+    "feed.min_reactions_count": {
+      "text": "{count, plural, one {कम से कम # रिएक्शन} other {कम से कम # रिएक्शन}}",
+      "status": "machine"
+    },
+    "feed.new": {
+      "text": "नई फ़ीड",
+      "status": "machine"
+    },
+    "feed.preset.discover": {
+      "text": "खोजें",
+      "status": "machine"
+    },
+    "feed.preset.for_me": {
+      "text": "मेरे लिए",
+      "status": "machine"
+    },
+    "feed.preset.latest": {
+      "text": "नवीनतम",
+      "status": "machine"
+    },
+    "feed.preset.popular": {
+      "text": "लोकप्रिय",
+      "status": "machine"
+    },
+    "feed.problem.conversations": {
+      "text": "बहुत ज़्यादा बातचीतें चुनी गई हैं।",
+      "status": "machine"
+    },
+    "feed.problem.generic": {
+      "text": "यह फ़ीड जैसी है वैसी सेव नहीं की जा सकती।",
+      "status": "machine"
+    },
+    "feed.problem.name": {
+      "text": "फ़ीड को 64 अक्षरों तक का नाम दें।",
+      "status": "machine"
+    },
+    "feed.problem.no_kinds": {
+      "text": "ग्रुप, चैनल या दोनों चुनें।",
+      "status": "machine"
+    },
+    "feed.problem.stripped": {
+      "text": "यह शेयर की गई फ़ीड बातचीतों के नाम नहीं दे सकती।",
+      "status": "machine"
+    },
+    "feed.problem.too_large": {
+      "text": "यह फ़ीड सेव करने के लिए बहुत बड़ी है।",
+      "status": "machine"
+    },
+    "feed.problem.weight": {
+      "text": "एक स्लाइडर सीमा से बाहर है।",
+      "status": "machine"
+    },
+    "feed.problem.window": {
+      "text": "1 से 30 दिन पीछे तक देखें।",
+      "status": "machine"
+    },
+    "feed.problem.words": {
+      "text": "शब्द सूचियाँ जाँचें: हर लाइन में एक शब्द, ज़्यादा से ज़्यादा 32 शब्द।",
+      "status": "machine"
+    },
+    "feed.refresh_failed": {
+      "text": "नए मैसेज नहीं देखे जा सके।",
+      "status": "machine"
+    },
+    "feed.replies.count": {
+      "text": "{count, plural, one {# जवाब} other {# जवाब}}",
+      "status": "machine"
+    },
+    "feed.share": {
+      "text": "शेयर करें",
+      "status": "machine"
+    },
+    "feed.share.a11y": {
+      "text": "फ़ीड शेयर करें",
+      "status": "machine"
+    },
+    "feed.share.download": {
+      "text": "फ़ाइल डाउनलोड करें",
+      "status": "machine"
+    },
+    "feed.share.share_file": {
+      "text": "फ़ाइल शेयर करें",
+      "status": "machine"
+    },
+    "feed.share.share_link": {
+      "text": "लिंक शेयर करें",
+      "status": "machine"
+    },
+    "feed.share.stripped": {
+      "text": "खास बातचीतें शामिल नहीं होतीं: किसी और के लिए उनका कोई मतलब नहीं है।",
+      "status": "machine"
+    },
+    "feed.share.title": {
+      "text": "\"{name}\" शेयर करें",
+      "status": "machine"
+    },
+    "feed.share.unshareable": {
+      "text": "यह फ़ीड जैसी है वैसी शेयर नहीं की जा सकती।",
+      "status": "machine"
+    },
+    "feed.show_new": {
+      "text": "{count, plural, one {# नया दिखाएँ} other {# नए दिखाएँ}}",
+      "status": "machine"
+    },
+    "feed.summary.factor.contacts": {
+      "text": "आपके कॉन्टैक्ट",
+      "status": "machine"
+    },
+    "feed.summary.factor.media": {
+      "text": "फ़ोटो और वीडियो",
+      "status": "machine"
+    },
+    "feed.summary.factor.mentions": {
+      "text": "आपका ज़िक्र",
+      "status": "machine"
+    },
+    "feed.summary.factor.reactions": {
+      "text": "रिएक्शन",
+      "status": "machine"
+    },
+    "feed.summary.factor.replies": {
+      "text": "जवाब",
+      "status": "machine"
+    },
+    "feed.summary.for_me": {
+      "text": "सिर्फ़ वह जो आपसे जुड़ा है",
+      "status": "machine"
+    },
+    "feed.summary.hide_own": {
+      "text": "आपके अपने मैसेज छिपाती है",
+      "status": "machine"
+    },
+    "feed.summary.hide_words": {
+      "text": "{count, plural, one {# शब्द छिपाती है} other {# शब्द छिपाती है}}",
+      "status": "machine"
+    },
+    "feed.summary.include_muted": {
+      "text": "म्यूट की गई बातचीतें शामिल हैं",
+      "status": "machine"
+    },
+    "feed.summary.look_back": {
+      "text": "{count, plural, one {# दिन पीछे तक देखती है} other {# दिन पीछे तक देखती है}}",
+      "status": "machine"
+    },
+    "feed.summary.newest_first": {
+      "text": "सबसे नए पहले",
+      "status": "machine"
+    },
+    "feed.summary.only_words": {
+      "text": "सिर्फ़ इन शब्दों वाले मैसेज: {words}",
+      "status": "machine"
+    },
+    "feed.summary.ranks_by": {
+      "text": "नएपन और इनके आधार पर क्रम: {factors}",
+      "status": "machine"
+    },
+    "feed.summary.sources.both": {
+      "text": "स्रोत: सभी ग्रुप और चैनल",
+      "status": "machine"
+    },
+    "feed.summary.sources.channels": {
+      "text": "स्रोत: सभी चैनल",
+      "status": "machine"
+    },
+    "feed.summary.sources.groups": {
+      "text": "स्रोत: सभी ग्रुप",
+      "status": "machine"
+    },
+    "feed.switcher.a11y": {
+      "text": "फ़ीड",
+      "status": "machine"
+    },
+    "feed.title": {
+      "text": "फ़ीड",
+      "status": "machine"
+    },
+    "feed.why.mentions": {
+      "text": "आपका ज़िक्र है",
+      "status": "machine"
+    },
+    "feed.why.popular": {
+      "text": "{source} में लोकप्रिय",
+      "status": "machine"
+    },
+    "feed.why.reply": {
+      "text": "आपके मैसेज का जवाब",
       "status": "machine"
     },
     "folders.add_to_folder": {
@@ -4902,6 +5802,10 @@
       "text": "{count, plural, one {ज़्यादा से ज़्यादा # बार} other {ज़्यादा से ज़्यादा # बार}}",
       "status": "machine"
     },
+    "ios.document_type.feed": {
+      "text": "Lakko फ़ीड",
+      "status": "machine"
+    },
     "ios.permission.camera": {
       "text": "Lakko कैमरे का इस्तेमाल उन डिवाइस के QR कोड स्कैन करने के लिए करता है जिन्हें आप अपने अकाउंट से जोड़ना चाहते हैं, कॉल में वीडियो भेजने के लिए, और उन वीडियो मैसेज को रिकॉर्ड करने के लिए जिन्हें आप भेजना चुनते हैं। कैमरा जो भी कैप्चर करता है, वह भेजने से पहले आपके डिवाइस पर एंड-टू-एंड एन्क्रिप्ट होता है।",
       "status": "machine"
@@ -4972,6 +5876,10 @@
     },
     "nav.contacts": {
       "text": "संपर्क",
+      "status": "machine"
+    },
+    "nav.feed": {
+      "text": "फ़ीड",
       "status": "machine"
     },
     "nav.rail_a11y": {
@@ -6244,6 +7152,14 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "आज आप बहुत सारे लोगों को खोज चुके हैं। कल फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "tokens.search_allowance_used": {
+      "text": "बहुत ज़्यादा खोजें। एक मिनट बाद फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "tokens.subscribe_allowance_used": {
+      "text": "आज आपने बहुत सारे चैनल सब्सक्राइब किए हैं। कल फिर से कोशिश करें।",
       "status": "machine"
     },
     "update.available.message": {

@@ -219,6 +219,22 @@ internal val DEVICE_LIMIT_REACHED: UiText =
  *  same plain sentence as web rather than a screen. */
 internal val DEVICE_BINDING_INVALID: UiText = UiText("chat.refusal.device_binding")
 
+/**
+ * ADR-0062 — a chat (one-to-one) is always the same two people. No screen
+ * offers add / remove / leave on a chat, so this is reached only by a stale
+ * view; stated as the standing rule. Same copy as web.
+ */
+internal val ONE_TO_ONE_MEMBERSHIP_FIXED: UiText = UiText("chat.refusal.one_to_one_fixed")
+
+/** ADR-0062 — a chat has no owner or admins. Same copy as web. */
+internal val ONE_TO_ONE_HAS_NO_ROLES: UiText = UiText("chat.refusal.one_to_one_no_roles")
+
+/**
+ * ADR-0062 — a change that would alter or drop the conversation's kind,
+ * refused by the peer gate. Same copy as web.
+ */
+internal val GROUP_KIND_CHANGED: UiText = UiText("chat.refusal.group_kind_changed")
+
 internal val RETRY_WHEN_IT_LANDS: UiText = UiText("chat.refusal.retry_one")
 
 /**
@@ -317,6 +333,9 @@ private fun refusalCopy(reason: FfiRefusalReason): RefusalCopy = when (reason) {
     FfiRefusalReason.PENDING_SET_FULL -> RefusalCopy(PENDING_SET_FULL, RETRY_WHEN_THEY_LAND)
     FfiRefusalReason.DEVICE_LIMIT_REACHED -> RefusalCopy(DEVICE_LIMIT_REACHED)
     FfiRefusalReason.DEVICE_BINDING_INVALID -> RefusalCopy(DEVICE_BINDING_INVALID)
+    FfiRefusalReason.ONE_TO_ONE_MEMBERSHIP_FIXED -> RefusalCopy(ONE_TO_ONE_MEMBERSHIP_FIXED)
+    FfiRefusalReason.ONE_TO_ONE_HAS_NO_ROLES -> RefusalCopy(ONE_TO_ONE_HAS_NO_ROLES)
+    FfiRefusalReason.GROUP_KIND_CHANGED -> RefusalCopy(GROUP_KIND_CHANGED)
 
     // The recorded collapses. Listed individually rather than as an `else` so
     // that adding a reason to the core forces a decision here.
@@ -437,6 +456,12 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.MembershipJoinerAlreadyAMember ->
                     FfiRefusalReason.JOINER_ALREADY_A_MEMBER
                 is FfiException.SweepAlreadyStaged -> FfiRefusalReason.SWEEP_ALREADY_STAGED
+                // ADR-0062 — the conversation-kind refusals.
+                is FfiException.MembershipOneToOneMembershipFixed ->
+                    FfiRefusalReason.ONE_TO_ONE_MEMBERSHIP_FIXED
+                is FfiException.MembershipOneToOneHasNoRoles ->
+                    FfiRefusalReason.ONE_TO_ONE_HAS_NO_ROLES
+                is FfiException.MembershipGroupKindChanged -> FfiRefusalReason.GROUP_KIND_CHANGED
                 // ADR-0051 — a channel metadata record out of bounds; not a
                 // membership refusal.
                 is FfiException.ChannelMeta -> null
@@ -446,8 +471,9 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.AnonTokenAlreadyFinalized,
                 -> null
                 // ADR-0049 device link, the sealed invite links of the
-                // 2026-09-28 security pass, and ADR-0060 scoped discovery:
-                // none is a membership refusal.
+                // 2026-09-28 security pass, ADR-0060 scoped discovery,
+                // ADR-0063 feed rules and ADR-0059 channel listings: none is a
+                // membership refusal.
                 is FfiException.DeviceLinkWrongCode,
                 is FfiException.DeviceLink,
                 is FfiException.InviteLinkDamaged,
@@ -461,6 +487,9 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.Visibility,
                 is FfiException.UsernameCertificate,
                 is FfiException.CommitterDelegation,
+                is FfiException.FeedRule,
+                is FfiException.ChannelListing,
+                is FfiException.ChannelCoPublisherBinding,
                 // ADR-0061 - a localization catalog or bundle refusal; not a
                 // membership refusal.
                 is FfiException.L10n,

@@ -29,8 +29,8 @@
 use std::fmt::Write as _;
 
 use lakko_mls::{
-    channel_id_from_group_id, AccountId, ChannelId, DeviceGroup, Group, Identity, PublisherGroup,
-    GROUP_ID_LEN,
+    channel_id_from_group_id, AccountId, ChannelId, DeviceGroup, Group, GroupKind, Identity,
+    PublisherGroup, GROUP_ID_LEN,
 };
 
 /// Local restatement of `services/ds/src/journal.rs`:
@@ -59,7 +59,7 @@ fn group_id_length_is_stable_across_constructors() {
     );
 
     let identity = Identity::generate("alice").expect("identity");
-    let group = Group::create(&identity).expect("create");
+    let group = Group::create(&identity, GroupKind::Group).expect("create");
 
     assert_eq!(
         group.group_id().len(),
@@ -78,7 +78,7 @@ fn group_id_length_is_stable_across_constructors() {
 #[test]
 fn created_group_id_hex_matches_the_ds_path_length() {
     let identity = Identity::generate("alice").expect("identity");
-    let group = Group::create(&identity).expect("create");
+    let group = Group::create(&identity, GroupKind::Group).expect("create");
 
     // Mirrors the clients' `pseudonymHex`: a plain byte-to-hex loop with no
     // padding, so the path length is exactly twice the id length.
@@ -131,7 +131,9 @@ fn created_group_ids_are_unique_and_not_all_zero() {
 
     for _ in 0..16 {
         let identity = Identity::generate("alice").expect("identity");
-        let id = Group::create(&identity).expect("create").group_id();
+        let id = Group::create(&identity, GroupKind::Group)
+            .expect("create")
+            .group_id();
 
         assert_eq!(id.len(), GROUP_ID_LEN);
         assert_ne!(
@@ -229,7 +231,7 @@ fn publisher_group_id_round_trips_through_channel_id() {
     // A chat group id is 32 bytes too, so the length check alone no longer
     // discriminates — the prefix must. A random id decoding as a channel would
     // let a `/g/` chat ticket be mistaken for a co-publisher ticket.
-    let chat = Group::create(&identity).expect("chat group");
+    let chat = Group::create(&identity, GroupKind::Group).expect("chat group");
     assert_eq!(chat.group_id().len(), DS_PSEUDONYM_LEN);
     assert_eq!(
         channel_id_from_group_id(&chat.group_id()),

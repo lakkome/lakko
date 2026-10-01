@@ -9,50 +9,33 @@
  * A one-to-one conversation is not a group here: it is the same MLS object,
  * but the person already reaches the other participant as a contact, and the
  * list is about groups and channels. The split is the one the Chats and
- * Groups lists use (`chat/conversation-kind-store.ts`), so a conversation is
- * a group here exactly when it is listed under Groups.
+ * Groups lists use (the kind the conversation carries, ADR-0062,
+ * `chat/conversation-kind.ts`), so a conversation is a group here exactly
+ * when it is listed under Groups.
  *
- * Must be called inside the providers (`useAuth`, `useChats`,
+ * Must be called inside the providers (`useChats`,
  * `useGroupNames`, `useProfiles`).
  */
-import { createSignal, onCleanup, onMount, type Accessor } from "solid-js";
+import { type Accessor } from "solid-js";
 
-import { useAuth } from "../auth/AuthContext";
 import { base64Decode } from "../auth/account-id";
 import { channelTitle } from "../channels/channel-row";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
-import { decideConversationKind } from "../chat/conversation-kind";
-import {
-  persistedConversationKind,
-  subscribeConversationKindChanged,
-} from "../chat/conversation-kind-store";
+import { conversationKindOf } from "../chat/conversation-kind";
 import { groupTitle } from "../chat/group-title";
 import { useGroupNames } from "../chat/GroupNameContext";
-import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "../chat/person-key";
+import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { useProfiles } from "../profile/ProfileContext";
 import { channelsState } from "../state/channels-state";
 import { channelIdBytes, scopeKey, type ScopeEntry } from "./who-can-find-me";
 
 /** Reactive: the groups and channels the account is in. */
 export function useFindableScopes(): Accessor<readonly ScopeEntry[]> {
-  const auth = useAuth();
   const chats = useChats();
   const groupNames = useGroupNames();
   const profiles = useProfiles();
 
-  const [kindVersion, setKindVersion] = createSignal(0);
-  onMount(() => {
-    const unsubscribe = subscribeConversationKindChanged(() => setKindVersion((v) => v + 1));
-    onCleanup(unsubscribe);
-  });
-
-  const isGroup = (g: ActiveGroup): boolean => {
-    kindVersion();
-    const s = auth.state();
-    const account = s.kind === "session" ? s.account.accountId : null;
-    const persisted = account === null ? null : persistedConversationKind(account, g.groupIdB64);
-    return decideConversationKind(persisted, peopleCountOf(g.group)) === "group";
-  };
+  const isGroup = (g: ActiveGroup): boolean => conversationKindOf(g.group) === "group";
 
   const groupName = (g: ActiveGroup): string => {
     const own = ownPersonKeyB64(chats.identity());

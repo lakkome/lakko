@@ -213,6 +213,9 @@ public fun NewGroupScreen(
                             chatRepository.startGroupWith(
                                 recipientAccountId = first.request.fromAccountId!!,
                                 recipientSignaturePubkey = first.request.fromPubkey,
+                                // ADR-0062 — a group from the first pick on,
+                                // even while it holds two people.
+                                kind = uniffi.lakko_ffi_uniffi.GroupKind.GROUP,
                             )
                         } catch (cause: Throwable) {
                             android.util.Log.w("NewGroupScreen", "group creation failed", cause)
@@ -220,7 +223,6 @@ public fun NewGroupScreen(
                             creating = false
                             return@launch
                         }
-                        GroupPresentationStore.markCreatedAsGroup(appContext, groupIdHex)
                         // ADR-0051 §3 — the name is written to the shared-name
                         // store and sent into the group right after the
                         // creating commit, BEFORE the follow-up adds, so the

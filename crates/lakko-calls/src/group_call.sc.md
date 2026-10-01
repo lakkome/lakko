@@ -64,5 +64,6 @@ Two axes of state, each with its own transitions:
 
 - ADR-0001 (MLS keys everything, incl. call media), ADR-0008 (`CallJwtClaims` / overlap-window lineage), ADR-0013 (SFrame AAD = header bytes), ADR-0029 + G-18 (mid-call rekey, core-via-FFI overlap keyer), ADR-0035 (per-`(leaf, stream)` KID key separation — the `stream_index` / `kid` params on the participant-key derivation; supersedes the ADR-0034 per-media-TYPE param)
 - Invariants C-1 (cross-party seed agreement), C-8 (epoch advance rotates seed), C-9 (overlap window), C-10 (most-recent-previous only) — see `docs/security/calls.md`
+- Test fixtures create their MLS groups with `lakko_mls::GroupKind::Group` (ADR-0062 made the kind a required argument of `Group::create`); nothing in this module reads the kind.
 - Delegate: `crate::call_key_ring::CallKeyRing` (the overlap logic + clamp constants)
 - Tests (in-module `#[cfg(test)]`): `cross_party_seal_open_round_trips`, `cross_party_round_trip_survives_epoch_advance`, `three_party_full_mesh_seal_open`, `overlap_window_accepts_stale_frame_until_dropped`, `chained_rotations_retain_only_most_recent_previous`, `cross_party_wrong_aad_rejects`, `refresh_at_retains_previous_until_expiry_then_prune_drops_it`, `refresh_at_clamps_the_overlap_window`

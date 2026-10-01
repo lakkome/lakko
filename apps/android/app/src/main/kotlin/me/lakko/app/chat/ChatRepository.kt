@@ -50,6 +50,7 @@ import me.lakko.app.ds.dsMailboxKey
 import me.lakko.app.reach.toKind
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
+import uniffi.lakko_ffi_uniffi.GroupKind
 import uniffi.lakko_ffi_uniffi.GroupMember
 import uniffi.lakko_ffi_uniffi.OutgoingOwner
 import uniffi.lakko_ffi_uniffi.ProposalRecord
@@ -668,6 +669,7 @@ public class ChatRepository(
             canonicalIdentity.set(identity)
             accountIdentity.getAndSet(account)?.close()
             currentAccountIdB64.set(newAccountIdB64)
+            feedRefresh.bind(newAccountIdB64)
             seedGroupCalls(persistedGroupCalls)
 
             // Eagerly rebuild `Group` handles for every previously-
@@ -720,6 +722,8 @@ public class ChatRepository(
                     val record = groups[groupIdHex] ?: continue
                     val seeded = persisted.messages.mapNotNull { it.toChatMessage() }
                     record.seed(messages = seeded, cursor = persisted.cursor)
+                    // ADR-0063 section 5 — what the feed showed of this group.
+                    record.seedFeedSeen(persisted.feedSeen.toSet(), persisted.feedSeenThrough)
                 }
                 publishThreadList()
             }
@@ -811,8 +815,11 @@ public class ChatRepository(
      * Steps:
      *   1. Fetch the recipient's KeyPackage from the discovery
      *      directory.
-     *   2. `Group.create(identity)` — fresh group with us as the
-     *      founding member.
+     *   2. `Group.create(identity, kind)` — fresh group with us as the
+     *      founding member. [kind] is the caller's (ADR-0062): `ONE_TO_ONE`
+     *      for a contact / invite accept, `GROUP` for the new-group flow,
+     *      even while it holds two people. It is fixed in the GroupContext
+     *      and never changes.
      *   3. `group.addMemberFromWire(identity, keyPackageBytes)`
      *      — produces a `(commit, welcome)` pair. Per MLS the
      *      commit would be broadcast, but our group is
@@ -832,6 +839,7 @@ public class ChatRepository(
     public suspend fun startGroupWith(
         recipientAccountId: ByteArray,
         recipientSignaturePubkey: ByteArray,
+        kind: GroupKind,
         /** ADR-0060 §6 — what authorises the Welcome into the recipient's
          *  closed mailbox when the caller holds it for this flow only (the
          *  link grant of an `/i/` link). `null` picks from the grants this
@@ -843,6 +851,7 @@ public class ChatRepository(
             startGroupWithOnMlsThread(
                 recipientAccountId = recipientAccountId,
                 recipientSignaturePubkey = recipientSignaturePubkey,
+                kind = kind,
                 recipientReach = recipientReach,
             )
         }
@@ -850,6 +859,7 @@ public class ChatRepository(
     private suspend fun startGroupWithOnMlsThread(
         recipientAccountId: ByteArray,
         recipientSignaturePubkey: ByteArray,
+        kind: GroupKind,
         recipientReach: DsReachAuth?,
     ): String {
         val identity = canonicalIdentity.get()
@@ -872,7 +882,7 @@ public class ChatRepository(
         // targeting it and there is no per-group lock to take until its id
         // exists. Only the shared provider needs guarding here.
         val created = providerLock.withLock {
-            val group = Group.create(identity)
+            val group = Group.create(identity, kind)
             // ADR-0050 section 2.6 — every device of the recipient AND this
             // account's other devices in ONE commit. The founder is the only
             // member, so the commit fans out to nobody and is dropped; the ONE
@@ -1811,6 +1821,31 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0062 — the kind the creator fixed in the group's GroupContext, the
+     * same on every member's device: `ONE_TO_ONE` or `GROUP`. `null` when
+     * there is no handle, the read fails, or the group carries no kind at all
+     * (a `PublisherGroup` / `DeviceGroup`, never a conversation). Lock-free
+     * read, like [memberCount]; the kind never changes, so a racing commit
+     * cannot make it stale.
+     */
+    public fun groupKind(groupIdHex: String): GroupKind? {
+        val record = groups[groupIdHex] ?: return null
+        return try {
+            record.group.groupKind()
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "groupKind failed for $groupIdHex", cause)
+            null
+        }
+    }
+
+    /**
+     * Which list [groupIdHex] belongs to, read from the group itself
+     * ([groupKind], ADR-0062); `null` counts as a group ([conversationKindOf]).
+     */
+    public fun conversationKind(groupIdHex: String): ConversationKind =
+        conversationKindOf(groupKind(groupIdHex))
+
+    /**
      * Live MLS roster for [groupIdHex] at the current epoch — `(leafIndex,
      * signaturePublicKey)` per member — or `null` when there is no handle.
      * The group-chat UI matches each key against the accepted contacts to
@@ -1871,16 +1906,25 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0048 UX §5 — the other member's signature key in a two-member chat,
-     * or `null` for a group, an unknown group or an unreadable roster. The
+     * ADR-0048 UX §5 — the other member's signature key in a one-to-one, or
+     * `null` for a group (by its ADR-0062 kind, even with two people), an
+     * unknown group or an unreadable roster. The
      * chat list names a 1x1 chat after this person.
      */
     public fun oneToOnePeerKey(groupIdHex: String): ByteArray? {
+        // ADR-0062 — a two-person GROUP is not a one-to-one: its title, its
+        // header and "the chat with this person" never name one member.
+        if (groupKind(groupIdHex) != GroupKind.ONE_TO_ONE) return null
         val members = members(groupIdHex) ?: return null
         if (members.size != 2) return null
         val own = ownMemberIdentity(groupIdHex) ?: return null
         return members.firstOrNull { outboxB64(it.signaturePublicKey) != own }?.signaturePublicKey
     }
+
+    /** This PERSON's account key (base64), or `null` before bootstrap. ADR-0059:
+     *  the person's own shared list is not a suggestion to themselves. */
+    public fun ownPersonKeyB64(): MemberIdentity? =
+        canonicalIdentity.get()?.let { runCatching { ownPersonKeyOf(it) }.getOrNull() }
 
     /**
      * ADR-0023 — our own IDENTITY in [groupIdHex]: this device's signature key,
@@ -4639,7 +4683,53 @@ public class ChatRepository(
             // ADR-0052 decision 3 — and the shared pins, verbatim with their
             // original stamps, on the same schedule.
             pinRepublish.onGrowth(groupIdHex)
+            // ADR-0059 section 6 — and this person's shared channel list,
+            // verbatim with its original stamp, where the switch is on.
+            sharedChannels.groupGrew(groupIdHex)
         }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0059 section 6 — channels shared inside a group
+    // -----------------------------------------------------------------
+
+    /**
+     * The "Share my channels" switches, the lists members shared, and their
+     * send / receive / growth re-send. The send is the audited control-message
+     * publish ([broadcastControlToGroup]); the receive is launched from the
+     * poll, never applied under the group lock.
+     */
+    /**
+     * docs/ux/feed.md state table, "refresh failed (network)" — the feed's
+     * failure state, app-wide and per account: the session shell's receive
+     * loop and channel post sync report into it, and so do the feed's pull
+     * to refresh and Retry. Bound at [bootstrap], reset in [clear].
+     */
+    public val feedRefresh: me.lakko.app.feed.FeedRefreshStatus = me.lakko.app.feed.FeedRefreshStatus()
+
+    public val sharedChannels: me.lakko.app.discover.SharedChannelsRepository by lazy {
+        me.lakko.app.discover.SharedChannelsRepository(
+            account = { currentAccountIdB64.get() },
+            broadcast = { groupIdHex, envelope ->
+                val identity = canonicalIdentity.get() ?: throw IllegalStateException("Sign in again.")
+                val record = groups[groupIdHex] ?: throw IllegalStateException("You are no longer in this group.")
+                withContext(mlsDispatcher) {
+                    broadcastControlToGroup(
+                        identity = identity,
+                        groupIdHex = groupIdHex,
+                        group = record.group,
+                        envelope = envelope,
+                    )
+                }
+            },
+            isLive = { groupIdHex ->
+                val record = groups[groupIdHex]
+                record != null && readIsActive { record.group.isActive() } != false
+            },
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            load = { me.lakko.app.discover.DiscoverStore.loadShared(applicationContext, it) },
+            save = { acct, row -> me.lakko.app.discover.DiscoverStore.saveShared(applicationContext, acct, row) },
+        )
     }
 
     // -----------------------------------------------------------------
@@ -4661,13 +4751,14 @@ public class ChatRepository(
     public fun personalPins(groupIdHex: String): Map<Long, ULong> =
         PinStore.loadPersonal(applicationContext, currentAccountIdB64.get(), groupIdHex)
 
-    /** Two PEOPLE in the conversation (ADR-0050 — devices do not count). */
+    /**
+     * A one-to-one by the kind its creator fixed in the group (ADR-0062) — a
+     * two-person GROUP is not one, so its pins follow the role table
+     * (ADR-0052 standing for both participants applies to a one-to-one only).
+     * An unreadable kind counts as a group ([conversationKindOf]).
+     */
     private fun isOneToOne(group: Group): Boolean =
-        try {
-            personKeysOf(group.members()).size == 2
-        } catch (_: Throwable) {
-            false
-        }
+        conversationKindOf(runCatching { group.groupKind() }.getOrNull()) == ConversationKind.Chat
 
     /**
      * Whether this device may set or clear a shared pin in [groupIdHex]: the
@@ -4870,6 +4961,18 @@ public class ChatRepository(
         incoming: uniffi.lakko_ffi_uniffi.FfiGroupName,
     ) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
+        // ADR-0062 section 7 — a one-to-one has no group name; applying one
+        // would retitle the person. Dropped on receipt, read from the group's
+        // own kind (the same answer on every member's device).
+        val kind = try {
+            group.groupKind()
+        } catch (_: Throwable) {
+            null
+        }
+        if (!groupNameAppliesTo(kind)) {
+            android.util.Log.i("ChatRepository", "ADR-0062 group name dropped in a one-to-one")
+            return
+        }
         val owner = roleTableOwner(group)
         val senderBytes = senderKey?.let {
             try {
@@ -5581,6 +5684,12 @@ public class ChatRepository(
                     // name: the standing read, the stored-row read, the verdict
                     // and the write are one serialized read-decide-write.
                     receivePin(record.group, groupIdHex, senderKey, op)
+                },
+                sharedChannelsSink = { senderKey, list ->
+                    // ADR-0059 section 6 — LAUNCHED onto the shared-channels
+                    // scope, never applied under this lock (see
+                    // SharedChannelsRepository on the lock order).
+                    sharedChannels.receive(groupIdHex, senderKey, list)
                 },
                 registrarSeedSink = { senderKey, envelope ->
                     // ADR-0057 — inside the locked apply region, so the owner
@@ -6336,13 +6445,30 @@ public class ChatRepository(
      *   screen, [screenPolledGroups]). Polling one of them here would lose the
      *   per-group in-flight race and return at once, so a loop whose every
      *   group is excluded would spin instead of waiting.
+     * @return how many groups the pass polled and how many answered, which the
+     *   app-level receive loop reports into [feedRefresh] (`docs/ux/feed.md`).
      */
-    public suspend fun pollAllGroups(waitSecs: Int = 0, exclude: Set<String> = emptySet()): Unit =
+    public suspend fun pollAllGroups(
+        waitSecs: Int = 0,
+        exclude: Set<String> = emptySet(),
+    ): me.lakko.app.feed.SourceCheck =
         withContext(mlsDispatcher) { pollAllGroupsOnMlsThread(waitSecs = waitSecs, exclude = exclude) }
 
-    private suspend fun pollAllGroupsOnMlsThread(waitSecs: Int = 0, exclude: Set<String> = emptySet()): Unit {
-        if (!mutableState.value.bootstrapped) return
-        canonicalIdentity.get() ?: return
+    /**
+     * [pollAllGroups] for the feed's pull to refresh (`docs/ux/feed.md`
+     * section 5): the same best-effort pass, reporting how many groups it
+     * polled and how many answered, so the feed can tell "the network is not
+     * there" from one bad group.
+     */
+    public suspend fun pollAllGroupsReporting(): me.lakko.app.feed.SourceCheck =
+        withContext(mlsDispatcher) { pollAllGroupsOnMlsThread(waitSecs = 0) }
+
+    private suspend fun pollAllGroupsOnMlsThread(
+        waitSecs: Int = 0,
+        exclude: Set<String> = emptySet(),
+    ): me.lakko.app.feed.SourceCheck {
+        if (!mutableState.value.bootstrapped) return me.lakko.app.feed.SourceCheck.NONE
+        canonicalIdentity.get() ?: return me.lakko.app.feed.SourceCheck.NONE
         // Snapshot the keys under the map's own monitor — `groups` is a
         // `synchronizedMap`, whose iterators are NOT self-synchronising.
         val groupIds = synchronized(groups) { groups.keys.toList() }.filter { it !in exclude }
@@ -6356,7 +6482,7 @@ public class ChatRepository(
         val active = groupIds.filter { isGroupActive(it) != false }
         if (active.isEmpty()) {
             if (waitSecs > 0) delay(waitSecs.toLong() * MILLIS_PER_SECOND)
-            return
+            return me.lakko.app.feed.SourceCheck.NONE
         }
         // docs/ux/calls.md section 2.1 — the fan-out is bounded, so a set larger
         // than [POLL_ALL_CONCURRENCY] polls in WAVES and one sweep costs one
@@ -6370,12 +6496,13 @@ public class ChatRepository(
             concurrency = POLL_ALL_CONCURRENCY,
             maxWaitSecs = waitSecs,
         )
-        runPollAllGroups(
+        val answered = runPollAllGroups(
             groupIds = active,
             concurrency = POLL_ALL_CONCURRENCY,
         ) { groupIdHex ->
             pollGroup(groupIdHex, waitSecs = perGroupWait)
         }
+        return me.lakko.app.feed.SourceCheck(tried = active.size, answered = answered)
     }
 
     /**
@@ -6396,6 +6523,10 @@ public class ChatRepository(
         currentAccountIdB64.set(null)
         canonicalIdentity.set(null)
         accountIdentity.getAndSet(null)?.close()
+        // ADR-0059 section 6 — the in-memory shared-channels row (the sealed
+        // file stays for the next sign-in unless forget-device deletes it).
+        sharedChannels.clear()
+        feedRefresh.reset()
         mutableState.value = ChatRepositoryState()
     }
 
@@ -8442,6 +8573,8 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0052 delete chat: pins", cause)
         }
+        // ADR-0059 section 6 — and the channel lists shared in it.
+        sharedChannels.forgetGroup(groupIdHex)
         // LAST, and only after everything above had its chance: dropping the
         // registry row is what makes the chat unreachable, so it must not
         // happen while a transcript is still behind it.
@@ -8985,6 +9118,9 @@ public class ChatRepository(
                             pinSink = { senderKey, op ->
                                 receivePin(record.group, groupIdHex, senderKey, op)
                             },
+                            sharedChannelsSink = { senderKey, list ->
+                                sharedChannels.receive(groupIdHex, senderKey, list)
+                            },
                             registrarSeedSink = { senderKey, envelope ->
                                 receiveRegistrarSeed(record.group, groupIdHex, senderKey, envelope)
                             },
@@ -9517,9 +9653,9 @@ public class ChatRepository(
     /**
      * File one finished call in the cross-conversation index.
      *
-     * The kind comes from the same persisted decision the conversation list
-     * routes on ([me.lakko.app.chat.ConversationKindStore]), so a Calls row
-     * opens the screen its conversation opens and never a different one.
+     * The kind comes from the group itself ([conversationKind], ADR-0062) —
+     * the same read the conversation list routes on — so a Calls row opens
+     * the screen its conversation opens and never a different one.
      */
     private fun recordCallHistoryEntry(
         groupIdHex: String,
@@ -9532,11 +9668,7 @@ public class ChatRepository(
                 accountIdB64 = currentAccountIdB64.get(),
                 entry = me.lakko.app.calls.CallHistoryEntry(
                     conversationIdHex = groupIdHex.lowercase(),
-                    kind = ConversationKindStore.resolve(
-                        applicationContext,
-                        groupIdHex,
-                        memberCount(groupIdHex),
-                    ),
+                    kind = conversationKind(groupIdHex),
                     outcome = entry.outcome,
                     video = entry.video,
                     startedAtMs = startedAtMs,
@@ -9583,11 +9715,7 @@ public class ChatRepository(
         }
         val found = mutableListOf<me.lakko.app.calls.CallHistoryEntry>()
         for ((hex, messages) in snapshot) {
-            val kind = try {
-                ConversationKindStore.resolve(applicationContext, hex, memberCount(hex))
-            } catch (_: Throwable) {
-                ConversationKind.Chat
-            }
+            val kind = conversationKind(hex)
             for (message in messages) {
                 val call = message.call ?: continue
                 // A row whose time cannot be read has no place in a list whose
@@ -9626,6 +9754,8 @@ public class ChatRepository(
                 slots[hex] = PersistedGroup(
                     cursor = record.cursor,
                     messages = persistableMessages(record.snapshot()),
+                    feedSeen = record.feedSeen.sorted(),
+                    feedSeenThrough = record.feedSeenThrough,
                 )
             }
         }
@@ -9669,6 +9799,61 @@ public class ChatRepository(
     public fun setThreadOnScreen(groupIdHex: String, onScreen: Boolean) {
         localUnread.setOnScreen(groupIdHex, onScreen)
         publishThreadList()
+    }
+
+    /**
+     * ADR-0063 section 5 — file what the feed kept on screen: [seen] maps a
+     * group id hex to the message ids shown. Each group's seen set grows, its
+     * watermark moves as far as the set is contiguous
+     * ([me.lakko.app.feed.markSeen], the core's `contiguousSeen`), and the log
+     * is persisted. Returns, per group whose watermark moved, the new
+     * watermark — the caller sends the read receipt and the read cursor there.
+     *
+     * [readCursorThrough] is the cross-device read cursor of a group, which
+     * counts as seen too; the larger of it and the feed's own watermark wins.
+     * Runs under each group's lock so a poll applying the same group cannot
+     * interleave with the read-modify-write.
+     */
+    public suspend fun recordFeedSeen(
+        seen: Map<String, Collection<Long>>,
+        readCursorThrough: (String) -> Long?,
+        contiguous: (List<Long>, List<Long>) -> Long?,
+    ): Map<String, Long> {
+        val advanced = HashMap<String, Long>()
+        var changed = false
+        for ((hex, ids) in seen) {
+            val record = groups[hex] ?: continue
+            groupLock(hex).withLock {
+                val rows = record.snapshot().map {
+                    me.lakko.app.feed.SeenRow(
+                        messageId = it.messageId,
+                        direction = when (it.direction) {
+                            Direction.Incoming -> "incoming"
+                            Direction.Outgoing -> "outgoing"
+                            Direction.System -> "system"
+                        },
+                    )
+                }
+                val cursor = readCursorThrough(hex)
+                val own = record.feedSeenThrough
+                val through = listOfNotNull(cursor, own).maxOrNull()
+                val result = me.lakko.app.feed.markSeen(
+                    rows = rows,
+                    state = me.lakko.app.feed.GroupSeenState(through, record.feedSeen),
+                    ids = ids,
+                    contiguous = contiguous,
+                )
+                record.seedFeedSeen(result.state.feedSeen, result.state.through)
+                if (result.newlySeen > 0) localUnread.onSeenElsewhere(hex, result.newlySeen)
+                result.advancedTo?.let { advanced[hex] = it }
+                changed = true
+            }
+        }
+        if (changed) {
+            persistMessageLogBestEffort()
+            publishThreadList()
+        }
+        return advanced
     }
 
     private val screenPollLock = Any()
@@ -9762,6 +9947,11 @@ public data class ChatThread(
     /** The chat was on screen at some point in this process, so [localUnread]
      *  is an exact count rather than a lower bound. */
     val unreadViewedThisSession: Boolean = false,
+    /** ADR-0063 section 5 — incoming ids the feed showed above the watermark;
+     *  the unread count skips them. */
+    val feedSeen: Set<Long> = emptySet(),
+    /** ADR-0063 section 5 — the feed's own contiguous-seen watermark. */
+    val feedSeenThrough: Long? = null,
 )
 
 /** One message in a [ChatThread].
@@ -10239,6 +10429,7 @@ private class GroupRecord(
         groupNameSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupName) -> Unit)? = null,
         profileRequestSink: ((MemberIdentity?) -> Unit)? = null,
         pinSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiPinOp) -> Unit)? = null,
+        sharedChannelsSink: ((MemberIdentity?, me.lakko.app.discover.SharedList) -> Unit)? = null,
         registrarSeedSink: ((MemberIdentity?, ByteArray) -> Unit)? = null,
         scopedSink: ((MemberIdentity?, me.lakko.app.reach.ScopedEnvelopeKind, ByteArray) -> Unit)? = null,
     ) {
@@ -10345,6 +10536,14 @@ private class GroupRecord(
                     // accept.
                     val op = event.pin
                     if (op != null) pinSink?.invoke(event.senderKey, op)
+                }
+                is IncomingChatEvent.SharedChannels -> {
+                    // ADR-0059 section 6 — a member's shared channel list. Not
+                    // a timeline row and never persisted. A malformed envelope
+                    // (`list == null`) is consumed as a no-op; the sink files a
+                    // well-formed one under the sender key resolved at receipt.
+                    val list = event.list
+                    if (list != null) sharedChannelsSink?.invoke(event.senderKey, list)
                 }
                 is IncomingChatEvent.RegistrarSeed -> {
                     // ADR-0057 obligation 4 — a registrar seed. Not a timeline
@@ -10554,6 +10753,8 @@ private class GroupRecord(
         groupIdHex = DsClient.pseudonymHex(groupId),
         messages = messages.toList(),
         cursor = cursor,
+        feedSeen = feedSeen,
+        feedSeenThrough = feedSeenThrough,
         typingMembers = activeTypingMembers(),
         readUpToByMember = readUpToSnapshot(),
         // ADR-0045 UX §6.2 — safe to read here, unlike `members()`: OpenMLS
@@ -10566,6 +10767,22 @@ private class GroupRecord(
 
     /** Read-only snapshot for the persistence layer. */
     fun snapshot(): List<ChatMessage> = messages.toList()
+
+    /** ADR-0063 section 5 — ids the feed kept on screen above the watermark. */
+    @Volatile
+    var feedSeen: Set<Long> = emptySet()
+        private set
+
+    /** ADR-0063 section 5 — the feed's own contiguous-seen watermark, beside
+     *  the cross-device read cursor (which only exists with a DeviceGroup). */
+    @Volatile
+    var feedSeenThrough: Long? = null
+        private set
+
+    fun seedFeedSeen(ids: Set<Long>, through: Long?) {
+        feedSeen = ids
+        feedSeenThrough = through
+    }
 
     /**
      * `docs/ux/calls.md` section 6 — append this device's own record of a

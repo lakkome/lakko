@@ -348,6 +348,18 @@ class GroupLocksTest {
         }
 
     @Test
+    fun `the fan-out reports how many groups answered`() = runTest {
+        val answered = runPollAllGroups(
+            groupIds = listOf("a", "boom", "c", "boom2"),
+            concurrency = 2,
+        ) { id ->
+            if (id.startsWith("boom")) throw IOException("DS unreachable for $id")
+        }
+        assertEquals(2, answered)
+        assertEquals(0, runPollAllGroups(groupIds = emptyList(), concurrency = 3) {})
+    }
+
+    @Test
     fun `an empty group list is a no-op`() = runTest {
         var calls = 0
         runPollAllGroups(groupIds = emptyList(), concurrency = 3) { calls++ }

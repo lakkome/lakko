@@ -45,6 +45,7 @@ import { recordProfileRequest } from "../profile/profile-request";
 import { recordGrantSignature } from "../profile/grant-signatures";
 import { saveRecent, saveTonePrefs } from "../media/emoji/emoji-index";
 import { saveCounter } from "../channels/publish-counter-store";
+import { writeFeedSelection } from "../feed/feed-selection-store";
 
 // Two accounts. A's bytes give `+` and `/` in standard base64, so its
 // base64url form differs and both forms are searched for.
@@ -94,6 +95,11 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     { db: "lakko-mls", store: "commit-outbox", row: { id: `${acct}#1`, accountId: acct, commit: ct } },
     byId("lakko-message-log", "logs"),
     byId("lakko-channel-log", "logs"),
+    byId("lakko-channel-post-log", "logs"),
+    byId("lakko-feed-state", "state"),
+    byId("lakko-feed-marks", "marks"),
+    { db: "lakko-discover", store: "rows", row: { key: `${acct}|prefs`, ciphertext: ct } },
+    { db: "lakko-discover", store: "rows", row: { key: `${acct}|shared`, ciphertext: ct } },
     byId("lakko-profiles", "rows"),
     byId("lakko-group-names", "rows"),
     byId("lakko-registrar-seeds", "rows"),
@@ -155,6 +161,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
   put(`lakko.conversation-kind.v1.${acct}`, JSON.stringify({ [G]: "group" }));
   selectTab(acct, "folder-1");
+  writeFeedSelection(acct, "custom:feed-1");
   put(`lakko.profile.own.v1.${acct}`, JSON.stringify({ displayName: "Me", updatedAtMs: 1 }));
   observeMembers(acct, G, new Set(["member-key"]));
   recordProfileRequest(acct, G, 1000);
@@ -183,6 +190,7 @@ function seedDeviceSettings(): void {
   local.setItem("lakko.composer.recordMode", "voice");
   local.setItem("lakko.media.autoplayVideoNotes", "1");
   local.setItem("lakko.gif.privacyNoteDismissed", "1");
+  local.setItem("lakko.feed.device-banner-dismissed", "1");
 }
 
 /** Retired device-wide rows that may still hold the wiped account's data. */
@@ -366,6 +374,10 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-mls": "account",
   "lakko-message-log": "account",
   "lakko-channel-log": "account",
+  "lakko-channel-post-log": "account",
+  "lakko-feed-state": "account",
+  "lakko-feed-marks": "account",
+  "lakko-discover": "account",
   "lakko-profiles": "account",
   "lakko-group-names": "account",
   "lakko-registrar-seeds": "account",
@@ -401,6 +413,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.leave-requested.v1": "account",
   "lakko.conversation-kind.v1.": "account",
   "lakko.folderTab.": "account",
+  "lakko.feed.selection.": "account",
   "lakko.profile.own.v1.": "account",
   "lakko.member-baseline.v1": "account",
   "lakko.profile-requests.v1": "account",
@@ -439,11 +452,14 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.push.device.v1": "device",
   "lakko.composer.recordMode": "device",
   "lakko.media.autoplayVideoNotes": "device",
+  "lakko.feed.device-banner-dismissed": "device",
   // sessionStorage, tab-wide, holds no account id ("device" / "phrase")
   "lakko.restored-identity": "device",
   // not storage names
   "lakko/state-bundle-row/v1": "not-storage",
   "lakko/state-bundle/v1": "not-storage",
+  "lakko/feed-marks/v1": "not-storage",
+  "lakko/channel-post-log/v1": "not-storage",
 };
 
 function sourceFiles(dir: string): string[] {

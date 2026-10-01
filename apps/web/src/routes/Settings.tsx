@@ -18,6 +18,7 @@ import { useAuth } from "../auth/AuthContext";
 import PasskeysSection from "../auth/PasskeysSection";
 import { AccountCard, ExportDataCard } from "../auth/AccountSections";
 import { ContactEnrollView, TotpEnrollView } from "../auth/RecoveryFactors";
+import { ChannelsIShareCard } from "../discover/ChannelsIShare";
 import { autoplayVideoNotes, setAutoplayVideoNotes } from "../media/media-prefs";
 import { useProfiles } from "../profile/ProfileContext";
 import { appLicense, appVersion } from "../ui/app-version";
@@ -187,6 +188,7 @@ function SecuritySection(): JSX.Element {
         <p>{t("settings.security.lede")}</p>
       </div>
       <PasskeysSection />
+      <ChannelsIShareCard />
       <section class="lk-card">
         <h2>{t("settings.security.devices_and_recovery")}</h2>
         <div class="lk-card-row">

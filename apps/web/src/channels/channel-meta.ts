@@ -26,7 +26,7 @@
 import { t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
 import type { PostDecode } from "./PostCard";
-import { composePost } from "./composer";
+import { composePost, type WasmIdentity } from "./composer";
 import { publishPost } from "./api";
 import type { ChannelSharedMeta } from "./channel-log-codec";
 import { channelsActions, channelsState } from "../state/channels-state";
@@ -130,7 +130,15 @@ export function channelMetaErrorText(code: string | undefined): string {
  */
 export async function publishChannelMeta(
   channelIdHex: string,
-  input: { readonly name: string; readonly description: string },
+  input: {
+    readonly name: string;
+    readonly description: string;
+    /** ADR-0059 metadata v2; each absent field keeps what this device holds. */
+    readonly topic?: number;
+    readonly language?: string;
+    readonly listed?: boolean;
+  },
+  identity: WasmIdentity,
   stampMs: bigint = BigInt(Date.now()),
 ): Promise<ChannelSharedMeta> {
   const keys = channelsState.keysByChannel().get(channelIdHex);
@@ -141,12 +149,19 @@ export async function publishChannelMeta(
     throw Object.assign(new Error("channel name is empty"), { channelMetaError: "name.empty" });
   }
   const wasm = await loadWasm();
-  const plaintext = wasm.composeChannelMeta(name, description, stampMs);
+  // ADR-0059 metadata v2: the Discover fields the owner set, kept across a
+  // rename; a channel never listed is topic "Other", language unset, not
+  // listed.
+  const held = channelsState.metaByChannel().get(channelIdHex);
+  const topic = input.topic ?? held?.topic ?? 0;
+  const language = input.language ?? held?.language ?? "";
+  const listed = input.listed ?? held?.listed ?? false;
+  const plaintext = wasm.composeChannelMeta(name, description, stampMs, topic, language, listed);
   const epoch = channelsState.epochByChannel().get(channelIdHex) ?? 0;
   const counter = channelsActions.nextCounter(channelIdHex);
   const wire = await composePost(keys, channelIdHex, epoch, counter, plaintext);
-  await publishPost(channelIdHex, wire);
-  const meta: ChannelSharedMeta = { name, description, updatedAtMs: stampMs };
+  await publishPost(channelIdHex, wire, identity);
+  const meta: ChannelSharedMeta = { name, description, updatedAtMs: stampMs, topic, language, listed };
   channelsActions.setSharedMeta(channelIdHex, meta);
   return meta;
 }
@@ -159,17 +174,21 @@ export async function publishChannelMeta(
  * neither posts nothing (`false`). Throws what {@link publishChannelMeta}
  * throws; the rotation caller logs and moves on.
  */
-export async function republishChannelMeta(channelIdHex: string): Promise<boolean> {
+export async function republishChannelMeta(
+  channelIdHex: string,
+  identity: WasmIdentity,
+): Promise<boolean> {
   const held = channelsState.metaByChannel().get(channelIdHex);
   if (held !== undefined) {
-    await publishChannelMeta(channelIdHex, held, held.updatedAtMs);
+    await publishChannelMeta(channelIdHex, held, identity, held.updatedAtMs);
     return true;
   }
   const local = channelsState.channels().find((c) => c.id === channelIdHex);
   if (local === undefined || local.localName.trim().length === 0) return false;
-  await publishChannelMeta(channelIdHex, {
-    name: local.localName,
-    description: local.localDescription,
-  });
+  await publishChannelMeta(
+    channelIdHex,
+    { name: local.localName, description: local.localDescription },
+    identity,
+  );
   return true;
 }

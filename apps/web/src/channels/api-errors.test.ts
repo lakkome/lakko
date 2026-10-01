@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import { describe, expect, it } from "vitest";
-import { CHANNELS_UNREACHABLE, channelErrorText, createChannel } from "./api";
+import { CHANNELS_UNREACHABLE, channelErrorText, fetchEpoch } from "./api";
 
 function withFetch(resp: Response, run: () => Promise<unknown>): Promise<unknown> {
   const real = globalThis.fetch;
@@ -18,14 +18,14 @@ describe("channels API error surface", () => {
       status: 200,
       headers: { "content-type": "text/html" },
     });
-    await expect(withFetch(html, () => createChannel("00".repeat(16), "/api/channels"))).rejects.toMatchObject(
+    await expect(withFetch(html, () => fetchEpoch("00".repeat(16), "/api/channels"))).rejects.toMatchObject(
       { code: CHANNELS_UNREACHABLE, status: 200 },
     );
   });
 
   it("reports a bodyless 502 the same way", async () => {
     const gateway = new Response("", { status: 502 });
-    await expect(withFetch(gateway, () => createChannel("00".repeat(16), "/api/channels"))).rejects.toMatchObject(
+    await expect(withFetch(gateway, () => fetchEpoch("00".repeat(16), "/api/channels"))).rejects.toMatchObject(
       { code: CHANNELS_UNREACHABLE, status: 502 },
     );
   });
@@ -35,7 +35,7 @@ describe("channels API error surface", () => {
       status: 404,
       headers: { "content-type": "application/json" },
     });
-    await expect(withFetch(refused, () => createChannel("00".repeat(16), "/api/channels"))).rejects.toMatchObject(
+    await expect(withFetch(refused, () => fetchEpoch("00".repeat(16), "/api/channels"))).rejects.toMatchObject(
       { code: "unknown-channel", detail: "no such channel" },
     );
   });

@@ -1194,6 +1194,10 @@
       "text": "Esta publicación es demasiado larga para publicarla.",
       "status": "machine"
     },
+    "channels.error.publisher_refused": {
+      "text": "Este dispositivo aún no puede publicar en este canal. Un copublicador puede publicar cuando el dispositivo del propietario termine de añadirlo.",
+      "status": "machine"
+    },
     "channels.error.refused": {
       "text": "El servidor rechazó la solicitud. Inténtalo más tarde.",
       "status": "machine"
@@ -1390,6 +1394,10 @@
       "text": "No se pudo guardar.",
       "status": "machine"
     },
+    "channels.meta.error.sign_in": {
+      "text": "Vuelve a iniciar sesión para guardar los cambios de este canal.",
+      "status": "machine"
+    },
     "channels.meta.saved": {
       "text": "Guardado. Los suscriptores verán el nuevo nombre con sus próximas publicaciones.",
       "status": "machine"
@@ -1486,6 +1494,10 @@
       "text": "No se pudo publicar.",
       "status": "machine"
     },
+    "channels.publish.error.sign_in": {
+      "text": "Vuelve a iniciar sesión para publicar en este canal.",
+      "status": "machine"
+    },
     "channels.rotation.desc": {
       "text": "Lakko renueva la protección del canal por sí solo. Renuévala ahora si crees que el dispositivo de un suscriptor se vio comprometido.",
       "status": "machine"
@@ -1496,6 +1508,10 @@
     },
     "channels.rotation.error.refresh": {
       "text": "No se pudo renovar. Inténtalo de nuevo en un momento.",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh_prefix": {
+      "text": "No se pudo renovar.",
       "status": "machine"
     },
     "channels.rotation.never": {
@@ -1518,6 +1534,10 @@
       "text": "Protección",
       "status": "machine"
     },
+    "channels.row.new_posts_a11y": {
+      "text": "{count, plural, one {# publicación nueva} other {# publicaciones nuevas}}",
+      "status": "machine"
+    },
     "channels.row.own": {
       "text": "Tu canal",
       "status": "machine"
@@ -1536,6 +1556,10 @@
     },
     "channels.subscribe.error.generic": {
       "text": "No se pudo completar la suscripción. Inténtalo más tarde.",
+      "status": "machine"
+    },
+    "channels.subscribe.error.network": {
+      "text": "No se pudo seguir el canal. Comprueba tu conexión e inténtalo de nuevo.",
       "status": "machine"
     },
     "channels.subscribe.error.prefix": {
@@ -2850,6 +2874,10 @@
       "text": "No se pudo solicitar este cambio.",
       "status": "machine"
     },
+    "chat.refusal.group_kind_changed": {
+      "text": "Este cambio no se puede aplicar a esta conversación.",
+      "status": "machine"
+    },
     "chat.refusal.join_not_kept": {
       "text": "Llegó una solicitud para unirse cuando ya había demasiadas en espera, así que no se guardó. Pide a la persona que la vuelva a enviar más tarde.",
       "status": "machine"
@@ -2864,6 +2892,14 @@
     },
     "chat.refusal.not_owner": {
       "text": "Solo el propietario del grupo puede cambiar los administradores o transferir la propiedad.",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_fixed": {
+      "text": "Un chat siempre es entre las mismas dos personas.",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_no_roles": {
+      "text": "Un chat no tiene administradores.",
       "status": "machine"
     },
     "chat.refusal.owner_cannot_leave": {
@@ -3418,6 +3454,10 @@
       "text": "Contraer",
       "status": "machine"
     },
+    "common.collapsed": {
+      "text": "Contraído",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "Confirmar",
       "status": "machine"
@@ -3528,6 +3568,10 @@
     },
     "common.expand": {
       "text": "Expandir",
+      "status": "machine"
+    },
+    "common.expanded": {
+      "text": "Desplegado",
       "status": "machine"
     },
     "common.fact_pair": {
@@ -3668,6 +3712,10 @@
     },
     "common.try_again": {
       "text": "Reintentar",
+      "status": "machine"
+    },
+    "common.undo": {
+      "text": "Deshacer",
       "status": "machine"
     },
     "common.unknown": {
@@ -4242,6 +4290,322 @@
       "text": "Abrir cámara",
       "status": "machine"
     },
+    "discover.card.a11y": {
+      "text": "Canal sugerido {name}",
+      "status": "machine"
+    },
+    "discover.card.following": {
+      "text": "Sigues este canal",
+      "status": "machine"
+    },
+    "discover.card.hide_topic": {
+      "text": "Ocultar este tema",
+      "status": "machine"
+    },
+    "discover.card.more": {
+      "text": "Más",
+      "status": "machine"
+    },
+    "discover.card.not_interested": {
+      "text": "No me interesa",
+      "status": "machine"
+    },
+    "discover.card.show_description": {
+      "text": "Mostrar descripción",
+      "status": "machine"
+    },
+    "discover.card.subscribers": {
+      "text": "{band} suscriptores",
+      "status": "machine"
+    },
+    "discover.edit_topics": {
+      "text": "Editar temas",
+      "status": "machine"
+    },
+    "discover.gone": {
+      "text": "Este canal ya no está disponible.",
+      "status": "machine"
+    },
+    "discover.language": {
+      "text": "Idioma",
+      "status": "machine"
+    },
+    "discover.listing.checking": {
+      "text": "Comprobando si este canal está publicado...",
+      "status": "machine"
+    },
+    "discover.listing.confirm_action": {
+      "text": "Publicar",
+      "status": "machine"
+    },
+    "discover.listing.confirm_body": {
+      "text": "Cualquiera podrá encontrar el nombre, la descripción y el número de suscriptores de este canal. Las publicaciones siguen cifradas.",
+      "status": "machine"
+    },
+    "discover.listing.confirm_title": {
+      "text": "¿Publicar este canal en Descubrir?",
+      "status": "machine"
+    },
+    "discover.listing.listed": {
+      "text": "Publicado",
+      "status": "machine"
+    },
+    "discover.listing.listed_notice": {
+      "text": "Publicado. Los suscriptores lo sabrán con la próxima actualización del canal.",
+      "status": "machine"
+    },
+    "discover.listing.needs_handle": {
+      "text": "Un canal necesita un @handle para publicarse en Descubrir.",
+      "status": "machine"
+    },
+    "discover.listing.not_listed": {
+      "text": "No publicado",
+      "status": "machine"
+    },
+    "discover.listing.owner_desc": {
+      "text": "Cualquiera puede encontrar el nombre, la descripción y el número de suscriptores de un canal publicado. Las publicaciones siguen cifradas.",
+      "status": "machine"
+    },
+    "discover.listing.refused": {
+      "text": "No se pudo publicar este canal. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "discover.listing.remove_failed": {
+      "text": "No se pudo retirar la publicación. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "discover.listing.title": {
+      "text": "Publicar en Descubrir",
+      "status": "machine"
+    },
+    "discover.listing.topic": {
+      "text": "Tema",
+      "status": "machine"
+    },
+    "discover.listing.update_failed": {
+      "text": "Guardado. No se pudo actualizar la ficha en Descubrir; guarda de nuevo para reintentarlo.",
+      "status": "machine"
+    },
+    "discover.listing.viewer_listed": {
+      "text": "Este canal está publicado en Descubrir. Solo su propietario puede cambiarlo.",
+      "status": "machine"
+    },
+    "discover.listing.viewer_not_listed": {
+      "text": "Este canal no está publicado en Descubrir. Solo su propietario puede publicarlo.",
+      "status": "machine"
+    },
+    "discover.mix.label": {
+      "text": "Mezclar temas al azar",
+      "status": "machine"
+    },
+    "discover.mix.off_line": {
+      "text": "Usa menos datos. El servidor de Lakko verá exactamente qué temas elegiste.",
+      "status": "machine"
+    },
+    "discover.nothing_yet": {
+      "text": "Aún no hay sugerencias. Elige temas o pide a la gente de tus grupos que comparta sus canales.",
+      "status": "machine"
+    },
+    "discover.pick.a11y": {
+      "text": "Elegir temas",
+      "status": "machine"
+    },
+    "discover.pick.body": {
+      "text": "Lakko descarga sugerencias sobre ellos, mezcladas con algunos temas al azar para que el servidor de Lakko no sepa exactamente cuáles elegiste. Nunca ve qué canales abres.",
+      "status": "machine"
+    },
+    "discover.pick.title": {
+      "text": "Elige algunos temas.",
+      "status": "machine"
+    },
+    "discover.reason.followed_by": {
+      "text": "Lo sigue {name} en {group}",
+      "status": "machine"
+    },
+    "discover.reason.followed_by_others": {
+      "text": "{count, plural, one {Lo siguen {name} y # persona más en {group}} other {Lo siguen {name} y # personas más en {group}}}",
+      "status": "machine"
+    },
+    "discover.reason.followed_count": {
+      "text": "{count, plural, one {Lo sigue # persona en {group}} other {Lo siguen # personas en {group}}}",
+      "status": "machine"
+    },
+    "discover.reason.group_fallback": {
+      "text": "un grupo",
+      "status": "machine"
+    },
+    "discover.reason.popular": {
+      "text": "Popular en {topic}",
+      "status": "machine"
+    },
+    "discover.reason.search": {
+      "text": "Coincide con tu búsqueda",
+      "status": "machine"
+    },
+    "discover.search.action": {
+      "text": "Buscar",
+      "status": "machine"
+    },
+    "discover.search.helper": {
+      "text": "Las búsquedas se envían al servidor de Lakko.",
+      "status": "machine"
+    },
+    "discover.search.no_results": {
+      "text": "No se encontraron canales.",
+      "status": "machine"
+    },
+    "discover.search.placeholder": {
+      "text": "Buscar canales",
+      "status": "machine"
+    },
+    "discover.search.searching": {
+      "text": "Buscando...",
+      "status": "machine"
+    },
+    "discover.search.too_short": {
+      "text": "Escribe al menos 2 caracteres.",
+      "status": "machine"
+    },
+    "discover.settings": {
+      "text": "Ajustes de Descubrir",
+      "status": "machine"
+    },
+    "discover.share.error": {
+      "text": "No se pudo cambiar. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "discover.share.label": {
+      "text": "Compartir mis canales con este grupo",
+      "status": "machine"
+    },
+    "discover.share.line": {
+      "text": "La gente de este grupo puede ver qué canales sigues. El servidor de Lakko no.",
+      "status": "machine"
+    },
+    "discover.shared.desc": {
+      "text": "Grupos donde la gente puede ver qué canales sigues. El servidor de Lakko no puede.",
+      "status": "machine"
+    },
+    "discover.shared.empty": {
+      "text": "No compartes tus canales con ningún grupo.",
+      "status": "machine"
+    },
+    "discover.shared.settings_sub": {
+      "text": "Grupos que pueden ver qué canales sigues",
+      "status": "machine"
+    },
+    "discover.shared.stop": {
+      "text": "Dejar de compartir",
+      "status": "machine"
+    },
+    "discover.shared.stop_failed": {
+      "text": "No se pudo dejar de compartir. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "discover.shared.title": {
+      "text": "Canales que comparto",
+      "status": "machine"
+    },
+    "discover.topic.art_design": {
+      "text": "Arte y diseño",
+      "status": "machine"
+    },
+    "discover.topic.books": {
+      "text": "Libros",
+      "status": "machine"
+    },
+    "discover.topic.business": {
+      "text": "Negocios",
+      "status": "machine"
+    },
+    "discover.topic.education": {
+      "text": "Educación",
+      "status": "machine"
+    },
+    "discover.topic.film_tv": {
+      "text": "Cine y TV",
+      "status": "machine"
+    },
+    "discover.topic.finance": {
+      "text": "Finanzas",
+      "status": "machine"
+    },
+    "discover.topic.food": {
+      "text": "Comida",
+      "status": "machine"
+    },
+    "discover.topic.gaming": {
+      "text": "Videojuegos",
+      "status": "machine"
+    },
+    "discover.topic.health": {
+      "text": "Salud",
+      "status": "machine"
+    },
+    "discover.topic.humour": {
+      "text": "Humor",
+      "status": "machine"
+    },
+    "discover.topic.lifestyle": {
+      "text": "Estilo de vida",
+      "status": "machine"
+    },
+    "discover.topic.local": {
+      "text": "Local",
+      "status": "machine"
+    },
+    "discover.topic.music": {
+      "text": "Música",
+      "status": "machine"
+    },
+    "discover.topic.nature": {
+      "text": "Naturaleza",
+      "status": "machine"
+    },
+    "discover.topic.news": {
+      "text": "Noticias",
+      "status": "machine"
+    },
+    "discover.topic.other": {
+      "text": "Otros",
+      "status": "machine"
+    },
+    "discover.topic.photography": {
+      "text": "Fotografía",
+      "status": "machine"
+    },
+    "discover.topic.politics": {
+      "text": "Política",
+      "status": "machine"
+    },
+    "discover.topic.religion": {
+      "text": "Religión",
+      "status": "machine"
+    },
+    "discover.topic.science": {
+      "text": "Ciencia",
+      "status": "machine"
+    },
+    "discover.topic.software_development": {
+      "text": "Desarrollo de software",
+      "status": "machine"
+    },
+    "discover.topic.sports": {
+      "text": "Deportes",
+      "status": "machine"
+    },
+    "discover.topic.technology": {
+      "text": "Tecnología",
+      "status": "machine"
+    },
+    "discover.topic.travel": {
+      "text": "Viajes",
+      "status": "machine"
+    },
+    "discover.unavailable": {
+      "text": "Las sugerencias no están disponibles ahora mismo.",
+      "status": "machine"
+    },
     "display_name.error.control": {
       "text": "Elimina los caracteres invisibles o de dirección del texto",
       "status": "machine"
@@ -4268,6 +4632,542 @@
     },
     "ds.clock_skew": {
       "text": "Revisa la fecha y la hora de este dispositivo.",
+      "status": "machine"
+    },
+    "feed.action.hide": {
+      "text": "Ocultar en los feeds",
+      "status": "machine"
+    },
+    "feed.action.hide_hint": {
+      "text": "Silenciar esta conversación en los feeds",
+      "status": "machine"
+    },
+    "feed.attachments.count": {
+      "text": "{count, plural, one {# archivo adjunto} other {# archivos adjuntos}}",
+      "status": "machine"
+    },
+    "feed.banner.dismiss": {
+      "text": "Entendido",
+      "status": "machine"
+    },
+    "feed.banner.local": {
+      "text": "Tu feed muestra los mensajes que ha recibido este dispositivo.",
+      "status": "machine"
+    },
+    "feed.divider.new": {
+      "text": "Nuevo",
+      "status": "machine"
+    },
+    "feed.edit": {
+      "text": "Editar",
+      "status": "machine"
+    },
+    "feed.edit_feed": {
+      "text": "Editar feed",
+      "status": "machine"
+    },
+    "feed.editor.default_name": {
+      "text": "Mi feed",
+      "status": "machine"
+    },
+    "feed.editor.delete": {
+      "text": "Eliminar feed",
+      "status": "machine"
+    },
+    "feed.editor.delete_confirm": {
+      "text": "¿Eliminar este feed?",
+      "status": "machine"
+    },
+    "feed.editor.fade": {
+      "text": "Qué tan rápido se desvanece",
+      "status": "machine"
+    },
+    "feed.editor.fade.day": {
+      "text": "Un día",
+      "status": "machine"
+    },
+    "feed.editor.fade.hours": {
+      "text": "Unas horas",
+      "status": "machine"
+    },
+    "feed.editor.fade.week": {
+      "text": "Una semana",
+      "status": "machine"
+    },
+    "feed.editor.filters": {
+      "text": "Filtros",
+      "status": "machine"
+    },
+    "feed.editor.for_me": {
+      "text": "Solo lo que me menciona, me responde o reacciona a lo mío",
+      "status": "machine"
+    },
+    "feed.editor.hide_own": {
+      "text": "Ocultar mis propios mensajes",
+      "status": "machine"
+    },
+    "feed.editor.hide_words": {
+      "text": "Ocultar palabras (una por línea)",
+      "status": "machine"
+    },
+    "feed.editor.icon": {
+      "text": "Icono",
+      "status": "machine"
+    },
+    "feed.editor.include_muted": {
+      "text": "Incluir conversaciones silenciadas",
+      "status": "machine"
+    },
+    "feed.editor.look_back": {
+      "text": "Retroceder (días)",
+      "status": "machine"
+    },
+    "feed.editor.look_back_count": {
+      "text": "{count, plural, one {Retroceder # día} other {Retroceder # días}}",
+      "status": "machine"
+    },
+    "feed.editor.media_only": {
+      "text": "Solo con fotos o vídeo",
+      "status": "machine"
+    },
+    "feed.editor.membership.a11y": {
+      "text": "{name} en este feed",
+      "status": "machine"
+    },
+    "feed.editor.membership.never": {
+      "text": "Nunca",
+      "status": "machine"
+    },
+    "feed.editor.membership.only": {
+      "text": "Solo",
+      "status": "machine"
+    },
+    "feed.editor.membership_hint": {
+      "text": "«Solo» limita el feed a las conversaciones marcadas así; «Nunca» deja fuera una.",
+      "status": "machine"
+    },
+    "feed.editor.min_reactions": {
+      "text": "Al menos estas reacciones",
+      "status": "machine"
+    },
+    "feed.editor.name": {
+      "text": "Nombre",
+      "status": "machine"
+    },
+    "feed.editor.only_words": {
+      "text": "Solo estas palabras (una por línea)",
+      "status": "machine"
+    },
+    "feed.editor.preview": {
+      "text": "Vista previa",
+      "status": "machine"
+    },
+    "feed.editor.preview_pending": {
+      "text": "La vista previa aparece cuando el feed se puede guardar.",
+      "status": "machine"
+    },
+    "feed.editor.slider.max": {
+      "text": "Mucho",
+      "status": "machine"
+    },
+    "feed.editor.slider.min": {
+      "text": "Ignorar",
+      "status": "machine"
+    },
+    "feed.editor.sources": {
+      "text": "Fuentes",
+      "status": "machine"
+    },
+    "feed.editor.sources.both": {
+      "text": "Ambos",
+      "status": "machine"
+    },
+    "feed.editor.sources.channels": {
+      "text": "Todos los canales",
+      "status": "machine"
+    },
+    "feed.editor.sources.groups": {
+      "text": "Todos los grupos",
+      "status": "machine"
+    },
+    "feed.editor.start.blank": {
+      "text": "En blanco",
+      "status": "machine"
+    },
+    "feed.editor.start_from": {
+      "text": "Empezar desde",
+      "status": "machine"
+    },
+    "feed.editor.stripped_hint": {
+      "text": "Los feeds compartidos llegan sin conversaciones concretas. Elige algunas abajo para hacerlo tuyo.",
+      "status": "machine"
+    },
+    "feed.editor.suggestions": {
+      "text": "Sugerencias",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.never": {
+      "text": "Nunca",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.rarely": {
+      "text": "Rara vez",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.sometimes": {
+      "text": "A veces",
+      "status": "machine"
+    },
+    "feed.editor.suggestions_rate": {
+      "text": "Con qué frecuencia aparece un canal sugerido",
+      "status": "machine"
+    },
+    "feed.editor.weight.from_contacts": {
+      "text": "De tus contactos",
+      "status": "machine"
+    },
+    "feed.editor.weight.media": {
+      "text": "Tiene fotos o vídeo",
+      "status": "machine"
+    },
+    "feed.editor.weight.mentions": {
+      "text": "Te menciona",
+      "status": "machine"
+    },
+    "feed.editor.weight.reactions": {
+      "text": "Reacciones",
+      "status": "machine"
+    },
+    "feed.editor.weight.recency": {
+      "text": "Lo reciente",
+      "status": "machine"
+    },
+    "feed.editor.weight.replies": {
+      "text": "Respuestas",
+      "status": "machine"
+    },
+    "feed.editor.what_counts": {
+      "text": "Qué cuenta",
+      "status": "machine"
+    },
+    "feed.empty.discover": {
+      "text": "Descubrir canales",
+      "status": "machine"
+    },
+    "feed.empty.no_match": {
+      "text": "Ningún mensaje coincide con este feed.",
+      "status": "machine"
+    },
+    "feed.empty.no_sources": {
+      "text": "Tu feed se llena con tus grupos y canales.",
+      "status": "machine"
+    },
+    "feed.empty.nothing_yet": {
+      "text": "Aquí no hay nada todavía. Los mensajes nuevos de tus grupos y canales aparecerán aquí.",
+      "status": "machine"
+    },
+    "feed.end": {
+      "text": "Estás al día.",
+      "status": "machine"
+    },
+    "feed.error.cannot_save_here": {
+      "text": "Este dispositivo no puede guardar esto ahora mismo.",
+      "status": "machine"
+    },
+    "feed.error.delete": {
+      "text": "No se pudo eliminar el feed. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "feed.error.no_device_key": {
+      "text": "Este dispositivo no puede guardar feeds ahora mismo.",
+      "status": "machine"
+    },
+    "feed.error.save": {
+      "text": "No se pudo guardar el feed. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "feed.hidden.empty": {
+      "text": "No hay nada oculto en tus feeds.",
+      "status": "machine"
+    },
+    "feed.hidden.show_again": {
+      "text": "Volver a mostrar",
+      "status": "machine"
+    },
+    "feed.hidden.title": {
+      "text": "Ocultos en los feeds",
+      "status": "machine"
+    },
+    "feed.hidden.toast": {
+      "text": "Oculto en los feeds.",
+      "status": "machine"
+    },
+    "feed.icon.bell": {
+      "text": "Campana",
+      "status": "machine"
+    },
+    "feed.icon.book": {
+      "text": "Libro",
+      "status": "machine"
+    },
+    "feed.icon.camera": {
+      "text": "Cámara",
+      "status": "machine"
+    },
+    "feed.icon.code": {
+      "text": "Código",
+      "status": "machine"
+    },
+    "feed.icon.feed": {
+      "text": "Feed",
+      "status": "machine"
+    },
+    "feed.icon.flag": {
+      "text": "Bandera",
+      "status": "machine"
+    },
+    "feed.icon.globe": {
+      "text": "Globo terráqueo",
+      "status": "machine"
+    },
+    "feed.icon.heart": {
+      "text": "Corazón",
+      "status": "machine"
+    },
+    "feed.icon.lightning": {
+      "text": "Rayo",
+      "status": "machine"
+    },
+    "feed.icon.music": {
+      "text": "Música",
+      "status": "machine"
+    },
+    "feed.icon.speech_bubble": {
+      "text": "Bocadillo",
+      "status": "machine"
+    },
+    "feed.icon.star": {
+      "text": "Estrella",
+      "status": "machine"
+    },
+    "feed.import.a11y": {
+      "text": "Importar feed",
+      "status": "machine"
+    },
+    "feed.import.add": {
+      "text": "Añadir a mis feeds",
+      "status": "machine"
+    },
+    "feed.import.choose_file": {
+      "text": "Elegir archivo",
+      "status": "machine"
+    },
+    "feed.import.hint": {
+      "text": "Abre un feed que alguien compartió contigo como archivo .lakkofeed.",
+      "status": "machine"
+    },
+    "feed.import.refused": {
+      "text": "Este archivo no es un feed que Lakko pueda abrir.",
+      "status": "machine"
+    },
+    "feed.import.title": {
+      "text": "Añadir un feed compartido",
+      "status": "machine"
+    },
+    "feed.item.reactions_a11y": {
+      "text": "Reacciones",
+      "status": "machine"
+    },
+    "feed.menu.a11y": {
+      "text": "Menú del feed",
+      "status": "machine"
+    },
+    "feed.min_reactions_count": {
+      "text": "{count, plural, one {Al menos # reacción} other {Al menos # reacciones}}",
+      "status": "machine"
+    },
+    "feed.new": {
+      "text": "Nuevo feed",
+      "status": "machine"
+    },
+    "feed.preset.discover": {
+      "text": "Descubrir",
+      "status": "machine"
+    },
+    "feed.preset.for_me": {
+      "text": "Para mí",
+      "status": "machine"
+    },
+    "feed.preset.latest": {
+      "text": "Lo último",
+      "status": "machine"
+    },
+    "feed.preset.popular": {
+      "text": "Popular",
+      "status": "machine"
+    },
+    "feed.problem.conversations": {
+      "text": "Hay demasiadas conversaciones elegidas.",
+      "status": "machine"
+    },
+    "feed.problem.generic": {
+      "text": "Este feed no se puede guardar tal como está.",
+      "status": "machine"
+    },
+    "feed.problem.name": {
+      "text": "Ponle al feed un nombre de hasta 64 caracteres.",
+      "status": "machine"
+    },
+    "feed.problem.no_kinds": {
+      "text": "Elige grupos, canales o ambos.",
+      "status": "machine"
+    },
+    "feed.problem.stripped": {
+      "text": "Este feed compartido no puede nombrar también conversaciones.",
+      "status": "machine"
+    },
+    "feed.problem.too_large": {
+      "text": "Este feed es demasiado grande para guardarlo.",
+      "status": "machine"
+    },
+    "feed.problem.weight": {
+      "text": "Un control deslizante está fuera de rango.",
+      "status": "machine"
+    },
+    "feed.problem.window": {
+      "text": "Retrocede entre 1 y 30 días.",
+      "status": "machine"
+    },
+    "feed.problem.words": {
+      "text": "Revisa las listas de palabras: una palabra por línea, hasta 32 palabras.",
+      "status": "machine"
+    },
+    "feed.refresh_failed": {
+      "text": "No se pudo comprobar si hay mensajes nuevos.",
+      "status": "machine"
+    },
+    "feed.replies.count": {
+      "text": "{count, plural, one {# respuesta} other {# respuestas}}",
+      "status": "machine"
+    },
+    "feed.share": {
+      "text": "Compartir",
+      "status": "machine"
+    },
+    "feed.share.a11y": {
+      "text": "Compartir feed",
+      "status": "machine"
+    },
+    "feed.share.download": {
+      "text": "Descargar archivo",
+      "status": "machine"
+    },
+    "feed.share.share_file": {
+      "text": "Compartir archivo",
+      "status": "machine"
+    },
+    "feed.share.share_link": {
+      "text": "Compartir enlace",
+      "status": "machine"
+    },
+    "feed.share.stripped": {
+      "text": "Las conversaciones concretas no se incluyen: no significan nada para nadie más.",
+      "status": "machine"
+    },
+    "feed.share.title": {
+      "text": "Compartir «{name}»",
+      "status": "machine"
+    },
+    "feed.share.unshareable": {
+      "text": "Este feed no se puede compartir tal como está.",
+      "status": "machine"
+    },
+    "feed.show_new": {
+      "text": "{count, plural, one {Mostrar # nuevo} other {Mostrar # nuevos}}",
+      "status": "machine"
+    },
+    "feed.summary.factor.contacts": {
+      "text": "tus contactos",
+      "status": "machine"
+    },
+    "feed.summary.factor.media": {
+      "text": "fotos y vídeo",
+      "status": "machine"
+    },
+    "feed.summary.factor.mentions": {
+      "text": "menciones de ti",
+      "status": "machine"
+    },
+    "feed.summary.factor.reactions": {
+      "text": "reacciones",
+      "status": "machine"
+    },
+    "feed.summary.factor.replies": {
+      "text": "respuestas",
+      "status": "machine"
+    },
+    "feed.summary.for_me": {
+      "text": "Solo lo que trata de ti",
+      "status": "machine"
+    },
+    "feed.summary.hide_own": {
+      "text": "Oculta tus propios mensajes",
+      "status": "machine"
+    },
+    "feed.summary.hide_words": {
+      "text": "{count, plural, one {Oculta # palabra} other {Oculta # palabras}}",
+      "status": "machine"
+    },
+    "feed.summary.include_muted": {
+      "text": "Incluye conversaciones silenciadas",
+      "status": "machine"
+    },
+    "feed.summary.look_back": {
+      "text": "{count, plural, one {Retrocede # día} other {Retrocede # días}}",
+      "status": "machine"
+    },
+    "feed.summary.newest_first": {
+      "text": "Lo más nuevo primero",
+      "status": "machine"
+    },
+    "feed.summary.only_words": {
+      "text": "Solo mensajes con: {words}",
+      "status": "machine"
+    },
+    "feed.summary.ranks_by": {
+      "text": "Ordena por lo reciente y por {factors}",
+      "status": "machine"
+    },
+    "feed.summary.sources.both": {
+      "text": "Fuentes: todos los grupos y canales",
+      "status": "machine"
+    },
+    "feed.summary.sources.channels": {
+      "text": "Fuentes: todos los canales",
+      "status": "machine"
+    },
+    "feed.summary.sources.groups": {
+      "text": "Fuentes: todos los grupos",
+      "status": "machine"
+    },
+    "feed.switcher.a11y": {
+      "text": "Feeds",
+      "status": "machine"
+    },
+    "feed.title": {
+      "text": "Feed",
+      "status": "machine"
+    },
+    "feed.why.mentions": {
+      "text": "Te menciona",
+      "status": "machine"
+    },
+    "feed.why.popular": {
+      "text": "Popular en {source}",
+      "status": "machine"
+    },
+    "feed.why.reply": {
+      "text": "Respuesta a tu mensaje",
       "status": "machine"
     },
     "folders.add_to_folder": {
@@ -4902,6 +5802,10 @@
       "text": "{count, plural, one {hasta # uso} other {hasta # usos}}",
       "status": "machine"
     },
+    "ios.document_type.feed": {
+      "text": "Feed de Lakko",
+      "status": "machine"
+    },
     "ios.permission.camera": {
       "text": "Lakko usa la cámara para escanear códigos QR de los dispositivos que quieres vincular a tu cuenta, para enviar video en las llamadas y para grabar los mensajes de video que decidas enviar. Todo lo que capta la cámara se cifra de extremo a extremo en tu dispositivo antes de enviarse.",
       "status": "machine"
@@ -4972,6 +5876,10 @@
     },
     "nav.contacts": {
       "text": "Contactos",
+      "status": "machine"
+    },
+    "nav.feed": {
+      "text": "Feed",
       "status": "machine"
     },
     "nav.rail_a11y": {
@@ -6244,6 +7152,14 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "Hoy has buscado a muchas personas. Inténtalo de nuevo mañana.",
+      "status": "machine"
+    },
+    "tokens.search_allowance_used": {
+      "text": "Demasiadas búsquedas. Inténtalo de nuevo en un minuto.",
+      "status": "machine"
+    },
+    "tokens.subscribe_allowance_used": {
+      "text": "Hoy te has suscrito a muchos canales. Inténtalo de nuevo mañana.",
       "status": "machine"
     },
     "update.available.message": {

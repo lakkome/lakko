@@ -201,8 +201,8 @@ final class OwnEchoRegistryTests: XCTestCase {
     /// signal for "the filter let it through".
     func testTwoRealGroupsSharingOneClientDoNotCrossSuppress() throws {
         let identity = try Identity.fromSeed(seed: Data(repeating: 0x71, count: 32))
-        let a = try Group.create(identity: identity)
-        let b = try Group.create(identity: identity)
+        let a = try Group.create(identity: identity, kind: .group)
+        let b = try Group.create(identity: identity, kind: .group)
         let journalA = DsClient.pseudonymHex(try a.groupId())
         let journalB = DsClient.pseudonymHex(try b.groupId())
         XCTAssertNotEqual(journalA, journalB, "two groups, two journals")

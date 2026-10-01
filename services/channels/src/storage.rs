@@ -35,6 +35,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::config::DEFAULT_ENVELOPE_RETENTION_EPOCHS;
+use crate::directory::{DirectoryEntry, GROWTH_WINDOW_MS};
 
 /// Prune a per-subscriber `epoch -> envelope` map down to its
 /// highest `keep_n` epochs, dropping the lowest first
@@ -168,6 +169,77 @@ pub struct StoredPost {
     pub payload: Vec<u8>,
 }
 
+/// Length of a channel owner's Ed25519 public key.
+pub const OWNER_PUBKEY_LEN: usize = 32;
+
+/// Length of an owner request-proof nonce.
+pub const OWNER_NONCE_LEN: usize = 16;
+
+/// A decoded listing as the directory stores it (ADR-0059 section 3). The
+/// canonical bytes are served back verbatim; the decoded fields feed the
+/// bucket index and search only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredListing {
+    /// Bucket topic: the listing's topic, or Other (0) for an id outside the
+    /// known list.
+    pub topic: u8,
+    /// ISO 639 language code.
+    pub language: String,
+    /// Canonical handle.
+    pub handle: String,
+    /// Channel name.
+    pub name: String,
+    /// Channel description.
+    pub description: String,
+    /// The canonical `lakko/channel-listing/v1` bytes.
+    pub bytes: Vec<u8>,
+    /// The owner's stamp; a replacement must be strictly newer.
+    pub updated_at_ms: u64,
+}
+
+impl StoredListing {
+    /// Whether a lowercased `needle` occurs in the name, handle or
+    /// description, case-insensitively (the in-memory search rule; the SQL
+    /// store matches with `LIKE` under the table's case-insensitive
+    /// collation).
+    #[must_use]
+    pub fn matches(&self, needle: &str) -> bool {
+        self.name.to_lowercase().contains(needle)
+            || self.handle.contains(needle)
+            || self.description.to_lowercase().contains(needle)
+    }
+}
+
+/// Which listings a directory read wants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DirectoryQuery {
+    /// Every listing of one (topic, language) bucket.
+    Bucket {
+        /// A known topic id.
+        topic: u8,
+        /// ISO 639 language code.
+        language: String,
+    },
+    /// Every listing whose name, handle or description contains `needle`
+    /// (already normalised by [`crate::directory::normalize_search_query`]).
+    Search {
+        /// The lowercased query.
+        needle: String,
+    },
+}
+
+/// An operator moderation action (internal listener only, ADR-0059
+/// section 7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModerationAction {
+    /// Remove the listing; the owner may list again.
+    Remove,
+    /// Remove the listing and refuse any later listing of the channel.
+    Block,
+    /// Lift a block.
+    Unblock,
+}
+
 /// Errors the storage layer surfaces.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -235,6 +307,20 @@ pub enum StorageError {
         /// The future epoch the caller supplied.
         got: u32,
     },
+    /// `create` named an existing channel with a different owner key. A
+    /// channel's owner key is fixed at creation (ADR-0059 section 1).
+    #[error("channel exists with a different owner key")]
+    OwnerMismatch,
+    /// Appointing one more co-publisher key would exceed the per-channel
+    /// cap (`lakko_channels::MAX_COPUBLISHERS`).
+    #[error("too many co-publisher keys for this channel")]
+    TooManyCoPublishers,
+    /// A listing whose `updated_at_ms` is not newer than the stored one.
+    #[error("listing is not newer than the stored one")]
+    StaleListing,
+    /// The operator blocked this channel from the directory.
+    #[error("channel is blocked from the directory")]
+    ListingBlocked,
     /// A member card names an epoch greater than the channel's
     /// `current_epoch` (ADR-0060): a card is sealed under a seed a reader
     /// already holds, never a future one.
@@ -274,8 +360,101 @@ pub enum StorageError {
 /// request handler does not block a tokio worker.
 #[async_trait]
 pub trait ChannelStore: Send + Sync {
-    /// Register a fresh channel. Idempotent.
-    async fn create(&self, channel: ChannelId) -> Result<(), StorageError>;
+    /// Register a fresh channel under its owner's public key (ADR-0059
+    /// section 1). Idempotent for the same key; a different key for an
+    /// existing channel is [`StorageError::OwnerMismatch`] and changes
+    /// nothing, so nobody can take a channel over by re-creating it.
+    async fn create(
+        &self,
+        channel: ChannelId,
+        owner_pubkey: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<(), StorageError>;
+
+    /// The owner key registered for `channel`, `None` for an unknown
+    /// channel.
+    async fn owner_pubkey(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Option<[u8; OWNER_PUBKEY_LEN]>, StorageError>;
+
+    /// Record an owner request-proof nonce. `Ok(false)` when it was already
+    /// recorded (a replay).
+    async fn consume_owner_nonce(
+        &self,
+        nonce: [u8; OWNER_NONCE_LEN],
+        now_ms: u64,
+    ) -> Result<bool, StorageError>;
+
+    /// Drop nonces recorded before `cutoff_ms`. Returns how many.
+    async fn prune_owner_nonces_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError>;
+
+    /// Appoint a co-publisher key for `channel` (ADR-0059 section 1,
+    /// co-publisher keys). Idempotent for a key already appointed. Refused
+    /// with [`StorageError::UnknownChannel`] or, when `max` keys are already
+    /// appointed, [`StorageError::TooManyCoPublishers`].
+    async fn appoint_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+        max: usize,
+        now_ms: u64,
+    ) -> Result<(), StorageError>;
+
+    /// Revoke a co-publisher key. `Ok(false)` when it was not appointed.
+    async fn revoke_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError>;
+
+    /// Whether `key` is an appointed co-publisher key of `channel`.
+    async fn is_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError>;
+
+    /// Store or replace the channel's listing. The first listing records
+    /// `now_ms` as the first-listed time, which a later withdrawal keeps.
+    ///
+    /// Refused with [`StorageError::UnknownChannel`],
+    /// [`StorageError::ListingBlocked`] or [`StorageError::StaleListing`]
+    /// (not strictly newer than the stored listing).
+    async fn put_listing(
+        &self,
+        channel: ChannelId,
+        listing: StoredListing,
+        now_ms: u64,
+    ) -> Result<(), StorageError>;
+
+    /// Withdraw the channel's listing. `Ok(false)` when none was listed.
+    async fn withdraw_listing(&self, channel: ChannelId) -> Result<bool, StorageError>;
+
+    /// The channel's listing with its counts at `now_ms`, `None` when it is
+    /// not listed.
+    async fn listing(
+        &self,
+        channel: ChannelId,
+        now_ms: u64,
+    ) -> Result<Option<DirectoryEntry>, StorageError>;
+
+    /// Every listing matching `query`, with counts at `now_ms`, unordered.
+    /// Ranking and the page cut are [`crate::directory::rank`]'s.
+    async fn directory_candidates(
+        &self,
+        query: &DirectoryQuery,
+        now_ms: u64,
+    ) -> Result<Vec<DirectoryEntry>, StorageError>;
+
+    /// Apply an operator moderation action with a reason code. Works for a
+    /// channel id that does not exist (a block may precede creation).
+    async fn moderate(
+        &self,
+        channel: ChannelId,
+        action: ModerationAction,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<(), StorageError>;
 
     /// `true` if the channel is registered.
     async fn exists(&self, channel: ChannelId) -> bool;
@@ -604,6 +783,43 @@ struct Inner {
     /// Channel id → (subscriber → (epoch, opaque member card)), ADR-0060.
     /// A `BTreeMap` so a page in subscriber-key order is a range scan.
     member_cards: HashMap<ChannelId, BTreeMap<SubscriberId, (u32, Vec<u8>)>>,
+    /// Channel id → owner key (ADR-0059 section 1).
+    owners: HashMap<ChannelId, [u8; OWNER_PUBKEY_LEN]>,
+    /// Channel id → (subscriber → first registration time). Kept across
+    /// re-subscribes; feeds the directory's 7-day growth signal.
+    registered_at: HashMap<ChannelId, HashMap<SubscriberId, u64>>,
+    /// Channel id → appointed co-publisher keys → when appointed.
+    copublishers: HashMap<ChannelId, HashMap<[u8; OWNER_PUBKEY_LEN], u64>>,
+    /// Owner request-proof nonces → when seen.
+    owner_nonces: HashMap<[u8; OWNER_NONCE_LEN], u64>,
+    /// Channel id → its published listing.
+    listings: HashMap<ChannelId, StoredListing>,
+    /// Channel id → first-listed time; survives a withdrawal.
+    first_listed_at: HashMap<ChannelId, u64>,
+    /// Channel id → (blocked, reason, action time).
+    moderation: HashMap<ChannelId, (bool, String, u64)>,
+}
+
+impl Inner {
+    fn entry_for(&self, channel: ChannelId, now_ms: u64) -> Option<DirectoryEntry> {
+        let listing = self.listings.get(&channel)?;
+        let since = now_ms.saturating_sub(GROWTH_WINDOW_MS);
+        let registered = self.registered_at.get(&channel);
+        let subscribers = self.subscribers.get(&channel).map_or(0, HashMap::len) as u64;
+        let recent_registrations =
+            registered.map_or(0, |m| m.values().filter(|&&t| t >= since).count()) as u64;
+        Some(DirectoryEntry {
+            channel,
+            listing: listing.bytes.clone(),
+            subscribers,
+            recent_registrations,
+            first_listed_at_ms: self
+                .first_listed_at
+                .get(&channel)
+                .copied()
+                .unwrap_or(now_ms),
+        })
+    }
 }
 
 impl InMemoryChannelStore {
@@ -626,8 +842,19 @@ impl InMemoryChannelStore {
 
 #[async_trait]
 impl ChannelStore for InMemoryChannelStore {
-    async fn create(&self, channel: ChannelId) -> Result<(), StorageError> {
+    async fn create(
+        &self,
+        channel: ChannelId,
+        owner_pubkey: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<(), StorageError> {
         let mut guard = self.inner.write().await;
+        match guard.owners.get(&channel) {
+            Some(existing) if *existing != owner_pubkey => return Err(StorageError::OwnerMismatch),
+            Some(_) => {},
+            None => {
+                guard.owners.insert(channel, owner_pubkey);
+            },
+        }
         guard.posts.entry(channel).or_default();
         guard.next_cursor.entry(channel).or_insert(1);
         // Genesis epoch is 0 — the first rotation bumps it
@@ -746,6 +973,12 @@ impl ChannelStore for InMemoryChannelStore {
             .entry(channel)
             .or_default()
             .insert(subscriber, server_ts_ms);
+        guard
+            .registered_at
+            .entry(channel)
+            .or_default()
+            .entry(subscriber)
+            .or_insert(server_ts_ms);
         Ok(())
     }
 
@@ -803,6 +1036,9 @@ impl ChannelStore for InMemoryChannelStore {
                 }
             }
             guard.envelopes.remove(&(channel, sub));
+            if let Some(map) = guard.registered_at.get_mut(&channel) {
+                map.remove(&sub);
+            }
             if let Some(cards) = guard.member_cards.get_mut(&channel) {
                 cards.remove(&sub);
             }
@@ -1201,6 +1437,158 @@ impl ChannelStore for InMemoryChannelStore {
         Ok(target_epoch)
     }
 
+    async fn owner_pubkey(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Option<[u8; OWNER_PUBKEY_LEN]>, StorageError> {
+        Ok(self.inner.read().await.owners.get(&channel).copied())
+    }
+
+    async fn consume_owner_nonce(
+        &self,
+        nonce: [u8; OWNER_NONCE_LEN],
+        now_ms: u64,
+    ) -> Result<bool, StorageError> {
+        let mut guard = self.inner.write().await;
+        if guard.owner_nonces.contains_key(&nonce) {
+            return Ok(false);
+        }
+        guard.owner_nonces.insert(nonce, now_ms);
+        Ok(true)
+    }
+
+    async fn prune_owner_nonces_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
+        let mut guard = self.inner.write().await;
+        let before = guard.owner_nonces.len();
+        guard.owner_nonces.retain(|_, seen| *seen >= cutoff_ms);
+        Ok((before - guard.owner_nonces.len()) as u64)
+    }
+
+    async fn appoint_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+        max: usize,
+        now_ms: u64,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.owners.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        let keys = guard.copublishers.entry(channel).or_default();
+        if keys.contains_key(&key) {
+            return Ok(());
+        }
+        if keys.len() >= max {
+            return Err(StorageError::TooManyCoPublishers);
+        }
+        keys.insert(key, now_ms);
+        Ok(())
+    }
+
+    async fn revoke_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError> {
+        let mut guard = self.inner.write().await;
+        Ok(guard
+            .copublishers
+            .get_mut(&channel)
+            .is_some_and(|keys| keys.remove(&key).is_some()))
+    }
+
+    async fn is_copublisher(
+        &self,
+        channel: ChannelId,
+        key: [u8; OWNER_PUBKEY_LEN],
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .copublishers
+            .get(&channel)
+            .is_some_and(|keys| keys.contains_key(&key)))
+    }
+
+    async fn put_listing(
+        &self,
+        channel: ChannelId,
+        listing: StoredListing,
+        now_ms: u64,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        if guard.moderation.get(&channel).is_some_and(|(b, _, _)| *b) {
+            return Err(StorageError::ListingBlocked);
+        }
+        if let Some(stored) = guard.listings.get(&channel) {
+            if !lakko_channels::listing::listing_is_newer(
+                listing.updated_at_ms,
+                stored.updated_at_ms,
+            ) {
+                return Err(StorageError::StaleListing);
+            }
+        }
+        guard.listings.insert(channel, listing);
+        guard.first_listed_at.entry(channel).or_insert(now_ms);
+        Ok(())
+    }
+
+    async fn withdraw_listing(&self, channel: ChannelId) -> Result<bool, StorageError> {
+        Ok(self.inner.write().await.listings.remove(&channel).is_some())
+    }
+
+    async fn listing(
+        &self,
+        channel: ChannelId,
+        now_ms: u64,
+    ) -> Result<Option<DirectoryEntry>, StorageError> {
+        Ok(self.inner.read().await.entry_for(channel, now_ms))
+    }
+
+    async fn directory_candidates(
+        &self,
+        query: &DirectoryQuery,
+        now_ms: u64,
+    ) -> Result<Vec<DirectoryEntry>, StorageError> {
+        let guard = self.inner.read().await;
+        let hits = guard.listings.iter().filter(|(_, l)| match query {
+            DirectoryQuery::Bucket { topic, language } => {
+                l.topic == *topic && l.language == *language
+            },
+            DirectoryQuery::Search { needle } => l.matches(needle),
+        });
+        Ok(hits
+            .filter_map(|(c, _)| guard.entry_for(*c, now_ms))
+            .collect())
+    }
+
+    async fn moderate(
+        &self,
+        channel: ChannelId,
+        action: ModerationAction,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        let blocked = match action {
+            ModerationAction::Remove => guard.moderation.get(&channel).is_some_and(|(b, _, _)| *b),
+            ModerationAction::Block => true,
+            ModerationAction::Unblock => false,
+        };
+        if action != ModerationAction::Unblock {
+            guard.listings.remove(&channel);
+        }
+        guard
+            .moderation
+            .insert(channel, (blocked, reason.to_string(), now_ms));
+        Ok(())
+    }
+
     async fn put_member_card(
         &self,
         channel: ChannelId,
@@ -1270,6 +1658,11 @@ impl ChannelStore for InMemoryChannelStore {
         if let Some(cards) = guard.member_cards.get_mut(&channel) {
             cards.remove(&subscriber);
         }
+        // The SQL store loses `registered_at` with the subscriber row; keep
+        // the directory growth signal the same in both stores (ADR-0059).
+        if let Some(map) = guard.registered_at.get_mut(&channel) {
+            map.remove(&subscriber);
+        }
         for ((staged_channel, _), staged) in &mut guard.staged_envelopes {
             if *staged_channel == channel {
                 staged.remove(&subscriber);
@@ -1305,6 +1698,8 @@ impl ChannelStore for InMemoryChannelStore {
 mod tests {
     use super::*;
 
+    const OWNER: [u8; OWNER_PUBKEY_LEN] = [7; OWNER_PUBKEY_LEN];
+
     fn cid(b: u8) -> ChannelId {
         ChannelId([b; 16])
     }
@@ -1313,8 +1708,8 @@ mod tests {
     async fn create_is_idempotent() {
         let s = InMemoryChannelStore::new();
         let c = cid(0xAA);
-        s.create(c).await.unwrap();
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         assert!(s.exists(c).await);
     }
 
@@ -1322,7 +1717,7 @@ mod tests {
     async fn put_assigns_monotone_cursors() {
         let s = InMemoryChannelStore::new();
         let c = cid(0xBB);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         let a = s.put(c, vec![1, 2, 3], 1024, 1000).await.unwrap();
         let b = s.put(c, vec![4, 5], 1024, 2000).await.unwrap();
         assert_eq!(a.cursor, 1);
@@ -1341,7 +1736,7 @@ mod tests {
     async fn put_rejects_empty_payload() {
         let s = InMemoryChannelStore::new();
         let c = cid(0xDD);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         let err = s.put(c, vec![], 1024, 0).await.unwrap_err();
         assert!(matches!(err, StorageError::EmptyPost));
     }
@@ -1350,7 +1745,7 @@ mod tests {
     async fn put_rejects_oversize_payload() {
         let s = InMemoryChannelStore::new();
         let c = cid(0xEE);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         let err = s.put(c, vec![0u8; 100], 50, 0).await.unwrap_err();
         assert!(matches!(
             err,
@@ -1362,7 +1757,7 @@ mod tests {
     async fn fetch_filters_by_cursor() {
         let s = InMemoryChannelStore::new();
         let c = cid(0xFF);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         for i in 0..5 {
             s.put(c, vec![i], 1024, u64::from(i)).await.unwrap();
         }
@@ -1377,7 +1772,7 @@ mod tests {
     async fn fetch_respects_limit() {
         let s = InMemoryChannelStore::new();
         let c = cid(0x11);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         for i in 0..10 {
             s.put(c, vec![i], 1024, 0).await.unwrap();
         }
@@ -1416,7 +1811,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x10);
         let sub = sid(0x20);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 1_700_000_000).await.unwrap();
         assert!(s.is_subscribed(c, sub).await);
         let list = s.list_subscribers(c).await.unwrap();
@@ -1436,7 +1831,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x30);
         let sub = sid(0x40);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 1).await.unwrap();
         s.subscribe(c, sub, 2).await.unwrap();
         let list = s.list_subscribers(c).await.unwrap();
@@ -1448,7 +1843,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x50);
         let sub = sid(0x60);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         let envelope = vec![0xAAu8; 80]; // SEED_ENVELOPE_LEN
         s.deliver_envelope(c, sub, None, envelope.clone(), 80)
@@ -1463,7 +1858,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x70);
         let sub = sid(0x80);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         let err = s
             .deliver_envelope(c, sub, None, vec![0u8; 79], 80)
@@ -1482,7 +1877,7 @@ mod tests {
     async fn deliver_envelope_rejects_unknown_subscriber() {
         let s = InMemoryChannelStore::new();
         let c = cid(0x90);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         let err = s
             .deliver_envelope(c, sid(0xA0), None, vec![0u8; 80], 80)
             .await
@@ -1495,7 +1890,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0xB0);
         let sub = sid(0xC0);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         assert!(s.fetch_envelope(c, sub).await.unwrap().is_none());
     }
@@ -1505,7 +1900,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0xD0);
         let sub = sid(0xE0);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         s.deliver_envelope(c, sub, None, vec![0x11; 80], 80)
             .await
@@ -1536,7 +1931,7 @@ mod tests {
     async fn genesis_epoch_is_zero() {
         let s = InMemoryChannelStore::new();
         let c = cid(0xF0);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         assert_eq!(s.current_epoch(c).await.unwrap(), 0);
     }
 
@@ -1553,7 +1948,7 @@ mod tests {
         let c = cid(0x01);
         let a = sid(0x02);
         let b = sid(0x03);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
         s.subscribe(c, b, 0).await.unwrap();
         // Pre-rotation: deliver an "epoch 0" envelope for
@@ -1586,7 +1981,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x04);
         let a = sid(0x05);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
         s.deliver_envelope(c, a, None, vec![0x00; 80], 80)
             .await
@@ -1613,7 +2008,7 @@ mod tests {
     async fn rotate_rejects_unsubscribed_pubkey() {
         let s = InMemoryChannelStore::new();
         let c = cid(0x06);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         // No subscribe; try to rotate to an unknown peer.
         let err = s
             .rotate(c, vec![(sid(0x07), vec![0u8; 80])], 80)
@@ -1631,7 +2026,7 @@ mod tests {
         // to decide whether to ask for a fresh envelope.
         let s = InMemoryChannelStore::new();
         let c = cid(0x08);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         let new_epoch = s.rotate(c, vec![], 80).await.unwrap();
         assert_eq!(new_epoch, 1);
     }
@@ -1644,7 +2039,7 @@ mod tests {
     async fn prune_removes_old_posts_keeps_fresh() {
         let s = InMemoryChannelStore::new();
         let c = cid(0xA1);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         // Five posts at timestamps 100, 200, 300, 400, 500.
         for i in 1..=5 {
             s.put(c, vec![u8::try_from(i).unwrap()], 1024, i * 100)
@@ -1668,7 +2063,7 @@ mod tests {
     async fn prune_with_future_cutoff_drops_everything() {
         let s = InMemoryChannelStore::new();
         let c = cid(0xA2);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         for i in 1..=3 {
             s.put(c, vec![u8::try_from(i).unwrap()], 1024, i * 100)
                 .await
@@ -1683,7 +2078,7 @@ mod tests {
     async fn prune_with_zero_cutoff_drops_nothing() {
         let s = InMemoryChannelStore::new();
         let c = cid(0xA3);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.put(c, vec![1], 1024, 100).await.unwrap();
         s.put(c, vec![2], 1024, 200).await.unwrap();
         let removed = s.prune_posts_older_than(0).await.unwrap();
@@ -1701,7 +2096,7 @@ mod tests {
         // rolled back).
         let s = InMemoryChannelStore::new();
         let c = cid(0xA4);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         let a = s.put(c, vec![1], 1024, 100).await.unwrap();
         let b = s.put(c, vec![2], 1024, 200).await.unwrap();
         assert_eq!(a.cursor, 1);
@@ -1717,8 +2112,8 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c1 = cid(0xB1);
         let c2 = cid(0xB2);
-        s.create(c1).await.unwrap();
-        s.create(c2).await.unwrap();
+        s.create(c1, OWNER).await.unwrap();
+        s.create(c2, OWNER).await.unwrap();
         s.put(c1, vec![1], 1024, 100).await.unwrap();
         s.put(c1, vec![2], 1024, 500).await.unwrap();
         s.put(c2, vec![3], 1024, 200).await.unwrap();
@@ -1741,7 +2136,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0xC1);
         let sub = sid(0xC2);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 100).await.unwrap();
         // Touch with a later timestamp.
         s.touch_subscriber_activity(c, sub, 500).await.unwrap();
@@ -1758,7 +2153,7 @@ mod tests {
         // never registered is silently ignored.
         let s = InMemoryChannelStore::new();
         let c = cid(0xC3);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         // No subscribe — touch should not error.
         s.touch_subscriber_activity(c, sid(0xC4), 1_000)
             .await
@@ -1772,7 +2167,7 @@ mod tests {
         let c = cid(0xD1);
         let stale = sid(0xD2);
         let active = sid(0xD3);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         // Stale subscriber: registered at 100, never
         // touched.
         s.subscribe(c, stale, 100).await.unwrap();
@@ -1798,7 +2193,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0xE1);
         let sub = sid(0xE2);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 100).await.unwrap();
         s.deliver_envelope(c, sub, None, vec![0xAB; 80], 80)
             .await
@@ -1817,7 +2212,7 @@ mod tests {
     async fn prune_subscribers_zero_cutoff_drops_nothing() {
         let s = InMemoryChannelStore::new();
         let c = cid(0xE3);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sid(0xE4), 100).await.unwrap();
         s.subscribe(c, sid(0xE5), 200).await.unwrap();
         let removed = s.prune_subscribers_older_than(0).await.unwrap();
@@ -1830,8 +2225,8 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c1 = cid(0xF1);
         let c2 = cid(0xF2);
-        s.create(c1).await.unwrap();
-        s.create(c2).await.unwrap();
+        s.create(c1, OWNER).await.unwrap();
+        s.create(c2, OWNER).await.unwrap();
         s.subscribe(c1, sid(0xF3), 100).await.unwrap();
         s.subscribe(c1, sid(0xF4), 700).await.unwrap();
         s.subscribe(c2, sid(0xF5), 200).await.unwrap();
@@ -1856,7 +2251,7 @@ mod tests {
         let c = cid(0x01);
         let a = sid(0x02);
         let b = sid(0x03);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
         s.subscribe(c, b, 0).await.unwrap();
         // Pre-rotation "epoch 0" envelopes so we can prove
@@ -1892,7 +2287,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x04);
         let a = sid(0x05);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
         s.deliver_envelope(c, a, None, vec![0x11; 80], 80)
             .await
@@ -1915,7 +2310,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x06);
         let a = sid(0x07);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
         // current_epoch is 0, so the only valid target is 1.
         let err = s
@@ -1938,7 +2333,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x08);
         let a = sid(0x09);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
         s.stage_envelopes(c, 1, vec![(a, vec![0xAA; 80])], 80)
             .await
@@ -1969,7 +2364,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x0A);
         let a = sid(0x0B);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
         s.deliver_envelope(c, a, None, vec![0x33; 80], 80)
             .await
@@ -1995,7 +2390,7 @@ mod tests {
         let c = cid(0x0C);
         let a = sid(0x0D);
         let b = sid(0x0E);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
         s.subscribe(c, b, 0).await.unwrap();
         // Chunk 1: a with a first value.
@@ -2025,7 +2420,7 @@ mod tests {
     async fn stage_rejects_unsubscribed_recipient() {
         let s = InMemoryChannelStore::new();
         let c = cid(0x0F);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         // No subscribe; try to stage to an unknown peer.
         let err = s
             .stage_envelopes(c, 1, vec![(sid(0x10), vec![0u8; 80])], 80)
@@ -2040,7 +2435,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x11);
         let a = sid(0x12);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
         let err = s
             .stage_envelopes(c, 1, vec![(a, vec![0u8; 79])], 80)
@@ -2067,7 +2462,7 @@ mod tests {
         let c = cid(0x13);
         let staged_sub = sid(0x14);
         let untouched_sub = sid(0x15);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, staged_sub, 0).await.unwrap();
         s.subscribe(c, untouched_sub, 0).await.unwrap();
         s.deliver_envelope(c, staged_sub, None, vec![0x00; 80], 80)
@@ -2099,7 +2494,7 @@ mod tests {
         // epoch (parity with rotate_empty_batch_still_bumps).
         let s = InMemoryChannelStore::new();
         let c = cid(0x16);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         assert_eq!(s.commit_rotation(c, 1).await.unwrap(), 1);
         assert_eq!(s.current_epoch(c).await.unwrap(), 1);
     }
@@ -2111,7 +2506,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x17);
         let a = sid(0x18);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
         s.stage_envelopes(c, 1, vec![(a, vec![0xAA; 80])], 80)
             .await
@@ -2158,7 +2553,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x20);
         let sub = sid(0x21);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         for e in 1u32..=5 {
             // Empty rotation bumps `current_epoch` to `e`.
@@ -2187,7 +2582,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x22);
         let sub = sid(0x23);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         // current_epoch is 0; ask to file at epoch 3.
         let err = s
@@ -2209,7 +2604,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x24);
         let sub = sid(0x25);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         // Raise current_epoch to 3 with empty rotations.
         for _ in 0..3 {
@@ -2231,7 +2626,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x26);
         let sub = sid(0x27);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         for e in 1u32..=6 {
             let byte = u8::try_from(e).unwrap();
@@ -2252,7 +2647,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x28);
         let sub = sid(0x29);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         for e in 1u32..=6 {
             let byte = u8::try_from(e).unwrap();
@@ -2273,7 +2668,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0x2A);
         let sub = sid(0x2B);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         assert_eq!(s.fetch_envelopes(c, sub).await.unwrap(), Vec::new());
     }
@@ -2286,7 +2681,7 @@ mod tests {
         let err = s.fetch_envelopes(c, sid(0x2D)).await.unwrap_err();
         assert!(matches!(err, StorageError::UnknownChannel));
         // Known channel, unregistered subscriber.
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         let err = s.fetch_envelopes(c, sid(0x2D)).await.unwrap_err();
         assert!(matches!(err, StorageError::UnknownSubscriber));
     }
@@ -2297,7 +2692,7 @@ mod tests {
         let s = InMemoryChannelStore::new().with_envelope_retention(2);
         let c = cid(0x2E);
         let sub = sid(0x2F);
-        s.create(c).await.unwrap();
+        s.create(c, OWNER).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         for e in 1u32..=4 {
             let byte = u8::try_from(e).unwrap();
@@ -2316,7 +2711,7 @@ mod tests {
         let s1 = InMemoryChannelStore::new().with_envelope_retention(0);
         let c1 = cid(0x30);
         let sub1 = sid(0x31);
-        s1.create(c1).await.unwrap();
+        s1.create(c1, OWNER).await.unwrap();
         s1.subscribe(c1, sub1, 0).await.unwrap();
         for e in 1u32..=3 {
             let byte = u8::try_from(e).unwrap();
@@ -2332,11 +2727,62 @@ mod tests {
         assert_eq!(epochs1, vec![3], "retention 0 floors to 1");
     }
 
+    fn stored(name: &str, updated_at_ms: u64) -> StoredListing {
+        StoredListing {
+            topic: 1,
+            language: "en".into(),
+            handle: "abc".into(),
+            name: name.into(),
+            description: String::new(),
+            bytes: name.as_bytes().to_vec(),
+            updated_at_ms,
+        }
+    }
+
+    #[tokio::test]
+    async fn listing_rules_match_the_sql_store() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(40);
+        assert!(matches!(s.create(c, OWNER).await, Ok(())));
+        assert!(matches!(
+            s.create(c, [8; OWNER_PUBKEY_LEN]).await,
+            Err(StorageError::OwnerMismatch)
+        ));
+        s.put_listing(c, stored("A", 5), 100).await.unwrap();
+        assert!(matches!(
+            s.put_listing(c, stored("B", 5), 200).await,
+            Err(StorageError::StaleListing)
+        ));
+        s.withdraw_listing(c).await.unwrap();
+        s.put_listing(c, stored("C", 1), 300).await.unwrap();
+        let entry = s.listing(c, 400).await.unwrap().unwrap();
+        assert_eq!(entry.first_listed_at_ms, 100);
+        // A removal keeps a block in force; unblock lifts it.
+        s.moderate(c, ModerationAction::Block, "spam", 1)
+            .await
+            .unwrap();
+        s.moderate(c, ModerationAction::Remove, "dup", 2)
+            .await
+            .unwrap();
+        assert!(matches!(
+            s.put_listing(c, stored("D", 9), 500).await,
+            Err(StorageError::ListingBlocked)
+        ));
+        s.moderate(c, ModerationAction::Unblock, "appeal", 3)
+            .await
+            .unwrap();
+        s.put_listing(c, stored("D", 9), 500).await.unwrap();
+        // Nonces are single use.
+        assert!(s.consume_owner_nonce([1; 16], 10).await.unwrap());
+        assert!(!s.consume_owner_nonce([1; 16], 11).await.unwrap());
+        assert_eq!(s.prune_owner_nonces_older_than(11).await.unwrap(), 1);
+    }
+
     // ADR-0060 - member cards.
 
     async fn member_store() -> InMemoryChannelStore {
         let s = InMemoryChannelStore::new();
-        s.create(cid(0x70)).await.unwrap();
+        s.create(cid(0x70), OWNER).await.unwrap();
         for b in [1u8, 2, 3] {
             s.subscribe(cid(0x70), sid(b), 0).await.unwrap();
         }

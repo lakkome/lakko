@@ -28,6 +28,9 @@ final class AppServices {
     let linkCallHost: LinkCallHost
     let deviceGroupSync: DeviceGroupSyncRepository
     let inviteIntake: InviteIntake
+    /// The Feed's "Couldn't check for new messages." state, fed by every
+    /// check. In memory, per account.
+    let feedRefresh: FeedRefreshCenter
 
     init(
         authRepository: AuthRepository,
@@ -37,7 +40,8 @@ final class AppServices {
         groupCallHost: GroupCallHost,
         linkCallHost: LinkCallHost,
         deviceGroupSync: DeviceGroupSyncRepository,
-        inviteIntake: InviteIntake
+        inviteIntake: InviteIntake,
+        feedRefresh: FeedRefreshCenter
     ) {
         self.authRepository = authRepository
         self.contactsRepository = contactsRepository
@@ -47,6 +51,7 @@ final class AppServices {
         self.linkCallHost = linkCallHost
         self.deviceGroupSync = deviceGroupSync
         self.inviteIntake = inviteIntake
+        self.feedRefresh = feedRefresh
     }
 }
 
@@ -95,6 +100,7 @@ extension AppServices {
         CallHistoryStore.shared.unbind()
         chatRepository.clear()
         deviceGroupSync.clear()
+        feedRefresh.reset()
         if let target {
             AccountLocalDataWipe.wipe(accountIdB64: target)
         } else {

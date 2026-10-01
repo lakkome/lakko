@@ -113,7 +113,7 @@ final class JournalOwnershipTests: XCTestCase {
     /// body and nothing that looks like an ADR-0053 claim.
     func testTheRealRootSignerProducesAClaimStatement() throws {
         let account = try Identity.fromSeed(seed: Data(repeating: 0x21, count: 32))
-        let group = try Group.create(identity: account)
+        let group = try Group.create(identity: account, kind: .group)
         let groupId = try group.groupId()
         let signer = try group.dsAccessSigner(identity: account)
         let root = try dsJournalRootSigner(accountIdentity: account, journalId: groupId)

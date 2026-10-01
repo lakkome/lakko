@@ -17,7 +17,7 @@
  * **What it removes:** this group's entry in the per-account message log
  * (a read-modify-write on a store that already exists — the log is keyed
  * `{ groupIdHex -> PersistedGroup }` internally, so no new store is needed),
- * its persisted conversation kind, its pending-request observations, its
+ * its pending-request observations, its
  * unapplied-request records, its durable leave record, its armed re-sends,
  * and its row in the in-memory group registry.
  *
@@ -38,7 +38,6 @@
  */
 
 import { getDeviceKey } from "../auth/key-store";
-import { forgetConversationKind } from "./conversation-kind-store";
 import { clearLeaveRequested } from "./membership-ended";
 import { clearArmedRetries, clearOwnRequestsForGroup, retryScopeKey } from "./membership-retry";
 import { deleteGroupFromMessageLog } from "./message-log-store";
@@ -75,7 +74,6 @@ export async function deleteChat(input: DeleteChatInput): Promise<void> {
   }
   // Local bookkeeping for a group that no longer exists here. All are
   // best-effort by construction and none can fail the delete.
-  forgetConversationKind(accountIdB64, groupIdB64);
   pruneObservations(accountIdB64, groupIdB64, []);
   clearUnappliedForGroup(accountIdB64, groupIdB64);
   clearOwnRequestsForGroup(accountIdB64, groupIdB64);

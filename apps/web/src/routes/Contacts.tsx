@@ -46,7 +46,6 @@ import {
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
-import { recordConversationKind } from "../chat/conversation-kind-store";
 import { deleteChat } from "../chat/delete-chat";
 import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
 import {
@@ -244,19 +243,20 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   ): Promise<string> {
     // ADR-0060 — accepting a request writes the 1:1 Welcome with the
     // requester's `reply` grant; a contact we message later is reached with
-    // the grants we keep for them.
-    const result = await props.client.startGroupWith(requireIdentity(), peerAccountId, peerPubkey, {
-      replyGrantB64,
-    });
+    // the grants we keep for them. ADR-0062 — a contact's conversation is a
+    // one-to-one for good.
+    const result = await props.client.startGroupWith(
+      requireIdentity(),
+      peerAccountId,
+      peerPubkey,
+      "chat",
+      { replyGrantB64 },
+    );
     // ADR-0048 — a 1x1 chat is labelled by the resolver (the peer's name);
     // this label is only the fallback.
     const active = chats.add({ label: DIRECT_CHAT_STAND_IN, group: result.group });
     // ADR-0048 §2 — founding a group is joining it.
     profiles.groupJoined(active.groupIdB64);
-    // docs/ux/client-redesign.md section 3 — a contact's conversation is a
-    // chat, filed under Chats until a third person joins.
-    const account = accountIdB64();
-    if (account !== null) recordConversationKind(account, active.groupIdB64, "chat");
     setAccepted(upsertAccepted({ ...contact, groupIdB64: active.groupIdB64 }));
     return paths.chat(base64UrlEncodeNoPad(active.group.groupId));
   }

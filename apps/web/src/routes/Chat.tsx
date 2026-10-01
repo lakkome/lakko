@@ -198,6 +198,8 @@ import { isOneToOne, useProfiles } from "../profile/ProfileContext";
 import { intakeScopedEnvelope } from "../reach/scoped-intake";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { usePins } from "../chat/PinContext";
+import { useSharedChannels } from "../discover/SharedChannelsContext";
+import { ShareChannelsSwitch } from "../discover/ShareChannelsSwitch";
 import { clampPinIndex, nextPinIndex, pinBarItems, type HeldForPin } from "../chat/pin-bar";
 import { pinRowDecision, type PinOption, type PinState } from "../chat/pin-sheet";
 import { PinList, PinnedBar, type PinBarEntry } from "../chat/PinnedBar";
@@ -414,13 +416,7 @@ import {
   type TimelineItem,
   type TimelineLayout,
 } from "../chat/timeline-layout";
-import {
-  observeConversationKind,
-  persistedConversationKind,
-  recordConversationKind,
-  subscribeConversationKindChanged,
-} from "../chat/conversation-kind-store";
-import { decideConversationKind, type ConversationKind } from "../chat/conversation-kind";
+import { conversationKindOf, type ConversationKind } from "../chat/conversation-kind";
 import { MembersCanFindMeSwitch } from "../settings/MembersCanFindMeSwitch";
 
 /**
@@ -529,6 +525,7 @@ function ChatView(props: {
   const profiles = useProfiles();
   const groupNames = useGroupNames();
   const pins = usePins();
+  const sharedChannels = useSharedChannels();
   // ADR-0024 — the durable read watermarks both receive paths feed.
   const readWatermarkStore = useReadWatermarks();
   const callLog = useCallLog();
@@ -854,10 +851,7 @@ function ChatView(props: {
    *  way the Chats list routes a row (a one-to-one under `/chat/`, a group
    *  under `/groups/`). */
   function hrefOfConversation(target: ActiveGroup): string {
-    const s = auth.state();
-    const persisted =
-      s.kind === "session" ? persistedConversationKind(s.account.accountId, target.groupIdB64) : null;
-    const kind = decideConversationKind(persisted, peopleCountOf(target.group));
+    const kind = conversationKindOf(target.group);
     const slug = base64UrlEncodeNoPad(target.group.groupId);
     return kind === "chat" ? paths.chat(slug) : paths.groupChat(slug);
   }
@@ -1143,7 +1137,7 @@ function ChatView(props: {
   };
   /** Under the name (docs/ux section 5.2): "typing..." while a typing
    *  indicator is live, else the person's "@username" in a 1x1, else the size
-   *  of the group in people. Which of the two follows the persisted kind, so
+   *  of the group in people. Which of the two follows the conversation kind, so
    *  a two-person group says "2 people" like the list it is filed under. */
   const headerSub = (): string => {
     const typing = typingIndicator();
@@ -1215,7 +1209,7 @@ function ChatView(props: {
         groupNames.nameOf(props.entry.groupIdB64) ?? props.entry.label,
         others.map((k) => memberNameOf(profiles.resolve(k))),
       ),
-      // The persisted kind decides, not the size: a two-person group is
+      // The conversation kind (ADR-0062) decides, not the size: a two-person group is
       // titled as a group, the same way the list files it.
       isGroup: isGroupChat(),
     });
@@ -1228,7 +1222,7 @@ function ChatView(props: {
       membershipEnded: membershipEnded(),
       callInProgress: callHost.anyCallInProgress(),
       liveCallInThisChat: liveGroupCall() !== null,
-      memberCount: memberCount(),
+      isGroup: isGroupChat(),
     });
 
   /** Place a 1x1 call. The session lives in the call host, so it survives
@@ -1351,7 +1345,7 @@ function ChatView(props: {
   // or `?call=video` (docs/ux/client-redesign.md section 5.3): the same header
   // buttons, pressed once the chat can offer a call. The parameter is dropped
   // from the URL first, so a reload or Back does not place a second call.
-  const [searchParams, setSearchParams] = useSearchParams<{ call?: string; at?: string }>();
+  const [searchParams, setSearchParams] = useSearchParams<{ call?: string; at?: string; reply?: string }>();
   // ADR-0052 decision 2 — `?at=<messageId>`: a forwarded message's "Forwarded
   // from" line in another conversation opened this one at its original. The
   // jump runs once the row is in the loaded timeline (the log hydrates
@@ -1373,6 +1367,28 @@ function ChatView(props: {
     atHandled = true;
     setSearchParams({ at: undefined }, { replace: true });
     // The row exists in the list; give it a frame to exist in the DOM.
+    requestAnimationFrame(() => jumpToMessage(id));
+  });
+  // docs/ux/feed.md section 5 — `?reply=<messageId>`: Reply chosen on a feed
+  // item opens this conversation with the reply strip already set
+  // (message-actions.md 3.1). Armed once the row is in the loaded timeline,
+  // then the parameter is dropped so a reload or Back does not arm it again;
+  // a message this device does not hold arms nothing.
+  let replyHandled = false;
+  createEffect(() => {
+    const wanted = searchParams.reply;
+    const held = rows();
+    if (replyHandled || wanted === undefined) return;
+    const id = Number(wanted);
+    if (!Number.isFinite(id)) {
+      replyHandled = true;
+      setSearchParams({ reply: undefined }, { replace: true });
+      return;
+    }
+    if (!held.some((r) => rowMessageId(r) === id)) return;
+    replyHandled = true;
+    setSearchParams({ reply: undefined }, { replace: true });
+    onStartReply(id);
     requestAnimationFrame(() => jumpToMessage(id));
   });
   let autoCallHandled = false;
@@ -1559,31 +1575,11 @@ function ChatView(props: {
   const [memberCount, setMemberCount] = createSignal(
     peopleCountOf(props.entry.group),
   );
-  // docs/ux/client-redesign.md section 3 — the persisted conversation kind.
-  // A group created with two people is a group; a 1x1 becomes a group for
-  // good once a third person is observed; nothing else moves it. The effect
-  // records what the roster shows (first sight, or the one allowed flip) and
-  // the memo reads what is stored, so the header and the timeline agree with
-  // the list this conversation is filed under.
-  const [kindVersion, setKindVersion] = createSignal(0);
-  onMount(() => {
-    const unsubscribe = subscribeConversationKindChanged(() => setKindVersion((v) => v + 1));
-    onCleanup(unsubscribe);
-  });
-  createEffect(() => {
-    const n = memberCount();
-    const s = auth.state();
-    if (s.kind === "session") observeConversationKind(s.account.accountId, props.entry.groupIdB64, n);
-  });
-  const conversationKind = createMemo<ConversationKind>(() => {
-    kindVersion();
-    const s = auth.state();
-    const persisted =
-      s.kind === "session"
-        ? persistedConversationKind(s.account.accountId, props.entry.groupIdB64)
-        : null;
-    return decideConversationKind(persisted, memberCount());
-  });
+  // docs/ux/client-redesign.md section 3 — the conversation kind, read from
+  // the group (ADR-0062): set by the creator, the same on every member's
+  // device, never changed by a commit. A two-person group is a group; a
+  // one-to-one never becomes one. The member count above is display only.
+  const conversationKind = createMemo<ConversationKind>(() => conversationKindOf(props.entry.group));
   const isGroupChat = (): boolean => conversationKind() === "group";
   // 1.18h — members panel state. `membersVersion` is a
   // monotonic counter bumped on every epoch advance (refresh
@@ -1737,6 +1733,7 @@ function ChatView(props: {
       groupNames.groupGrew(props.entry.groupIdB64);
       // ADR-0052 decision 3 — and the room's shared pins, original stamps.
       pins.groupGrew(props.entry.groupIdB64);
+      sharedChannels.groupGrew(props.entry.groupIdB64);
     }
   });
 
@@ -3247,8 +3244,8 @@ function ChatView(props: {
     const typers = activeTypers(typingMap(), now).filter((m) => m !== own);
     if (typers.length === 0) return null;
     // A 1×1 chat has exactly one peer — skip the name (the chat
-    // header already shows who it is).
-    const oneOnOne = memberCount() <= 2;
+    // header already shows who it is). ADR-0062: the kind, not the count.
+    const oneOnOne = !isGroupChat();
     if (typers.length === 1) {
       const who = typers[0] as MemberIdentity;
       return oneOnOne
@@ -3553,6 +3550,16 @@ function ChatView(props: {
         void pins.receive(props.entry, e).catch((err) => {
           // eslint-disable-next-line no-console
           console.warn("pin receive failed", err);
+        });
+        continue;
+      }
+      // ADR-0059 section 6 — a member's shared channels. Filed per member
+      // (account key resolved at receipt) under the per-group lock; never a
+      // timeline row.
+      if (e.kind === "shared-channels") {
+        void sharedChannels.receive(props.entry, e).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn("shared channels receive failed", err);
         });
         continue;
       }
@@ -4992,15 +4999,6 @@ function ChatView(props: {
     outcome: { kind: "committed"; commitMessageId: number } | { kind: "proposed"; proposalMessageId: number },
     recipientKeyB64: string,
   ): void {
-    // docs/ux section 3 — adding a person to a 1x1 makes it a group, filed
-    // under Groups from now on (never back), whether the add lands now (a
-    // legacy commit) or after a committer sweeps the proposal.
-    {
-      const s = auth.state();
-      if (s.kind === "session") {
-        recordConversationKind(s.account.accountId, props.entry.groupIdB64, "group");
-      }
-    }
     // Suppress the echo so the sender's next pollMessages
     // doesn't try to processIncoming on its own artifact at
     // an epoch we've already advanced past. ADR-0045: the artifact is a
@@ -5926,7 +5924,7 @@ function ChatView(props: {
   // the session-wide `PinContext`; what this view adds is the LOCAL half of
   // the authority rule (which rows the sheet offers), the bar derived from
   // the store and the rows this device holds, and the tap.
-  const pinsOneToOne = (): boolean => memberCount() === 2;
+  const pinsOneToOne = (): boolean => conversationKind() === "chat";
   /** Whether this device may set or clear a shared pin here: either
    *  participant of a one-to-one, else the ADR-0022 owner / admin, else any
    *  member of a table-less group (`ownRole() === null`); nobody once the
@@ -6433,6 +6431,13 @@ function ChatView(props: {
               under the panel, which is now behind the dim and unreadable. */}
           <Show when={error()}>{(message) => <div class="form-error">{message()}</div>}</Show>
           <Show when={notice()}>{(message) => <div class="form-notice">{message()}</div>}</Show>
+          {/* ADR-0059 section 6 — share the listed channels this person
+              follows with this group. Not a block of the shared info rule
+              (`lakko-ui-rules`): it is shown in every group this device is
+              still a member of. */}
+          <Show when={!membershipEnded()}>
+            <ShareChannelsSwitch entry={props.entry} />
+          </Show>
           {/* 1.18g — the add-member form, reached from `Add member` in the
               header's overflow menu, which opens this info with the form
               ready. Submit drives
@@ -8416,6 +8421,12 @@ function timelineRowToPersisted(
     // ADR-0052 decision 3 — consumed by the pin gate, never a timeline row
     // (no "pinned a message" transcript row in this version). Never persist
     // it.
+    return null;
+  }
+  if (row.event.kind === "shared-channels") {
+    // ADR-0059 section 6 — consumed by the shared-channels store, never a
+    // timeline row. Never persist it: which channels a member follows is
+    // not part of the transcript.
     return null;
   }
   if (row.event.kind === "scopedDiscovery") {

@@ -650,7 +650,9 @@ final class GroupCallRecordTests: XCTestCase {
                     decodesAsRegistrarSeed: { _ in false },
                     registrarSeedEnvelopeLen: 205,
                     decodesAsScopedDiscovery: { _ in false },
-                    scopedDiscoveryEnvelopeLens: 40...400
+                    scopedDiscoveryEnvelopeLens: 40...400,
+                    decodesAsSharedChannels: { _ in false },
+                    sharedChannelsEnvelopeLens: 35...9795
                 ),
                 name
             )

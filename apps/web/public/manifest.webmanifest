@@ -10,6 +10,14 @@
   "theme_color": "#3730a3",
   "lang": "en",
   "dir": "ltr",
+  "file_handlers": [
+    {
+      "action": "/feed/import",
+      "accept": {
+        "application/vnd.lakko.feed": [".lakkofeed"]
+      }
+    }
+  ],
   "icons": [
     {
       "src": "/icon-192.png",

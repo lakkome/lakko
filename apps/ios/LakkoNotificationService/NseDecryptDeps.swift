@@ -264,7 +264,9 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             decodesAsRegistrarSeed: Self.decodesAsRegistrarSeed,
             registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLength,
             decodesAsScopedDiscovery: Self.decodesAsScopedDiscovery,
-            scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLengths
+            scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLengths,
+            decodesAsSharedChannels: Self.decodesAsSharedChannels,
+            sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLengths
         ) {
             return nil
         }
@@ -460,6 +462,31 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     /// FFI's `registrarSeedEnvelopeLen()` (205).
     private static var registrarSeedEnvelopeLength: Int {
         Int(registrarSeedEnvelopeLen())
+    }
+
+    /// The ADR-0059 shared-channels filter: the slim FFI's
+    /// `decodeSharedChannelsEnvelope` (which returns no fields), plus the
+    /// domain prefix itself. A list that fails its bounds is still a list
+    /// the sender meant for the group, never a chat message, so a domain match
+    /// is suppressed as well, the web service worker's rule. READ-ONLY: the
+    /// NSE never stores a received list (C-59).
+    private static func decodesAsSharedChannels(_ bytes: Data) -> Bool {
+        if (try? decodeSharedChannelsEnvelope(plaintext: bytes)) != nil { return true }
+        return bytes.starts(with: sharedChannelsDomain)
+    }
+
+    /// `lakko/shared-channels/v1` plus its trailing NUL, built without a raw
+    /// NUL in this source.
+    private static let sharedChannelsDomain: Data = {
+        var d = Data("lakko/shared-channels/v1".utf8)
+        d.append(0x00)
+        return d
+    }()
+
+    /// The well-formed length range of a shared-channels list, from the slim
+    /// FFI so no wire number is hand-copied here.
+    private static var sharedChannelsEnvelopeLengths: ClosedRange<Int> {
+        Int(sharedChannelsEnvelopeMinLen())...Int(sharedChannelsEnvelopeMaxLen())
     }
 
     /// LOAD-BEARING: this does NOT persist — no `snapshotStorage()` /

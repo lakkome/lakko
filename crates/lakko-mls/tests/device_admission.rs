@@ -21,8 +21,8 @@
 //! device changing roles (item 10).
 
 use lakko_mls::{
-    account_committer_rank, group, key_package, Group, Identity, Incoming, LeafNodeIndex,
-    OutgoingOwner, ProposalKind, RefusalReason, Role, RoleTable,
+    account_committer_rank, group, key_package, Group, GroupKind, Identity, Incoming,
+    LeafNodeIndex, OutgoingOwner, ProposalKind, RefusalReason, Role, RoleTable,
 };
 
 fn wire(msg: openmls::framing::MlsMessageOut) -> Vec<u8> {
@@ -88,7 +88,7 @@ fn deliver_stored(bytes: &[u8], peers: &mut [(&Identity, &mut Group)]) {
 /// a time, delivering each commit to the members already in. Returns the
 /// founder's group and each joiner's group, in order.
 fn found(creator: &Identity, joiners: &[&Identity]) -> (Group, Vec<Group>) {
-    let mut g = Group::create(creator).expect("create");
+    let mut g = Group::create(creator, GroupKind::Group).expect("create");
     let mut others: Vec<Group> = Vec::new();
     for joiner in joiners {
         let added = g

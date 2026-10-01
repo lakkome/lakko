@@ -260,6 +260,12 @@ final class AccountLocalDataWipeTests: XCTestCase {
                     id: channelHex, localName: "c", localDescription: "", addedAtMs: 1, handle: "h")],
                 subscribedSeeds: []))
         DeviceGroupSnapshotStore().putSnapshot(accountIdB64: x, blob: Data([1, 2]))
+        // ADR-0063 feed + ADR-0059 Discover (this branch's stores).
+        ChannelPostLogStore().put(accountIdB64: x, payload: ChannelPostLogPayload(channels: [:]))
+        try FeedStore().save(accountIdB64: x, state: FeedState())
+        try FeedReadingStore().save(accountIdB64: x, reading: FeedReading.decode(Data()))
+        try DiscoverStore().save(accountIdB64: x, kind: .prefs, plaintext: Data([1]))
+        try DiscoverStore().save(accountIdB64: x, kind: .shared, plaintext: Data([1]))
         SyncedStateStore.save(SyncedState(), accountIdB64: x)
         try CommitOutboxStore().putNewDurable(
             accountIdB64: x,
@@ -271,7 +277,6 @@ final class AccountLocalDataWipeTests: XCTestCase {
         // UserDefaults, through the stores.
         SnapshotLeafKeyStore().save(accountIdB64: x, leafKeyB64: "leaf")
         KnownGroupsStore().add(accountIdB64: x, groupIdHex: group)
-        ConversationKindStore().record(accountIdB64: x, groupIdHex: group, kind: .group)
         GroupNameStore().record(
             accountIdB64: x, groupIdHex: group, value: StoredGroupName(name: "n", updatedAtMs: 1))
         SharedPinStore().record(

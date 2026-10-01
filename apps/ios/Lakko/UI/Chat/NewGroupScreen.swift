@@ -147,20 +147,16 @@ struct NewGroupScreen: View {
         do {
             groupIdHex = try await chatRepository.startGroupWith(
                 recipientAccountId: firstAccountId,
-                recipientSignaturePubkey: first.request.fromPubkey
+                recipientSignaturePubkey: first.request.fromPubkey,
+                // ADR-0062 — a group, fixed in the GroupContext, even while
+                // it still has two people.
+                kind: .group
             )
         } catch {
             NSLog("New group: founding failed: \(error)")
             errorMessage = "chats.new_group.error"
             return
         }
-        // UX spec section 5.1 — made through the new-group flow: a group,
-        // even while it still has two people.
-        if let account = chatRepository.accountIdB64 {
-            chatRepository.conversationKindStore.record(
-                accountIdB64: account, groupIdHex: groupIdHex, kind: .group)
-        }
-
         /// Catalog keys and their arguments, rendered when shown.
         var notices: [(key: String, texts: [String: String])] = []
 

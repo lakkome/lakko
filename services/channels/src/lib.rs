@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! `lakko-svc-channels` — channels backend for Phase 4a
-//! (publisher path; see ADR-0010).
+//! `lakko-svc-channels` — the channel-broadcast backend (ADR-0010) and the
+//! channel directory (ADR-0059).
 //!
 //! This crate is shipped both as a binary (`src/main.rs`)
 //! and as a library (this file) so the integration tests
@@ -15,6 +15,9 @@
 
 pub mod api;
 pub mod config;
+pub mod directory;
+pub mod internal;
+pub mod owner_auth;
 pub mod sql_store;
 pub mod storage;
 
@@ -22,8 +25,12 @@ pub use api::{router, AppState};
 pub use config::{Config, ConfigError};
 pub use sql_store::SqlChannelStore;
 pub use storage::{
-    ChannelId, ChannelStore, InMemoryChannelStore, StorageError, StoredPost, SubscriberId,
+    ChannelId, ChannelStore, DirectoryQuery, InMemoryChannelStore, ModerationAction, StorageError,
+    StoredListing, StoredPost, SubscriberId,
 };
+
+/// The service's migrations, for `main` and the DB-gated tests.
+pub static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Service version pulled from the crate manifest at
 /// compile time.

@@ -33,7 +33,7 @@ import Foundation
 /// did not reach the journal has asked nobody, and recording it would silence
 /// this device for a day over a network blip. The stamp is per `(account,
 /// group)` in `UserDefaults` — a non-secret timestamp about a group id this
-/// device already knows, the same shape as ``ConversationKindStore``.
+/// device already knows, the same shape as ``KnownGroupsStore``.
 @MainActor
 final class ProfileRequester {
 
@@ -133,7 +133,7 @@ final class ProfileRequester {
 }
 
 /// Per-account map `groupIdHex -> last request time (ms since the epoch)` in
-/// `UserDefaults`. Same reasoning as ``ConversationKindStore``: a tiny
+/// `UserDefaults`. Same reasoning as ``KnownGroupsStore``: a tiny
 /// non-secret map namespaced by account so two accounts on one device do not
 /// collide. App-private — the notification extension never asks.
 public final class ProfileRequestStore {

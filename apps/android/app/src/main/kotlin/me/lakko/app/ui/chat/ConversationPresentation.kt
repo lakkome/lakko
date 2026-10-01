@@ -4,9 +4,7 @@
 package me.lakko.app.ui.chat
 
 import android.content.Context
-import android.content.SharedPreferences
 import me.lakko.app.chat.ChatRepository
-import me.lakko.app.chat.ConversationKindStore
 import me.lakko.app.l10n.Localization
 import me.lakko.app.l10n.Strings
 import me.lakko.app.l10n.joinList
@@ -15,90 +13,38 @@ import me.lakko.app.profile.ProfileDirectory
 /**
  * Chats vs Groups — docs/ux/client-redesign.md section 3.
  *
- * The kind itself (and its persistence) lives in
- * [me.lakko.app.chat.ConversationKind] / [ConversationKindStore]; this alias
+ * The kind itself lives in [me.lakko.app.chat.ConversationKind] and is read
+ * from the group ([ChatRepository.conversationKind], ADR-0062); this alias
  * keeps the UI-side name the screens already use. Presentation only: nothing
- * here touches the repository or the MLS state.
+ * here touches the MLS state.
  */
 public typealias ConversationKind = me.lakko.app.chat.ConversationKind
 
 /**
- * Local presentation facts about groups the signed-in account created on this
- * device: the "created as a group" flag, in plain `SharedPreferences`, one
- * string set per account (`created-as-group.v2:<accountIdB64>`). Until
- * 2026-09-30 the set was device-wide, so a second account on the same phone
- * inherited it; the device-wide `created-as-group` set of earlier builds is
- * never read, and [deleteAccount] removes it. With no account bound (see
- * [me.lakko.app.contacts.AcceptedContactsStore]) a read is `false` and nothing
- * is written.
+ * Presentation constants for groups.
  *
- * The group NAME no longer lives here. Since ADR-0051 a name is a fact shared
- * inside the group — sent as an encrypted envelope, accepted from the owner or
- * an admin, ordered by its stamp — and it is stored per `(account, group)` in
- * [me.lakko.app.chat.GroupNameStore] together with that stamp. What remains
- * here is the one presentation fact that is genuinely local.
+ * The group NAME does not live here: since ADR-0051 a name is a fact shared
+ * inside the group and is stored per `(account, group)` in
+ * [me.lakko.app.chat.GroupNameStore]. The per-device "created as a group"
+ * flag that used to live here is gone since ADR-0062 — the kind is read from
+ * the group, the same on every member's device.
  */
 public object GroupPresentationStore {
-    private const val PREFS = "lakko-group-presentation"
-    private const val KEY_PREFIX = "created-as-group.v2:"
-    private const val RETIRED_KEY = "created-as-group"
-
-    private fun prefs(context: Context): SharedPreferences =
-        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-
-    private fun key(accountIdB64: String): String =
-        KEY_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64)
-
-    private fun bound(): String? = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64
-
-    public fun markCreatedAsGroup(context: Context, groupIdHex: String) {
-        val account = bound() ?: return
-        val p = prefs(context)
-        val set = p.getStringSet(key(account), emptySet()).orEmpty().toMutableSet()
-        set += groupIdHex.lowercase()
-        p.edit().putStringSet(key(account), set).apply()
-        // The persisted kind is what both lists read; the flag above is kept
-        // for the title rule and for entries written before the kind existed.
-        ConversationKindStore.set(context, groupIdHex, ConversationKind.Group)
-    }
-
-    public fun wasCreatedAsGroup(context: Context, groupIdHex: String): Boolean {
-        val account = bound() ?: return false
-        return prefs(context).getStringSet(key(account), emptySet()).orEmpty().contains(groupIdHex.lowercase())
-    }
-
-    /** Forget device: drop [accountIdB64]'s set and the retired device-wide
-     *  one. Other accounts' sets stay. */
-    public fun deleteAccount(context: Context, accountIdB64: String) {
-        prefs(context).edit().remove(key(accountIdB64)).remove(RETIRED_KEY).apply()
-    }
-
     /** The input cap for a group name (ADR-0051 §1: 1 to 64 scalars). */
     public const val MAX_NAME_CHARS: Int = 64
 }
 
-/**
- * Which list a conversation belongs to: the persisted kind, derived once from
- * the people count at first sight and flipped chat -> group when a third
- * person is observed ([me.lakko.app.chat.decideConversationKind]).
- */
+/** Which list a conversation belongs to — read from the group (ADR-0062). */
 public fun conversationKind(
-    context: Context,
     repository: ChatRepository,
     groupIdHex: String,
-): ConversationKind {
-    if (GroupPresentationStore.wasCreatedAsGroup(context, groupIdHex)) {
-        return ConversationKindStore.set(context, groupIdHex, ConversationKind.Group)
-    }
-    return ConversationKindStore.resolve(context, groupIdHex, repository.memberCount(groupIdHex))
-}
+): ConversationKind = repository.conversationKind(groupIdHex)
 
-/** `true` when the conversation is presented as a group (persisted kind). */
+/** `true` when the conversation is a group (ADR-0062 kind). */
 public fun isGroupConversation(
-    context: Context,
     repository: ChatRepository,
     groupIdHex: String,
-): Boolean = conversationKind(context, repository, groupIdHex) == ConversationKind.Group
+): Boolean = conversationKind(repository, groupIdHex) == ConversationKind.Group
 
 /**
  * The title of a conversation, never a hex id: the other person's name for a
@@ -117,7 +63,7 @@ public fun conversationTitle(
     strings: Strings = Localization.strings.value,
 ): String {
     repository.oneToOnePeerKey(groupIdHex)?.let { key ->
-        if (!isGroupConversation(context, repository, groupIdHex)) {
+        if (!isGroupConversation(repository, groupIdHex)) {
             return directory.resolve(key).primary
         }
     }

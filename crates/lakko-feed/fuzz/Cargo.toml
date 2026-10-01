@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-feed-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace - cargo-fuzz crates require nightly and
+# libfuzzer-sys, which we don't want as a workspace-wide dep.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-feed = { path = ".." }
+
+# ADR-0063: a shared feed arrives as a file or a link someone else made, and
+# `decode_feed_rule` is the first thing a client runs on it. Bounded, exact
+# and panic-free on arbitrary input; a rule that decodes must re-encode to the
+# same bytes, and its export must carry no conversation id.
+[[bin]]
+name = "feed_rule_decode"
+path = "fuzz_targets/feed_rule_decode.rs"
+test = false
+doc = false
+bench = false

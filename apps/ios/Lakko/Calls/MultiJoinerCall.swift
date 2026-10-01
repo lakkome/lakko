@@ -333,7 +333,7 @@ final class MultiJoinerCall {
         let seed: Data
         let leaf: UInt32
         do {
-            founded = try Group.create(identity: opts.identity)
+            founded = try Group.create(identity: opts.identity, kind: .group)
             seed = try deriveSeed(founded)
             leaf = try founded.ownLeafIndex()
         } catch {
@@ -663,6 +663,11 @@ final class MultiJoinerCall {
             // ADR-0060 (and the ADR-0057 registrar seed) — group-journal /
             // DeviceGroup envelopes, never the SFU signal-relay. Out of place
             // here — drop.
+            break
+        case .sharedChannels:
+            // ADR-0059 — a shared-channels list rides the GROUP JOURNAL and
+            // speaks for its MLS sender, never the SFU signal-relay. Out of
+            // place here — drop.
             break
         }
     }

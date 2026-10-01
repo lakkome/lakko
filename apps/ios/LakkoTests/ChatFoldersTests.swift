@@ -317,4 +317,23 @@ final class ChatFoldersTests: XCTestCase {
         XCTAssertNil(ChatFolders.resolveSelectedTab(stored: hex, folders: []))
         XCTAssertNil(ChatFolders.resolveSelectedTab(stored: "", folders: [f]))
     }
+
+    /// A channel row carries the feed's channel unread count, so the folder
+    /// screens (which build their rows from the same function as the chat
+    /// list) show the same count; a channel the model holds no count for
+    /// reads 0.
+    @MainActor
+    func testChannelRowsCarryTheChannelUnreadCounts() {
+        let channels = ChannelsUiState()
+        let counted = String(repeating: "1", count: 32)
+        let uncounted = String(repeating: "2", count: 32)
+        channels.addChannel(ChannelHandle(
+            id: counted, localName: "News", localDescription: "", addedAtMs: 1))
+        channels.addChannel(ChannelHandle(
+            id: uncounted, localName: "Quiet", localDescription: "", addedAtMs: 2))
+        let rows = ChatListScreen.channelRows(channels: channels, channelUnread: [counted: 4])
+        let unread = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0.unread) })
+        XCTAssertEqual(unread[counted], 4)
+        XCTAssertEqual(unread[uncounted], 0)
+    }
 }

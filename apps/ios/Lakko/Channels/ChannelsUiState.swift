@@ -225,7 +225,10 @@ public final class ChannelsUiState: ObservableObject {
             handle: handle ?? old.handle,
             sharedName: old.sharedName,
             sharedDescription: old.sharedDescription,
-            sharedUpdatedAtMs: old.sharedUpdatedAtMs
+            sharedUpdatedAtMs: old.sharedUpdatedAtMs,
+            sharedTopic: old.sharedTopic,
+            sharedLanguage: old.sharedLanguage,
+            sharedListed: old.sharedListed
         )
         persistChannelLog()
     }
@@ -253,7 +256,10 @@ public final class ChannelsUiState: ObservableObject {
             handle: old.handle,
             sharedName: meta.name,
             sharedDescription: meta.description,
-            sharedUpdatedAtMs: meta.updatedAtMs
+            sharedUpdatedAtMs: meta.updatedAtMs,
+            sharedTopic: meta.topic,
+            sharedLanguage: meta.language,
+            sharedListed: meta.listed
         )
         persistChannelLog()
         return true
@@ -662,6 +668,12 @@ public struct ChannelHandle: Equatable, Sendable, Identifiable {
     /// ADR-0051 §4 — the record's stamp; `0` when none was read. A newer
     /// record replaces the fields, an older or equal one is ignored.
     public let sharedUpdatedAtMs: UInt64
+    /// ADR-0059 metadata v2 — the record's topic id (0 = Other), language
+    /// (empty = not set) and whether the owner listed the channel in Discover.
+    /// What lets a member share only listed channels in a group (section 6).
+    public let sharedTopic: UInt8
+    public let sharedLanguage: String
+    public let sharedListed: Bool
 
     public init(
         id: String,
@@ -671,7 +683,10 @@ public struct ChannelHandle: Equatable, Sendable, Identifiable {
         handle: String = "",
         sharedName: String = "",
         sharedDescription: String = "",
-        sharedUpdatedAtMs: UInt64 = 0
+        sharedUpdatedAtMs: UInt64 = 0,
+        sharedTopic: UInt8 = 0,
+        sharedLanguage: String = "",
+        sharedListed: Bool = false
     ) {
         self.id = id
         self.localName = localName
@@ -681,13 +696,17 @@ public struct ChannelHandle: Equatable, Sendable, Identifiable {
         self.sharedName = sharedName
         self.sharedDescription = sharedDescription
         self.sharedUpdatedAtMs = sharedUpdatedAtMs
+        self.sharedTopic = sharedTopic
+        self.sharedLanguage = sharedLanguage
+        self.sharedListed = sharedListed
     }
 
     /// The newest shared record this row holds, or `nil` when none landed.
     public var sharedMeta: SharedChannelMeta? {
         guard sharedUpdatedAtMs > 0, !sharedName.isEmpty else { return nil }
         return SharedChannelMeta(
-            name: sharedName, description: sharedDescription, updatedAtMs: sharedUpdatedAtMs)
+            name: sharedName, description: sharedDescription, updatedAtMs: sharedUpdatedAtMs,
+            topic: sharedTopic, language: sharedLanguage, listed: sharedListed)
     }
 
     /// ADR-0051 §5 — the title: the shared name, else the local name, else the

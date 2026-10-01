@@ -72,7 +72,7 @@ pinned in its source document but missing from the index, or the reverse:
 | Class | Count | Range | Source |
 |---|---|---|---|
 | **I-** | 8 | I-1..I-8 | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 69 | C-1..C-69 | [`calls.md`](./calls.md) |
+| **C-** | 70 | C-1..C-70 | [`calls.md`](./calls.md) |
 | **T-** | 16 | T-1..T-16 | [`transport.md`](./transport.md) |
 | **G-** | 39 | G-1..G-39 | [`known-gaps.md`](./known-gaps.md) |
 

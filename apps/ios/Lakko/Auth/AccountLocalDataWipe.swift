@@ -152,7 +152,6 @@ enum AccountLocalDataWipe {
         step("mls-snapshot") { IdentitySnapshotStore().deleteSnapshot(accountIdB64: accountIdB64) }
         step("snapshot-leaf-key") { SnapshotLeafKeyStore().clear(accountIdB64: accountIdB64) }
         step("known-groups") { KnownGroupsStore().clear(accountIdB64: accountIdB64) }
-        step("conversation-kind") { ConversationKindStore().clear(accountIdB64: accountIdB64) }
         step("group-names") { GroupNameStore().clear(accountIdB64: accountIdB64) }
         step("shared-pins") { SharedPinStore().clear(accountIdB64: accountIdB64) }
         step("personal-pins") { PersonalPinStore().clear(accountIdB64: accountIdB64) }
@@ -210,6 +209,27 @@ enum AccountLocalDataWipe {
         step("channels") { ChannelsUiState.forget(accountIdB64: accountIdB64) }
         step("co-published-journals") {
             CoPublishedJournals.shared.clear(accountIdB64: accountIdB64)
+        }
+        // ADR-0063 — the decrypted channel posts the feed reads.
+        step("channel-post-log") { ChannelPostLogStore().delete(accountIdB64: accountIdB64) }
+        // ADR-0059 — G-43 publisher roles learned this session (in memory,
+        // keyed per (account, channel) owner key; cleared whole).
+        step("publisher-roles") { ChannelPublisherRoleCache.shared.clearAll() }
+        // ADR-0059 — Discover: picked topics, decoys, cached buckets,
+        // not-interested channels, the share switches and the lists members
+        // shared.
+        step("discover") { DiscoverStore().delete(accountIdB64: accountIdB64) }
+
+        // 6b. The feed (ADR-0063): saved feeds, and `docs/ux/feed.md`
+        //     section 5 hidden conversations, last looks and channel read
+        //     markers.
+        step("feeds") { FeedStore().delete(accountIdB64: accountIdB64) }
+        step("feed-reading") { FeedReadingStore().delete(accountIdB64: accountIdB64) }
+        // The Feed tab's selection (it can name one of this account's saved
+        // feeds) and the device banner: device-wide keys, as on Android.
+        step("feed-prefs") {
+            standard.removeObject(forKey: FeedViewModel.selectionKey)
+            standard.removeObject(forKey: FeedViewModel.bannerKey)
         }
 
         // 7. Calls and media.

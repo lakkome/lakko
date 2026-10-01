@@ -2631,7 +2631,9 @@ dependencies = [
 name = "lakko-channels"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "hex",
+ "lakko-contacts",
  "lakko-crypto",
  "thiserror 1.0.69",
  "tracing",
@@ -2711,6 +2713,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-feed"
+version = "0.0.0"
+dependencies = [
+ "lakko-contacts",
+ "proptest",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "lakko-ffi-extension"
 version = "0.0.0"
 dependencies = [
@@ -2743,6 +2754,7 @@ dependencies = [
  "lakko-device-link",
  "lakko-discovery-client",
  "lakko-ds-proof",
+ "lakko-feed",
  "lakko-l10n",
  "lakko-mls",
  "lakko-mnemonic",
@@ -2782,6 +2794,7 @@ dependencies = [
  "lakko-device-link",
  "lakko-discovery-client",
  "lakko-ds-proof",
+ "lakko-feed",
  "lakko-l10n",
  "lakko-mls",
  "lakko-mnemonic",
@@ -3013,12 +3026,15 @@ dependencies = [
  "base64 0.22.1",
  "dotenvy",
  "hex",
+ "lakko-anon-token",
+ "lakko-anon-token-server",
  "lakko-channels",
  "lakko-crypto",
  "reqwest",
  "serde",
  "serde_json",
  "sqlx",
+ "subtle",
  "thiserror 1.0.69",
  "tokio",
  "tower",

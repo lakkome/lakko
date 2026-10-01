@@ -237,8 +237,19 @@ public enum CoPublisher {
             let knocks = try await ds.fetchKnocks(
                 groupId: groupId, after: knockAfter, waitSecs: 0,
                 auth: auth(ds: ds, identity: identity, publisherGroup: publisherGroup))
+            let channelId = try publisherGroup.channelId()
             for row in knocks.messages {
                 knockCursor = max(knockCursor, row.id)
+                // ADR-0059 — a co-publisher binding rides beside the proposal;
+                // it is not an MLS message, so it is read here and never
+                // processed.
+                if let binding = try? decodeChannelCopublisherBinding(bytes: row.payload) {
+                    if binding.channelId == channelId {
+                        await CoPublisherKeyBook.shared.record(
+                            groupId: groupId, binding: binding)
+                    }
+                    continue
+                }
                 _ = try? publisherGroup.processKnock(identity: identity, bytes: row.payload)
             }
             // ADR-0060 section 6 — a co-publisher's attribution carries its
@@ -322,6 +333,22 @@ public enum CoPublisher {
             publisherGroup: publisherGroup,
             channelIdHex: channelIdHex
         )
+        // ADR-0059 — appoint the newcomer's co-publisher key so its own
+        // rotation fanout can read the subscriber list. After the
+        // load-bearing reseal; never fails the approve. Only the owner can
+        // appoint: a co-publisher approving another gets a 401 here, logged.
+        if let key = await CoPublisherKeyBook.shared.key(groupId: groupId, joinerKey: proposalRef) {
+            do {
+                try await channelsClient.setCoPublisherAppointment(
+                    appoint: true, channelIdHex: channelIdHex,
+                    accountIdentity: identity, copublisherKey: key)
+            } catch {
+                NSLog("ADR-0059: appointing the co-publisher key failed: %@",
+                      String(describing: error))
+            }
+        } else {
+            NSLog("ADR-0059: no co-publisher binding read for the approved joiner; not appointed")
+        }
     }
 
     /// Reject a pending co-publisher — no commit, no epoch advance. The
@@ -393,6 +420,8 @@ public enum CoPublisher {
             throw CoPublisherError.notAChannelGroup
         }
         let channelIdHex = ChannelsComposer.bytesToHex(channelIdBytes)
+        let binding = try composeChannelCopublisherBinding(
+            accountIdentity: identity, channelId: channelIdBytes)
         // ADR-0057 — this device asks to CO-publish, so it is not the channel
         // owner: it must never claim the PublisherGroup journal.
         CoPublishedJournals.shared.mark(journalIdHex: DsClient.pseudonymHex(groupId))
@@ -405,7 +434,11 @@ public enum CoPublisher {
             purpose: ReplyPurpose.groupJoin(groupId))
         try await DsKnockJoin(
             knock: { payloads in
-                try await ds.knock(groupId: groupId, payloads: payloads).epoch
+                // ADR-0059 section 1 — this account's co-publisher key for the
+                // channel, signed by its account identity key (the key the
+                // owner approves), rides beside the proposal. Not on the probe.
+                let all = payloads.isEmpty ? payloads : payloads + [binding]
+                return try await ds.knock(groupId: groupId, payloads: all).epoch
             },
             createProposal: { epoch in
                 try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)
@@ -478,10 +511,15 @@ public enum CoPublisher {
         // ADR-0057 — a co-publisher never claims the journal (idempotent with
         // the mark set when the request was sent).
         CoPublishedJournals.shared.mark(journalIdHex: DsClient.pseudonymHex(groupId))
-        return try ChannelsComposer.freshPublisherKeys(
+        let keys = try ChannelsComposer.freshPublisherKeys(
             identity: identity,
             channelIdHex: channelIdHex,
             existingSigningSeed: existingSigningSeed)
+        // ADR-0059 section 9: this account publishes here as a co-publisher,
+        // so its writes are signed with the co-publisher key from the first one.
+        try? ChannelsClient.rememberPublisherRole(
+            channelIdHex: channelIdHex, accountIdentity: identity, role: .copublisher)
+        return keys
     }
 
     /// Bound on the mailbox pages one Welcome look-up reads.
@@ -505,7 +543,10 @@ public enum CoPublisher {
         if newServerEpoch < currentEpoch {
             throw CoPublisherError.unexpectedServerEpoch(currentEpoch)
         }
-        let subscribers = try await channelsClient.listSubscribers(channelIdHex: channelIdHex)
+        let subscribers = try await channelsClient.listSubscribers(
+            channelIdHex: channelIdHex,
+            accountIdentity: identity
+        )
         var batch: [RotateBatchEntry] = []
         batch.reserveCapacity(subscribers.count)
         for subscriberHex in subscribers {
@@ -525,7 +566,8 @@ public enum CoPublisher {
                 )
             )
         }
-        _ = try await channelsClient.rotateChannel(channelIdHex: channelIdHex, envelopes: batch)
+        _ = try await channelsClient.rotateChannel(
+            channelIdHex: channelIdHex, envelopes: batch, accountIdentity: identity)
     }
 
     // MARK: - helpers
@@ -588,6 +630,29 @@ public enum CoPublisherError: Error, LocalizedError {
         case .linkDamaged:
             return inviteLinkDamagedMessage
         }
+    }
+}
+
+/// Co-publisher keys read off PublisherGroup knock queues (ADR-0059
+/// section 1), filed under the joiner's account key each binding was
+/// verified under, so the approve looks one up by the joiner key it approves.
+/// In memory: a binding read before a restart is not kept (the knock cursor
+/// has moved past it), so a joiner approved after a restart is not appointed.
+actor CoPublisherKeyBook {
+    static let shared = CoPublisherKeyBook()
+    private var keys: [Data: Data] = [:]
+
+    private static func slot(groupId: Data, joinerKey: Data) -> Data {
+        groupId + joinerKey
+    }
+
+    func record(groupId: Data, binding: FfiChannelCoPublisherBinding) {
+        keys[Self.slot(groupId: groupId, joinerKey: binding.accountPubkey)] =
+            binding.copublisherPubkey
+    }
+
+    func key(groupId: Data, joinerKey: Data) -> Data? {
+        keys[Self.slot(groupId: groupId, joinerKey: joinerKey)]
     }
 }
 

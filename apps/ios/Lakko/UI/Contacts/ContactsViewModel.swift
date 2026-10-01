@@ -275,7 +275,8 @@ public final class ContactsViewModel: ObservableObject {
             do {
                 groupIdHex = try await chatRepository.startGroupWith(
                     recipientAccountId: fromAccountId,
-                    recipientSignaturePubkey: pending.fromPubkey
+                    recipientSignaturePubkey: pending.fromPubkey,
+                    kind: .oneToOne
                 )
             } catch {
                 // chat handshake failed — fall back to the local-

@@ -11,6 +11,11 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use lakko_anon_token::{MasterSecret, TokenContext, DEFAULT_WINDOW_SECS};
+use lakko_anon_token_server::{
+    current_epoch, testing::mint_header, AnonTokenServerConfig, TokenVerifier, TOKEN_HEADER,
+};
+use lakko_channels::owner::{ChannelOwnerSigner, OwnerRequest, OWNER_PROOF_HEADER_NAME};
 use lakko_channels::seed::ContentKeySeed;
 use lakko_channels::{open_member_card, seal_member_card, EpochId};
 use lakko_crypto::signing::SigningKey;
@@ -20,6 +25,54 @@ use serde_json::json;
 use tokio::net::TcpListener;
 
 const CHANNEL_HEX: &str = "00112233445566778899aabbccddeeff";
+
+/// The anonymous-token master secret the test server verifies under
+/// (ADR-0054: subscribing spends a `channel-subscribe` token).
+const MASTER_HEX: &str = "0303030303030303030303030303030303030303030303030303030303030303";
+
+fn subscribe_token() -> String {
+    mint_header(
+        &MasterSecret::from_bytes([3; 32]),
+        TokenContext::ChannelSubscribe,
+        current_epoch(DEFAULT_WINDOW_SECS),
+    )
+}
+
+/// The channel owner (ADR-0059): its key is registered at creation and signs
+/// the publisher routes (rotate, the subscriber list).
+fn owner() -> ChannelOwnerSigner {
+    let id: [u8; 16] = hex::decode(CHANNEL_HEX).unwrap().try_into().unwrap();
+    ChannelOwnerSigner::from_account_seed(&[5; 32], &id)
+}
+
+/// Send `req` with an owner proof over its exact method, path, query and
+/// body bytes.
+async fn owner_send(req: reqwest::RequestBuilder) -> reqwest::Response {
+    let (client, req) = req.build_split();
+    let mut req = req.unwrap();
+    let body = req
+        .body()
+        .and_then(reqwest::Body::as_bytes)
+        .unwrap_or(&[])
+        .to_vec();
+    let mut nonce = [0u8; 16];
+    lakko_crypto::random::fill(&mut nonce);
+    let proof = owner()
+        .sign_at(
+            &OwnerRequest {
+                method: req.method().as_str(),
+                canonical_path: req.url().path(),
+                query: req.url().query().unwrap_or(""),
+                body: &body,
+            },
+            now_ms(),
+            nonce,
+        )
+        .encode();
+    req.headers_mut()
+        .insert(OWNER_PROOF_HEADER_NAME, proof.parse().unwrap());
+    client.execute(req).await.unwrap()
+}
 
 async fn spawn() -> SocketAddr {
     let cfg = Config {
@@ -32,8 +85,16 @@ async fn spawn() -> SocketAddr {
         subscriber_retention_secs: 0,
         prune_interval_secs: 0,
         envelope_retention_epochs: 4,
+        internal_bind: "127.0.0.1:0".parse().unwrap(),
     };
-    let app = router(AppState::new(cfg, Arc::new(InMemoryChannelStore::new())));
+    let verifier = TokenVerifier::in_memory(
+        AnonTokenServerConfig::from_values(Some(MASTER_HEX), None).unwrap(),
+    );
+    let app = router(AppState::new(
+        cfg,
+        Arc::new(InMemoryChannelStore::new()),
+        verifier,
+    ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -122,7 +183,10 @@ fn now_ms() -> u64 {
 async fn setup(client: &reqwest::Client, addr: SocketAddr, members: &[&Member]) {
     let resp = client
         .post(format!("http://{addr}/v1/channels"))
-        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .json(&json!({
+            "channel_id": CHANNEL_HEX,
+            "owner_pubkey_hex": hex::encode(owner().verifying_key().to_bytes()),
+        }))
         .send()
         .await
         .unwrap();
@@ -132,6 +196,7 @@ async fn setup(client: &reqwest::Client, addr: SocketAddr, members: &[&Member]) 
             .post(format!(
                 "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
             ))
+            .header(TOKEN_HEADER, subscribe_token())
             .json(&json!({ "subscriber_pubkey_hex": m.hex() }))
             .send()
             .await
@@ -344,12 +409,12 @@ async fn a_card_is_framed_registered_and_epoch_bounded() {
     );
     // Rotate twice, upload at 2, then an older card is refused.
     for _ in 0..2 {
-        let resp = client
-            .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/rotate"))
-            .json(&json!({ "envelopes": [] }))
-            .send()
-            .await
-            .unwrap();
+        let resp = owner_send(
+            client
+                .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/rotate"))
+                .json(&json!({ "envelopes": [] })),
+        )
+        .await;
         assert_eq!(resp.status(), 200);
     }
     let current = alice.card(2, b"now");
@@ -497,13 +562,10 @@ async fn a_signed_unsubscribe_removes_the_subscriber_and_its_card() {
         members[0]["subscriber_pk_b64"].as_str().unwrap(),
         URL_SAFE_NO_PAD.encode(bob.pk())
     );
-    let resp = client
-        .get(format!(
-            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
-        ))
-        .send()
-        .await
-        .unwrap();
+    let resp = owner_send(client.get(format!(
+        "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
+    )))
+    .await;
     let subs = resp.text().await.unwrap();
     assert!(!subs.contains(&alice.hex()), "{subs}");
     assert!(subs.contains(&bob.hex()), "{subs}");

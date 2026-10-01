@@ -1194,6 +1194,10 @@
       "text": "این پست برای انتشار بیش از حد طولانی است.",
       "status": "machine"
     },
+    "channels.error.publisher_refused": {
+      "text": "این دستگاه هنوز اجازه انتشار در این کانال را ندارد. هم‌ناشر وقتی می‌تواند منتشر کند که دستگاه مالک افزودن آن را تمام کرده باشد.",
+      "status": "machine"
+    },
     "channels.error.refused": {
       "text": "سرور درخواست را رد کرد. بعداً دوباره تلاش کنید.",
       "status": "machine"
@@ -1390,6 +1394,10 @@
       "text": "ذخیره ممکن نشد.",
       "status": "machine"
     },
+    "channels.meta.error.sign_in": {
+      "text": "برای ذخیره تغییرات این کانال دوباره وارد شوید.",
+      "status": "machine"
+    },
     "channels.meta.saved": {
       "text": "ذخیره شد. مشترکان نام جدید را همراه پست‌های بعدی می‌بینند.",
       "status": "machine"
@@ -1486,6 +1494,10 @@
       "text": "انتشار ممکن نشد.",
       "status": "machine"
     },
+    "channels.publish.error.sign_in": {
+      "text": "برای انتشار در این کانال دوباره وارد شوید.",
+      "status": "machine"
+    },
     "channels.rotation.desc": {
       "text": "Lakko خودش محافظت کانال را تازه می‌کند. اگر فکر می‌کنید دستگاه یکی از مشترکان به خطر افتاده است، همین حالا آن را تازه کنید.",
       "status": "machine"
@@ -1496,6 +1508,10 @@
     },
     "channels.rotation.error.refresh": {
       "text": "تازه‌سازی ممکن نشد. کمی بعد دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh_prefix": {
+      "text": "تازه‌سازی ممکن نشد.",
       "status": "machine"
     },
     "channels.rotation.never": {
@@ -1518,6 +1534,10 @@
       "text": "محافظت",
       "status": "machine"
     },
+    "channels.row.new_posts_a11y": {
+      "text": "{count, plural, one {# پست جدید} other {# پست جدید}}",
+      "status": "machine"
+    },
     "channels.row.own": {
       "text": "کانال شما",
       "status": "machine"
@@ -1536,6 +1556,10 @@
     },
     "channels.subscribe.error.generic": {
       "text": "اشتراک ممکن نشد. بعداً دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "channels.subscribe.error.network": {
+      "text": "دنبال کردن کانال ممکن نشد. اتصال خود را بررسی کنید و دوباره امتحان کنید.",
       "status": "machine"
     },
     "channels.subscribe.error.prefix": {
@@ -2850,6 +2874,10 @@
       "text": "درخواست این تغییر ممکن نشد.",
       "status": "machine"
     },
+    "chat.refusal.group_kind_changed": {
+      "text": "این تغییر را نمی‌توان در این گفتگو اعمال کرد.",
+      "status": "machine"
+    },
     "chat.refusal.join_not_kept": {
       "text": "یک درخواست عضویت وقتی رسید که درخواست‌های زیادی در انتظار بودند، به همین دلیل نگه داشته نشد. از آن شخص بخواهید بعداً دوباره آن را بفرستد.",
       "status": "machine"
@@ -2864,6 +2892,14 @@
     },
     "chat.refusal.not_owner": {
       "text": "فقط مالک گروه می‌تواند مدیران را تغییر دهد یا مالکیت را منتقل کند.",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_fixed": {
+      "text": "گفتگوی دونفره همیشه میان همان دو نفر است.",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_no_roles": {
+      "text": "گفتگوی دونفره مدیر ندارد.",
       "status": "machine"
     },
     "chat.refusal.owner_cannot_leave": {
@@ -3418,6 +3454,10 @@
       "text": "جمع کردن",
       "status": "machine"
     },
+    "common.collapsed": {
+      "text": "بسته",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "تأیید",
       "status": "machine"
@@ -3528,6 +3568,10 @@
     },
     "common.expand": {
       "text": "باز کردن",
+      "status": "machine"
+    },
+    "common.expanded": {
+      "text": "باز",
       "status": "machine"
     },
     "common.fact_pair": {
@@ -3668,6 +3712,10 @@
     },
     "common.try_again": {
       "text": "تلاش دوباره",
+      "status": "machine"
+    },
+    "common.undo": {
+      "text": "واگرد",
       "status": "machine"
     },
     "common.unknown": {
@@ -4242,6 +4290,322 @@
       "text": "باز کردن دوربین",
       "status": "machine"
     },
+    "discover.card.a11y": {
+      "text": "کانال پیشنهادی {name}",
+      "status": "machine"
+    },
+    "discover.card.following": {
+      "text": "این کانال را دنبال می‌کنید",
+      "status": "machine"
+    },
+    "discover.card.hide_topic": {
+      "text": "پنهان کردن این موضوع",
+      "status": "machine"
+    },
+    "discover.card.more": {
+      "text": "بیشتر",
+      "status": "machine"
+    },
+    "discover.card.not_interested": {
+      "text": "علاقه‌ای ندارم",
+      "status": "machine"
+    },
+    "discover.card.show_description": {
+      "text": "نمایش توضیحات",
+      "status": "machine"
+    },
+    "discover.card.subscribers": {
+      "text": "{band} مشترک",
+      "status": "machine"
+    },
+    "discover.edit_topics": {
+      "text": "ویرایش موضوع‌ها",
+      "status": "machine"
+    },
+    "discover.gone": {
+      "text": "این کانال دیگر در دسترس نیست.",
+      "status": "machine"
+    },
+    "discover.language": {
+      "text": "زبان",
+      "status": "machine"
+    },
+    "discover.listing.checking": {
+      "text": "در حال بررسی فهرست بودن این کانال...",
+      "status": "machine"
+    },
+    "discover.listing.confirm_action": {
+      "text": "فهرست کن",
+      "status": "machine"
+    },
+    "discover.listing.confirm_body": {
+      "text": "هر کسی می‌تواند نام، توضیحات و تعداد مشترکان این کانال را پیدا کند. پست‌ها رمزگذاری‌شده باقی می‌مانند.",
+      "status": "machine"
+    },
+    "discover.listing.confirm_title": {
+      "text": "این کانال در کشف فهرست شود؟",
+      "status": "machine"
+    },
+    "discover.listing.listed": {
+      "text": "فهرست‌شده",
+      "status": "machine"
+    },
+    "discover.listing.listed_notice": {
+      "text": "فهرست شد. مشترکان با به‌روزرسانی بعدی کانال باخبر می‌شوند.",
+      "status": "machine"
+    },
+    "discover.listing.needs_handle": {
+      "text": "کانال برای فهرست شدن در کشف به یک @handle نیاز دارد.",
+      "status": "machine"
+    },
+    "discover.listing.not_listed": {
+      "text": "فهرست‌نشده",
+      "status": "machine"
+    },
+    "discover.listing.owner_desc": {
+      "text": "هر کسی می‌تواند نام، توضیحات و تعداد مشترکان کانال فهرست‌شده را پیدا کند. پست‌ها رمزگذاری‌شده باقی می‌مانند.",
+      "status": "machine"
+    },
+    "discover.listing.refused": {
+      "text": "فهرست کردن این کانال ممکن نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "discover.listing.remove_failed": {
+      "text": "برداشتن از فهرست ممکن نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "discover.listing.title": {
+      "text": "فهرست شدن در کشف",
+      "status": "machine"
+    },
+    "discover.listing.topic": {
+      "text": "موضوع",
+      "status": "machine"
+    },
+    "discover.listing.update_failed": {
+      "text": "ذخیره شد. فهرست کشف به‌روز نشد؛ برای تلاش دوباره، دوباره ذخیره کنید.",
+      "status": "machine"
+    },
+    "discover.listing.viewer_listed": {
+      "text": "این کانال در کشف فهرست شده است. فقط مالک کانال می‌تواند این را تغییر دهد.",
+      "status": "machine"
+    },
+    "discover.listing.viewer_not_listed": {
+      "text": "این کانال در کشف فهرست نشده است. فقط مالک کانال می‌تواند آن را فهرست کند.",
+      "status": "machine"
+    },
+    "discover.mix.label": {
+      "text": "افزودن موضوع‌های تصادفی",
+      "status": "machine"
+    },
+    "discover.mix.off_line": {
+      "text": "داده کمتری مصرف می‌کند. سرور Lakko دقیقاً می‌بیند کدام موضوع‌ها را انتخاب کرده‌اید.",
+      "status": "machine"
+    },
+    "discover.nothing_yet": {
+      "text": "هنوز پیشنهادی نیست. موضوع‌هایی انتخاب کنید یا از افراد گروه‌هایتان بخواهید کانال‌هایشان را به اشتراک بگذارند.",
+      "status": "machine"
+    },
+    "discover.pick.a11y": {
+      "text": "انتخاب موضوع‌ها",
+      "status": "machine"
+    },
+    "discover.pick.body": {
+      "text": "Lakko برای آن‌ها پیشنهادهایی بارگیری می‌کند، آمیخته با چند موضوع تصادفی، تا سرور Lakko نتواند دقیقاً بفهمد کدام را انتخاب کرده‌اید. هرگز نمی‌بیند کدام کانال‌ها را باز می‌کنید.",
+      "status": "machine"
+    },
+    "discover.pick.title": {
+      "text": "چند موضوع انتخاب کنید.",
+      "status": "machine"
+    },
+    "discover.reason.followed_by": {
+      "text": "{name} در {group} دنبالش می‌کند",
+      "status": "machine"
+    },
+    "discover.reason.followed_by_others": {
+      "text": "{count, plural, one {{name} و # نفر دیگر در {group} دنبالش می‌کنند} other {{name} و # نفر دیگر در {group} دنبالش می‌کنند}}",
+      "status": "machine"
+    },
+    "discover.reason.followed_count": {
+      "text": "{count, plural, one {# نفر در {group} دنبالش می‌کند} other {# نفر در {group} دنبالش می‌کنند}}",
+      "status": "machine"
+    },
+    "discover.reason.group_fallback": {
+      "text": "یک گروه",
+      "status": "machine"
+    },
+    "discover.reason.popular": {
+      "text": "محبوب در {topic}",
+      "status": "machine"
+    },
+    "discover.reason.search": {
+      "text": "با جستجوی شما جور است",
+      "status": "machine"
+    },
+    "discover.search.action": {
+      "text": "جستجو",
+      "status": "machine"
+    },
+    "discover.search.helper": {
+      "text": "جستجوها به سرور Lakko فرستاده می‌شوند.",
+      "status": "machine"
+    },
+    "discover.search.no_results": {
+      "text": "کانالی پیدا نشد.",
+      "status": "machine"
+    },
+    "discover.search.placeholder": {
+      "text": "جستجوی کانال‌ها",
+      "status": "machine"
+    },
+    "discover.search.searching": {
+      "text": "در حال جستجو...",
+      "status": "machine"
+    },
+    "discover.search.too_short": {
+      "text": "دست‌کم ۲ نویسه بنویسید.",
+      "status": "machine"
+    },
+    "discover.settings": {
+      "text": "تنظیمات کشف",
+      "status": "machine"
+    },
+    "discover.share.error": {
+      "text": "تغییر ممکن نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "discover.share.label": {
+      "text": "اشتراک کانال‌هایم با این گروه",
+      "status": "machine"
+    },
+    "discover.share.line": {
+      "text": "افراد این گروه می‌توانند ببینند کدام کانال‌ها را دنبال می‌کنید. سرور Lakko نمی‌تواند.",
+      "status": "machine"
+    },
+    "discover.shared.desc": {
+      "text": "گروه‌هایی که افرادشان می‌توانند ببینند کدام کانال‌ها را دنبال می‌کنید. سرور Lakko نمی‌تواند.",
+      "status": "machine"
+    },
+    "discover.shared.empty": {
+      "text": "کانال‌هایتان را با هیچ گروهی به اشتراک نمی‌گذارید.",
+      "status": "machine"
+    },
+    "discover.shared.settings_sub": {
+      "text": "گروه‌هایی که می‌توانند ببینند کدام کانال‌ها را دنبال می‌کنید",
+      "status": "machine"
+    },
+    "discover.shared.stop": {
+      "text": "توقف اشتراک",
+      "status": "machine"
+    },
+    "discover.shared.stop_failed": {
+      "text": "خاموش کردن اشتراک ممکن نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "discover.shared.title": {
+      "text": "کانال‌هایی که به اشتراک می‌گذارم",
+      "status": "machine"
+    },
+    "discover.topic.art_design": {
+      "text": "هنر و طراحی",
+      "status": "machine"
+    },
+    "discover.topic.books": {
+      "text": "کتاب",
+      "status": "machine"
+    },
+    "discover.topic.business": {
+      "text": "کسب‌وکار",
+      "status": "machine"
+    },
+    "discover.topic.education": {
+      "text": "آموزش",
+      "status": "machine"
+    },
+    "discover.topic.film_tv": {
+      "text": "فیلم و تلویزیون",
+      "status": "machine"
+    },
+    "discover.topic.finance": {
+      "text": "مالی",
+      "status": "machine"
+    },
+    "discover.topic.food": {
+      "text": "غذا",
+      "status": "machine"
+    },
+    "discover.topic.gaming": {
+      "text": "بازی",
+      "status": "machine"
+    },
+    "discover.topic.health": {
+      "text": "سلامت",
+      "status": "machine"
+    },
+    "discover.topic.humour": {
+      "text": "طنز",
+      "status": "machine"
+    },
+    "discover.topic.lifestyle": {
+      "text": "سبک زندگی",
+      "status": "machine"
+    },
+    "discover.topic.local": {
+      "text": "محلی",
+      "status": "machine"
+    },
+    "discover.topic.music": {
+      "text": "موسیقی",
+      "status": "machine"
+    },
+    "discover.topic.nature": {
+      "text": "طبیعت",
+      "status": "machine"
+    },
+    "discover.topic.news": {
+      "text": "اخبار",
+      "status": "machine"
+    },
+    "discover.topic.other": {
+      "text": "سایر",
+      "status": "machine"
+    },
+    "discover.topic.photography": {
+      "text": "عکاسی",
+      "status": "machine"
+    },
+    "discover.topic.politics": {
+      "text": "سیاست",
+      "status": "machine"
+    },
+    "discover.topic.religion": {
+      "text": "دین",
+      "status": "machine"
+    },
+    "discover.topic.science": {
+      "text": "علم",
+      "status": "machine"
+    },
+    "discover.topic.software_development": {
+      "text": "توسعه نرم‌افزار",
+      "status": "machine"
+    },
+    "discover.topic.sports": {
+      "text": "ورزش",
+      "status": "machine"
+    },
+    "discover.topic.technology": {
+      "text": "فناوری",
+      "status": "machine"
+    },
+    "discover.topic.travel": {
+      "text": "سفر",
+      "status": "machine"
+    },
+    "discover.unavailable": {
+      "text": "پیشنهادها اکنون در دسترس نیستند.",
+      "status": "machine"
+    },
     "display_name.error.control": {
       "text": "نویسه‌های نامرئی یا جهت‌دهنده متن را حذف کنید",
       "status": "machine"
@@ -4268,6 +4632,542 @@
     },
     "ds.clock_skew": {
       "text": "تاریخ و ساعت این دستگاه را بررسی کنید.",
+      "status": "machine"
+    },
+    "feed.action.hide": {
+      "text": "پنهان کردن از فیدها",
+      "status": "machine"
+    },
+    "feed.action.hide_hint": {
+      "text": "بی‌صدا کردن این گفتگو در فیدها",
+      "status": "machine"
+    },
+    "feed.attachments.count": {
+      "text": "{count, plural, one {# پیوست} other {# پیوست}}",
+      "status": "machine"
+    },
+    "feed.banner.dismiss": {
+      "text": "متوجه شدم",
+      "status": "machine"
+    },
+    "feed.banner.local": {
+      "text": "فید شما پیام‌هایی را نشان می‌دهد که این دستگاه دریافت کرده است.",
+      "status": "machine"
+    },
+    "feed.divider.new": {
+      "text": "جدید",
+      "status": "machine"
+    },
+    "feed.edit": {
+      "text": "ویرایش",
+      "status": "machine"
+    },
+    "feed.edit_feed": {
+      "text": "ویرایش فید",
+      "status": "machine"
+    },
+    "feed.editor.default_name": {
+      "text": "فید من",
+      "status": "machine"
+    },
+    "feed.editor.delete": {
+      "text": "حذف فید",
+      "status": "machine"
+    },
+    "feed.editor.delete_confirm": {
+      "text": "این فید حذف شود؟",
+      "status": "machine"
+    },
+    "feed.editor.fade": {
+      "text": "سرعت کم‌رنگ شدن موارد قدیمی",
+      "status": "machine"
+    },
+    "feed.editor.fade.day": {
+      "text": "یک روز",
+      "status": "machine"
+    },
+    "feed.editor.fade.hours": {
+      "text": "چند ساعت",
+      "status": "machine"
+    },
+    "feed.editor.fade.week": {
+      "text": "یک هفته",
+      "status": "machine"
+    },
+    "feed.editor.filters": {
+      "text": "فیلترها",
+      "status": "machine"
+    },
+    "feed.editor.for_me": {
+      "text": "فقط آنچه از من نام می‌برد، به من پاسخ می‌دهد یا به پیام‌های من واکنش نشان می‌دهد",
+      "status": "machine"
+    },
+    "feed.editor.hide_own": {
+      "text": "پنهان کردن پیام‌های خودم",
+      "status": "machine"
+    },
+    "feed.editor.hide_words": {
+      "text": "پنهان کردن واژه‌ها (هر خط یک واژه)",
+      "status": "machine"
+    },
+    "feed.editor.icon": {
+      "text": "نماد",
+      "status": "machine"
+    },
+    "feed.editor.include_muted": {
+      "text": "شامل گفتگوهای بی‌صدا",
+      "status": "machine"
+    },
+    "feed.editor.look_back": {
+      "text": "بازه (روز)",
+      "status": "machine"
+    },
+    "feed.editor.look_back_count": {
+      "text": "{count, plural, one {# روز گذشته} other {# روز گذشته}}",
+      "status": "machine"
+    },
+    "feed.editor.media_only": {
+      "text": "فقط با عکس یا ویدیو",
+      "status": "machine"
+    },
+    "feed.editor.membership.a11y": {
+      "text": "{name} در این فید",
+      "status": "machine"
+    },
+    "feed.editor.membership.never": {
+      "text": "هرگز",
+      "status": "machine"
+    },
+    "feed.editor.membership.only": {
+      "text": "فقط",
+      "status": "machine"
+    },
+    "feed.editor.membership_hint": {
+      "text": "«فقط» فید را به گفتگوهای علامت‌خورده محدود می‌کند؛ «هرگز» یک گفتگو را کنار می‌گذارد.",
+      "status": "machine"
+    },
+    "feed.editor.min_reactions": {
+      "text": "دست‌کم این تعداد واکنش",
+      "status": "machine"
+    },
+    "feed.editor.name": {
+      "text": "نام",
+      "status": "machine"
+    },
+    "feed.editor.only_words": {
+      "text": "فقط این واژه‌ها (هر خط یک واژه)",
+      "status": "machine"
+    },
+    "feed.editor.preview": {
+      "text": "پیش‌نمایش",
+      "status": "machine"
+    },
+    "feed.editor.preview_pending": {
+      "text": "پیش‌نمایش وقتی نمایش داده می‌شود که بتوان فید را ذخیره کرد.",
+      "status": "machine"
+    },
+    "feed.editor.slider.max": {
+      "text": "خیلی زیاد",
+      "status": "machine"
+    },
+    "feed.editor.slider.min": {
+      "text": "نادیده بگیر",
+      "status": "machine"
+    },
+    "feed.editor.sources": {
+      "text": "منبع‌ها",
+      "status": "machine"
+    },
+    "feed.editor.sources.both": {
+      "text": "هر دو",
+      "status": "machine"
+    },
+    "feed.editor.sources.channels": {
+      "text": "همه کانال‌ها",
+      "status": "machine"
+    },
+    "feed.editor.sources.groups": {
+      "text": "همه گروه‌ها",
+      "status": "machine"
+    },
+    "feed.editor.start.blank": {
+      "text": "خالی",
+      "status": "machine"
+    },
+    "feed.editor.start_from": {
+      "text": "شروع از",
+      "status": "machine"
+    },
+    "feed.editor.stripped_hint": {
+      "text": "فیدهای اشتراکی بدون گفتگوهای مشخص می‌رسند. برای شخصی کردن آن، چند مورد را در زیر انتخاب کنید.",
+      "status": "machine"
+    },
+    "feed.editor.suggestions": {
+      "text": "پیشنهادها",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.never": {
+      "text": "هرگز",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.rarely": {
+      "text": "به‌ندرت",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.sometimes": {
+      "text": "گاهی",
+      "status": "machine"
+    },
+    "feed.editor.suggestions_rate": {
+      "text": "هر چند وقت یک کانال پیشنهادی نمایش داده شود",
+      "status": "machine"
+    },
+    "feed.editor.weight.from_contacts": {
+      "text": "از مخاطبان شما",
+      "status": "machine"
+    },
+    "feed.editor.weight.media": {
+      "text": "دارای عکس یا ویدیو",
+      "status": "machine"
+    },
+    "feed.editor.weight.mentions": {
+      "text": "نام بردن از شما",
+      "status": "machine"
+    },
+    "feed.editor.weight.reactions": {
+      "text": "واکنش‌ها",
+      "status": "machine"
+    },
+    "feed.editor.weight.recency": {
+      "text": "تازگی",
+      "status": "machine"
+    },
+    "feed.editor.weight.replies": {
+      "text": "پاسخ‌ها",
+      "status": "machine"
+    },
+    "feed.editor.what_counts": {
+      "text": "چه چیزی مهم است",
+      "status": "machine"
+    },
+    "feed.empty.discover": {
+      "text": "کشف کانال‌ها",
+      "status": "machine"
+    },
+    "feed.empty.no_match": {
+      "text": "هیچ پیامی با این فید جور نیست.",
+      "status": "machine"
+    },
+    "feed.empty.no_sources": {
+      "text": "فید شما از گروه‌ها و کانال‌هایتان پر می‌شود.",
+      "status": "machine"
+    },
+    "feed.empty.nothing_yet": {
+      "text": "هنوز اینجا چیزی نیست. پیام‌های جدید گروه‌ها و کانال‌هایتان اینجا نمایش داده می‌شوند.",
+      "status": "machine"
+    },
+    "feed.end": {
+      "text": "همه را دیده‌اید.",
+      "status": "machine"
+    },
+    "feed.error.cannot_save_here": {
+      "text": "این دستگاه اکنون نمی‌تواند این را ذخیره کند.",
+      "status": "machine"
+    },
+    "feed.error.delete": {
+      "text": "حذف فید ممکن نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "feed.error.no_device_key": {
+      "text": "این دستگاه اکنون نمی‌تواند فید ذخیره کند.",
+      "status": "machine"
+    },
+    "feed.error.save": {
+      "text": "ذخیره فید ممکن نشد. دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "feed.hidden.empty": {
+      "text": "چیزی از فیدهای شما پنهان نشده است.",
+      "status": "machine"
+    },
+    "feed.hidden.show_again": {
+      "text": "نمایش دوباره",
+      "status": "machine"
+    },
+    "feed.hidden.title": {
+      "text": "پنهان‌شده از فیدها",
+      "status": "machine"
+    },
+    "feed.hidden.toast": {
+      "text": "از فیدها پنهان شد.",
+      "status": "machine"
+    },
+    "feed.icon.bell": {
+      "text": "زنگ",
+      "status": "machine"
+    },
+    "feed.icon.book": {
+      "text": "کتاب",
+      "status": "machine"
+    },
+    "feed.icon.camera": {
+      "text": "دوربین",
+      "status": "machine"
+    },
+    "feed.icon.code": {
+      "text": "کد",
+      "status": "machine"
+    },
+    "feed.icon.feed": {
+      "text": "فید",
+      "status": "machine"
+    },
+    "feed.icon.flag": {
+      "text": "پرچم",
+      "status": "machine"
+    },
+    "feed.icon.globe": {
+      "text": "کره زمین",
+      "status": "machine"
+    },
+    "feed.icon.heart": {
+      "text": "قلب",
+      "status": "machine"
+    },
+    "feed.icon.lightning": {
+      "text": "صاعقه",
+      "status": "machine"
+    },
+    "feed.icon.music": {
+      "text": "موسیقی",
+      "status": "machine"
+    },
+    "feed.icon.speech_bubble": {
+      "text": "حباب گفتگو",
+      "status": "machine"
+    },
+    "feed.icon.star": {
+      "text": "ستاره",
+      "status": "machine"
+    },
+    "feed.import.a11y": {
+      "text": "وارد کردن فید",
+      "status": "machine"
+    },
+    "feed.import.add": {
+      "text": "افزودن به فیدهای من",
+      "status": "machine"
+    },
+    "feed.import.choose_file": {
+      "text": "انتخاب فایل",
+      "status": "machine"
+    },
+    "feed.import.hint": {
+      "text": "فیدی را که کسی به صورت فایل .lakkofeed با شما به اشتراک گذاشته باز کنید.",
+      "status": "machine"
+    },
+    "feed.import.refused": {
+      "text": "این فایل فیدی نیست که Lakko بتواند باز کند.",
+      "status": "machine"
+    },
+    "feed.import.title": {
+      "text": "افزودن فید اشتراکی",
+      "status": "machine"
+    },
+    "feed.item.reactions_a11y": {
+      "text": "واکنش‌ها",
+      "status": "machine"
+    },
+    "feed.menu.a11y": {
+      "text": "منوی فید",
+      "status": "machine"
+    },
+    "feed.min_reactions_count": {
+      "text": "{count, plural, one {دست‌کم # واکنش} other {دست‌کم # واکنش}}",
+      "status": "machine"
+    },
+    "feed.new": {
+      "text": "فید جدید",
+      "status": "machine"
+    },
+    "feed.preset.discover": {
+      "text": "کشف",
+      "status": "machine"
+    },
+    "feed.preset.for_me": {
+      "text": "برای من",
+      "status": "machine"
+    },
+    "feed.preset.latest": {
+      "text": "جدیدترین",
+      "status": "machine"
+    },
+    "feed.preset.popular": {
+      "text": "محبوب",
+      "status": "machine"
+    },
+    "feed.problem.conversations": {
+      "text": "گفتگوهای بیش از حدی انتخاب شده‌اند.",
+      "status": "machine"
+    },
+    "feed.problem.generic": {
+      "text": "این فید را نمی‌توان به همین شکل ذخیره کرد.",
+      "status": "machine"
+    },
+    "feed.problem.name": {
+      "text": "برای فید نامی تا ۶۴ نویسه انتخاب کنید.",
+      "status": "machine"
+    },
+    "feed.problem.no_kinds": {
+      "text": "گروه‌ها، کانال‌ها یا هر دو را انتخاب کنید.",
+      "status": "machine"
+    },
+    "feed.problem.stripped": {
+      "text": "این فید اشتراکی نمی‌تواند گفتگوهایی را هم مشخص کند.",
+      "status": "machine"
+    },
+    "feed.problem.too_large": {
+      "text": "این فید برای ذخیره شدن بیش از حد بزرگ است.",
+      "status": "machine"
+    },
+    "feed.problem.weight": {
+      "text": "یکی از لغزنده‌ها خارج از محدوده است.",
+      "status": "machine"
+    },
+    "feed.problem.window": {
+      "text": "بازه باید بین ۱ تا ۳۰ روز باشد.",
+      "status": "machine"
+    },
+    "feed.problem.words": {
+      "text": "فهرست واژه‌ها را بررسی کنید: هر خط یک واژه، حداکثر ۳۲ واژه.",
+      "status": "machine"
+    },
+    "feed.refresh_failed": {
+      "text": "بررسی پیام‌های جدید ممکن نشد.",
+      "status": "machine"
+    },
+    "feed.replies.count": {
+      "text": "{count, plural, one {# پاسخ} other {# پاسخ}}",
+      "status": "machine"
+    },
+    "feed.share": {
+      "text": "اشتراک‌گذاری",
+      "status": "machine"
+    },
+    "feed.share.a11y": {
+      "text": "اشتراک‌گذاری فید",
+      "status": "machine"
+    },
+    "feed.share.download": {
+      "text": "بارگیری فایل",
+      "status": "machine"
+    },
+    "feed.share.share_file": {
+      "text": "اشتراک‌گذاری فایل",
+      "status": "machine"
+    },
+    "feed.share.share_link": {
+      "text": "اشتراک‌گذاری پیوند",
+      "status": "machine"
+    },
+    "feed.share.stripped": {
+      "text": "گفتگوهای مشخص کنار گذاشته می‌شوند: برای دیگران معنایی ندارند.",
+      "status": "machine"
+    },
+    "feed.share.title": {
+      "text": "اشتراک‌گذاری «{name}»",
+      "status": "machine"
+    },
+    "feed.share.unshareable": {
+      "text": "این فید را نمی‌توان به همین شکل به اشتراک گذاشت.",
+      "status": "machine"
+    },
+    "feed.show_new": {
+      "text": "{count, plural, one {نمایش # مورد جدید} other {نمایش # مورد جدید}}",
+      "status": "machine"
+    },
+    "feed.summary.factor.contacts": {
+      "text": "مخاطبان شما",
+      "status": "machine"
+    },
+    "feed.summary.factor.media": {
+      "text": "عکس و ویدیو",
+      "status": "machine"
+    },
+    "feed.summary.factor.mentions": {
+      "text": "نام بردن از شما",
+      "status": "machine"
+    },
+    "feed.summary.factor.reactions": {
+      "text": "واکنش‌ها",
+      "status": "machine"
+    },
+    "feed.summary.factor.replies": {
+      "text": "پاسخ‌ها",
+      "status": "machine"
+    },
+    "feed.summary.for_me": {
+      "text": "فقط آنچه به شما مربوط است",
+      "status": "machine"
+    },
+    "feed.summary.hide_own": {
+      "text": "پیام‌های خودتان را پنهان می‌کند",
+      "status": "machine"
+    },
+    "feed.summary.hide_words": {
+      "text": "{count, plural, one {# واژه را پنهان می‌کند} other {# واژه را پنهان می‌کند}}",
+      "status": "machine"
+    },
+    "feed.summary.include_muted": {
+      "text": "شامل گفتگوهای بی‌صدا",
+      "status": "machine"
+    },
+    "feed.summary.look_back": {
+      "text": "{count, plural, one {# روز گذشته را نشان می‌دهد} other {# روز گذشته را نشان می‌دهد}}",
+      "status": "machine"
+    },
+    "feed.summary.newest_first": {
+      "text": "جدیدترین‌ها اول",
+      "status": "machine"
+    },
+    "feed.summary.only_words": {
+      "text": "فقط پیام‌هایی با: {words}",
+      "status": "machine"
+    },
+    "feed.summary.ranks_by": {
+      "text": "مرتب‌سازی بر اساس تازگی و {factors}",
+      "status": "machine"
+    },
+    "feed.summary.sources.both": {
+      "text": "منبع‌ها: همه گروه‌ها و کانال‌ها",
+      "status": "machine"
+    },
+    "feed.summary.sources.channels": {
+      "text": "منبع‌ها: همه کانال‌ها",
+      "status": "machine"
+    },
+    "feed.summary.sources.groups": {
+      "text": "منبع‌ها: همه گروه‌ها",
+      "status": "machine"
+    },
+    "feed.switcher.a11y": {
+      "text": "فیدها",
+      "status": "machine"
+    },
+    "feed.title": {
+      "text": "فید",
+      "status": "machine"
+    },
+    "feed.why.mentions": {
+      "text": "از شما نام برده است",
+      "status": "machine"
+    },
+    "feed.why.popular": {
+      "text": "محبوب در {source}",
+      "status": "machine"
+    },
+    "feed.why.reply": {
+      "text": "پاسخ به پیام شما",
       "status": "machine"
     },
     "folders.add_to_folder": {
@@ -4902,6 +5802,10 @@
       "text": "{count, plural, one {حداکثر # بار} other {حداکثر # بار}}",
       "status": "machine"
     },
+    "ios.document_type.feed": {
+      "text": "فید Lakko",
+      "status": "machine"
+    },
     "ios.permission.camera": {
       "text": "Lakko از دوربین برای اسکن کدهای QR دستگاه‌هایی که می‌خواهید به حسابتان پیوند دهید، ارسال ویدیو در تماس‌ها و ضبط پیام‌های ویدیویی‌ای که ارسالشان را انتخاب می‌کنید استفاده می‌کند. هر چه دوربین ضبط کند، پیش از ارسال روی دستگاه شما رمزگذاری سرتاسری می‌شود.",
       "status": "machine"
@@ -4972,6 +5876,10 @@
     },
     "nav.contacts": {
       "text": "مخاطبان",
+      "status": "machine"
+    },
+    "nav.feed": {
+      "text": "فید",
       "status": "machine"
     },
     "nav.rail_a11y": {
@@ -6244,6 +7152,14 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "امروز افراد زیادی را جستجو کرده‌اید. فردا دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "tokens.search_allowance_used": {
+      "text": "جستجوهای بیش از حد. یک دقیقه دیگر دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "tokens.subscribe_allowance_used": {
+      "text": "امروز مشترک کانال‌های زیادی شده‌اید. فردا دوباره امتحان کنید.",
       "status": "machine"
     },
     "update.available.message": {

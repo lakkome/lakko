@@ -33,6 +33,12 @@ public data class SharedChannelMeta(
     val name: String,
     val description: String,
     val updatedAtMs: ULong,
+    /** ADR-0059 metadata v2: the topic id (0 = Other). */
+    val topic: Int = 0,
+    /** ADR-0059 metadata v2: ISO 639 language, "" when not set. */
+    val language: String = "",
+    /** ADR-0059 metadata v2: the owner listed the channel in Discover. */
+    val listed: Boolean = false,
 )
 
 /** UX copy (docs/ux/group-and-channel-names.md section 5). */
@@ -73,7 +79,16 @@ public fun classifiedPostOf(content: FfiChannelPostContent): ClassifiedPost = wh
         if (m == null) {
             ClassifiedPost.Malformed
         } else {
-            ClassifiedPost.Meta(SharedChannelMeta(m.name, m.description, m.updatedAtMs))
+            ClassifiedPost.Meta(
+                SharedChannelMeta(
+                    name = m.name,
+                    description = m.description,
+                    updatedAtMs = m.updatedAtMs,
+                    topic = m.topic.toInt(),
+                    language = m.language,
+                    listed = m.listed,
+                ),
+            )
         }
     }
     FfiChannelPostKind.MALFORMED -> ClassifiedPost.Malformed
@@ -97,6 +112,9 @@ public object ChannelMetaPublisher {
 
     /**
      * Post `{ name, description }` stamped [updatedAtMs] into [channelId].
+     * ADR-0059 metadata v2: [topic], [language] and [listed] default to what
+     * this device holds for the channel, so a rename keeps a listed channel
+     * listed; a channel never listed is topic Other, language unset, not listed.
      * Throws [uniffi.lakko_ffi_uniffi.FfiException.ChannelMeta] when the
      * record violates a bound (the message starts with the frozen reason
      * code), and whatever the compose / publish path throws on failure.
@@ -108,10 +126,21 @@ public object ChannelMetaPublisher {
         name: String,
         description: String,
         updatedAtMs: ULong,
+        topic: Int? = null,
+        language: String? = null,
+        listed: Boolean? = null,
     ) {
         val keys = state.keysByChannel.value[channelId]
             ?: throw IllegalStateException("no publisher keys for this channel on this device")
-        val record = FfiChannelMeta(name = name.trim(), description = description.trim(), updatedAtMs = updatedAtMs)
+        val held = state.channels.value.firstOrNull { it.id == channelId }
+        val record = FfiChannelMeta(
+            name = name.trim(),
+            description = description.trim(),
+            updatedAtMs = updatedAtMs,
+            topic = (topic ?: held?.sharedTopic ?: 0).coerceIn(0, 255).toUByte(),
+            language = language ?: held?.sharedLanguage ?: "",
+            listed = listed ?: held?.sharedListed ?: false,
+        )
         val plaintext = composeChannelMeta(record)
         val epoch = state.epochByChannel.value[channelId]
             ?: client.fetchEpoch(channelId).also { state.setEpoch(channelId, it) }
@@ -123,8 +152,22 @@ public object ChannelMetaPublisher {
             messageCounter = counter,
             plaintext = plaintext,
         )
-        client.publishPost(channelId, wire)
-        state.adoptSharedMeta(channelId, SharedChannelMeta(record.name, record.description, record.updatedAtMs))
+        val publisher = state.publisher
+            ?: throw IllegalStateException("channel publisher identity not available")
+        // ADR-0059 section 9: the record is a post, signed with this
+        // account's publisher role for the channel.
+        ChannelPublisherSigners.derive(publisher, channelId).use { client.publishPost(channelId, wire, it) }
+        state.adoptSharedMeta(
+            channelId,
+            SharedChannelMeta(
+                name = record.name,
+                description = record.description,
+                updatedAtMs = record.updatedAtMs,
+                topic = record.topic.toInt(),
+                language = record.language,
+                listed = record.listed,
+            ),
+        )
     }
 
     /**
@@ -157,5 +200,12 @@ public object ChannelMetaPublisher {
 public fun ChannelHandle.sharedMeta(): SharedChannelMeta? {
     val stamp = sharedUpdatedAtMs ?: return null
     if (sharedName.isBlank()) return null
-    return SharedChannelMeta(name = sharedName, description = sharedDescription, updatedAtMs = stamp)
+    return SharedChannelMeta(
+        name = sharedName,
+        description = sharedDescription,
+        updatedAtMs = stamp,
+        topic = sharedTopic,
+        language = sharedLanguage,
+        listed = sharedListed,
+    )
 }

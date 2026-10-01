@@ -30,7 +30,7 @@ fn master() -> MasterSecret {
     MasterSecret::from_hex(MASTER_HEX).unwrap()
 }
 
-fn issuer_with(quotas: [(TokenContext, u32); 5]) -> AnonTokenIssuer {
+fn issuer_with(quotas: [(TokenContext, u32); super::CONTEXT_COUNT]) -> AnonTokenIssuer {
     let server = AnonTokenServerConfig::from_values(Some(MASTER_HEX), None)
         .unwrap()
         .unwrap();

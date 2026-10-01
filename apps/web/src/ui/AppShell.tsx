@@ -44,6 +44,8 @@ const ITEMS: ReadonlyArray<{ href: string; labelKey: string; icon: IconName; pre
   // URL a conversation happens to sit at is not something the rail should
   // show.
   { href: paths.home, labelKey: "nav.chats", icon: "chat", prefix: ["/chat/", "/groups", "/channels"] },
+  // `docs/ux/feed.md` section 2 - second, one tap from the home.
+  { href: paths.feed, labelKey: "nav.feed", icon: "feed", prefix: [] },
   { href: paths.contacts, labelKey: "nav.contacts", icon: "contacts", prefix: [] },
   { href: paths.calls, labelKey: "nav.calls", icon: "calls", prefix: [] },
   { href: paths.settings, labelKey: "nav.settings", icon: "settings", prefix: ["/devices"] },

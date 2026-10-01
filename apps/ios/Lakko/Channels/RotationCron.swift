@@ -188,7 +188,8 @@ public actor RotationCron {
 
         // 3. Walk the subscriber list + seal new envelopes.
         let subscribers = try await context.channelsClient.listSubscribers(
-            channelIdHex: context.channelIdHex
+            channelIdHex: context.channelIdHex,
+            accountIdentity: context.identity
         )
         var batch: [RotateBatchEntry] = []
         batch.reserveCapacity(subscribers.count)
@@ -232,13 +233,15 @@ public actor RotationCron {
             try await context.channelsClient.stageRotation(
                 channelIdHex: context.channelIdHex,
                 targetEpoch: newServerEpoch,
-                batch: Array(batch[offset..<end])
+                batch: Array(batch[offset..<end]),
+                accountIdentity: context.identity
             )
             offset = end
         }
         let committedEpoch = try await context.channelsClient.commitRotation(
             channelIdHex: context.channelIdHex,
-            targetEpoch: newServerEpoch
+            targetEpoch: newServerEpoch,
+            accountIdentity: context.identity
         )
 
         // 5. Stamp the new state + persist.

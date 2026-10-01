@@ -245,6 +245,10 @@ public final class ChatViewModel: ObservableObject {
     // MARK: - Wiring
 
     private let repository: ChatRepository
+
+    /// ADR-0059 section 6 — the shared-channels runtime, for the group-info
+    /// "Share my channels" switch.
+    var sharedChannelsHub: SharedChannelsHub { repository.sharedChannels }
     /// Supplies the current auth session token for minting the SFU
     /// call-admission JWT. Defaults to `{ nil }` (group calls then
     /// refuse, fail-closed); the composition root passes
@@ -410,6 +414,9 @@ public final class ChatViewModel: ObservableObject {
     @Published var screenVisible: Bool = false {
         didSet {
             if screenVisible {
+                // `docs/ux/feed.md` section 5 — a reply chosen in the feed
+                // arms the strip as this screen comes up.
+                armPendingReply()
                 // Newly visible — publish a receipt for whatever's
                 // already loaded.
                 maybePublishReadReceipt()
@@ -654,46 +661,24 @@ public final class ChatViewModel: ObservableObject {
     /// ``groupCallAffordance(nowMs:)`` rather than reading this directly.
     @Published private(set) var ongoingGroupCall: OngoingGroupCall?
 
-    /// `true` when this chat has >2 MLS members — the call button then
-    /// routes through the SFU group-call path; a 2-member chat stays on
-    /// the 1×1 P2P `CallSession`. `nil` member count (no handle) reads
-    /// as a 1×1.
-    var isGroupChat: Bool {
-        (repository.memberCount(groupIdHex: groupIdHex) ?? 0) > 2
-    }
-
-    /// UX spec section 5.1 — the list this conversation belongs to, from the
-    /// persisted kind (``ConversationKindDecision``). This is the
-    /// PRESENTATION notion: it decides sender names in bubbles, the "N
-    /// members" subtitle and the members-sheet title. Call routing keeps
-    /// ``isGroupChat`` (the live people count), because a two-person group
-    /// made through the new-group flow is still a 1x1 call.
+    /// ADR-0062 — the list this conversation belongs to, read from the
+    /// group's own GroupContext (`Group.groupKind()`), the same answer on
+    /// every member's device and fixed at creation. It decides everything
+    /// that distinguishes a one-to-one from a group: sender names in bubbles,
+    /// the "N members" subtitle, the members-sheet title, the typing wording
+    /// and call routing. A group whose kind cannot be read counts as a group.
     var conversationKind: ConversationKind {
-        let account = repository.accountIdB64
-        let stored = account.flatMap {
-            repository.conversationKindStore.load(accountIdB64: $0, groupIdHex: groupIdHex)
-        }
-        let verdict = ConversationKindDecision.resolve(
-            stored: stored, peopleCount: repository.memberCount(groupIdHex: groupIdHex))
-        if let persist = verdict.persist, let account {
-            repository.conversationKindStore.record(
-                accountIdB64: account, groupIdHex: groupIdHex, kind: persist)
-        }
-        return verdict.kind
+        repository.conversationKind(groupIdHex: groupIdHex)
     }
 
     /// `true` when the conversation is presented as a group.
     var presentsAsGroup: Bool { conversationKind == .group }
 
-    /// UX spec section 5.1 — record that this conversation is a group: the
-    /// new-group path calls it when the picker lands, and the first add to a
-    /// 1x1 calls it. One-way; a group never becomes a chat again.
-    func markConversationAsGroup() {
-        guard let account = repository.accountIdB64 else { return }
-        repository.conversationKindStore.record(
-            accountIdB64: account, groupIdHex: groupIdHex, kind: .group)
-        objectWillChange.send()
-    }
+    /// `true` for a group of any size — the call button then routes through
+    /// the SFU group-call path; a one-to-one places a 1x1 P2P `CallSession`.
+    /// Same read as ``conversationKind``: a two-person group calls over the
+    /// SFU.
+    var isGroupChat: Bool { presentsAsGroup }
 
     /// The banner / toolbar decision at `nowMs`: is there a live group call on
     /// this chat that this device is not in?
@@ -804,7 +789,7 @@ public final class ChatViewModel: ObservableObject {
             membershipEnded: membershipHasEnded,
             callInProgress: anyCallInProgress,
             affordance: groupCallAffordance(),
-            memberCount: repository.memberCount(groupIdHex: groupIdHex)
+            isGroup: isGroupChat
         )
     }
 
@@ -1554,9 +1539,6 @@ public final class ChatViewModel: ObservableObject {
                     )
                 }
                 addMemberInput = ""
-                // UX spec section 5.1 — adding someone to a 1x1 makes it a
-                // group, even while the add is still a pending request.
-                markConversationAsGroup()
                 // ADR-0045 — `proposed` is not a quieter `committed`: nobody has
                 // been added yet. `refreshMembers` re-reads the roster (which is
                 // unchanged) AND the pending set (which now holds the request),
@@ -2435,6 +2417,27 @@ public final class ChatViewModel: ObservableObject {
         composerFocusRequest += 1
     }
 
+    /// `docs/ux/feed.md` section 5 — Reply from a feed item: the conversation
+    /// opens with the reply strip already set. Parked until this screen is on
+    /// screen (leaving the screen drops an armed reply, section 3.1), armed at
+    /// once when it already is.
+    private var pendingReplyId: Int64?
+
+    public func requestReply(to messageId: Int64) {
+        pendingReplyId = messageId
+        if screenVisible { armPendingReply() }
+    }
+
+    private func armPendingReply() {
+        guard let id = pendingReplyId else { return }
+        pendingReplyId = nil
+        guard let message = repository.state.threads
+            .first(where: { $0.groupIdHex == groupIdHex })?
+            .messages.first(where: { $0.messageId == id && !$0.deleted })
+        else { return }
+        beginReply(message)
+    }
+
     /// The strip's close control.
     func cancelReply() {
         replyingTo = nil
@@ -2659,10 +2662,11 @@ public final class ChatViewModel: ObservableObject {
         return entries[index].messageId
     }
 
-    /// Whether this conversation is a one-to-one (two PEOPLE), which is what
-    /// turns `Pin for everyone` into `Pin for both`.
+    /// Whether this conversation is a one-to-one (its ADR-0062 kind — a
+    /// two-person group is not one), which is what turns `Pin for everyone`
+    /// into `Pin for both`.
     var isOneToOneForPins: Bool {
-        repository.memberCount(groupIdHex: groupIdHex) == 2
+        repository.isOneToOne(groupIdHex: groupIdHex)
     }
 
     /// Section 4.1 — may this device set or clear a shared pin here? Read from
@@ -2972,8 +2976,8 @@ public final class ChatViewModel: ObservableObject {
             return Localization.text("chat.typing.several")
         }
         let who = typers[0]
-        // 1×1 chats (2 members) read as a bare "typing…" — naming the
-        // sole peer adds nothing.
+        // A one-to-one (its ADR-0062 kind) reads as a bare "typing…" —
+        // naming the sole peer adds nothing. A two-person group names them.
         if !isGroupChat {
             return Localization.text("chat.typing.one_to_one")
         }

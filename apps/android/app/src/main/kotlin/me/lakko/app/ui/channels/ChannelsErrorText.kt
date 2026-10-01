@@ -28,6 +28,8 @@ internal fun channelsErrorCodeKey(code: String): String = when (code) {
     "post-too-large" -> "channels.error.post_too_large"
     "empty-post" -> "channels.error.empty_post"
     "envelope-not-ready" -> "channels.error.not_let_in"
+    // G-43 — a publisher proof the service refused (ADR-0059 section 9).
+    me.lakko.app.channels.PUBLISHER_REFUSED -> "channels.error.publisher_refused"
     else -> "channels.error.refused"
 }
 

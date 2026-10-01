@@ -64,9 +64,9 @@ public data class ContactLink(
 /**
  * Which info [groupIdHex] opens.
  *
- * The group test is the same one the header's own shape uses: the persisted
- * kind, OR more than one other member — a conversation with three people in it
- * is a group whatever was written down when it had two.
+ * The group test is the same one the header's own shape uses: the kind read
+ * from the group (ADR-0062). It is never derived from the people count — a
+ * two-person group is a group, and a one-to-one cannot grow.
  *
  * A one-to-one is then matched to a contact by the CHAT first and by the
  * signature key second. The chat is the stronger link: a contact row records
@@ -77,12 +77,11 @@ public data class ContactLink(
  */
 public fun conversationInfo(
     kind: ConversationKind,
-    otherMemberCount: Int,
     groupIdHex: String,
     peerRouteKey: String?,
     contacts: List<ContactLink>,
 ): ConversationInfo {
-    if (kind == ConversationKind.Group || otherMemberCount > 1) return ConversationInfo.Group
+    if (kind == ConversationKind.Group) return ConversationInfo.Group
     contacts.firstOrNull { it.groupIdHex?.equals(groupIdHex, ignoreCase = true) == true }
         ?.let { return ConversationInfo.Person(it.routeKey) }
     if (peerRouteKey != null) {

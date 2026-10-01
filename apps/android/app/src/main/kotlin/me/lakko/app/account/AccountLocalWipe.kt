@@ -150,9 +150,13 @@ public object AccountLocalWipe {
         Step("read-watermarks") { ctx, acct ->
             me.lakko.app.chat.SharedPreferencesReadWatermarkStore(ctx).deleteAccount(acct)
         },
-        Step("conversation-kinds") { ctx, acct -> me.lakko.app.chat.ConversationKindStore.deleteAccount(ctx, acct) },
-        Step("group-presentation") { ctx, acct ->
-            me.lakko.app.ui.chat.GroupPresentationStore.deleteAccount(ctx, acct)
+        // ADR-0062 — the conversation kind is read from the group and the
+        // per-device "created as a group" flag is gone, so nothing reads these
+        // two files any more; whatever an earlier build left in them goes whole.
+        Step("retired-conversation-kind") { ctx, _ ->
+            for (name in listOf("lakko-conversation-kind", "lakko-group-presentation")) {
+                ctx.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
+            }
         },
         Step("folder-tab") { ctx, acct -> me.lakko.app.ui.chat.FolderTabPrefs.deleteAccount(ctx, acct) },
         Step("played-media-marks") { ctx, acct -> me.lakko.app.media.MediaPrefs.forgetAccountOnDevice(ctx, acct) },
@@ -185,6 +189,20 @@ public object AccountLocalWipe {
         Step("invite-link-secrets") { ctx, acct ->
             me.lakko.app.contacts.EncryptedInviteLinkSecretStore(ctx).clearForAccount(acct)
         },
+
+        // ---- feed + Discover (ADR-0063, ADR-0059) ---------------------------
+        // The sealed feed rules, the channel-post log and the feed reading
+        // state (with its in-memory copy), then the Discover rows: picked
+        // topics, cached buckets, the share switches and the lists members
+        // shared.
+        Step("feed") { ctx, acct -> me.lakko.app.feed.FeedSealedStore.deleteAccount(ctx, acct) },
+        // The feed tab selection and the import banner: device-wide rows of
+        // the session that is ending.
+        Step("feed-prefs") { ctx, _ -> me.lakko.app.feed.FeedPrefs.clear(ctx) },
+        Step("discover") { ctx, acct -> me.lakko.app.discover.DiscoverStore.deleteAccount(ctx, acct) },
+        // The in-memory owner / co-publisher role cache (ADR-0059 section 9):
+        // its keys are derived from this account's seed.
+        Step("channel-publisher-roles") { _, _ -> me.lakko.app.channels.ChannelPublisherRoles.shared.clear() },
 
         // ---- channels -------------------------------------------------------
         Step("channel-co-published") { ctx, acct ->

@@ -1194,6 +1194,10 @@
       "text": "Цей допис задовгий для публікації.",
       "status": "machine"
     },
+    "channels.error.publisher_refused": {
+      "text": "Цьому пристрою поки не можна публікувати в цьому каналі. Співавтор зможе публікувати, коли пристрій власника завершить його додавання.",
+      "status": "machine"
+    },
     "channels.error.refused": {
       "text": "Сервер відхилив запит. Спробуйте пізніше.",
       "status": "machine"
@@ -1390,6 +1394,10 @@
       "text": "Не вдалося зберегти.",
       "status": "machine"
     },
+    "channels.meta.error.sign_in": {
+      "text": "Увійдіть знову, щоб зберегти зміни каналу.",
+      "status": "machine"
+    },
     "channels.meta.saved": {
       "text": "Збережено. Підписники побачать нову назву разом із наступними дописами.",
       "status": "machine"
@@ -1486,6 +1494,10 @@
       "text": "Не вдалося опублікувати.",
       "status": "machine"
     },
+    "channels.publish.error.sign_in": {
+      "text": "Увійдіть знову, щоб публікувати в цьому каналі.",
+      "status": "machine"
+    },
     "channels.rotation.desc": {
       "text": "Lakko сам оновлює захист каналу. Оновіть його зараз, якщо вважаєте, що пристрій когось із підписників скомпрометовано.",
       "status": "machine"
@@ -1496,6 +1508,10 @@
     },
     "channels.rotation.error.refresh": {
       "text": "Не вдалося оновити. Спробуйте трохи згодом.",
+      "status": "machine"
+    },
+    "channels.rotation.error.refresh_prefix": {
+      "text": "Не вдалося оновити.",
       "status": "machine"
     },
     "channels.rotation.never": {
@@ -1518,6 +1534,10 @@
       "text": "Захист",
       "status": "machine"
     },
+    "channels.row.new_posts_a11y": {
+      "text": "{count, plural, one {# нова публікація} few {# нові публікації} many {# нових публікацій} other {# нової публікації}}",
+      "status": "machine"
+    },
     "channels.row.own": {
       "text": "Ваш канал",
       "status": "machine"
@@ -1536,6 +1556,10 @@
     },
     "channels.subscribe.error.generic": {
       "text": "Не вдалося підписатися. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "channels.subscribe.error.network": {
+      "text": "Не вдалося підписатися на канал. Перевірте з’єднання та спробуйте ще раз.",
       "status": "machine"
     },
     "channels.subscribe.error.prefix": {
@@ -2850,6 +2874,10 @@
       "text": "Цю зміну не вдалося запитати.",
       "status": "machine"
     },
+    "chat.refusal.group_kind_changed": {
+      "text": "Цю зміну не можна застосувати до цієї розмови.",
+      "status": "machine"
+    },
     "chat.refusal.join_not_kept": {
       "text": "Запит на приєднання надійшов, коли очікуваних було вже забагато, тому його не збережено. Попросіть людину надіслати його пізніше.",
       "status": "machine"
@@ -2864,6 +2892,14 @@
     },
     "chat.refusal.not_owner": {
       "text": "Змінювати адміністраторів і передавати права власника може лише власник групи.",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_fixed": {
+      "text": "В особистому чаті завжди ті самі двоє людей.",
+      "status": "machine"
+    },
+    "chat.refusal.one_to_one_no_roles": {
+      "text": "В особистому чаті немає адміністраторів.",
       "status": "machine"
     },
     "chat.refusal.owner_cannot_leave": {
@@ -3418,6 +3454,10 @@
       "text": "Згорнути",
       "status": "machine"
     },
+    "common.collapsed": {
+      "text": "Згорнуто",
+      "status": "machine"
+    },
     "common.confirm": {
       "text": "Підтвердити",
       "status": "machine"
@@ -3528,6 +3568,10 @@
     },
     "common.expand": {
       "text": "Розгорнути",
+      "status": "machine"
+    },
+    "common.expanded": {
+      "text": "Розгорнуто",
       "status": "machine"
     },
     "common.fact_pair": {
@@ -3668,6 +3712,10 @@
     },
     "common.try_again": {
       "text": "Спробувати ще раз",
+      "status": "machine"
+    },
+    "common.undo": {
+      "text": "Скасувати",
       "status": "machine"
     },
     "common.unknown": {
@@ -4242,6 +4290,322 @@
       "text": "Відкрити камеру",
       "status": "machine"
     },
+    "discover.card.a11y": {
+      "text": "Рекомендований канал {name}",
+      "status": "machine"
+    },
+    "discover.card.following": {
+      "text": "Ви підписані на цей канал",
+      "status": "machine"
+    },
+    "discover.card.hide_topic": {
+      "text": "Приховати цю тему",
+      "status": "machine"
+    },
+    "discover.card.more": {
+      "text": "Ще",
+      "status": "machine"
+    },
+    "discover.card.not_interested": {
+      "text": "Не цікаво",
+      "status": "machine"
+    },
+    "discover.card.show_description": {
+      "text": "Показати опис",
+      "status": "machine"
+    },
+    "discover.card.subscribers": {
+      "text": "Підписників: {band}",
+      "status": "machine"
+    },
+    "discover.edit_topics": {
+      "text": "Змінити теми",
+      "status": "machine"
+    },
+    "discover.gone": {
+      "text": "Цей канал більше недоступний.",
+      "status": "machine"
+    },
+    "discover.language": {
+      "text": "Мова",
+      "status": "machine"
+    },
+    "discover.listing.checking": {
+      "text": "Перевіряємо, чи показується канал в огляді...",
+      "status": "machine"
+    },
+    "discover.listing.confirm_action": {
+      "text": "Показувати",
+      "status": "machine"
+    },
+    "discover.listing.confirm_body": {
+      "text": "Назву, опис і кількість підписників каналу зможе знайти будь-хто. Публікації залишаються зашифрованими.",
+      "status": "machine"
+    },
+    "discover.listing.confirm_title": {
+      "text": "Показувати цей канал в огляді?",
+      "status": "machine"
+    },
+    "discover.listing.listed": {
+      "text": "Показується",
+      "status": "machine"
+    },
+    "discover.listing.listed_notice": {
+      "text": "Канал додано до огляду. Підписники дізнаються про це з наступним оновленням каналу.",
+      "status": "machine"
+    },
+    "discover.listing.needs_handle": {
+      "text": "Щоб канал з’явився в огляді, йому потрібен @handle.",
+      "status": "machine"
+    },
+    "discover.listing.not_listed": {
+      "text": "Не показується",
+      "status": "machine"
+    },
+    "discover.listing.owner_desc": {
+      "text": "Назву, опис і кількість підписників каналу з огляду може знайти будь-хто. Публікації залишаються зашифрованими.",
+      "status": "machine"
+    },
+    "discover.listing.refused": {
+      "text": "Не вдалося додати канал до огляду. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "discover.listing.remove_failed": {
+      "text": "Не вдалося прибрати канал з огляду. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "discover.listing.title": {
+      "text": "Показувати в огляді",
+      "status": "machine"
+    },
+    "discover.listing.topic": {
+      "text": "Тема",
+      "status": "machine"
+    },
+    "discover.listing.update_failed": {
+      "text": "Збережено. Не вдалося оновити картку в огляді — збережіть ще раз, щоб повторити.",
+      "status": "machine"
+    },
+    "discover.listing.viewer_listed": {
+      "text": "Цей канал показується в огляді. Змінити це може лише власник каналу.",
+      "status": "machine"
+    },
+    "discover.listing.viewer_not_listed": {
+      "text": "Цей канал не показується в огляді. Додати його туди може лише власник каналу.",
+      "status": "machine"
+    },
+    "discover.mix.label": {
+      "text": "Додавати випадкові теми",
+      "status": "machine"
+    },
+    "discover.mix.off_line": {
+      "text": "Менше трафіку. Сервер Lakko точно знатиме, які теми ви вибрали.",
+      "status": "machine"
+    },
+    "discover.nothing_yet": {
+      "text": "Рекомендацій поки немає. Виберіть теми або попросіть учасників ваших груп поділитися своїми каналами.",
+      "status": "machine"
+    },
+    "discover.pick.a11y": {
+      "text": "Вибір тем",
+      "status": "machine"
+    },
+    "discover.pick.body": {
+      "text": "Lakko завантажує рекомендації за ними впереміш із кількома випадковими темами, тож сервер Lakko не може точно дізнатися, які теми ви вибрали. Він ніколи не бачить, які канали ви відкриваєте.",
+      "status": "machine"
+    },
+    "discover.pick.title": {
+      "text": "Виберіть кілька тем.",
+      "status": "machine"
+    },
+    "discover.reason.followed_by": {
+      "text": "{name} читає в групі «{group}»",
+      "status": "machine"
+    },
+    "discover.reason.followed_by_others": {
+      "text": "{count, plural, one {{name} і ще # людина читають у групі «{group}»} few {{name} і ще # людини читають у групі «{group}»} many {{name} і ще # людей читають у групі «{group}»} other {{name} і ще # людини читають у групі «{group}»}}",
+      "status": "machine"
+    },
+    "discover.reason.followed_count": {
+      "text": "{count, plural, one {Читає # людина в групі «{group}»} few {Читають # людини в групі «{group}»} many {Читають # людей у групі «{group}»} other {Читають # людини в групі «{group}»}}",
+      "status": "machine"
+    },
+    "discover.reason.group_fallback": {
+      "text": "одна з груп",
+      "status": "machine"
+    },
+    "discover.reason.popular": {
+      "text": "Популярне в темі «{topic}»",
+      "status": "machine"
+    },
+    "discover.reason.search": {
+      "text": "Відповідає вашому пошуку",
+      "status": "machine"
+    },
+    "discover.search.action": {
+      "text": "Знайти",
+      "status": "machine"
+    },
+    "discover.search.helper": {
+      "text": "Пошукові запити надсилаються на сервер Lakko.",
+      "status": "machine"
+    },
+    "discover.search.no_results": {
+      "text": "Канали не знайдено.",
+      "status": "machine"
+    },
+    "discover.search.placeholder": {
+      "text": "Пошук каналів",
+      "status": "machine"
+    },
+    "discover.search.searching": {
+      "text": "Пошук...",
+      "status": "machine"
+    },
+    "discover.search.too_short": {
+      "text": "Введіть щонайменше 2 символи.",
+      "status": "machine"
+    },
+    "discover.settings": {
+      "text": "Налаштування огляду",
+      "status": "machine"
+    },
+    "discover.share.error": {
+      "text": "Не вдалося змінити. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "discover.share.label": {
+      "text": "Ділитися моїми каналами з цією групою",
+      "status": "machine"
+    },
+    "discover.share.line": {
+      "text": "Учасники цієї групи бачитимуть, які канали ви читаєте. Сервер Lakko — ні.",
+      "status": "machine"
+    },
+    "discover.shared.desc": {
+      "text": "Групи, учасники яких бачать, які канали ви читаєте. Сервер Lakko цього не бачить.",
+      "status": "machine"
+    },
+    "discover.shared.empty": {
+      "text": "Ви не ділитеся своїми каналами з жодною групою.",
+      "status": "machine"
+    },
+    "discover.shared.settings_sub": {
+      "text": "Групи, які бачать, які канали ви читаєте",
+      "status": "machine"
+    },
+    "discover.shared.stop": {
+      "text": "Припинити ділитися",
+      "status": "machine"
+    },
+    "discover.shared.stop_failed": {
+      "text": "Не вдалося вимкнути. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "discover.shared.title": {
+      "text": "Канали, якими я ділюся",
+      "status": "machine"
+    },
+    "discover.topic.art_design": {
+      "text": "Мистецтво й дизайн",
+      "status": "machine"
+    },
+    "discover.topic.books": {
+      "text": "Книги",
+      "status": "machine"
+    },
+    "discover.topic.business": {
+      "text": "Бізнес",
+      "status": "machine"
+    },
+    "discover.topic.education": {
+      "text": "Освіта",
+      "status": "machine"
+    },
+    "discover.topic.film_tv": {
+      "text": "Кіно й серіали",
+      "status": "machine"
+    },
+    "discover.topic.finance": {
+      "text": "Фінанси",
+      "status": "machine"
+    },
+    "discover.topic.food": {
+      "text": "Їжа",
+      "status": "machine"
+    },
+    "discover.topic.gaming": {
+      "text": "Ігри",
+      "status": "machine"
+    },
+    "discover.topic.health": {
+      "text": "Здоров’я",
+      "status": "machine"
+    },
+    "discover.topic.humour": {
+      "text": "Гумор",
+      "status": "machine"
+    },
+    "discover.topic.lifestyle": {
+      "text": "Спосіб життя",
+      "status": "machine"
+    },
+    "discover.topic.local": {
+      "text": "Місцеве",
+      "status": "machine"
+    },
+    "discover.topic.music": {
+      "text": "Музика",
+      "status": "machine"
+    },
+    "discover.topic.nature": {
+      "text": "Природа",
+      "status": "machine"
+    },
+    "discover.topic.news": {
+      "text": "Новини",
+      "status": "machine"
+    },
+    "discover.topic.other": {
+      "text": "Інше",
+      "status": "machine"
+    },
+    "discover.topic.photography": {
+      "text": "Фотографія",
+      "status": "machine"
+    },
+    "discover.topic.politics": {
+      "text": "Політика",
+      "status": "machine"
+    },
+    "discover.topic.religion": {
+      "text": "Релігія",
+      "status": "machine"
+    },
+    "discover.topic.science": {
+      "text": "Наука",
+      "status": "machine"
+    },
+    "discover.topic.software_development": {
+      "text": "Розробка ПЗ",
+      "status": "machine"
+    },
+    "discover.topic.sports": {
+      "text": "Спорт",
+      "status": "machine"
+    },
+    "discover.topic.technology": {
+      "text": "Технології",
+      "status": "machine"
+    },
+    "discover.topic.travel": {
+      "text": "Подорожі",
+      "status": "machine"
+    },
+    "discover.unavailable": {
+      "text": "Рекомендації зараз недоступні.",
+      "status": "machine"
+    },
     "display_name.error.control": {
       "text": "Видаліть невидимі символи або символи напрямку тексту",
       "status": "machine"
@@ -4268,6 +4632,542 @@
     },
     "ds.clock_skew": {
       "text": "Перевірте дату й час на цьому пристрої.",
+      "status": "machine"
+    },
+    "feed.action.hide": {
+      "text": "Приховати зі стрічок",
+      "status": "machine"
+    },
+    "feed.action.hide_hint": {
+      "text": "Не показувати цю розмову в стрічках",
+      "status": "machine"
+    },
+    "feed.attachments.count": {
+      "text": "{count, plural, one {# вкладення} few {# вкладення} many {# вкладень} other {# вкладення}}",
+      "status": "machine"
+    },
+    "feed.banner.dismiss": {
+      "text": "Зрозуміло",
+      "status": "machine"
+    },
+    "feed.banner.local": {
+      "text": "Стрічка показує повідомлення, які отримав цей пристрій.",
+      "status": "machine"
+    },
+    "feed.divider.new": {
+      "text": "Нове",
+      "status": "machine"
+    },
+    "feed.edit": {
+      "text": "Змінити",
+      "status": "machine"
+    },
+    "feed.edit_feed": {
+      "text": "Змінити стрічку",
+      "status": "machine"
+    },
+    "feed.editor.default_name": {
+      "text": "Моя стрічка",
+      "status": "machine"
+    },
+    "feed.editor.delete": {
+      "text": "Видалити стрічку",
+      "status": "machine"
+    },
+    "feed.editor.delete_confirm": {
+      "text": "Видалити цю стрічку?",
+      "status": "machine"
+    },
+    "feed.editor.fade": {
+      "text": "Як швидко старе йде вниз",
+      "status": "machine"
+    },
+    "feed.editor.fade.day": {
+      "text": "День",
+      "status": "machine"
+    },
+    "feed.editor.fade.hours": {
+      "text": "Кілька годин",
+      "status": "machine"
+    },
+    "feed.editor.fade.week": {
+      "text": "Тиждень",
+      "status": "machine"
+    },
+    "feed.editor.filters": {
+      "text": "Фільтри",
+      "status": "machine"
+    },
+    "feed.editor.for_me": {
+      "text": "Лише згадки про мене, відповіді мені та реакції на мої повідомлення",
+      "status": "machine"
+    },
+    "feed.editor.hide_own": {
+      "text": "Приховувати мої повідомлення",
+      "status": "machine"
+    },
+    "feed.editor.hide_words": {
+      "text": "Приховувати слова (по одному в рядку)",
+      "status": "machine"
+    },
+    "feed.editor.icon": {
+      "text": "Значок",
+      "status": "machine"
+    },
+    "feed.editor.include_muted": {
+      "text": "Включати розмови без звуку",
+      "status": "machine"
+    },
+    "feed.editor.look_back": {
+      "text": "Глибина (днів)",
+      "status": "machine"
+    },
+    "feed.editor.look_back_count": {
+      "text": "{count, plural, one {За # день} few {За # дні} many {За # днів} other {За # дня}}",
+      "status": "machine"
+    },
+    "feed.editor.media_only": {
+      "text": "Лише з фото або відео",
+      "status": "machine"
+    },
+    "feed.editor.membership.a11y": {
+      "text": "{name} у цій стрічці",
+      "status": "machine"
+    },
+    "feed.editor.membership.never": {
+      "text": "Ніколи",
+      "status": "machine"
+    },
+    "feed.editor.membership.only": {
+      "text": "Лише",
+      "status": "machine"
+    },
+    "feed.editor.membership_hint": {
+      "text": "«Лише» обмежує стрічку позначеними розмовами; «Ніколи» виключає розмову.",
+      "status": "machine"
+    },
+    "feed.editor.min_reactions": {
+      "text": "Щонайменше реакцій",
+      "status": "machine"
+    },
+    "feed.editor.name": {
+      "text": "Назва",
+      "status": "machine"
+    },
+    "feed.editor.only_words": {
+      "text": "Лише ці слова (по одному в рядку)",
+      "status": "machine"
+    },
+    "feed.editor.preview": {
+      "text": "Попередній перегляд",
+      "status": "machine"
+    },
+    "feed.editor.preview_pending": {
+      "text": "Попередній перегляд з’явиться, коли стрічку можна буде зберегти.",
+      "status": "machine"
+    },
+    "feed.editor.slider.max": {
+      "text": "Дуже",
+      "status": "machine"
+    },
+    "feed.editor.slider.min": {
+      "text": "Не враховувати",
+      "status": "machine"
+    },
+    "feed.editor.sources": {
+      "text": "Джерела",
+      "status": "machine"
+    },
+    "feed.editor.sources.both": {
+      "text": "Усе",
+      "status": "machine"
+    },
+    "feed.editor.sources.channels": {
+      "text": "Усі канали",
+      "status": "machine"
+    },
+    "feed.editor.sources.groups": {
+      "text": "Усі групи",
+      "status": "machine"
+    },
+    "feed.editor.start.blank": {
+      "text": "Порожня",
+      "status": "machine"
+    },
+    "feed.editor.start_from": {
+      "text": "Почати з",
+      "status": "machine"
+    },
+    "feed.editor.stripped_hint": {
+      "text": "Стрічки, якими поділилися, приходять без конкретних розмов. Виберіть їх нижче, щоб налаштувати стрічку під себе.",
+      "status": "machine"
+    },
+    "feed.editor.suggestions": {
+      "text": "Рекомендації",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.never": {
+      "text": "Ніколи",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.rarely": {
+      "text": "Рідко",
+      "status": "machine"
+    },
+    "feed.editor.suggestions.sometimes": {
+      "text": "Іноді",
+      "status": "machine"
+    },
+    "feed.editor.suggestions_rate": {
+      "text": "Як часто показувати рекомендований канал",
+      "status": "machine"
+    },
+    "feed.editor.weight.from_contacts": {
+      "text": "Від ваших контактів",
+      "status": "machine"
+    },
+    "feed.editor.weight.media": {
+      "text": "З фото або відео",
+      "status": "machine"
+    },
+    "feed.editor.weight.mentions": {
+      "text": "Згадки про вас",
+      "status": "machine"
+    },
+    "feed.editor.weight.reactions": {
+      "text": "Реакції",
+      "status": "machine"
+    },
+    "feed.editor.weight.recency": {
+      "text": "Новизна",
+      "status": "machine"
+    },
+    "feed.editor.weight.replies": {
+      "text": "Відповіді",
+      "status": "machine"
+    },
+    "feed.editor.what_counts": {
+      "text": "Що важливо",
+      "status": "machine"
+    },
+    "feed.empty.discover": {
+      "text": "Знайти канали",
+      "status": "machine"
+    },
+    "feed.empty.no_match": {
+      "text": "Немає повідомлень, що відповідають цій стрічці.",
+      "status": "machine"
+    },
+    "feed.empty.no_sources": {
+      "text": "Стрічка наповнюється з ваших груп і каналів.",
+      "status": "machine"
+    },
+    "feed.empty.nothing_yet": {
+      "text": "Тут поки порожньо. Нові повідомлення з ваших груп і каналів з’являться тут.",
+      "status": "machine"
+    },
+    "feed.end": {
+      "text": "Ви все переглянули.",
+      "status": "machine"
+    },
+    "feed.error.cannot_save_here": {
+      "text": "Цей пристрій зараз не може це зберегти.",
+      "status": "machine"
+    },
+    "feed.error.delete": {
+      "text": "Не вдалося видалити стрічку. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "feed.error.no_device_key": {
+      "text": "Цей пристрій зараз не може зберігати стрічки.",
+      "status": "machine"
+    },
+    "feed.error.save": {
+      "text": "Не вдалося зберегти стрічку. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "feed.hidden.empty": {
+      "text": "З ваших стрічок нічого не приховано.",
+      "status": "machine"
+    },
+    "feed.hidden.show_again": {
+      "text": "Показувати знову",
+      "status": "machine"
+    },
+    "feed.hidden.title": {
+      "text": "Приховано зі стрічок",
+      "status": "machine"
+    },
+    "feed.hidden.toast": {
+      "text": "Приховано зі стрічок.",
+      "status": "machine"
+    },
+    "feed.icon.bell": {
+      "text": "Дзвіночок",
+      "status": "machine"
+    },
+    "feed.icon.book": {
+      "text": "Книга",
+      "status": "machine"
+    },
+    "feed.icon.camera": {
+      "text": "Камера",
+      "status": "machine"
+    },
+    "feed.icon.code": {
+      "text": "Код",
+      "status": "machine"
+    },
+    "feed.icon.feed": {
+      "text": "Стрічка",
+      "status": "machine"
+    },
+    "feed.icon.flag": {
+      "text": "Прапор",
+      "status": "machine"
+    },
+    "feed.icon.globe": {
+      "text": "Глобус",
+      "status": "machine"
+    },
+    "feed.icon.heart": {
+      "text": "Серце",
+      "status": "machine"
+    },
+    "feed.icon.lightning": {
+      "text": "Блискавка",
+      "status": "machine"
+    },
+    "feed.icon.music": {
+      "text": "Музика",
+      "status": "machine"
+    },
+    "feed.icon.speech_bubble": {
+      "text": "Хмаринка репліки",
+      "status": "machine"
+    },
+    "feed.icon.star": {
+      "text": "Зірка",
+      "status": "machine"
+    },
+    "feed.import.a11y": {
+      "text": "Імпорт стрічки",
+      "status": "machine"
+    },
+    "feed.import.add": {
+      "text": "Додати до моїх стрічок",
+      "status": "machine"
+    },
+    "feed.import.choose_file": {
+      "text": "Вибрати файл",
+      "status": "machine"
+    },
+    "feed.import.hint": {
+      "text": "Відкрийте стрічку, якою з вами поділилися, — файл .lakkofeed.",
+      "status": "machine"
+    },
+    "feed.import.refused": {
+      "text": "Lakko не може відкрити цей файл як стрічку.",
+      "status": "machine"
+    },
+    "feed.import.title": {
+      "text": "Додати стрічку, якою поділилися",
+      "status": "machine"
+    },
+    "feed.item.reactions_a11y": {
+      "text": "Реакції",
+      "status": "machine"
+    },
+    "feed.menu.a11y": {
+      "text": "Меню стрічки",
+      "status": "machine"
+    },
+    "feed.min_reactions_count": {
+      "text": "{count, plural, one {Щонайменше # реакція} few {Щонайменше # реакції} many {Щонайменше # реакцій} other {Щонайменше # реакції}}",
+      "status": "machine"
+    },
+    "feed.new": {
+      "text": "Нова стрічка",
+      "status": "machine"
+    },
+    "feed.preset.discover": {
+      "text": "Огляд",
+      "status": "machine"
+    },
+    "feed.preset.for_me": {
+      "text": "Для мене",
+      "status": "machine"
+    },
+    "feed.preset.latest": {
+      "text": "Нове",
+      "status": "machine"
+    },
+    "feed.preset.popular": {
+      "text": "Популярне",
+      "status": "machine"
+    },
+    "feed.problem.conversations": {
+      "text": "Вибрано забагато розмов.",
+      "status": "machine"
+    },
+    "feed.problem.generic": {
+      "text": "Цю стрічку не можна зберегти в такому вигляді.",
+      "status": "machine"
+    },
+    "feed.problem.name": {
+      "text": "Дайте стрічці назву до 64 символів.",
+      "status": "machine"
+    },
+    "feed.problem.no_kinds": {
+      "text": "Виберіть групи, канали або все разом.",
+      "status": "machine"
+    },
+    "feed.problem.stripped": {
+      "text": "У стрічці, якою поділилися, не можна вказувати розмови.",
+      "status": "machine"
+    },
+    "feed.problem.too_large": {
+      "text": "Ця стрічка завелика, щоб її зберегти.",
+      "status": "machine"
+    },
+    "feed.problem.weight": {
+      "text": "Значення повзунка поза допустимим діапазоном.",
+      "status": "machine"
+    },
+    "feed.problem.window": {
+      "text": "Глибина — від 1 до 30 днів.",
+      "status": "machine"
+    },
+    "feed.problem.words": {
+      "text": "Перевірте списки слів: одне слово в рядку, не більше 32 слів.",
+      "status": "machine"
+    },
+    "feed.refresh_failed": {
+      "text": "Не вдалося перевірити нові повідомлення.",
+      "status": "machine"
+    },
+    "feed.replies.count": {
+      "text": "{count, plural, one {# відповідь} few {# відповіді} many {# відповідей} other {# відповіді}}",
+      "status": "machine"
+    },
+    "feed.share": {
+      "text": "Поділитися",
+      "status": "machine"
+    },
+    "feed.share.a11y": {
+      "text": "Поділитися стрічкою",
+      "status": "machine"
+    },
+    "feed.share.download": {
+      "text": "Завантажити файл",
+      "status": "machine"
+    },
+    "feed.share.share_file": {
+      "text": "Поділитися файлом",
+      "status": "machine"
+    },
+    "feed.share.share_link": {
+      "text": "Поділитися посиланням",
+      "status": "machine"
+    },
+    "feed.share.stripped": {
+      "text": "Вибрані вручну розмови не передаються: іншим вони нічого не скажуть.",
+      "status": "machine"
+    },
+    "feed.share.title": {
+      "text": "Поділитися «{name}»",
+      "status": "machine"
+    },
+    "feed.share.unshareable": {
+      "text": "Цією стрічкою не можна поділитися в такому вигляді.",
+      "status": "machine"
+    },
+    "feed.show_new": {
+      "text": "{count, plural, one {Показати # нове} few {Показати # нові} many {Показати # нових} other {Показати # нового}}",
+      "status": "machine"
+    },
+    "feed.summary.factor.contacts": {
+      "text": "ваші контакти",
+      "status": "machine"
+    },
+    "feed.summary.factor.media": {
+      "text": "фото й відео",
+      "status": "machine"
+    },
+    "feed.summary.factor.mentions": {
+      "text": "згадки про вас",
+      "status": "machine"
+    },
+    "feed.summary.factor.reactions": {
+      "text": "реакції",
+      "status": "machine"
+    },
+    "feed.summary.factor.replies": {
+      "text": "відповіді",
+      "status": "machine"
+    },
+    "feed.summary.for_me": {
+      "text": "Лише те, що стосується вас",
+      "status": "machine"
+    },
+    "feed.summary.hide_own": {
+      "text": "Приховує ваші повідомлення",
+      "status": "machine"
+    },
+    "feed.summary.hide_words": {
+      "text": "{count, plural, one {Приховує # слово} few {Приховує # слова} many {Приховує # слів} other {Приховує # слова}}",
+      "status": "machine"
+    },
+    "feed.summary.include_muted": {
+      "text": "Включає розмови без звуку",
+      "status": "machine"
+    },
+    "feed.summary.look_back": {
+      "text": "{count, plural, one {За останній # день} few {За останні # дні} many {За останні # днів} other {За останні # дня}}",
+      "status": "machine"
+    },
+    "feed.summary.newest_first": {
+      "text": "Спочатку нові",
+      "status": "machine"
+    },
+    "feed.summary.only_words": {
+      "text": "Лише повідомлення зі словами: {words}",
+      "status": "machine"
+    },
+    "feed.summary.ranks_by": {
+      "text": "Сортує за новизною та параметрами: {factors}",
+      "status": "machine"
+    },
+    "feed.summary.sources.both": {
+      "text": "Джерела: усі групи й канали",
+      "status": "machine"
+    },
+    "feed.summary.sources.channels": {
+      "text": "Джерела: усі канали",
+      "status": "machine"
+    },
+    "feed.summary.sources.groups": {
+      "text": "Джерела: усі групи",
+      "status": "machine"
+    },
+    "feed.switcher.a11y": {
+      "text": "Стрічки",
+      "status": "machine"
+    },
+    "feed.title": {
+      "text": "Стрічка",
+      "status": "machine"
+    },
+    "feed.why.mentions": {
+      "text": "Вас згадали",
+      "status": "machine"
+    },
+    "feed.why.popular": {
+      "text": "Популярне в {source}",
+      "status": "machine"
+    },
+    "feed.why.reply": {
+      "text": "Відповідь на ваше повідомлення",
       "status": "machine"
     },
     "folders.add_to_folder": {
@@ -4902,6 +5802,10 @@
       "text": "{count, plural, one {до # використання} few {до # використань} many {до # використань} other {до # використання}}",
       "status": "machine"
     },
+    "ios.document_type.feed": {
+      "text": "Стрічка Lakko",
+      "status": "machine"
+    },
     "ios.permission.camera": {
       "text": "Lakko використовує камеру, щоб сканувати QR-коди пристроїв, які ви хочете прив'язати до облікового запису, передавати відео у дзвінках і записувати відеоповідомлення, які ви вирішили надіслати. Усе, що знімає камера, шифрується наскрізним шифруванням на вашому пристрої перед надсиланням.",
       "status": "machine"
@@ -4972,6 +5876,10 @@
     },
     "nav.contacts": {
       "text": "Контакти",
+      "status": "machine"
+    },
+    "nav.feed": {
+      "text": "Стрічка",
       "status": "machine"
     },
     "nav.rail_a11y": {
@@ -6244,6 +7152,14 @@
     },
     "tokens.lookup_allowance_used": {
       "text": "Сьогодні ви шукали дуже багато людей. Спробуйте завтра.",
+      "status": "machine"
+    },
+    "tokens.search_allowance_used": {
+      "text": "Забагато запитів. Спробуйте за хвилину.",
+      "status": "machine"
+    },
+    "tokens.subscribe_allowance_used": {
+      "text": "Сьогодні ви підписалися на багато каналів. Спробуйте завтра.",
       "status": "machine"
     },
     "update.available.message": {

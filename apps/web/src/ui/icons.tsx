@@ -12,6 +12,8 @@ const PATHS = {
   chat: `<path d="M4 6a2.5 2.5 0 0 1 2.5-2.5h11A2.5 2.5 0 0 1 20 6v8a2.5 2.5 0 0 1-2.5 2.5H9.2L4.8 20v-3.6A2.5 2.5 0 0 1 4 14z"/>`,
   contacts: `<circle cx="9" cy="8" r="3.2"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><circle cx="17" cy="9" r="2.4"/><path d="M15.6 14.3a4.4 4.4 0 0 1 4.9 4.2"/>`,
   channels: `<path d="M4 10v4a1 1 0 0 0 1 1h3l6 4V5L8 9H5a1 1 0 0 0-1 1z"/><path d="M17 9.5a3.5 3.5 0 0 1 0 5"/>`,
+  // Stacked cards: the Feed destination.
+  feed: `<rect x="4" y="4" width="16" height="6.5" rx="1.8"/><rect x="4" y="13.5" width="16" height="6.5" rx="1.8"/>`,
   calls: `<path d="M6.6 3.5h2.9l1.5 4-2 1.5a10 10 0 0 0 6 6l1.5-2 4 1.5v2.9a2 2 0 0 1-2 2A15.5 15.5 0 0 1 4.6 5.5a2 2 0 0 1 2-2z"/>`,
   groups: `<circle cx="12" cy="7.5" r="3"/><path d="M6.5 19a5.5 5.5 0 0 1 11 0"/><circle cx="5" cy="9.5" r="2.2"/><path d="M1.5 17.5a4 4 0 0 1 4.2-3.9"/><circle cx="19" cy="9.5" r="2.2"/><path d="M22.5 17.5a4 4 0 0 0-4.2-3.9"/>`,
   settings: `<circle cx="12" cy="12" r="3.3"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/>`,
@@ -79,6 +81,17 @@ const PATHS = {
   // draws the same idea for a subscriber list; a call control needs its own
   // name so a change to one never silently restyles the other.
   speaker: `<path d="M4 9.5v5a1 1 0 0 0 1 1h2.8l4.7 3.5v-14L7.8 8.5H5a1 1 0 0 0-1 1z"/><path d="M16 9.4a3.6 3.6 0 0 1 0 5.2M18.6 6.8a7.2 7.2 0 0 1 0 10.4"/>`,
+  // The feed icons of `docs/ux/feed.md` section 4.1, beside the ones the set
+  // already had (`feed`, `chat`, `bell`, `globe`). Index order lives in
+  // `feed/feed-icons.ts`, not here.
+  star: `<path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/>`,
+  heart: `<path d="M12 19.5s-7.5-4.4-7.5-9.7A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 2.6c0 5.3-7.5 9.7-7.5 9.7z"/>`,
+  lightning: `<path d="M13.5 3 5.5 13.5h6l-1 7.5 8-10.5h-6z"/>`,
+  book: `<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v15.5H5.5A1.5 1.5 0 0 0 4 21z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v15.5h5.5A1.5 1.5 0 0 1 20 21z"/>`,
+  code: `<path d="m8.5 7-5 5 5 5M15.5 7l5 5-5 5M13.5 4.5l-3 15"/>`,
+  music: `<path d="M9 18V5.5l11-2V16"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>`,
+  camera: `<path d="M3 9a2 2 0 0 1 2-2h2.2l1.3-2h7l1.3 2H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/>`,
+  flag: `<path d="M5 21V4M5 4.5c4-2 7 2 11 0v8.5c-4 2-7-2-11 0"/>`,
 } as const;
 
 /** Every icon name the set knows. */

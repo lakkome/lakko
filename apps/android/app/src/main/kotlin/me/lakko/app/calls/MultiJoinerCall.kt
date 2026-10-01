@@ -12,6 +12,7 @@ import kotlinx.coroutines.launch
 import org.webrtc.VideoTrack
 import uniffi.lakko_ffi_uniffi.FfiIncomingEnvelopeKind
 import uniffi.lakko_ffi_uniffi.Group
+import uniffi.lakko_ffi_uniffi.GroupKind
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
 import uniffi.lakko_ffi_uniffi.SfuPeerSnapshot
@@ -32,7 +33,7 @@ import uniffi.lakko_ffi_uniffi.wrapCallWelcome
  *
  * ## Roles
  *
- *   * **Owner** ([host]) — the sole founder. Calls `Group.create(identity)`,
+ *   * **Owner** ([host]) — the sole founder. Calls `Group.create(identity, GROUP)`,
  *     derives the SFrame seed, joins the SFU room, and admits joiners (it is
  *     the acting committer while present).
  *   * **Joiner** ([join]) — never founds a group. Mints a fresh KeyPackage,
@@ -387,7 +388,9 @@ class MultiJoinerCall private constructor(
         val seed: ByteArray
         val leaf: Int
         try {
-            founded = Group.create(opts.identity)
+            // ADR-0062 — a call-link group grows (ADR-0032 admits joiners
+            // into it), so it follows the group rule.
+            founded = Group.create(opts.identity, GroupKind.GROUP)
             seed = deriveSeed(founded)
             leaf = founded.ownLeafIndex().toInt()
         } catch (err: Throwable) {
@@ -648,6 +651,9 @@ class MultiJoinerCall private constructor(
             FfiIncomingEnvelopeKind.REGISTRAR_SEED,
             FfiIncomingEnvelopeKind.COMMITTER_DELEGATION,
             -> Unit
+            // ADR-0059 - a shared-channels list rides the GROUP JOURNAL and
+            // speaks for its MLS sender, never the SFU signal-relay; dropped.
+            FfiIncomingEnvelopeKind.SHARED_CHANNELS -> Unit
         }
     }
 

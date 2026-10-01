@@ -48,7 +48,7 @@ import { loadWasm } from "../wasm";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { ChatClient, type IncomingChatEvent } from "./client";
 import { readIsActive } from "./membership-ended";
-import { peopleCountOf } from "./person-key";
+import { conversationKindOf } from "./conversation-kind";
 import { IdbPinBackend } from "./pin-idb";
 import {
   PinStore,
@@ -150,12 +150,10 @@ export function PinProvider(props: { children: JSX.Element }): JSX.Element {
     }
   }
 
+  /** ADR-0062 — read from the group, not from the people count: a
+   *  two-person group keeps the group rule (owner / admin). */
   function isOneToOne(group: WasmGroup): boolean {
-    try {
-      return peopleCountOf(group) === 2;
-    } catch {
-      return false;
-    }
+    return conversationKindOf(group) === "chat";
   }
 
   async function maySetShared(group: WasmGroup): Promise<boolean> {

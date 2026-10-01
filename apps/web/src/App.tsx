@@ -38,6 +38,8 @@ import { BackgroundReceiveProvider } from "./chat/BackgroundReceiveContext";
 import { CallActionListener } from "./calls/CallActionListener";
 import { CallHostProvider, CallHostView } from "./calls/CallHostContext";
 import { ChannelsHydration } from "./channels/ChannelsHydration";
+import { ChannelPostSync } from "./feed/ChannelPostSync";
+import { SubscriberAdmission } from "./channels/SubscriberAdmission";
 import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
 import {
   MailboxJoinFailureBanner,
@@ -50,6 +52,7 @@ import { ScopedDiscoveryRuntime } from "./reach/ScopedDiscoveryRuntime";
 import { GroupNameProvider } from "./chat/GroupNameContext";
 import { JournalOwnershipProvider } from "./ds/JournalOwnershipContext";
 import { PinProvider } from "./chat/PinContext";
+import { SharedChannelsProvider } from "./discover/SharedChannelsContext";
 import { ReadWatermarkProvider } from "./chat/ReadWatermarkContext";
 import { CallLogProvider } from "./calls/CallLogContext";
 import { WakeNavigator } from "./push/WakeNavigator";
@@ -125,6 +128,11 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     store of shared and personal pins, the role-gated receive and the
  *     growth re-send. Beside the group-name provider, for the same reasons.
  *
+ *   <SharedChannelsProvider> — ADR-0059 section 6: the channels members
+ *     share inside a group, the per-group "Share my channels" switch and its
+ *     send, receive and growth re-send. Beside the pin provider, for the
+ *     same reasons (both receive paths feed it).
+ *
  *   <MailboxProvider> — the identity-mailbox receive loop (contact
  *     requests, acks, Welcomes) for the whole signed-in session, and
  *     the pending-request list the Contacts route renders. Inside
@@ -161,6 +169,7 @@ const App: Component = () => (
         <JournalOwnershipProvider>
         <GroupNameProvider>
         <PinProvider>
+        <SharedChannelsProvider>
         <ReadWatermarkProvider>
         <CallLogProvider>
         <MailboxProvider>
@@ -180,6 +189,16 @@ const App: Component = () => (
            * PublisherGroup open.
            */}
           <ChannelsHydration />
+          {/*
+           * ADR-0063 section 4: while the app is in front, channel posts are
+           * fetched and filed into the log the Feed ranks.
+           */}
+          <ChannelPostSync />
+          {/*
+           * ADR-0059 section 4: new subscribers to this device's channels are
+           * let in while the app is open, whatever screen is showing.
+           */}
+          <SubscriberAdmission />
           {/*
            * ADR-0060 — what this account publishes to be found by (the
            * Everyone publication, the contacts-of-contacts record and the
@@ -229,6 +248,7 @@ const App: Component = () => (
         </MailboxProvider>
         </CallLogProvider>
         </ReadWatermarkProvider>
+        </SharedChannelsProvider>
         </PinProvider>
         </GroupNameProvider>
         </JournalOwnershipProvider>

@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn a_group_signer_is_verified_by_the_server_under_the_registered_key() {
         let identity = MlsIdentity::generate("w").unwrap();
-        let group = MlsGroup::create(&identity).unwrap();
+        let group = MlsGroup::create(&identity, lakko_mls::GroupKind::Group).unwrap();
         let signer = group_signer(&group, &identity).unwrap();
         assert_eq!(signer.epoch(), group.epoch());
         let header = signer.sign("POST", "/ds/group/00/messages", "", b"body");

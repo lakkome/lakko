@@ -137,8 +137,7 @@ import { buildPeerTagMap, personForPeerTag, type PeerTagBinding, type PeerTagMap
 import { useProfiles } from "../profile/ProfileContext";
 import { memberNameOf } from "../profile/member-label";
 import { useGroupNames } from "../chat/GroupNameContext";
-import { decideConversationKind } from "../chat/conversation-kind";
-import { persistedConversationKind } from "../chat/conversation-kind-store";
+import { conversationKindOf } from "../chat/conversation-kind";
 import { groupTitle } from "../chat/group-title";
 import { paths } from "../routes/paths";
 import {
@@ -700,14 +699,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const own = chats.identity();
     const ownKeyB64 = own === null ? null : base64Encode(own.signaturePublicKey);
     const memberKeysB64 = memberKeysOf(entry.group);
-    const account = accountId();
     // The same title the chat header and the list show (ADR-0051 §5): the
-    // persisted kind decides group-vs-1x1, the shared name comes first.
-    const isGroup =
-      decideConversationKind(
-        account === null ? null : persistedConversationKind(account, groupIdB64),
-        memberKeysB64.length,
-      ) === "group";
+    // kind the conversation carries (ADR-0062) decides group-vs-1x1, the
+    // shared name comes first.
+    const isGroup = conversationKindOf(entry.group) === "group";
     return peerName({
       ownKeyB64,
       memberKeysB64,

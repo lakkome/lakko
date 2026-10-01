@@ -21,6 +21,7 @@ pub mod device_group;
 pub mod device_group_sync;
 pub mod error;
 pub mod group;
+pub mod group_kind;
 pub mod group_proposals;
 pub mod group_roles;
 pub mod history_bundle;
@@ -39,6 +40,7 @@ pub use group::{
     epoch_after_message, epoch_of_message, is_external_join_proposal_for, Group, Incoming,
     MemberAddition, MemberRecord, ProposalCommit, GROUP_ID_LEN,
 };
+pub use group_kind::{GroupKind, GROUP_KIND_BODY_LEN};
 pub use group_proposals::{ProposalKind, ProposalRecord};
 pub use group_roles::{account_committer_rank, committer_rank, OutgoingOwner, Role, RoleTable};
 pub use identity::Identity;
@@ -234,6 +236,27 @@ pub mod fuzz_api {
     #[must_use]
     pub fn decode_role_table(bytes: &[u8]) -> bool {
         crate::group_roles::RoleTable::decode(bytes).is_ok()
+    }
+
+    /// Decode the ADR-0062 `0xFF03` group-kind body (`GroupKind::decode`). The
+    /// bytes are attacker-touchable: the kind travels inside every Welcome a
+    /// group founder can craft, and `join_from_welcome` decodes it before the
+    /// group is kept. Returns `true` on a successful decode, and **panics**
+    /// (the harness's failure signal) if anything that decodes does not
+    /// re-encode to the identical bytes.
+    #[must_use]
+    pub fn decode_group_kind(bytes: &[u8]) -> bool {
+        match crate::group_kind::GroupKind::decode(bytes) {
+            Ok(kind) => {
+                assert_eq!(
+                    kind.encode().as_slice(),
+                    bytes,
+                    "a decoded group kind must re-encode to the identical bytes"
+                );
+                true
+            },
+            Err(_) => false,
+        }
     }
 
     /// Decode + verify an ADR-0050 device binding (`DeviceBinding::decode`).

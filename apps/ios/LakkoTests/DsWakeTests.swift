@@ -268,7 +268,7 @@ final class DsWakeTests: XCTestCase {
         let dsScope = WakeRecordingDsURLProtocol.freshScope()
         let ownerSeed = Data(repeating: 0x31, count: 32)
         let owner = try Identity.fromSeed(seed: ownerSeed)
-        let group = try Group.create(identity: owner)
+        let group = try Group.create(identity: owner, kind: .group)
         let groupIdHex = DsClient.pseudonymHex(try group.groupId())
 
         var accountIdBytes = Data(count: 16)
