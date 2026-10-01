@@ -66,6 +66,19 @@ public fun RestoreViaDevicePanel(
     onRecovered: suspend (PairingOrchestrator.JoinRecoveryOutcome) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // ADR-0049 section 2 (amended 2026-09-28) — the code route is the
+    // default; the QR route stays one tap away ("Show a QR code instead").
+    var showQr by remember { mutableStateOf(false) }
+    if (!showQr) {
+        DeviceLinkCodePanel(
+            loginHandle = loginHandle,
+            known = known,
+            onRecovered = onRecovered,
+            onShowQr = { showQr = true },
+            modifier = modifier,
+        )
+        return
+    }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var ui: RestoreViaDeviceUi by remember { mutableStateOf(RestoreViaDeviceUi.Idle) }
@@ -182,7 +195,7 @@ public fun RestoreViaDevicePanel(
 }
 
 /**
- * The sentence a failed restore shows (ADR-0058 section 6: from its kind,
+ * The sentence a failed restore shows (ADR-0061 section 6: from its kind,
  * never from the exception's text). Mirrors web `deviceRestoreErrorMessage`.
  */
 internal fun deviceRestoreErrorText(cause: Throwable): UiText = when (cause) {

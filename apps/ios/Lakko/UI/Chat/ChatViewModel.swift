@@ -892,14 +892,14 @@ public final class ChatViewModel: ObservableObject {
     /// than the raw text, and §6 row 7 is about not leaking a *refusal's*
     /// internal reason, not about hiding every error.
     ///
-    /// ADR-0058 section 6 — the non-refusal case now renders from its kind
+    /// ADR-0061 section 6 — the non-refusal case now renders from its kind
     /// too: the action's own `chat.error.*` key (``errorText(for:fallbackKey:)``).
     private func reportMembershipFailure(_ error: Error, op: String, key: String) {
         membershipError = Self.errorText(for: error, fallbackKey: key)
         NSLog("%@ failed: %@", op, error.localizedDescription)
     }
 
-    /// What the person is told when an action fails (ADR-0058 section 6): a
+    /// What the person is told when an action fails (ADR-0061 section 6): a
     /// membership refusal keeps its curated copy, a device clock that is off
     /// and a used-up allowance say so, and anything else is the action's own
     /// catalog message. The error's own prose is for the log only.

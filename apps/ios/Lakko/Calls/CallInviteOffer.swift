@@ -165,7 +165,7 @@ public enum CallInviteOfferRules {
     /// One sentence on what happened, one on what to do. Never ends the call,
     /// and says so, because a failure inside a live call reads as the call
     /// having broken when nothing has. Rendered from the kind of failure; the
-    /// failure's own prose goes to the log only (ADR-0058).
+    /// failure's own prose goes to the log only (ADR-0061).
     public static func failureMessage(for error: Error) -> String {
         if case LinkCallHostError.signedOut = error { return signedOutMessage }
         return Localization.text("call.invite.unavailable")

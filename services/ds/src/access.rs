@@ -6,14 +6,20 @@
 //! A journal with a registration row (`ds_group_access` / `ds_mailbox_access`)
 //! is **claimed**: its gated routes answer only a request that carries a valid
 //! [`lakko_ds_proof`] header. A journal with no row keeps the Phase 1.3
-//! posture (anyone who names it) - which is every journal until its owner
-//! claims it, and the rendezvous mailboxes by design.
+//! posture (anyone who names it) - which is every group journal until its
+//! owner claims it. A mailbox is different since ADR-0060: it is personal, so
+//! its `GET messages` needs the identity proof whether or not it is claimed
+//! (an unclaimed one has no key and always answers the uniform `401`); the
+//! proofless meeting points moved to their own `/ds/rendezvous/` namespace.
 //!
 //! What is gated: a claimed group's `GET`/`POST messages` and `GET knocks`
-//! (write tier); a claimed mailbox's `GET messages`.
-//! What is not: a mailbox `POST` (the cold inbox strangers are meant to
-//! reach) and a group's `POST knock` (it spends an anonymous token instead,
-//! ADR-0054 S3).
+//! (write tier); every mailbox's `GET messages` (the identity proof, whether
+//! or not the mailbox is claimed, ADR-0060).
+//! A mailbox `POST` is gated by reach keys, not here (ADR-0060,
+//! `src/reach.rs`): ADR-0053 left it the open cold inbox, and a claimed
+//! mailbox is now closed to a stranger.
+//! What is not gated: a group's `POST knock` (it spends an anonymous token
+//! instead, ADR-0054 S3).
 //!
 //! **Who registers epoch keys is ADR-0057's, not this module's**
 //! (`src/ownership.rs`): a journal is claimed under a root key, and only the
@@ -205,7 +211,7 @@ async fn mailbox_key(
 /// Parse the proof header and verify it under `key_for_epoch`, touching no
 /// store. Every failure is [`refused`]. The nonce is not yet consumed: the
 /// caller does that with [`consume_nonce`] on the connection it decides on.
-fn verify_header(
+pub(crate) fn verify_header(
     headers: &HeaderMap,
     parts: &RequestParts<'_>,
     key_for_epoch: impl Fn(u64) -> Option<VerifyingKey>,
@@ -260,7 +266,7 @@ async fn check_proof(
     }
 }
 
-fn parts<'a>(method: &'a Method, uri: &'a Uri, body: &'a [u8]) -> RequestParts<'a> {
+pub(crate) fn parts<'a>(method: &'a Method, uri: &'a Uri, body: &'a [u8]) -> RequestParts<'a> {
     RequestParts {
         method: method.as_str(),
         canonical_path: uri.path(),
@@ -276,7 +282,13 @@ pub(crate) enum Gated {
     Unclaimed,
     /// The group is claimed and the request carried a valid proof - the
     /// caller holds an epoch key of the tier it asked for.
-    Proven,
+    Proven {
+        /// The newest epoch registered for the group. A read hands it to the
+        /// member, so a device that has consumed the whole journal and is
+        /// still behind it can tell it will never catch up (its state forked
+        /// from the chain) rather than wait forever.
+        latest_epoch: u64,
+    },
 }
 
 /// Gate a group-journal request: open when the group is unclaimed, else a
@@ -305,17 +317,22 @@ pub(crate) async fn gate_group(
         Access::Read => keys.len(),
         Access::Write => WRITE_EPOCHS.min(keys.len()),
     };
+    // `group_keys` orders newest first.
+    let latest_epoch = keys[0].0;
     let usable = &keys[..tier];
     let req = parts(method, uri, body);
     check_proof(&state.db, group_id, headers, &req, |epoch| {
         usable.iter().find(|(e, _)| *e == epoch).map(|(_, k)| *k)
     })
     .await?;
-    Ok(Gated::Proven)
+    Ok(Gated::Proven { latest_epoch })
 }
 
-/// Gate a mailbox read: open when the mailbox is unclaimed, else a valid
-/// proof under the identity key at `MAILBOX_EPOCH`.
+/// Gate a mailbox read: a valid proof under the identity key at
+/// `MAILBOX_EPOCH`. An unclaimed mailbox has no key, so every read of it is
+/// the uniform [`refused`] - the same answer a claimed mailbox gives a read
+/// without a proof - and the answer never tells whether a mailbox is claimed
+/// (ADR-0060; proofless meeting points use `/ds/rendezvous/`).
 pub(crate) async fn gate_mailbox_read(
     state: &AppState,
     device_id: &[u8; PSEUDONYM_LEN],
@@ -324,7 +341,7 @@ pub(crate) async fn gate_mailbox_read(
     headers: &HeaderMap,
 ) -> Result<(), HandlerError> {
     let Some(key) = mailbox_key(&state.db, device_id).await? else {
-        return Ok(());
+        return Err(refused());
     };
     let req = parts(method, uri, &[]);
     check_proof(&state.db, device_id, headers, &req, |epoch| {
@@ -604,7 +621,7 @@ pub(crate) async fn prune_nonces(pool: &MySqlPool) {
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::test_support::*;
     use axum::body::Body;
@@ -632,7 +649,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        let (status, _) = send(
+        let (status, body) = send(
             &app,
             Req {
                 method: "GET",
@@ -643,6 +660,9 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // An unclaimed journal has no chain to report.
+        assert!(parsed.get("latest_epoch").is_none());
     }
 
     /// ADR-0054: the wake header is parsed before the append, so a malformed
@@ -862,6 +882,37 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// A signed read names the newest registered epoch, so a device that has
+    /// read the whole journal and is still behind it knows its state forked
+    /// from the chain and will never catch up by waiting.
+    #[tokio::test]
+    async fn a_signed_read_names_the_latest_epoch() {
+        let Some((app, _pool)) = app().await else {
+            return;
+        };
+        let gid = fresh_name(12);
+        let k3 = key(3);
+        assert_eq!(
+            claim(&app, &gid, &fresh_signer(0x5c), 3, &k3).await,
+            StatusCode::NO_CONTENT
+        );
+        let uri = messages_uri("group", &gid);
+        let (status, body) = send(
+            &app,
+            Req {
+                method: "GET",
+                uri: &format!("{uri}?after=0"),
+                body: vec![],
+                proof: Some((&k3, 3)),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(0));
+        assert_eq!(parsed["latest_epoch"], 3);
+    }
+
     #[tokio::test]
     async fn a_replayed_proof_is_refused() {
         let Some((app, _pool)) = app().await else {
@@ -899,7 +950,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_claimed_mailbox_is_read_by_its_owner_and_written_by_anyone() {
+    async fn a_claimed_mailbox_is_read_by_its_owner_only() {
         let Some((app, _pool)) = app().await else {
             return;
         };
@@ -939,7 +990,8 @@ mod tests {
             assert_eq!(status, StatusCode::NO_CONTENT);
         }
         let uri = messages_uri("mailbox", &device);
-        // Anyone still posts.
+        // A proofless post is answered as stored; since ADR-0060 a claimed,
+        // closed mailbox drops it (`src/reach.rs` covers the reach keys).
         let (status, _) = send(
             &app,
             Req {
@@ -986,7 +1038,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(0));
     }
 
     #[tokio::test]

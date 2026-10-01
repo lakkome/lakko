@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Interface localization (ADR-0058) — UniFFI surface.
+//! Interface localization (ADR-0061) — UniFFI surface.
 //!
 //! Mirror of `lakko-ffi-wasm/src/l10n.rs` over the same [`lakko_l10n`] core,
 //! so iOS and Android pick the language, render plurals and accept a signed

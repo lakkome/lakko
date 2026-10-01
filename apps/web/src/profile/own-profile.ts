@@ -78,6 +78,32 @@ export function saveOwnProfile(
   return next;
 }
 
+/**
+ * ADR-0048 section 4a — adopt the own name another device of this account
+ * sent over the DeviceGroup. Written only when `updatedAtMs` is strictly
+ * greater than the stored stamp, and the stamp is kept exactly as received
+ * (never re-stamped), so a later save here still orders after it. Returns
+ * the stored profile when it was adopted, `null` otherwise. A stamp beyond
+ * what a JS number holds exactly is refused.
+ */
+export function adoptOwnProfile(
+  accountId: string,
+  displayName: string | null,
+  updatedAtMs: bigint,
+  storage: OwnProfileStorage | null = defaultStorage(),
+): OwnProfile | null {
+  if (storage === null) return null;
+  if (updatedAtMs <= 0n || updatedAtMs > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  const previous = loadOwnProfile(accountId, storage);
+  if (updatedAtMs <= BigInt(previous.updatedAtMs)) return null;
+  const next: OwnProfile = {
+    displayName: displayName === "" ? null : displayName,
+    updatedAtMs: Number(updatedAtMs),
+  };
+  storage.setItem(KEY_PREFIX + accountId, JSON.stringify(next));
+  return next;
+}
+
 /** Drop an account's own profile (forget device). */
 export function clearOwnProfile(
   accountId: string,

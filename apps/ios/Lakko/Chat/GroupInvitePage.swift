@@ -107,7 +107,7 @@ public struct GroupInviteHeadline: Equatable {
     /// Nothing is invented and the page does not say why. (A fragment under
     /// which the preview does not open is not this state: that link is refused
     /// as damaged, see ``groupInviteDamagedMessage``.) In the interface
-    /// language of the moment it is read (ADR-0058).
+    /// language of the moment it is read (ADR-0061).
     public static var noPreview: GroupInviteHeadline {
         GroupInviteHeadline(
             lead: Localization.text("invite.group.lead_anonymous_unnamed"),

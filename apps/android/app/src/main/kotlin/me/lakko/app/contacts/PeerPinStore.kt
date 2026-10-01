@@ -58,7 +58,8 @@ import me.lakko.app.transparency.LogVerifyStatus
  * ## Storage layout
  *
  * `EncryptedSharedPreferences` named `"lakko-peer-pins"`. Keys:
- * `"pin-v1:<accountIdB64>"`. Value is a `|`-separated record (the pubkey
+ * `"pin-v2:<ownerAccountIdB64>:<peerAccountIdB64>"` — one namespace per
+ * signed-in account (see [PeerPinStore]). Value is a `|`-separated record (the pubkey
  * base64 never contains `|`), parsed front-to-back so older shapes stay
  * readable (back-compat):
  *   * `"<pubkeyB64>|<marker>"` — the original two-field shape.
@@ -229,14 +230,28 @@ public interface PinStore {
  *
  * Construct with an Android [Context]; the prefs are opened against
  * `context.applicationContext` so the store outlives any Activity.
+ *
+ * **Scoped to the OWNING account** ([ownerAccountIdB64], the signed-in
+ * account whose trust decisions these are), like the accepted list in
+ * [AcceptedContactsStore]: a second account signed in on the same phone
+ * neither sees nor inherits the first account's pins. The key is
+ * `pin-v2:<ownerAccountIdB64>:<peerAccountIdB64>`; the retired device-wide
+ * `pin-v1:` keys are never read. [deleteForOwner] drops one owner's pins
+ * (forget device).
  */
-public class PeerPinStore(context: Context) : PinStore {
+public class PeerPinStore(
+    context: Context,
+    /** The signed-in account these pins belong to, standard base64. */
+    private val ownerAccountIdB64: String,
+) : PinStore {
 
     private val appContext: Context = context.applicationContext
 
+    private fun keyOf(accountIdB64: String): String = pinKey(ownerAccountIdB64, accountIdB64)
+
     override fun readPin(accountIdB64: String): Pin? {
         val raw = openPrefs(appContext)
-            .getString(KEY_PREFIX + accountIdB64, null)
+            .getString(keyOf(accountIdB64), null)
             ?: return null
         // Stored as one of (KT-log back-compat, see the class doc):
         //   "<pubkeyB64>|<marker>"                                   (original)
@@ -318,7 +333,7 @@ public class PeerPinStore(context: Context) : PinStore {
     }
 
     override fun removePin(accountIdB64: String) {
-        openPrefs(appContext).edit().remove(KEY_PREFIX + accountIdB64).apply()
+        openPrefs(appContext).edit().remove(keyOf(accountIdB64)).apply()
     }
 
     override fun recordLogStatus(accountIdB64: String, logStatus: LogVerifyStatus): Boolean {
@@ -381,12 +396,44 @@ public class PeerPinStore(context: Context) : PinStore {
         pinnedLogVersion: Long?,
     ) {
         val value = serializePin(pubkeyB64, marker, logStatus, isReset, pinnedLogVersion)
-        openPrefs(appContext).edit().putString(KEY_PREFIX + accountIdB64, value).apply()
+        openPrefs(appContext).edit().putString(keyOf(accountIdB64), value).apply()
     }
 
     public companion object {
         private const val PREFS_NAME = "lakko-peer-pins"
-        private const val KEY_PREFIX = "pin-v1:"
+        private const val KEY_PREFIX = "pin-v2:"
+
+        /** The retired device-wide prefix (one namespace for every account).
+         *  Never read; [deleteForOwner] removes any such rows. */
+        private const val LEGACY_KEY_PREFIX = "pin-v1:"
+
+        /** The storage key of [peerAccountIdB64]'s pin as held by
+         *  [ownerAccountIdB64]. Visible for the unit test. */
+        internal fun pinKey(ownerAccountIdB64: String, peerAccountIdB64: String): String =
+            "$KEY_PREFIX$ownerAccountIdB64:$peerAccountIdB64"
+
+        /** The keys among [keys] that belong to [ownerAccountIdB64], plus any
+         *  retired device-wide `pin-v1:` rows. Visible for the unit test. */
+        internal fun keysOwnedBy(keys: Collection<String>, ownerAccountIdB64: String): List<String> {
+            val prefix = "$KEY_PREFIX$ownerAccountIdB64:"
+            return keys.filter { it.startsWith(prefix) || it.startsWith(LEGACY_KEY_PREFIX) }
+        }
+
+        /** The pin store of the account bound in [AcceptedContactsStore]
+         *  (the signed-in one), or `null` when no session is live. */
+        public fun forBoundAccount(context: Context): PeerPinStore? =
+            AcceptedContactsStore.boundAccountB64?.let { PeerPinStore(context, it) }
+
+        /** Forget device: drop every pin [ownerAccountIdB64] holds. Other
+         *  accounts' pins stay. Best-effort. */
+        public fun deleteForOwner(context: Context, ownerAccountIdB64: String) {
+            val prefs = openPrefs(context)
+            val doomed = keysOwnedBy(prefs.all.keys, ownerAccountIdB64)
+            if (doomed.isEmpty()) return
+            val edit = prefs.edit()
+            for (key in doomed) edit.remove(key)
+            edit.apply()
+        }
 
         /**
          * Serialize a pin record to the `|`-separated on-disk form. Visible

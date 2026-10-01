@@ -310,7 +310,7 @@ public object AttachmentBridge {
         bytes: ULong,
         strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
     ): String {
-        // ADR-0058: the number in the interface language's digits, the unit
+        // ADR-0061: the number in the interface language's digits, the unit
         // from the catalog (`common.size.*`).
         val locale = java.util.Locale.forLanguageTag(strings.language)
         val (key, value) = when {

@@ -212,7 +212,7 @@ private struct ChannelOwnerView: View {
     @State private var hiddenCursors: Set<UInt64> = []
     @State private var loading = true
     @FocusState private var composerFocused: Bool
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
     private var posts: [PostView] {

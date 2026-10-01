@@ -41,7 +41,7 @@ struct CallsScreen: View {
     /// Titles come from the conversation list's own resolver, so a call and
     /// its chat are never named two ways.
     @ObservedObject var conversations: ChatListViewModel
-    /// ADR-0058 — the title follows the interface language.
+    /// ADR-0061 — the title follows the interface language.
     @ObservedObject private var l10n = Localization.shared
     /// Start a group video call and land in it. Returns the one sentence to
     /// show when it could not start (another call holds the slot, or there is
@@ -65,7 +65,7 @@ struct CallsScreen: View {
     @State private var startError: UiText?
 
     private let calendar = Calendar.current
-    /// The interface language, so day headings and times follow it (ADR-0058).
+    /// The interface language, so day headings and times follow it (ADR-0061).
     private var locale: Locale { l10n.locale }
 
     var body: some View {

@@ -17,10 +17,8 @@ import Security
 ///
 /// ## Posture
 ///
-///   * `kSecClassGenericPassword`, one item holding the whole
-///     JSON-encoded `[PersistedSubscriberKey]` blob (the existing
-///     single-blob shape, not per-account — matches the legacy
-///     `UserDefaults` key it replaces).
+///   * `kSecClassGenericPassword`, one item per account holding the whole
+///     JSON-encoded `[PersistedSubscriberKey]` blob of that account.
 ///   * `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` — device-bound,
 ///     no iCloud Keychain sync, background read allowed after first unlock.
 ///   * Hardware-isolated class key (Secure Enclave + device passcode);
@@ -30,17 +28,24 @@ public enum ChannelSubscriberKeyStore {
     /// Service tag — versioned so a future layout change can land beside v1.
     public static let serviceTag: String = "me.lakko.channel-subscriber-keys.v1"
 
-    /// Single account slot — the blob is global to the install (the legacy
-    /// `UserDefaults` key was not account-namespaced either).
-    private static let account: String = "subscriber-keys"
+    /// The item's account slot is `"subscriber-keys|<accountIdB64>"`: one blob per
+    /// Lakko ACCOUNT, keyed per channel inside (2026-09-30). The blob used to
+    /// be global to the install (slot `"subscriber-keys"`), so a second account signed
+    /// in on the same phone inherited the first one's channel keys. That
+    /// device-wide item is never read now; ``deleteLegacy()`` removes it.
+    static let legacyAccount: String = "subscriber-keys"
+
+    static func itemAccount(_ accountIdB64: String) -> String {
+        legacyAccount + "|" + accountIdB64
+    }
 
     /// Persist the encoded keypair `blob`, replacing any existing item.
-    public static func save(_ blob: Data) {
-        delete()
+    public static func save(_ blob: Data, accountIdB64: String) {
+        delete(accountIdB64: accountIdB64)
         let addQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: serviceTag,
-            kSecAttrAccount: account,
+            kSecAttrAccount: itemAccount(accountIdB64),
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecValueData: blob,
         ]
@@ -51,11 +56,11 @@ public enum ChannelSubscriberKeyStore {
     }
 
     /// Read the persisted keypair blob, or `nil` when absent.
-    public static func load() -> Data? {
+    public static func load(accountIdB64: String) -> Data? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: serviceTag,
-            kSecAttrAccount: account,
+            kSecAttrAccount: itemAccount(accountIdB64),
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne,
         ]
@@ -68,11 +73,22 @@ public enum ChannelSubscriberKeyStore {
     }
 
     /// Delete the persisted blob (un-follow-all / logout / `forgetDevice`).
-    public static func delete() {
+    public static func delete(accountIdB64: String) {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: serviceTag,
-            kSecAttrAccount: account,
+            kSecAttrAccount: itemAccount(accountIdB64),
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
+    /// Delete the device-wide item this store used before it was per account.
+    /// Nothing reads it; forget-device removes it.
+    public static func deleteLegacy() {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: serviceTag,
+            kSecAttrAccount: legacyAccount,
         ]
         SecItemDelete(query as CFDictionary)
     }

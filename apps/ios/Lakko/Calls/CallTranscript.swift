@@ -102,7 +102,7 @@ public struct CallTranscriptRow: Equatable, Sendable {
     // MARK: - Copy
 
     /// The sentence the conversation shows, in the interface language
-    /// (ADR-0058). The duration stays a clock value (`12:04`).
+    /// (ADR-0061). The duration stays a clock value (`12:04`).
     public var text: String {
         switch outcome {
         case .answered(let durationMs):

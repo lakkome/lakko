@@ -108,7 +108,7 @@ public enum AnonTokenUnavailable: Error, Equatable, LocalizedError {
 }
 
 /// The copy for token outcomes (`docs/ux/anti-abuse.md` section 3), from the
-/// catalog (ADR-0058).
+/// catalog (ADR-0061).
 public enum AnonTokenCopy {
     /// Search (a username or channel lookup) - allowance used up.
     public static var searchAllowanceUsed: String {

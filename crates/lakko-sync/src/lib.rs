@@ -20,6 +20,11 @@
 //!   or [`Resolved::Empty`].
 //! - [`draft`] — per-group [`Draft`] with the same LWW rule. One
 //!   draft per group, replaceable by a strictly-greater HLC.
+//! - [`synced`] — the multi-device fold of ADR-0058: chat folders plus the
+//!   flags / read cursors / drafts / conversation order maps the
+//!   DeviceGroup carries, one commutative, associative, idempotent
+//!   [`SyncedState`] every client consumes over the FFI, its persistence
+//!   codec, and the catch-up snapshot.
 //!
 //! ## Why no character-level CRDT
 //!
@@ -51,10 +56,12 @@
 pub mod draft;
 pub mod edit;
 pub mod hlc;
+pub mod synced;
 
 pub use draft::{merge_drafts, Draft};
 pub use edit::{EditChain, EditOp, Resolved};
 pub use hlc::{Hlc, HybridLogicalClock};
+pub use synced::{should_send_snapshot, SyncedState};
 
 /// Fuzz-only entry points. Marked `#[doc(hidden)]` — this is the sole
 /// harness surface for `crates/lakko-sync/fuzz/`, **not** part of the

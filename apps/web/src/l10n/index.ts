@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The app's one localization runtime (ADR-0058), wired to the real wasm
+ * The app's one localization runtime (ADR-0061), wired to the real wasm
  * core, the compiled catalogs in `./catalog`, local storage and the
  * document. `main.tsx` calls {@link bootstrapL10n} before the first paint;
  * components call {@link t}.

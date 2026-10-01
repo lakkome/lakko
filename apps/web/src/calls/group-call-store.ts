@@ -109,3 +109,27 @@ export function clearGroupCallStore(): void {
   records.clear();
   setVersion(version() + 1);
 }
+
+/** Forget device / Delete account: drop the account's records, in memory and
+ *  in this tab's session storage. Another account's are left alone. */
+export function clearGroupCallsForAccount(accountId: string): void {
+  const memoryPrefix = `${accountId}|`;
+  for (const k of [...records.keys()]) {
+    if (k.startsWith(memoryPrefix)) records.delete(k);
+  }
+  try {
+    const store = globalThis.sessionStorage;
+    if (store !== undefined) {
+      const prefix = `lakko:group-calls:${accountId}:`;
+      const victims: string[] = [];
+      for (let i = 0; i < store.length; i += 1) {
+        const k = store.key(i);
+        if (k !== null && k.startsWith(prefix)) victims.push(k);
+      }
+      for (const k of victims) store.removeItem(k);
+    }
+  } catch {
+    /* storage blocked: nothing was stored either */
+  }
+  setVersion(version() + 1);
+}

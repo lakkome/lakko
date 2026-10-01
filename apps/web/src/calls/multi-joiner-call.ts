@@ -755,6 +755,10 @@ export class MultiJoinerCall {
         // call group instead (`broadcastOwnProfile`), and surface through
         // `onMaybeCommit` as an MLS application message. Dropped here.
         break;
+      case K.RegistrarSeed:
+        // ADR-0057 - no client consumes a registrar seed yet. Never a
+        // commit, never rendered: dropped.
+        break;
       default:
         break;
     }

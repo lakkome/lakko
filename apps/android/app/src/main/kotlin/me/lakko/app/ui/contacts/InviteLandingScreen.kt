@@ -124,6 +124,7 @@ public fun InviteLandingScreen(
                 body = t("invite.link.damaged"),
                 onDone = onDone,
             )
+            InviteLandingState.Damaged -> DamagedPanel(onDone = onDone)
             InviteLandingState.RateLimited -> RateLimitedPanel(
                 onRetry = viewModel::retry,
                 onDone = onDone,
@@ -133,7 +134,7 @@ public fun InviteLandingScreen(
                 body = t("common.error.session_ended"),
                 onDone = onDone,
             )
-            // The failure's prose went to the log (ADR-0058 section 6).
+            // The failure's prose went to the log (ADR-0061 section 6).
             is InviteLandingState.Failed -> FailedPanel(
                 onRetry = viewModel::retry,
                 onDone = onDone,
@@ -256,6 +257,21 @@ private fun InfoPanel(
         onClick = onDone,
         modifier = Modifier.fillMaxWidth(),
     ) { Text(t("common.done")) }
+}
+
+/** Sealed links (`docs/ux/group-invite-page.md` section 3): the one
+ *  sentence and Done, nothing else — nothing was opened. */
+@Composable
+private fun DamagedPanel(onDone: () -> Unit) {
+    Text(
+        text = me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY,
+        style = MaterialTheme.typography.bodyMedium,
+    )
+    Spacer(Modifier.height(24.dp))
+    Button(
+        onClick = onDone,
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text("Done") }
 }
 
 /** ADR-0054 UX section 3 - the day's allowance of invite tokens is used up:

@@ -18,7 +18,7 @@ import { joinList, t } from "../l10n";
 /**
  * The new-group form's default label.
  *
- * This and the stand-ins below are MARKERS, not screen text (ADR-0058): the
+ * This and the stand-ins below are MARKERS, not screen text (ADR-0061): the
  * store keeps them in English whatever the interface language, and every
  * screen names the conversation through {@link groupTitle}, which reads them
  * as "unnamed" and renders the members' names or `chat.group.default_name`

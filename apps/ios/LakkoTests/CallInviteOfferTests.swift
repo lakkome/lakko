@@ -90,7 +90,7 @@ final class CallInviteOfferRulesTests: XCTestCase {
 
     /// Section 5: "One sentence on what happened and that it can be tried
     /// again. The call is unaffected and does not end." Rendered from the kind
-    /// of failure (ADR-0058): the failure's own prose never reaches the screen.
+    /// of failure (ADR-0061): the failure's own prose never reaches the screen.
     func testTheFailureSaysWhatHappenedAndThatTheCallIsStillRunning() {
         struct Refused: Error {}
         let message = Rules.failureMessage(for: Refused())

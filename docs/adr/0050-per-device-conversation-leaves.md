@@ -261,11 +261,22 @@ platform, no timestamps beyond `updated_at`. Recorded in section 6.
 
 ### 2.7 Welcomes and mailboxes
 
-A device polls two DS mailboxes: the **account** mailbox
-(`IdentityPseudonym(account_key)`) for contact requests, acks and legacy
-Welcomes, and its **device** mailbox (`IdentityPseudonym(device_key)`) for
-Welcomes to its own leaf. The sweep already addresses Welcomes by added leaf
-key; nothing changes there. Contact requests stay sealed to the account X25519
+**Amended 2026-09-29 by [ADR-0060](0060-scoped-discovery.md) (the
+maintainer's call):** a Welcome goes to the **account** mailbox
+(`IdentityPseudonym(account_key)`) of the account the added leaf is bound to,
+resolved through the leaf's device binding; one write per added account, not
+per leaf. Every device of the account already polls that mailbox for contact
+requests and acks; a device that cannot open a Welcome (it names a sibling
+leaf) drops it. The **device** mailbox receives no writes any more: ADR-0060
+closes every claimed mailbox behind reach keys, a device key is readable by
+every co-member and by anyone fetching the account's KeyPackages, and
+registering the account's reach keys on each device mailbox would multiply
+the key set and the delegations by the device count. A device still claims
+its mailbox (so it is closed, with no reach keys) and stops polling it.
+
+The text this replaces: a device polled its account mailbox for contact
+requests, acks and legacy Welcomes, and its device mailbox for Welcomes to
+its own leaf, addressed by added leaf key. Contact requests stay sealed to the account X25519
 key, so any device can accept one; the accepted contact then syncs (2.9).
 
 ### 2.8 Pairing and confirmation: the fan-out
@@ -280,7 +291,7 @@ one hook covers both. Order:
    `knownGroupIds`; fetch the new device's KeyPackage from discovery (poll with a
    bounded wait, since step 1 races); for each group propose a self-service
    Add; sweep where it is the acting committer.
-3. New device: receive one Welcome per group in its device mailbox, join,
+3. New device: receive one Welcome per group in its account mailbox, join,
    persist; the history bundle (2.9) now lands under real groups; reconcile the
    durable cursor so the bundled tail is not re-fetched.
 

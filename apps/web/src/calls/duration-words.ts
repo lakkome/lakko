@@ -3,7 +3,7 @@
 
 /**
  * A call's length said in words, for a screen reader (`docs/ux/calls.md` §8)
- * and the call history, in the interface language (ADR-0058).
+ * and the call history, in the interface language (ADR-0061).
  *
  * Each unit is its own plural message (`common.duration.hours` / `minutes` /
  * `seconds`), and the units present are joined pair by pair through

@@ -17,9 +17,13 @@
 //!   2. (state, blinded_b64) = blind(normalised)
 //!   3. POST /discovery/oprf { pow, blinded: blinded_b64 }
 //!         → { evaluated: evaluated_b64 }
-//!   4. oprf_hash = state.finalize(normalised, evaluated_b64)
-//!   5. POST /discovery/{register, lookup} { pow, account_id?, oprf_hash }
+//!   4. done = state.finalize(evaluated_b64)
+//!   5. POST /discovery/{register, lookup} { account_id?, oprf_hash: done.lookup_key() }
 //! ```
+//!
+//! The OPRF output (`done.output()`) stays on the client: public records
+//! are sealed under keys derived from it, and the server stores only the
+//! one-way lookup key (see the `blinder` module).
 //!
 //! The server never sees `normalised` — only the blinded element.
 //! Two different clients looking up the same username produce the
@@ -65,6 +69,19 @@
 //! and lookup alike. `@channel` handles ([`OprfBlinder::blind_channel`])
 //! are a separate namespace with their own (unchanged) policy.
 //!
+//! ## Display-name search (ADR-0060 section 5)
+//!
+//! A name is found by word prefix, ignoring case, repeated spaces and
+//! accents. [`normalize_name_for_search`] is the one normalised form,
+//! [`name_search_terms`] the terms a name is published under,
+//! [`name_query_term`] the one term a query looks up, and
+//! [`name_matches_query`] the local filter over what comes back.
+//! [`OprfBlinder::blind_name_term`] blinds a term in a third OPRF namespace,
+//! domain-separated from usernames and `@channel` handles. It lives here
+//! rather than in `lakko-contacts` (where the ADR places it) because it needs
+//! the `unicode-normalization` tables, which the iOS notification extension
+//! that links `lakko-contacts` must not carry; see the `name` module.
+//!
 //! ## Security notes
 //!
 //! * The OPRF blinds the username, not the request envelope. The
@@ -82,11 +99,19 @@
 
 mod blinder;
 mod error;
+mod name;
 mod normalize;
 
-pub use blinder::{OprfBlinder, OPRF_HASH_LEN};
+pub use blinder::{
+    discovery_lookup_key, OprfBlinder, OprfFinalized, DISCOVERY_LOOKUP_DOMAIN, OPRF_HASH_LEN,
+};
 pub use error::DiscoveryClientError;
 pub use lakko_contacts::username::{UsernameError, USERNAME_MAX_LEN, USERNAME_MIN_LEN};
+pub use name::{
+    is_name_term, name_matches_query, name_query_term, name_search_terms,
+    normalize_name_for_search, MAX_NAME_TERMS, NAME_INPUT_MAX_BYTES, NAME_SEARCH_MIN_CHARS,
+    NAME_TERM_MAX_CHARS, NAME_TERM_MIN_CHARS,
+};
 pub use normalize::{login_handle, normalize_username, validate_username};
 
 /// Lakko VOPRF cipher suite — Ristretto255-SHA512.

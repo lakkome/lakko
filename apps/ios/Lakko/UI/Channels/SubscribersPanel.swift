@@ -21,7 +21,7 @@ struct SubscribersPanel: View {
     @State private var subscribers: [String]?
     @State private var busyPk: String?
     @State private var error: UiText?
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
     private enum Status { case delivered, auto, failed }
     @State private var statusByPk: [String: Status] = [:]

@@ -260,13 +260,14 @@ public final class DiscoveryClient {
             OprfRequest(blinded: blinder.blindedB64())
         )
 
-        let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
-        let oprfHashB64 = base64Encode(oprfHashBytes)
+        // ADR-0060 §5: only the lookup key goes to discovery; the OPRF
+        // output never leaves the device.
+        let lookupKey = try blinder.finalize(evaluatedB64: oprfResp.evaluated).lookupKey
 
         let resp = try await register(
             RegisterRequest(
                 accountId: base64Encode(accountId),
-                oprfHash: oprfHashB64
+                oprfHash: base64Encode(lookupKey)
             )
         )
         guard resp.ok else {
@@ -298,11 +299,10 @@ public final class DiscoveryClient {
             OprfRequest(blinded: blinder.blindedB64())
         )
 
-        let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
-        let oprfHashB64 = base64Encode(oprfHashBytes)
+        let lookupKey = try blinder.finalize(evaluatedB64: oprfResp.evaluated).lookupKey
 
         guard let resp = try await lookupRaw(
-            LookupRequest(oprfHash: oprfHashB64)
+            LookupRequest(oprfHash: base64Encode(lookupKey))
         ) else {
             return LookupResult(
                 normalisedUsername: normalisedUsername,
@@ -313,6 +313,125 @@ public final class DiscoveryClient {
             normalisedUsername: normalisedUsername,
             account: base64Decode(resp.accountId)
         )
+    }
+
+    // MARK: - ADR-0060 scoped discovery
+
+    /// One OPRF round over `username` (one `discovery-lookup` token). The
+    /// result carries both halves (ADR-0060 §5): `lookupKey` is what a
+    /// username certificate binds and the only one that may go to discovery;
+    /// `output` never leaves the device and is the key an introduction record
+    /// is opened under. Throws on a name outside the rule.
+    public func usernameOprf(_ username: String) async throws -> OprfResult {
+        _ = try requireValidUsername(
+            username, emptyError: DiscoveryClientError.argument("username must be non-empty"))
+        let blinder = try OprfBlinder.blind(username: username)
+        let evaluated = try await oprfEvaluate(OprfRequest(blinded: blinder.blindedB64()))
+        return try blinder.finalize(evaluatedB64: evaluated.evaluated)
+    }
+
+    /// One OPRF round over a name search term, in the name domain
+    /// (`OprfBlinder.blindNameTerm`, one `discovery-lookup` token). As with
+    /// ``usernameOprf(_:)``: `lookupKey` for discovery, `output` for records.
+    public func nameTermOprf(_ term: String) async throws -> OprfResult {
+        let blinder = try OprfBlinder.blindNameTerm(term: term)
+        let evaluated = try await oprfEvaluate(OprfRequest(blinded: blinder.blindedB64()))
+        return try blinder.finalize(evaluatedB64: evaluated.evaluated)
+    }
+
+    /// `GET /discovery/username-certificate` (bearer) — this account's
+    /// username certificate, signed now; `nil` when the account has no
+    /// username (`404`).
+    public func fetchUsernameCertificate() async throws -> Data? {
+        let endpoint = "/discovery/username-certificate"
+        var request = URLRequest(url: try buildURL(endpoint: endpoint))
+        request.httpMethod = "GET"
+        attachAuthorizationHeader(to: &request)
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
+        } catch {
+            throw DiscoveryClientError.network(endpoint: endpoint, underlying: error)
+        }
+        guard let http = raw.1 as? HTTPURLResponse else {
+            throw DiscoveryClientError.http(status: 0, endpoint: endpoint, body: "non-HTTP response")
+        }
+        if http.statusCode == 404 { return nil }
+        guard (200..<300).contains(http.statusCode) else {
+            throw DiscoveryClientError.http(
+                status: http.statusCode, endpoint: endpoint,
+                body: Self.truncate(String(data: raw.0, encoding: .utf8) ?? "<binary>"))
+        }
+        let parsed = try decoder.decode(UsernameCertificateWire.self, from: raw.0)
+        return base64Decode(parsed.usernameCertificateB64)
+    }
+
+    /// `PUT /discovery/visibility` (bearer) — enter Everyone with the lookup
+    /// keys (`OprfResult.lookupKey`, never the OPRF output) of every name
+    /// search term and the public record (`composePublicRecord`, sealed under
+    /// the OPRF outputs), or leave it (`public == false`, no terms, no record).
+    public func putVisibility(
+        public isPublic: Bool, nameTermLookupKeys: [Data], publicRecord: Data?
+    ) async throws {
+        let endpoint = "/discovery/visibility"
+        var request = URLRequest(url: try buildURL(endpoint: endpoint))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        attachAuthorizationHeader(to: &request)
+        request.httpBody = try encoder.encode(VisibilityWireRequest(
+            isPublic: isPublic, nameTermsB64: nameTermLookupKeys.map { base64Encode($0) },
+            publicRecordB64: publicRecord.map { base64Encode($0) }))
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
+        } catch {
+            throw DiscoveryClientError.network(endpoint: endpoint, underlying: error)
+        }
+        guard let http = raw.1 as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let status = (raw.1 as? HTTPURLResponse)?.statusCode ?? 0
+            throw DiscoveryClientError.http(
+                status: status, endpoint: endpoint,
+                body: Self.truncate(String(data: raw.0, encoding: .utf8) ?? "<binary>"))
+        }
+    }
+
+    /// `POST /discovery/name/lookup` (anonymous) — the people (at most 20) in
+    /// Everyone who published the name term whose lookup key
+    /// (`OprfResult.lookupKey`, never the OPRF output) is `termLookupKey`,
+    /// each with the public record the searcher opens with the term's OPRF
+    /// output.
+    public func nameLookup(termLookupKey: Data) async throws -> [PublicAccountHit] {
+        let resp: NameLookupWireResponse = try await postAnonymous(
+            endpoint: "/discovery/name/lookup",
+            body: NameLookupWireRequest(oprfHashB64: base64Encode(termLookupKey)),
+            context: nil)
+        return resp.results.compactMap { row in
+            guard let accountId = base64Decode(row.accountIdB64) else { return nil }
+            return PublicAccountHit(
+                accountId: accountId, publicRecord: base64Decode(row.publicRecordB64))
+        }
+    }
+
+    /// `POST /discovery/lookup` (anonymous) for a username whose OPRF round
+    /// the caller already ran: `lookupKey` is `OprfResult.lookupKey`. `nil`
+    /// when the name is not registered or its owner is not in Everyone.
+    public func lookupPublic(lookupKey: Data) async throws -> PublicAccountHit? {
+        guard let resp = try await lookupRaw(LookupRequest(oprfHash: base64Encode(lookupKey))),
+              let accountId = base64Decode(resp.accountId) else { return nil }
+        return PublicAccountHit(
+            accountId: accountId, publicRecord: resp.publicRecord.flatMap { base64Decode($0) })
+    }
+
+    /// `GET /.well-known/lakko-username-cert-key` — the username-certificate
+    /// verifying key, used only when no key is pinned at build time.
+    public func fetchUsernameCertKey() async throws -> Data? {
+        let endpoint = "/.well-known/lakko-username-cert-key"
+        guard let resp: CertKeyWire = try await getNullableOn404Public(endpoint: endpoint) else {
+            return nil
+        }
+        return base64UrlDecodeNoPad(resp.keyB64url)
     }
 
     // MARK: - Channel discovery (G4-5, ADR-0010)
@@ -355,12 +474,11 @@ public final class DiscoveryClient {
             OprfRequest(blinded: blinder.blindedB64())
         )
 
-        let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
-        let oprfHashB64 = base64Encode(oprfHashBytes)
+        let lookupKey = try blinder.finalize(evaluatedB64: oprfResp.evaluated).lookupKey
 
         let resp = try await channelRegister(
             ChannelRegisterRequest(
-                oprfHash: oprfHashB64,
+                oprfHash: base64Encode(lookupKey),
                 channelId: base64Encode(channelId)
             )
         )
@@ -382,11 +500,10 @@ public final class DiscoveryClient {
             OprfRequest(blinded: blinder.blindedB64())
         )
 
-        let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
-        let oprfHashB64 = base64Encode(oprfHashBytes)
+        let lookupKey = try blinder.finalize(evaluatedB64: oprfResp.evaluated).lookupKey
 
         guard let resp = try await channelLookupRaw(
-            ChannelLookupRequest(oprfHash: oprfHashB64)
+            ChannelLookupRequest(oprfHash: base64Encode(lookupKey))
         ) else {
             return nil
         }
@@ -602,50 +719,41 @@ public final class DiscoveryClient {
 
     // MARK: - High-level invite flows
 
-    /// Upload a freshly-composed `InviteCapability` blob and
-    /// receive the server-minted `blobId` (6 random bytes,
-    /// ADR-0028 amendment of 2026-09-27). Drives
-    /// `POST /discovery/invite`. A second upload of the same
-    /// bytes gets a second id.
-    public func uploadInvite(capabilityBytes: Data) async throws -> Data {
-        guard !capabilityBytes.isEmpty else {
-            throw DiscoveryClientError.argument(
-                "capabilityBytes must be non-empty"
-            )
-        }
-        guard capabilityBytes.count <= Self.maxCapabilityBytes else {
-            throw DiscoveryClientError.argument(
-                "capabilityBytes exceeds the \(Self.maxCapabilityBytes)-byte ceiling " +
-                "(got \(capabilityBytes.count) bytes)"
-            )
-        }
-
+    /// Upload a freshly-minted SEALED `/i/` link (ADR-0028 amendment
+    /// 2026-09-28) and receive the server-minted `blobId` (6 random bytes).
+    /// The ledger stores only `mint.sealed`; the clear fields carry what the
+    /// server needs (revoke key, expiry, consume ceiling, the owner's label).
+    /// A second upload of the same bytes gets a second id.
+    public func uploadInvite(
+        mint: InviteLinkMint,
+        expiryMs: UInt64,
+        maxUses: UInt32,
+        label: String,
+        bootstrapReferral: Bool
+    ) async throws -> Data {
+        try Self.checkSealed(mint.sealed, ceiling: Self.maxCapabilityBytes)
         let resp = try await inviteUpload(
             InviteUploadRequest(
-                capability: base64Encode(capabilityBytes)
+                sealed: base64Encode(mint.sealed),
+                issuerPubkey: base64Encode(mint.issuerPubkey),
+                expiryMs: expiryMs,
+                maxUses: maxUses,
+                label: label,
+                bootstrapReferral: bootstrapReferral
             )
         )
-        guard let blobId = base64UrlDecodeNoPad(resp.blobId),
-              blobId.count == Self.blobIdLength else {
-            throw DiscoveryClientError.http(
-                status: 200,
-                endpoint: "/discovery/invite",
-                body: "server returned malformed blob_id"
-            )
-        }
-        return blobId
+        return try Self.parseBlobId(resp.blobId, endpoint: "/discovery/invite")
     }
 
-    /// Fetch a previously-uploaded `InviteCapability` by its
-    /// ledger `blobId`. Returns `nil` on 404, raw
-    /// capability bytes on 200 (the caller drives
-    /// `InviteCapability.decodeAndVerify` to re-verify locally so
-    /// a malicious server cannot serve substituted bytes).
+    /// Fetch a previously-uploaded SEALED `/i/` link by its ledger `blobId`.
+    /// Returns `nil` on 404, the sealed bytes on 200; the caller opens them
+    /// with the link's fragment secret (`InviteCapability.openLink`), which
+    /// also re-verifies the signature, so a substituted blob opens nothing.
     public func fetchInvite(blobId: Data) async throws -> Data? {
         guard let raw = try await inviteFetch(blobId: blobId) else {
             return nil
         }
-        return base64Decode(raw.capability)
+        return base64Decode(raw.sealed)
     }
 
     /// Atomically bump the consume counter for the invite at
@@ -883,55 +991,33 @@ public final class DiscoveryClient {
         )
     }
 
-    /// Upload a freshly-composed `CallInviteCapability` blob and
-    /// receive the server-minted `blobId` (6 random bytes).
-    /// Drives `POST /discovery/call-invite`.
-    /// Every upload gets a fresh id.
-    ///
-    /// Sibling of ``uploadInvite(capabilityBytes:)``; the
-    /// client-side ceiling is `maxCallCapabilityBytes` (8 KiB,
-    /// 4× contact-invite) because the call-invite capability
-    /// embeds a one-time MLS KeyPackage.
-    public func uploadCallInvite(capabilityBytes: Data) async throws -> Data {
-        guard !capabilityBytes.isEmpty else {
-            throw DiscoveryClientError.argument(
-                "capabilityBytes must be non-empty"
-            )
-        }
-        guard capabilityBytes.count <= Self.maxCallCapabilityBytes else {
-            throw DiscoveryClientError.argument(
-                "capabilityBytes exceeds the \(Self.maxCallCapabilityBytes)-byte ceiling " +
-                "(got \(capabilityBytes.count) bytes)"
-            )
-        }
-
+    /// Upload a freshly-minted SEALED `/c/` link and receive the
+    /// server-minted `blobId` (6 random bytes). Drives
+    /// `POST /discovery/call-invite`. Every upload gets a fresh id.
+    public func uploadCallInvite(
+        mint: InviteLinkMint,
+        expiryMs: UInt64,
+        maxUses: UInt32
+    ) async throws -> Data {
+        try Self.checkSealed(mint.sealed, ceiling: Self.maxCallCapabilityBytes)
         let resp = try await callInviteUpload(
             InviteUploadRequest(
-                capability: base64Encode(capabilityBytes)
+                sealed: base64Encode(mint.sealed),
+                issuerPubkey: base64Encode(mint.issuerPubkey),
+                expiryMs: expiryMs,
+                maxUses: maxUses
             )
         )
-        guard let blobId = base64UrlDecodeNoPad(resp.blobId),
-              blobId.count == Self.blobIdLength else {
-            throw DiscoveryClientError.http(
-                status: 200,
-                endpoint: "/discovery/call-invite",
-                body: "server returned malformed blob_id"
-            )
-        }
-        return blobId
+        return try Self.parseBlobId(resp.blobId, endpoint: "/discovery/call-invite")
     }
 
-    /// Fetch a previously-uploaded `CallInviteCapability` by
-    /// its ledger `blobId`. Returns `nil` on 404,
-    /// raw capability bytes on 200 (the caller drives
-    /// `CallInviteCapability.decodeAndVerify` to re-verify
-    /// locally so a malicious server cannot serve substituted
-    /// bytes).
+    /// Fetch a previously-uploaded SEALED `/c/` link. `nil` on 404, the
+    /// sealed bytes on 200 (opened with `CallInviteCapability.openLink`).
     public func fetchCallInvite(blobId: Data) async throws -> Data? {
         guard let raw = try await callInviteFetch(blobId: blobId) else {
             return nil
         }
-        return base64Decode(raw.capability)
+        return base64Decode(raw.sealed)
     }
 
     /// Atomically bump the consume counter for the call-invite
@@ -1026,7 +1112,7 @@ public final class DiscoveryClient {
     /// `GroupInviteCapability` blob. Low-level helper driven by
     /// ``uploadGroupInvite(capabilityBytes:maxUses:)``.
     public func groupInviteUpload(
-        _ request: GroupInviteUploadRequest
+        _ request: InviteUploadRequest
     ) async throws -> InviteUploadResponse {
         try await post(endpoint: "/discovery/group-invite", body: request)
     }
@@ -1046,53 +1132,37 @@ public final class DiscoveryClient {
         )
     }
 
-    /// Upload a freshly-composed `GroupInviteCapability` blob and receive the
-    /// server-minted `blobId` (6 random bytes). Drives `POST
-    /// /discovery/group-invite`. Every upload gets a fresh id.
+    /// Upload a freshly-minted SEALED `/g/` link and receive the
+    /// server-minted `blobId` (6 random bytes). Drives
+    /// `POST /discovery/group-invite`. Every upload gets a fresh id.
     ///
     /// `maxUses` is a SOFT anti-spam throttle (NOT part of the signed
     /// capability, NOT an access control — the admin approval gate is the
     /// security boundary): `0` = single-use, `0xFFFFFFFF` = unlimited.
     public func uploadGroupInvite(
-        capabilityBytes: Data,
+        mint: InviteLinkMint,
+        expiryMs: UInt64,
         maxUses: UInt32
     ) async throws -> Data {
-        guard !capabilityBytes.isEmpty else {
-            throw DiscoveryClientError.argument("capabilityBytes must be non-empty")
-        }
-        guard capabilityBytes.count <= Self.maxGroupCapabilityBytes else {
-            throw DiscoveryClientError.argument(
-                "capabilityBytes exceeds the \(Self.maxGroupCapabilityBytes)-byte ceiling " +
-                "(got \(capabilityBytes.count) bytes)"
-            )
-        }
-
+        try Self.checkSealed(mint.sealed, ceiling: Self.maxGroupCapabilityBytes)
         let resp = try await groupInviteUpload(
-            GroupInviteUploadRequest(
-                capability: base64Encode(capabilityBytes),
+            InviteUploadRequest(
+                sealed: base64Encode(mint.sealed),
+                issuerPubkey: base64Encode(mint.issuerPubkey),
+                expiryMs: expiryMs,
                 maxUses: maxUses
             )
         )
-        guard let blobId = base64UrlDecodeNoPad(resp.blobId),
-              blobId.count == Self.blobIdLength else {
-            throw DiscoveryClientError.http(
-                status: 200,
-                endpoint: "/discovery/group-invite",
-                body: "server returned malformed blob_id"
-            )
-        }
-        return blobId
+        return try Self.parseBlobId(resp.blobId, endpoint: "/discovery/group-invite")
     }
 
-    /// Fetch a previously-uploaded `GroupInviteCapability` by its
-    /// ledger `blobId`. Returns `nil` on 404, raw capability bytes
-    /// on 200 (the caller drives `GroupInviteCapability.decodeAndVerify` to
-    /// re-verify locally so a malicious server cannot serve substituted bytes).
+    /// Fetch a previously-uploaded SEALED `/g/` link. `nil` on 404, the
+    /// sealed bytes on 200 (opened with `GroupInviteCapability.openLink`).
     public func fetchGroupInvite(blobId: Data) async throws -> Data? {
         guard let raw = try await groupInviteFetch(blobId: blobId) else {
             return nil
         }
-        return base64Decode(raw.capability)
+        return base64Decode(raw.sealed)
     }
 
     /// Atomically bump the consume counter for the group-invite at `blobId`
@@ -1781,21 +1851,41 @@ public final class DiscoveryClient {
     /// misbehaving caller.
     fileprivate static let maxKeyPackageBytes: Int = 2048
 
-    /// Mirror of `services/discovery`'s `MAX_CAPABILITY_BYTES`.
-    fileprivate static let maxCapabilityBytes: Int = 2048
+    /// A sealed blob must be non-empty and within the ledger's ceiling.
+    fileprivate static func checkSealed(_ sealed: Data, ceiling: Int) throws {
+        guard !sealed.isEmpty else {
+            throw DiscoveryClientError.argument("sealed link must be non-empty")
+        }
+        guard sealed.count <= ceiling else {
+            throw DiscoveryClientError.argument(
+                "sealed link exceeds the \(ceiling)-byte ceiling (got \(sealed.count) bytes)")
+        }
+    }
+
+    /// Parse the server-minted ledger id.
+    fileprivate static func parseBlobId(_ slug: String, endpoint: String) throws -> Data {
+        guard let blobId = base64UrlDecodeNoPad(slug), blobId.count == blobIdLength else {
+            throw DiscoveryClientError.http(
+                status: 200, endpoint: endpoint, body: "server returned malformed blob_id")
+        }
+        return blobId
+    }
+
+    /// The `/i/` sealed-blob ceiling (`lakko_contacts::invite::MAX_SEALED_LEN`).
+    fileprivate static let maxCapabilityBytes: Int = 254
 
     /// Mirror of `services/discovery`'s `MAX_CALL_CAPABILITY_BYTES`
     /// — the call-invite ledger uses an 8192-byte ceiling
     /// (vs. contact-invite's 2048) because `CallInviteCapability`
     /// embeds a one-time MLS KeyPackage (~4 KiB upper bound per
     /// `MAX_KEY_PACKAGE_LEN`).
-    fileprivate static let maxCallCapabilityBytes: Int = 8192
+    fileprivate static let maxCallCapabilityBytes: Int = 4338
 
     /// Mirror of `services/discovery`'s group-invite `MAX_CAPABILITY_BYTES`
     /// (ADR-0028) — the group join-ticket wire is leaner than a call-invite
     /// (no embedded KeyPackage); it tops out near 363 bytes, so the ledger
     /// column + this client-side ceiling are 512.
-    fileprivate static let maxGroupCapabilityBytes: Int = 512
+    fileprivate static let maxGroupCapabilityBytes: Int = 938
 
     /// The ledger id of an invite (`/i/`, `/c/`, `/g/`): a random 6-byte id
     /// the discovery service mints at upload (ADR-0028 amendment of
@@ -1821,6 +1911,20 @@ public struct RegisterResult: Equatable {
 }
 
 /// Result of ``DiscoveryClient/lookup(username:)``.
+/// A person in Everyone found by discovery (ADR-0060 section 5): the account id
+/// and the public record, opened with the OPRF **output** of the username or
+/// name term that found it (`openPublicRecord`). `publicRecord` is `nil` only
+/// when the server sent none or it did not decode.
+public struct PublicAccountHit: Equatable {
+    public let accountId: Data
+    public let publicRecord: Data?
+
+    public init(accountId: Data, publicRecord: Data?) {
+        self.accountId = accountId
+        self.publicRecord = publicRecord
+    }
+}
+
 public struct LookupResult: Equatable {
     public let normalisedUsername: String
     /// Raw 16-byte account_id, or `nil` if the username is not
@@ -1984,4 +2088,53 @@ public struct DeviceKeyPackage: Equatable {
         self.deviceId = deviceId
         self.keyPackage = keyPackage
     }
+}
+
+// MARK: - ADR-0060 wire shapes
+
+private struct UsernameCertificateWire: Decodable {
+    let usernameCertificateB64: String
+    enum CodingKeys: String, CodingKey { case usernameCertificateB64 = "username_certificate_b64" }
+}
+
+private struct VisibilityWireRequest: Encodable {
+    let isPublic: Bool
+    let nameTermsB64: [String]
+    let publicRecordB64: String?
+    enum CodingKeys: String, CodingKey {
+        case isPublic = "public"
+        case nameTermsB64 = "name_terms_b64"
+        case publicRecordB64 = "public_record_b64"
+    }
+
+    // The server refuses the field outside Everyone, so a nil record is
+    // omitted rather than sent as null.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(isPublic, forKey: .isPublic)
+        try c.encode(nameTermsB64, forKey: .nameTermsB64)
+        try c.encodeIfPresent(publicRecordB64, forKey: .publicRecordB64)
+    }
+}
+
+private struct NameLookupWireRequest: Encodable {
+    let oprfHashB64: String
+    enum CodingKeys: String, CodingKey { case oprfHashB64 = "oprf_hash_b64" }
+}
+
+private struct NameLookupWireResponse: Decodable {
+    struct Row: Decodable {
+        let accountIdB64: String
+        let publicRecordB64: String
+        enum CodingKeys: String, CodingKey {
+            case accountIdB64 = "account_id_b64"
+            case publicRecordB64 = "public_record_b64"
+        }
+    }
+    let results: [Row]
+}
+
+private struct CertKeyWire: Decodable {
+    let keyB64url: String
+    enum CodingKeys: String, CodingKey { case keyB64url = "key_b64url" }
 }

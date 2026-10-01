@@ -97,10 +97,12 @@ describe("ADR-0051 — a group name is filtered in the foreground loop", () => {
     expect(ev?.kind).not.toBe("application");
   });
 
-  it("the bytes would render as a chat bubble without the arm (the defect)", async () => {
+  it("the real parser never degrades the bytes to chat (the defect is closed in the core)", async () => {
     const parsed = wasm.parseBodyEnvelope(wasm.composeGroupNameEnvelope("Zed Unique Group", 2n));
-    expect(parsed.kind).toBe("chat");
-    expect(parsed.text).toContain("Zed Unique Group");
+    // Before 2026-09-29 the lossy-UTF-8 fallback rendered these bytes as a
+    // chat bubble; the core now classifies them as a service envelope.
+    expect(parsed.kind).toBe("service-envelope");
+    expect(parsed.text).toBe("");
   });
 
   it("a malformed envelope is dropped, not rendered", async () => {

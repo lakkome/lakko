@@ -34,7 +34,7 @@ import uniffi.lakko_ffi_uniffi.FfiException
 
 /**
  * Why a username fails the ADR-0048 §4 rule. [text] is what a screen shows
- * (ADR-0058: the catalog key, rendered in the current language); [copy] is
+ * (ADR-0061: the catalog key, rendered in the current language); [copy] is
  * the English sentence for logs and exception messages only, never a screen.
  */
 public enum class UsernameProblem(public val copy: String, public val text: UiText) {

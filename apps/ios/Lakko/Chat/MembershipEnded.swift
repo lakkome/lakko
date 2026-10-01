@@ -232,7 +232,7 @@ import Foundation
 
 // MARK: - Copy (§6.2) — one definition each, so the view cannot drift from it
 //
-// From the catalog (ADR-0058), read at every render so the text follows a
+// From the catalog (ADR-0061), read at every render so the text follows a
 // live language switch.
 
 /// §6.2.3 — the narrowing, applied only on positive evidence.

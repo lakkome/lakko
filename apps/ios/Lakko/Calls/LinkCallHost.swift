@@ -88,7 +88,7 @@ final class LinkCallHost: ObservableObject {
         case started
         case alreadyInThisCall
         /// The messages are kept as ``UiText`` so a landing showing one follows
-        /// a language switch (ADR-0058).
+        /// a language switch (ADR-0061).
         case busy(message: UiText)
         case failed(message: UiText)
 
@@ -501,7 +501,11 @@ extension LinkCallHost {
                     ownerSigningSeed: identity.ed25519Seed(),
                     ownerAccountId: secrets.accountId,
                     identity: identity,
-                    discoveryClient: DiscoveryClient(sessionToken: secrets.sessionToken)
+                    discoveryClient: DiscoveryClient(sessionToken: secrets.sessionToken),
+                    linkGrant: { linkId, expiresAtMs in
+                        try await ReachCenter.shared.newLinkGrant(
+                            linkId: linkId, expiresAtMs: expiresAtMs)
+                    }
                 ).url
             }
         ))

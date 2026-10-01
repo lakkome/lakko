@@ -75,3 +75,9 @@ export function forgetSentRequest(
   save(accountIdB64, next);
   return next;
 }
+
+/** Drop every sent record of the account (Forget device, Delete account). */
+export function clearSentRequests(accountIdB64: string): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.removeItem(keyFor(accountIdB64));
+}

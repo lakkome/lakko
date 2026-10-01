@@ -67,8 +67,17 @@ public fun kindWriteAllowed(stored: ConversationKind?, requested: ConversationKi
     !(stored == ConversationKind.Group && requested == ConversationKind.Chat)
 
 /**
- * Per-device persisted conversation kind, one entry per group id, in plain
+ * Persisted conversation kind, one entry per `(account, group id)`, in plain
  * `SharedPreferences` (a list assignment is not sensitive).
+ *
+ * The kind belongs to the signed-in ACCOUNT's view of its conversation: until
+ * 2026-09-30 it was keyed on the group id alone, so a second account on the
+ * same phone that shared a conversation inherited the first account's
+ * decision and forget device left it behind. Rows are keyed
+ * `kind.v2:<accountIdB64>:<groupIdHex>`; the account is the one bound in
+ * [me.lakko.app.contacts.AcceptedContactsStore]. With no account bound a read
+ * is `null` and nothing is written. The device-wide `kind:<groupIdHex>` rows
+ * of earlier builds are never read; [deleteAccount] removes them.
  *
  * Writers: the new-group flow ([set] `Group`), the contact-accept and
  * invite-accept paths that create a 1x1 ([set] `Chat`), the members panel when
@@ -77,47 +86,70 @@ public fun kindWriteAllowed(stored: ConversationKind?, requested: ConversationKi
  */
 public object ConversationKindStore {
     private const val PREFS = "lakko-conversation-kind"
-    private const val KEY_PREFIX = "kind:"
+    private const val KEY_PREFIX = "kind.v2:"
+    private const val RETIRED_PREFIX = "kind:"
 
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    private fun key(groupIdHex: String): String = KEY_PREFIX + groupIdHex.lowercase()
+    private fun bound(): String? = me.lakko.app.contacts.AcceptedContactsStore.boundAccountB64
 
-    /** The stored kind, or `null` when this conversation has none yet. */
+    private fun accountPrefix(accountIdB64: String): String =
+        KEY_PREFIX + me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountIdB64) + ":"
+
+    /** The row key of [groupIdHex] for [accountIdB64]. Visible for tests. */
+    internal fun key(accountIdB64: String, groupIdHex: String): String =
+        accountPrefix(accountIdB64) + groupIdHex.lowercase()
+
+    /** The stored kind, or `null` when this conversation has none yet or no
+     *  account is signed in. */
     public fun stored(context: Context, groupIdHex: String): ConversationKind? =
-        prefs(context).getString(key(groupIdHex), null)
+        bound()?.let { stored(context, it, groupIdHex) }
+
+    /** [stored] for [accountIdB64], whatever is bound. */
+    public fun stored(context: Context, accountIdB64: String, groupIdHex: String): ConversationKind? =
+        prefs(context).getString(key(accountIdB64, groupIdHex), null)
             ?.let { raw -> ConversationKind.entries.firstOrNull { it.name == raw } }
 
-    /** Explicit write, subject to [kindWriteAllowed]. Returns the kind now stored. */
+    /** Explicit write, subject to [kindWriteAllowed]. Returns the kind now
+     *  stored (the requested kind, unstored, with no account signed in). */
     public fun set(context: Context, groupIdHex: String, kind: ConversationKind): ConversationKind {
-        val current = stored(context, groupIdHex)
+        val account = bound() ?: return kind
+        val current = stored(context, account, groupIdHex)
         if (!kindWriteAllowed(current, kind)) return current ?: kind
         if (current != kind) {
-            prefs(context).edit().putString(key(groupIdHex), kind.name).apply()
+            prefs(context).edit().putString(key(account, groupIdHex), kind.name).apply()
         }
         return kind
     }
 
     /**
      * The kind to show, applying [decideConversationKind] to the stored value
-     * and the live people count, and persisting a new decision.
+     * and the live people count, and persisting a new decision (not with no
+     * account signed in).
      */
     public fun resolve(context: Context, groupIdHex: String, peopleCount: Int?): ConversationKind {
-        val decision = decideConversationKind(stored(context, groupIdHex), peopleCount)
-        if (decision.persist) {
-            prefs(context).edit().putString(key(groupIdHex), decision.kind.name).apply()
+        val account = bound()
+        val decision = decideConversationKind(account?.let { stored(context, it, groupIdHex) }, peopleCount)
+        if (decision.persist && account != null) {
+            prefs(context).edit().putString(key(account, groupIdHex), decision.kind.name).apply()
         }
         return decision.kind
     }
 
-    /** Drop one conversation's entry (a deleted chat). */
+    /** Drop one conversation's entry for the signed-in account (a deleted chat). */
     public fun remove(context: Context, groupIdHex: String) {
-        prefs(context).edit().remove(key(groupIdHex)).apply()
+        val account = bound() ?: return
+        prefs(context).edit().remove(key(account, groupIdHex)).apply()
     }
 
-    /** Forget-device wipe. */
-    public fun clear(context: Context) {
-        prefs(context).edit().clear().apply()
+    /** Forget device: drop every entry of [accountIdB64] and the retired
+     *  device-wide rows. Other accounts' entries stay. */
+    public fun deleteAccount(context: Context, accountIdB64: String) {
+        val p = prefs(context)
+        val prefix = accountPrefix(accountIdB64)
+        val e = p.edit()
+        for (k in p.all.keys) if (k.startsWith(prefix) || k.startsWith(RETIRED_PREFIX)) e.remove(k)
+        e.apply()
     }
 }

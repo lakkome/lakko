@@ -68,7 +68,7 @@ public fun AuthScaffold(
     title: String,
     onBack: (() -> Unit)?,
     modifier: Modifier = Modifier,
-    /** Show the language button in the top bar (sign-in and sign-up, ADR-0058). */
+    /** Show the language button in the top bar (sign-in and sign-up, ADR-0061). */
     showLanguageButton: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
@@ -177,7 +177,7 @@ public fun BusyButton(
     }
 }
 
-/** One error sentence under a form, rendered from its catalog key (ADR-0058). */
+/** One error sentence under a form, rendered from its catalog key (ADR-0061). */
 @Composable
 public fun FormError(message: UiText?, modifier: Modifier = Modifier) {
     FormError(message?.text(), modifier)

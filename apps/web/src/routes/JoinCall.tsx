@@ -53,7 +53,7 @@ import {
   createSignal,
   onCleanup,
 } from "solid-js";
-import { A, useParams } from "@solidjs/router";
+import { A, useLocation, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
@@ -67,11 +67,14 @@ import { guestWorkingTitle, signupWorkingLine } from "../auth/signup-working";
 import { loadWasm } from "../wasm";
 import { DiscoveryClient, DiscoveryHttpError, isDiscoveryRateLimited } from "../discovery/client";
 import {
+  INVITE_LINK_DAMAGED,
   INVITE_LINK_RATE_LIMITED,
   INVITE_LINK_TRY_AGAIN,
   inviteLinkWidths,
+  isInviteLinkDamaged,
+  openInviteLinkFromUrl,
 } from "../contacts/invite-link";
-import { parseCallInviteSlug } from "../calls/invite";
+import { CALL_INVITE_INLINE_MIN_LEN } from "../calls/invite";
 import { useCallHost, type CallHostApi } from "../calls/CallHostContext";
 import { callIdHex } from "../calls/call-signaling-dispatch";
 import { hexKey } from "../calls/multi-joiner-election";
@@ -129,31 +132,45 @@ export default function JoinCall() {
 
   // Decode + verify the capability in a resource so the panel renders the
   // right state declaratively. Re-runs on navigation.
-  const slugSignal = createMemo(() => params.slug);
+  const location = useLocation();
+  // The fragment is the link secret (sealed-link amendment): re-run on it too.
+  const slugSignal = createMemo(() => ({ slug: params.slug, hash: location.hash }));
   /** The ledger answered 429: the link may be fine, so the page says "try
    *  again later" instead of "invalid" (ADR-0028 short-link amendment). */
   const [rateLimited, setRateLimited] = createSignal(false);
+  /** The link does not open under its fragment (missing, malformed, wrong
+   *  secret, tampered or substituted): docs/ux/call-links.md section 5. */
+  const [damaged, setDamaged] = createSignal(false);
   const [decoded, { refetch }] = createResource(
     slugSignal,
-    async (slug): Promise<DecodedCall | null> => {
+    async ({ slug, hash }): Promise<DecodedCall | null> => {
+      let cap: import("../../wasm/lakko_ffi_wasm").CallInviteCapability | null = null;
       try {
         setRateLimited(false);
+        setDamaged(false);
         const wasm = await loadWasm();
-        const parsed = parseCallInviteSlug(slug, inviteLinkWidths(wasm));
-        let capabilityBytes: Uint8Array;
-        if (parsed.kind === "pointer") {
-          const fetched = await discovery.fetchCallInvite(parsed.blobId);
-          if (fetched === null) return null;
-          capabilityBytes = fetched;
-        } else {
-          capabilityBytes = parsed.capabilityBytes;
-        }
-        const cap = wasm.CallInviteCapability.decodeAndVerify(capabilityBytes);
+        // Sealed-link amendment of ADR-0028 / ADR-0009 (2026-09-28): a
+        // missing or malformed fragment is refused before any request, and
+        // the blob opens only under the fragment's secret.
+        const opened = await openInviteLinkFromUrl({
+          slug,
+          hash,
+          widths: inviteLinkWidths(wasm),
+          inlineMinLen: CALL_INVITE_INLINE_MIN_LEN,
+          what: "call-invite",
+          fetchPointer: (blobId) => discovery.fetchCallInvite(blobId),
+          open: (sealed, secret) => wasm.CallInviteCapability.openLink(sealed, secret),
+        });
+        if (opened.kind === "not-found") return null;
+        cap = opened.capability;
         const identity = chats.identity();
         const isOwner =
           identity !== null &&
           hexKey(identity.signaturePublicKey) ===
             hexKey(cap.ownerSignaturePubkey);
+        // The page carries only what the call needs. The link's reach grant
+        // is not kept: this web flow joins over the SFU relay and writes
+        // nothing to the owner's mailbox.
         return {
           callId: cap.callId,
           ownerAccountId: cap.ownerAccountId,
@@ -169,9 +186,15 @@ export default function JoinCall() {
           setRateLimited(true);
           return null;
         }
+        if (isInviteLinkDamaged(err)) {
+          setDamaged(true);
+          return null;
+        }
         // eslint-disable-next-line no-console
-        console.warn("join-call: decode/verify failed", err);
+        console.warn("join-call: open/verify failed", err);
         return null;
+      } finally {
+        cap?.free();
       }
     },
   );
@@ -309,7 +332,9 @@ export default function JoinCall() {
       ownerSignatureKey: d.ownerSignatureKey,
       mediaVideo: d.mediaVideo,
       isOwner: d.isOwner,
-      routePath: paths.joinCall(params.slug),
+      // The fragment is the link secret: without it the page it returns to
+      // could not open the link again.
+      routePath: `${paths.joinCall(params.slug)}${location.hash}`,
     });
     switch (outcome.kind) {
       case "started":
@@ -347,6 +372,9 @@ export default function JoinCall() {
           <Show when={decoded.loading}>
             <p>{t("call.link.loading")}</p>
           </Show>
+          <Show when={!decoded.loading && decoded() === null && damaged()}>
+            <p>{INVITE_LINK_DAMAGED()}</p>
+          </Show>
           <Show when={!decoded.loading && decoded() === null && rateLimited()}>
             <p>{INVITE_LINK_RATE_LIMITED()}</p>
             <button type="button" class="primary" onClick={() => void refetch()}>
@@ -354,10 +382,15 @@ export default function JoinCall() {
             </button>
             <A href={paths.home}>{t("common.open_lakko")}</A>
           </Show>
+          <Show when={!decoded.loading && decoded() === null && damaged()}>
+            <p>{INVITE_LINK_DAMAGED()}</p>
+            <A href={paths.home}>Open Lakko</A>
+          </Show>
           <Show
             when={
               !decoded.loading &&
-              ((decoded() === null && !rateLimited()) || decoded()?.valid === false)
+              ((decoded() === null && !rateLimited() && !damaged()) ||
+                decoded()?.valid === false)
             }
           >
             <p>{t("call.link.invalid")}</p>

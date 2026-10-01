@@ -8,7 +8,8 @@
  * 1.16b moves to a real shell:
  *
  *   - `<AuthProvider>` exposes the session state to every route.
- *   - `<Router>` from @solidjs/router serves the routes defined in
+ *   - `<MemoryRouter>` from @solidjs/router over `originHistory` serves the
+ *     routes defined in
  *     `routes/routes.tsx`. Public pages (`/login`, `/signup`) and
  *     protected pages (`/`, `/contacts`, `/chat/:id`, `/dev`) are
  *     gated by `<RequireAnonymous>` / `<RequireSession>` guards,
@@ -27,8 +28,10 @@
  * No business logic in this file on purpose: every screen lives in
  * its own module so swapping a route is a single import change.
  */
+import { FolderEditorHost } from "./chat/folders/FolderEditor";
 import type { Component } from "solid-js";
-import { Router, type RouteSectionProps } from "@solidjs/router";
+import { MemoryRouter, type RouteSectionProps } from "@solidjs/router";
+import { originHistory } from "./routes/origin-history";
 import { AuthProvider } from "./auth/AuthContext";
 import { ChatProvider } from "./chat/ChatContext";
 import { BackgroundReceiveProvider } from "./chat/BackgroundReceiveContext";
@@ -42,7 +45,10 @@ import {
 } from "./contacts/MailboxContext";
 import { OneToOneContactAdoption } from "./contacts/OneToOneContactAdoption";
 import { ProfileProvider } from "./profile/ProfileContext";
+import { ReachProvider } from "./reach/ReachProvider";
+import { ScopedDiscoveryRuntime } from "./reach/ScopedDiscoveryRuntime";
 import { GroupNameProvider } from "./chat/GroupNameContext";
+import { JournalOwnershipProvider } from "./ds/JournalOwnershipContext";
 import { PinProvider } from "./chat/PinContext";
 import { ReadWatermarkProvider } from "./chat/ReadWatermarkContext";
 import { CallLogProvider } from "./calls/CallLogContext";
@@ -95,11 +101,20 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     DeviceGroup handle + poll loop. MUST be inside AuthProvider
  *     so the auth-state subscription resolves.
  *
+ *   <ReachProvider> — ADR-0060 scoped discovery: the session's reach keys
+ *     and the "who can find me" setting, synced to the account mailbox.
+ *     Above ProfileProvider, which reads the grants a profile carries.
  *   <ProfileProvider> — ADR-0048 profile names: the own profile, the
  *     received-profile store, username verification, publishing into groups
  *     and the one display resolver. Inside Auth + Chat (it reads the session
  *     and publishes through the canonical identity) and ABOVE the mailbox,
  *     whose Welcome joins and contact requests feed it.
+ *
+ *   <JournalOwnershipProvider> — ADR-0057 journal ownership: which journals
+ *     this account owns (root), the registrar seeds other owners handed it,
+ *     and the owner's appointment of registrars. Inside the profile provider
+ *     (it reads the account ids profiles carry) and ABOVE every receive loop,
+ *     which hands it registrar-seed envelopes.
  *
  *   <GroupNameProvider> — ADR-0051 shared group names: the per-group store,
  *     the role-gated receive and the growth re-send. Inside Auth + Chat for
@@ -141,7 +156,9 @@ const App: Component = () => (
   <ChatProvider>
     <AuthProvider>
       <DeviceGroupSyncProvider>
+        <ReachProvider>
         <ProfileProvider>
+        <JournalOwnershipProvider>
         <GroupNameProvider>
         <PinProvider>
         <ReadWatermarkProvider>
@@ -149,7 +166,11 @@ const App: Component = () => (
         <MailboxProvider>
         <CallHostProvider>
         <BackgroundReceiveProvider>
-          <Router root={RootLayout}>{routes}</Router>
+          {/*
+           * The address bar shows the origin only: the router's paths live in
+           * `history.state` (`routes/origin-history.ts`), never in the URL.
+           */}
+          <MemoryRouter root={RootLayout} history={originHistory}>{routes}</MemoryRouter>
           {/*
            * Per-session hydration of the channel list / subscriber seeds /
            * publisher keys from the encrypted channel log, and the restore of
@@ -159,6 +180,12 @@ const App: Component = () => (
            * PublisherGroup open.
            */}
           <ChannelsHydration />
+          {/*
+           * ADR-0060 — what this account publishes to be found by (the
+           * Everyone publication, the contacts-of-contacts record and the
+           * relayed bundle). Whole-session, like the receivers above.
+           */}
+          <ScopedDiscoveryRuntime />
           {/*
            * A Welcome this device could not open. Top level for the same
            * reason as the update banner below: it is received for the whole
@@ -189,6 +216,13 @@ const App: Component = () => (
            * request resolves `false`, so this mount is what makes the
            * destructive controls live at all.
            */}
+          {/*
+           * docs/ux/chat-folders.md section 3 - the one folder editor, opened
+           * from the folder bar, a row menu and Settings. Before the
+           * confirmation dialog so "Discard changes?" and "Delete folder?"
+           * draw over it.
+           */}
+          <FolderEditorHost />
           <ConfirmDialog />
         </BackgroundReceiveProvider>
         </CallHostProvider>
@@ -197,7 +231,9 @@ const App: Component = () => (
         </ReadWatermarkProvider>
         </PinProvider>
         </GroupNameProvider>
+        </JournalOwnershipProvider>
         </ProfileProvider>
+        </ReachProvider>
       </DeviceGroupSyncProvider>
     </AuthProvider>
   </ChatProvider>

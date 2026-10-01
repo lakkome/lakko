@@ -104,6 +104,17 @@ android {
             "\"${project.findProperty("lakko.device.attest.key") as String? ?: ""}\"",
         )
 
+        // ADR-0060 section 5 - optional build-time pin of the discovery
+        // username-certificate verifying key (base64url of the 32-byte Ed25519
+        // key). When set, a claimed username is verified against it and the
+        // `/.well-known/lakko-username-cert-key` endpoint is never consulted;
+        // empty when unset (fetched once per process).
+        buildConfigField(
+            "String",
+            "LAKKO_USERNAME_CERT_KEY",
+            "\"${project.findProperty("lakko.username.cert.key") as String? ?: ""}\"",
+        )
+
         // ADR-0037 (G-11) — backup-head staleness window in SECONDS (the Android
         // mirror of the web `VITE_LAKKO_BACKUP_HEAD_STALENESS_SECS`). A restore
         // freshness gate for a fresh-install (no floor) restore: a head whose

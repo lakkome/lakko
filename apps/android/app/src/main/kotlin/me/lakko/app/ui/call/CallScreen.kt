@@ -1792,7 +1792,7 @@ private fun formatBps(bps: Int?, strings: Strings, locale: java.util.Locale): St
 }
 
 /**
- * The name on a participant's tile and row (ADR-0058): the name the call
+ * The name on a participant's tile and row (ADR-0061): the name the call
  * carries, else `call.participant.you` for this device and
  * `call.participant.unnamed` for someone this device cannot name.
  */

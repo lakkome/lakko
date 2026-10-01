@@ -15,9 +15,23 @@
  * `lastRotationMs` is a `bigint` (Unix ms); `JSON.stringify` cannot
  * serialise a `bigint`, so it is stored as a decimal string and
  * re-parsed on load.
+ *
+ * ## One row per (account, channel) (2026-09-30)
+ *
+ * The rotation schedule is the publishing account's, so the row is
+ * `lakko.channels.rotation-state.v2.<accountIdB64>.<channelIdHex>`. The v1
+ * row was keyed by the channel alone, so a second account signed in on the
+ * same browser read (and on a co-published channel, overwrote) the first
+ * account's schedule, and Forget device left it behind. Which account a
+ * call means: the trailing `owner` argument, otherwise the signed-in
+ * account bound through `bindContactsAccount` (`contacts/local-store.ts`).
+ * With no account a read is `null` and a write is a no-op. Log out keeps the
+ * rows; Forget device drops the account's
+ * ({@link clearRotationStatesForAccount}).
  */
 
 import type { Wasm } from "../wasm";
+import { boundContactsAccount } from "../contacts/local-store";
 
 /** wasm-bindgen `ChannelRotationState` — `{ lastRotationMs: bigint,
  *  postsSinceRotation: number }`. Derived from the free-function
@@ -27,7 +41,19 @@ export type ChannelRotationState = ReturnType<Wasm["channelRotationStateNew"]>;
 
 /** One key per channel; versioned so a future shape change can
  *  migrate rather than silently mis-parse. */
-const KEY_PREFIX = "lakko.channels.rotation-state.v1.";
+const KEY_PREFIX = "lakko.channels.rotation-state.v2.";
+/** The retired device-wide rows (`<prefix><channelIdHex>`). Never read;
+ *  dropped by Forget device. */
+const RETIRED_PREFIX = "lakko.channels.rotation-state.v1.";
+
+function accountOf(owner: string | undefined): string | null {
+  const account = owner ?? boundContactsAccount();
+  return account === null || account.length === 0 ? null : account;
+}
+
+function keyFor(account: string, channelIdHex: string): string {
+  return `${KEY_PREFIX}${account}.${channelIdHex}`;
+}
 
 /** On-disk JSON shape — `lastRotationMs` as a decimal string so a
  *  `bigint` survives `JSON.stringify`. */
@@ -44,9 +70,11 @@ interface PersistedRotationState {
  */
 export function loadRotationState(
   channelIdHex: string,
+  owner?: string,
 ): ChannelRotationState | null {
-  if (typeof localStorage === "undefined") return null;
-  const raw = localStorage.getItem(KEY_PREFIX + channelIdHex);
+  const account = accountOf(owner);
+  if (account === null || typeof localStorage === "undefined") return null;
+  const raw = localStorage.getItem(keyFor(account, channelIdHex));
   if (raw === null) return null;
   try {
     const p = JSON.parse(raw) as PersistedRotationState;
@@ -73,15 +101,34 @@ export function loadRotationState(
 export function saveRotationState(
   channelIdHex: string,
   state: ChannelRotationState,
+  owner?: string,
 ): void {
-  if (typeof localStorage === "undefined") return;
+  const account = accountOf(owner);
+  if (account === null || typeof localStorage === "undefined") return;
   const p: PersistedRotationState = {
     lastRotationMs: state.lastRotationMs.toString(),
     postsSinceRotation: state.postsSinceRotation,
   };
   try {
-    localStorage.setItem(KEY_PREFIX + channelIdHex, JSON.stringify(p));
+    localStorage.setItem(keyFor(account, channelIdHex), JSON.stringify(p));
   } catch {
     // ignore — see the doc comment above.
+  }
+}
+
+/** Forget device: drop every rotation row of `accountIdB64` and the retired
+ *  device-wide rows. Another account's rows are left alone. */
+export function clearRotationStatesForAccount(accountIdB64: string): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const own = `${KEY_PREFIX}${accountIdB64}.`;
+    const doomed: string[] = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (key !== null && (key.startsWith(own) || key.startsWith(RETIRED_PREFIX))) doomed.push(key);
+    }
+    for (const key of doomed) localStorage.removeItem(key);
+  } catch {
+    // storage unavailable: nothing to clear
   }
 }

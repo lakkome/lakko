@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # Localization batch 3: conversation list and chat screen keys
 
-ADR-0058 S5, batch 3. Every user-visible string of the merged conversation list and of the chat screen (header, timeline, message menu, reply / forward / pin, selection, composer with voice and video-note recording, emoji and GIF picker, group info with its member list, join requests, invite link, ownership transfer, leave and delete, the ended-membership states, membership refusals and the errors of every chat action) moved from web literals into `l10n/catalog/en.json`. The in-call screens (`routes/Call.tsx`, `calls/*`) are a later batch. The iOS and Android clients map their own literals of the same screens onto these keys; names follow meaning, not the web component.
+ADR-0061 S5, batch 3. Every user-visible string of the merged conversation list and of the chat screen (header, timeline, message menu, reply / forward / pin, selection, composer with voice and video-note recording, emoji and GIF picker, group info with its member list, join requests, invite link, ownership transfer, leave and delete, the ended-membership states, membership refusals and the errors of every chat action) moved from web literals into `l10n/catalog/en.json`. The in-call screens (`routes/Call.tsx`, `calls/*`) are a later batch. The iOS and Android clients map their own literals of the same screens onto these keys; names follow meaning, not the web component.
 
 387 keys added, 10 of them `security_critical` (they render in English until a translation is `reviewed`, and a signed update can never change them).
 
@@ -20,7 +20,7 @@ The batch 1 and 2 conventions (`docs/l10n/batch-1-auth.md`, `docs/l10n/batch-2-s
 - Dates in the timeline ("16 September") and on list rows (clock time, short weekday, short date) are formatted by the platform for the interface language (web: `Intl.DateTimeFormat(currentLanguage())`); only "Today" and "Yesterday" are catalog messages.
 - Names (`{name}`, `{names}`) are text arguments; `{name}` in the lookup and add-member messages is passed with its `@`.
 - A destructive confirmation names its target on the button (`chat.delete.confirm_named`, `chat.leave.confirm_named`, `chat.members.remove.confirm_named`); an unnamed target uses the bare verb (`common.delete`, `chat.leave.confirm`, `common.remove`). Web: `namedActionKey` in `ui/confirm-dialog.ts`.
-- Errors render from their kind (ADR-0058 section 6): a membership refusal from its `RefusalReason` (`chat.refusal.*`), a contact failure from its variant, and anything else as the action's own `chat.error.*` key. Core, server and browser prose goes to the log only.
+- Errors render from their kind (ADR-0061 section 6): a membership refusal from its `RefusalReason` (`chat.refusal.*`), a contact failure from its variant, and anything else as the action's own `chat.error.*` key. Core, server and browser prose goes to the log only.
 - Where an internal code used to be shown raw ("Last call ended (hungUp)."), the line is now one message per code (`chat.call.last_ended.*`).
 - `chats.row.people`, `chat.members.pending.*` counts and `chat.select.*` counts are plural messages with `{count}`.
 

@@ -19,7 +19,7 @@ import java.util.Locale
  * (docs/ux/client-redesign.md section 5.4, docs/ux/group-and-channel-names.md
  * section 3.2): everything a row, a header or a status line shows is computed
  * here, off the composition, so it can be unit-tested without Compose. The
- * words come from the catalog (ADR-0058): each helper that says something takes
+ * words come from the catalog (ADR-0061): each helper that says something takes
  * the [Strings] of the language on screen.
  */
 

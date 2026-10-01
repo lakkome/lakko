@@ -36,16 +36,22 @@
 //! |---|---|
 //! | 1 claim | `epoch(8) epoch_key(32)` - the signer is the root |
 //! | 2 reset | `epoch(8) epoch_key(32) has_set(1) [count(2) (key(32) rank(1))*]` |
-//! | 3 register epoch | `epoch(8) epoch_key(32) count(2) revoke_key(32)*` |
+//! | 3 register epoch | `epoch(8) epoch_key(32) mode(1) count(2) revoke_key(32)*` |
 //! | 4 registrars | `count(2) (key(32) change(1))*` - change 0 removes |
 //! | 5 root transfer | `new_root(32)` |
 //! | 6 push binding | `push_gid(32)` |
+//! | 7 registrars set | `count(2) (key(32) rank(1))*` - the whole set |
 //!
 //! Ranks: `1` member, `2` admin (the root is not a registrar and outranks
-//! both). Lists hold at most [`MAX_LIST_ENTRIES`] distinct keys. Every key
-//! except a `push_gid` and a revoked key must be a valid Ed25519 point. The
-//! decoder is bounded ([`MAX_STATEMENT_LEN`]) and requires the input to be
-//! consumed exactly, so one statement has one encoding.
+//! both). A register-epoch `mode` is `1` append or `2` replace
+//! ([`RegisterMode`]); any other byte is malformed. Lists hold at most
+//! [`MAX_LIST_ENTRIES`] distinct keys, except a registrars set, which holds
+//! at most [`MAX_REGISTRARS`] (the whole set a journal may carry) and may be
+//! empty; a registrars set never names its own signer (the root is not a
+//! registrar). Every key except a `push_gid` and a revoked key must be a
+//! valid Ed25519 point. The decoder is bounded ([`MAX_STATEMENT_LEN`], sized
+//! by the largest registrars set) and requires the input to be consumed
+//! exactly, so one statement has one encoding.
 //!
 //! # What the verifier checks
 //!
@@ -76,14 +82,30 @@ pub const KEY_LEN: usize = 32;
 /// revocation list). Chosen, not measured: an owner appointing registrars for
 /// a large group sends several statements.
 pub const MAX_LIST_ENTRIES: usize = 256;
+/// Most registrars one journal holds, and so the longest registrars set
+/// ([`StatementBody::RegistrarsSet`]). A bound on the rows a root can make
+/// the server keep, not a group-size policy: chosen, not measured.
+pub const MAX_REGISTRARS: usize = 4096;
 
 const HEADER_LEN: usize = STATEMENT_DOMAIN.len() + 1 + JOURNAL_ID_LEN + KEY_LEN + 8 + NONCE_LEN;
 const ENTRY_LEN: usize = KEY_LEN + 1;
 
-/// Upper bound on an encoded statement; anything longer is refused unparsed.
-/// The largest kind is a reset carrying a full registrar set.
-pub const MAX_STATEMENT_LEN: usize =
+/// A reset carrying a full (256-entry) registrar set.
+const MAX_RESET_LEN: usize =
     HEADER_LEN + 8 + KEY_LEN + 1 + 2 + MAX_LIST_ENTRIES * ENTRY_LEN + SIGNATURE_LEN;
+/// A registrars set of [`MAX_REGISTRARS`] entries (about 132 KiB).
+const MAX_REGISTRARS_SET_LEN: usize = HEADER_LEN + 2 + MAX_REGISTRARS * ENTRY_LEN + SIGNATURE_LEN;
+
+/// Upper bound on an encoded statement; anything longer is refused unparsed.
+/// The largest kind is a registrars set of [`MAX_REGISTRARS`] entries; every
+/// other kind is bounded far below it by its own list bound
+/// ([`MAX_LIST_ENTRIES`]), which the decoder checks per kind before it
+/// allocates.
+pub const MAX_STATEMENT_LEN: usize = if MAX_REGISTRARS_SET_LEN > MAX_RESET_LEN {
+    MAX_REGISTRARS_SET_LEN
+} else {
+    MAX_RESET_LEN
+};
 
 /// Derive a journal's root seed from the owner's account identity seed (the
 /// 32-byte Ed25519 seed of the ADR-0017 account identity) and the journal id.
@@ -188,6 +210,44 @@ pub struct RegistrarChange {
     pub rank: Option<Rank>,
 }
 
+/// How a register-epoch statement relates to the chain already there
+/// ([ADR-0057], as amended by the 2026-09-28 security pass). The byte values
+/// are frozen.
+///
+/// [ADR-0057]: ../../../docs/adr/0057-journal-ownership.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RegisterMode {
+    /// Extend the chain by exactly one epoch (`latest + 1`); never drops
+    /// anything. The ordinary registration before a commit is published.
+    Append,
+    /// Write `epoch` and drop every epoch above it, when everything dropped
+    /// (and anything overwritten at `epoch`) was registered by a strictly
+    /// lower rank; a skip past `latest + 1` is the root's. The repair of a
+    /// chain a lower rank extended with keys only it holds.
+    Replace,
+}
+
+impl RegisterMode {
+    /// The wire byte.
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::Append => 1,
+            Self::Replace => 2,
+        }
+    }
+
+    /// Parse a wire byte.
+    #[must_use]
+    pub const fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            1 => Some(Self::Append),
+            2 => Some(Self::Replace),
+            _ => None,
+        }
+    }
+}
+
 /// Which statement a blob carries. The byte values are frozen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum StatementKind {
@@ -204,6 +264,8 @@ pub enum StatementKind {
     RootTransfer,
     /// The root or an admin binds the journal to one push routing id.
     PushBinding,
+    /// The root replaces the journal's whole registrar set.
+    RegistrarsSet,
 }
 
 impl StatementKind {
@@ -217,6 +279,7 @@ impl StatementKind {
             Self::Registrars => 4,
             Self::RootTransfer => 5,
             Self::PushBinding => 6,
+            Self::RegistrarsSet => 7,
         }
     }
 
@@ -228,6 +291,7 @@ impl StatementKind {
             4 => Some(Self::Registrars),
             5 => Some(Self::RootTransfer),
             6 => Some(Self::PushBinding),
+            7 => Some(Self::RegistrarsSet),
             _ => None,
         }
     }
@@ -243,6 +307,7 @@ impl StatementKind {
             Self::Registrars => "registrars",
             Self::RootTransfer => "root",
             Self::PushBinding => "push-binding",
+            Self::RegistrarsSet => "registrars-set",
         }
     }
 }
@@ -273,6 +338,8 @@ pub enum StatementBody {
         epoch: u64,
         /// Its access verifying key.
         epoch_key: [u8; KEY_LEN],
+        /// Append the next epoch, or replace a suffix.
+        mode: RegisterMode,
         /// Registrar keys to revoke (the signer may revoke only strictly
         /// lower ranks).
         revoke: Vec<[u8; KEY_LEN]>,
@@ -292,6 +359,13 @@ pub enum StatementBody {
         /// The ADR-0042 `push_gid`.
         push_gid: [u8; KEY_LEN],
     },
+    /// Replace the journal's whole registrar set: every registrar not
+    /// listed is removed. Empty removes them all.
+    RegistrarsSet {
+        /// The new set, at most [`MAX_REGISTRARS`] distinct keys, never the
+        /// signer's own.
+        registrars: Vec<RegistrarEntry>,
+    },
 }
 
 impl StatementBody {
@@ -305,6 +379,7 @@ impl StatementBody {
             Self::Registrars { .. } => StatementKind::Registrars,
             Self::RootTransfer { .. } => StatementKind::RootTransfer,
             Self::PushBinding { .. } => StatementKind::PushBinding,
+            Self::RegistrarsSet { .. } => StatementKind::RegistrarsSet,
         }
     }
 }
@@ -347,6 +422,9 @@ pub enum StatementError {
     /// The signature does not verify under the embedded signer.
     #[error("statement signature invalid")]
     BadSignature,
+    /// A registrars set names its own signer (the root is not a registrar).
+    #[error("statement lists its own signer as a registrar")]
+    SignerListed,
 }
 
 fn is_point(key: &[u8; KEY_LEN]) -> bool {
@@ -364,8 +442,9 @@ fn check_distinct(keys: impl Iterator<Item = [u8; KEY_LEN]>) -> Result<usize, St
     Ok(seen.len())
 }
 
-/// The list rules every constructor and the decoder share.
-fn validate_body(body: &StatementBody) -> Result<(), StatementError> {
+/// The list rules every constructor and the decoder share. `signer` is the
+/// statement's signer, which a registrars set may not name.
+fn validate_body(body: &StatementBody, signer: &[u8; KEY_LEN]) -> Result<(), StatementError> {
     match body {
         StatementBody::Claim { epoch_key, .. } => {
             if !is_point(epoch_key) {
@@ -416,12 +495,24 @@ fn validate_body(body: &StatementBody) -> Result<(), StatementError> {
             }
         },
         StatementBody::PushBinding { .. } => {},
+        StatementBody::RegistrarsSet { registrars } => {
+            if registrars.len() > MAX_REGISTRARS {
+                return Err(StatementError::ListBounds);
+            }
+            check_distinct(registrars.iter().map(|e| e.key))?;
+            if !registrars.iter().all(|e| is_point(&e.key)) {
+                return Err(StatementError::InvalidKey);
+            }
+            if registrars.iter().any(|e| e.key == *signer) {
+                return Err(StatementError::SignerListed);
+            }
+        },
     }
     Ok(())
 }
 
 fn count_u16(len: usize) -> [u8; 2] {
-    // Every list is validated to at most MAX_LIST_ENTRIES (< 2^16) first.
+    // Every list is validated to at most MAX_REGISTRARS (< 2^16) first.
     u16::try_from(len).unwrap_or(u16::MAX).to_be_bytes()
 }
 
@@ -453,10 +544,12 @@ fn encode_fields(body: &StatementBody, out: &mut Vec<u8>) {
         StatementBody::RegisterEpoch {
             epoch,
             epoch_key,
+            mode,
             revoke,
         } => {
             out.extend_from_slice(&epoch.to_be_bytes());
             out.extend_from_slice(epoch_key);
+            out.push(mode.to_byte());
             out.extend_from_slice(&count_u16(revoke.len()));
             for key in revoke {
                 out.extend_from_slice(key);
@@ -472,6 +565,13 @@ fn encode_fields(body: &StatementBody, out: &mut Vec<u8>) {
         StatementBody::RootTransfer { new_root: key }
         | StatementBody::PushBinding { push_gid: key } => {
             out.extend_from_slice(key);
+        },
+        StatementBody::RegistrarsSet { registrars } => {
+            out.extend_from_slice(&count_u16(registrars.len()));
+            for e in registrars {
+                out.extend_from_slice(&e.key);
+                out.push(e.rank.to_byte());
+            }
         },
     }
 }
@@ -501,8 +601,9 @@ fn signed_bytes_of(
 /// # Errors
 ///
 /// The list rules of the body ([`StatementError::ListBounds`],
-/// [`StatementError::DuplicateKey`], [`StatementError::InvalidKey`]): a
-/// statement the server would refuse is never signed.
+/// [`StatementError::DuplicateKey`], [`StatementError::InvalidKey`],
+/// [`StatementError::SignerListed`]): a statement the server would refuse is
+/// never signed.
 pub fn sign_statement(
     key: &SigningKey,
     journal_id: &[u8; JOURNAL_ID_LEN],
@@ -510,8 +611,8 @@ pub fn sign_statement(
     nonce: [u8; NONCE_LEN],
     body: StatementBody,
 ) -> Result<SignedStatement, StatementError> {
-    validate_body(&body)?;
     let signer = key.verifying_key().to_bytes();
+    validate_body(&body, &signer)?;
     let bytes = signed_bytes_of(journal_id, &signer, unix_ms, &nonce, &body);
     Ok(SignedStatement {
         journal_id: *journal_id,
@@ -556,11 +657,11 @@ impl<'a> Reader<'a> {
         Ok(u64::from_be_bytes(self.array::<8>()?))
     }
 
-    /// A list count, checked against the bound and the bytes left before
+    /// A list count, checked against `max` and the bytes left before
     /// anything is allocated.
-    fn count(&mut self, entry_len: usize) -> Result<usize, StatementError> {
+    fn count(&mut self, entry_len: usize, max: usize) -> Result<usize, StatementError> {
         let n = self.u16()?;
-        if n > MAX_LIST_ENTRIES {
+        if n > max {
             return Err(StatementError::ListBounds);
         }
         if self.rest.len() < n.saturating_mul(entry_len) {
@@ -582,7 +683,7 @@ fn decode_fields(kind: StatementKind, r: &mut Reader<'_>) -> Result<StatementBod
             let registrars = match r.u8()? {
                 0 => None,
                 1 => {
-                    let n = r.count(ENTRY_LEN)?;
+                    let n = r.count(ENTRY_LEN, MAX_LIST_ENTRIES)?;
                     let mut set = Vec::with_capacity(n);
                     for _ in 0..n {
                         let key = r.array()?;
@@ -602,7 +703,8 @@ fn decode_fields(kind: StatementKind, r: &mut Reader<'_>) -> Result<StatementBod
         StatementKind::RegisterEpoch => {
             let epoch = r.u64()?;
             let epoch_key = r.array()?;
-            let n = r.count(KEY_LEN)?;
+            let mode = RegisterMode::from_byte(r.u8()?).ok_or(StatementError::Malformed)?;
+            let n = r.count(KEY_LEN, MAX_LIST_ENTRIES)?;
             let mut revoke = Vec::with_capacity(n);
             for _ in 0..n {
                 revoke.push(r.array()?);
@@ -610,11 +712,12 @@ fn decode_fields(kind: StatementKind, r: &mut Reader<'_>) -> Result<StatementBod
             StatementBody::RegisterEpoch {
                 epoch,
                 epoch_key,
+                mode,
                 revoke,
             }
         },
         StatementKind::Registrars => {
-            let n = r.count(ENTRY_LEN)?;
+            let n = r.count(ENTRY_LEN, MAX_LIST_ENTRIES)?;
             let mut changes = Vec::with_capacity(n);
             for _ in 0..n {
                 let key = r.array()?;
@@ -631,6 +734,16 @@ fn decode_fields(kind: StatementKind, r: &mut Reader<'_>) -> Result<StatementBod
         },
         StatementKind::PushBinding => StatementBody::PushBinding {
             push_gid: r.array()?,
+        },
+        StatementKind::RegistrarsSet => {
+            let n = r.count(ENTRY_LEN, MAX_REGISTRARS)?;
+            let mut registrars = Vec::with_capacity(n);
+            for _ in 0..n {
+                let key = r.array()?;
+                let rank = Rank::from_byte(r.u8()?).ok_or(StatementError::Malformed)?;
+                registrars.push(RegistrarEntry { key, rank });
+            }
+            StatementBody::RegistrarsSet { registrars }
         },
     })
 }
@@ -679,7 +792,8 @@ impl SignedStatement {
     /// # Errors
     ///
     /// [`StatementError::Malformed`], [`StatementError::ListBounds`],
-    /// [`StatementError::DuplicateKey`] or [`StatementError::InvalidKey`].
+    /// [`StatementError::DuplicateKey`], [`StatementError::InvalidKey`] or
+    /// [`StatementError::SignerListed`].
     pub fn decode(bytes: &[u8]) -> Result<Self, StatementError> {
         if bytes.len() > MAX_STATEMENT_LEN || bytes.len() < HEADER_LEN + SIGNATURE_LEN {
             return Err(StatementError::Malformed);
@@ -701,7 +815,7 @@ impl SignedStatement {
         if !is_point(&signer) {
             return Err(StatementError::InvalidKey);
         }
-        validate_body(&body)?;
+        validate_body(&body, &signer)?;
         let signature: [u8; SIGNATURE_LEN] = signature
             .try_into()
             .map_err(|_| StatementError::Malformed)?;
@@ -830,11 +944,13 @@ mod tests {
             StatementBody::RegisterEpoch {
                 epoch: u64::MAX,
                 epoch_key: pk(5),
+                mode: RegisterMode::Append,
                 revoke: vec![[9; 32], pk(6)],
             },
             StatementBody::RegisterEpoch {
                 epoch: 1,
                 epoch_key: pk(5),
+                mode: RegisterMode::Replace,
                 revoke: vec![],
             },
             StatementBody::Registrars {
@@ -852,6 +968,19 @@ mod tests {
             StatementBody::RootTransfer { new_root: pk(9) },
             StatementBody::PushBinding {
                 push_gid: [0xEE; 32],
+            },
+            StatementBody::RegistrarsSet { registrars: vec![] },
+            StatementBody::RegistrarsSet {
+                registrars: vec![
+                    RegistrarEntry {
+                        key: pk(10),
+                        rank: Rank::Member,
+                    },
+                    RegistrarEntry {
+                        key: pk(11),
+                        rank: Rank::Admin,
+                    },
+                ],
             },
         ]
     }
@@ -942,6 +1071,7 @@ mod tests {
         let dup = StatementBody::RegisterEpoch {
             epoch: 1,
             epoch_key: pk(1),
+            mode: RegisterMode::Append,
             revoke: vec![pk(2), pk(2)],
         };
         assert_eq!(
@@ -956,6 +1086,7 @@ mod tests {
         let too_many = StatementBody::RegisterEpoch {
             epoch: 1,
             epoch_key: pk(1),
+            mode: RegisterMode::Replace,
             revoke: (0..=MAX_LIST_ENTRIES)
                 .map(|i| {
                     let mut k = [0u8; 32];
@@ -1002,7 +1133,7 @@ mod tests {
             Err(StatementError::Malformed)
         );
         let mut wrong_kind = good.clone();
-        wrong_kind[STATEMENT_DOMAIN.len()] = 0x07;
+        wrong_kind[STATEMENT_DOMAIN.len()] = 0x08;
         assert_eq!(
             SignedStatement::decode(&wrong_kind),
             Err(StatementError::Malformed)
@@ -1059,6 +1190,7 @@ mod tests {
             StatementKind::Registrars,
             StatementKind::RootTransfer,
             StatementKind::PushBinding,
+            StatementKind::RegistrarsSet,
         ]
         .iter()
         .map(|k| (k.to_byte(), k.path_segment()))
@@ -1072,8 +1204,182 @@ mod tests {
                 (4, "registrars"),
                 (5, "root"),
                 (6, "push-binding"),
+                (7, "registrars-set"),
             ]
         );
+        assert_eq!(RegisterMode::Append.to_byte(), 1);
+        assert_eq!(RegisterMode::Replace.to_byte(), 2);
+        for byte in [0u8, 3, 0xFF] {
+            assert_eq!(RegisterMode::from_byte(byte), None);
+        }
+    }
+
+    fn register_wire(mode: RegisterMode) -> Vec<u8> {
+        signer()
+            .sign_at(
+                &JOURNAL,
+                StatementBody::RegisterEpoch {
+                    epoch: 4,
+                    epoch_key: pk(1),
+                    mode,
+                    revoke: vec![pk(2)],
+                },
+                1,
+                [3; NONCE_LEN],
+            )
+            .unwrap()
+            .encode()
+    }
+
+    #[test]
+    fn the_register_mode_is_one_signed_byte_and_nothing_else_parses() {
+        let append = register_wire(RegisterMode::Append);
+        let replace = register_wire(RegisterMode::Replace);
+        let mode_at = HEADER_LEN + 8 + KEY_LEN;
+        assert_eq!(append[mode_at], 1);
+        assert_eq!(replace[mode_at], 2);
+        // The two differ in that byte (and the signature) only.
+        assert_eq!(append[..mode_at], replace[..mode_at]);
+        assert_eq!(
+            append[mode_at + 1..append.len() - SIGNATURE_LEN],
+            replace[mode_at + 1..replace.len() - SIGNATURE_LEN]
+        );
+        // Swapping the mode byte parses, but no longer verifies.
+        let mut swapped = append.clone();
+        swapped[mode_at] = 2;
+        let parsed = SignedStatement::decode(&swapped).unwrap();
+        assert_eq!(parsed.verify(1), Err(StatementError::BadSignature));
+        for byte in [0u8, 3, 0x80, 0xFF] {
+            let mut bad = append.clone();
+            bad[mode_at] = byte;
+            assert_eq!(
+                SignedStatement::decode(&bad),
+                Err(StatementError::Malformed),
+                "mode {byte}"
+            );
+        }
+    }
+
+    fn entries(n: usize) -> Vec<RegistrarEntry> {
+        (0..n)
+            .map(|i| {
+                let mut seed = [0u8; 32];
+                seed[..8].copy_from_slice(&(i as u64 + 1).to_be_bytes());
+                RegistrarEntry {
+                    key: SigningKey::from_seed(&seed).verifying_key().to_bytes(),
+                    rank: if i % 2 == 0 {
+                        Rank::Member
+                    } else {
+                        Rank::Admin
+                    },
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_registrars_set_is_bounded_by_the_journal_bound_not_the_list_bound() {
+        // The full set a journal may hold signs, fits and round-trips.
+        let full = signer()
+            .sign_at(
+                &JOURNAL,
+                StatementBody::RegistrarsSet {
+                    registrars: entries(MAX_REGISTRARS),
+                },
+                1,
+                [5; NONCE_LEN],
+            )
+            .unwrap();
+        let wire = full.encode();
+        assert_eq!(wire.len(), MAX_STATEMENT_LEN, "the largest statement");
+        assert_eq!(SignedStatement::decode(&wire).unwrap(), full);
+        full.verify(1).unwrap();
+        // One more is refused by the signer and, forged, by the decoder
+        // before anything is allocated.
+        assert_eq!(
+            signer().sign_at(
+                &JOURNAL,
+                StatementBody::RegistrarsSet {
+                    registrars: entries(MAX_REGISTRARS + 1),
+                },
+                1,
+                [5; NONCE_LEN],
+            ),
+            Err(StatementError::ListBounds)
+        );
+        let mut over = wire[..HEADER_LEN].to_vec();
+        over.extend_from_slice(&u16::try_from(MAX_REGISTRARS + 1).unwrap().to_be_bytes());
+        over.extend_from_slice(&[0u8; SIGNATURE_LEN]);
+        assert_eq!(
+            SignedStatement::decode(&over),
+            Err(StatementError::ListBounds)
+        );
+        // A registrar-change list keeps its own, smaller bound.
+        let mut changes = wire[..HEADER_LEN].to_vec();
+        changes[STATEMENT_DOMAIN.len()] = StatementKind::Registrars.to_byte();
+        changes.extend_from_slice(&u16::try_from(MAX_LIST_ENTRIES + 1).unwrap().to_be_bytes());
+        changes.extend_from_slice(&[0u8; SIGNATURE_LEN]);
+        assert_eq!(
+            SignedStatement::decode(&changes),
+            Err(StatementError::ListBounds)
+        );
+    }
+
+    #[test]
+    fn a_registrars_set_never_names_its_signer_or_a_key_twice() {
+        let own = RegistrarEntry {
+            key: signer().public_key(),
+            rank: Rank::Admin,
+        };
+        let body = StatementBody::RegistrarsSet {
+            registrars: vec![entries(1)[0], own],
+        };
+        assert_eq!(
+            signer().sign_at(&JOURNAL, body.clone(), 1, [0; NONCE_LEN]),
+            Err(StatementError::SignerListed)
+        );
+        // Forged past the signer: the decoder refuses it too.
+        let bytes = signed_bytes_of(&JOURNAL, &signer().public_key(), 1, &[0; NONCE_LEN], &body);
+        let mut forged = bytes;
+        forged.extend_from_slice(&[0u8; SIGNATURE_LEN]);
+        assert_eq!(
+            SignedStatement::decode(&forged),
+            Err(StatementError::SignerListed)
+        );
+        let e = entries(1)[0];
+        assert_eq!(
+            signer().sign_at(
+                &JOURNAL,
+                StatementBody::RegistrarsSet {
+                    registrars: vec![e, e],
+                },
+                1,
+                [0; NONCE_LEN],
+            ),
+            Err(StatementError::DuplicateKey)
+        );
+        // A rank byte other than member or admin is malformed.
+        let good = signer()
+            .sign_at(
+                &JOURNAL,
+                StatementBody::RegistrarsSet {
+                    registrars: vec![e],
+                },
+                1,
+                [0; NONCE_LEN],
+            )
+            .unwrap()
+            .encode();
+        let rank_at = HEADER_LEN + 2 + KEY_LEN;
+        for byte in [0u8, 3, ROOT_RANK_BYTE, 0xFF] {
+            let mut bad = good.clone();
+            bad[rank_at] = byte;
+            assert_eq!(
+                SignedStatement::decode(&bad),
+                Err(StatementError::Malformed),
+                "rank {byte}"
+            );
+        }
     }
 
     // Golden vectors: a change to a derivation domain or its input layout
@@ -1085,6 +1391,10 @@ mod tests {
         "3a645b6e7e557d5ef293dbe2dc546ee08975efc2e71b1e1f9108a31ab6b30130";
     const GOLDEN_CLAIM_BLAKE3: &str =
         "d5f24a1c868978609ab248b0b1047578c35cac21d05d9a98f4d787a7dc9cf669";
+    const GOLDEN_REPLACE_BLAKE3: &str =
+        "b545aba1cddb5bc07351ddc0612e23c8e92bdc8bd8fe7d414b7dddf2ba22202c";
+    const GOLDEN_REGISTRARS_SET_BLAKE3: &str =
+        "ef3dcf722011a725aa190c28c1491eb08a7d9d5084106e1357de0c6d3d7aee31";
 
     #[test]
     fn derivations_are_pinned() {
@@ -1144,6 +1454,49 @@ mod tests {
         assert!(bytes.starts_with(b"lakko/ds/statement/v1\x00\x01"));
         assert_eq!(bytes.len(), HEADER_LEN + 8 + 32);
         assert_eq!(hex(&hash::blake3(&bytes)), GOLDEN_CLAIM_BLAKE3);
+
+        let replace = StatementSigner::from_seed(&[0x05; 32])
+            .sign_at(
+                &[0x06; 32],
+                StatementBody::RegisterEpoch {
+                    epoch: 9,
+                    epoch_key: pk(7),
+                    mode: RegisterMode::Replace,
+                    revoke: vec![pk(8)],
+                },
+                1_700_000_000_000,
+                [0xAB; NONCE_LEN],
+            )
+            .unwrap()
+            .signed_bytes();
+        assert!(replace.starts_with(b"lakko/ds/statement/v1\x00\x03"));
+        assert_eq!(replace.len(), HEADER_LEN + 8 + 32 + 1 + 2 + 32);
+        assert_eq!(replace[HEADER_LEN + 8 + 32], 2);
+        assert_eq!(hex(&hash::blake3(&replace)), GOLDEN_REPLACE_BLAKE3);
+
+        let set = StatementSigner::from_seed(&[0x05; 32])
+            .sign_at(
+                &[0x06; 32],
+                StatementBody::RegistrarsSet {
+                    registrars: vec![
+                        RegistrarEntry {
+                            key: pk(8),
+                            rank: Rank::Admin,
+                        },
+                        RegistrarEntry {
+                            key: pk(9),
+                            rank: Rank::Member,
+                        },
+                    ],
+                },
+                1_700_000_000_000,
+                [0xAB; NONCE_LEN],
+            )
+            .unwrap()
+            .signed_bytes();
+        assert!(set.starts_with(b"lakko/ds/statement/v1\x00\x07"));
+        assert_eq!(set.len(), HEADER_LEN + 2 + 2 * 33);
+        assert_eq!(hex(&hash::blake3(&set)), GOLDEN_REGISTRARS_SET_BLAKE3);
     }
 
     fn hex(bytes: &[u8]) -> String {

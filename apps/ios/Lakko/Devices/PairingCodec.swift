@@ -106,7 +106,7 @@ public enum PairingScanFailure {
 
     /// Copy for a failed scan: the wrong-account and version refusals get
     /// their own sentence, a limit or a lost connection theirs, anything
-    /// else the generic one (ADR-0058: never a core or server message).
+    /// else the generic one (ADR-0061: never a core or server message).
     public static func userFacing(_ error: Error) -> String {
         if isWrongAccount(error) { return wrongAccountCopy }
         if case .Unsupported = error as? FfiError { return unsupportedCopy }

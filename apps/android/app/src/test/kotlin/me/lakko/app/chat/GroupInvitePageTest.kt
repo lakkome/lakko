@@ -86,11 +86,15 @@ class GroupInvitePageTest {
     }
 
     @Test
-    fun `an absent or blank fragment is no preview, not an error`() {
+    fun `an absent or blank fragment parses as absent and carries no secret (the link is damaged)`() {
         assertSame(GroupInviteFragment.Absent, parseGroupInviteFragment(null, L))
         assertSame(GroupInviteFragment.Absent, parseGroupInviteFragment("", L))
         assertSame(GroupInviteFragment.Absent, parseGroupInviteFragment("   ", L))
         assertNull(groupInviteFragmentOf(pointerUrl()))
+        // Sealed links: no fragment opens nothing.
+        assertNull(GroupInviteFragment.Absent.secretOrNull())
+        assertNull(GroupInviteFragment.Malformed.secretOrNull())
+        assertArrayEquals(key, GroupInviteFragment.Secret(key).secretOrNull())
     }
 
     @Test
@@ -110,42 +114,32 @@ class GroupInvitePageTest {
     @Test
     fun `a secret that opens the preview shows it`() {
         var opened: ByteArray? = null
-        val outcome = resolveGroupInvitePreview(GroupInviteFragment.Secret(key)) { opened = it; preview }
+        val outcome = resolveGroupInvitePreview(hasPreview = true, secret = key) { opened = it; preview }
         assertEquals(GroupInvitePreviewOutcome.Shown(preview), outcome)
         assertArrayEquals(key, opened)
     }
 
     @Test
-    fun `no fragment shows the page without a preview and never opens`() {
-        val outcome = resolveGroupInvitePreview(GroupInviteFragment.Absent) {
-            error("no secret, nothing to open")
+    fun `a capability minted without a preview shows the page without one and never opens`() {
+        val outcome = resolveGroupInvitePreview(hasPreview = false, secret = key) {
+            error("no preview, nothing to open")
         }
         assertEquals(GroupInvitePreviewOutcome.Shown(null), outcome)
     }
 
     @Test
-    fun `a secret the preview does not open under refuses the link`() {
-        // The core throws when the sealed preview does not open (a capability
-        // swapped in under a live id, or a wrong secret).
-        val outcome = resolveGroupInvitePreview(GroupInviteFragment.Secret(key)) {
+    fun `a present preview that does not open refuses the link`() {
+        // The core throws when the sealed preview does not open (a wrong or
+        // truncated secret).
+        val outcome = resolveGroupInvitePreview(hasPreview = true, secret = key) {
             throw IllegalStateException("does not open")
         }
         assertSame(GroupInvitePreviewOutcome.Damaged, outcome)
     }
 
     @Test
-    fun `a secret on a capability with no preview refuses the link`() {
-        // `openPreview` answers null when the capability carries none: a
-        // substituted preview-less capability must not pass as a plain link.
-        val outcome = resolveGroupInvitePreview(GroupInviteFragment.Secret(key)) { null }
-        assertSame(GroupInvitePreviewOutcome.Damaged, outcome)
-    }
-
-    @Test
-    fun `a malformed fragment refuses the link without opening`() {
-        val outcome = resolveGroupInvitePreview(GroupInviteFragment.Malformed) {
-            error("must not open")
-        }
+    fun `a present preview that answers nothing refuses the link`() {
+        val outcome = resolveGroupInvitePreview(hasPreview = true, secret = key) { null }
         assertSame(GroupInvitePreviewOutcome.Damaged, outcome)
     }
 

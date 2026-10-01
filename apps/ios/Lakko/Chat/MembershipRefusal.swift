@@ -417,7 +417,14 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 .UsernameEmpty, .UsernameTooShort, .UsernameTooLong, .UsernameInvalidCharacters,
                 .DisplayNameLineBreak, .DisplayNameControlOrFormatCharacter,
                 .DisplayNameTooLong, .DisplayNameTooManyBytes, .ChannelMeta,
-                .AnonToken, .AnonTokenAlreadyFinalized:
+                .AnonToken, .AnonTokenAlreadyFinalized,
+                // ADR-0058 synced state; the 2026-09-28 device link and
+                // sealed invite links; ADR-0060 scoped discovery.
+                .DeviceGroupPayloadRefused, .SyncedState, .DeviceLinkWrongCode, .DeviceLink,
+                .InviteLinkDamaged, .Reach, .Introduction, .Visibility, .UsernameCertificate,
+                .CommitterDelegation,
+                // ADR-0061 interface localization.
+                .L10n:
                 return nil
             }
         }

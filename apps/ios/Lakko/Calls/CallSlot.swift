@@ -112,7 +112,7 @@ enum CallSlotWiring {
 }
 
 /// The words for a call flow's failure, from the KIND of failure and never from
-/// its prose (ADR-0058, batch 5; the web `calls/call-errors.ts`). Core, SFU and
+/// its prose (ADR-0061, batch 5; the web `calls/call-errors.ts`). Core, SFU and
 /// server prose goes to the log only.
 enum CallErrorText {
 

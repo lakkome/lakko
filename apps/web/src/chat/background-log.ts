@@ -260,3 +260,17 @@ export function eventToPersistedMessage(
     createdAt: e.createdAt,
   };
 }
+
+/**
+ * The highest DS message id in a slot, or `null` for an empty one. What "Mark
+ * all as read" (`docs/ux/chat-folders.md` 2.2) moves the read cursor to - the
+ * same cursor opening the chat moves.
+ */
+export function newestMessageId(slot: PersistedGroup | undefined): bigint | null {
+  let best: bigint | null = null;
+  for (const m of slot?.messages ?? []) {
+    const id = idOf(m);
+    if (id !== null && (best === null || id > best)) best = id;
+  }
+  return best;
+}

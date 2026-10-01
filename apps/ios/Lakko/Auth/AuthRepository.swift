@@ -3,6 +3,7 @@
 
 import Foundation
 import LakkoCore
+import UserNotifications
 
 /// Single source of truth for "is the user authenticated on this
 /// device?".
@@ -117,9 +118,12 @@ public final class AuthRepository: ObservableObject {
     /// Every change is mirrored into ``AmbientSessionToken`` (the bearer
     /// source a few repositories read) and into ``AnonTokenPool/shared``
     /// (ADR-0054 S3): the pool draws anonymous tokens with this session and
-    /// is cleared on logout and on an account switch.
+    /// is cleared on logout and on an account switch. It also binds the
+    /// account the contact list and its identity pins are read for
+    /// (``AcceptedContactsStore``, ``PeerPinStore``): no session, no contacts.
     @Published public private(set) var identitySecrets: IdentitySecrets? {
         didSet {
+            AcceptedContactsStore.bind(accountIdB64: identitySecrets.map { base64Encode($0.accountId) })
             AmbientSessionToken.shared.set(identitySecrets?.sessionToken)
             AnonTokenPool.shared.configure(
                 accountKey: identitySecrets.map { base64Encode($0.accountId) },
@@ -169,6 +173,21 @@ public final class AuthRepository: ObservableObject {
     /// bound in this process. ``LoginHandleBindLedger/shared`` in the app.
     private let loginHandleBinds: LoginHandleBindLedger
 
+    /// ADR-0042 (amended 2026-09-30) — the `(device pseudonym, account)`
+    /// binding the background push paths gate every wake on. Log out and
+    /// Forget device clear it before anything else they do.
+    private let pushBinding: PushAccountBindingStore
+
+    /// Removes this app's delivered notifications. Log out and Forget device
+    /// call it, so nothing an account received stays on the lock screen after
+    /// it signs out. Injectable for tests.
+    private let removeDeliveredNotifications: () -> Void
+
+    /// The live `UNUserNotificationCenter` removal.
+    nonisolated static func removeAllDeliveredNotifications() {
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+    }
+
     public convenience init(
         sessionStore: SessionStore = SessionStore(),
         authClientFactory: @escaping () -> AuthClient = { AuthClient() },
@@ -191,7 +210,9 @@ public final class AuthRepository: ObservableObject {
         nowMs: () -> Int64,
         accountDirectory: AccountDirectory,
         loginHandleBinds: LoginHandleBindLedger = .shared,
-        restoreDirectory: DeviceRestoreDirectory = DiscoveryDeviceRestoreDirectory()
+        restoreDirectory: DeviceRestoreDirectory = DiscoveryDeviceRestoreDirectory(),
+        pushBinding: PushAccountBindingStore = .live,
+        removeDeliveredNotifications: @escaping () -> Void = AuthRepository.removeAllDeliveredNotifications
     ) {
         self.sessionStore = sessionStore
         self.authClientFactory = authClientFactory
@@ -199,6 +220,8 @@ public final class AuthRepository: ObservableObject {
         self.accountDirectory = accountDirectory
         self.restoreDirectory = restoreDirectory
         self.loginHandleBinds = loginHandleBinds
+        self.pushBinding = pushBinding
+        self.removeDeliveredNotifications = removeDeliveredNotifications
         rehydrate(nowMs: nowMs())
     }
 
@@ -486,7 +509,7 @@ public final class AuthRepository: ObservableObject {
         // 1.20c — best-effort push subscribe. Same posture as the
         // web side: errors are logged and swallowed; the user
         // lands in a working session even without push.
-        Task { await Self.subscribePushBestEffort(context: "signup") }
+        Task { await self.subscribePushBestEffort(context: "signup", accountIdB64: accountIdB64) }
         return SignupOutcome(recoveryPhrase: phrase)
     }
 
@@ -707,7 +730,7 @@ public final class AuthRepository: ObservableObject {
         )
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "login")
         // 1.20c — best-effort push subscribe.
-        Task { await Self.subscribePushBestEffort(context: "login") }
+        Task { await self.subscribePushBestEffort(context: "login", accountIdB64: accountIdB64) }
     }
 
     /// ADR-0054 S5 — re-`PUT` the login handle of `username` with
@@ -891,7 +914,7 @@ public final class AuthRepository: ObservableObject {
             sessionExpiresAtMs: assertion.sessionExpiresAtMs,
             username: cached.username
         )
-        Task { await Self.subscribePushBestEffort(context: "passkey-login") }
+        Task { await self.subscribePushBestEffort(context: "passkey-login", accountIdB64: cached.accountIdB64) }
     }
 
     /// Drive the full recover-from-mnemonic flow.
@@ -1178,7 +1201,7 @@ public final class AuthRepository: ObservableObject {
         )
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "recover")
         // 1.20c — best-effort push subscribe.
-        Task { await Self.subscribePushBestEffort(context: "recover") }
+        Task { await self.subscribePushBestEffort(context: "recover", accountIdB64: accountIdB64) }
     }
 
     /// Drop the in-memory session. Keeps ``SessionStore`` and the
@@ -1189,6 +1212,11 @@ public final class AuthRepository: ObservableObject {
     /// surfaced in ``AuthState/anon(cachedUsername:)`` so the next
     /// Login form pre-fills it.
     public func logout() {
+        // ADR-0042 (amended 2026-09-30) — FIRST: from here on no background
+        // wake is handled for this account, and nothing it already received
+        // stays on the lock screen.
+        pushBinding.clear()
+        removeDeliveredNotifications()
         let cached = sessionStore.load()
         // Drop the persisted session token so a relaunch after logout lands
         // logged out instead of silently restoring the session this call
@@ -1211,69 +1239,26 @@ public final class AuthRepository: ObservableObject {
         Task { await PushSubscriber.shared.unsubscribe(prepaidToken: unregisterToken) }
     }
 
-    /// Drop the in-memory session **and** the on-device material.
+    /// The session half of Forget device and Delete account: end the session
+    /// on this device after ``AccountLocalDataWipe`` has removed the account's
+    /// local data. It removes no store itself — calling it alone would leave
+    /// every one behind, which is how Delete account used to leave the chats
+    /// on disk — so its only caller is
+    /// ``AppServices/wipeAccountLocalData(accountIdB64:)``.
     ///
-    /// Mirror of the web's `forgetDevice` semantics. Distinct from
-    /// ``logout()``: this wipes both the ``SessionStore`` record and
-    /// the Keychain-stored device key. After `forgetDevice` the
-    /// only way back into the account is via the recovery passphrase
-    /// (``recover(mnemonicPhrase:newPassword:)``).
-    public func forgetDevice() {
+    /// Distinct from ``logout()``, which keeps the account's data for its
+    /// next sign-in: this drops the session record too, so the login screen
+    /// comes up with no cached username, and after it the only way back into
+    /// the account is the recovery phrase (or another device).
+    public func endSessionAfterLocalWipe() {
+        // ADR-0042 (amended 2026-09-30) — FIRST, as in ``logout()``. The wipe
+        // has already done both; repeated so the order holds on its own.
+        pushBinding.clear()
+        removeDeliveredNotifications()
         if let cached = sessionStore.load() {
-            DeviceKeyStore.deleteDeviceKey(accountIdB64: cached.accountIdB64)
-            // Phase 2a1c — drop the cached recovery phrase too.
-            // Best-effort; a Keychain failure here is logged and
-            // ignored (the row is unreadable without the device
-            // key just wiped, but the clean wipe matches
-            // `forgetDevice`'s "leave nothing per-account behind"
-            // contract).
-            try? PhraseStore().deletePhrase(accountIdB64: cached.accountIdB64)
-            // ADR-0037 (G-11) — drop the backup-head version floor. Same
-            // clean-wipe rationale; the next recover starts from the
-            // zero-anchor freshness-window path.
-            BackupFloorStore.deleteFloor(accountIdB64: cached.accountIdB64)
-            // Phase 2a2c2 — drop the cached export key too. Same
-            // clean-wipe rationale.
-            ExportKeyStore.deleteExportKey(accountIdB64: cached.accountIdB64)
-            // The persisted session token (relaunch restore input). Same
-            // clean-wipe rationale.
+            // The persisted session token (relaunch restore input), through
+            // the injected persistence so a test observes it.
             persistence.deleteSessionToken(accountIdB64: cached.accountIdB64)
-            // ADR-0017 — drop the cached AccountIdentity (phrase) seed.
-            // It is the highest-sensitivity on-device secret. After this
-            // wipe the only way back into the account is the recovery
-            // phrase (or a paired device). Same clean-wipe rationale as
-            // the export-key / device-key rows.
-            AccountIdentitySeedStore.deleteAccountIdentitySeed(
-                accountIdB64: cached.accountIdB64
-            )
-            // Phase 2a3b0 — drop the cached DeviceIdentity
-            // seed. The leaf in the user's DeviceGroup that
-            // this seed signed for is orphaned; sibling
-            // devices clean it up via 2a3c's remove-device
-            // flow.
-            DeviceIdentityStore.deleteDeviceIdentitySeed(
-                accountIdB64: cached.accountIdB64
-            )
-            // Phase 2a3b3 — drop the cached DeviceGroup MLS
-            // snapshot. Same clean-wipe rationale as the
-            // identity-seed / phrase / device-key rows above.
-            DeviceGroupSnapshotStore().deleteSnapshot(
-                accountIdB64: cached.accountIdB64
-            )
-            // ADR-0048 — the account's own profile, the profiles received from
-            // the people it talked to, and the username verdicts. Same
-            // clean-wipe rationale.
-            ProfileDirectory.shared.forget(accountIdB64: cached.accountIdB64)
-            // The account's stranger-inbox cursor + pending requests. Same
-            // clean-wipe rationale; the live `ContactsRepository` unbinds on
-            // the `identitySecrets = nil` below, so nothing re-writes the row.
-            ContactsInboxStore().clear(accountIdB64: cached.accountIdB64)
-            // The account's channel list + subscriber-side recovered content
-            // seeds. Same clean-wipe rationale. (The three per-installation
-            // channel Keychain blobs — publisher seeds, publish counters,
-            // subscriber keypairs — are not per-account and are left as they
-            // were before this store existed.)
-            ChannelLogStore().delete(accountIdB64: cached.accountIdB64)
         }
         sessionStore.clear()
         // ADR-0054 S3 — the push unregister below spends a token; take it
@@ -1298,16 +1283,34 @@ public final class AuthRepository: ObservableObject {
 
     // MARK: - Push integration helpers
 
-    /// 1.20c — fire ``PushSubscriber/subscribe()`` on the
-    /// MainActor with errors logged and swallowed. Called from
+    /// 1.20c — fire ``PushSubscriber/subscribe(accountIdB64:stillSignedIn:)``
+    /// on the MainActor with errors logged and swallowed. Called from
     /// signup / login / recover after the state flip so the
     /// user lands in a working session even when push fails.
-    @MainActor
-    private static func subscribePushBestEffort(context: String) async {
+    ///
+    /// ADR-0042 (amended 2026-09-30) — the pseudonym is registered for
+    /// `accountIdB64`, and bound to it only while that account is still the
+    /// one signed in when the subscribe gets there.
+    private func subscribePushBestEffort(context: String, accountIdB64: String) async {
         do {
-            _ = try await PushSubscriber.shared.subscribe()
+            _ = try await PushSubscriber.shared.subscribe(
+                accountIdB64: accountIdB64,
+                stillSignedIn: { [weak self] in self?.signedInAccountIdB64 == accountIdB64 }
+            )
         } catch {
             NSLog("push subscribe (\(context)) failed: \(error)")
+        }
+    }
+
+    /// The account the current state is signed in as, including the states
+    /// where ACCESS succeeded and identity is still being restored. `nil`
+    /// while logged out.
+    var signedInAccountIdB64: String? {
+        switch state {
+        case .session(let account), .needsRecoveryPhrase(let account), .saveFreshPhrase(let account):
+            return account.accountIdB64
+        case .loading, .anon:
+            return nil
         }
     }
 
@@ -2012,7 +2015,7 @@ public final class AuthRepository: ObservableObject {
                 sessionExpiresAtMs: sessionExpiresAtMs,
                 username: username
             )
-            Task { await Self.subscribePushBestEffort(context: pushContext) }
+            Task { await self.subscribePushBestEffort(context: pushContext, accountIdB64: accountIdB64) }
             return
         }
 
@@ -2551,14 +2554,21 @@ public final class AuthRepository: ObservableObject {
         // metadata, so reconstruct an IncomingContactRequest with sentinels:
         // a negative messageId (never collides with a real DS id), a zero
         // pseudonym, no intro.
-        let existingContacts = AcceptedContactsStore.load()
+        // Written into the RESTORED account's list, named explicitly: the
+        // session may not be installed yet when a restore runs.
+        let existingContacts = AcceptedContactsStore.load(accountIdB64: accountIdB64)
         let restoredContacts = reconstructRestoredContacts(
             existing: existingContacts,
             restored: parsed.acceptedContacts,
             createdAtMs: parsed.createdAtMs
         )
         if !restoredContacts.isEmpty {
-            AcceptedContactsStore.save(existingContacts + restoredContacts)
+            AcceptedContactsStore.save(existingContacts + restoredContacts, accountIdB64: accountIdB64)
+            // A live repository already bound to this account merges them
+            // (its next save would otherwise overwrite the write above).
+            NotificationCenter.default.post(
+                name: .lakkoStateBundleApplied, object: restoredContacts,
+                userInfo: [StateBundle.appliedAccountKey: accountIdB64])
             NSLog("backup restore (\(context)): merged \(restoredContacts.count) contact(s)")
         }
         // The index the snapshot cannot supply: `restoreStorage` lays down a
@@ -2566,6 +2576,17 @@ public final class AuthRepository: ObservableObject {
         // `ChatRepository.bootstrap` rebuilds handles from a separately
         // persisted set of ids. Without this the restored device held every
         // group and listed none.
+        // ADR-0058 section 5.2 — the folded synced state (folders, pins,
+        // mutes, archive, read cursors, drafts), merged into this device's
+        // store before the DeviceGroup poll seeds from it. A running sync
+        // runtime for the account folds it too.
+        if !parsed.syncedState.isEmpty {
+            SyncedStateStore.mergeIntoStored(bytes: parsed.syncedState, accountIdB64: accountIdB64)
+            NotificationCenter.default.post(
+                name: .lakkoSyncedStateRestored, object: nil,
+                userInfo: ["accountIdB64": accountIdB64, "bytes": parsed.syncedState])
+            NSLog("backup restore (\(context)): synced state restored")
+        }
         let restoredGroupIdsHex = parsed.knownGroupIds.map(Self.hexString(fromBytes:))
         if !restoredGroupIdsHex.isEmpty {
             NSLog(
@@ -2642,7 +2663,7 @@ public final class AuthRepository: ObservableObject {
         // carries ed25519 + display name + the 16-byte account_id. displayName
         // stays "" when unset so a restore does not promote the fingerprint
         // fallback into a "chosen" name.
-        let contactRecords = AcceptedContactsStore.load().map { c in
+        let contactRecords = AcceptedContactsStore.load(accountIdB64: accountIdB64).map { c in
             BackupContactRecord(
                 ed25519Pubkey: c.request.fromPubkey,
                 x25519Pubkey: Data(count: 32),
@@ -2658,7 +2679,11 @@ public final class AuthRepository: ObservableObject {
                 ed25519Seed: seedBytes,
                 phraseBytes: phraseBytes,
                 contacts: contactRecords,
-                wholeStorageSnapshot: wholeStorageSnapshot
+                wholeStorageSnapshot: wholeStorageSnapshot,
+                // ADR-0058 — whatever synced state this device already holds
+                // (after a recover, the one just restored), so the baseline
+                // does not overwrite the backup's folders with none.
+                syncedState: SyncedStateStore.bytes(accountIdB64: accountIdB64)
             )
         } catch {
             NSLog("backup baseline upload (\(context)) failed: \(error)")

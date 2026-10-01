@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The message syntax of ADR-0058: a subset of ICU MessageFormat.
+//! The message syntax of ADR-0061: a subset of ICU MessageFormat.
 //!
 //! Supported:
 //!

@@ -8,7 +8,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * Host-side tests for the Android language holder (ADR-0058). The real
+ * Host-side tests for the Android language holder (ADR-0061). The real
  * resolution rule is `l10nResolveLanguage` in `lakko-l10n`, which needs the
  * native library the JVM suite does not have; here it is a fake that records
  * WHAT it was asked, so these tests pin the order of the inputs the client

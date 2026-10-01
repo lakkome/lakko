@@ -3,7 +3,7 @@
 
 /**
  * The words the service worker puts on a call notification, kept in the
- * interface language (ADR-0058, `docs/ux/localization.md` section 10: "the web
+ * interface language (ADR-0061, `docs/ux/localization.md` section 10: "the web
  * service worker renders notification text in the chosen language").
  *
  * The worker cannot reach the catalog: `public/sw.js` is copied verbatim and

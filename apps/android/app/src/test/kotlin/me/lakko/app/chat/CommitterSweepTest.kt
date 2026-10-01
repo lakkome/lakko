@@ -291,13 +291,14 @@ class CommitterSweepTest {
         cursor: FakeCursor = FakeCursor(),
         acting: ActingCommitter = ActingCommitter.Act,
         persisted: MutableList<Unit> = mutableListOf(),
+        mayStage: () -> Boolean = { true },
     ) = SweepPorts(
         group = group,
         journal = journal,
         outbox = outbox,
         cursor = cursor,
         actingCommitter = { acting },
-        welcomeMailbox = { key -> key },
+        welcomeTargets = { keys -> keys },
         wrapWelcome = { welcome -> welcome },
         markOwnPublished = {},
         persist = { persisted.add(Unit) },
@@ -311,6 +312,7 @@ class CommitterSweepTest {
         decodeB64 = { s ->
             if (s.isEmpty()) ByteArray(0) else s.split(",").map { it.toByte() }.toByteArray()
         },
+        mayStage = mayStage,
     )
 
     // ---------------------------------------------------------------- the five
@@ -358,7 +360,7 @@ class CommitterSweepTest {
                 outbox = recordingOutbox,
                 cursor = FakeCursor(),
                 actingCommitter = { ActingCommitter.Act },
-                welcomeMailbox = { it },
+                welcomeTargets = { it },
                 wrapWelcome = { it },
                 markOwnPublished = {},
                 persist = {},
@@ -447,7 +449,7 @@ class CommitterSweepTest {
                 id = "entry-restart",
                 commitB64 = "1",
                 welcomeEnvelopeB64 = "2",
-                welcomeMailboxesB64 = listOf("9"),
+                welcomeLeafKeysB64 = listOf("9"),
             ),
         )
 
@@ -561,7 +563,7 @@ class CommitterSweepTest {
                 outbox = FakeOutbox(),
                 cursor = FakeCursor(),
                 actingCommitter = { throw IllegalStateException("store unreadable") },
-                welcomeMailbox = { it },
+                welcomeTargets = { it },
                 wrapWelcome = { it },
                 markOwnPublished = {},
                 persist = {},
@@ -603,7 +605,7 @@ class CommitterSweepTest {
                     outbox = FakeOutbox(),
                     cursor = FakeCursor(),
                     actingCommitter = { ActingCommitter.Act },
-                    welcomeMailbox = { it },
+                    welcomeTargets = { it },
                     wrapWelcome = { it },
                     markOwnPublished = {},
                     persist = {},
@@ -952,7 +954,7 @@ class CommitterSweepTest {
             id = "entry-owed",
             commitB64 = "1",
             welcomeEnvelopeB64 = null,
-            welcomeMailboxesB64 = emptyList(),
+            welcomeLeafKeysB64 = emptyList(),
         )
         val journal = FakeJournal(rows = listOf(row(id = 50, tag = 7)))
         journal.nextId = 101
@@ -1081,7 +1083,7 @@ class CommitterSweepTest {
                 outbox = recordingOutbox,
                 cursor = FakeCursor(),
                 actingCommitter = { ActingCommitter.Act },
-                welcomeMailbox = { it },
+                welcomeTargets = { it },
                 wrapWelcome = { it },
                 markOwnPublished = {},
                 persist = {},
@@ -1107,7 +1109,7 @@ class CommitterSweepTest {
             id = "entry-owed",
             commitB64 = "1",
             welcomeEnvelopeB64 = "2",
-            welcomeMailboxesB64 = listOf("3"),
+            welcomeLeafKeysB64 = listOf("3"),
         )
         val outbox = FakeOutbox(owed = owed)
         // Belt to that braces: even with the marker wrongly present, a staged
@@ -1260,7 +1262,7 @@ class CommitterSweepTest {
                 outbox = recordingOutbox,
                 cursor = base.cursor,
                 actingCommitter = base.actingCommitter,
-                welcomeMailbox = base.welcomeMailbox,
+                welcomeTargets = base.welcomeTargets,
                 wrapWelcome = base.wrapWelcome,
                 markOwnPublished = base.markOwnPublished,
                 persist = base.persist,
@@ -1293,7 +1295,7 @@ class CommitterSweepTest {
                     outbox = base.outbox,
                     cursor = base.cursor,
                     actingCommitter = base.actingCommitter,
-                    welcomeMailbox = base.welcomeMailbox,
+                    welcomeTargets = base.welcomeTargets,
                     wrapWelcome = base.wrapWelcome,
                     markOwnPublished = base.markOwnPublished,
                     persist = base.persist,
@@ -1313,6 +1315,37 @@ class CommitterSweepTest {
         assertFalse("nothing may be left staged", group.hasStagedSweep())
         assertEquals(emptyList<String>(), journal.published)
         assertTrue("nothing may be recorded", outbox.recorded.isEmpty())
+    }
+
+    /** A hold after a refused registration stops a NEW stage before any
+     *  network: nothing staged, nothing fetched, nothing published. */
+    @Test
+    fun `a held group stages nothing and reads nothing`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val journal = FakeJournal()
+        val outcome = runCommitterSweep(ports(group = group, journal = journal, mayStage = { false }))
+
+        assertSame(SweepOutcome.BackedOff, outcome)
+        assertFalse(group.hasStagedSweep())
+        assertEquals(0, group.abandoned)
+        assertEquals(0, journal.fetches)
+        assertEquals(emptyList<String>(), journal.published)
+    }
+
+    /** C-67 — a hold never delays an obligation: a verdict owed from an
+     *  earlier stage is still adjudicated while the group is held. */
+    @Test
+    fun `a held group still resolves an owed verdict`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1).apply { hasStaged = true }
+        val journal = FakeJournal()
+        val outbox = FakeOutbox(
+            owed = SweepDurableEntry("entry-held", "1", "2", listOf("9")),
+        )
+        val outcome = runCommitterSweep(ports(group, journal, outbox, mayStage = { false }))
+
+        assertTrue("outcome was $outcome", outcome is SweepOutcome.Committed)
+        assertEquals(1, group.merged)
+        assertFalse(group.hasStagedSweep())
     }
 
     /** A remove / role sweep carries no add, so it sends no Welcome at all. */

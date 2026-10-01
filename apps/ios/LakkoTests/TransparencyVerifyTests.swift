@@ -482,7 +482,7 @@ final class TransparencyVerifyTests: XCTestCase {
     /// of the served key. The gate refuses REGARDLESS of the log — this
     /// only colours the error.
     func testRefusalCarriesLoggedResetTrue() async {
-        let pinStore = PeerPinStore(defaults: freshDefaults())
+        let pinStore = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let oldPubkey = Data(repeating: 0x01, count: 32)
         pinStore.setPin(
             accountIdB64: base64Encode(accountId),
@@ -523,7 +523,7 @@ final class TransparencyVerifyTests: XCTestCase {
     }
 
     func testRefusalCarriesLoggedResetFalse() async {
-        let pinStore = PeerPinStore(defaults: freshDefaults())
+        let pinStore = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let oldPubkey = Data(repeating: 0x01, count: 32)
         pinStore.setPin(
             accountIdB64: base64Encode(accountId),
@@ -558,7 +558,7 @@ final class TransparencyVerifyTests: XCTestCase {
     }
 
     func testRefusalCarriesLoggedResetNilWhenLogOff() async {
-        let pinStore = PeerPinStore(defaults: freshDefaults())
+        let pinStore = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let oldPubkey = Data(repeating: 0x01, count: 32)
         pinStore.setPin(
             accountIdB64: base64Encode(accountId),
@@ -881,7 +881,7 @@ final class TransparencyVerifyTests: XCTestCase {
     /// gate-2 routing + version-persist without needing a valid proof
     /// through gate 1's `verifySupersession` FFI.
     func testRotationRoutesThroughChainAndPersistsFloor() async {
-        let pinStore = PeerPinStore(defaults: freshDefaults())
+        let pinStore = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let accountIdB64 = base64Encode(accountId)
         // Seed an OLD pin keyed on a DIFFERENT pubkey + a stale floor.
         pinStore.setPin(
@@ -921,7 +921,7 @@ final class TransparencyVerifyTests: XCTestCase {
     /// previously-confirmed floor — `recordLogVersion` is skipped on a
     /// non-confirmed verdict (version == nil), and it does NOT block.
     func testChainMismatchKeepsPreviousFloorAndDoesNotBlock() async {
-        let pinStore = PeerPinStore(defaults: freshDefaults())
+        let pinStore = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let accountIdB64 = base64Encode(accountId)
         pinStore.setPin(
             accountIdB64: accountIdB64,
@@ -961,7 +961,7 @@ final class TransparencyVerifyTests: XCTestCase {
     /// A non-rotation fetch (no oldPin / unchanged key / no proof) keeps
     /// the SINGLE-KEY inclusion check — the chain seam is NOT invoked.
     func testNonRotationKeepsSingleKeyInclusionCheck() async {
-        let pinStore = PeerPinStore(defaults: freshDefaults())
+        let pinStore = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let accountIdB64 = base64Encode(accountId)
         // Pin already EQUALS the served key — not a rotation.
         pinStore.setPin(
@@ -1003,7 +1003,7 @@ final class TransparencyVerifyTests: XCTestCase {
     /// gate 2 must NEVER make gate 1 more permissive. (Gate 2 never runs
     /// here — gate 1 short-circuits.)
     func testGate1StillFailsClosedOnChangedKeyNoProof() async {
-        let pinStore = PeerPinStore(defaults: freshDefaults())
+        let pinStore = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let oldPubkey = Data(repeating: 0x01, count: 32)
         pinStore.setPin(
             accountIdB64: base64Encode(accountId),
@@ -1040,7 +1040,7 @@ final class TransparencyVerifyTests: XCTestCase {
     // MARK: - G-30 #2: PeerPinStore.recordLogVersion / readLogVersion
 
     func testRecordLogVersionRoundTrip() {
-        let store = PeerPinStore(defaults: freshDefaults())
+        let store = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let key = base64Encode(accountId)
         store.setPin(accountIdB64: key, pinnedSignaturePubkeyB64: base64Encode(servedPubkey), rotationMarker: 0)
         XCTAssertNil(store.readLogVersion(accountIdB64: key))
@@ -1049,7 +1049,7 @@ final class TransparencyVerifyTests: XCTestCase {
     }
 
     func testRecordLogVersionClear() {
-        let store = PeerPinStore(defaults: freshDefaults())
+        let store = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let key = base64Encode(accountId)
         store.setPin(accountIdB64: key, pinnedSignaturePubkeyB64: base64Encode(servedPubkey), rotationMarker: 0)
         store.recordLogVersion(accountIdB64: key, version: 8)
@@ -1059,7 +1059,7 @@ final class TransparencyVerifyTests: XCTestCase {
     }
 
     func testRecordLogVersionNoOpWithoutPin() {
-        let store = PeerPinStore(defaults: freshDefaults())
+        let store = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let key = base64Encode(accountId)
         // No pin → no write, returns false, nothing to read.
         XCTAssertFalse(store.recordLogVersion(accountIdB64: key, version: 3))
@@ -1067,7 +1067,7 @@ final class TransparencyVerifyTests: XCTestCase {
     }
 
     func testRecordLogVersionCarriedAcrossRePin() {
-        let store = PeerPinStore(defaults: freshDefaults())
+        let store = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let key = base64Encode(accountId)
         store.setPin(accountIdB64: key, pinnedSignaturePubkeyB64: base64Encode(pinnedOldPubkey), rotationMarker: 0)
         store.recordLogVersion(accountIdB64: key, version: 6)
@@ -1085,7 +1085,7 @@ final class TransparencyVerifyTests: XCTestCase {
     }
 
     func testRecordLogVersionIdempotentNoChange() {
-        let store = PeerPinStore(defaults: freshDefaults())
+        let store = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let key = base64Encode(accountId)
         store.setPin(accountIdB64: key, pinnedSignaturePubkeyB64: base64Encode(servedPubkey), rotationMarker: 0)
         store.recordLogVersion(accountIdB64: key, version: 4)
@@ -1098,7 +1098,7 @@ final class TransparencyVerifyTests: XCTestCase {
         // A pin blob written BEFORE G-30 #2 (no `pinnedLogVersion` key)
         // must decode with version == nil (synthesized Codable). Simulate
         // by writing a pin via the v1-shape init and reading it back.
-        let store = PeerPinStore(defaults: freshDefaults())
+        let store = PeerPinStore(defaults: freshDefaults(), ownerAccountIdB64: "test-owner")
         let key = base64Encode(accountId)
         store.setPin(accountIdB64: key, pinnedSignaturePubkeyB64: base64Encode(servedPubkey), rotationMarker: 0)
         // setPin writes no version → absent key → nil on read.

@@ -172,7 +172,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
     try {
       await props.onPick(row);
     } catch (err) {
-      // ADR-0058 section 6: the error's code, never its prose.
+      // ADR-0061 section 6: the error's code, never its prose.
       console.warn("[forward] failed", err);
       setError(() => keyedErrorText(err) ?? t("chat.forward.error.generic"));
     } finally {

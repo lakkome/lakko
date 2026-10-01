@@ -30,7 +30,7 @@ public struct InviteLandingScreen: View {
 
     @ObservedObject public var viewModel: InviteLandingViewModel
     public var onDone: () -> Void
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
     public init(
@@ -126,7 +126,7 @@ public struct InviteLandingScreen: View {
         }
     }
 
-    /// The catalog key of the result's headline (ADR-0058 batch 4).
+    /// The catalog key of the result's headline (ADR-0061 batch 4).
     private func headline(for result: AcceptInviteResult) -> String {
         switch result {
         case .accepted: return l10n.t("invite.contact.result.sent_title")
@@ -135,6 +135,7 @@ public struct InviteLandingScreen: View {
         case .exhausted: return l10n.t("invite.contact.result.used_up_title")
         case .notFound: return l10n.t("invite.contact.result.not_found_title")
         case .malformedSlug: return l10n.t("invite.contact.invalid_title")
+        case .damaged: return "Invite link damaged"
         case .rateLimited: return l10n.t("invite.contact.result.rate_limited_title")
         case .requiresReauth: return l10n.t("chat.reauth.title")
         case .failed: return l10n.t("invite.contact.result.failed_title")
@@ -142,7 +143,7 @@ public struct InviteLandingScreen: View {
     }
 
     /// The result's explanation. A failure's own detail is diagnostic prose
-    /// (ADR-0058 section 6): it goes to the log, the screen says the
+    /// (ADR-0061 section 6): it goes to the log, the screen says the
     /// action's sentence.
     private func copy(for result: AcceptInviteResult) -> String {
         switch result {
@@ -157,7 +158,9 @@ public struct InviteLandingScreen: View {
         case .notFound:
             return l10n.t("invite.contact.no_longer_valid")
         case .malformedSlug:
-            return l10n.t("invite.contact.invalid_body")
+            return "This link is incomplete. Ask for it to be sent again."
+        case .damaged:
+            return l10n.t("invite.link.damaged")
         case .rateLimited:
             return inviteRateLimitedMessage
         case .requiresReauth:

@@ -56,11 +56,11 @@ public enum LegacyChannelV1 {
     static let rustRefusalMarker = "legacy v1 PublisherGroup state"
 
     /// User-facing copy for a channel whose MLS state predates the v2
-    /// derivation (`channels.legacy.channel`, ADR-0058).
+    /// derivation (`channels.legacy.channel`, ADR-0061).
     public static var channelMessage: String { Localization.text("channels.legacy.channel") }
 
     /// User-facing copy for a `/g/` co-publisher link minted under the v1
-    /// derivation (`channels.legacy.copublisher_link`, ADR-0058).
+    /// derivation (`channels.legacy.copublisher_link`, ADR-0061).
     public static var coPublisherLinkMessage: String {
         Localization.text("channels.legacy.copublisher_link")
     }

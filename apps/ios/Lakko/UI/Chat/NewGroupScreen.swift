@@ -22,7 +22,7 @@ struct NewGroupScreen: View {
     let chatRepository: ChatRepository
     /// Called with the new group's hex id and, when some adds failed, the
     /// notice the chat should show (rendered in the language of the moment
-    /// it is on screen, ADR-0058).
+    /// it is on screen, ADR-0061).
     let onCreated: (_ groupIdHex: String, _ notice: UiText?) -> Void
 
     @State private var name: String = ""
@@ -30,7 +30,7 @@ struct NewGroupScreen: View {
     @State private var busy = false
     /// The catalog key of the founding failure, rendered when shown.
     @State private var errorMessage: String?
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
     /// UX spec §2 — one line, at most 64 characters.

@@ -55,6 +55,16 @@ the create menu in section 3.
 
 The app opens on Chats. There is no home screen.
 
+**Web: the address bar shows the origin only** (`https://lakko.me/`, on the
+test stack `https://test.lakko.me/`), whatever screen is open. A chat or group
+id, an invite secret or a notification parameter never appears in the address
+bar, the browser's history list, a bookmark or a screenshot. The screen the
+user is on lives in the browser's session history instead, so back and
+forward move between screens and a reload keeps the screen. A link opened
+from outside (`/i/`, `/c/`, `/g/`, a notification) is read once on entry and
+cleared from the address bar before anything renders
+(`apps/web/src/routes/origin-history.ts`).
+
 ## 2. The conversation list
 
 ### 2.1 Row model
@@ -144,6 +154,14 @@ already know.
 **Per platform.** Pinned above the list on the web, `.searchable` on iOS, a
 search bar above the list on Android - the same field where each platform
 puts one.
+
+**Also with an empty list (2026-09-30).** The field is there before the
+first conversation exists: finding the first person to talk to is exactly
+what a new account needs it for. With nothing typed the empty state shows as
+before (its sentence and its New button); once something is typed the empty
+state gives way to what the search finds, the people half included
+([`who-can-find-me.md`](who-can-find-me.md) section 6.1). The folder bar
+stays hidden with an empty list.
 
 The LOCAL half is settled and built: fuzzy over the titles and previews of
 what this device already holds. **How the whole field should present itself
@@ -296,7 +314,9 @@ needs an index that does not exist and is out of this spec.
 - **Message search.** It needs a local index no client has, and it is what
   the remaining open part of section 4 is about.
 - **Folders / custom filters.** The merged list is the point; a filter
-  mechanism on top of it is a separate decision.
+  mechanism on top of it is a separate decision - taken in
+  [`chat-folders.md`](chat-folders.md): a folder is a saved view of this
+  list, and All chats stays this list unchanged.
 - **Call history sync across devices.** The calls list is this device's, like
   the message log. Making it follow the person is the same question as
   cross-device message history and belongs with it.

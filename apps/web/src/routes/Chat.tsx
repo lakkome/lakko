@@ -194,7 +194,8 @@ import {
 } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { recordRemovedDevices } from "../chat/device-readmission";
-import { useProfiles } from "../profile/ProfileContext";
+import { isOneToOne, useProfiles } from "../profile/ProfileContext";
+import { intakeScopedEnvelope } from "../reach/scoped-intake";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { usePins } from "../chat/PinContext";
 import { clampPinIndex, nextPinIndex, pinBarItems, type HeldForPin } from "../chat/pin-bar";
@@ -213,7 +214,7 @@ import {
   groupNameErrorCode,
   groupNameErrorText,
 } from "../chat/group-name-store";
-import { observeMembers } from "../profile/membership-baseline";
+import { observeMembership } from "../profile/membership-baseline";
 import { isOwnKeyB64 } from "../profile/own-key";
 import { createUsernameCheck } from "../profile/username-field";
 import { mayLookUp, usernameReason } from "../profile/rules";
@@ -413,6 +414,7 @@ import {
   subscribeConversationKindChanged,
 } from "../chat/conversation-kind-store";
 import { decideConversationKind, type ConversationKind } from "../chat/conversation-kind";
+import { MembersCanFindMeSwitch } from "../settings/MembersCanFindMeSwitch";
 
 /**
  * `/chat/:id` (from the Chats list) and `/groups/:id` (from the Groups list)
@@ -1066,7 +1068,7 @@ function ChatView(props: {
   const PERSIST_DEBOUNCE_MS = 500;
   const [input, setInput] = createSignal("");
   const [busy, setBusy] = createSignal(false);
-  // ADR-0058 — held as how to render them, so a line already on screen
+  // ADR-0061 — held as how to render them, so a line already on screen
   // follows a language switch.
   const [error, setError] = createLiveText();
   const [notice, setNotice] = createLiveText();
@@ -1714,7 +1716,13 @@ function ChatView(props: {
     const current = new Set(members().map((m) => base64Encode(m.sigPubkey)));
     const s = auth.state();
     if (s.kind !== "session") return;
-    const grew = untrack(() => observeMembers(s.account.accountId, props.entry.groupIdB64, current));
+    const change = untrack(() =>
+      observeMembership(s.account.accountId, props.entry.groupIdB64, current),
+    );
+    // ADR-0060 section 3 — a person left: rotate this account's reach keys
+    // for the group and republish the profile carrying them.
+    if (change.shrank) void profiles.groupShrank(props.entry.groupIdB64);
+    const grew = change.grew;
     if (grew) {
       profiles.groupGrew(props.entry.groupIdB64);
       // ADR-0051 §3 — an owner / admin holding a name re-sends it (original
@@ -3624,10 +3632,27 @@ function ChatView(props: {
       // unattributable sender is dropped.
       if (e.kind === "profile") {
         if (e.profile !== undefined && e.senderKey !== undefined) {
-          profiles.ingest(e.senderKey, e.profile);
+          profiles.ingest(e.senderKey, e.profile, { groupIdB64: props.entry.groupIdB64 });
         }
         continue;
       }
+      // ADR-0060 — a scoped-discovery service envelope: to its handler
+      // (a committer delegation, a contact's introduction offer or bundle),
+      // never a timeline row.
+      if (e.kind === "scopedDiscovery") {
+        void intakeScopedEnvelope({
+          kind: e.envelope,
+          payload: e.payload,
+          senderKeyB64: e.senderKey,
+          oneToOne: isOneToOne(props.entry.group),
+        });
+        continue;
+      }
+      // ADR-0057 — consumed at receipt by the chat client; a stray one is
+      // dropped here, never shown.
+      if (e.kind === "registrarSeed") continue;
+      // An unrecognised `lakko/…` service envelope: never a row.
+      if (e.kind === "serviceEnvelope") continue;
       if (incomingIds.has(e.messageId)) continue;
       fresh.push({ kind: "incoming", event: e });
     }
@@ -4383,7 +4408,7 @@ function ChatView(props: {
           // No secret means nothing was ever subscribed under a `push_gid` for
           // this group, so there is nothing to retire — done, not failed, so
           // the claim stands.
-          if (secret !== null) await retireOldPushGid(secret);
+          if (secret !== null) await retireOldPushGid(accountId, secret);
         } catch (err) {
           // Released so the next re-run retries it.
           releaseTeardownStep(teardownDone, "retire-push-subscription");
@@ -6554,6 +6579,7 @@ function ChatView(props: {
               )}
             </Show>
           </section>
+          <MembersCanFindMeSwitch kind="group" groupIdB64={props.entry.groupIdB64} />
           <section aria-label={t("chat.members.title")} class="lk-card" style={{ gap: "8px" }}>
             <h2>{t("chat.members.heading", { count: members().length })}</h2>
             {/* ADR-0045 UX §5.1 — the pending notice. TOP of the panel, above
@@ -8247,7 +8273,7 @@ function membershipRetryMaySucceed(reason: string): boolean {
 }
 
 /**
- * ADR-0045 UX §6 / §12 item 6 and ADR-0058 section 6 — the single funnel
+ * ADR-0045 UX §6 / §12 item 6 and ADR-0061 section 6 — the single funnel
  * every handler's failure goes through, returned as how to render it so a
  * message already on screen follows a language switch.
  *
@@ -8448,6 +8474,21 @@ function timelineRowToPersisted(
     // ADR-0052 decision 3 — consumed by the pin gate, never a timeline row
     // (no "pinned a message" transcript row in this version). Never persist
     // it.
+    return null;
+  }
+  if (row.event.kind === "scopedDiscovery") {
+    // ADR-0060 — a service envelope; its payload can hold secrets (a
+    // delegation, an introduction record). Never a row, never persisted.
+    return null;
+  }
+  if (row.event.kind === "registrarSeed") {
+    // ADR-0057 — consumed at receipt by the chat client and never a row.
+    // Never persist it: it carries a sealed registrar seed.
+    return null;
+  }
+  if (row.event.kind === "serviceEnvelope") {
+    // An unrecognised `lakko/…` service envelope: never a row, never
+    // persisted, so it can never become the chat-list preview line.
     return null;
   }
   if (row.event.kind === "membershipProposal") {

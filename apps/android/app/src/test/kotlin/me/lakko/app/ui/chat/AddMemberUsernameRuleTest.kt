@@ -68,7 +68,7 @@ class AddMemberUsernameRuleTest {
             vm.setAddMemberInput("pa-vel")
             vm.onAddMember()
             assertEquals(emptyList<String>(), lookups)
-            // ADR-0058: the reason is the catalog message, held as its key
+            // ADR-0061: the reason is the catalog message, held as its key
             // so a language switch re-renders it.
             assertEquals(
                 me.lakko.app.profile.UsernameProblem.INVALID_CHARACTERS.text,

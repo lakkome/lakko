@@ -30,6 +30,9 @@ lakko-crypto.workspace = true
 # introduces no dependency cycle.
 lakko-attest.workspace = true
 
+# ADR-0058: the synced-state tail is validated through the fold's decoder.
+lakko-sync.workspace = true
+
 # CSPRNG for the Argon2 salt + AEAD nonce. Same `rand` major as
 # `lakko-attachments` so the workspace pulls one version.
 rand = "0.8"

@@ -208,7 +208,7 @@ public enum ChannelsFormatting {
 /// the epoch, or the failure class the decrypt path reported.
 struct UnavailablePostView: View {
     let reason: String
-    /// ADR-0058 — re-renders on a language switch.
+    /// ADR-0061 — re-renders on a language switch.
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
@@ -225,7 +225,7 @@ struct UnavailablePostView: View {
 }
 
 /// The reasons a post can be unreadable, in the words the card shows
-/// (ADR-0058), read in the language of the moment.
+/// (ADR-0061), read in the language of the moment.
 enum UnavailablePostReason {
     /// The post predates this device's access (older key window).
     static var beforeAccess: String { Localization.text("channels.post.older_key") }
@@ -233,7 +233,7 @@ enum UnavailablePostReason {
     static var notVerified: String { Localization.text("channels.post.unreadable") }
 }
 
-// MARK: - Failure copy (ADR-0058 batch 4)
+// MARK: - Failure copy (ADR-0061 batch 4)
 
 /// How a channels failure reads: a fixed first sentence and the server code's
 /// own sentence (`channels.error.*`) through `common.sentence_pair`, or the

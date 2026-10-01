@@ -796,7 +796,7 @@ class HostedCallsTest {
         assertEquals(LinkCallStartOutcome.Failed("mint refused"), outcome)
         assertEquals(LinkCallPhase.ERROR, h.host.slot.value?.phase)
         // The diagnostic stays in the outcome for the log; a failure of no
-        // known kind carries no reason to the screen (ADR-0058).
+        // known kind carries no reason to the screen (ADR-0061).
         assertNull(h.host.slot.value?.error)
         assertFalse(h.host.occupiesSlot)
     }

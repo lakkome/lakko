@@ -94,7 +94,7 @@ public fun notificationPermissionAsk(
  */
 public const val NOTIFICATIONS_OFF_TITLE: String = "Turn on notifications"
 
-/** Catalog key of [NOTIFICATIONS_OFF_TITLE] (ADR-0058); the screen renders
+/** Catalog key of [NOTIFICATIONS_OFF_TITLE] (ADR-0061); the screen renders
  *  the key, the constant pins the English the catalog carries. */
 public const val NOTIFICATIONS_OFF_TITLE_KEY: String = "settings.notifications.off.title"
 

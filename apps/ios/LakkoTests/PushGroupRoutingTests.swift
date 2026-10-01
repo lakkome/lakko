@@ -390,15 +390,14 @@ final class PushGroupRoutingTests: XCTestCase {
         // Device-key-encrypted round-trip returns the exact 32 bytes.
         XCTAssertEqual(store.getSecret(accountIdB64: "acct", groupIdHex: "grp"), secret)
         // Plaintext reverse index maps push_gid -> (account, group_id).
-        let route = store.lookupRoute(pushGidHex: pushGidHex)
-        XCTAssertEqual(route?.accountIdB64, "acct")
-        XCTAssertEqual(route?.groupIdHex, "grp")
+        let route = store.lookupRoute(accountIdB64: "acct", pushGidHex: pushGidHex)
+        XCTAssertEqual(route, "grp")
 
         // A wipe removes both the secret + the reverse-index entry.
         store.clear(accountIdB64: "acct")
         XCTAssertFalse(store.hasSecret(accountIdB64: "acct", groupIdHex: "grp"))
         XCTAssertNil(store.getSecret(accountIdB64: "acct", groupIdHex: "grp"))
-        XCTAssertNil(store.lookupRoute(pushGidHex: pushGidHex))
+        XCTAssertNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: pushGidHex))
     }
 
     // MARK: - owner-mint funnel
@@ -433,9 +432,8 @@ final class PushGroupRoutingTests: XCTestCase {
 
         // push_gid = keyed-BLAKE3(secret); the reverse index maps it to the group.
         let pushGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: secret))
-        let route = store.lookupRoute(pushGidHex: PushGroupRouting.hex(pushGid))
-        XCTAssertEqual(route?.accountIdB64, "acctOwner")
-        XCTAssertEqual(route?.groupIdHex, groupIdHex)
+        let route = store.lookupRoute(accountIdB64: "acctOwner", pushGidHex: PushGroupRouting.hex(pushGid))
+        XCTAssertEqual(route, groupIdHex)
 
         // Subscribed under push_gid — NOT the DS group_id.
         XCTAssertEqual(spy.targets, [pushGid])
@@ -551,6 +549,126 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertEqual(
             broadcaster.envelopes.count, 1,
             "a distributed secret must not be re-broadcast on a later provision")
+    }
+
+    /// ADR-0057 obligation 8, second security pass finding 5 — the journal is
+    /// bound to the minted secret's `push_gid` BEFORE the secret is broadcast.
+    func testTheJournalIsBoundBeforeTheSecretIsBroadcast() async throws {
+        let store = makeStore()
+        let routing = makeRouting(store: store, spy: SubscribeSpy())
+        var log: [String] = []
+        var bound: [Data] = []
+        routing.bindSecret = { account, group, secret in
+            XCTAssertEqual(account, "acctOwner")
+            log.append("bind")
+            bound.append(secret)
+            return .bound
+        }
+        let identity = try makeIdentity(0x34)
+        let (group, groupIdHex) = try makeOwnerGroup(identity)
+
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { _ in log.append("broadcast") })
+        XCTAssertEqual(log, ["bind", "broadcast"], "the bind precedes the broadcast")
+        let minted = try XCTUnwrap(store.getSecret(accountIdB64: "acctOwner", groupIdHex: groupIdHex))
+        XCTAssertEqual(bound, [minted])
+    }
+
+    /// `409`: the id is bound to another journal — a fresh secret is minted
+    /// once and bound; the broadcast carries that second secret.
+    func testA409MintsAFreshSecretOnceAndBindsItBeforeTheBroadcast() async throws {
+        let store = makeStore()
+        let routing = makeRouting(store: store, spy: SubscribeSpy())
+        var bound: [Data] = []
+        var answers: [PushBindOutcome] = [.conflict, .bound]
+        routing.bindSecret = { _, _, secret in
+            bound.append(secret)
+            return answers.removeFirst()
+        }
+        let broadcaster = FlakyBroadcastRecorder(shouldFail: false)
+        let identity = try makeIdentity(0x35)
+        let (group, groupIdHex) = try makeOwnerGroup(identity)
+
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(bound.count, 2)
+        XCTAssertNotEqual(bound[0], bound[1], "a fresh secret, not the taken one")
+        let stored = try XCTUnwrap(store.getSecret(accountIdB64: "acctOwner", groupIdHex: groupIdHex))
+        XCTAssertEqual(stored, bound[1])
+        XCTAssertEqual(
+            PushGroupRouting.tryDecodeSecretEnvelope(try XCTUnwrap(broadcaster.envelopes.first))?.secret,
+            bound[1])
+    }
+
+    /// Two `409`s: logged and broadcast anyway (only ONE re-mint).
+    func testTwo409sBroadcastTheSecondSecretUnbound() async throws {
+        let store = makeStore()
+        let routing = makeRouting(store: store, spy: SubscribeSpy())
+        var binds = 0
+        routing.bindSecret = { _, _, _ in binds += 1; return .conflict }
+        let broadcaster = FlakyBroadcastRecorder(shouldFail: false)
+        let identity = try makeIdentity(0x36)
+        let (group, groupIdHex) = try makeOwnerGroup(identity)
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(binds, 2, "one re-mint, then give up")
+        XCTAssertEqual(broadcaster.envelopes.count, 1)
+    }
+
+    /// `503`: broadcast anyway (wakes are dropped until bound), and the next
+    /// provisioning pass binds the distributed secret again.
+    func testA503BroadcastsAnywayAndReBindsOnTheNextPass() async throws {
+        let store = makeStore()
+        let routing = makeRouting(store: store, spy: SubscribeSpy())
+        var bound: [Data] = []
+        var answers: [PushBindOutcome] = [.disabled, .bound]
+        routing.bindSecret = { _, _, secret in
+            bound.append(secret)
+            return answers.isEmpty ? .bound : answers.removeFirst()
+        }
+        let broadcaster = FlakyBroadcastRecorder(shouldFail: false)
+        let identity = try makeIdentity(0x37)
+        let (group, groupIdHex) = try makeOwnerGroup(identity)
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(broadcaster.envelopes.count, 1)
+        XCTAssertEqual(bound.count, 1)
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(bound.count, 2, "re-bound on the next pass")
+        XCTAssertEqual(bound[0], bound[1], "the same distributed secret")
+        XCTAssertEqual(broadcaster.envelopes.count, 1, "not broadcast again")
+        await routing.ensureProvisioned(
+            accountIdB64: "acctOwner", groupIdHex: groupIdHex, group: group,
+            identity: identity, broadcast: { try broadcaster.send($0) })
+        XCTAssertEqual(bound.count, 2, "bound now: nothing more")
+    }
+
+    /// A rotation binds the NEW secret before broadcasting it too.
+    func testARotationBindsBeforeItBroadcasts() async throws {
+        let store = makeStore()
+        let routing = makeRouting(store: store, spy: SubscribeSpy(), unsubscribeSpy: UnsubscribeSpy())
+        var log: [String] = []
+        var bound: [Data] = []
+        routing.bindSecret = { _, _, secret in
+            log.append("bind")
+            bound.append(secret)
+            return .bound
+        }
+        let old = try XCTUnwrap(PushGroupRouting.mintSecret())
+        try seedSettled(store: store, accountIdB64: "acct", groupIdHex: "grp", secret: old)
+        let outcome = await routing.rotateSecret(
+            accountIdB64: "acct", groupIdHex: "grp", ownRole: .admin,
+            mintEpoch: { Self.rotationEpoch },
+            broadcast: { _ in log.append("broadcast") })
+        XCTAssertEqual(outcome, .rotated)
+        XCTAssertEqual(log, ["bind", "broadcast"])
+        XCTAssertEqual(bound, [try XCTUnwrap(store.getSecret(accountIdB64: "acct", groupIdHex: "grp"))])
     }
 
     /// Upgrade rule: a row written before the flag existed (a BARE 32-byte
@@ -1024,9 +1142,8 @@ final class PushGroupRoutingTests: XCTestCase {
         )
 
         // The golden-equality: the non-owner's push_gid == the owner's.
-        let route = store.lookupRoute(pushGidHex: PushGroupRouting.hex(ownerPushGid))
-        XCTAssertEqual(route?.accountIdB64, "acctPeer")
-        XCTAssertEqual(route?.groupIdHex, groupIdHex)
+        let route = store.lookupRoute(accountIdB64: "acctPeer", pushGidHex: PushGroupRouting.hex(ownerPushGid))
+        XCTAssertEqual(route, groupIdHex)
         XCTAssertEqual(spy.targets, [ownerPushGid])
     }
 
@@ -1282,7 +1399,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertEqual(spy.targets, [ownerPushGid], "no re-subscribe on a refused secret")
         // The rogue push_gid never entered the reverse index either.
         let rogueGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: rogue))
-        XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(rogueGid)))
+        XCTAssertNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(rogueGid)))
     }
 
     // MARK: - ADMIN rows of the gate, against a REAL promoted admin
@@ -1388,9 +1505,9 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertEqual(unsub.targets, [ownerPushGid],
                        "and retires its OWN row under the superseded id")
         XCTAssertNil(
-            store.lookupRoute(pushGidHex: PushGroupRouting.hex(ownerPushGid)),
+            store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(ownerPushGid)),
             "the superseded reverse-index row is deleted, not accumulated")
-        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(rotatedGid)))
+        XCTAssertNotNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(rotatedGid)))
     }
 
     /// The tier boundary the widening did NOT cross: a PLAIN member's changed
@@ -1426,7 +1543,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertEqual(spy.targets, [ownerPushGid], "no re-subscribe on a refused secret")
         XCTAssertTrue(unsub.targets.isEmpty, "a refused secret retires nothing")
         let rogueGid = try XCTUnwrap(PushGroupRouting.derivePushGid(secret: rogue))
-        XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(rogueGid)))
+        XCTAssertNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(rogueGid)))
     }
 
     /// Owner priority: whatever an admin seeded, a later owner broadcast
@@ -1582,11 +1699,11 @@ final class PushGroupRoutingTests: XCTestCase {
             accountIdB64: "acct", groupIdHex: "grp2", secret: other, pushGidHex: otherGidHex,
             distributed: true, mintEpoch: 0)
 
-        store.removeRoute(pushGidHex: gidHex)
+        store.removeRoute(accountIdB64: "acct", pushGidHex: gidHex)
 
-        XCTAssertNil(store.lookupRoute(pushGidHex: gidHex), "the named row is gone")
+        XCTAssertNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: gidHex), "the named row is gone")
         XCTAssertNotNil(
-            store.lookupRoute(pushGidHex: otherGidHex),
+            store.lookupRoute(accountIdB64: "acct", pushGidHex: otherGidHex),
             "and ONLY the named row — a sibling group's route survives")
         // Scoped to the reverse index: it must never strand a group by
         // deleting the material a live push_gid is derived from.
@@ -1598,8 +1715,8 @@ final class PushGroupRoutingTests: XCTestCase {
     /// have to check first.
     func testRemoveRouteOnAnAbsentRowIsANoOp() throws {
         let store = makeStore()
-        store.removeRoute(pushGidHex: String(repeating: "ab", count: 32))
-        XCTAssertNil(store.lookupRoute(pushGidHex: String(repeating: "ab", count: 32)))
+        store.removeRoute(accountIdB64: "acct", pushGidHex: String(repeating: "ab", count: 32))
+        XCTAssertNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: String(repeating: "ab", count: 32)))
     }
 
     // MARK: - ADR-0043: the pure membership-shrink decision core
@@ -1769,8 +1886,8 @@ final class PushGroupRoutingTests: XCTestCase {
 
         // The reverse index carries the new entry and NOT the retired one:
         // without the delete every rotation grows the map by a dead row.
-        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(newGid)))
-        XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(oldGid)))
+        XCTAssertNotNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(newGid)))
+        XCTAssertNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(oldGid)))
     }
 
     /// ADR-0043 ratified option (b): an ADMIN may rotate too.
@@ -2056,9 +2173,9 @@ final class PushGroupRoutingTests: XCTestCase {
 
         // Exactly one live route row: the reverse index does not grow a dead
         // entry per rotation.
-        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(finalGid)))
-        XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(firstGid)))
-        XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(oldGid)))
+        XCTAssertNotNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(finalGid)))
+        XCTAssertNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(firstGid)))
+        XCTAssertNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(oldGid)))
     }
 
     // MARK: - ADR-0043: the membership-shrink trigger entry point
@@ -2191,8 +2308,8 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertEqual(
             unsub.subscribesBefore, [2],
             "and only after the new id is armed (never unsubscribed from both)")
-        XCTAssertNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(heldGid)))
-        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(rotatedGid)))
+        XCTAssertNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(heldGid)))
+        XCTAssertNotNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(rotatedGid)))
     }
 
     /// An IDENTICAL re-broadcast retires nothing — the id did not change, so
@@ -2218,7 +2335,7 @@ final class PushGroupRoutingTests: XCTestCase {
 
         XCTAssertTrue(unsub.targets.isEmpty)
         XCTAssertNotNil(store.lookupRoute(
-            pushGidHex: PushGroupRouting.hex(
+            accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(
                 try XCTUnwrap(PushGroupRouting.derivePushGid(secret: held)))))
     }
 
@@ -2632,7 +2749,7 @@ final class PushGroupRoutingTests: XCTestCase {
             "gid(S1) MUST NOT be retired — retiring it is the whole of F-A, because it "
                 + "migrates the group back onto the id the evicted member still derives")
         XCTAssertNotNil(
-            store.lookupRoute(pushGidHex: PushGroupRouting.hex(gid1)),
+            store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(gid1)),
             "the live route survives the replay")
         XCTAssertEqual(
             spy.targets.count, subscribesAfterRotation,
@@ -2726,7 +2843,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertEqual(
             spy.targets.last, gid1,
             "the last subscription must be the rotation's id")
-        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(gid1)))
+        XCTAssertNotNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(gid1)))
         XCTAssertFalse(
             unsub.targets.contains(gid1),
             "retiring the LIVE gid is the whole of F-A — it migrates the group back onto "
@@ -2736,7 +2853,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertTrue(
             unsub.targets.contains(gidOld), "the superseded gid must be torn down")
         XCTAssertNil(
-            store.lookupRoute(pushGidHex: PushGroupRouting.hex(gidOld)),
+            store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(gidOld)),
             "and its reverse-index row dropped")
     }
 
@@ -2806,7 +2923,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertEqual(
             store.getRecord(accountIdB64: "acct", groupIdHex: groupIdHex)?.mintEpoch,
             rotationEpoch)
-        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(expectedGid)))
+        XCTAssertNotNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(expectedGid)))
         XCTAssertFalse(
             unsub.targets.contains(expectedGid),
             "the surviving id must never be retired")
@@ -2911,7 +3028,7 @@ final class PushGroupRoutingTests: XCTestCase {
         for armed in spy.targets where armed != peerGid {
             XCTAssertTrue(unsub.targets.contains(armed))
         }
-        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(peerGid)))
+        XCTAssertNotNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(peerGid)))
     }
 
     // MARK: - the routing row is held across network I/O, but BOUNDED
@@ -3090,7 +3207,7 @@ final class PushGroupRoutingTests: XCTestCase {
         XCTAssertTrue(
             unsub.targets.contains(rotatedGid),
             "the intermediate id must still be retired, not stranded")
-        XCTAssertNotNil(store.lookupRoute(pushGidHex: PushGroupRouting.hex(peerGid)))
+        XCTAssertNotNil(store.lookupRoute(accountIdB64: "acct", pushGidHex: PushGroupRouting.hex(peerGid)))
     }
 
     /// The deadline fails CLOSED **for correctness**: a broadcast that merely

@@ -341,7 +341,7 @@ public data class SignupUiState(
     val busy: Boolean = false,
     /** The proof-of-work solve is running: the working row offers `Cancel`. */
     val solving: Boolean = false,
-    /** The form's error sentence (ADR-0058: rendered from its key). */
+    /** The form's error sentence (ADR-0061: rendered from its key). */
     val error: UiText? = null,
     /** The last attempt met `signup-rate-limited`: the button reads
      *  `Try again`. The form keeps its contents. */

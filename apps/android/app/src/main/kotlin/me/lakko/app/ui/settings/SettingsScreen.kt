@@ -26,12 +26,14 @@ import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -90,6 +92,10 @@ public fun SettingsScreen(
     onLogout: () -> Unit,
     onForgetDevice: () -> Unit,
     modifier: Modifier = Modifier,
+    /** docs/ux/chat-folders.md section 4 — between Notifications and Appearance. */
+    onOpenChatFolders: () -> Unit = {},
+    /** `docs/ux/who-can-find-me.md` section 2 — Settings > Privacy. */
+    onOpenWhoCanFindMe: () -> Unit = {},
 ) {
     val mode by ThemePreference.mode.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -165,6 +171,11 @@ public fun SettingsScreen(
             SectionLabel(t("settings.section.account"))
             SettingsRow(t("settings.section.profile"), Icons.Filled.Person, onOpenProfile)
 
+            // docs/ux/who-can-find-me.md section 2 — Privacy, after Profile: it
+            // is about people, not keys, which is why it is not under Security.
+            SectionLabel("Privacy")
+            SettingsRow("Who can find me", Icons.Filled.Visibility, onOpenWhoCanFindMe)
+
             SectionLabel(t("settings.section.security"))
             SettingsRow(t("settings.passkeys.title"), Icons.Filled.Key, onOpenPasskeys)
             SettingsRow(
@@ -179,6 +190,9 @@ public fun SettingsScreen(
                 onOpenRecovery,
                 supporting = t("settings.security.recovery.sub"),
             )
+
+            SectionLabel("Chat folders")
+            SettingsRow("Chat folders", Icons.Filled.Folder, onOpenChatFolders)
 
             SectionLabel(t("settings.section.appearance"))
             Row(

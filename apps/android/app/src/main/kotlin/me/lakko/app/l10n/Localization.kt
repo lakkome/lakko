@@ -173,7 +173,7 @@ public fun ProvideLocalization(content: @Composable () -> Unit) {
 }
 
 /**
- * Process-wide holder of the interface language (ADR-0058 section 4).
+ * Process-wide holder of the interface language (ADR-0061 section 4).
  *
  * The choice is kept in plain `SharedPreferences` on every API level and,
  * on Android 13+, also as the system per-app language, which is then the

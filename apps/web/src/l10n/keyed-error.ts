@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * An error whose user-facing text is a catalog key (ADR-0058 section 6:
+ * An error whose user-facing text is a catalog key (ADR-0061 section 6:
  * errors render from their code, never from `.message`).
  *
  * `.message` carries the text in the language current when the error was

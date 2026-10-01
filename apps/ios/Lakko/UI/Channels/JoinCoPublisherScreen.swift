@@ -22,7 +22,7 @@ struct JoinCoPublisherScreen: View {
     /// retired-derivation channel, an invalid link, an owner who has not yet
     /// approved), or `nil`.
     @State private var errorMessage: UiText?
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
     /// ADR-0053 — the shared join-request failure (same copy and Try-again
     /// rule as the group join screen). The raw error is logged, never shown.

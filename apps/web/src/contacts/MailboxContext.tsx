@@ -24,6 +24,10 @@
  *     behind `mailbox-poller.ts`, which is what keeps the loop and the Refresh
  *     button from dispatching the same batch twice.
  *
+ * The account cursor and the pending requests are persisted together per
+ * account by `inbox-store.ts` (raw rows, re-decoded on load), so a request
+ * the cursor has already passed survives a reload until Accept or Decline.
+ *
  * After every Welcome attempt, joined or not, the account's KeyPackage is
  * republished: processing a Welcome consumes the KeyPackage it was built on,
  * and a failed attempt may have consumed it too. See
@@ -62,21 +66,17 @@ import {
 import { useProfiles } from "../profile/ProfileContext";
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
-import {
-  loadAccepted,
-  loadCursor,
-  saveCursor,
-  upsertAccepted,
-  type AcceptedContact,
-} from "./local-store";
+import { loadAccepted, upsertAccepted, type AcceptedContact } from "./local-store";
+import { createPendingInbox, type FetchedRequest, type PendingInbox } from "./inbox-store";
 import { createMailboxPoller, type MailboxPoller } from "./mailbox-poller";
 
 /** Copy for a Welcome this device could not open. */
 export const JOIN_FAILURE_MESSAGE = (): string => t("contacts.mailbox.join_failed");
 
 export interface MailboxApi {
-  /** Contact requests awaiting Accept / Decline, oldest first. In memory
-   *  only — the intro plaintext never goes to localStorage. */
+  /** Contact requests awaiting Accept / Decline, oldest first. Kept across
+   *  reloads as the raw (sealed) mailbox rows — the intro plaintext never
+   *  goes to localStorage. */
   readonly pending: Accessor<readonly IncomingContactRequest[]>;
   /** A user-initiated `refresh()` is in flight. */
   readonly busy: Accessor<boolean>;
@@ -91,7 +91,8 @@ export interface MailboxApi {
   dismissJoinFailure(): void;
   /** Fetch the mailbox now (no long poll). */
   refresh(): Promise<void>;
-  /** Drop a request from the pending list (after Accept or Decline). */
+  /** Drop a request from the pending list for good (after Accept or
+   *  Decline). */
   removePending(messageId: number): void;
 }
 
@@ -122,9 +123,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const [acceptedVersion, setAcceptedVersion] = createSignal(0);
   const [joinFailure, setJoinFailure] = createLiveText();
 
-  // The single-account mailbox cursor (`lakko.contacts.v2`), mirrored in
-  // memory so the poller's cursor re-read is synchronous.
-  let cursor = loadCursor();
+  // The signed-in account's mailbox cursor + pending requests, persisted
+  // together (`inbox-store.ts`). `null` while signed out.
+  let inbox: PendingInbox | null = null;
   // Welcome rows already joined in this page lifetime. A batch whose cursor
   // write was HELD (the post-join persist failed) is fetched again; without
   // this, the second pass would try to open a Welcome whose KeyPackage the
@@ -139,8 +140,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     const s = auth.state();
     if (s.kind !== "session") throw new Error("mailbox dispatch without a session");
     const accountIdB64 = s.account.accountId;
-    const seen = new Set(pending().map((r) => r.messageId));
-    const fresh: IncomingContactRequest[] = [];
+    const target = inbox;
+    if (target === null) throw new Error("mailbox dispatch without an inbox");
+    const fresh: FetchedRequest[] = [];
     let welcomeAttempted = false;
     let joined = false;
     const joinedGroupIds: string[] = [];
@@ -154,10 +156,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           if (ev.request.profile !== null) {
             profiles.ingest(base64Encode(ev.request.fromPubkey), ev.request.profile);
           }
-          if (!seen.has(ev.request.messageId)) {
-            seen.add(ev.request.messageId);
-            fresh.push(ev.request);
-          }
+          fresh.push({ request: ev.request, row: ev.row });
         } else if (ev.kind === "welcome") {
           if (joinedWelcomeIds.has(ev.welcome.messageId)) continue;
           welcomeAttempted = true;
@@ -179,11 +178,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             joinedGroupIds.push(active.groupIdB64);
             joined = true;
           } catch (err) {
-            // ADR-0053 — an account-mailbox Welcome is a channel co-publisher's,
-            // opened by the co-publisher flow under the account identity; this
-            // handler's device-identity join cannot open it, and that is not a
-            // failed join the user needs to hear about.
-            if (ev.welcome.fromAccountMailbox !== true) failed = true;
+            // ADR-0060 — every device of the account reads the one account
+            // mailbox, so a Welcome here may add ANOTHER device of ours, or be
+            // a channel co-publisher's (opened by that flow under the account
+            // identity). Neither holds a KeyPackage of this device, and that
+            // is not a failed join the user needs to hear about.
+            if (!isWelcomeForAnotherLeaf(err)) failed = true;
             // eslint-disable-next-line no-console
             console.warn("joinGroupFromWelcome failed", ev.welcome.messageId, err);
           }
@@ -197,7 +197,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             // ADR-0048 — the name comes from the resolver; a re-delivered ack
             // must not wipe a rename the user already gave this contact.
             displayName:
-              loadAccepted().find(
+              loadAccepted(accountIdB64).find(
                 (c) => c.signaturePubkeyB64 === base64Encode(ev.ack.accepterPubkey),
               )?.displayName ?? "",
             acceptedAtMs: Date.now(),
@@ -205,11 +205,13 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             // roster can resolve to this contact's name.
             accountIdHex: groupIdHex(ev.ack.accepterAccountId),
           };
-          upsertAccepted(accepter);
+          upsertAccepted(accepter, accountIdB64);
           setAcceptedVersion(acceptedVersion() + 1);
         }
       }
-      if (fresh.length > 0) setPending([...pending(), ...fresh]);
+      // Persisted with the cursor it was fetched under; a failed write throws
+      // here, which holds the cursor so the rows are fetched again.
+      if (fresh.length > 0) target.addFetched(fresh);
       if (joined) {
         // The joined group lives only in memory until a snapshot lands, and
         // the Welcome cannot be opened a second time in this page lifetime.
@@ -234,43 +236,22 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   const poller: MailboxPoller = createMailboxPoller<IncomingMailboxEvent>({
-    readCursor: () => cursor,
+    readCursor: () => inbox?.cursor() ?? 0,
     writeCursor: (next) => {
-      cursor = next;
-      saveCursor(next);
+      // One write for the cursor and the pending rows; a failure throws and
+      // leaves the in-memory cursor where it was.
+      if (inbox === null) throw new Error("mailbox cursor write without an inbox");
+      inbox.advanceCursor(next);
     },
     fetch: async (after, waitSecs, signal) =>
       client.pollMailbox(auth.identitySecrets(), after, waitSecs, signal),
     dispatch,
   });
 
-  // ADR-0050 — the DEVICE mailbox, where Welcomes sealed to this device's
-  // KeyPackages arrive. Its own cursor: a different DS queue.
-  const DEVICE_CURSOR_KEY = "lakko.contacts.device-mailbox.v1";
-  let deviceCursor = loadDeviceCursor();
-  function loadDeviceCursor(): number {
-    try {
-      const raw = globalThis.localStorage?.getItem(DEVICE_CURSOR_KEY);
-      const n = raw === null || raw === undefined ? 0 : Number(raw);
-      return Number.isFinite(n) && n >= 0 ? n : 0;
-    } catch {
-      return 0;
-    }
-  }
-  const devicePoller: MailboxPoller = createMailboxPoller<IncomingMailboxEvent>({
-    readCursor: () => deviceCursor,
-    writeCursor: (next) => {
-      deviceCursor = next;
-      try {
-        globalThis.localStorage?.setItem(DEVICE_CURSOR_KEY, String(next));
-      } catch {
-        /* storage unavailable: re-fetch after reload is harmless */
-      }
-    },
-    fetch: async (after, waitSecs, signal) =>
-      client.pollDeviceMailbox(auth.identitySecrets(), after, waitSecs, signal),
-    dispatch,
-  });
+  // ADR-0060 section 6 — one inbound mailbox per person: every Welcome is
+  // addressed to the ACCOUNT mailbox (the device mailbox is claimed and
+  // closed, and no longer polled; its cursor key `lakko.contacts.device-
+  // mailbox.v1` is left unread).
 
   function isHidden(): boolean {
     return globalThis.document?.visibilityState === "hidden";
@@ -280,7 +261,22 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     if (activeAccount === accountIdB64 && loopAbort !== null) return;
     stop();
     activeAccount = accountIdB64;
-    cursor = loadCursor();
+    const opened = createPendingInbox({
+      accountIdB64,
+      isAccepted: (keyB64) =>
+        loadAccepted(accountIdB64).some((c) => c.signaturePubkeyB64 === keyB64),
+      onChange: () => setPending(opened.pending()),
+    });
+    inbox = opened;
+    setPending(opened.pending());
+    // Requests kept from an earlier page load: back through the poller's own
+    // verify-and-open path before they are listed.
+    void opened
+      .restore((rows) => client.decodePendingRequestRows(auth.identitySecrets(), rows))
+      .catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("contacts inbox: restoring pending requests failed", err);
+      });
     const controller = new AbortController();
     loopAbort = controller;
     void runLongPollLoop(controller.signal, {
@@ -288,12 +284,8 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       isPaused: isHidden,
       waitUntilResumed: (signal) => resume.wait(signal),
       tick: async (signal) => {
-        // Long-poll the account mailbox and the device mailbox together; the
-        // tick ends when both return (each returns early on a new row).
-        await Promise.all([
-          poller.poll(LONG_POLL_WAIT_SECS, signal),
-          devicePoller.poll(LONG_POLL_WAIT_SECS, signal),
-        ]);
+        // Long-poll the account mailbox (ADR-0060: the one inbound mailbox).
+        await poller.poll(LONG_POLL_WAIT_SECS, signal);
         return 0;
       },
       classifyFailure: (err) => (isDsNetworkFailure(err) ? "network" : "other"),
@@ -310,6 +302,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     if (loopAbort !== null) {
       loopAbort.abort();
       loopAbort = null;
+    }
+    if (inbox !== null) {
+      inbox.dispose();
+      inbox = null;
     }
     if (activeAccount !== null) {
       activeAccount = null;
@@ -356,7 +352,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       }
       setBusy(true);
       try {
-        await Promise.all([poller.poll(0), devicePoller.poll(0)]);
+        await poller.poll(0);
       } catch (err) {
         setError(formatMailboxError(err));
       } finally {
@@ -364,7 +360,8 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       }
     },
     removePending(messageId) {
-      setPending(pending().filter((r) => r.messageId !== messageId));
+      if (inbox !== null) inbox.remove(messageId);
+      else setPending(pending().filter((r) => r.messageId !== messageId));
     },
   };
 
@@ -429,4 +426,18 @@ export function MailboxJoinFailureBanner(): JSX.Element {
       )}
     </Show>
   );
+}
+
+/**
+ * ADR-0060 — whether a Welcome refused by `joinFromWelcome` was simply not
+ * sealed to any KeyPackage of this device (OpenMLS `NoMatchingKeyPackage`):
+ * another device's Welcome, or a co-publisher's, read from the shared account
+ * mailbox. Every other refusal is a real failed join.
+ */
+export function isWelcomeForAnotherLeaf(err: unknown): boolean {
+  const text =
+    err instanceof Error
+      ? `${err.message} ${String((err as { cause?: unknown }).cause ?? "")}`
+      : String(err);
+  return /NoMatchingKeyPackage|no matching key ?package/i.test(text);
 }

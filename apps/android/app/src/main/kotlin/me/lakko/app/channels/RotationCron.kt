@@ -92,14 +92,25 @@ public class RotationCron(
     private val channelsClient: ChannelsClient,
     private val saveState: suspend (ChannelRotationState) -> Unit,
     private val onRotated: ((UInt) -> Unit)? = null,
-    /** ADR-0053 — registers the rotated epoch's journal key. Tests pass a
-     *  no-op; production builds a DS client per registration. */
+    /** ADR-0057 — registers the rotated epoch's journal key with the channel
+     *  owner's journal ROOT (the publisher identity is the account identity).
+     *  Tests pass a no-op; production builds a DS client per registration. */
     private val registerRotatedEpoch: suspend (groupId: ByteArray, before: me.lakko.app.ds.DsJournalSigner?, after: me.lakko.app.ds.DsJournalSigner?) -> Unit =
         { groupId, before, after ->
+            val root = try {
+                me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId)
+            } catch (_: Throwable) {
+                null
+            }
             me.lakko.app.ds.DsClient().use { ds ->
-                me.lakko.app.ds.registerBeforePublish(before, after) { next, current ->
-                    ds.registerNextEpoch(groupId, next, current)
-                }
+                me.lakko.app.ds.registerEpochBeforePublish(
+                    journalId = groupId,
+                    before = before,
+                    after = after,
+                    statements = root,
+                    revoke = emptyList(),
+                    put = { make -> ds.putStatement(make) },
+                )
             }
         },
 ) {

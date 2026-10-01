@@ -186,7 +186,7 @@ pub struct CompileReport {
 ///
 /// Fails on anything that is a defect in the file (unknown key, bad syntax,
 /// arguments or plural forms that do not fit the source, an unsupported
-/// language). Applies the review rule of ADR-0058: a security-critical key
+/// language). Applies the review rule of ADR-0061: a security-critical key
 /// is kept only when its status is `reviewed`.
 pub fn compile_translation(
     source: &SourceCatalog,

@@ -48,7 +48,8 @@ public interface ContactsInboxStore {
     /** Persist the pending list as-is (an empty list is a valid state). */
     public fun savePending(accountIdB64: String, pending: List<IncomingContactRequest>)
 
-    /** Drop both entries for [accountIdB64] (logout / forget device). */
+    /** Drop both entries for [accountIdB64] (forget device only; log out
+     *  keeps them for the next login of the same account). */
     public fun delete(accountIdB64: String)
 }
 

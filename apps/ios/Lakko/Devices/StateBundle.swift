@@ -5,8 +5,12 @@ import Foundation
 import LakkoCore
 
 extension Notification.Name {
-    /// Posted after a pairing state bundle merged contacts into
-    /// ``AcceptedContactsStore``, so a live ``ContactsRepository`` reloads them.
+    /// Posted after a pairing state bundle (or a backup restore) merged
+    /// contacts into ``AcceptedContactsStore``, so a live
+    /// ``ContactsRepository`` reloads them. The object is the merged
+    /// `[AcceptedContact]`; `userInfo[StateBundle.appliedAccountKey]` names
+    /// the account they were filed under, and a repository bound to any other
+    /// account ignores them.
     static let lakkoStateBundleApplied = Notification.Name("me.lakko.state-bundle-applied")
 }
 
@@ -23,6 +27,10 @@ extension Notification.Name {
 /// DeviceGroup exporter at the post-add epoch.
 public enum StateBundle {
 
+    /// `userInfo` key of ``Notification/Name/lakkoStateBundleApplied``: the
+    /// base64 account id the merged contacts belong to.
+    public static let appliedAccountKey = "accountIdB64"
+
     /// Exporter label; the context is the 32-byte rendezvous pseudonym.
     public static let exporterLabel = "lakko/state-bundle/v1"
     /// Exporter output length — the ChaCha20-Poly1305 key size.
@@ -32,7 +40,15 @@ public enum StateBundle {
     public static let pollTimeoutSeconds: TimeInterval = 20
     static let perRequestLongPollSeconds = 5
     static let maxBundleBytes = 1 << 20
-    static let knownGroupsKey = "lakko.pairing.known-groups.v1"
+    /// Per-account prefix of the known group ids; the account id follows.
+    static let knownGroupsKeyPrefix = "lakko.pairing.known-groups.v2."
+    /// The device-wide key the known group ids used before they were per
+    /// account. Never read; removed by ``clearKnownGroupIds(accountIdB64:defaults:)``.
+    static let legacyKnownGroupsKey = "lakko.pairing.known-groups.v1"
+
+    static func knownGroupsKey(accountIdB64: String) -> String {
+        knownGroupsKeyPrefix + accountIdB64
+    }
 
     // MARK: - Wire shape (field names match the web bundle)
 
@@ -157,8 +173,9 @@ public enum StateBundle {
     }
 
     /// Read this device's contacts, pins and known group ids into a bundle.
-    public static func build(accountIdB64: String, pinStore: PeerPinStore = PeerPinStore()) -> V1 {
-        let contacts = AcceptedContactsStore.load()
+    public static func build(accountIdB64: String, pinStore: PeerPinStore? = nil) -> V1 {
+        let pinStore = pinStore ?? PeerPinStore(ownerAccountIdB64: accountIdB64)
+        let contacts = AcceptedContactsStore.load(accountIdB64: accountIdB64)
         var pins: [CarriedPin] = []
         for contact in contacts {
             guard let accountId = contact.request.fromAccountId else { continue }
@@ -178,13 +195,17 @@ public enum StateBundle {
 
     /// Merge a bundle into this device: contacts not already present (by
     /// signature key), pins through the monotone setter, the known group ids
-    /// for the chat list's "Synchronizing..." label.
+    /// for the chat list's "Synchronizing..." label. `accountIdB64` is the
+    /// account the bundle belongs to (the one being paired): its contacts and
+    /// pins are filed under it, never under whoever else is signed in.
     @discardableResult
     public static func apply(
         _ bundle: V1,
-        pinStore: PeerPinStore = PeerPinStore()
+        accountIdB64: String,
+        pinStore: PeerPinStore? = nil
     ) -> (contacts: Int, pins: Int) {
-        var current = AcceptedContactsStore.load()
+        let pinStore = pinStore ?? PeerPinStore(ownerAccountIdB64: accountIdB64)
+        var current = AcceptedContactsStore.load(accountIdB64: accountIdB64)
         let have = Set(current.map { $0.request.fromPubkey })
         var fresh: [AcceptedContact] = []
         for carried in bundle.contacts {
@@ -196,7 +217,7 @@ public enum StateBundle {
         let added = fresh.count
         if added > 0 {
             current.append(contentsOf: fresh)
-            AcceptedContactsStore.save(current)
+            AcceptedContactsStore.save(current, accountIdB64: accountIdB64)
         }
         var pins = 0
         for pin in bundle.pins {
@@ -209,40 +230,69 @@ public enum StateBundle {
                 pins += 1
             }
         }
-        saveKnownGroupIds(bundle.knownGroupIdsB64)
+        saveKnownGroupIds(bundle.knownGroupIdsB64, accountIdB64: accountIdB64)
         // The contacts ride in the notification too: a live repository merges
         // them into its state (whose next save would otherwise overwrite the
         // store write above).
-        NotificationCenter.default.post(name: .lakkoStateBundleApplied, object: fresh)
+        NotificationCenter.default.post(
+            name: .lakkoStateBundleApplied, object: fresh,
+            userInfo: [appliedAccountKey: accountIdB64])
         return (added, pins)
     }
 
     // MARK: - Known group ids (drives the one "Synchronizing..." label)
+    //
+    // Per account (2026-09-30): the ids name the groups of the account that was
+    // paired, so they are filed under it, the way ``AcceptedContactsStore``
+    // files the contacts. They used to sit under one device-wide key, so a
+    // second account signed in on the same phone showed "Synchronizing..." for
+    // the first account's groups. A caller that does not name the account acts
+    // on the bound one (``AcceptedContactsStore/boundAccountIdB64``); with none,
+    // reads are empty and writes do nothing.
 
-    public static func saveKnownGroupIds(_ idsB64: [String], defaults: UserDefaults = .standard) {
+    static func saveKnownGroupIds(
+        _ idsB64: [String],
+        accountIdB64: String? = AcceptedContactsStore.boundAccountIdB64,
+        defaults: UserDefaults = .standard
+    ) {
+        guard let accountIdB64 else { return }
+        let key = knownGroupsKey(accountIdB64: accountIdB64)
         if idsB64.isEmpty {
-            defaults.removeObject(forKey: knownGroupsKey)
+            defaults.removeObject(forKey: key)
         } else {
-            defaults.set(idsB64, forKey: knownGroupsKey)
+            defaults.set(idsB64, forKey: key)
         }
     }
 
-    public static func loadKnownGroupIds(defaults: UserDefaults = .standard) -> [String] {
-        defaults.stringArray(forKey: knownGroupsKey) ?? []
+    static func loadKnownGroupIds(
+        accountIdB64: String? = AcceptedContactsStore.boundAccountIdB64,
+        defaults: UserDefaults = .standard
+    ) -> [String] {
+        guard let accountIdB64 else { return [] }
+        return defaults.stringArray(forKey: knownGroupsKey(accountIdB64: accountIdB64)) ?? []
+    }
+
+    /// Forget-device: drop one account's known group ids (and the old
+    /// device-wide row, which nothing reads any more).
+    static func clearKnownGroupIds(accountIdB64: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: knownGroupsKey(accountIdB64: accountIdB64))
+        defaults.removeObject(forKey: legacyKnownGroupsKey)
     }
 
     /// How many known groups this device has not joined yet. Clears the stored
     /// list once every known group is held, so the label cannot outlive its
     /// cause. `joinedGroupIdHexes` are this device's hex group ids.
-    public static func pendingKnownGroups(
+    static func pendingKnownGroups(
         joinedGroupIdHexes: [String],
+        accountIdB64: String? = AcceptedContactsStore.boundAccountIdB64,
         defaults: UserDefaults = .standard
     ) -> Int {
-        let known = loadKnownGroupIds(defaults: defaults)
+        guard let accountIdB64 else { return 0 }
+        let known = loadKnownGroupIds(accountIdB64: accountIdB64, defaults: defaults)
         guard !known.isEmpty else { return 0 }
         let joined = Set(joinedGroupIdHexes.compactMap { hexDecode($0) }.map { base64Encode($0) })
         let pending = known.filter { !joined.contains($0) }
-        if pending.isEmpty { saveKnownGroupIds([], defaults: defaults) }
+        if pending.isEmpty { saveKnownGroupIds([], accountIdB64: accountIdB64, defaults: defaults) }
         return pending.count
     }
 
@@ -280,7 +330,7 @@ public enum StateBundle {
         )
         defer { key.resetBytes(in: 0..<key.count) }
         let sealed = try sealWithKey(key: key, plaintext: encode(bundle))
-        _ = try await ds.publishMailbox(pseudonym: rendezvousPseudonym, payload: wrapRow(sealed))
+        _ = try await ds.publishRendezvous(id: rendezvousPseudonym, payload: wrapRow(sealed))
     }
 
     /// Joiner side: poll the state row past the Welcome cursor (skipping the
@@ -304,8 +354,7 @@ public enum StateBundle {
             let waitSecs = min(perRequestLongPollSeconds, max(1, Int(remaining)))
             let result: FetchResult
             do {
-                result = try await ds.fetchMailbox(
-                    pseudonym: rendezvousPseudonym, after: cursor, limit: 1, waitSecs: waitSecs)
+                result = try await ds.fetchRendezvous(id: rendezvousPseudonym, after: cursor, limit: 1, waitSecs: waitSecs)
             } catch {
                 // 404 ("no rows yet") and network blips: keep polling until
                 // the deadline, as the history and recovery polls do.

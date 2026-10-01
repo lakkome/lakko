@@ -320,7 +320,7 @@ public fun ChatScreen(
     // UX 5.2 — the timeline's clock: DS `created_at` rendered in the device's
     // 12/24-hour format; date separators relative to now.
     val zone = remember { ZoneId.systemDefault() }
-    // ADR-0058: dates and times in the interface language.
+    // ADR-0061: dates and times in the interface language.
     val strings = LocalStrings.current
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
     val use24h = remember(context) { DateFormat.is24HourFormat(context) }
@@ -2033,6 +2033,10 @@ internal fun Bubble(
 /** UX 3.1 — how long a jumped-to row stays lit: "about a second and a half". */
 internal const val REPLY_HIGHLIGHT_MS: Long = 1_500L
 
+/** Where an attachment handed to another app is written (the FileProvider
+ *  `cache-path`). Plaintext; forget device deletes the directory. */
+internal const val SHARED_ATTACHMENTS_DIR: String = "shared-attachments"
+
 /** The strip's close control, by name, for TalkBack and the UI tests. */
 internal const val CANCEL_REPLY_LABEL: String = "chat.reply.cancel"
 
@@ -2970,7 +2974,7 @@ private fun shareDecryptedBytes(
     )
     runCatching {
         val shareDir = java.io.File(
-            java.io.File(context.cacheDir, "shared-attachments"),
+            java.io.File(context.cacheDir, SHARED_ATTACHMENTS_DIR),
             java.util.UUID.randomUUID().toString(),
         ).apply { mkdirs() }
         val outFile = java.io.File(shareDir, baseName)
@@ -3587,6 +3591,14 @@ private fun MembersSheet(
                         canRename = InfoSection.RENAME_GROUP in sections,
                     )
                     Spacer(Modifier.height(12.dp))
+                    // docs/ux/who-can-find-me.md section 5 — this group's
+                    // `Members can find me` switch (absent unless the setting
+                    // includes groups).
+                    me.lakko.app.ui.settings.MembersCanFindMeRow(
+                        reach = me.lakko.app.reach.ReachManager.get(androidx.compose.ui.platform.LocalContext.current),
+                        kind = me.lakko.app.ui.settings.FindMeScopeKind.GROUP,
+                        idHex = viewModel.groupIdHex,
+                    )
                 }
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees the
                 // add affordance; a plain member's add would be refused by peers.

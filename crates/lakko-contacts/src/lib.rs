@@ -22,8 +22,12 @@
 //!   [`compose`] / [`decode_and_verify`] / [`open_envelope`].
 //!   Manual length-prefixed binary codec, frozen at v1.
 //!   Ed25519-signed by the sender's identity key.
-//!   The sealed plaintext is `profile_len ‖ profile ‖ intro`
-//!   (ADR-0048 §2).
+//!   The sealed plaintext is
+//!   `profile_len ‖ profile ‖ reply_grant_len ‖ reply_grant ‖ intro`
+//!   (ADR-0048 §2, ADR-0060 §6).
+//! - [`committer_delegation`] — the ADR-0060 §6 committer-delegation
+//!   envelope: a proposer's delegations for whichever candidate commits its
+//!   `Add`, so the Welcome reaches the added person's closed mailbox.
 //! - [`profile`] — the ADR-0048 profile envelope (display name,
 //!   claimed username, `updated_at_ms`): bounded, fail-closed,
 //!   classified by [`incoming_envelope`].
@@ -38,6 +42,14 @@
 //!   for everyone, `updated_at_ms`): fixed-length, fail-closed, classified
 //!   by [`incoming_envelope`]; the order is [`pin::pin_is_newer`], the
 //!   authority is the receiver's role-table check.
+//! - [`reach`] — ADR-0060 reach keys: the per-class, per-scope Ed25519 keys
+//!   an identity mailbox accepts a write under, derived from the account
+//!   seed, and the [`ReachGrant`] that hands one to someone.
+//! - [`introduction`] — ADR-0060 contacts of contacts: introduction records
+//!   sealed under OPRF outputs, the offer that asks a contact to relay one,
+//!   and the padded bundle a contact relays.
+//! - [`visibility`] — ADR-0060 "who can find me" setting and the reach-key
+//!   version state, as envelopes the owner's devices exchange.
 //! - [`registrar_seed`] — the ADR-0057 registrar-seed envelope (a journal
 //!   root hands one member its Delivery Service registrar seed, sealed to
 //!   that member's account X25519 key): fixed-length, fail-closed,
@@ -76,12 +88,14 @@ pub mod call_invite;
 pub mod call_kp_forward;
 pub mod call_welcome;
 pub mod committer_beacon;
+pub mod committer_delegation;
 pub mod envelope;
 pub mod error;
 pub mod group_invite;
 pub mod group_join_attribution;
 pub mod group_name;
 pub mod incoming_envelope;
+pub mod introduction;
 pub mod invite;
 pub mod link_seal;
 pub mod media_state;
@@ -90,10 +104,12 @@ pub mod profile;
 pub mod profile_request;
 pub mod pseudonym;
 pub mod push_routing;
+pub mod reach;
 pub mod registrar_seed;
 pub mod request;
 pub mod safety;
 pub mod username;
+pub mod visibility;
 
 pub use ack::{compose_ack, decode_and_verify_ack, ContactAck};
 pub use call_invite::{
@@ -117,6 +133,13 @@ pub use committer_beacon::{
     COMMITTER_BEACON_FRESHNESS_WINDOW_MS, COMMITTER_BEACON_INTERVAL_MS,
     COMMITTER_BEACON_PAYLOAD_LEN, COMMITTER_BEACON_VERSION_V1, COMMITTER_BEACON_WORST_CASE_POLL_MS,
 };
+pub use committer_delegation::{
+    compose_committer_delegation, decode_committer_delegation, try_unwrap_committer_delegation,
+    CommitterDelegationEnvelope, CommitterDelegationError, COMMITTER_DELEGATION_BLOB_LEN,
+    COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1, COMMITTER_DELEGATION_ENVELOPE_MAX_LEN,
+    COMMITTER_DELEGATION_ENVELOPE_MIN_LEN, COMMITTER_DELEGATION_VERSION_V1,
+    MAX_COMMITTER_DELEGATIONS,
+};
 pub use error::{ContactError, Result};
 pub use group_invite::{
     compose as compose_group_invite, decode_and_verify as decode_and_verify_group_invite,
@@ -134,11 +157,21 @@ pub use group_name::{
     GROUP_NAME_ENVELOPE_MAX_LEN, GROUP_NAME_ENVELOPE_MIN_LEN, GROUP_NAME_VERSION_V1,
 };
 pub use incoming_envelope::{dispatch_incoming_envelope, DispatchError, IncomingEnvelope};
+pub use introduction::{
+    bundle_is_newer, compose_bundle, compose_introduction, compose_introduction_offer,
+    compose_public_record, decode_introduction_offer, decode_introductions, fof_tag,
+    introduction_tags, open_introduction, open_public_record, try_unwrap_introduction_offer,
+    try_unwrap_introductions, IntroductionEntry, IntroductionError, IntroductionPayload,
+    IntroductionRecord, IntroductionsBundle, BUNDLE_SIZE_BUCKETS, FOF_KEY_DOMAIN, FOF_TAG_DOMAIN,
+    FOF_TAG_LEN, INTRODUCTIONS_ENVELOPE_DOMAIN_V1, INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1,
+    INTRODUCTION_RECORD_MAX_LEN, INTRODUCTION_RECORD_MIN_LEN, MAX_BUNDLE_RECORDS,
+    MAX_INTRODUCTION_TERMS, OPRF_OUTPUT_LEN, WRAPPED_KEY_LEN,
+};
 pub use invite::{
-    compute_joiner_tag, generate_blob_id, owner_list_canonical_bytes, revoke_canonical_bytes,
-    sign_owner_list, sign_revocation, InviteCapability, BLOB_ID_B64URL_LEN, BLOB_ID_LEN,
-    JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1, MAX_LABEL_LEN, NEVER_EXPIRES, OWNER_LIST_DOMAIN_V1,
-    REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS, SINGLE_USE,
+    compute_joiner_tag, generate_blob_id, generate_link_id, owner_list_canonical_bytes,
+    revoke_canonical_bytes, sign_owner_list, sign_revocation, InviteCapability, BLOB_ID_B64URL_LEN,
+    BLOB_ID_LEN, JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1, LINK_ID_LEN, MAX_LABEL_LEN,
+    NEVER_EXPIRES, OWNER_LIST_DOMAIN_V1, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS, SINGLE_USE,
 };
 pub use media_state::{
     compose_media_state, decode_media_state, try_unwrap_media_state, MediaState, MediaStateError,
@@ -149,10 +182,12 @@ pub use pin::{
     PIN_ENVELOPE_DOMAIN_V1, PIN_ENVELOPE_LEN, PIN_VERSION_V1,
 };
 pub use profile::{
-    check_display_name, compose_profile, decode_profile, is_format_char, normalize_display_name,
-    profile_is_newer, try_unwrap_profile, DisplayNameError, Profile, ProfileError,
-    DISPLAY_NAME_MAX_BYTES, DISPLAY_NAME_MAX_CHARS, FORMAT_CHAR_RANGES, PROFILE_ENVELOPE_DOMAIN_V1,
-    PROFILE_ENVELOPE_MAX_LEN, PROFILE_ENVELOPE_MIN_LEN, PROFILE_VERSION_V1,
+    check_display_name, compose_profile, decode_profile, is_format_char, is_profile_grant_class,
+    normalize_display_name, profile_is_newer, try_unwrap_profile, DisplayNameError, Profile,
+    ProfileError, DISPLAY_NAME_MAX_BYTES, DISPLAY_NAME_MAX_CHARS, FORMAT_CHAR_RANGES,
+    MAX_PROFILE_GRANTS, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_ENVELOPE_MAX_LEN,
+    PROFILE_ENVELOPE_MIN_LEN, PROFILE_VERSION_V1, PROFILE_VERSION_V2, PROFILE_VERSION_V3,
+    USERNAME_CERT_LEN,
 };
 pub use profile_request::{
     compose_profile_request, decode_profile_request, should_request_profiles,
@@ -169,12 +204,18 @@ pub use push_routing::{
     PUSH_ROUTING_SECRET_MINT_EPOCH_LEN, PUSH_ROUTING_SECRET_PAYLOAD_LEN,
     PUSH_ROUTING_SECRET_VERSION_V2,
 };
+pub use reach::{
+    reach_seed, reach_verifying_key, ReachClass, ReachError, ReachGrant, MAX_REACH_SCOPE_ID_LEN,
+    REACH_GRANT_LEN, REACH_SEED_DOMAIN, REACH_SEED_LEN,
+};
 pub use registrar_seed::{
     compose_registrar_seed, decode_registrar_seed, try_unwrap_registrar_seed,
     RegistrarSeedEnvelope, RegistrarSeedError, RegistrarSeedRank,
     REGISTRAR_SEED_ENVELOPE_DOMAIN_V1, REGISTRAR_SEED_ENVELOPE_LEN, REGISTRAR_SEED_VERSION_V1,
 };
-pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};
+pub use request::{
+    compose, decode_and_verify, open_envelope, ContactRequest, OpenedRequest, ACCOUNT_ID_LEN,
+};
 pub use safety::{
     safety_number, safety_number_bytes, SAFETY_NUMBER_DIGITS, SAFETY_NUMBER_DIGITS_PER_GROUP,
     SAFETY_NUMBER_GROUPS,
@@ -182,6 +223,14 @@ pub use safety::{
 pub use username::{
     check_canonical_username, login_handle, UsernameError, LOGIN_HANDLE_DOMAIN, LOGIN_HANDLE_LEN,
     USERNAME_MAX_LEN, USERNAME_MIN_LEN,
+};
+pub use visibility::{
+    compose_reach_state, compose_visibility, decode_reach_state, decode_visibility,
+    merge_reach_state, reach_state_is_newer, try_unwrap_reach_state, try_unwrap_visibility,
+    visibility_is_newer, GroupsForm, ReachState, ReachStateEntry, ReachStateMerge, ScopeId,
+    ScopeKind, VisibilityError, VisibilityMode, VisibilitySetting, MAX_CHOSEN_SCOPES,
+    MAX_REACH_STATE_ENTRIES, MAX_REACH_STATE_ENVELOPE_LEN, MAX_SCOPE_ID_LEN,
+    MAX_VISIBILITY_ENVELOPE_LEN, REACH_STATE_ENVELOPE_DOMAIN_V1, VISIBILITY_ENVELOPE_DOMAIN_V1,
 };
 
 /// Entry points for the fuzz harnesses in `crates/lakko-contacts/fuzz`.
@@ -206,5 +255,16 @@ pub mod fuzz_api {
     #[must_use]
     pub fn open_sealed_link(kind_byte: u8, secret: &[u8], sealed: &[u8]) -> Option<bool> {
         crate::link_seal::fuzz_open(kind_byte, secret, sealed)
+    }
+
+    /// Split a contact request's **sealed plaintext** (the bytes inside the
+    /// sealed envelope, which a fuzzer cannot reach through the AEAD) into
+    /// profile, reply grant and intro. `None` when the splitter refuses;
+    /// `Some(true)` when what it accepted re-frames to the same bytes (a
+    /// profile only when it decoded, a reply grant always class `reply`),
+    /// `Some(false)` on a disagreement (a bug).
+    #[must_use]
+    pub fn contact_request_plaintext(plain: &[u8]) -> Option<bool> {
+        crate::request::fuzz_split(plain)
     }
 }

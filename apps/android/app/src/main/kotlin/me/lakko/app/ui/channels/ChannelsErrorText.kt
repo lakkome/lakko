@@ -10,7 +10,7 @@ import me.lakko.app.chat.anonTokenFailureText
 import me.lakko.app.l10n.UiText
 
 /*
- * ADR-0058 section 6 — what the channel screens say about a failed action.
+ * ADR-0061 section 6 — what the channel screens say about a failed action.
  *
  * The channels service's `detail` prose is never shown (it goes to the log):
  * a known error code maps to `channels.error.*`, any other to

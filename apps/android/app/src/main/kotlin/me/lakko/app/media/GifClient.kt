@@ -399,7 +399,7 @@ public class SearchDebouncer(
     public val hasPending: Boolean get() = pending != null
 }
 
-// ----- copy (UX spec §5): catalog keys (ADR-0058) ---------------------------
+// ----- copy (UX spec §5): catalog keys (ADR-0061) ---------------------------
 
 public const val GIF_PRIVACY_NOTE: String = "chat.gif.privacy_note"
 public const val GIF_NO_RESULTS: String = "chat.gif.no_results"

@@ -35,7 +35,7 @@
  *   durable fix is a typed error variant in the core; that is a `crates/`
  *   change and deliberately not made here. See {@link isLegacyPublisherGroupError}.
  *
- * The copy is catalog text (`channels.legacy.*`, ADR-0058); a
+ * The copy is catalog text (`channels.legacy.*`, ADR-0061); a
  * {@link LegacyChannelError} is a {@link KeyedError}, so a screen renders it
  * in the language current when it is shown.
  */

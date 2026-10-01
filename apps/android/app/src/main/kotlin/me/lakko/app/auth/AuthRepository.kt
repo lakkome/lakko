@@ -296,7 +296,7 @@ public class AuthRepository(
             is SessionRestoreDecision.Restored -> {
                 // Secrets first, then state: an observer that reacts to the
                 // Session flip must already find the secrets it needs.
-                mutableIdentitySecrets.value = decision.secrets
+                publishIdentitySecrets(decision.secrets)
                 mutableState.value = AuthState.Session(account = decision.account)
                 // ADR-0054 UX section 3 - a push registration that failed
                 // (a used-up allowance, no network) is retried silently at the
@@ -368,6 +368,17 @@ public class AuthRepository(
                 cause,
             )
         }
+        publishIdentitySecrets(secrets)
+    }
+
+    /**
+     * The one place a live session's secrets are published. Binds the
+     * per-account contact list ([me.lakko.app.contacts.AcceptedContactsStore])
+     * to the landing account FIRST, so an observer of [identitySecrets] never
+     * reads another account's contacts; [clearIdentitySecrets] unbinds it.
+     */
+    private fun publishIdentitySecrets(secrets: IdentitySecrets) {
+        me.lakko.app.contacts.AcceptedContactsStore.bind(secrets.accountId)
         mutableIdentitySecrets.value = secrets
     }
 
@@ -1107,7 +1118,7 @@ public class AuthRepository(
                     // admitted to the account's chats by its other devices or its
                     // contacts; the chat list says "Synchronizing..." until the
                     // first chat arrives.
-                    me.lakko.app.devices.StateBundle.markRestored(applicationContext)
+                    me.lakko.app.devices.StateBundle.markRestored(applicationContext, accountIdB64)
                     val restoredBackup = restoreFromServerBackupBestEffort(
                         sessionToken = result.sessionToken,
                         accountId = accountIdBytes,
@@ -1224,6 +1235,9 @@ public class AuthRepository(
                         phrase = mnemonicPhrase,
                         context = "recover",
                         wholeStorageSnapshot = restoredSnapshot,
+                        // ADR-0058 — re-publish the restored folded state too,
+                        // or this baseline would drop it from the backup.
+                        syncedState = restoredBackup.syncedState,
                     )
                     // 1.20d — best-effort push subscribe.
                     subscribePushBestEffort("recover")
@@ -2551,6 +2565,10 @@ public class AuthRepository(
      * Login form pre-fills it.
      */
     public fun logout() {
+        // ADR-0042, amended 2026-09-30 — before anything else: drop the push
+        // wake binding (a wake that lands from here on is refused) and this
+        // app's delivered notifications.
+        me.lakko.app.push.PushSignOut.clearFirst(applicationContext)
         val cached = sessionStore.load()
         // Drop the persisted bearer token FIRST and synchronously. A relaunch
         // silently restores any session whose token is still on disk
@@ -2581,104 +2599,29 @@ public class AuthRepository(
     }
 
     /**
-     * Drop the in-memory session **and** the on-device material.
+     * Drop the in-memory session **and** every piece of the account's local
+     * data on this device.
      *
-     * Mirror of the web's `forgetDevice` semantics. Distinct from
-     * [logout]: this wipes both the [SessionStore] record and the
-     * Keystore-wrapped device key envelope. After `forgetDevice`
-     * the only way back into the account is via the recovery
-     * passphrase (1.15d6 `/recover` flow).
+     * Forget device and Delete account both end here (through the one
+     * orchestration in `MainActivity`, which stops the chat, contacts,
+     * channels and device-sync runtimes first so nothing writes a store back).
+     * The on-device wipe itself is [me.lakko.app.account.AccountLocalWipe]:
+     * the one list of per-account stores, push binding and notifications
+     * first. Distinct from [logout], which keeps all of it for the account's
+     * next sign-in. After this the only way back into the account is the
+     * recovery phrase or another device.
      */
     public fun forgetDevice() {
-        val cached = sessionStore.load()
-        if (cached != null) {
-            // The persisted bearer token goes too — a stale row would let a
-            // later cold start re-attach to this account's session.
-            deletePersistedSessionTokenBestEffort(cached.accountIdB64, "forgetDevice")
-            try {
-                deviceKeyStore.deleteDeviceKey(applicationContext, cached.accountIdB64)
-            } catch (_: Throwable) {
-                // Best-effort wipe; SessionStore.clear() below is
-                // still worth running.
-            }
-            // Phase 2a1c — drop the cached recovery phrase. The
-            // EncryptedSharedPreferences row is independent of
-            // the device key envelope above, so we wipe it
-            // explicitly. Best-effort.
-            try {
-                me.lakko.app.backup.PhraseStore.deletePhrase(
-                    applicationContext,
-                    cached.accountIdB64,
-                )
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // ADR-0037 (G-11) — drop the backup-head version floor. Its
-            // EncryptedSharedPreferences row is independent of the phrase / key
-            // above; a stale floor would confuse a future signup on the same
-            // accountId. Best-effort.
-            try {
-                me.lakko.app.backup.FloorStore.deleteFloor(
-                    applicationContext,
-                    cached.accountIdB64,
-                )
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // Phase 2a2c2 — drop the cached export key too. Same
-            // clean-wipe rationale as the phrase + device-key
-            // rows above.
-            try {
-                ExportKeyStore.deleteExportKey(
-                    applicationContext,
-                    cached.accountIdB64,
-                )
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // Phase 2a3b0 — drop the cached DeviceIdentity
-            // seed. The leaf in the user's DeviceGroup that
-            // this seed signed for is orphaned; sibling
-            // devices clean it up via 2a3c's remove-device
-            // flow.
-            try {
-                DeviceIdentityStore.deleteDeviceIdentitySeed(
-                    applicationContext,
-                    cached.accountIdB64,
-                )
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // ADR-0017 — drop the cached AccountIdentity (phrase)
-            // seed. It is the highest-sensitivity on-device secret;
-            // a stale row would confuse a future signup on the same
-            // accountId. After this wipe the only way back into the
-            // account is the recovery phrase (or a paired device).
-            try {
-                AccountIdentitySeedStore.deleteAccountIdentitySeed(
-                    applicationContext,
-                    cached.accountIdB64,
-                )
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            // Phase 2a3b4 — drop the per-account DeviceGroup
-            // snapshot envelope. Without the snapshot the local
-            // OpenMLS provider has no DeviceGroup state to
-            // restore, mirroring the iOS / web `forgetDevice`
-            // surface. The Keystore wrap key under
-            // `DeviceGroupSnapshotStore.WRAP_KEY_ALIAS` is
-            // shared across accounts so we leave it intact;
-            // only the per-account envelope file is removed.
-            try {
-                me.lakko.app.devices.DeviceGroupSnapshotStore.deleteSnapshot(
-                    applicationContext,
-                    cached.accountIdB64,
-                )
-            } catch (_: Throwable) {
-                // best-effort
-            }
+        // ADR-0042, amended 2026-09-30 — first, as in [logout] (the wipe
+        // repeats it as its first step; idempotent).
+        me.lakko.app.push.PushSignOut.clearFirst(applicationContext)
+        val accountIdB64 = identitySecrets.value?.let { base64Encode(it.accountId) }
+            ?: sessionStore.load()?.accountIdB64
+        if (accountIdB64 != null) {
+            me.lakko.app.account.AccountLocalWipe.wipeAccountLocalData(applicationContext, accountIdB64)
         }
+        // The signed-in pointer goes whatever account it names: this device is
+        // no longer signed in to anything.
         sessionStore.clear()
         // ADR-0054 - the push unregister below spends one push-register
         // token, drawn with THIS session after the live one is gone.
@@ -2746,11 +2689,11 @@ public class AuthRepository(
                 is me.lakko.app.backup.GatedRestoreOutcome.Restored -> outcome.payload
                 is me.lakko.app.backup.GatedRestoreOutcome.NoBackup -> {
                     Log.i("lakko-auth", "backup restore ($context): no prior backup")
-                    return RestoredBackup(ByteArray(0), emptyList())
+                    return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
                 }
                 is me.lakko.app.backup.GatedRestoreOutcome.WrongPhraseOrTampered -> {
                     Log.w("lakko-auth", "backup restore ($context): wrong phrase or tampered")
-                    return RestoredBackup(ByteArray(0), emptyList())
+                    return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
                 }
                 is me.lakko.app.backup.GatedRestoreOutcome.RollbackBlocked -> {
                     if (outcome.hard) {
@@ -2768,11 +2711,11 @@ public class AuthRepository(
                             "backup restore ($context): stale head override declined - ${outcome.reason.diagnostic}",
                         )
                     }
-                    return RestoredBackup(ByteArray(0), emptyList())
+                    return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
                 }
                 is me.lakko.app.backup.GatedRestoreOutcome.TransportFailed -> {
                     Log.w("lakko-auth", "backup restore ($context) failed", outcome.cause)
-                    return RestoredBackup(ByteArray(0), emptyList())
+                    return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
                 }
             }
             Log.i(
@@ -2797,8 +2740,9 @@ public class AuthRepository(
             // a negative messageId (never collides with a real DS id), a zero
             // pseudonym, no intro.
             try {
+                // The RESTORED account's list, whatever session is bound.
                 val existing =
-                    me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext)
+                    me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext, accountIdB64)
                 val restored =
                     me.lakko.app.contacts.reconstructRestoredContacts(
                         existing,
@@ -2808,6 +2752,7 @@ public class AuthRepository(
                 if (restored.isNotEmpty()) {
                     me.lakko.app.contacts.AcceptedContactsStore.save(
                         applicationContext,
+                        accountIdB64,
                         existing + restored,
                     )
                     Log.i(
@@ -2832,7 +2777,17 @@ public class AuthRepository(
                     "backup restore ($context): ${groupIdsHex.size} known group(s)",
                 )
             }
-            return RestoredBackup(parsed.wholeStorageSnapshot, groupIdsHex)
+            // ADR-0058 section 5.2 — the folded synced state (folders, pins,
+            // mutes, archive, read cursors, drafts, order). Seeded into the
+            // store the sync runtime reads at bootstrap, merged with anything
+            // this device already held, so a restore with no other device
+            // alive still gets them back.
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.seedFromBackup(
+                context = applicationContext,
+                accountIdB64 = accountIdB64,
+                bytes = parsed.syncedState,
+            )
+            return RestoredBackup(parsed.wholeStorageSnapshot, groupIdsHex, parsed.syncedState)
         } finally {
             client.close()
             phraseBytes.fill(0)
@@ -2844,6 +2799,8 @@ public class AuthRepository(
     private data class RestoredBackup(
         val snapshot: ByteArray,
         val knownGroupIdsHex: List<String>,
+        /** ADR-0058 — `SyncedState.toBytes()` from the backup, empty when none. */
+        val syncedState: ByteArray,
     )
 
     /**
@@ -2864,6 +2821,7 @@ public class AuthRepository(
         phrase: String,
         context: String,
         wholeStorageSnapshot: ByteArray = ByteArray(0),
+        syncedState: ByteArray? = null,
     ) {
         val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
         val backupClient = me.lakko.app.backup.BackupClient()
@@ -2899,7 +2857,7 @@ public class AuthRepository(
             // displayName stays null/"" when unset so a restore does not promote
             // the fingerprint fallback into a "chosen" name.
             val contactRecords =
-                me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext).map { c ->
+                me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext, accountIdB64).map { c ->
                     uniffi.lakko_ffi_uniffi.BackupContactRecord(
                         ed25519Pubkey = c.request.fromPubkey,
                         x25519Pubkey = ByteArray(32),
@@ -2918,6 +2876,7 @@ public class AuthRepository(
                     // monotonic version floor under the Keystore-backed store.
                     context = applicationContext,
                     accountIdB64 = accountIdB64,
+                    syncedState = syncedState,
                 )
             } catch (cause: Throwable) {
                 Log.w("lakko-auth", "backup baseline upload ($context) failed", cause)
@@ -3039,14 +2998,34 @@ public class AuthRepository(
      *  subscriber + here, never thrown past the auth flow —
      *  push failure must not block sign-in. */
     private fun subscribePushBestEffort(context: String) {
+        // ADR-0042, amended 2026-09-30 — the pseudonym is registered FOR the
+        // account signed in right now, and the wake binding names it. Read
+        // here, synchronously, so the account cannot change under the launch.
+        val accountIdB64 = signedInAccountIdB64() ?: run {
+            Log.w("lakko-auth", "push subscribe ($context) skipped: no signed-in account")
+            return
+        }
         pushScope.launch {
             try {
-                PushSubscriber(applicationContext).subscribe()
+                PushSubscriber(applicationContext).subscribe(
+                    accountIdB64 = accountIdB64,
+                    stillSignedIn = { signedInAccountIdB64() == accountIdB64 },
+                )
             } catch (cause: Throwable) {
                 Log.w("lakko-auth", "push subscribe ($context) failed", cause)
             }
         }
     }
+
+    /** The account of the current session, whichever post-ACCESS state it
+     *  is in, or `null` when signed out. */
+    private fun signedInAccountIdB64(): String? =
+        when (val state = mutableState.value) {
+            is AuthState.Session -> state.account.accountIdB64
+            is AuthState.NeedsRecoveryPhrase -> state.account.accountIdB64
+            is AuthState.SaveFreshPhrase -> state.account.accountIdB64
+            AuthState.Loading, is AuthState.Anon -> null
+        }
 
     /** 1.20d — Mirror of [subscribePushBestEffort] for the
      *  unregister path. */
@@ -3086,6 +3065,9 @@ public class AuthRepository(
             secrets.accountId.fill(0)
         }
         mutableIdentitySecrets.value = null
+        // No session, no contact list: an account-less read is empty and an
+        // account-less write is refused until the next landing binds again.
+        me.lakko.app.contacts.AcceptedContactsStore.unbind()
     }
 
     /** ADR-0017 — drop any parked fresh-device fail-safe context,

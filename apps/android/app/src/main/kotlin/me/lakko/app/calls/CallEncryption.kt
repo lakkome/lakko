@@ -38,7 +38,7 @@ import me.lakko.app.l10n.joinList
  * number, which is a security signal that says nothing and cannot be acted on.
  *
  * Pure and Android-free, so the copy and the grouping are unit-tested on the
- * host JVM. The words are catalog messages (ADR-0058), all `security_critical`:
+ * host JVM. The words are catalog messages (ADR-0061), all `security_critical`:
  * they render in English until a translation is reviewed.
  */
 

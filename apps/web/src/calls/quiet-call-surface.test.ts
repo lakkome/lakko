@@ -116,12 +116,12 @@ describe("what each quiet surface offers", () => {
     // only other place that carries them — is the surface mute withholds. So
     // without this, a muted video call could be answered in no way except
     // with the camera on.
-    // ADR-0058: the words come from the catalog, so the guard looks for the key.
+    // ADR-0061: the words come from the catalog, so the guard looks for the key.
     expect(code(PANEL)).toContain('t("call.incoming.accept_without_video")');
   });
 
   it("offers Accept and Decline on the conversation row", () => {
-    // ADR-0058: the row's words come from the catalog, so the guard looks for
+    // ADR-0061: the row's words come from the catalog, so the guard looks for
     // the two catalog keys and the two host calls they drive.
     const list = code(LIST);
     expect(list).toContain('t("call.incoming.accept")');

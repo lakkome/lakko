@@ -18,7 +18,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 lakko-l10n = { path = ".." }
 
-# `accept_bundle` is the signed translation-bundle parser (ADR-0058): the
+# `accept_bundle` is the signed translation-bundle parser (ADR-0061): the
 # bundle is downloaded from a static host a malicious network or operator
 # could tamper, so the bytes are attacker-controlled and reach the length /
 # layout / signature checks before anything is trusted.

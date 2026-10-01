@@ -22,7 +22,7 @@ import { t } from "../l10n";
 import { tRich } from "../l10n/rich";
 
 /**
- * The text a failed enrolment shows (ADR-0058 section 6: from the kind of
+ * The text a failed enrolment shows (ADR-0061 section 6: from the kind of
  * failure, never the server's prose, which goes to the log). Returned as a
  * function so it renders in the language current when it is shown.
  */

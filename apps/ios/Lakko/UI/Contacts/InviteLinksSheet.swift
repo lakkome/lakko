@@ -12,7 +12,7 @@ import SwiftUI
 struct InviteLinksSheet: View {
     @ObservedObject var viewModel: ContactsViewModel
     let onDismiss: () -> Void
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
     /// Frozen per body so every row's "expires in" agrees.
@@ -22,7 +22,8 @@ struct InviteLinksSheet: View {
         InviteLinkRows.merge(
             active: viewModel.activeInvites,
             sessionGenerated: viewModel.repositoryState.outstandingInvites,
-            now: now)
+            now: now,
+            accountIdB64: viewModel.inviteAccountIdB64)
     }
 
     var body: some View {
@@ -135,7 +136,9 @@ struct InviteLinksSheet: View {
 struct LinkActionsRow: View {
     let title: String
     var details: [String] = []
-    let url: String
+    /// `nil` when the link's secret is not on this device (a link another
+    /// device minted, ADR-0028 amendment 2026-09-28): Revoke only.
+    let url: String?
     var highlighted: Bool = false
     var revoking: Bool = false
     var revoke: (() -> Void)? = nil
@@ -165,24 +168,30 @@ struct LinkActionsRow: View {
                     .foregroundStyle(Color.lakkoTextMuted)
             }
             HStack(spacing: 8) {
-                Button {
-                    UIPasteboard.general.string = url
-                    copied = true
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 1_500_000_000)
-                        copied = false
+                if let url {
+                    Button {
+                        UIPasteboard.general.string = url
+                        copied = true
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                            copied = false
+                        }
+                    } label: {
+                        Label(l10n.t(copied ? "common.copied" : "common.copy"), systemImage: copied ? "checkmark" : "doc.on.doc")
                     }
-                } label: {
-                    Label(l10n.t(copied ? "common.copied" : "common.copy"), systemImage: copied ? "checkmark" : "doc.on.doc")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
 
-                ShareLink(item: url) {
-                    Label(l10n.t("chat.invite_link.share"), systemImage: "square.and.arrow.up")
+                    ShareLink(item: url) {
+                        Label(l10n.t("chat.invite_link.share"), systemImage: "square.and.arrow.up")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else {
+                    Text(InviteLinkRows.createdElsewhereCopy)
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoTextMuted)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
 
                 if let revoke {
                     Spacer()

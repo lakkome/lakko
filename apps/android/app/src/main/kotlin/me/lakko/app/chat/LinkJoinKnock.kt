@@ -90,13 +90,16 @@ private val INVITE_RATE_LIMITED = me.lakko.app.discovery.INVITE_RATE_LIMITED_TEX
  * clock, `invite.link.rate_limited` when the ledger consume answered `429`,
  * `tokens.action_allowance_used` when the day's allowance of invite-consume or
  * knock tokens is used up, [JOIN_FAILED_TEXT] for everything else.
- * Never a raw message (ADR-0058 section 6).
+ * Never a raw message (ADR-0061 section 6).
  */
 public fun joinFailureCopy(error: Throwable): UiText {
     var cause: Throwable? = error
     val seen = HashSet<Throwable>()
     while (cause != null && seen.add(cause)) {
         if (cause is GroupNotAcceptingRequests) return GROUP_NOT_ACCEPTING_REQUESTS_TEXT
+        if (cause is me.lakko.app.discovery.InviteLinkDamaged || cause is GroupInviteLinkDamaged) {
+            return UiText("invite.link.damaged")
+        }
         if (cause is me.lakko.app.anon.AnonTokenQuotaExhausted) {
             return UiText("tokens.action_allowance_used")
         }

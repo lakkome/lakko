@@ -52,7 +52,7 @@ public class IncomingCallActivity : ComponentActivity() {
         showOverLockScreen()
         IncomingCallRinger.attach(applicationContext)
         // The ring can be the first screen of this process (a push woke it):
-        // load the interface language before drawing (ADR-0058). Idempotent.
+        // load the interface language before drawing (ADR-0061). Idempotent.
         me.lakko.app.l10n.Localization.init(applicationContext)
 
         readAnswerAction(intent)

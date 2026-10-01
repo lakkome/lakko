@@ -19,7 +19,7 @@ import SwiftUI
 /// message and advances to the next older pin; the screen owns both.
 struct PinnedBarView: View {
 
-    /// ADR-0058 — observed so a language switch re-renders the view.
+    /// ADR-0061 — observed so a language switch re-renders the view.
     @ObservedObject var l10n = Localization.shared
     let entry: PinnedEntry
     let index: Int
@@ -120,7 +120,7 @@ struct PinnedStackIndicator: View {
 /// explanation). Cancel does nothing.
 struct PinScopeSheet: View {
 
-    /// ADR-0058 — observed so a language switch re-renders the view.
+    /// ADR-0061 — observed so a language switch re-renders the view.
     @ObservedObject var l10n = Localization.shared
     let options: [PinSheetOption]
     let onChoose: (PinChoice) -> Void
@@ -171,7 +171,7 @@ struct PinScopeSheet: View {
 /// each row jumping to its message and closing the list.
 struct PinnedListSheet: View {
 
-    /// ADR-0058 — observed so a language switch re-renders the view.
+    /// ADR-0061 — observed so a language switch re-renders the view.
     @ObservedObject var l10n = Localization.shared
     let entries: [PinnedEntry]
     let lines: (PinnedEntry) -> (author: String, excerpt: String)

@@ -96,6 +96,7 @@ import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsComposerException
 import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.channels.CoPublishedJournals
 import me.lakko.app.channels.CoPublisher
 import me.lakko.app.channels.LegacyChannelException
 import me.lakko.app.channels.LegacyChannelV1
@@ -300,6 +301,28 @@ public fun NewChannelScreen(
                     val wantedHandle = handle.trim().removePrefix("@")
                     scope.launch {
                         try {
+                            val publisher = state.publisher
+                                ?: throw IllegalStateException("channel publisher identity not available")
+                            // ADR-0057 finding 3 — the channel's PublisherGroup
+                            // journal is claimed with the owner's root BEFORE
+                            // anything announces the channel; a claim that does
+                            // not land aborts the creation with nothing sent.
+                            try {
+                                publisher.withIdentity { identity ->
+                                    DsClient().use { ds ->
+                                        CoPublisher.foundAndClaimAtCreation(ds, identity, id)
+                                    }
+                                }
+                            } catch (e: LegacyChannelException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                Log.w(TAG, "channel journal claim did not land; not created", e)
+                                // TODO(ADR-0061): main's literal, carried as the key
+                                // until it moves into the catalog (renders verbatim).
+                                error = UiText("Could not reach the server. Try again.")
+                                busy = false
+                                return@launch
+                            }
                             // Claim the optional handle FIRST so a first-come
                             // collision aborts cleanly without a half-created
                             // channel. An empty handle skips discovery.
@@ -340,8 +363,6 @@ public fun NewChannelScreen(
                             // created in the shared publisher identity's
                             // provider and snapshotted with it so the seed
                             // survives a relaunch.
-                            val publisher = state.publisher
-                                ?: throw IllegalStateException("channel publisher identity not available")
                             val keys = publisher.withIdentity { identity ->
                                 ChannelsComposer.freshPublisherKeys(
                                     identity = identity,
@@ -471,25 +492,42 @@ public fun ChannelDetailScreen(
     // (section 2.3: "where the client has it").
     val subscriberCount = SubscriberFanoutRegistry.subscriberCounts()[channelId]
 
+    // ADR-0060 section 3 / UX 6.3 — the channel's member list, opened from
+    // the `Members` row of channel info.
+    var membersOpen by remember { mutableStateOf(false) }
+    if (membersOpen && channel != null) {
+        ChannelMembersSheet(
+            channelId = channelId,
+            state = state,
+            client = client,
+            onDismiss = { membersOpen = false },
+        )
+    }
+
     if (infoOpen && channel != null) {
         ChannelInfoSheet(
             channel = channel,
             isPublisher = keys != null,
-            isSubscriber = isSubscriber,
+            // A publisher registers a subscriber key only to upload its member
+            // card (ADR-0060 section 3); it still has no subscription to end.
+            isSubscriber = isSubscriber && keys == null,
             subscriberCount = subscriberCount,
+            onOpenMembers = {
+                infoOpen = false
+                membersOpen = true
+            },
             onManage = {
                 infoOpen = false
                 onManage()
             },
             onStopFollowing = {
-                // Local by design AND by what exists: forget the reader
-                // keypair and the seeds it recovered, then drop the channel
-                // from this device's list. Nothing here tells the server —
-                // no channels route retires a subscriber — which is why the
-                // copy only ever speaks for this device.
+                // ADR-0060 §3 — forget the reader keypair, the seeds it
+                // recovered and the channel on this device at once, and tell
+                // the server with a DELETE signed by the subscriber key (in
+                // the background; a failure is logged, the local state is
+                // gone either way).
                 infoOpen = false
-                state.clearSubscriberKeys(channelId)
-                state.removeChannel(channelId)
+                me.lakko.app.channels.ChannelUnsubscribe.leave(state, channelId, client.baseUrl)
                 // The channel this screen is about is gone from the list, so
                 // staying on it would show an empty reader for something no
                 // longer followed.
@@ -674,7 +712,13 @@ private fun OwnerChannelView(
         }
     }
 
-    LaunchedEffect(channelId) { refresh() }
+    val context = LocalContext.current
+    LaunchedEffect(channelId) {
+        refresh()
+        // ADR-0060 section 3 — publishers upload a member card like anyone
+        // else, under a subscriber key registered on the channel.
+        me.lakko.app.channels.ChannelMemberCards.refreshPublisherCard(context, state, client, channelId)
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         PostList(
@@ -824,7 +868,7 @@ private fun PostList(
     statusLine: (@Composable () -> Unit)? = null,
 ) {
     val zone = remember { ZoneId.systemDefault() }
-    // ADR-0058: the date words and the date itself in the interface language.
+    // ADR-0061: the date words and the date itself in the interface language.
     val strings = LocalStrings.current
     val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
     val ordered = remember(posts) { posts.sortedByDescending { it.serverTsMs } }
@@ -884,10 +928,8 @@ private fun PostList(
  * it for a subscriber and not for a publisher, because a publisher reads its
  * own channel from its own keys and has no subscription to end.
  *
- * This comment used to say the client had no unsubscribe at all. That was
- * wrong for as long as it stood: `ChannelsUiState.clearSubscriberKeys` and
- * `removeChannel` both existed and were simply never called from anywhere, so
- * a person who followed a channel could not stop.
+ * `Unsubscribe` drops the channel on this device and, since ADR-0060 §3, also
+ * retires the subscriber on the server (`ChannelUnsubscribe.leave`).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -896,6 +938,8 @@ private fun ChannelInfoSheet(
     isPublisher: Boolean,
     isSubscriber: Boolean,
     subscriberCount: Int?,
+    /** Open the channel's member list (ADR-0060 section 3). */
+    onOpenMembers: () -> Unit,
     onManage: () -> Unit,
     /** Stop following on this device (`channels.info.unsubscribe_sub`). */
     onStopFollowing: () -> Unit,
@@ -982,6 +1026,35 @@ private fun ChannelInfoSheet(
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(t("channels.manage.title")) }
             }
+            // docs/ux/who-can-find-me.md section 6.3 — a channel lists its
+            // members to its members. The core decides the block.
+            if (InfoSection.CHANNEL_MEMBERS in sections) {
+                Spacer(Modifier.height(16.dp))
+                HorizontalDivider()
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpenMembers() }
+                        .padding(vertical = 14.dp),
+                ) {
+                    Text("Members", style = MaterialTheme.typography.bodyLarge)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "Who reads this channel and shared a card.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            // docs/ux/who-can-find-me.md section 5 — this channel's
+            // `Members can find me` switch (absent unless the setting includes
+            // groups and channels).
+            me.lakko.app.ui.settings.MembersCanFindMeRow(
+                reach = me.lakko.app.reach.ReachManager.get(androidx.compose.ui.platform.LocalContext.current),
+                kind = me.lakko.app.ui.settings.FindMeScopeKind.CHANNEL,
+                idHex = channel.id,
+                modifier = Modifier.fillMaxWidth(),
+            )
             if (InfoSection.CHANNEL_DESCRIPTION in sections) {
                 header.description?.let {
                     Spacer(Modifier.height(16.dp))
@@ -1017,10 +1090,10 @@ private fun ChannelInfoSheet(
     }
 }
 
-// docs/ux/conversation-info.md section 2.3 — the copy is deliberately about
-// THIS DEVICE. No channels route retires a subscriber, so the registration on
-// the server outlives the act; wording that claimed the channel had been told
-// would be false. The web client says the same words for the same reason.
+// docs/ux/conversation-info.md section 2.3 — the copy speaks for THIS DEVICE.
+// Since ADR-0060 §3 the server is told too (a signed DELETE), but that request
+// is best-effort and may not land, so the words still promise only what
+// happens here. The web client says the same words.
 
 // The catalog keys: `channels.unsubscribe.action` (the control and the
 // confirming button), `channels.info.unsubscribe_sub` (the line under it),
@@ -1137,6 +1210,7 @@ private fun SubscriberChannelView(
     val postsByChannel by state.postsByChannel.collectAsState()
     val posts = postsByChannel[channelId] ?: emptyList()
 
+    val context = LocalContext.current
     var bootstrap by remember(channelId) { mutableStateOf(SubscribeBootstrap.Registering) }
     var attempt by remember(channelId) { mutableIntStateOf(0) }
     val decodedByCursor = remember(channelId) { mutableStateMapOf<ULong, PostRender>() }
@@ -1267,6 +1341,9 @@ private fun SubscriberChannelView(
             if (haveCurrent) {
                 bootstrap = SubscribeBootstrap.Active
                 loadAndDecodePosts()
+                // ADR-0060 section 3 — this reader's member card for the
+                // newest epoch it holds (uploaded only when due).
+                me.lakko.app.channels.ChannelMemberCards.refreshReaderCard(context, state, client, channelId)
             }
             var ticks = 0
             while (true) {
@@ -1275,6 +1352,12 @@ private fun SubscriberChannelView(
                 try {
                     if (!haveCurrent || ticks % EPOCH_RECHECK_EVERY_TICKS == 0) {
                         haveCurrent = catchUp(pubHex)
+                        // A rotation brings a new epoch: the card follows it.
+                        if (haveCurrent) {
+                            me.lakko.app.channels.ChannelMemberCards.refreshReaderCard(
+                                context, state, client, channelId,
+                            )
+                        }
                     }
                     if (state.subscribedSeeds(channelId).isNotEmpty()) {
                         bootstrap = SubscribeBootstrap.Active
@@ -1469,12 +1552,24 @@ public fun ChannelManageScreen(
             val pub = publisher ?: throw IllegalStateException("channel publisher identity not available")
             // Open-or-create: persisted so a group minted here is not lost.
             val opened = pub.withIdentity { id -> CoPublisher.openPublisherGroup(id, channelId) }
-            pubGroup = opened
-            // ADR-0053 — claim the publisher journal (at creation the first
-            // registration, afterwards an idempotent re-send). Best effort.
-            pub.withIdentity(persist = false) { id ->
-                DsClient().use { ds -> CoPublisher.claimJournal(ds, id, opened) }
+            // ADR-0057 — the channel OWNER claims the publisher journal (at
+            // creation the first registration, afterwards an idempotent
+            // re-send). A co-publisher device never claims: its root would
+            // squat the journal against the owner. Best effort, and BEFORE the
+            // handle is published to this screen: the rotation heartbeat and
+            // the approve path register epochs on it, and a registration ahead
+            // of the claim is refused on a journal still unclaimed.
+            try {
+                val coPublished = CoPublishedJournals.onDevice(context) { state.boundAccount }
+                pub.withIdentity(persist = false) { id ->
+                    DsClient().use { ds -> CoPublisher.claimJournal(ds, id, opened, coPublished) }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "publisher journal claim did not run", e)
             }
+            pubGroup = opened
         } catch (e: Throwable) {
             Log.w(TAG, "open publisher group failed", e)
             openError = LegacyChannelV1.describeText(e) { UiText("channels.manage.error.open") }
@@ -2044,6 +2139,10 @@ public fun JoinCoPublisherScreen(
     var offerRetry by remember { mutableStateOf(false) }
     val ds = remember { DsClient() }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    // ADR-0057 — marks the channel's journal as co-published, so this device
+    // never claims it.
+    val coPublished = remember(context, state) { CoPublishedJournals.onDevice(context) { state.boundAccount } }
 
     // The stored name of a channel joined without one: a data value, taken in
     // the language on screen when the channel is added.
@@ -2095,7 +2194,7 @@ public fun JoinCoPublisherScreen(
                         // below must run on the SAME identity, and the
                         // joined group is persisted with it.
                         val request = publisher.withIdentity { identity ->
-                            CoPublisher.requestToCoPublish(ds, identity, trimmed)
+                            CoPublisher.requestToCoPublish(ds, identity, trimmed, coPublished)
                         }
                         status = UiText("channels.join.waiting")
                         var keys: ChannelPublisherKeys? = null
@@ -2108,6 +2207,7 @@ public fun JoinCoPublisherScreen(
                                     request.groupId,
                                     request.joinerKey,
                                     request.channelIdHex,
+                                    coPublished,
                                     // G-29 — reuse the persisted signing seed on a re-poll.
                                     state.persistedPublisherSigningSeed(request.channelIdHex),
                                 )

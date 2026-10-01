@@ -39,7 +39,7 @@ public suspend fun <T : Any> awaitBounded(
 
 /**
  * The readable composer error for an attachment that could not be added
- * (ADR-0058: the kind decides the sentence, the exception's own text is never
+ * (ADR-0061: the kind decides the sentence, the exception's own text is never
  * shown).
  */
 public fun attachFailureMessage(name: String?, error: Throwable?): UiText {

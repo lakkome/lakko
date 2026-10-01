@@ -26,7 +26,7 @@ enum MicrophonePermission {
     static var deniedMessage: String { Localization.text("call.permission.microphone.body") }
 
     /// The same copy held as a message, for a notice kept in state: it
-    /// renders in the language of the moment it is shown (ADR-0058).
+    /// renders in the language of the moment it is shown (ADR-0061).
     static var deniedText: UiText { .key("call.permission.microphone.body") }
 
     /// Grant state now, then — only when undetermined — the system prompt.

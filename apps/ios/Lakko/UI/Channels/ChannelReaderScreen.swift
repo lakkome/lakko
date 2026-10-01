@@ -43,7 +43,7 @@ struct ChannelReaderScreen: View {
     }
     @State private var bootstrap: Bootstrap = .notSubscribed
     @State private var bootstrapError: UiText?
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
     @State private var posts: [PostView] = []
     @State private var decodedByCursor: [UInt64: PostDecodeState] = [:]
@@ -408,6 +408,15 @@ struct ChannelReaderScreen: View {
                 )
             }
         }
+
+        // ADR-0060 section 3 — this subscriber's member card for the newest
+        // epoch it holds, and the grants the other members' cards carry.
+        await ChannelMemberCards.uploadIfNeeded(state: state, channelId: channelId)
+        await ChannelMemberCards.refresh(
+            state: state, channelId: channelId,
+            resolveKey: { accountId in
+                try? await ContactsClient().resolveVerifiedBundle(accountId: accountId).signaturePubkey
+            })
     }
 
     private func loadAndDecodePosts() async {

@@ -4,7 +4,7 @@
 /**
  * A catalog message with parts rendered as elements (a bold name, a link),
  * so a translator still sees one whole sentence and can move the part
- * anywhere in it (ADR-0058).
+ * anywhere in it (ADR-0061).
  *
  * Each element argument is formatted as a marker the text can never contain
  * (private-use characters), then the output is split on those markers. The

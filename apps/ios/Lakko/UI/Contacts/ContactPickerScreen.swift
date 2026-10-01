@@ -15,7 +15,7 @@ struct ContactPickerScreen: View {
     var footer: String? = nil
     /// Called with the picked contact's chat.
     let onPick: (String) -> Void
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {

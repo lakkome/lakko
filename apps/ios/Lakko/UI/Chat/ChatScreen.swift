@@ -26,7 +26,7 @@ public struct ChatScreen: View {
     /// people — so tapping the name opens THAT person
     /// (`docs/ux/conversation-info.md` section 1).
     @ObservedObject public var contacts: ContactsViewModel
-    /// ADR-0058 — observed so a language switch re-renders the screen.
+    /// ADR-0061 — observed so a language switch re-renders the screen.
     @ObservedObject private var l10n = Localization.shared
     /// Leave this screen (pop it). Navigation back is the system back button
     /// and edge swipe; this is only for the case the chat was deleted from
@@ -1726,7 +1726,7 @@ struct SelectableMessageRow<Row: View>: View {
 
 struct MessageRow: View {
     let message: ChatMessage
-    /// ADR-0058 — observed so a language switch re-renders the row.
+    /// ADR-0061 — observed so a language switch re-renders the row.
     @ObservedObject var l10n = Localization.shared
     /// ADR-0023 — the local member's IDENTITY (their signature key),
     /// used to highlight the reaction chips this user contributed. Never
@@ -2709,7 +2709,7 @@ private struct GroupNameSection: View {
 /// which is not the same thing as a screen about a person.
 struct MembersSheet: View {
     @ObservedObject var viewModel: ChatViewModel
-    /// ADR-0058 — observed so a language switch re-renders the panel.
+    /// ADR-0061 — observed so a language switch re-renders the panel.
     @ObservedObject var l10n = Localization.shared
 
     /// ADR-0045 (UX §6) — the `Leave group` confirmation. Local to the sheet:
@@ -2823,6 +2823,9 @@ struct MembersSheet: View {
                         viewModel: viewModel,
                         canRename: sections.contains(.renameGroup))
                 }
+                // `docs/ux/who-can-find-me.md` section 5 — present only while
+                // the setting includes groups at all.
+                MembersCanFindMeSection(groupIdHex: viewModel.groupIdHex)
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees
                 // the add affordance; a plain member's add would be refused.
                 if sections.contains(.addMember) {

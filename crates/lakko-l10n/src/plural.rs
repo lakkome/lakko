@@ -4,7 +4,7 @@
 //! CLDR plural categories, through ICU4X's compiled data.
 //!
 //! Only whole counts are supported (message counts, members, minutes): the
-//! message subset of ADR-0058 has no fractional plural argument.
+//! message subset of ADR-0061 has no fractional plural argument.
 
 use icu_locale_core::Locale;
 use icu_plurals::{PluralCategory, PluralRules};

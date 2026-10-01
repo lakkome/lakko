@@ -12,7 +12,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/** ADR-0058 - what the sign-in screens hand the catalog. */
+/** ADR-0061 - what the sign-in screens hand the catalog. */
 class UiTextTest {
 
     @Test

@@ -33,19 +33,27 @@ class MemoryStorage {
   }
 }
 
+/** The signed-in account most tests run as. */
+const OWNER = "b3duZXItYWNjb3VudC0wMDAwMA==";
+const OTHER = "b3RoZXItYWNjb3VudC0wMDAwMA==";
+
 beforeEach(() => {
   (globalThis as unknown as { localStorage: Storage }).localStorage =
     new MemoryStorage() as unknown as Storage;
+  bindContactsAccount(OWNER);
 });
 
 afterEach(() => {
+  bindContactsAccount(null);
   delete (globalThis as unknown as { localStorage?: Storage }).localStorage;
 });
 
 import {
+  clearRotationStatesForAccount,
   loadRotationState,
   saveRotationState,
 } from "./rotation-state-store";
+import { bindContactsAccount } from "../contacts/local-store";
 
 const CH = "00112233445566778899aabbccddeeff";
 
@@ -79,7 +87,7 @@ describe("rotation-state-store", () => {
 
   it("treats a corrupt entry as absent rather than throwing", () => {
     localStorage.setItem(
-      "lakko.channels.rotation-state.v1." + CH,
+      `lakko.channels.rotation-state.v2.${OWNER}.${CH}`,
       "{ not valid json",
     );
     expect(loadRotationState(CH)).toBeNull();
@@ -87,9 +95,46 @@ describe("rotation-state-store", () => {
 
   it("rejects a negative post count as corrupt (returns null)", () => {
     localStorage.setItem(
-      "lakko.channels.rotation-state.v1." + CH,
+      `lakko.channels.rotation-state.v2.${OWNER}.${CH}`,
       JSON.stringify({ lastRotationMs: "1", postsSinceRotation: -3 }),
     );
     expect(loadRotationState(CH)).toBeNull();
+  });
+
+  it("two accounts on one browser never see each other's schedule", () => {
+    saveRotationState(CH, { lastRotationMs: 42n, postsSinceRotation: 1 });
+    bindContactsAccount(OTHER);
+    expect(loadRotationState(CH)).toBeNull();
+    saveRotationState(CH, { lastRotationMs: 7n, postsSinceRotation: 2 });
+    bindContactsAccount(OWNER);
+    expect(loadRotationState(CH)!.lastRotationMs).toBe(42n);
+    expect(loadRotationState(CH, OTHER)!.lastRotationMs).toBe(7n);
+  });
+
+  it("with no account a read is null and a write is a no-op", () => {
+    bindContactsAccount(null);
+    saveRotationState(CH, { lastRotationMs: 42n, postsSinceRotation: 1 });
+    expect(localStorage.length).toBe(0);
+    expect(loadRotationState(CH)).toBeNull();
+  });
+
+  it("the retired device-wide row is not read", () => {
+    localStorage.setItem(
+      "lakko.channels.rotation-state.v1." + CH,
+      JSON.stringify({ lastRotationMs: "5", postsSinceRotation: 1 }),
+    );
+    expect(loadRotationState(CH)).toBeNull();
+  });
+
+  it("Forget device drops the account's rows and the retired ones, never another account's", () => {
+    localStorage.setItem("lakko.channels.rotation-state.v1." + CH, "{}");
+    saveRotationState(CH, { lastRotationMs: 42n, postsSinceRotation: 1 });
+    saveRotationState(CH, { lastRotationMs: 7n, postsSinceRotation: 2 }, OTHER);
+
+    clearRotationStatesForAccount(OWNER);
+
+    expect(loadRotationState(CH)).toBeNull();
+    expect(loadRotationState(CH, OTHER)!.lastRotationMs).toBe(7n);
+    expect(localStorage.getItem("lakko.channels.rotation-state.v1." + CH)).toBeNull();
   });
 });

@@ -5,10 +5,10 @@ import Foundation
 
 /// Cross-device sync state types (Phase 2a3e2b-iOS).
 ///
-/// Mirror of `apps/web/src/devices/sync/state.ts`. Four record
-/// shapes — one per typed body variant in
-/// `schemas/mls-app/devicegroup_v1.proto` — plus a per-record
-/// `updatedAtHlc` for last-write-wins resolution.
+/// The read-side shapes the app consumes. They are no longer folded here:
+/// since ADR-0058 the one fold is `SyncedState` in `lakko-sync`, reached over
+/// the FFI, and these values are projections of its registers (see
+/// ``DeviceGroupSyncRepository``). `updatedAtHlc` is the register's stamp.
 
 public struct DraftState: Equatable {
     public let text: String
@@ -64,15 +64,6 @@ public struct OrderState: Equatable {
         self.groupIds = groupIds
         self.updatedAtHlc = updatedAtHlc
     }
-}
-
-/// Last-write-wins resolver. Returns `true` when `candidate`
-/// should replace `existing` (higher HLC, or no existing
-/// record), `false` when it should be dropped (older or
-/// duplicate).
-public func shouldApply(candidateHlc: UInt64, existingHlc: UInt64?) -> Bool {
-    guard let existing = existingHlc else { return true }
-    return candidateHlc > existing
 }
 
 /// Hex-encode a `group_id` byte slice for use as a map key.

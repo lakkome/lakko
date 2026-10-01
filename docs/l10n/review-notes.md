@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
 
-# Translation review notes (ADR-0058 S5)
+# Translation review notes (ADR-0061 S5)
 
 Every translation in `l10n/catalog/<lang>.json` is a machine translation
 (`status: "machine"`) until a native speaker reviews it. Keys marked
@@ -35,7 +35,7 @@ recovery area (`docs/l10n/batch-1-auth.md`).
   translated). Check these on screen.
 - **Digits.** fa spells out "24", "3 of 5" and "six-digit"; the other
   languages keep the literal digits of the English source. Word positions
-  and codes are arguments and are always Latin digits (ADR-0058 open
+  and codes are arguments and are always Latin digits (ADR-0061 open
   question 2).
 - **Share term** differs: es/pt-BR "partes", tr "pay", he "חלק",
   zh-Hans "分片", uk "частка".

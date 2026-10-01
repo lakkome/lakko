@@ -13,7 +13,7 @@ import me.lakko.app.ds.DsNetworkError
 import me.lakko.app.l10n.UiText
 
 /*
- * ADR-0058 section 6 — what the contacts screens say about a failed action.
+ * ADR-0061 section 6 — what the contacts screens say about a failed action.
  *
  * Errors render from their kind, never from core, server or transport prose
  * (that goes to the log). The kinds, in the order they are asked:
@@ -52,10 +52,16 @@ private fun contactsVariantText(error: Throwable): UiText? {
     while (cause != null && seen.add(cause)) {
         if (cause is ContactsError) {
             when (val v = cause.variant) {
-                is ContactsError.Variant.UsernameUnknown -> return UiText(
-                    "chat.members.add.error.unknown_username",
-                    texts = mapOf("name" to "@${v.normalisedUsername}"),
-                )
+                // ADR-0060 / docs/ux/who-can-find-me.md section 6.1 "Not found":
+                // the same whether the account does not exist or does not let
+                // the searcher find it, so it never names the username.
+                // TODO(ADR-0061): main's literal, carried as the key until it
+                // is moved into the catalog (an unknown key renders verbatim).
+                is ContactsError.Variant.UsernameUnknown ->
+                    return UiText(me.lakko.app.search.SEARCH_NOT_FOUND)
+                // ADR-0060 "Request refused"; the same literal-as-key carry.
+                is ContactsError.Variant.ReachRefused ->
+                    return UiText(ContactsError.REACH_REFUSED_COPY)
                 is ContactsError.Variant.NoIdentityBundle ->
                     return UiText("chat.members.add.error.no_bundle")
                 is ContactsError.Variant.Wrapped -> Unit

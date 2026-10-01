@@ -138,7 +138,7 @@ struct EmojiTab: View {
     }
 
     /// The bundled Unicode data names its groups in English; each known group
-    /// has a catalog message (ADR-0058, batch 3), an unknown one shows as-is.
+    /// has a catalog message (ADR-0061, batch 3), an unknown one shows as-is.
     static func groupTitle(_ name: String) -> String {
         let keys = [
             "Smileys & Emotion": "chat.emoji.group.smileys",

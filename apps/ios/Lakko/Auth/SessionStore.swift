@@ -76,7 +76,8 @@ public final class SessionStore {
         defaults.set(session.username, forKey: usernameKey)
     }
 
-    /// Drop the cached record. Used by ``AuthRepository/forgetDevice()``.
+    /// Drop the cached record. Used by ``AuthRepository/endSessionAfterLocalWipe()`` and
+    /// ``AccountLocalDataWipe``.
     ///
     /// Note: this does NOT delete the Keychain-stored device key —
     /// ``DeviceKeyStore/deleteDeviceKey(accountIdB64:)`` must be

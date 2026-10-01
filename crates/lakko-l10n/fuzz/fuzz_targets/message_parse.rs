@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target — the ADR-0058 message syntax: parse, format in every
+//! Fuzz target — the ADR-0061 message syntax: parse, format in every
 //! supported language, check against itself; and load the same bytes as a
 //! source catalog. Must never panic.
 

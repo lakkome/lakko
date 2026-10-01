@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Interface localization (ADR-0058): language resolution, the message formatter, the catalog and the signed translation bundle"
+description = "Interface localization (ADR-0061): language resolution, the message formatter, the catalog and the signed translation bundle"
 
 [lints]
 workspace = true
@@ -20,7 +20,7 @@ lakko-crypto.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# CLDR plural categories (ADR-0058 open question 1). ICU4X; its
+# CLDR plural categories (ADR-0061 open question 1). ICU4X; its
 # `icu_locale_core` sibling was already in the tree through `idna`.
 icu_plurals.workspace = true
 icu_locale_core.workspace = true

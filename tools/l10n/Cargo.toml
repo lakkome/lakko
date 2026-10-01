@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Catalog tool (ADR-0058) — validate and compile the interface translations, and sign the translation bundle offline."
+description = "Catalog tool (ADR-0061) — validate and compile the interface translations, and sign the translation bundle offline."
 
 [[bin]]
 name = "lakko-l10n"

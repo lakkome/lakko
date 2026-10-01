@@ -134,7 +134,7 @@ public data class LinkCallSlot(
     val slug: String?,
     val owner: Boolean,
     val phase: LinkCallPhase,
-    /** The reason, for [LinkCallPhase.ERROR], from the kind of failure (ADR-0058); `null` names none. */
+    /** The reason, for [LinkCallPhase.ERROR], from the kind of failure (ADR-0061); `null` names none. */
     val error: UiText?,
 )
 

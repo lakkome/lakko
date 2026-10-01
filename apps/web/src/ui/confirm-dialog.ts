@@ -184,7 +184,7 @@ export function namedAction(
 }
 
 /**
- * {@link namedAction} for a catalog verb (ADR-0058): the bare verb from
+ * {@link namedAction} for a catalog verb (ADR-0061): the bare verb from
  * `bareKey`, or `namedKey` with the target as `{name}`, so a translator can
  * put the name where the language wants it.
  */

@@ -180,17 +180,17 @@ describe("ADR-0045 — the committer beacon is filtered in the foreground loop",
     expect(ev.createdAt).toBe("2026-08-24T00:00:00Z");
   });
 
-  it("beacon bytes would render as a chat bubble without the arm", async () => {
-    // The defect, demonstrated on the real parser: `parse_body`'s lossy-UTF-8
-    // fallback DEGRADES binary input to `chat` (it does NOT throw), which is
-    // both correct for legacy plaintext and exactly why the beacon needs its
-    // own arm ahead of it. This is also the check that this suite's stand-ins
-    // are faithful: the real parser's behaviour here is the thing a naive
-    // double would get wrong.
+  it("the real parser classifies beacon bytes as a service envelope, never chat", async () => {
+    // The defect this arm was first written against: `parse_body`'s lossy-UTF-8
+    // fallback used to DEGRADE the beacon to `chat` text. Since the 2026-09-29
+    // live walk the core classifies any non-JSON `lakko/…` plaintext as
+    // `service-envelope` (text empty), which the receive loop drops; the arm
+    // still claims the beacon first, because it carries information the fold
+    // needs. This is also the check that this suite's stand-ins are faithful.
     const parsed = wasm.parseBodyEnvelope(wasm.composeCommitterBeacon());
 
-    expect(parsed.kind).toBe("chat");
-    expect(parsed.text).toContain("lakko/committer-beacon/v1");
+    expect(parsed.kind).toBe("service-envelope");
+    expect(parsed.text).toBe("");
   });
 
   it("an unknown beacon version is NOT swallowed by the arm", async () => {
@@ -198,14 +198,17 @@ describe("ADR-0045 — the committer beacon is filtered in the foreground loop",
     // codec accepts. A future v2 beacon falls through to the chat parser like
     // any other unrecognised plaintext rather than being silently eaten by a
     // length-only match — which is what keeps the peek honest about being
-    // backed by the codec.
+    // backed by the codec. The parser then classifies it as an unrecognised
+    // service envelope, which the poll drops: never a chat row.
     const notABeacon = wasm.composeCommitterBeacon();
     notABeacon[notABeacon.length - 1] = 0xff;
 
     const [ev] = await classify(notABeacon);
 
     expect(ev?.kind).not.toBe("committerBeacon");
-    expect(ev?.kind).toBe("application");
+    // Classified as an unrecognised service envelope and dropped by the poll:
+    // no event at all, never a chat row.
+    expect(ev).toBeUndefined();
   });
 
   it("the length the arm reads from the FFI matches the wire", async () => {
@@ -255,11 +258,11 @@ describe("ADR-0048 — the profile request is filtered in the foreground loop", 
     expect(ev.createdAt).toBe("2026-08-24T00:00:00Z");
   });
 
-  it("request bytes would render as a chat bubble without the arm", () => {
+  it("the real parser classifies request bytes as a service envelope, never chat", () => {
     const parsed = wasm.parseBodyEnvelope(wasm.composeProfileRequest());
 
-    expect(parsed.kind).toBe("chat");
-    expect(parsed.text).toContain("lakko/profile-request/v1");
+    expect(parsed.kind).toBe("service-envelope");
+    expect(parsed.text).toBe("");
   });
 
   it("an unknown request version is NOT swallowed by the arm", async () => {
@@ -269,7 +272,9 @@ describe("ADR-0048 — the profile request is filtered in the foreground loop", 
     const [ev] = await classify(notARequest);
 
     expect(ev?.kind).not.toBe("profileRequest");
-    expect(ev?.kind).toBe("application");
+    // Classified as an unrecognised service envelope and dropped by the poll:
+    // no event at all, never a chat row.
+    expect(ev).toBeUndefined();
   });
 
   it("the length the arm reads from the FFI matches the wire", () => {

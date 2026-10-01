@@ -34,7 +34,7 @@ public struct ResolvedDisplayName: Equatable, Sendable {
     }
 
     /// The roster / sender label for a person nothing is known about, in the
-    /// interface language when it is read (ADR-0058).
+    /// interface language when it is read (ADR-0061).
     public static var placeholderMember: String { Localization.text("chat.members.unnamed") }
     /// The request-row label for a person nothing is known about, in the
     /// interface language when it is read.

@@ -29,10 +29,18 @@
  * identity key for a mailbox read. The signer comes from the registry in
  * `./access` (or is passed explicitly); the path signed is the service path,
  * never the `/api/ds` prefix, and the query is signed exactly as sent. A
- * refused group request is retried under the previous epoch's key, then once
- * after a claim (contract point 5). Mailbox writes and the knock stay
- * unsigned; the knock spends one anonymous `ds-knock` token instead
- * (ADR-0054 S3) and carries no credentials.
+ * refused group request is retried under the previous epoch's key (contract
+ * point 5); then, ONLY when this account owns the journal (ADR-0057
+ * obligation 2), the owner claims it with its root (the claim registers the
+ * current epoch) and retries once; an already-claimed journal is left alone. A plain member
+ * never claims and never registers: it waits for the committer's
+ * registration. Mailbox writes and the knock stay unsigned; the knock spends
+ * one anonymous `ds-knock` token instead (ADR-0054 S3) and carries no
+ * credentials.
+ *
+ * ADR-0057 statements (claim, reset, register, registrars, push binding) are
+ * `PUT /ds/group/<hex>/<segment>` with the signer's JSON body and NO proof
+ * header ({@link DsClient.putStatement}).
  *
  * ADR-0054 - a group publish that should wake the recipients carries an
  * `x-lakko-wake` header (built by `./wake`); the DS forwards the wake to
@@ -49,6 +57,16 @@ import {
   type ProofSigner,
 } from "./access";
 import { DS_WAKE_HEADER, dsWakeHeaderValue, type DsWake } from "./wake";
+import { type OwnerClaimOutcome } from "./owner-claim";
+import {
+  NoJournalAuthorityError,
+  claimAsOwner,
+  isStatus,
+  registerEpochWith,
+  releaseAuthority,
+  type StatementSender,
+} from "./ownership";
+import { journalRepair, type JournalRepair } from "./journal-repair";
 import {
   anonTokens,
   anonymousFetchInit,
@@ -56,6 +74,53 @@ import {
 } from "../tokens/anon-token-pool";
 
 export { DS_WAKE_HEADER, dsWakeHeaderValue, type DsWake, type DsWakeKind } from "./wake";
+
+/** The header a reach-key delegation travels in (`delegationHeaderName()` on
+ *  the wasm surface; pinned against it by `client.reach.test.ts`). */
+export const DS_DELEGATION_HEADER = "x-lakko-ds-delegation";
+
+/**
+ * How a write to someone else's identity mailbox is authorised (ADR-0060
+ * section 2). `signer` is a reach signer (`DsProofSigner.forReach(seed)`) of a
+ * key the owner registered, or the delegate's signer next to `delegation`.
+ * Absent: the write is unsigned, which an open (Everyone) or unclaimed
+ * mailbox stores and a closed one silently drops.
+ */
+export interface MailboxWriteAuth {
+  readonly signer?: ProofSigner | null;
+  /** The `x-lakko-ds-delegation` header value. */
+  readonly delegation?: string | null;
+}
+
+/** One change to the reach keys of this device's own mailbox. */
+export interface MailboxReachUpdate {
+  readonly add?: readonly { readonly publicKey: Uint8Array; readonly expiresAtMs?: number | null }[];
+  readonly remove?: readonly Uint8Array[];
+  /** Set the Everyone flag; absent leaves it unchanged. */
+  readonly open?: boolean;
+}
+
+/** The JSON body of `PUT /ds/mailbox/{hex}/reach`. Exported for the test. */
+export function reachUpdateBody(update: MailboxReachUpdate): {
+  add: { reach_pk_b64: string; expires_at_ms?: number }[];
+  remove: string[];
+  open?: boolean;
+} {
+  const body: {
+    add: { reach_pk_b64: string; expires_at_ms?: number }[];
+    remove: string[];
+    open?: boolean;
+  } = {
+    add: (update.add ?? []).map((a) =>
+      a.expiresAtMs === undefined || a.expiresAtMs === null
+        ? { reach_pk_b64: base64Encode(a.publicKey) }
+        : { reach_pk_b64: base64Encode(a.publicKey), expires_at_ms: a.expiresAtMs },
+    ),
+    remove: (update.remove ?? []).map((k) => base64Encode(k)),
+  };
+  if (update.open !== undefined) body.open = update.open;
+  return body;
+}
 
 /** Default base URL — Vite dev proxy `/api/ds/*` →
  *  `127.0.0.1:8082`. Prod nginx routes the same path. */
@@ -96,6 +161,10 @@ export interface FetchResult {
   /** `true` if there are more rows past the last returned id;
    *  client should call again with `after = lastMessage.id`. */
   hasMore: boolean;
+  /** A signed read of a CLAIMED group journal only: the newest epoch
+   *  registered on the DS for it (`latest_epoch`). Absent for an unclaimed
+   *  journal and for a mailbox. */
+  latestEpoch?: number;
 }
 
 /** Programmer error — surfaced before any network call. */
@@ -149,7 +218,7 @@ export function isDsNetworkFailure(err: unknown): boolean {
 
 /** How one request is proven (ADR-0053). */
 type SigningPlan =
-  /** Never signed: someone else's mailbox, a rendezvous mailbox, the knock. */
+  /** Never signed: a rendezvous id, the knock, a proofless mailbox write. */
   | { readonly kind: "none" }
   /** Signed by this signer (or unsigned when `null`), one attempt: the caller
    *  owns the group and knows exactly which key the request needs. */
@@ -194,10 +263,13 @@ export interface DsClientOptions {
   readonly now?: () => number;
   /** The anonymous-token pool the knock spends from. Defaults to the app's. */
   readonly tokens?: AnonTokenPool;
+  /** The journal repair scheduler a refusal notes. Defaults to the app's. */
+  readonly repair?: Pick<JournalRepair, "note">;
 }
 
-export class DsClient {
+export class DsClient implements StatementSender {
   private readonly access: DsAccessRegistry;
+  private readonly repair: Pick<JournalRepair, "note">;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
   private readonly tokens: AnonTokenPool;
@@ -211,6 +283,7 @@ export class DsClient {
       options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
     this.now = options.now ?? (() => Date.now());
     this.tokens = options.tokens ?? anonTokens;
+    this.repair = options.repair ?? journalRepair;
   }
 
   // -----------------------------------------------------------------
@@ -251,33 +324,53 @@ export class DsClient {
       }
       case "group": {
         const { current, previous } = this.access.groupSigners(plan.groupId);
-        if (current !== null && this.access.markClaimAttempt(plan.groupId)) {
-          // Contract point 2 - claim on open, once per group per session.
-          // Fired, not awaited: an unclaimed journal answers the request below
-          // either way, and a claimed one ignores a claim it already holds.
-          void this.claimGroupWith(plan.groupId, current, previous).catch((err: unknown) => {
-            // eslint-disable-next-line no-console
-            console.warn("ds: claim on open failed; retried on the next refusal", err);
-          });
-        }
         const first = await this.attempt(req, current);
         if (first.status !== 401) return this.finish(req, first);
         // Contract point 5 - once under the previous epoch's key (a read
-        // before a lagging registration landed), then once after a claim.
+        // before a lagging registration landed).
         let latest = first;
         if (previous !== null) {
           latest = await this.attempt(req, previous);
           if (latest.status !== 401) return this.finish(req, latest);
         }
+        // ADR-0057 obligation 2 - the lazy claim, by the OWNER only. A plain
+        // member (or an admin) never claims and never registers here: it waits
+        // for the committer's registration and retries on the next poll.
         const again = this.access.groupSigners(plan.groupId);
-        if (again.current !== null) {
-          await this.claimGroupWith(plan.groupId, again.current, again.previous).catch(
-            () => undefined,
-          );
-          latest = await this.attempt(req, again.current);
+        if (again.current !== null && this.access.ownsJournal(plan.groupId)) {
+          const claimed = await this.ownerClaim(plan.groupId, again.current).catch((err: unknown) => {
+            // eslint-disable-next-line no-console
+            console.warn("ds: the owner's lazy claim failed", err);
+            return false;
+          });
+          if (claimed) latest = await this.attempt(req, again.current);
+        }
+        // Second security pass, finding 1 - refused at this device's own epoch
+        // after everything else was tried: an owner or admin schedules the
+        // repair check (a member's note is dropped there).
+        if (latest.status === 401 && again.current !== null) {
+          const skewed = isClockSkewed(parseHttpDate(latest.headers.get("date")), this.now());
+          if (!skewed) this.repair.note(plan.groupId, again.current.epoch, "refused-at-head");
         }
         return this.finish(req, latest);
       }
+    }
+  }
+
+  /** ADR-0057 obligation 2: claim the journal with this account's root at the
+   *  epoch `current` proves. `true` only when the claim landed (the journal
+   *  was unclaimed), which is the one case a retry can now succeed; an
+   *  already-claimed journal (409) means this device waits for the
+   *  committer's registration like everyone else. */
+  private async ownerClaim(groupId: Uint8Array, current: ProofSigner): Promise<boolean> {
+    const authority = this.access.journalAuthority(groupId);
+    try {
+      if (authority.kind !== "root") return false;
+      const outcome = await claimAsOwner(this, groupId, authority.signer, current.epoch, current.verifyingKey());
+      if (outcome === "claimed") this.access.noteOwnerClaimed(groupId);
+      return outcome === "claimed";
+    } finally {
+      releaseAuthority(authority);
     }
   }
 
@@ -346,39 +439,90 @@ export class DsClient {
   }
 
   // -----------------------------------------------------------------
-  // Claims (ADR-0053 contract point 2)
+  // ADR-0057 statements
   // -----------------------------------------------------------------
 
   /**
-   * `PUT /ds/group/{hex}/access` registering `next`'s key at its epoch,
-   * proven under `signedBy` (unsigned when `null`: the first claim of an
-   * unclaimed journal, or re-sending a key the journal already holds). Throws
-   * on a refusal - the register-before-publish caller aborts on it.
+   * `PUT <path>` with a statement body the wasm signer built (`path` is the
+   * service path `/ds/group/<hex>/<segment>`). No proof header: the
+   * statement carries its own signature. Throws `DsHttpError` on a refusal.
    */
-  async claimGroupWith(
-    groupId: Uint8Array,
-    next: ProofSigner,
-    signedBy: ProofSigner | null,
-  ): Promise<void> {
-    if (groupId.length === 0) throw new DsClientArgError("groupId must be non-empty");
-    const body = new TextEncoder().encode(next.groupClaimBodyJson());
+  async putStatement(path: string, bodyJson: string): Promise<void> {
+    if (!path.startsWith("/ds/group/")) {
+      throw new DsClientArgError("a statement path must name a group journal");
+    }
     await this.send({
       method: "PUT",
-      path: `/ds/group/${pseudonymHex(groupId)}/access`,
+      path,
       query: "",
-      body,
+      body: new TextEncoder().encode(bodyJson),
       contentType: "application/json",
-      plan: { kind: "explicit", signer: signedBy },
+      plan: { kind: "none" },
     });
   }
 
-  /** {@link EpochRegistrar} over this client. */
+  /**
+   * ADR-0057 obligation 2 - claim `groupId` with this account's root when this
+   * account owns it, once per session (`./owner-claim`). Called when a group
+   * is opened and before every registration, because an UNCLAIMED journal
+   * never answers the `401` the lazy claim waits for. Never throws; a `204`
+   * reaches {@link DsAccessRegistry.noteOwnerClaimed}.
+   */
+  ensureOwnerClaim(groupId: Uint8Array): Promise<OwnerClaimOutcome> {
+    if (groupId.length === 0) return Promise.resolve("not-owner");
+    return this.access.ownerClaims.run(groupId, {
+      ownsJournal: (g) => this.access.ownsJournal(g),
+      currentEpochKey: (g) => {
+        const { current } = this.access.groupSigners(g);
+        return current === null ? null : { epoch: current.epoch, key: current.verifyingKey() };
+      },
+      claim: async (g, epoch, key) => {
+        // The ROOT, whatever the "root held" marker says: this is how an owner
+        // whose journal lost its claim gets it back. A journal held by another
+        // root answers 401 and is left to the takeover.
+        const authority = this.access.rootAuthority(g);
+        try {
+          if (authority.kind !== "root") throw new NoJournalAuthorityError();
+          const outcome = await claimAsOwner(this, g, authority.signer, epoch, key);
+          if (outcome === "already-claimed") throw new DsHttpError(409, `/ds/group/${pseudonymHex(g)}/claim`, "");
+        } finally {
+          releaseAuthority(authority);
+        }
+      },
+      onClaimed: (g) => this.access.noteOwnerClaimed(g),
+      now: this.now,
+    });
+  }
+
+  /** {@link EpochRegistrar} over this client: register `epochKey` at `epoch`
+   *  signed with this device's authority over the journal (root or
+   *  registrar), revoking `revokeKeys`. Throws `NoJournalAuthorityError`
+   *  when this device holds neither.
+   *
+   *  The owner claims the journal first (once per session): a registration in
+   *  an unclaimed journal is refused `401` and nothing would ever claim it. */
   async registerGroupEpoch(
     groupId: Uint8Array,
-    next: ProofSigner,
-    signedBy: ProofSigner | null,
+    epoch: bigint,
+    epochKey: Uint8Array,
+    revokeKeys: readonly Uint8Array[] = [],
   ): Promise<void> {
-    await this.claimGroupWith(groupId, next, signedBy);
+    if (groupId.length === 0) throw new DsClientArgError("groupId must be non-empty");
+    await this.ensureOwnerClaim(groupId);
+    const authority = this.access.journalAuthority(groupId);
+    try {
+      await registerEpochWith(this, groupId, authority, epoch, epochKey, revokeKeys);
+    } catch (err) {
+      // Append 409: another committer registered `epoch` first. The caller
+      // abandons (never a Replace in a commit path); an owner or admin
+      // schedules the repair check at the epoch it is at.
+      if (isStatus(err, 409) && epoch > 0n) {
+        this.repair.note(groupId, epoch - 1n, "append-conflict");
+      }
+      throw err;
+    } finally {
+      releaseAuthority(authority);
+    }
   }
 
   /** `PUT /ds/mailbox/{hex}/access` - claim the mailbox `signer`'s identity
@@ -450,12 +594,15 @@ export class DsClient {
    * `POST /ds/mailbox/{pseudonym_hex}/messages` — publish a raw
    * payload to a mailbox. The body is sent as
    * `application/octet-stream`; the server caps the size at
-   * `MAX_MESSAGE_BYTES`. Never signed: a mailbox write is the open cold
-   * inbox (ADR-0053 section 2).
+   * `MAX_MESSAGE_BYTES`. ADR-0060: a claimed mailbox is closed unless its
+   * owner chose Everyone, so the write carries the reach grant (or the
+   * delegation) that authorises it; an unauthorised write to a closed
+   * mailbox is answered as stored and dropped.
    */
   async publishMailbox(
     pseudonym: Uint8Array,
     payload: Uint8Array,
+    auth?: MailboxWriteAuth | null,
   ): Promise<PublishResult> {
     if (pseudonym.length !== 32) {
       throw new DsClientArgError("pseudonym must be 32 bytes");
@@ -463,9 +610,84 @@ export class DsClient {
     if (payload.length === 0) {
       throw new DsClientArgError("payload must be non-empty");
     }
-    return this.publish(`/ds/mailbox/${pseudonymHex(pseudonym)}/messages`, payload, {
+    const signer = auth?.signer ?? null;
+    const delegation = auth?.delegation ?? null;
+    if (delegation !== null && signer === null) {
+      // The DS refuses a delegation without the delegate's proof; say so here
+      // rather than as a 401.
+      throw new DsClientArgError("a delegation needs the delegate's proof signer");
+    }
+    return this.publish(
+      `/ds/mailbox/${pseudonymHex(pseudonym)}/messages`,
+      payload,
+      { kind: "explicit", signer },
+      delegation === null ? undefined : { [DS_DELEGATION_HEADER]: delegation },
+    );
+  }
+
+  /**
+   * `POST /ds/rendezvous/{hex}/messages` - a random rendezvous id (pairing,
+   * recovery, the welcome courier, the state bundle; ADR-0060 section 2).
+   * Never signed and never carries a delegation or wake header: the DS
+   * refuses all three there.
+   */
+  async publishRendezvous(id: Uint8Array, payload: Uint8Array): Promise<PublishResult> {
+    if (id.length !== 32) throw new DsClientArgError("rendezvous id must be 32 bytes");
+    if (payload.length === 0) throw new DsClientArgError("payload must be non-empty");
+    return this.publish(`/ds/rendezvous/${pseudonymHex(id)}/messages`, payload, {
       kind: "none",
     });
+  }
+
+  /** `GET /ds/rendezvous/{hex}/messages` - unsigned, like its write. */
+  async fetchRendezvous(
+    id: Uint8Array,
+    options: { after?: number; limit?: number; waitSecs?: number; signal?: AbortSignal } = {},
+  ): Promise<FetchResult> {
+    if (id.length !== 32) throw new DsClientArgError("rendezvous id must be 32 bytes");
+    return this.fetchJournal(`/ds/rendezvous/${pseudonymHex(id)}/messages`, options, {
+      kind: "none",
+    });
+  }
+
+  /**
+   * `PUT /ds/mailbox/{hex}/reach` (ADR-0060 section 2): add and remove reach
+   * public keys and set the Everyone flag, proven under the mailbox's
+   * identity key. `pseudonym` must be one of this device's own mailboxes (the
+   * registry holds its signer); the mailbox is claimed first when the DS says
+   * it is not.
+   */
+  async putMailboxReach(pseudonym: Uint8Array, update: MailboxReachUpdate): Promise<void> {
+    if (pseudonym.length !== 32) throw new DsClientArgError("pseudonym must be 32 bytes");
+    const body = new TextEncoder().encode(JSON.stringify(reachUpdateBody(update)));
+    await this.send({
+      method: "PUT",
+      path: `/ds/mailbox/${pseudonymHex(pseudonym)}/reach`,
+      query: "",
+      body,
+      contentType: "application/json",
+      plan: { kind: "mailbox", pseudonym },
+    });
+  }
+
+  /**
+   * `POST /ds/mailbox/{hex}/reach/check` with a reach proof: `true` when the
+   * key is registered and unexpired (204), `false` on the uniform refusal
+   * (401). Any other answer throws, so a network failure is never read as
+   * "not found" (UX section 6.1).
+   */
+  async reachCheck(pseudonym: Uint8Array, signer: ProofSigner): Promise<boolean> {
+    if (pseudonym.length !== 32) throw new DsClientArgError("pseudonym must be 32 bytes");
+    const req = {
+      method: "POST" as const,
+      path: `/ds/mailbox/${pseudonymHex(pseudonym)}/reach/check`,
+      query: "",
+      body: new Uint8Array(0),
+    };
+    const response = await this.attempt(req, signer);
+    if (response.status === 401) return false;
+    await this.finish(req, response);
+    return true;
   }
 
   /**
@@ -531,8 +753,8 @@ export class DsClient {
   /**
    * `GET /ds/mailbox/{pseudonym_hex}/messages?after=&limit=&wait=`
    * — pull all messages newer than `after` for the given
-   * mailbox. Proven under the identity key when the mailbox is one of this
-   * device's own (ADR-0053); unsigned otherwise (a rendezvous mailbox).
+   * mailbox. Always proven under the identity key: only this device's own
+   * mailboxes are read here (ADR-0060; a rendezvous id has its own route).
    *
    * `wait` is the long-poll budget in seconds (0 returns
    * immediately whatever's there; non-zero holds the connection
@@ -554,12 +776,13 @@ export class DsClient {
     if (pseudonym.length !== 32) {
       throw new DsClientArgError("pseudonym must be 32 bytes");
     }
+    // ADR-0060: every read of a personal mailbox carries the identity proof
+    // (an unproven read is 401 whether the mailbox is claimed or not);
+    // rendezvous ids are read through `fetchRendezvous`.
     const plan: SigningPlan =
       options.signer !== undefined
         ? { kind: "explicit", signer: options.signer }
-        : this.access.mailboxSigner(pseudonym) !== null
-          ? { kind: "mailbox", pseudonym }
-          : { kind: "none" };
+        : { kind: "mailbox", pseudonym };
     return this.fetchJournal(`/ds/mailbox/${pseudonymHex(pseudonym)}/messages`, options, plan);
   }
 
@@ -611,6 +834,7 @@ export class DsClient {
     const json = (await response.json()) as {
       messages: { id: number; payload_b64: string; created_at: string }[];
       has_more: boolean;
+      latest_epoch?: number;
     };
     return {
       messages: json.messages.map((m) => ({
@@ -619,6 +843,7 @@ export class DsClient {
         createdAt: m.created_at,
       })),
       hasMore: json.has_more,
+      ...(typeof json.latest_epoch === "number" ? { latestEpoch: json.latest_epoch } : {}),
     };
   }
 }

@@ -9,8 +9,9 @@
 //!     `/discovery/oprf` round-trip. Static `blind(username)`
 //!     normalises the input and produces the base64 blinded
 //!     element; `finalize(evaluatedB64)` consumes the server's
-//!     evaluation and returns the 64-byte OPRF hash that goes
-//!     into `/discovery/{register, lookup}` as `oprf_hash`.
+//!     evaluation and returns an [`OprfResult`]: the OPRF output, which
+//!     stays on the device, and its `lookupKey`, which goes into
+//!     `/discovery/{register, lookup}` as `oprf_hash`.
 //!
 //!   * [`validateUsername`] — the ADR-0048 §4 username rule
 //!     (normalise, then ASCII `[a-z0-9_]`, 3 to 32 characters). Throws
@@ -26,9 +27,14 @@
 //!     the normalisation rules.
 
 use lakko_discovery_client::{
-    login_handle as inner_login_handle, normalize_username as inner_normalize,
-    validate_username as inner_validate, DiscoveryClientError, OprfBlinder as InnerBlinder,
-    UsernameError, OPRF_HASH_LEN,
+    discovery_lookup_key as inner_lookup_key, is_name_term as inner_is_name_term,
+    login_handle as inner_login_handle, name_matches_query as inner_name_matches_query,
+    name_query_term as inner_name_query_term, name_search_terms as inner_name_search_terms,
+    normalize_name_for_search as inner_normalize_name_for_search,
+    normalize_username as inner_normalize, validate_username as inner_validate,
+    DiscoveryClientError, OprfBlinder as InnerBlinder, UsernameError, MAX_NAME_TERMS,
+    NAME_INPUT_MAX_BYTES, NAME_SEARCH_MIN_CHARS, NAME_TERM_MAX_CHARS, NAME_TERM_MIN_CHARS,
+    OPRF_HASH_LEN,
 };
 use std::sync::Mutex;
 use wasm_bindgen::prelude::*;
@@ -119,6 +125,87 @@ pub fn login_handle(username: &str) -> Result<Vec<u8>, JsValue> {
         .map_err(username_error_value)
 }
 
+// ============================================================================
+// Name search — ADR-0060 §5 (word prefixes)
+// ============================================================================
+
+/// Normalise a display name or a typed query for search (NFKD, lowercase,
+/// marks dropped, whitespace collapsed, trimmed). `undefined` when the input
+/// is not searchable: over 1024 bytes, or under 2 characters normalised.
+#[wasm_bindgen(js_name = normalizeNameForSearch)]
+#[must_use]
+pub fn normalize_name_for_search(input: &str) -> Option<String> {
+    inner_normalize_name_for_search(input)
+}
+
+/// The search terms a display name publishes or seals under: every prefix of
+/// 3 to 16 characters of every normalised word (a shorter word whole), at
+/// most 64, in order. Blind each with `OprfBlinder.blindNameTerm`.
+#[wasm_bindgen(js_name = nameSearchTerms)]
+#[must_use]
+pub fn name_search_terms(display_name: &str) -> Vec<String> {
+    inner_name_search_terms(display_name)
+}
+
+/// The one term a typed query looks up: its longest normalised word, cut to
+/// 16 characters. `undefined` when the query is not searchable.
+#[wasm_bindgen(js_name = nameQueryTerm)]
+#[must_use]
+pub fn name_query_term(query: &str) -> Option<String> {
+    inner_name_query_term(query)
+}
+
+/// The post-filter a lookup's candidates pass through: every word of the
+/// query is a prefix of some word of the name.
+#[wasm_bindgen(js_name = nameMatchesQuery)]
+#[must_use]
+pub fn name_matches_query(display_name: &str, query: &str) -> bool {
+    inner_name_matches_query(display_name, query)
+}
+
+/// Whether `term` is a name term: 1 to 16 characters, no whitespace, already
+/// normalised.
+#[wasm_bindgen(js_name = isNameTerm)]
+#[must_use]
+pub fn is_name_term(term: &str) -> bool {
+    inner_is_name_term(term)
+}
+
+/// Fewest characters a normalised query needs to be searched: 2.
+#[wasm_bindgen(js_name = nameSearchMinChars)]
+#[must_use]
+pub fn name_search_min_chars() -> usize {
+    NAME_SEARCH_MIN_CHARS
+}
+
+/// Longest input the normaliser accepts, in bytes: 1024.
+#[wasm_bindgen(js_name = nameInputMaxBytes)]
+#[must_use]
+pub fn name_input_max_bytes() -> usize {
+    NAME_INPUT_MAX_BYTES
+}
+
+/// Shortest prefix a word publishes as a term: 3.
+#[wasm_bindgen(js_name = nameTermMinChars)]
+#[must_use]
+pub fn name_term_min_chars() -> usize {
+    NAME_TERM_MIN_CHARS
+}
+
+/// Longest term: 16.
+#[wasm_bindgen(js_name = nameTermMaxChars)]
+#[must_use]
+pub fn name_term_max_chars() -> usize {
+    NAME_TERM_MAX_CHARS
+}
+
+/// Most name terms one person publishes: 64.
+#[wasm_bindgen(js_name = maxNameTerms)]
+#[must_use]
+pub fn max_name_terms() -> usize {
+    MAX_NAME_TERMS
+}
+
 /// Client-side OPRF blinder — JS handle.
 ///
 /// JS usage:
@@ -136,8 +223,10 @@ pub fn login_handle(username: &str) -> Result<Vec<u8>, JsValue> {
 ///   body: JSON.stringify({ pow, blinded: blinder.blindedB64 }),
 /// }).then((r) => r.json());
 ///
-/// // 3. Finalize → 64-byte hash for /discovery/{register, lookup}.
-/// const oprfHash = blinder.finalize(evaluated); // Uint8Array(64)
+/// // 3. Finalize: lookupKey goes to /discovery/{register, lookup};
+/// //    output never leaves the device.
+/// const done = blinder.finalize(evaluated);
+/// const oprfHash = done.lookupKey; // Uint8Array(64)
 /// ```
 #[wasm_bindgen]
 pub struct OprfBlinder {
@@ -192,6 +281,39 @@ impl OprfBlinder {
         })
     }
 
+    /// Blind one name term (ADR-0060 §5) in the name OPRF namespace, apart
+    /// from usernames and channel handles. A publisher blinds each of
+    /// `nameSearchTerms`; `normalizedUsername` returns the term.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `term` is not a name term (`isNameTerm`), or on an OPRF
+    /// blinding failure.
+    #[wasm_bindgen(js_name = blindNameTerm)]
+    pub fn blind_name_term(term: &str) -> Result<OprfBlinder, JsError> {
+        let (blinder, blinded_b64) = InnerBlinder::blind_name_term(term).map_err(discovery_err)?;
+        Ok(Self {
+            inner: Mutex::new(Some(blinder)),
+            blinded_b64,
+        })
+    }
+
+    /// Blind the one term a typed name query looks up (`nameQueryTerm` of
+    /// `query`). Filter what the lookup returns with `nameMatchesQuery`.
+    ///
+    /// # Errors
+    ///
+    /// Throws when the query is not searchable, or on an OPRF blinding
+    /// failure.
+    #[wasm_bindgen(js_name = blindName)]
+    pub fn blind_name(query: &str) -> Result<OprfBlinder, JsError> {
+        let (blinder, blinded_b64) = InnerBlinder::blind_name(query).map_err(discovery_err)?;
+        Ok(Self {
+            inner: Mutex::new(Some(blinder)),
+            blinded_b64,
+        })
+    }
+
     /// Base64-encoded blinded element — the `blinded` field of
     /// `/discovery/oprf`'s request body.
     #[wasm_bindgen(getter, js_name = blindedB64)]
@@ -211,17 +333,61 @@ impl OprfBlinder {
         }
     }
 
-    /// Finalise the OPRF dance with the server's evaluation.
-    /// Returns the 64-byte OPRF hash as a `Uint8Array`.
+    /// Finalise the OPRF dance with the server's evaluation. Returns the
+    /// OPRF output and its lookup key; only `lookupKey` goes to the server.
     ///
     /// Single-use — a second call returns an error.
-    pub fn finalize(&self, evaluated_b64: &str) -> Result<Vec<u8>, JsError> {
+    pub fn finalize(&self, evaluated_b64: &str) -> Result<OprfResult, JsError> {
         let mut guard = self.inner.lock().map_err(|_| lock_poisoned())?;
         let blinder = guard.take().ok_or_else(already_finalized)?;
-        let hash = blinder.finalize(evaluated_b64).map_err(discovery_err)?;
-        debug_assert_eq!(hash.len(), OPRF_HASH_LEN);
-        Ok(hash.to_vec())
+        let done = blinder.finalize(evaluated_b64).map_err(discovery_err)?;
+        Ok(OprfResult {
+            output: done.output().to_vec(),
+            lookup_key: done.lookup_key().to_vec(),
+        })
     }
+}
+
+/// What one OPRF round yields (ADR-0060 section 5). `lookupKey` is the
+/// `oprf_hash` of every discovery request and what a username certificate
+/// binds; `output` never leaves the device, because public and introduction
+/// records are sealed under keys derived from it.
+#[wasm_bindgen]
+pub struct OprfResult {
+    output: Vec<u8>,
+    lookup_key: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl OprfResult {
+    /// The 64-byte OPRF output. Never send it to the server.
+    #[wasm_bindgen(getter)]
+    pub fn output(&self) -> Vec<u8> {
+        self.output.clone()
+    }
+
+    /// The 64-byte lookup key derived from `output`.
+    #[wasm_bindgen(getter, js_name = lookupKey)]
+    pub fn lookup_key(&self) -> Vec<u8> {
+        self.lookup_key.clone()
+    }
+}
+
+/// The lookup key of an OPRF output (ADR-0060 section 5), for a caller that
+/// kept an output from an earlier round.
+///
+/// # Errors
+///
+/// Throws when `output` is not 64 bytes.
+#[wasm_bindgen(js_name = discoveryLookupKey)]
+pub fn discovery_lookup_key(output: &[u8]) -> Result<Vec<u8>, JsError> {
+    let output = <[u8; OPRF_HASH_LEN]>::try_from(output).map_err(|_| {
+        JsError::new(&format!(
+            "an OPRF output must be {OPRF_HASH_LEN} bytes, got {}",
+            output.len()
+        ))
+    })?;
+    Ok(inner_lookup_key(&output).to_vec())
 }
 
 #[cfg(test)]
@@ -255,6 +421,39 @@ mod tests {
     #[test]
     fn validate_username_returns_the_normalised_form() {
         assert_eq!(validate_username("@Bob_42").expect("valid"), "bob_42");
+    }
+
+    #[test]
+    fn name_search_rules_cross_the_boundary() {
+        assert_eq!(
+            normalize_name_for_search("  Anna  W\u{e9}ber "),
+            Some("anna weber".to_string())
+        );
+        assert_eq!(normalize_name_for_search("a"), None);
+        assert_eq!(
+            name_search_terms("Anna Weber"),
+            ["ann", "anna", "web", "webe", "weber"].map(String::from)
+        );
+        assert_eq!(name_query_term("anna weber"), Some("weber".to_string()));
+        assert!(name_matches_query("Anna Weber", "we an"));
+        assert!(!name_matches_query("Anna Weber", "ber"));
+        assert!(is_name_term("ann") && !is_name_term("Ann"));
+        assert_eq!(
+            (
+                name_search_min_chars(),
+                name_input_max_bytes(),
+                name_term_min_chars(),
+                name_term_max_chars(),
+                max_name_terms()
+            ),
+            (2, 1024, 3, 16, 64)
+        );
+        // Success paths only: a throw builds a `JsError`, which panics off
+        // wasm32; the refusals are `lakko-discovery-client`'s.
+        let b = OprfBlinder::blind_name("Anna  W\u{e9}ber").expect("blind");
+        assert_eq!(b.normalized_username().expect("getter"), "weber");
+        let t = OprfBlinder::blind_name_term("ann").expect("blind term");
+        assert_eq!(t.normalized_username().expect("getter"), "ann");
     }
 
     #[test]

@@ -105,6 +105,7 @@ function deps(
   return {
     forbidden,
     deps: {
+      readWakeBinding: async () => ({ devicePseudonymHex: "dd".repeat(32), accountId: "acct" }),
       resolveAccount: async () => ({ accountId: "acct", groupIdBytes: GROUP_BYTES }),
       getDeviceKey: async () => ({}),
       getIdentitySeed: async () => new Uint8Array(64),
@@ -123,7 +124,7 @@ function deps(
   };
 }
 
-const wake = { deviceHex: null, groupHex: GROUP_HEX, pointer: 42 };
+const wake = { deviceHex: "dd".repeat(32), groupHex: GROUP_HEX, pointer: 42 };
 
 describe("an offer becomes a ring", () => {
   it("classifies a fresh offer as a ring naming the call", async () => {
@@ -184,6 +185,27 @@ describe("a muted conversation is announced without interrupting", () => {
     expect(out?.call.kind).toBe("ring");
     expect(out?.call.silent).toBe(true);
     expect(out?.call.callerName).toBe("Anna");
+  });
+
+  it("asks mute and the caller's name of the BOUND account only (ADR-0042, 2026-09-30)", async () => {
+    const asked: string[] = [];
+    const { deps: d } = deps([row(42, offer())], { muted: true, senderName: "Anna" });
+    const bound = {
+      ...d,
+      readWakeBinding: async () => ({ devicePseudonymHex: "dd".repeat(32), accountId: "bound" }),
+      resolveAccount: async (accountId: string) => ({ accountId, groupIdBytes: GROUP_BYTES }),
+      lookupMuted: async (accountId: string) => {
+        asked.push(`muted:${accountId}`);
+        return true;
+      },
+      lookupSenderName: async (accountId: string, _k: unknown, key: string) => {
+        asked.push(`name:${accountId}`);
+        return key === SENDER_KEY_B64 ? "Anna" : null;
+      },
+    };
+    const out = await decryptPushPreview(wake, bound);
+    expect(out?.call.silent).toBe(true);
+    expect(asked.sort()).toEqual(["muted:bound", "name:bound"]);
   });
 
   it("leaves an unmuted conversation exactly as it was", async () => {

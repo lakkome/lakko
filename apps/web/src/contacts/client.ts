@@ -52,12 +52,18 @@ import {
   parseGroupInviteSlug,
   splitGroupInviteLink,
 } from "./group-invite";
-import { inviteLinkWidths } from "./invite-link";
+import {
+  InviteLinkDamagedError,
+  inviteLinkWidths,
+  openSealedInvite,
+  parseInviteLinkFragment,
+} from "./invite-link";
 import { DsClient } from "../ds/client";
 import { withGroupMlsLock } from "../mls/group-lock";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type {
-  GroupInviteMint as WasmGroupInviteMint,
+  InviteLinkMint as WasmInviteLinkMint,
+  GroupInviteCapability as WasmGroupInviteCapability,
   Group as WasmGroup,
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
@@ -104,15 +110,24 @@ import {
   type SweepPorts,
   type StagedSweepArtifacts,
 } from "../chat/sweep";
+import { isBackoffRefusal, sweepBackoff } from "../chat/sweep-backoff";
 import type { ActingCommitter } from "../chat/committer-beacon";
 // ADR-0045 — the ONE dispatch ladder that turns a processed MLS message into a
 // timeline event. The sweep's verdict apply consumes journal rows the poll will
 // never fetch again, so it has to build events for them, and it has to build
 // them the same way the poll does.
-import { rosterOf, toEvent } from "../chat/client";
+import { consumeRegistrarSeed, ChatClient, rosterOf, toEvent } from "../chat/client";
+import { noteOwnerTransition, readRoleTableOwner } from "../ds/root-handover";
+import { bestGrantFor } from "../reach/received-grants";
+import { DELEGATION_TTL_MS, committerCandidates } from "../reach/delegation-rules";
+import type { ReachGrant as WasmReachGrant } from "../../wasm/lakko_ffi_wasm";
+import { reachSession } from "../reach/reach-service";
+import { accountKeyOfKeyPackage, accountKeyOfLeaf, resolveWriteAuth } from "../reach/mailbox-write";
+import { forgetJoinReply, joinReplyFor, rememberJoinReply } from "../reach/join-replies";
+import { journalHex } from "../ds/access";
 import { scanJournal } from "../chat/journal-head-epoch";
 import {
-  healAfterApply,
+  dsAccess,
   knockToJoin,
   registerBeforePublish,
   takeSigner,
@@ -120,6 +135,15 @@ import {
 } from "../ds/access";
 import { resolveLeafSignatureKey, resolveMemberIdentity } from "../chat/author-identity";
 import type { IncomingChatEvent } from "../chat/client";
+import {
+  JournalClaimFailedError,
+  claimAtCreation,
+  evicteeAccountKeys,
+  releaseAuthority,
+  revocationKeys,
+  type OwnershipRosterMember,
+} from "../ds/ownership";
+import { wasmRegistrarDerivation } from "../ds/journal-authority";
 // ADR-0045 UX §6 — the seventh refusal string, defined ONCE beside the rest of
 // the §6.1 copy. Both C-65 directions reuse it verbatim (a pending role change
 // refuses a transfer, a pending transfer refuses a role change), so a single
@@ -244,8 +268,23 @@ export interface IncomingContactRequest {
    *  signature authenticates): file it under that key and verify the
    *  username before showing it. */
   profile: ReceivedProfile | null;
+  /** ADR-0060 section 6 — the requester's `reply` grant (the 37-byte grant
+   *  wire, base64), which the accept (the 1:1 Welcome) and the ContactAck are
+   *  written with; `null` when the request carried none or did not decrypt.
+   *  Secret: never logged, kept only until the request is answered. */
+  replyGrantB64: string | null;
   /** ISO-8601 timestamp the DS recorded on receive. */
   createdAt: string;
+}
+
+/** Options of the contact-request senders (ADR-0060 section 6). */
+export interface ContactRequestOptions {
+  /** The grant this write is made under: an invite link's `link` grant when
+   *  the request answers an `/i/` or `/c/` link. Without one, the request is
+   *  signed with any grant kept for the recipient (a group or channel they let
+   *  find us), else sent unsigned (which only an Everyone mailbox stores).
+   *  Not consumed: the caller frees it and never keeps a link grant. */
+  readonly writeGrant?: WasmReachGrant | null;
 }
 
 /** A verified incoming Welcome (MLS group-join blob) decoded
@@ -310,9 +349,26 @@ export interface IncomingContactAck {
  *  1.16e3). Callers `switch` on it to dispatch to the right
  *  handler. */
 export type IncomingMailboxEvent =
-  | { kind: "contact-request"; request: IncomingContactRequest }
+  | {
+      kind: "contact-request";
+      request: IncomingContactRequest;
+      /** The DS row the request was decoded from, exactly as received. The
+       *  mailbox keeps it (not the decoded request) until Accept or Decline,
+       *  so a request survives a reload the cursor has already skipped past
+       *  (`contacts/inbox-store.ts`). */
+      row: MailboxRow;
+    }
   | { kind: "welcome"; welcome: IncomingWelcome }
   | { kind: "contact-ack"; ack: IncomingContactAck };
+
+/** One account-mailbox row as the DS served it. `payload` is the envelope
+ *  (kind byte + wire bytes): a signed ContactRequest whose intro and profile
+ *  are sealed to this account's X25519 key. */
+export interface MailboxRow {
+  readonly messageId: number;
+  readonly payload: Uint8Array;
+  readonly createdAt: string;
+}
 
 /** Result of `ContactsClient.pollMailbox`. */
 /** ADR-0050 — every leaf index in `group` whose account is the account of
@@ -634,6 +690,10 @@ function sweepPortsFor(
 ): SweepPorts {
   const groupIdBytes = group.groupId;
   const groupIdB64 = base64Encode(groupIdBytes);
+  // ADR-0060 — the accounts one sweep's Welcome fan-out already reached.
+  const welcomedAccounts = new Map<string, number>();
+  /** The leaves the staged sweep removes (set by `stagePendingProposals`). */
+  let stagedRemovedLeaves = new Set<number>();
   return {
     actingCommitter,
     group: {
@@ -651,10 +711,25 @@ function sweepPortsFor(
         // staged commit by the core rather than predicted by the caller — which
         // matters here because it is what addresses the Welcome.
         const added: Uint8Array[] = [];
+        stagedRemovedLeaves = new Set<number>();
         for (const raw of staged.swept()) {
-          const record = raw as { kind: string; addSignatureKey?: Uint8Array };
+          const record = raw as {
+            kind: string;
+            addSignatureKey?: Uint8Array;
+            removeTargetLeaf?: number;
+            senderLeaf?: number;
+          };
           if (record.kind === "add" && record.addSignatureKey !== undefined) {
             added.push(record.addSignatureKey);
+          }
+          // ADR-0057 — the leaves this commit removes, for the owner's
+          // revocation list: a `remove` names its target, a `leave` (RFC 9420
+          // SelfRemove) removes its sender.
+          if (record.kind === "remove" && record.removeTargetLeaf !== undefined) {
+            stagedRemovedLeaves.add(record.removeTargetLeaf);
+          }
+          if (record.kind === "leave" && record.senderLeaf !== undefined) {
+            stagedRemovedLeaves.add(record.senderLeaf);
           }
         }
         return {
@@ -664,7 +739,11 @@ function sweepPortsFor(
         };
       },
       mergeStagedSweep: () => {
+        // ADR-0057 root handover - the sweep that carries this account's own
+        // ownership transfer moves the role table here.
+        const ownerBefore = readRoleTableOwner(group);
         group.mergeStagedSweep(identity);
+        noteOwnerTransition(groupIdBytes, ownerBefore, readRoleTableOwner(group));
       },
       abandonStagedSweep: () => {
         group.abandonStagedSweep(identity);
@@ -679,20 +758,29 @@ function sweepPortsFor(
         // The MLS apply is what the verdict reads, so it is deliberately OUTSIDE
         // the guard below: a throw here must reach `adjudicate`, which skips the
         // row exactly as the poll loop does.
+        const ownerBefore = readRoleTableOwner(group);
         const processed = group.processIncomingVerifyingRoles(identity, row.payload);
+        // ADR-0057 root handover - a remote commit the verdict applies.
+        noteOwnerTransition(groupIdBytes, ownerBefore, readRoleTableOwner(group));
         try {
           // The roster is read HERE, one line after the apply, because that
           // is the epoch this row decrypted at — a leaf resolved any later
           // can name whoever was added into a vacated slot since.
-          onSweptEvent(
-            await toEvent(
-              row.id,
-              row.createdAt,
-              processed,
-              (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
-              (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
-            ),
+          const event = await toEvent(
+            row.id,
+            row.createdAt,
+            processed,
+            (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
+            (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
           );
+          // ADR-0057 — consumed at receipt, like the poll does, never shown.
+          if (event.kind === "registrarSeed") {
+            await consumeRegistrarSeed(group, event);
+          } else if (event.kind === "serviceEnvelope") {
+            // An unrecognised `lakko/…` service envelope: dropped, never shown.
+          } else {
+            onSweptEvent(event);
+          }
         } catch (err) {
           // The ratchet has already moved and the row is consumed, so an event
           // that could not be built costs one timeline row — never the verdict,
@@ -713,8 +801,32 @@ function sweepPortsFor(
         }));
       },
       publishGroup: async (bytes) => (await ds.publishGroup(groupIdBytes, bytes)).id,
-      publishMailbox: async (pseudonym, bytes) =>
-        (await ds.publishMailbox(pseudonym, bytes)).id,
+      // ADR-0060 section 6 — the sweep records each added LEAF's signature key
+      // (`welcomeMailbox` below); the Welcome is written, once per account,
+      // to the account mailbox that leaf's binding names, read off the roster
+      // after the merge. A leaf of an account already written to in this
+      // sweep is skipped (its devices share one mailbox and one Welcome).
+      publishMailbox: async (leafKey, bytes) => {
+        const accountKey = accountKeyOfLeaf(rosterOf(group), leafKey);
+        const accountHex = journalHex(accountKey);
+        const done = welcomedAccounts.get(accountHex);
+        if (done !== undefined) return done;
+        const pseudonym = wasm.IdentityPseudonym.fromIdentity(accountKey).asBytes();
+        const explicit = joinReplyFor(leafKey);
+        const write = await resolveWriteAuth(accountKey, {
+          scope: groupIdBytes,
+          explicit,
+          allowMember: true,
+        });
+        try {
+          const id = (await ds.publishMailbox(pseudonym, bytes, write.auth)).id;
+          welcomedAccounts.set(accountHex, id);
+          if (explicit !== null) forgetJoinReply(leafKey);
+          return id;
+        } finally {
+          write.release();
+        }
+      },
     },
     outbox: {
       newEntryId: newOutboxEntryId,
@@ -784,42 +896,67 @@ function sweepPortsFor(
       },
     },
     cursor,
-    welcomeMailbox: (signatureKey) =>
-      wasm.IdentityPseudonym.fromIdentity(signatureKey).asBytes(),
+    // ADR-0060 — the destination recorded is the added LEAF's key; the
+    // account mailbox it maps to is resolved at publish (see `publishMailbox`).
+    welcomeMailbox: (signatureKey) => signatureKey,
     wrapWelcome: (welcome) => wrapEnvelope(KIND_WELCOME, welcome),
-    // ADR-0053 contract point 3 — the staged epoch's key, proven under the
-    // current one, registered before the sweep is published.
+    // ADR-0053 contract point 3 + ADR-0057 obligation 5 — the staged epoch's
+    // key, registered with this device's root or registrar key before the
+    // sweep is published. The owner revokes the registrar keys of the
+    // accounts this sweep evicts in the same statement; an admin cannot
+    // derive them and sends none (the owner's next reconcile removes them).
     registerStagedEpoch: async () => {
-      const signerN = takeSigner(() => group.dsAccessSigner(identity));
       const staged = takeSigner(() => {
         const next = group.dsStagedAccessSigner(identity);
         if (next === undefined) throw new Error("no staged sweep");
         return next;
       });
+      const authority = dsAccess.journalAuthority(groupIdBytes);
+      // Read BEFORE the network: the backoff is keyed on the membership the
+      // refusal was about.
+      const fingerprint = membershipFingerprint(group);
       try {
-        await registerBeforePublish(ds, groupIdBytes, signerN, staged);
+        const evictees = evicteeAccountKeys(
+          rosterOf(group) as unknown as OwnershipRosterMember[],
+          stagedRemovedLeaves,
+        );
+        const revoke = revocationKeys(authority, evictees, wasmRegistrarDerivation(wasm));
+        releaseAuthority(authority);
+        // The DS client signs with the same authority it resolves itself.
+        await registerBeforePublish(ds, groupIdBytes, staged, revoke);
+        sweepBackoff.reset(groupIdB64);
+      } catch (err) {
+        // A refusal that will not change by the next poll: back off the next
+        // sweep start (`chat/sweep-backoff.ts`). The sweep itself abandons as
+        // before; nothing is published.
+        if (isBackoffRefusal(err)) {
+          const waitMs = sweepBackoff.noteRefused(groupIdB64, Date.now(), fingerprint);
+          // eslint-disable-next-line no-console
+          console.warn(`ds: staged epoch registration refused; next sweep in ${Math.round(waitMs / 1000)} s`);
+        }
+        throw err;
       } finally {
-        signerN?.free();
+        releaseAuthority(authority);
         staged?.free();
       }
     },
-    // ADR-0053 contract point 4 — heal after the verdict apply.
-    beginApply: () => {
-      const before = takeSigner(() => group.dsAccessSigner(identity));
-      return async (heal: boolean) => {
-        if (!heal) {
-          before?.free();
-          return;
-        }
-        const after = takeSigner(() => group.dsAccessSigner(identity));
-        try {
-          await healAfterApply(ds, groupIdBytes, before, after);
-        } finally {
-          before?.free();
-          after?.free();
-        }
-      };
+    mayStartSweep: () =>
+      sweepBackoff.mayStart(groupIdB64, Date.now(), membershipFingerprint(group)),
+    mayRegister: () => {
+      const authority = dsAccess.journalAuthority(groupIdBytes);
+      try {
+        return authority.kind !== "none";
+      } finally {
+        releaseAuthority(authority);
+      }
     },
+    // After a lost verdict nothing is re-registered (ADR-0057): the winner
+    // registered its own epoch before publishing, and every registration is
+    // an APPEND now (the second security pass), so this device's registration
+    // could not have displaced the winner's - it met 409 or landed first and
+    // the winner's met 409. A Replace is never sent from a commit path; a
+    // journal a lower rank pushed ahead is the repair's (`ds/journal-repair`).
+    beginApply: () => async () => {},
     markOwnPublished,
     persist,
     persistApplied,
@@ -843,6 +980,29 @@ function hasPendingRoleChange(group: WasmGroup): boolean {
     );
   } catch {
     return false;
+  }
+}
+
+/**
+ * The group's membership and role table as one string, for the sweep backoff:
+ * a change to either ends the wait (`chat/sweep-backoff.ts`). A torn read
+ * yields a value that differs from any real one, which ends a wait rather
+ * than extending it.
+ */
+function membershipFingerprint(group: WasmGroup): string {
+  try {
+    const keys = (group.members() as Array<{ signaturePublicKey: Uint8Array }>)
+      .map((m) => base64Encode(m.signaturePublicKey))
+      .sort();
+    const owner = group.roleTableOwner();
+    const admins = group.roleTableAdmins();
+    return [
+      keys.join(","),
+      owner === undefined ? "-" : base64Encode(owner),
+      base64Encode(admins),
+    ].join("|");
+  } catch {
+    return `unreadable:${Math.random()}`;
   }
 }
 
@@ -1094,9 +1254,12 @@ export class ContactsClient {
     myIdentity: WasmIdentity,
     signerN: ProofSigner | null,
   ): Promise<void> {
+    // ADR-0057 — the new epoch is registered with this device's root or
+    // registrar key; the key of the epoch it left proves nothing any more.
+    void signerN;
     const signerN1 = takeSigner(() => group.dsAccessSigner(myIdentity));
     try {
-      await registerBeforePublish(this.ds, group.groupId, signerN, signerN1);
+      await registerBeforePublish(this.ds, group.groupId, signerN1);
     } finally {
       signerN1?.free();
     }
@@ -1327,8 +1490,21 @@ export class ContactsClient {
           // journal), so no echo re-arm — the committer never re-fetches it.
           const secondBytes = base64Decode(entry.secondArtifactB64);
           const pseudonym = base64Decode(entry.secondArtifactMailboxB64);
-          const pub2 = await this.ds.publishMailbox(pseudonym, secondBytes);
-          secondMessageId = pub2.id;
+          // ADR-0060 — signed with the key that reaches the account the
+          // mailbox is named after (unsigned when the entry predates it).
+          const write =
+            entry.secondArtifactAccountKeyB64 === undefined
+              ? null
+              : await resolveWriteAuth(base64Decode(entry.secondArtifactAccountKeyB64), {
+                  scope: groupIdBytes,
+                  allowMember: true,
+                });
+          try {
+            const pub2 = await this.ds.publishMailbox(pseudonym, secondBytes, write?.auth);
+            secondMessageId = pub2.id;
+          } finally {
+            write?.release();
+          }
         }
         await this.ackCommitBestEffort(entry.id, commitPub.id, secondMessageId);
       } catch (err) {
@@ -1740,6 +1916,7 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     recipientUsername: string,
     introMessage: Uint8Array,
+    options?: ContactRequestOptions,
   ): Promise<SendResult> {
     // 1. Resolve the username.
     let lookup;
@@ -1779,6 +1956,7 @@ export class ContactsClient {
       recipientSignaturePub,
       recipientX25519Pub,
       introMessage,
+      options,
     );
 
     return {
@@ -1826,12 +2004,14 @@ export class ContactsClient {
     recipientSignaturePubkey: Uint8Array,
     recipientX25519Pubkey: Uint8Array,
     introMessage: Uint8Array,
+    options?: ContactRequestOptions,
   ): Promise<SendResult> {
     const publish = await this.composeAndPublishContactRequest(
       identity,
       recipientSignaturePubkey,
       recipientX25519Pubkey,
       introMessage,
+      options,
     );
     return {
       recipientUsername: "",
@@ -1856,6 +2036,7 @@ export class ContactsClient {
     recipientSignaturePubkey: Uint8Array,
     recipientX25519Pubkey: Uint8Array,
     introMessage: Uint8Array,
+    options?: ContactRequestOptions,
   ): Promise<{ messageId: number; createdAt: string }> {
     // The canonical Identity (1.16e6c2) is the same instance the
     // ChatProvider holds — using it here keeps Ed25519 + X25519
@@ -1897,6 +2078,20 @@ export class ContactsClient {
     const privacyPassToken = new Uint8Array(0);
     // ADR-0048 §2 — the sender's profile rides the sealed plaintext.
     const profileEnvelope = await this.profileEnvelopeForRequest();
+    // ADR-0060 section 6 — our `reply` grant rides the sealed request, so the
+    // accept (the 1:1 Welcome) and the ContactAck can land in our closed
+    // mailbox. Registered (7-day expiry) before the request is sent: a request
+    // whose answer could not arrive must not go out. No session (a signed-out
+    // edge) sends none, and the answer then lands only if we are in Everyone.
+    const session = reachSession();
+    let reply: { scopeHex: string; grant: WasmReachGrant } | null = null;
+    if (session !== null) {
+      try {
+        reply = await session.newReply("contact-request", journalHex(recipientSignaturePubkey));
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+    }
     let wireBytes: Uint8Array;
     try {
       // 1.16e3b: pass our own account_id so the receiver can
@@ -1910,21 +2105,37 @@ export class ContactsClient {
         validAfterMs,
         privacyPassToken,
         profileEnvelope,
+        reply?.grant ?? undefined,
         introMessage,
       );
     } catch (err) {
       throw ContactsError.wrap(err);
+    } finally {
+      // `ContactRequest.compose` takes the grant by value: after a compose the
+      // handle is moved and freeing it again throws (which, from a `finally`,
+      // would replace the result). Free it quietly.
+      try {
+        reply?.grant.free();
+      } catch {
+        /* moved into the request */
+      }
     }
 
     // Publish to the DS, wrapped with the kind discriminator so
     // the receiver's pollMailbox can distinguish a
-    // ContactRequest from a Welcome (1.16e3).
+    // ContactRequest from a Welcome (1.16e3). ADR-0060: signed with the
+    // grant that lets us reach the recipient (a link's, or a kept one).
     const envelope = wrapEnvelope(KIND_CONTACT_REQUEST, wireBytes);
+    const write = await resolveWriteAuth(recipientSignaturePubkey, {
+      explicit: options?.writeGrant ?? null,
+    });
     let publish;
     try {
-      publish = await this.ds.publishMailbox(recipientPseudonym, envelope);
+      publish = await this.ds.publishMailbox(recipientPseudonym, envelope, write.auth);
     } catch (err) {
       throw ContactsError.wrap(err);
+    } finally {
+      write.release();
     }
     return { messageId: publish.id, createdAt: publish.createdAt };
   }
@@ -1992,11 +2203,17 @@ export class ContactsClient {
     }
 
     const envelope = wrapEnvelope(KIND_CONTACT_ACK, wireBytes);
+    // ADR-0060 section 6 — written with the requester's `reply` grant.
+    const write = await resolveWriteAuth(originalRequest.fromPubkey, {
+      explicit: originalRequest.replyGrantB64,
+    });
     let publish;
     try {
-      publish = await this.ds.publishMailbox(senderMailbox, envelope);
+      publish = await this.ds.publishMailbox(senderMailbox, envelope, write.auth);
     } catch (err) {
       throw ContactsError.wrap(err);
+    } finally {
+      write.release();
     }
     return { messageId: publish.id, createdAt: publish.createdAt };
   }
@@ -2028,19 +2245,37 @@ export class ContactsClient {
    *                                  `AddMember` result.
    */
   async sendWelcome(
-    recipientSignaturePubkey: Uint8Array,
+    recipientAccountKey: Uint8Array,
     welcomeBytes: Uint8Array,
+    options: {
+      /** The group the Welcome is into: prefers that scope's kept grant and
+       *  allows the person's `member` key for it. */
+      readonly groupId?: Uint8Array;
+      /** A grant held for exactly this write (the requester's `reply` grant
+       *  when accepting their contact request), as a kept wire. */
+      readonly explicitGrantB64?: string | null;
+    } = {},
   ): Promise<{ messageId: number; createdAt: string }> {
     const wasm = await loadWasm();
+    // ADR-0060 section 6 — one inbound mailbox per person: a Welcome goes to
+    // the added leaf's ACCOUNT mailbox, signed with the key that lets us
+    // reach that account.
     const recipientPseudonym = wasm.IdentityPseudonym.fromIdentity(
-      recipientSignaturePubkey,
+      recipientAccountKey,
     ).asBytes();
     const envelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
+    const write = await resolveWriteAuth(recipientAccountKey, {
+      ...(options.groupId === undefined ? {} : { scope: options.groupId }),
+      explicit: options.explicitGrantB64 ?? null,
+      allowMember: true,
+    });
     let publish;
     try {
-      publish = await this.ds.publishMailbox(recipientPseudonym, envelope);
+      publish = await this.ds.publishMailbox(recipientPseudonym, envelope, write.auth);
     } catch (err) {
       throw ContactsError.wrap(err);
+    } finally {
+      write.release();
     }
     return {
       messageId: publish.id,
@@ -2217,6 +2452,9 @@ export class ContactsClient {
           console.warn("ContactAck verify failed", message.id, err);
           continue;
         }
+        // ADR-0060 — they answered: the `reply` key our request handed them
+        // has done its job and is removed from our mailbox.
+        void reachSession()?.closeRepliesTo(journalHex(ack.accepterPubkey));
         events.push({
           kind: "contact-ack",
           ack: {
@@ -2232,72 +2470,43 @@ export class ContactsClient {
         continue;
       }
       // env.kind === KIND_CONTACT_REQUEST
-      let parsed;
-      try {
-        parsed = wasm.ContactRequest.decodeAndVerify(env.body);
-      } catch (err) {
-        // Bad signature, malformed wire bytes, or some other
-        // verifier failure. Drop and move on — the cursor
-        // advances so we won't re-process the same row.
-        // eslint-disable-next-line no-console
-        console.warn("ContactRequest verify failed", message.id, err);
-        continue;
-      }
-
-      let intro: string | null = null;
-      let profile: ReceivedProfile | null = null;
-      try {
-        const opened = parsed.openEnvelope(myX25519Secret);
-        intro = new TextDecoder("utf-8", { fatal: false }).decode(opened.introMessage);
-        // ADR-0048 — a profile out of bounds arrives as `undefined` with the
-        // intro intact; the request itself is still a valid request.
-        const p = opened.profile;
-        if (p !== undefined) {
-          profile = {
-            displayName: p.displayName ?? null,
-            username: p.username ?? null,
-            updatedAtMs: p.updatedAtMs,
-            // Copied before `free()`: the getter's view dies with the handle.
-            accountId: p.accountId === undefined ? null : p.accountId.slice(),
-          };
-          p.free();
-        }
-        opened.free();
-      } catch (err) {
-        // Envelope didn't decrypt for our X25519 secret. Could
-        // be a malicious request, could be a bug; either way
-        // we still surface the request to the user (signature
-        // is verified) but with no intro body.
-        // eslint-disable-next-line no-console
-        console.warn(
-          "ContactRequest envelope unseal failed",
-          message.id,
-          err,
-        );
-      }
-
-      // `fromAccountId` is `Uint8Array | undefined` on the
-      // wasm-bindgen surface — normalise to `null` for the
-      // discriminated TS API (the UI distinguishes
-      // present-but-empty from absent).
-      const fromAccountId =
-        parsed.fromAccountId === undefined ? null : parsed.fromAccountId;
+      const request = decodeContactRequestBody(
+        wasm,
+        message.id,
+        env.body,
+        message.createdAt,
+        myX25519Secret,
+      );
+      if (request === null) continue;
       events.push({
         kind: "contact-request",
-        request: {
-          messageId: message.id,
-          fromPubkey: parsed.fromPubkey,
-          fromAccountId,
-          fromPseudonym: parsed.fromPseudonym,
-          validAfterMs: parsed.validAfterMs,
-          intro,
-          profile,
-          createdAt: message.createdAt,
-        },
+        request,
+        row: { messageId: message.id, payload: message.payload, createdAt: message.createdAt },
       });
     }
 
     return { events, cursor, hasMore: raw.hasMore };
+  }
+
+  /**
+   * Rebuild pending contact requests from account-mailbox rows kept on this
+   * device (`contacts/inbox-store.ts`), through the same verify-and-open path
+   * `pollMailbox` runs. One result per row, in order; `null` for a row that no
+   * longer decodes as a verified ContactRequest (the caller drops it).
+   */
+  async decodePendingRequestRows(
+    identity: IdentitySecrets | null,
+    rows: readonly MailboxRow[],
+  ): Promise<(IncomingContactRequest | null)[]> {
+    if (rows.length === 0) return [];
+    const wasm = await loadWasm();
+    const myIdentity = await this.resolveAccountIdentity(identity);
+    const x25519Secret = myIdentity.x25519SecretKey;
+    return rows.map((row) => {
+      const env = parseEnvelope(row.payload);
+      if (env.kind !== KIND_CONTACT_REQUEST) return null;
+      return decodeContactRequestBody(wasm, row.messageId, env.body, row.createdAt, x25519Secret);
+    });
   }
 
   /**
@@ -2329,6 +2538,11 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     recipientAccountId: Uint8Array,
     recipientSignaturePubkey: Uint8Array,
+    options: {
+      /** ADR-0060 — the requester's `reply` grant when this accepts their
+       *  contact request: the 1:1 Welcome is written with it. */
+      readonly replyGrantB64?: string | null;
+    } = {},
   ): Promise<{ group: WasmGroup; welcomeMessageId: number }> {
     const wasm = await loadWasm();
 
@@ -2370,32 +2584,64 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
     void added.commit;
-    // ADR-0053 contract point 2 — claim the journal at creation, at the epoch
-    // the one commit above moved it to (nobody ever holds epoch 0: the commit
-    // fans out to nobody). Unsigned: this is the first registration of an
-    // unclaimed journal. Best effort — a failure leaves the journal unclaimed,
-    // which behaves as before, and the first open claims it.
-    {
+    // ADR-0057 obligation 1 — the owner claims the journal at creation with
+    // its ROOT (derived from the account identity), at the epoch the one
+    // commit above moved it to (nobody ever holds epoch 0: the commit fans out
+    // to nobody), naming that epoch's access key. FAIL-CLOSED (the second
+    // security pass, finding 3): the claim must answer 204 before any Welcome
+    // leaves, else whoever claimed the id first would be its root for good. A
+    // failure aborts the creation with nothing published; the local group is
+    // dropped (its random id is never reused).
+    try {
       const founding = takeSigner(() => group.dsAccessSigner(myIdentity));
-      if (founding !== null) {
+      if (founding === null) throw new Error("ds: the founding epoch's key could not be derived");
+      let account: WasmIdentity | null = null;
+      try {
+        account = await this.resolveAccountIdentity(identity);
+        const root = wasm.dsJournalRootSigner(account, group.groupId);
         try {
-          await this.ds.claimGroupWith(group.groupId, founding, null);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("ds: claim at group creation failed; claimed on first open", err);
+          await claimAtCreation(this.ds, group.groupId, root, founding.epoch, founding.verifyingKey());
         } finally {
-          founding.free();
+          root.free();
+        }
+      } finally {
+        founding.free();
+        if (account !== null && account !== this.accountIdentityProvider?.()) {
+          try {
+            account.free();
+          } catch {
+            /* already freed */
+          }
         }
       }
+      dsAccess.markRootHeld(group.groupId);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ds: claim at group creation failed; the group was not created", err);
+      try {
+        group.free();
+      } catch {
+        /* already freed */
+      }
+      throw ContactsError.wrap(err instanceof JournalClaimFailedError ? err.cause : err);
     }
+    // ADR-0060 section 6 — one write per added ACCOUNT, to its account
+    // mailbox: the recipient's (with their reply grant when this accepts
+    // their request) and, when we have other devices, our own.
     let firstWelcomeMessageId = 0;
+    const delivered = new Set<string>();
     for (const dev of devices) {
+      const accountKey = await accountKeyOfKeyPackage(dev.keyPackage);
+      const accountHex = journalHex(accountKey);
+      if (delivered.has(accountHex)) continue;
+      delivered.add(accountHex);
+      const isRecipient = accountHex === journalHex(recipientSignaturePubkey);
       let publish;
       try {
-        publish = await this.sendWelcome(
-          wasm.keyPackageSignatureKey(dev.keyPackage),
-          added.welcome,
-        );
+        publish = await this.sendWelcome(accountKey, added.welcome, {
+          groupId: group.groupId,
+          explicitGrantB64: isRecipient ? (options.replyGrantB64 ?? null) : null,
+        });
       } catch (err) {
         throw ContactsError.wrap(err);
       }
@@ -2595,7 +2841,87 @@ export class ContactsClient {
       }
       // `devices` is non-empty (checked above), so `outcome` is set.
       return outcome as MembershipOutcome;
+    }).then(async (outcome) => {
+      // ADR-0060 section 6 — a proposed Add is committed by whoever sweeps,
+      // who may hold no key that reaches the added person. Hand every
+      // committer candidate a single-use delegation made with the key WE hold
+      // for them. Outside the MLS lock: it is an ordinary application message.
+      if (outcome.kind === "proposed") {
+        await this.publishCommitterDelegations(identity, group, recipientSignaturePubkey);
+      }
+      return outcome;
     });
+  }
+
+  /**
+   * ADR-0060 section 6 — post a committer-delegation envelope for an Add this
+   * device proposed: one delegation per committer candidate (the owner, then
+   * the admins by rank, at most `maxCommitterDelegations()`), each signed with
+   * the grant this account keeps for the added person and naming the
+   * candidate's account key. Nothing is posted when this account holds no
+   * grant for them (the added person is then reachable only if they are in
+   * Everyone, or a committer holds a key of its own). Never throws: a missing
+   * delegation costs the added person their Welcome, not the proposal.
+   */
+  private async publishCommitterDelegations(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    addedAccountKey: Uint8Array,
+  ): Promise<void> {
+    const session = reachSession();
+    if (session === null) return;
+    const held = bestGrantFor(session.receivedGrants(), journalHex(addedAccountKey), {
+      scopeHex: journalHex(group.groupId),
+    });
+    if (held === null) return;
+    try {
+      const wasm = await loadWasm();
+      let ownerHex: string | null = null;
+      const adminHexes: string[] = [];
+      const owner = group.roleTableOwner();
+      if (owner !== undefined && owner !== null) ownerHex = journalHex(owner);
+      const flat = group.roleTableAdmins();
+      for (let i = 0; i + 32 <= flat.length; i += 32) adminHexes.push(journalHex(flat.slice(i, i + 32)));
+      const candidates = committerCandidates(
+        ownerHex,
+        adminHexes,
+        (hex) => group.committerRank(hexBytes(hex)),
+        wasm.maxCommitterDelegations(),
+      );
+      if (candidates.length === 0) return;
+      const grant = wasm.decodeReachGrant(base64Decode(held.wireB64));
+      const seed = grant.seed;
+      grant.free();
+      const mailbox = wasm.IdentityPseudonym.fromIdentity(addedAccountKey).asBytes();
+      const expires = BigInt(Date.now() + DELEGATION_TTL_MS);
+      const blobs: Uint8Array[] = [];
+      try {
+        for (const hex of candidates) {
+          blobs.push(
+            wasm.signDelegationBlob(
+              seed,
+              mailbox,
+              hexBytes(hex),
+              expires,
+              crypto.getRandomValues(new Uint8Array(16)),
+            ),
+          );
+        }
+      } finally {
+        seed.fill(0);
+      }
+      const env = new wasm.CommitterDelegationEnvelope(addedAccountKey, blobs);
+      const bytes = wasm.composeCommitterDelegationEnvelope(env);
+      env.free();
+      const chat = new ChatClient(undefined, {
+        ...(this.identityProvider === undefined ? {} : { identityProvider: this.identityProvider }),
+        ...(this.onPersist === undefined ? {} : { onPersist: this.onPersist }),
+      });
+      await chat.broadcastControl(identity, group, bytes);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ContactsClient: committer delegations not posted", err instanceof Error ? err.message : "");
+    }
   }
 
   /**
@@ -2681,16 +3007,17 @@ export class ContactsClient {
     //    is re-published idempotently by `sweepPendingCommits`).
     let groupIdBytes: Uint8Array;
     let welcomePseudonym: Uint8Array;
+    let welcomeAccountKey: Uint8Array;
     let welcomeEnvelope: Uint8Array;
     let entryId: string;
     try {
       groupIdBytes = group.groupId;
       const wasm = await loadWasm();
-      // ADR-0050: the Welcome is sealed to THIS leaf's KeyPackage, so it is
-      // addressed to the leaf's own mailbox, never the account's.
-      welcomePseudonym = wasm.IdentityPseudonym.fromIdentity(
-        wasm.keyPackageSignatureKey(keyPackageBytes),
-      ).asBytes();
+      // ADR-0060 section 6 (amending ADR-0050 section 2.7): the Welcome is
+      // sealed to THIS leaf's KeyPackage but addressed to the ACCOUNT mailbox
+      // the leaf's binding names — one inbound mailbox per person.
+      welcomeAccountKey = await accountKeyOfKeyPackage(keyPackageBytes);
+      welcomePseudonym = wasm.IdentityPseudonym.fromIdentity(welcomeAccountKey).asBytes();
       welcomeEnvelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
       // ADR-0053 contract point 3 — register N+1 before anything durable says
       // the commit exists. A refusal lands in the catch below: reset, no publish.
@@ -2704,6 +3031,7 @@ export class ContactsClient {
         secondArtifactB64: base64Encode(welcomeEnvelope),
         secondArtifactKind: "welcome",
         secondArtifactMailboxB64: base64Encode(welcomePseudonym),
+        secondArtifactAccountKeyB64: base64Encode(welcomeAccountKey),
       });
     } catch (err) {
       await this.resetGroupAfterPersistAbort(group);
@@ -2724,13 +3052,20 @@ export class ContactsClient {
     // 7. Publish artifact 2 — the Welcome to the new member's stranger inbox
     //    (the SAME bytes stored in the outbox entry).
     let welcomePublish;
+    const welcomeWrite = await resolveWriteAuth(welcomeAccountKey, {
+      scope: groupIdBytes,
+      allowMember: true,
+    });
     try {
       welcomePublish = await this.ds.publishMailbox(
         welcomePseudonym,
         welcomeEnvelope,
+        welcomeWrite.auth,
       );
     } catch (err) {
       throw ContactsError.wrap(err);
+    } finally {
+      welcomeWrite.release();
     }
 
     // 8. Both artifacts durable on the wire -> ack (best-effort; a crash here
@@ -3350,12 +3685,28 @@ export class ContactsClient {
         continue; // not an attribution envelope (an MLS message / other) — skip
       }
       // Only trust an attribution whose capability targets THIS group.
-      if (base64Encode(attr.groupId) !== base64Encode(groupId)) continue;
+      if (base64Encode(attr.groupId) !== base64Encode(groupId)) {
+        attr.free();
+        continue;
+      }
+      // ADR-0060 section 6 (C-69) — the joiner's `reply` grant rides the
+      // signed attribution; keep it so whichever committer sweeps the
+      // approved `Add` can write the Welcome to the joiner's closed mailbox.
+      const session = reachSession();
+      if (session !== null) {
+        const reply = attr.replyGrant;
+        try {
+          rememberJoinReply(attr.joinerSignatureKey, session.encodeGrant(reply));
+        } finally {
+          reply.free();
+        }
+      }
       out.push({
         joinerSignatureKey: attr.joinerSignatureKey,
         issuerSignaturePubkey: attr.issuerSignaturePubkey,
         issuerFingerprint: attr.issuerFingerprint,
       });
+      attr.free();
     }
     return out;
   }
@@ -3370,11 +3721,13 @@ export class ContactsClient {
    *
    *  ADR-0028 v2 (docs/ux/group-invite-page.md): the capability also carries a
    *  **sealed preview** — the group's name, the inviter's display name and the
-   *  member count at mint time — encrypted under a fresh link key that rides
-   *  the URL **fragment** (`#<key>`), which no browser sends and no ledger
-   *  stores. Both the pointer and the inline form carry the same fragment. A
-   *  name the display-name rule refuses is left out rather than failing the
-   *  mint: the page then shows no name, never a guess.
+   *  member count at mint time. Since the 2026-09-28 security pass the WHOLE
+   *  capability is sealed under a fresh 12-byte link secret that rides the
+   *  URL **fragment** (`#<secret>`), which no browser sends and no ledger
+   *  stores; the same secret opens the preview. Both the pointer and the
+   *  inline form carry the same fragment. A name the display-name rule
+   *  refuses is left out rather than failing the mint: the page then shows no
+   *  name, never a guess.
    *
    *  `expiryMs` is UNIX millis (`0` = never expires). The UI gates the
    *  affordance on `ownRole` (owner / admin), matching add / remove. */
@@ -3401,10 +3754,8 @@ export class ContactsClient {
         names.inviterName,
         memberCount,
       );
-    let wire: Uint8Array;
-    let linkKey: Uint8Array;
+    let mint: WasmInviteLinkMint;
     try {
-      let mint: WasmGroupInviteMint;
       try {
         mint = mintWith({ groupName: preview.groupName, inviterName: preview.inviterName });
       } catch (err) {
@@ -3414,26 +3765,35 @@ export class ContactsClient {
         console.warn("group-invite: preview names refused, minting without names", err);
         mint = mintWith({});
       }
-      wire = mint.wire;
-      linkKey = mint.linkKey;
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    // Production default (ADR-0028 OQ1): upload to the discovery ledger — the
-    // server-side anti-abuse surface (per-joiner consume dedup + soft max_uses)
-    // — and return the short pointer URL. `max_uses` is a soft throttle, not
-    // an access control: the admin approval gate stays the security boundary.
+    const sealed = mint.sealed;
+    const linkSecret = mint.linkSecret;
+    const issuerPubkey = mint.issuerPubkey;
+    mint.free();
+    // Production default (ADR-0028 OQ1): upload the SEALED blob to the
+    // discovery ledger (sealed-link amendment, 2026-09-28: the server cannot
+    // open it; the clear fields carry what it needs) and return the short
+    // pointer URL. `max_uses` is a soft throttle, not an access control: the
+    // admin approval gate stays the security boundary.
     //
     // The inline form is the fallback for a TRANSPORT failure only (a
     // censored / offline network), where the link must still work without the
     // round-trip. A server answer (a 401 from a client with no session token,
     // a 429, a 5xx) surfaces instead: falling back there silently hands the
     // user the huge inline URL for a defect that should be fixed. The log
-    // names the status and never the capability.
+    // names the status and never the capability. Both forms carry the link
+    // secret as the fragment; without it the link opens nothing.
     const widths = inviteLinkWidths(wasm);
     let url: string;
     try {
-      const blobId = await this.discovery.uploadGroupInvite(wire, maxUses);
+      const blobId = await this.discovery.uploadGroupInvite({
+        sealed,
+        issuerPubkey,
+        expiryMs,
+        maxUses,
+      });
       url = composePointerGroupInviteUrl(blobId, widths, origin);
     } catch (err) {
       if (!(err instanceof DiscoveryNetworkError)) {
@@ -3448,9 +3808,9 @@ export class ContactsClient {
       }
       // eslint-disable-next-line no-console
       console.warn("group-invite: ledger unreachable, using the inline link");
-      url = composeInlineGroupInviteUrl(wire, origin);
+      url = composeInlineGroupInviteUrl(sealed, origin);
     }
-    return appendGroupInviteLinkSecret(url, linkKey, widths);
+    return appendGroupInviteLinkSecret(url, linkSecret, widths);
   }
 
   /** ADR-0028 revoke — the issuer revokes a previously-created group invite
@@ -3484,17 +3844,17 @@ export class ContactsClient {
     return true;
   }
 
-  /** ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
+  /** ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the SEALED link blob,
    *  fetching from the discovery ledger when the slug is an 8-character
    *  ledger id (the production form) or passing the bytes straight through
-   *  when it is an inline capability (the upload-failed fallback). Returns the
-   *  `blobId` (non-null only for the pointer form) so the caller can drive
+   *  when it is the inline sealed blob (the upload-failed fallback). Returns
+   *  the `blobId` (non-null only for the pointer form) so the caller can drive
    *  `consumeGroupInvite` before requesting to join. A 429 from the ledger
    *  surfaces as a wrapped `DiscoveryRateLimitedError` (see
    *  `isDiscoveryRateLimited`), never as "not found". */
   async resolveGroupInviteSlug(
     slug: string,
-  ): Promise<{ capabilityWire: Uint8Array; blobId: Uint8Array | null }> {
+  ): Promise<{ sealed: Uint8Array; blobId: Uint8Array | null }> {
     let parsed;
     try {
       parsed = parseGroupInviteSlug(slug, inviteLinkWidths(await loadWasm()));
@@ -3502,7 +3862,7 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
     if (parsed.kind === "inline") {
-      return { capabilityWire: parsed.capabilityBytes, blobId: null };
+      return { sealed: parsed.sealed, blobId: null };
     }
     let fetched: Uint8Array | null;
     try {
@@ -3513,11 +3873,47 @@ export class ContactsClient {
     if (fetched === null) {
       throw ContactsError.wrap(new Error("group invite not found or expired"));
     }
-    return { capabilityWire: fetched, blobId: parsed.blobId };
+    return { sealed: fetched, blobId: parsed.blobId };
+  }
+
+  /** Sealed-link amendment of ADR-0028 (2026-09-28): open a `/g/` link. A
+   *  missing or malformed fragment is refused as damaged BEFORE any request;
+   *  otherwise the sealed blob is resolved (ledger or inline) and opened with
+   *  the fragment's secret, which also verifies the capability inside. Any
+   *  open failure is `InviteLinkDamagedError`. The caller owns (and frees) the
+   *  returned capability; `capabilityWire` is its PLAINTEXT wire, the value
+   *  the joiner tag and the join attribution are computed over. */
+  async openGroupInviteLink(
+    slug: string,
+    hash: string | null | undefined,
+  ): Promise<{
+    capability: WasmGroupInviteCapability;
+    capabilityWire: Uint8Array;
+    blobId: Uint8Array | null;
+    linkSecret: Uint8Array;
+  }> {
+    const wasm = await loadWasm();
+    const widths = inviteLinkWidths(wasm);
+    // A malformed slug throws here, before any request.
+    try {
+      parseGroupInviteSlug(slug, widths);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    const fragment = parseInviteLinkFragment(hash, widths);
+    if (fragment.kind !== "secret") throw new InviteLinkDamagedError();
+    const { sealed, blobId } = await this.resolveGroupInviteSlug(slug);
+    const capability = openSealedInvite(
+      (b, k) => wasm.GroupInviteCapability.openLink(b, k),
+      sealed,
+      fragment,
+    );
+    return { capability, capabilityWire: capability.wire, blobId, linkSecret: fragment.secret };
   }
 
   /** ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/` link
-   *  capability (the wire bytes the slug base64url-decodes to). Decodes +
+   *  capability (the plaintext wire the sealed link opened to, see
+   *  `resolveGroupInviteSlug`). Decodes +
    *  verifies the capability (fail-closed on a forged / malformed / expired
    *  link, before any post), reads the group's current epoch from the journal
    *  head's public MLS framing (`epochAfterMessage` over the paged journal, no group secret), crafts an
@@ -3543,6 +3939,7 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
     if (!cap.isValidNow(BigInt(nowMs))) {
+      cap.free();
       throw ContactsError.wrap(new Error("group invite link has expired"));
     }
     // ADR-0028 OQ1 — when the link was a server-backed pointer, register one
@@ -3569,6 +3966,35 @@ export class ContactsClient {
       }
     }
     const groupId = cap.groupId;
+    cap.free();
+    // ADR-0060 section 6 (C-69) — the committer that sweeps our approved `Add`
+    // writes the Welcome to this account's closed mailbox under our `reply`
+    // grant, which rides the signed attribution. Registered (7-day expiry)
+    // before the knock: a request whose answer could not land must not go
+    // out. Closed once the group is joined (`closeRepliesTo(groupIdHex)`).
+    const session = reachSession();
+    if (session === null) {
+      throw ContactsError.wrap(new Error("Lakko is still starting up. Try again in a moment."));
+    }
+    let replyGrant: import("../../wasm/lakko_ffi_wasm").ReachGrant;
+    try {
+      replyGrant = (await session.newReply("group-join", journalHex(groupId))).grant;
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    let attribution: Uint8Array | null;
+    try {
+      // ADR-0028 OQ2 — the self-signed join attribution tells the approving
+      // admin which member's link this request arrived on, and carries the
+      // reply grant the Welcome needs.
+      attribution = wasm.composeGroupJoinAttribution(myIdentity.ed25519Seed, capabilityWire, replyGrant);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("group-join: could not compose the join attribution", err instanceof Error ? err.name : "");
+      attribution = null;
+    } finally {
+      replyGrant.free();
+    }
     // ADR-0053 contract point 6 — the knock. A claimed journal answers only
     // its members, so the joiner never reads it: a probe knock (one anonymous
     // token, ADR-0054 S3)
@@ -3579,17 +4005,11 @@ export class ContactsClient {
       await knockToJoin({
         knock: (payloads) => this.ds.knock(groupId, payloads),
         buildProposal: (epoch) => myIdentity.createExternalJoinProposal(groupId, epoch),
-        // ADR-0028 OQ2 — the self-signed join attribution tells the approving
-        // admin which member's link this request arrived on. Advisory: a
-        // failure to build it must not block the join, the admin approval gate
-        // (ADR-0027) is the boundary.
-        buildAttribution: () => {
-          try {
-            return wasm.composeGroupJoinAttribution(myIdentity.ed25519Seed, capabilityWire);
-          } catch {
-            return null;
-          }
-        },
+        // The attribution is advisory for the approval (the admin approval
+        // gate, ADR-0027, is the boundary) but it is also the only carrier of
+        // our reply grant, so without it the Welcome lands only if this
+        // account is in Everyone.
+        buildAttribution: () => attribution,
       });
     } catch (err) {
       // `GroupNotClaimedError` carries readable copy of its own: nobody in
@@ -3686,4 +4106,93 @@ export class ContactsClient {
       outcome,
     };
   }
+}
+
+/**
+ * Verify and open one ContactRequest body (the envelope with its kind byte
+ * already stripped). Shared by the live poll and by the reload path that
+ * rebuilds pending requests from the rows `contacts/inbox-store.ts` kept, so
+ * a restored request passes exactly the checks a freshly polled one did.
+ *
+ * Returns `null` when the signature or the wire fails verification. An
+ * envelope that does not open for `x25519Secret` still yields a request
+ * (the signature is verified) with no intro and no profile.
+ */
+function decodeContactRequestBody(
+  wasm: Wasm,
+  messageId: number,
+  body: Uint8Array,
+  createdAt: string,
+  x25519Secret: Uint8Array,
+): IncomingContactRequest | null {
+  let parsed;
+  try {
+    parsed = wasm.ContactRequest.decodeAndVerify(body);
+  } catch (err) {
+    // Bad signature, malformed wire bytes, or some other verifier failure.
+    // Dropped; the caller's cursor still advances past the row.
+    // eslint-disable-next-line no-console
+    console.warn("ContactRequest verify failed", messageId, err);
+    return null;
+  }
+
+  let intro: string | null = null;
+  let profile: ReceivedProfile | null = null;
+  let replyGrantB64: string | null = null;
+  try {
+    const opened = parsed.openEnvelope(x25519Secret);
+    intro = new TextDecoder("utf-8", { fatal: false }).decode(opened.introMessage);
+    // ADR-0060 section 6 — the requester's `reply` grant, the key our accept
+    // and ack are written with. Only a `reply` class is kept.
+    const reply = opened.replyGrant;
+    if (reply !== undefined) {
+      if (reply.class === wasm.ReachClass.Reply) {
+        replyGrantB64 = base64Encode(wasm.encodeReachGrant(reply));
+      }
+      reply.free();
+    }
+    // ADR-0048 — a profile out of bounds arrives as `undefined` with the
+    // intro intact; the request itself is still a valid request.
+    const p = opened.profile;
+    if (p !== undefined) {
+      profile = {
+        displayName: p.displayName ?? null,
+        username: p.username ?? null,
+        updatedAtMs: p.updatedAtMs,
+        // Copied before `free()`: the getter's view dies with the handle.
+        accountId: p.accountId === undefined ? null : p.accountId.slice(),
+      };
+      p.free();
+    }
+    opened.free();
+  } catch (err) {
+    // Envelope didn't decrypt for our X25519 secret. Could be a malicious
+    // request, could be a bug; either way the request is still surfaced (the
+    // signature is verified) but with no intro body.
+    // eslint-disable-next-line no-console
+    console.warn("ContactRequest envelope unseal failed", messageId, err);
+  }
+
+  // `fromAccountId` is `Uint8Array | undefined` on the wasm-bindgen surface —
+  // normalise to `null` for the discriminated TS API (the UI distinguishes
+  // present-but-empty from absent).
+  const fromAccountId = parsed.fromAccountId === undefined ? null : parsed.fromAccountId;
+  return {
+    messageId,
+    fromPubkey: parsed.fromPubkey,
+    fromAccountId,
+    fromPseudonym: parsed.fromPseudonym,
+    validAfterMs: parsed.validAfterMs,
+    intro,
+    profile,
+    replyGrantB64,
+    createdAt,
+  };
+}
+
+/** Lowercase hex to bytes (the form `journalHex` produces). */
+function hexBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
 }

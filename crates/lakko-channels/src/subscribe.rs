@@ -5,10 +5,26 @@
 //!
 //! Per ADR-0010 §"Tier 2 — Sender-key broadcast" — a
 //! publisher seals the channel's 32-byte `content_key_seed`
-//! against each subscriber's identity X25519 public key.
-//! The subscriber opens with their X25519 private key and
-//! installs the seed into [`ContentKeySeed`], from which
-//! [`crate::post::verify_and_decrypt`] takes over.
+//! against each subscriber's key. The subscriber opens with
+//! its secret and installs the seed into [`ContentKeySeed`],
+//! from which [`crate::post::verify_and_decrypt`] takes over.
+//!
+//! ## One subscriber key: Ed25519 ([ADR-0060] section 3)
+//!
+//! A subscriber holds ONE Ed25519 key pair. Its public key is
+//! the subscriber identifier everywhere: the registration, the
+//! envelope path, the member-card binding
+//! ([`crate::member_card`]) and the key a member-card upload is
+//! signed with. The X25519 key the seed envelope is sealed to
+//! is derived from it (`lakko_crypto::signing`,
+//! [`SigningKey::to_x25519_secret`] /
+//! [`VerifyingKey::to_x25519_public`], the libsodium
+//! `ed25519_*_to_curve25519` mapping), so the key a subscriber
+//! signs with and the key it receives the seed under are one
+//! registered value. A key that is not a valid Ed25519 point,
+//! or is of small order, is refused ([`subscriber_public_key`]).
+//!
+//! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
 //!
 //! ## Wire shape
 //!
@@ -61,9 +77,11 @@ use lakko_crypto::aead::{self, AeadKey, Algorithm, Nonce, KEY_LEN, NONCE_LEN};
 use lakko_crypto::agreement::{PublicKey, SecretKey};
 use lakko_crypto::kdf::hkdf_sha256;
 use lakko_crypto::secret::SecretBytes;
+use lakko_crypto::signing::{SigningKey, VerifyingKey};
 
 use crate::epoch::EpochId;
 use crate::error::{ChannelError, Result};
+use crate::member_card::SUBSCRIBER_PK_LEN;
 use crate::seed::{ContentKeySeed, CONTENT_KEY_SEED_LEN};
 use crate::CHANNEL_ID_LEN;
 
@@ -90,18 +108,51 @@ const HKDF_INFO_NONCE: &[u8] = b"lakko/channel/v1/seed-envelope/nonce";
 /// becomes a requirement.
 const ALG: Algorithm = Algorithm::ChaCha20Poly1305;
 
+/// Parse and validate a subscriber key: a valid Ed25519
+/// point of more than small order. The one check the
+/// registration, the seal and a member-card signature all
+/// apply.
+///
+/// # Errors
+///
+/// [`ChannelError::BadSubscriberKey`] for a wrong length, an
+/// encoding that is not a curve point, or a small-order point.
+pub fn subscriber_public_key(bytes: &[u8]) -> Result<VerifyingKey> {
+    if bytes.len() != SUBSCRIBER_PK_LEN {
+        return Err(ChannelError::BadSubscriberKey);
+    }
+    let key = VerifyingKey::from_bytes(bytes).map_err(|_| ChannelError::BadSubscriberKey)?;
+    if key.is_weak() {
+        return Err(ChannelError::BadSubscriberKey);
+    }
+    Ok(key)
+}
+
 /// Seal a 32-byte content-key seed against a subscriber's
-/// identity X25519 public key. Returns the on-wire bytes:
+/// Ed25519 public key (converted to X25519, see the module
+/// docs). Returns the on-wire bytes:
 /// `eph_pub(32) || ciphertext_with_tag`.
 ///
 /// # Errors
 ///
-/// Returns [`ChannelError::KeyDerivation`] on HKDF failure
+/// Returns [`ChannelError::BadSubscriberKey`] when the key is
+/// not a valid Ed25519 point or is of small order,
+/// [`ChannelError::KeyDerivation`] on HKDF failure
 /// (cannot happen with current fixed sizes) and
 /// [`ChannelError::AeadSeal`] on AEAD seal failure
 /// (impossible with ChaCha20-Poly1305 + valid lengths;
 /// surfaced for completeness).
 pub fn seal_seed(
+    subscriber_pk: &[u8; SUBSCRIBER_PK_LEN],
+    channel_id: &[u8; CHANNEL_ID_LEN],
+    epoch_id: EpochId,
+    seed: &ContentKeySeed,
+) -> Result<Vec<u8>> {
+    let subscriber_pub = subscriber_public_key(subscriber_pk)?.to_x25519_public();
+    seal_seed_to_x25519(&subscriber_pub, channel_id, epoch_id, seed)
+}
+
+fn seal_seed_to_x25519(
     subscriber_pub: &PublicKey,
     channel_id: &[u8; CHANNEL_ID_LEN],
     epoch_id: EpochId,
@@ -123,10 +174,10 @@ pub fn seal_seed(
     Ok(out)
 }
 
-/// Open a [`SeedEnvelope`] against the subscriber's static
-/// X25519 secret. Returns the recovered seed wrapped in
-/// [`ContentKeySeed`] — the public API never exposes the
-/// raw bytes.
+/// Open a seed envelope with the subscriber's Ed25519 key
+/// (its X25519 secret derived, see the module docs). Returns
+/// the recovered seed wrapped in [`ContentKeySeed`] — the
+/// public API never exposes the raw bytes.
 ///
 /// # Errors
 ///
@@ -142,11 +193,12 @@ pub fn seal_seed(
 ///   future schema bump changed the seed size without
 ///   bumping the envelope label).
 pub fn open_seed(
-    subscriber_priv: &SecretKey,
+    subscriber_key: &SigningKey,
     channel_id: &[u8; CHANNEL_ID_LEN],
     epoch_id: EpochId,
     wire: &[u8],
 ) -> Result<ContentKeySeed> {
+    let subscriber_priv = subscriber_key.to_x25519_secret();
     if wire.len() < EPH_PUB_LEN + TAG_LEN {
         return Err(ChannelError::Wire("seed envelope shorter than minimum"));
     }
@@ -212,55 +264,91 @@ mod tests {
 
     #[test]
     fn round_trip_seal_open() {
-        let sub = SecretKey::generate();
+        let sub = SigningKey::generate();
         let seed = fixture_seed();
-        let env = seal_seed(&sub.public_key(), &CHANNEL, EpochId::new(1), &seed).unwrap();
+        let env = seal_seed(
+            &sub.verifying_key().to_bytes(),
+            &CHANNEL,
+            EpochId::new(1),
+            &seed,
+        )
+        .unwrap();
         let recovered = open_seed(&sub, &CHANNEL, EpochId::new(1), &env).unwrap();
         assert_eq!(recovered, seed);
     }
 
     #[test]
     fn envelope_size_matches_constant() {
-        let sub = SecretKey::generate();
+        let sub = SigningKey::generate();
         let seed = fixture_seed();
-        let env = seal_seed(&sub.public_key(), &CHANNEL, EpochId::new(1), &seed).unwrap();
+        let env = seal_seed(
+            &sub.verifying_key().to_bytes(),
+            &CHANNEL,
+            EpochId::new(1),
+            &seed,
+        )
+        .unwrap();
         assert_eq!(env.len(), SEED_ENVELOPE_LEN);
     }
 
     #[test]
     fn wrong_subscriber_key_fails() {
-        let sub = SecretKey::generate();
-        let other = SecretKey::generate();
+        let sub = SigningKey::generate();
+        let other = SigningKey::generate();
         let seed = fixture_seed();
-        let env = seal_seed(&sub.public_key(), &CHANNEL, EpochId::new(1), &seed).unwrap();
+        let env = seal_seed(
+            &sub.verifying_key().to_bytes(),
+            &CHANNEL,
+            EpochId::new(1),
+            &seed,
+        )
+        .unwrap();
         let err = open_seed(&other, &CHANNEL, EpochId::new(1), &env).unwrap_err();
         assert!(matches!(err, ChannelError::AeadOpen));
     }
 
     #[test]
     fn wrong_channel_id_fails() {
-        let sub = SecretKey::generate();
+        let sub = SigningKey::generate();
         let other_channel = *b"OTHER-CHAN-ID-16";
         let seed = fixture_seed();
-        let env = seal_seed(&sub.public_key(), &CHANNEL, EpochId::new(1), &seed).unwrap();
+        let env = seal_seed(
+            &sub.verifying_key().to_bytes(),
+            &CHANNEL,
+            EpochId::new(1),
+            &seed,
+        )
+        .unwrap();
         let err = open_seed(&sub, &other_channel, EpochId::new(1), &env).unwrap_err();
         assert!(matches!(err, ChannelError::AeadOpen));
     }
 
     #[test]
     fn wrong_epoch_fails() {
-        let sub = SecretKey::generate();
+        let sub = SigningKey::generate();
         let seed = fixture_seed();
-        let env = seal_seed(&sub.public_key(), &CHANNEL, EpochId::new(1), &seed).unwrap();
+        let env = seal_seed(
+            &sub.verifying_key().to_bytes(),
+            &CHANNEL,
+            EpochId::new(1),
+            &seed,
+        )
+        .unwrap();
         let err = open_seed(&sub, &CHANNEL, EpochId::new(2), &env).unwrap_err();
         assert!(matches!(err, ChannelError::AeadOpen));
     }
 
     #[test]
     fn tampered_ciphertext_fails() {
-        let sub = SecretKey::generate();
+        let sub = SigningKey::generate();
         let seed = fixture_seed();
-        let mut env = seal_seed(&sub.public_key(), &CHANNEL, EpochId::new(1), &seed).unwrap();
+        let mut env = seal_seed(
+            &sub.verifying_key().to_bytes(),
+            &CHANNEL,
+            EpochId::new(1),
+            &seed,
+        )
+        .unwrap();
         // Flip a byte in the ciphertext (just past the
         // ephemeral pubkey prefix).
         env[EPH_PUB_LEN] ^= 0xFF;
@@ -270,9 +358,15 @@ mod tests {
 
     #[test]
     fn tampered_ephemeral_pubkey_fails() {
-        let sub = SecretKey::generate();
+        let sub = SigningKey::generate();
         let seed = fixture_seed();
-        let mut env = seal_seed(&sub.public_key(), &CHANNEL, EpochId::new(1), &seed).unwrap();
+        let mut env = seal_seed(
+            &sub.verifying_key().to_bytes(),
+            &CHANNEL,
+            EpochId::new(1),
+            &seed,
+        )
+        .unwrap();
         // Flip the high byte of the ephemeral pubkey. The
         // DH output changes, the HKDF key/nonce change,
         // and the AEAD authenticator rejects.
@@ -283,7 +377,7 @@ mod tests {
 
     #[test]
     fn too_short_buffer_fails() {
-        let sub = SecretKey::generate();
+        let sub = SigningKey::generate();
         let err = open_seed(&sub, &CHANNEL, EpochId::new(0), &[0u8; 10]).unwrap_err();
         assert!(matches!(err, ChannelError::Wire(_)));
     }
@@ -296,11 +390,23 @@ mod tests {
         // the publisher's "fan-out one seed to N
         // subscribers" path produces N independent
         // envelopes.
-        let sub_a = SecretKey::generate();
-        let sub_b = SecretKey::generate();
+        let sub_a = SigningKey::generate();
+        let sub_b = SigningKey::generate();
         let seed = fixture_seed();
-        let env_a = seal_seed(&sub_a.public_key(), &CHANNEL, EpochId::new(5), &seed).unwrap();
-        let env_b = seal_seed(&sub_b.public_key(), &CHANNEL, EpochId::new(5), &seed).unwrap();
+        let env_a = seal_seed(
+            &sub_a.verifying_key().to_bytes(),
+            &CHANNEL,
+            EpochId::new(5),
+            &seed,
+        )
+        .unwrap();
+        let env_b = seal_seed(
+            &sub_b.verifying_key().to_bytes(),
+            &CHANNEL,
+            EpochId::new(5),
+            &seed,
+        )
+        .unwrap();
         assert_ne!(env_a, env_b);
         // Both still open to the same seed.
         let a = open_seed(&sub_a, &CHANNEL, EpochId::new(5), &env_a).unwrap();
@@ -313,12 +419,60 @@ mod tests {
     fn cross_recipient_envelope_rejected() {
         // Two subscribers, but try to open A's envelope
         // with B's key — must fail at the AEAD layer.
-        let sub_a = SecretKey::generate();
-        let sub_b = SecretKey::generate();
+        let sub_a = SigningKey::generate();
+        let sub_b = SigningKey::generate();
         let seed = fixture_seed();
-        let env_a = seal_seed(&sub_a.public_key(), &CHANNEL, EpochId::new(1), &seed).unwrap();
+        let env_a = seal_seed(
+            &sub_a.verifying_key().to_bytes(),
+            &CHANNEL,
+            EpochId::new(1),
+            &seed,
+        )
+        .unwrap();
         let err = open_seed(&sub_b, &CHANNEL, EpochId::new(1), &env_a).unwrap_err();
         assert!(matches!(err, ChannelError::AeadOpen));
+    }
+
+    #[test]
+    fn the_envelope_is_sealed_to_the_x25519_image_of_the_subscriber_key() {
+        // A publisher sealing straight to the converted X25519 key produces
+        // an envelope the subscriber opens with its Ed25519 key: the
+        // conversion is the whole binding.
+        let sub = SigningKey::generate();
+        let seed = fixture_seed();
+        let x = sub.verifying_key().to_x25519_public();
+        let env = seal_seed_to_x25519(&x, &CHANNEL, EpochId::new(1), &seed).unwrap();
+        assert_eq!(
+            open_seed(&sub, &CHANNEL, EpochId::new(1), &env).unwrap(),
+            seed
+        );
+    }
+
+    #[test]
+    fn invalid_and_small_order_subscriber_keys_are_refused() {
+        let seed = fixture_seed();
+        // The identity point: decodes, order 1.
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        // y = 2 is not on the curve (no x satisfies the equation).
+        let mut off_curve = [0u8; 32];
+        off_curve[0] = 2;
+        for bad in [identity, off_curve] {
+            assert!(matches!(
+                seal_seed(&bad, &CHANNEL, EpochId::new(1), &seed),
+                Err(ChannelError::BadSubscriberKey)
+            ));
+            assert!(matches!(
+                subscriber_public_key(&bad),
+                Err(ChannelError::BadSubscriberKey)
+            ));
+        }
+        assert!(matches!(
+            subscriber_public_key(&[0u8; 31]),
+            Err(ChannelError::BadSubscriberKey)
+        ));
+        let good = SigningKey::generate().verifying_key().to_bytes();
+        assert!(subscriber_public_key(&good).is_ok());
     }
 
     #[test]

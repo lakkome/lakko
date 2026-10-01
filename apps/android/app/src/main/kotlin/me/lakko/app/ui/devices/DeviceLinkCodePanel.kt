@@ -1,0 +1,202 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.ui.devices
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import me.lakko.app.devices.AuthClientDeviceLinkApi
+import me.lakko.app.devices.DEVICE_LINK_DECLINED_COPY
+import me.lakko.app.devices.DEVICE_LINK_EXPIRED_COPY
+import me.lakko.app.devices.DEVICE_LINK_NEW_LEAD
+import me.lakko.app.devices.DEVICE_LINK_NEW_TITLE
+import me.lakko.app.devices.DEVICE_LINK_RESTORING_COPY
+import me.lakko.app.devices.DEVICE_LINK_SHOW_QR
+import me.lakko.app.devices.DEVICE_LINK_WAITING_COPY
+import me.lakko.app.devices.DEVICE_LINK_WRONG_CODE_COPY
+import me.lakko.app.devices.DeviceLinkInvalidCode
+import me.lakko.app.devices.FfiDeviceLinkInitiator
+import me.lakko.app.devices.NewDeviceLink
+import me.lakko.app.devices.NewDeviceLinkState
+import me.lakko.app.devices.PairingOrchestrator
+import me.lakko.app.devices.WelcomeCourier
+
+/**
+ * ADR-0049 section 2 — the new device's "Confirm on another device" route
+ * (`docs/ux/identity-recovery.md` section 4). Posts a request for the account
+ * [loginHandle] names, waits for the other device's answer, takes the six
+ * digits it shows, and only after the key confirmation verifies waits for the
+ * Welcome and completes exactly as the QR route does.
+ */
+@Composable
+internal fun DeviceLinkCodePanel(
+    loginHandle: ByteArray,
+    known: PairingOrchestrator.KnownAccount?,
+    onRecovered: suspend (PairingOrchestrator.JoinRecoveryOutcome) -> Unit,
+    onShowQr: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var attempt by remember { mutableIntStateOf(0) }
+    var state: NewDeviceLinkState? by remember { mutableStateOf(null) }
+    var error: String? by remember { mutableStateOf(null) }
+    var code by remember { mutableStateOf("") }
+    var link: NewDeviceLink? by remember { mutableStateOf(null) }
+    var session: PairingOrchestrator.JoinSession? by remember { mutableStateOf(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            session?.dispose()
+            session = null
+        }
+    }
+
+    // One request per attempt; "Start again" bumps the attempt.
+    LaunchedEffect(attempt) {
+        state = NewDeviceLinkState.WaitingForOtherDevice
+        error = null
+        code = ""
+        try {
+            val js = session ?: PairingOrchestrator.prepareJoinFlow(
+                context = context,
+                loginHandle = loginHandle,
+                known = known,
+            ).also { session = it }
+            val l = NewDeviceLink(
+                api = AuthClientDeviceLinkApi(),
+                initiatorFor = { id -> FfiDeviceLinkInitiator(id, loginHandle) },
+                pairingPayload = js.qrPayload,
+            )
+            link = l
+            l.start(loginHandle)
+            state = l.awaitAnswer()
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            error = deviceLinkFailureCopy(cause)
+            state = null
+        }
+    }
+
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(DEVICE_LINK_NEW_TITLE, style = MaterialTheme.typography.titleMedium)
+        Text(
+            DEVICE_LINK_NEW_LEAD,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val s = state
+        val fieldEnabled = s == NewDeviceLinkState.EnterCode
+        OutlinedTextField(
+            value = code,
+            onValueChange = { typed -> code = typed.filter(Char::isDigit).take(DEVICE_LINK_CODE_DIGITS) },
+            label = { Text("Code") },
+            singleLine = true,
+            enabled = fieldEnabled,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        when (s) {
+            NewDeviceLinkState.WaitingForOtherDevice -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CircularProgressIndicator()
+                Text(DEVICE_LINK_WAITING_COPY, style = MaterialTheme.typography.bodySmall)
+            }
+            NewDeviceLinkState.Checking -> CircularProgressIndicator()
+            NewDeviceLinkState.WrongCode -> Text(DEVICE_LINK_WRONG_CODE_COPY, color = MaterialTheme.colorScheme.error)
+            NewDeviceLinkState.Declined -> Text(DEVICE_LINK_DECLINED_COPY, color = MaterialTheme.colorScheme.error)
+            NewDeviceLinkState.Expired -> Text(DEVICE_LINK_EXPIRED_COPY, color = MaterialTheme.colorScheme.error)
+            NewDeviceLinkState.Confirmed -> Text(DEVICE_LINK_RESTORING_COPY)
+            NewDeviceLinkState.EnterCode, null -> Unit
+        }
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            when (s) {
+                NewDeviceLinkState.EnterCode -> Button(
+                    enabled = code.length == DEVICE_LINK_CODE_DIGITS,
+                    onClick = {
+                        val l = link ?: return@Button
+                        val js = session ?: return@Button
+                        state = NewDeviceLinkState.Checking
+                        scope.launch {
+                            try {
+                                val next = l.submitCode(code)
+                                state = next
+                                if (next == NewDeviceLinkState.Confirmed) {
+                                    // Only now is the Welcome trusted: the old
+                                    // device proved it holds the code.
+                                    when (val outcome = js.awaitWelcome()) {
+                                        is WelcomeCourier.WelcomeOutcome.Received -> {
+                                            val recovery = js.accept(
+                                                welcomeBytes = outcome.welcomeBytes,
+                                                welcomeCursor = outcome.welcomeCursor,
+                                                recovery = true,
+                                            )
+                                            if (recovery == null) {
+                                                error = "The other device linked this one but didn't send " +
+                                                    "recovery data. Restore with your recovery phrase instead."
+                                            } else {
+                                                onRecovered(recovery)
+                                            }
+                                        }
+                                        WelcomeCourier.WelcomeOutcome.Timeout -> state = NewDeviceLinkState.Expired
+                                        WelcomeCourier.WelcomeOutcome.Cancelled -> Unit
+                                    }
+                                }
+                            } catch (cause: kotlinx.coroutines.CancellationException) {
+                                throw cause
+                            } catch (_: DeviceLinkInvalidCode) {
+                                state = NewDeviceLinkState.EnterCode
+                            } catch (cause: Throwable) {
+                                error = deviceLinkFailureCopy(cause)
+                                state = NewDeviceLinkState.EnterCode
+                            }
+                        }
+                    },
+                ) { Text("Continue") }
+                NewDeviceLinkState.WrongCode, NewDeviceLinkState.Declined, NewDeviceLinkState.Expired, null ->
+                    Button(onClick = { attempt += 1 }) { Text("Start again") }
+                else -> Unit
+            }
+            OutlinedButton(onClick = onShowQr) { Text(DEVICE_LINK_SHOW_QR) }
+        }
+    }
+}
+
+/** Six digits (spec section 4). */
+private const val DEVICE_LINK_CODE_DIGITS: Int = 6
+
+/** One sentence for a failure outside the named states (a limit, the
+ *  network, login by name switched off). */
+private fun deviceLinkFailureCopy(cause: Throwable): String {
+    val http = cause as? me.lakko.app.auth.AuthHttpError
+    if (http != null) {
+        me.lakko.app.auth.authLimitCopy(http)?.let { return it }
+        if (http.status == 503) return "Signing in by name is not available right now. Use a QR code instead."
+    }
+    if (cause is me.lakko.app.auth.AuthNetworkError) return "No connection. Check your network and try again."
+    return "Something went wrong. Start again."
+}

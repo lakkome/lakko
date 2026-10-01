@@ -166,7 +166,7 @@ fuzz-list:
     @echo "lakko-svc-sfu:"
     @ls services/sfu/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
 
-# ADR-0058 interface catalog: validate the English source and every
+# ADR-0061 interface catalog: validate the English source and every
 # translation under l10n/catalog (syntax, arguments, plural forms,
 # translator comments). Prints per language what is missing and which
 # security-critical strings still wait for review.
@@ -186,7 +186,7 @@ l10n-check:
     rm -rf "$out"
     echo "compiled catalogs up to date"
 
-# ADR-0058: compile l10n/catalog into what each client embeds (source.json
+# ADR-0061: compile l10n/catalog into what each client embeds (source.json
 # + one compiled <lang>.json per translation). The outputs are committed so
 # Xcode, Gradle and Vite need no Rust step; run this after every catalog
 # edit (l10n-check fails when the committed outputs are stale).

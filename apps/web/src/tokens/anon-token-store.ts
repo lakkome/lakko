@@ -63,6 +63,10 @@ interface Row {
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("IndexedDB unavailable in this environment"));
+      return;
+    }
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (): void => {
       const db = req.result;
@@ -136,6 +140,29 @@ export function indexedDbAnonTokenStore(): AnonTokenStore {
       await done(tx);
     },
   };
+}
+
+/**
+ * Drop every stored row of one account, leaving other accounts' rows (Forget
+ * device, Delete account). `account` is the key the pool files rows under:
+ * the account part of the session token, base64url of the account id.
+ * Throws when the store cannot be opened; the caller logs.
+ */
+export async function deleteAnonTokensForAccount(account: string): Promise<void> {
+  const conn = await openDb();
+  try {
+    const tx = conn.transaction(STORE, "readwrite");
+    const store = tx.objectStore(STORE);
+    const req = store.getAll();
+    req.onsuccess = (): void => {
+      for (const row of (req.result ?? []) as Row[]) {
+        if (row.account === account) store.delete([row.account, row.context]);
+      }
+    };
+    await done(tx);
+  } finally {
+    conn.close();
+  }
 }
 
 /** The app's store: IndexedDB where the environment has it, else none (the

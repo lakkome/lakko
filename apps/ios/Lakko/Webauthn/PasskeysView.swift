@@ -179,7 +179,7 @@ public struct PasskeysView: View {
         }
     }
 
-    /// Dates in the interface language (ADR-0058: formatted by the platform
+    /// Dates in the interface language (ADR-0061: formatted by the platform
     /// before they are passed).
     private func metadataLine(for cred: CredentialSummary) -> String {
         let created = format(cred.created_at_ms) ?? l10n.t("common.unknown")

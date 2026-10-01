@@ -604,7 +604,7 @@ private struct CallEndedOverlay: View {
 
 public struct CallScreen: View {
     @StateObject private var state = CallUiState()
-    /// Re-renders the screen's words on a language switch (ADR-0058).
+    /// Re-renders the screen's words on a language switch (ADR-0061).
     @ObservedObject private var l10n = Localization.shared
     /// One sound controller per CallScreen lifetime; deallocated with the view.
     @StateObject private var sounds = CallSoundsObservable()
@@ -1553,7 +1553,7 @@ private struct ChatMessageRow: View {
                     Text(msg.senderName)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(Color.lakkoAccent)
-                    // The environment locale the root injects (ADR-0058).
+                    // The environment locale the root injects (ADR-0061).
                     Text(msg.ts, format: .dateTime.hour().minute())
                         .font(.system(size: 12))
                         .foregroundColor(Color.lakkoTextMuted)

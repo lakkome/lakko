@@ -142,7 +142,7 @@ private const val NOTICE_MS = 2_500L
 private const val FAILURE_NOTICE_MS = 5_000L
 
 /**
- * UX spec §2 / §3 / §6 copy, as catalog keys (ADR-0058): the controller keeps
+ * UX spec §2 / §3 / §6 copy, as catalog keys (ADR-0061): the controller keeps
  * the key, the screen renders it, so a language switch re-renders a notice
  * that is already up.
  */

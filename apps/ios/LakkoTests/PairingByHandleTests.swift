@@ -82,7 +82,7 @@ final class PairingPayloadByHandleTests: XCTestCase {
             PairingScanFailure.userFacing(FfiError.Unsupported(message: "pairing QR version 1")),
             PairingScanFailure.unsupportedCopy)
         XCTAssertFalse(PairingScanFailure.isWrongAccount(FfiError.Group(message: "something else")))
-        // ADR-0058: anything else renders the generic sentence, never the
+        // ADR-0061: anything else renders the generic sentence, never the
         // error's own text.
         XCTAssertEqual(
             PairingScanFailure.userFacing(AuthClientError.argument("boom")),

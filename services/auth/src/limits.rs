@@ -39,8 +39,19 @@
 //! [`CODE_DEVICE_REQUEST_LIMITED`], [`CODE_SIGNUP_RATE_LIMITED`],
 //! [`CODE_HANDLE_BIND_LIMITED`].
 //!
+//! - **The device-link guess budget** ([`DeviceLinkTier`]): the
+//!   `wrong_code` outcomes an account's signed-in device records (ADR-0049
+//!   section 2, security pass finding 6). Each device request gets one online
+//!   guess at the six-digit code; across requests, `N` wrong codes in a
+//!   window suspend the account's device requests for a while (defaults: 3
+//!   in 24 h for 1 h, 6 in 24 h for 24 h). Enforced in
+//!   [`crate::device_request`], where a suspended account's new requests are
+//!   stored against its handle's stand-in, so the requester sees a request
+//!   nobody answers - exactly what an unknown name sees.
+//!
 //! Every default below is **chosen, not measured**; each has an env knob of
-//! the form `N/SECS` (at most `N` per `SECS` seconds).
+//! the form `N/SECS` (at most `N` per `SECS` seconds), and a device-link tier
+//! a second knob for its suspension in seconds.
 //!
 //! No limiter here fails open: the name counters fail closed on a store
 //! error (the guessing and code-sending routes are exactly where an
@@ -296,6 +307,38 @@ impl Category {
     }
 }
 
+/// One tier of the device-link guess budget: `wrong_codes.limit` wrong codes
+/// within `wrong_codes.window_secs` suspend the account's device requests for
+/// `suspend_secs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeviceLinkTier {
+    /// How many wrong codes in how long trip this tier.
+    pub(crate) wrong_codes: Window,
+    /// How long a tripped tier suspends the account's device requests.
+    pub(crate) suspend_secs: u32,
+}
+
+/// The device-link tiers, each with its `(N/SECS knob, suspension knob,
+/// default)`. Defaults chosen, not measured.
+const DEVICE_LINK_TIERS: [(&str, &str, DeviceLinkTier); 2] = [
+    (
+        "LAKKO_AUTH_LIMIT_DEVICE_LINK_WRONG_CODE_SHORT",
+        "LAKKO_AUTH_DEVICE_LINK_SUSPEND_SHORT_SECS",
+        DeviceLinkTier {
+            wrong_codes: Window::new(3, 86_400),
+            suspend_secs: 3600,
+        },
+    ),
+    (
+        "LAKKO_AUTH_LIMIT_DEVICE_LINK_WRONG_CODE_LONG",
+        "LAKKO_AUTH_DEVICE_LINK_SUSPEND_LONG_SECS",
+        DeviceLinkTier {
+            wrong_codes: Window::new(6, 86_400),
+            suspend_secs: 86_400,
+        },
+    ),
+];
+
 /// Every limit the service enforces, plus the in-memory address buckets.
 #[derive(Debug)]
 pub(crate) struct Limits {
@@ -307,6 +350,8 @@ pub(crate) struct Limits {
     /// Minimum seconds between two handle-changing binds of one account
     /// (0 = no minimum).
     handle_change_min_interval_secs: u32,
+    /// The device-link guess budget, one entry per tier.
+    device_link: [DeviceLinkTier; DEVICE_LINK_TIERS.len()],
     /// Cap on the address-bucket map ([`MAX_ADDRESS_BUCKETS`]).
     max_buckets: usize,
     buckets: Mutex<HashMap<(Category, IpAddr), Bucket>>,
@@ -336,6 +381,7 @@ impl Limits {
             ips,
             name_key,
             handle_change_min_interval_secs,
+            device_link: DEVICE_LINK_TIERS.map(|(_, _, tier)| tier),
             max_buckets: MAX_ADDRESS_BUCKETS,
             buckets: Mutex::new(HashMap::new()),
         }
@@ -374,6 +420,22 @@ impl Limits {
             })?,
             _ => DEFAULT_HANDLE_CHANGE_MIN_INTERVAL_SECS,
         };
+        let mut device_link = DEVICE_LINK_TIERS.map(|(_, _, tier)| tier);
+        for (i, (window_var, suspend_var, default)) in DEVICE_LINK_TIERS.iter().enumerate() {
+            let suspend_secs = match std::env::var(suspend_var) {
+                Ok(v) if !v.trim().is_empty() => v
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|s| *s > 0)
+                    .ok_or_else(|| anyhow::anyhow!("{suspend_var} must be a positive integer"))?,
+                _ => default.suspend_secs,
+            };
+            device_link[i] = DeviceLinkTier {
+                wrong_codes: read(window_var, default.wrong_codes)?,
+                suspend_secs,
+            };
+        }
         let name_key = if let Some(p) = handle_pepper {
             name_subkey(p)
         } else {
@@ -386,7 +448,9 @@ impl Limits {
             rand::rngs::OsRng.fill_bytes(&mut k);
             k
         };
-        Ok(Self::with_windows(names, ips, name_key, interval))
+        let mut limits = Self::with_windows(names, ips, name_key, interval);
+        limits.device_link = device_link;
+        Ok(limits)
     }
 
     /// Override one name window (tests).
@@ -408,6 +472,20 @@ impl Limits {
     pub(crate) const fn with_handle_change_interval(mut self, secs: u32) -> Self {
         self.handle_change_min_interval_secs = secs;
         self
+    }
+
+    /// The device-link guess budget, one entry per tier.
+    pub(crate) const fn device_link(&self) -> &[DeviceLinkTier] {
+        &self.device_link
+    }
+
+    /// The longest device-link window, for the pruner.
+    fn max_device_link_window_secs(&self) -> u32 {
+        self.device_link
+            .iter()
+            .map(|t| t.wrong_codes.window_secs)
+            .max()
+            .unwrap_or(1)
     }
 
     /// Override the address-bucket cap (tests).
@@ -460,6 +538,17 @@ impl Limits {
             secs = self.handle_change_min_interval_secs,
             "auth handle change minimum interval"
         );
+        for ((window_var, suspend_var, _), tier) in DEVICE_LINK_TIERS.iter().zip(&self.device_link)
+        {
+            tracing::info!(
+                knob = window_var,
+                suspend_knob = suspend_var,
+                wrong_codes = tier.wrong_codes.limit,
+                window_secs = tier.wrong_codes.window_secs,
+                suspend_secs = tier.suspend_secs,
+                "auth device-link guess budget"
+            );
+        }
     }
 
     /// Charge one request from `ip` (grouped by [`bucket_address`]) to
@@ -765,8 +854,9 @@ pub(crate) async fn ip_gate(
 // Pruner
 // ---------------------------------------------------------------------------
 
-/// Periodically drop name counters whose window has long passed and address
-/// buckets that have refilled.
+/// Periodically drop name counters whose window has long passed, address
+/// buckets that have refilled, and device-link wrong codes and suspensions
+/// that no longer count.
 pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
@@ -785,6 +875,22 @@ pub(crate) fn spawn_pruner(pool: MySqlPool, limits: Arc<Limits>) -> tokio::task:
             .await;
             if let Err(e) = result {
                 tracing::warn!(error = %e, "auth_name_limits prune failed");
+            }
+            let result = sqlx::query(
+                "DELETE FROM device_link_wrong_codes WHERE at < NOW(3) - INTERVAL ? SECOND",
+            )
+            .bind(i64::from(limits.max_device_link_window_secs()))
+            .execute(&pool)
+            .await;
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "device_link_wrong_codes prune failed");
+            }
+            let result =
+                sqlx::query("DELETE FROM device_link_suspensions WHERE suspended_until < NOW(3)")
+                    .execute(&pool)
+                    .await;
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "device_link_suspensions prune failed");
             }
         }
     })

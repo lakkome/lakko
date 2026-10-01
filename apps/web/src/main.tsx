@@ -21,6 +21,7 @@ import { runBootUpdateCheck } from "./update/release-check";
 import { bootstrapTheme } from "./ui/theme";
 import { bootstrapL10n, LANGUAGE_STORAGE_KEY } from "./l10n";
 import { publishNotificationStrings } from "./l10n/notification-strings";
+import { installOriginHistory } from "./routes/origin-history";
 
 /** Longest the first paint waits for a non-English catalog. Chosen, not measured. */
 const FIRST_PAINT_WAIT_MS = 2000;
@@ -55,14 +56,19 @@ if (root === null) {
 // setAttribute; ~0.5 ms typical.
 bootstrapTheme();
 
-// ADR-0058: resolve the interface language (stored choice, else the system
+// The address bar shows the origin only: read the entry path (an invite
+// link, a notification's `/?wake=`) and clear the URL before any screen
+// renders. `routes/origin-history.ts`.
+installOriginHistory();
+
+// ADR-0061: resolve the interface language (stored choice, else the system
 // list, else English) and load its catalog. Until the core has loaded every
 // string renders from the English source. When the language is likely not
 // English, the first paint waits for the catalog so the screen does not show
 // English for a moment and then switch; the wait is capped so a slow or
 // failed load never keeps the app from rendering. Never rejects.
 const l10nReady = bootstrapL10n();
-// ADR-0058: the service worker's notification words follow the language.
+// ADR-0061: the service worker's notification words follow the language.
 void l10nReady.then(publishNotificationStrings);
 const mount = (): void => {
   render(() => <App />, root);

@@ -5,7 +5,7 @@
  * Error copy for the Contacts screens, shared by the list, detail and invite
  * panels.
  *
- * ADR-0058 section 6: an error renders from its kind, never from its
+ * ADR-0061 section 6: an error renders from its kind, never from its
  * `.message`. A handful of well-known failures (a used-up allowance, a
  * changed identity key, an unknown username, no network) have their own
  * catalog messages; a sentence already written for a screen (a
@@ -18,6 +18,7 @@ import { isDsNetworkFailure } from "../ds/client";
 import { DiscoveryNetworkError, DiscoveryRateLimitedError } from "../discovery/client";
 import { t } from "../l10n";
 import { keyedErrorText } from "../l10n/keyed-error";
+import { SEARCH_NOT_FOUND } from "../search/search-state";
 import { anonTokenMessage } from "../tokens/token-copy";
 import { ContactsError, SupersessionRefused } from "./client";
 import { supersessionRefusedMessage } from "./supersession-message";
@@ -69,8 +70,10 @@ export function contactsErrorText(
       case "no-identity-secrets":
         return () => t("common.error.session_ended");
       case "username-unknown":
-        return () =>
-          t("chat.members.add.error.unknown_username", { name: `@${variant.username}` });
+        // `docs/ux/who-can-find-me.md` section 6.1: the same answer whether
+        // the account does not exist or does not let this person find it
+        // (ADR-0060), so it never names the account as unregistered.
+        return () => SEARCH_NOT_FOUND;
       case "no-identity-bundle":
         return () => t("chat.members.add.error.no_bundle");
       default:

@@ -168,6 +168,6 @@ public class RestoreIdentityPromptViewModel(
 public data class RestoreIdentityUiState(
     val phrase: String = "",
     val busy: Boolean = false,
-    /** The form's error sentence (ADR-0058: rendered from its key). */
+    /** The form's error sentence (ADR-0061: rendered from its key). */
     val error: UiText? = null,
 )

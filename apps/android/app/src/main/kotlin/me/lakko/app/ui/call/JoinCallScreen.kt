@@ -138,8 +138,11 @@ data class JoinCallUiState(
     /** The discovery service answered `429` while resolving the link: not an
      *  invalid link, the screen says to try again later. */
     val rateLimited: Boolean = false,
+    /** Sealed links (2026-09-28): the fragment is missing or malformed, or
+     *  the link does not open under it. Refused with one sentence. */
+    val damaged: Boolean = false,
     val phase: JoinCallPhase = JoinCallPhase.Idle,
-    /** Why the last attempt failed (ADR-0058: a catalog message). */
+    /** Why the last attempt failed (ADR-0061: a catalog message). */
     val error: UiText? = null,
     /** ADR-0048 UX §4 — a guest's "Your name", prefilled `Guest`. */
     val guestName: String = GUEST_NAME_DEFAULT,
@@ -191,6 +194,9 @@ class JoinCallViewModel(
     /** Set by [decode] when the ledger answered `429`. */
     private var lastDecodeRateLimited = false
 
+    /** Set by [decode] when the link is damaged (sealed links). */
+    private var lastDecodeDamaged = false
+
     init {
         runDecode()
     }
@@ -198,8 +204,16 @@ class JoinCallViewModel(
     private fun runDecode() {
         viewModelScope.launch {
             lastDecodeRateLimited = false
+            lastDecodeDamaged = false
             val d = decode(slug)
-            local.update { it.copy(loading = false, decoded = d, rateLimited = d == null && lastDecodeRateLimited) }
+            local.update {
+                it.copy(
+                    loading = false,
+                    decoded = d,
+                    rateLimited = d == null && lastDecodeRateLimited,
+                    damaged = d == null && lastDecodeDamaged,
+                )
+            }
         }
     }
 
@@ -222,7 +236,7 @@ class JoinCallViewModel(
             LinkCallPhase.ERROR -> JoinCallPhase.Error
         }
         // The slot's error is the kind of failure, already a catalog line
-        // (ADR-0058); an error with no kind reads the generic line.
+        // (ADR-0061); an error with no kind reads the generic line.
         val shownError = if (phase == JoinCallPhase.Error) {
             slot.error?.let {
                 UiText("common.sentence_pair", parts = mapOf("first" to UiText("call.link.error.generic"), "second" to it))
@@ -234,9 +248,16 @@ class JoinCallViewModel(
     }
 
     private suspend fun decode(slug: String): DecodedCall? {
+        // Sealed links: `<slug>#<secret>`; a missing or malformed secret is
+        // refused before any request.
+        val link = me.lakko.app.discovery.InviteLinkArgument.decode(slug)
+        val secret = me.lakko.app.discovery.inviteLinkSecretOf(link.fragment) ?: run {
+            lastDecodeDamaged = true
+            return null
+        }
         return try {
-            val parsed = parseCallInviteSlug(slug)
-            val capabilityBytes: ByteArray = when (parsed) {
+            val parsed = parseCallInviteSlug(link.slug)
+            val sealedBytes: ByteArray = when (parsed) {
                 is ParsedCallInvite.Pointer -> {
                     val discovery = DiscoveryClient()
                     try {
@@ -247,7 +268,9 @@ class JoinCallViewModel(
                 }
                 is ParsedCallInvite.Inline -> parsed.capabilityBytes
             }
-            CallInviteCapability.decodeAndVerify(capabilityBytes).use { cap ->
+            me.lakko.app.discovery.openSealedInviteLink(sealedBytes, secret) { bytes, key ->
+                CallInviteCapability.openLink(bytes, key)
+            }.use { cap ->
                 val secrets = authRepository.identitySecrets.value
                 val isOwner = secrets != null &&
                     Identity.fromSeed(secrets.accountIdentitySeed).use {
@@ -263,6 +286,9 @@ class JoinCallViewModel(
                     isOwner = isOwner,
                 )
             }
+        } catch (e: me.lakko.app.discovery.InviteLinkDamaged) {
+            lastDecodeDamaged = true
+            null
         } catch (e: DiscoveryHttpError) {
             if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) {
                 lastDecodeRateLimited = true
@@ -399,6 +425,9 @@ class JoinCallViewModel(
                 )
                 if (updated != null) {
                     me.lakko.app.profile.OwnProfileStore.save(applicationContext, secrets.accountId, updated)
+                    // ADR-0048 section 4a — to the account's other devices
+                    // too (nothing is sent before a session binds).
+                    me.lakko.app.reach.ReachManager.get(applicationContext).publishOwnProfileToDevices()
                 }
             } catch (err: Throwable) {
                 Log.w("JoinCall", "guest profile not saved", err)
@@ -432,7 +461,7 @@ class JoinCallViewModel(
                 local.update { it.copy(phase = JoinCallPhase.Idle, busyMessage = outcome.message) }
             is LinkCallStartOutcome.Failed -> {
                 // The host's sentence is diagnostic English; the log keeps it and
-                // the screen shows the catalog line (ADR-0058).
+                // the screen shows the catalog line (ADR-0061).
                 Log.w("JoinCall", "link call failed: ${outcome.message}")
                 local.update { it.copy(phase = JoinCallPhase.Error, error = UiText("call.link.error.generic")) }
             }
@@ -558,6 +587,10 @@ fun JoinCallScreen(
                 Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT.text())
                 TextButton(onClick = { viewModel.retryDecode() }) { Text(t("common.try_again")) }
                 TextButton(onClick = onExit) { Text(t("common.back")) }
+            }
+            ui.damaged -> {
+                Text(me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY)
+                TextButton(onClick = onExit) { Text("Go back") }
             }
             ui.decoded == null || ui.decoded?.valid == false -> {
                 Text(t("call.link.invalid"))

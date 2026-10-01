@@ -358,6 +358,13 @@ differences are the title, the compose action and the row title rule.
   verification surface.
 - Invite links are managed in a sheet ("Invite links": active links with
   copy, share and revoke), never as a textarea with a raw URL.
+- Since links are sealed (2026-09-28) the server's list never holds a
+  link's secret. The device that created a link keeps the secret for the
+  account (with the other per-account secrets, surviving a restart), so it
+  can copy and share the link later. A row whose secret this device does not
+  hold shows, in place of Copy and Share, one line:
+  `Created on another device. Copy it there, or revoke it here.` Revoke
+  stays.
 
 ### 5.4 Channels
 

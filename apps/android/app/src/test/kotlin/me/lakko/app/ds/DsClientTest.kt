@@ -211,6 +211,19 @@ class DsClientTest {
         }
     }
 
+    @Test
+    fun `fetchGroup surfaces latest_epoch and leaves it null when absent`() = runTest {
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to """{"messages":[],"has_more":false,"latest_epoch":7}""",
+                HttpStatusCode.OK to """{"messages":[],"has_more":false}""",
+            ),
+        ).use { client ->
+            assertEquals(7uL, client.fetchGroup(ByteArray(32)).latestEpoch)
+            assertEquals(null, client.fetchGroup(ByteArray(32)).latestEpoch)
+        }
+    }
+
     // ===================================================================
     // Cursor / limit / wait params
     // ===================================================================

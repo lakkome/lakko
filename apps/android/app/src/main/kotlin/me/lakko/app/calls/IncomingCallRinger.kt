@@ -354,7 +354,7 @@ public object IncomingCallRinger : IncomingCallRingPort {
         }
 
     private fun post(context: Context, ring: IncomingCallRing, remainingMs: Long) {
-        // The interface language (ADR-0058): loaded by MainActivity, or by
+        // The interface language (ADR-0061): loaded by MainActivity, or by
         // LakkoMessagingService when a push rings before any Activity ran.
         val strings = Localization.strings.value
         ensureChannel(context, strings)

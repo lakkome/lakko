@@ -68,7 +68,7 @@ struct AntiCensorshipSettingsView: View {
                 color: .lakkoSuccess
             )
         case .unavailable:
-            // The failure itself is in the log (ADR-0058: never its prose).
+            // The failure itself is in the log (ADR-0061: never its prose).
             label(
                 l10n.t("settings.anti_censorship.status.unavailable"),
                 l10n.t("settings.anti_censorship.status.unavailable.sub"),

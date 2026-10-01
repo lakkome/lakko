@@ -67,7 +67,7 @@ enum AppearanceSetting: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// The catalog key of the option's label (ADR-0058).
+    /// The catalog key of the option's label (ADR-0061).
     var labelKey: String {
         switch self {
         case .system: return "settings.appearance.theme.system"

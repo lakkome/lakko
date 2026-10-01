@@ -151,6 +151,7 @@ public class ContactsViewModel(
             inviteError = ui.inviteError,
             activeInvitesLoaded = ui.activeInvitesLoaded,
             activeInvites = ui.activeInvites,
+            activeInviteUrls = ui.activeInviteUrls,
             loadingActiveInvites = ui.loadingActiveInvites,
             activeInvitesError = ui.activeInvitesError,
             revokingActiveInviteSlug = ui.revokingActiveInviteSlug,
@@ -330,11 +331,17 @@ public class ContactsViewModel(
                     is me.lakko.app.discovery.ListInvitesResult.List -> result.invites
                     me.lakko.app.discovery.ListInvitesResult.NotFoundOrNotOwner -> emptyList()
                 }
+                val urls = try {
+                    repo.heldInviteLinkUrls(rows.map { it.blobIdSlug })
+                } catch (_: Throwable) {
+                    emptyMap()
+                }
                 mutableUi.update {
                     it.copy(
                         loadingActiveInvites = false,
                         activeInvitesLoaded = true,
                         activeInvites = rows,
+                        activeInviteUrls = urls,
                     )
                 }
             } catch (err: Throwable) {
@@ -447,26 +454,11 @@ public class ContactsViewModel(
         val pending = repo.state.value.pending.firstOrNull { it.messageId == messageId }
         if (pending == null) return
 
-        // 1.9b1: ship a ContactAck back to the original sender's
-        // mailbox so their UI can flip from "pending" to
-        // "accepted" without waiting on the Welcome arrival.
-        // Best-effort — a network failure here doesn't unwind
-        // the local accept (the user already trusted the peer);
-        // we swallow and move on. The signed ack is independent
-        // of MLS state, so the sender can light up their address
-        // book even if the group-creation step below stalls.
-        viewModelScope.launch {
-            try {
-                repo.sendContactAck(pending)
-            } catch (_: Throwable) {
-                // best-effort
-            }
-        }
-
         if (chatRepo == null || pending.fromAccountId == null) {
             // No chat bridge wired OR v1 legacy envelope without
             // a sender account-id — fall back to the pre-1.15f4c
             // "purely local marker" semantics.
+            viewModelScope.launch { sendAckBestEffort(pending) }
             repo.acceptContactRequest(messageId)
             return
         }
@@ -490,6 +482,29 @@ public class ContactsViewModel(
                 null
             }
             repo.acceptContactRequest(messageId, groupIdHex = groupIdHex)
+            // AFTER the chat's Welcome, never before it: see [sendAckBestEffort].
+            sendAckBestEffort(pending)
+        }
+    }
+
+    /**
+     * 1.9b1: ship a ContactAck back to the original sender's mailbox so their
+     * UI can flip from "pending" to "accepted". Best-effort — a network
+     * failure here doesn't unwind the local accept.
+     *
+     * Sent once the 1:1 chat's Welcome has been written. Both are written with
+     * the requester's `reply` grant (ADR-0060 section 6), and a requester
+     * closes that key as soon as the ack arrives: an ack sent first (or in
+     * parallel) let an online requester close the key before the Welcome
+     * landed, and the Welcome was refused (seen live on web 2026-09-30).
+     */
+    private suspend fun sendAckBestEffort(pending: me.lakko.app.contacts.IncomingContactRequest) {
+        try {
+            repo.sendContactAck(pending)
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // best-effort
         }
     }
 
@@ -504,7 +519,7 @@ public class ContactsViewModel(
         repo.renameContact(messageId, name)
     }
 
-    /** Core, server and transport prose goes to the log only (ADR-0058 section 6). */
+    /** Core, server and transport prose goes to the log only (ADR-0061 section 6). */
     private fun logFailure(action: String, err: Throwable) {
         android.util.Log.w("LakkoContacts", "WARN $action failed: ${err.javaClass.simpleName}: ${err.message}")
     }
@@ -530,6 +545,9 @@ public class ContactsViewModel(
          *  differs. */
         val activeInvitesLoaded: Boolean = false,
         val activeInvites: List<me.lakko.app.discovery.ActiveInvite> = emptyList(),
+        /** UX 5.3 — the full URL of each listed link whose secret this device
+         *  kept, by slug. */
+        val activeInviteUrls: Map<String, String> = emptyMap(),
         val loadingActiveInvites: Boolean = false,
         val activeInvitesError: UiText? = null,
         /** `blobIdSlug` of the row currently being revoked, when
@@ -543,11 +561,11 @@ public class ContactsViewModel(
 public data class ContactsUiState(
     val usernameInput: String,
     /** ADR-0048 §4 — the reason the typed username fails, or `null`
-     *  (ADR-0058: a catalog message the screen renders). */
+     *  (ADR-0061: a catalog message the screen renders). */
     val usernameError: me.lakko.app.l10n.UiText? = null,
     val introInput: String,
     val sending: Boolean,
-    /** ADR-0058 — rendered from the failure's kind, never from core prose. */
+    /** ADR-0061 — rendered from the failure's kind, never from core prose. */
     val sendError: UiText?,
     /** A request was just sent; consumed by the add sheet. */
     val sendSucceeded: Boolean = false,
@@ -560,6 +578,9 @@ public data class ContactsUiState(
     /** Phase 1.18d2b-list. */
     val activeInvitesLoaded: Boolean,
     val activeInvites: List<me.lakko.app.discovery.ActiveInvite>,
+    /** UX 5.3 — slug -> full URL for the listed links this device can share;
+     *  a listed slug absent here was created on another device. */
+    val activeInviteUrls: Map<String, String> = emptyMap(),
     val loadingActiveInvites: Boolean,
     val activeInvitesError: UiText?,
     val revokingActiveInviteSlug: String?,
@@ -586,7 +607,7 @@ internal fun atLabel(raw: String): String? {
 
 /**
  * KT-log S4 — the PURE 3-way mapping from `(loggedReset, peerLabel)` to the
- * catalog message (`contacts.identity_changed.*`, ADR-0058) for a
+ * catalog message (`contacts.identity_changed.*`, ADR-0061) for a
  * fail-closed [SupersessionRefused].
  *
  * A [SupersessionRefused] is thrown when a peer's discovery bundle carries
@@ -625,3 +646,21 @@ internal fun supersessionRefusedMessage(
         UiText("${base}_unnamed")
     }
 }
+
+/**
+ * The user-facing message for a [ContactsError].
+ *
+ * A name that does not resolve reads as `docs/ux/who-can-find-me.md` section
+ * 6.1 "Not found": the same whether the account does not exist or exists and
+ * does not let the searcher find it (ADR-0060), so it never claims the name
+ * is unregistered.
+ */
+internal fun contactsErrorCopy(err: ContactsError): String =
+    when (val v = err.variant) {
+        is ContactsError.Variant.UsernameUnknown -> me.lakko.app.search.SEARCH_NOT_FOUND
+        is ContactsError.Variant.NoIdentityBundle ->
+            "That account has no identity bundle yet — ask them to open the app once."
+        is ContactsError.Variant.Wrapped ->
+            v.cause.message ?: "Send failed."
+        is ContactsError.Variant.ReachRefused -> ContactsError.REACH_REFUSED_COPY
+    }

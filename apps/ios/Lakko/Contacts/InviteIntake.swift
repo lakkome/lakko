@@ -39,8 +39,9 @@ import Foundation
 @MainActor
 public final class InviteIntake: ObservableObject {
 
-    /// The slug from the most recent `lakko.me/i/<slug>` Universal
-    /// Link tap. `nil` when no invite is pending.
+    /// The link token (`slug#fragment`, see ``InviteLinkSecret/token(slug:fragment:)``)
+    /// from the most recent `lakko.me/i/<slug>` Universal Link tap. `nil` when
+    /// no invite is pending.
     @Published public private(set) var pendingSlug: String?
 
     /// ADR-0028 (G-3) — the slug from the most recent
@@ -55,9 +56,9 @@ public final class InviteIntake: ObservableObject {
     /// - it is decoded on the device and nowhere else.
     public private(set) var pendingGroupJoinFragment: String?
 
-    /// ADR-0032 (G-21/G-22) — the slug from the most recent
-    /// `lakko.me/c/<slug>` multi-joiner call-invite link tap. `nil` when no
-    /// call-join is pending. Drives ``JoinCallLandingScreen``.
+    /// ADR-0032 (G-21/G-22) — the link token (`slug#fragment`) from the most
+    /// recent `lakko.me/c/<slug>` multi-joiner call-invite link tap. `nil` when
+    /// no call-join is pending. Drives ``JoinCallLandingScreen``.
     @Published public private(set) var pendingCallJoinSlug: String?
 
     /// ADR-0032 — set when a guest signup is kicked off from the `/c/` landing,
@@ -83,14 +84,17 @@ public final class InviteIntake: ObservableObject {
     public func handle(_ url: URL) {
         let path = url.path
         if let slug = Self.slug(from: path, prefix: "/i/") {
-            pendingSlug = slug
+            // ADR-0028 amendment 2026-09-28 — the sealed-link secret rides the
+            // fragment; it is parked inside the token (`slug#fragment`) so it
+            // reaches the landing through the route, never a server.
+            pendingSlug = InviteLinkSecret.token(slug: slug, fragment: Self.fragment(of: url))
         } else if let slug = Self.slug(from: path, prefix: "/g/") {
             // The fragment is set BEFORE the published slug so an observer
             // that wakes on the slug already finds its key.
             pendingGroupJoinFragment = Self.fragment(of: url)
             pendingGroupJoinSlug = slug
         } else if let slug = Self.slug(from: path, prefix: "/c/") {
-            pendingCallJoinSlug = slug
+            pendingCallJoinSlug = InviteLinkSecret.token(slug: slug, fragment: Self.fragment(of: url))
         }
     }
 

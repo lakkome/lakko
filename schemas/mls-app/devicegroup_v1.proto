@@ -25,6 +25,13 @@ package lakko.mls_app.devicegroup.v1;
 //   * `ConversationOrder` — explicit display ordering for the
 //                          conversation list (overrides the
 //                          fallback "by latest message" order)
+//   * `FolderChanges`    — a live chat-folder edit (ADR-0058)
+//   * `StateSnapshot`    — the catch-up re-send of the whole folded
+//                          state to a device that joined late
+//                          (ADR-0058 section 5)
+//   * `ServiceEnvelope`  — an opaque `lakko-contacts` envelope
+//                          (ADR-0060 section 7) the client
+//                          dispatches itself
 //
 // Two reasons for a dedicated `devicegroup_v1.proto` instead of
 // extending `mls-app/v1.proto`:
@@ -64,9 +71,21 @@ message DeviceGroupPayload {
         DraftUpdate draft = 11;
         ThreadFlags flags = 12;
         ConversationOrder order = 13;
+        // ADR-0058 chat folders: a live folder edit, and the catch-up
+        // re-send of this device's whole folded state. 14-17 stay claimed
+        // by ADR-0050 section 2.9 (ContactUpsert / ContactRemove /
+        // ChannelSubscribed / ChannelUnsubscribed, unbuilt).
+        FolderChanges folder_changes = 18;
+        StateSnapshot state_snapshot = 19;
+        // ADR-0060 section 7: a `lakko-contacts` envelope (the
+        // "who can find me" setting and the reach-key state)
+        // carried verbatim. The receiver dispatches the bytes; this
+        // layer never interprets them.
+        ServiceEnvelope service_envelope = 20;
     }
 
-    reserved 14 to 31;
+    reserved 14 to 17;
+    reserved 21 to 31;
 }
 
 // "I read up to this point in this thread." Other devices use
@@ -146,4 +165,138 @@ message ConversationOrder {
     repeated bytes group_ids = 1;
 
     reserved 2 to 15;
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0058 — chat folders.
+//
+// Every piece of folder state is a small register carrying ITS OWN hybrid
+// logical clock stamp, so two devices changing different parts of one folder
+// both keep their change. The envelope's `DeviceGroupPayload.hlc` is the
+// stamp of the message and is ignored by the fold for `FolderChanges` and
+// `StateSnapshot`. The fold itself lives in `lakko-sync`; the decode bounds
+// (ADR-0058 section 4) are enforced by `lakko-mls` and refuse the whole
+// payload, never truncate it.
+// ---------------------------------------------------------------------------
+
+// A conversation a folder names: a one-to-one or a group by its MLS
+// group_id, a channel by its channel id.
+message ConversationRef {
+    enum Kind {
+        KIND_UNSPECIFIED = 0;
+        ONE_TO_ONE = 1;
+        GROUP = 2;
+        CHANNEL = 3;
+    }
+    Kind kind = 1;
+    // MLS group_id for ONE_TO_ONE / GROUP, channel id for CHANNEL.
+    // 1..=64 bytes.
+    bytes id = 2;
+    reserved 3 to 7;
+}
+
+// The folder's name and rule toggles.
+message FolderMeta {
+    uint64 hlc = 1;
+    // 16 random bytes, minted once by the creating device.
+    bytes folder_id = 2;
+    // 1..=24 scalar values, <= 96 bytes, the display-name character rule.
+    string name = 3;
+    // bit0 one-to-one, bit1 groups, bit2 channels. Other bits refused.
+    uint32 include_kinds = 4;
+    // bit0 muted, bit1 read, bit2 archived. Other bits refused.
+    uint32 exclude_flags = 5;
+    reserved 6; // icon, not in v1
+    reserved 7 to 15;
+}
+
+// One conversation's membership in one folder. `NONE` is the element
+// tombstone: removing a chat writes `NONE` with a fresh stamp.
+message FolderMember {
+    enum State {
+        NONE = 0;
+        INCLUDED = 1;
+        EXCLUDED = 2;
+    }
+    uint64 hlc = 1;
+    bytes folder_id = 2;
+    ConversationRef conversation = 3;
+    State state = 4;
+    reserved 5 to 7;
+}
+
+// The folder's own ordered pin list, as one value. At most 10.
+message FolderPins {
+    uint64 hlc = 1;
+    bytes folder_id = 2;
+    repeated ConversationRef pinned = 3;
+    reserved 4 to 7;
+}
+
+// A folder deletion. Hides every register of the folder stamped <= hlc.
+message FolderRemoved {
+    uint64 hlc = 1;
+    bytes folder_id = 2;
+    reserved 3 to 7;
+}
+
+// The account's folder order, as one value. At most 256 ids.
+message FolderOrder {
+    uint64 hlc = 1;
+    repeated bytes folder_ids = 2;
+    reserved 3 to 7;
+}
+
+// A live edit: only the registers that changed, each with its stamp.
+// At most 1024 registers in total.
+message FolderChanges {
+    repeated FolderMeta metas = 1;
+    repeated FolderMember members = 2;
+    repeated FolderPins pins = 3;
+    repeated FolderRemoved removed = 4;
+    // Absent = unchanged.
+    FolderOrder order = 5;
+    reserved 6 to 15;
+}
+
+// The catch-up re-send (ADR-0058 section 5): the whole folded state of this
+// device, every entry with its ORIGINAL stamp, split into parts.
+message StateSnapshot {
+    message Stamped {
+        uint64 hlc = 1;
+        oneof entry {
+            ThreadFlags flags = 2;
+            ReadCursor cursor = 3;
+            DraftUpdate draft = 4;
+        }
+    }
+    repeated Stamped entries = 1;
+
+    message StampedOrder {
+        uint64 hlc = 1;
+        ConversationOrder order = 2;
+    }
+    // Absent = none held.
+    StampedOrder conversation_order = 2;
+
+    FolderChanges folders = 3;
+    // 0-based; must be < parts.
+    uint32 part = 4;
+    // 1..=64.
+    uint32 parts = 5;
+    reserved 6 to 15;
+}
+
+// An opaque `lakko-contacts` envelope carried between the owner's
+// own devices (ADR-0060 section 7): today the Visibility setting
+// and the ReachState counters. `lakko-mls` bounds its length
+// (1 to `MAX_SERVICE_ENVELOPE_LEN` bytes, refusing the whole
+// payload otherwise) and never reads its content; the client hands
+// the bytes to the `lakko-contacts` dispatcher, which keeps only
+// the kinds it accepts on this carrier.
+message ServiceEnvelope {
+    // The envelope bytes, domain separator included.
+    bytes envelope = 1;
+
+    reserved 2 to 7;
 }

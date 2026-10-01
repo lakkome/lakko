@@ -78,11 +78,10 @@ import Foundation
 /// true, which is the existing "stored but unreadable" state the receive
 /// gate already fails closed on (invariant #4).
 ///
-///   2. **routes** — the **`push_gid → (account, group_id)` reverse
-///      index**, keyed by the lowercase-hex `push_gid`. This is the map
-///      the ADR-0041 silent-push decrypt path reverse-resolves in
-///      Sprint 4 (`resolveAccount(pushGidHex)` → the real `group_id` for
-///      the DS fetch). It is stored **plaintext** in the App Group shared
+///   2. **routes** — the **`(account, push_gid) → group_id` reverse
+///      index**. This is the map the ADR-0041 silent-push decrypt path
+///      reads to turn a wake's opaque `g` back into the real `group_id` for
+///      the DS fetch. It is stored **plaintext** in the App Group shared
 ///      `UserDefaults` suite (``SharedStorage/sharedDefaults()``): `push_gid`
 ///      is a one-way BLAKE3 derivation (reveals nothing) and `group_id`
 ///      is a public DS routing address already shared with the server —
@@ -90,11 +89,22 @@ import Foundation
 ///      in the shared suite. Plaintext is REQUIRED so the read-only NSE
 ///      can read it without the device key.
 ///
+/// ## Why a route is keyed by account as well (amended 2026-09-30)
+///
+/// Two accounts on one device that are members of one group derive the SAME
+/// `push_gid`, so a row keyed by `push_gid` alone was simply the last writer's,
+/// and a background path reading it decrypted as whichever account wrote last.
+/// ADR-0042's amendment makes the background paths handle a wake only for the
+/// account the device pseudonym is bound to (``PushAccountBinding``), so the
+/// index is looked up for `(bound account, push_gid)` and a row belonging to
+/// another account is a miss. Deletes are scoped the same way. The previous
+/// `me.lakko.push-route.v1.` rows are no longer read.
+///
 /// The two age differently, which ADR-0043 makes load-bearing: a rotation
 /// OVERWRITES the secret row in place (same `(account, group)` key) but only
 /// ADDS to the routes (keyed by the freshly derived `pushGidHex`). The
 /// superseded route entry is therefore retired explicitly, via
-/// ``removeRoute(pushGidHex:)``.
+/// ``removeRoute(accountIdB64:pushGidHex:)``.
 ///
 /// ## Invariants
 ///
@@ -163,9 +173,10 @@ public final class PushRoutingStore {
     /// secret blob in `UserDefaults.standard`.
     private static let secretKeyPrefix: String = "me.lakko.push-routing-secret.v1."
 
-    /// Per-`push_gid` key prefix for the plaintext reverse-index row in
-    /// the App Group shared suite (NSE-readable in Sprint 4).
-    private static let routeKeyPrefix: String = "me.lakko.push-route.v1."
+    /// Per-`(account, push_gid)` key prefix for the plaintext reverse-index
+    /// row in the App Group shared suite (NSE-readable). v2: the v1 rows were
+    /// keyed by `push_gid` alone and are no longer read.
+    private static let routeKeyPrefix: String = "me.lakko.push-route.v2."
 
     /// App-private location for the encrypted secret (foreground-only).
     private let secretDefaults: UserDefaults
@@ -195,7 +206,7 @@ public final class PushRoutingStore {
 
     /// Persist a group's `push_routing_secret` + its `distributed` flag
     /// (device-key-encrypted, one atomic write) AND its
-    /// `push_gid → (account, group_id)` reverse-index entry.
+    /// `(account, push_gid) → group_id` reverse-index entry.
     /// Idempotent: re-persisting the same `(account, group)` / secret
     /// overwrites both rows in place (a no-op in effect).
     ///
@@ -223,10 +234,10 @@ public final class PushRoutingStore {
         guard let combined = seal(Self.encodeRecord(
             secret: secret, distributed: distributed, mintEpoch: mintEpoch)) else { return }
         secretDefaults.set(combined, forKey: Self.secretKey(accountIdB64, groupIdHex))
-        // The plaintext reverse-index row: [account, group] keyed by push_gid.
+        // The plaintext reverse-index row: group_id keyed by (account, push_gid).
         routeDefaults.set(
-            [accountIdB64, groupIdHex],
-            forKey: Self.routeKey(pushGidHex)
+            groupIdHex,
+            forKey: Self.routeKey(accountIdB64, pushGidHex)
         )
     }
 
@@ -362,35 +373,37 @@ public final class PushRoutingStore {
         secretDefaults.object(forKey: Self.secretKey(accountIdB64, groupIdHex)) != nil
     }
 
-    /// Reverse-map a `push_gid` (lowercase hex) to its owning
-    /// `(account, group_id)`, or `nil` when unknown. This is the read the
-    /// ADR-0041 silent-push decrypt path performs in Sprint 4 to turn an
-    /// opaque wake `g` back into the real DS `group_id`. Reads the App
-    /// Group shared suite first, then the app-private fallback.
-    public func lookupRoute(pushGidHex: String)
-        -> (accountIdB64: String, groupIdHex: String)? {
-        let key = Self.routeKey(pushGidHex)
+    /// Reverse-map a `push_gid` (lowercase hex) to the real `group_id` it
+    /// routes for `accountIdB64`, or `nil` when this account holds no row for
+    /// it. A row another account wrote for the same `push_gid` is a miss.
+    /// This is the read the ADR-0041 silent-push paths perform, always for
+    /// the account the wake is bound to (``PushAccountBinding``). Reads the
+    /// App Group shared suite first, then the app-private fallback.
+    public func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? {
+        let key = Self.routeKey(accountIdB64, pushGidHex.lowercased())
         for defaults in orderedRouteDefaults() {
-            guard let pair = defaults.stringArray(forKey: key),
-                  pair.count == 2 else { continue }
-            return (accountIdB64: pair[0], groupIdHex: pair[1])
+            guard let groupIdHex = defaults.string(forKey: key), !groupIdHex.isEmpty else {
+                continue
+            }
+            return groupIdHex
         }
         return nil
     }
 
-    /// Delete ONE reverse-index entry, by its `push_gid` (lowercase hex).
+    /// Delete ONE reverse-index entry: `accountIdB64`'s row for `push_gid`
+    /// (lowercase hex). Another account's row for the same `push_gid` stays.
     ///
     /// ADR-0043. The asymmetry this closes: the secret row is keyed
     /// `(account, group)` and is **overwritten in place** by a rotation, but
-    /// a route row is keyed by `pushGidHex`, so a rotation only ever **adds**
-    /// a row — the superseded `push_gid → (account, group_id)` entry survives
-    /// forever. Left behind, each rotation grows the reverse map by one dead
-    /// entry whose `push_gid` nothing will ever notify again.
+    /// a route row is keyed by `push_gid`, so a rotation only ever **adds**
+    /// a row — the superseded entry survives forever. Left behind, each
+    /// rotation grows the reverse map by one dead entry whose `push_gid`
+    /// nothing will ever notify again.
     ///
     /// Removes from BOTH ordered route locations (the App Group shared suite
     /// AND the app-private fallback), because
-    /// ``lookupRoute(pushGidHex:)`` reads both — deleting from only the
-    /// shared suite would leave a fallback row that still resolves.
+    /// ``lookupRoute(accountIdB64:pushGidHex:)`` reads both — deleting from
+    /// only the shared suite would leave a fallback row that still resolves.
     ///
     /// A no-op when the row is absent (`removeObject` on an unknown key
     /// succeeds), so the caller never has to check first — a rotation on a
@@ -399,19 +412,18 @@ public final class PushRoutingStore {
     /// Scoped to the ONE key: never touches the secret store, so it can never
     /// strand a group by deleting the material a live `push_gid` is derived
     /// from.
-    public func removeRoute(pushGidHex: String) {
-        let key = Self.routeKey(pushGidHex)
+    public func removeRoute(accountIdB64: String, pushGidHex: String) {
+        let key = Self.routeKey(accountIdB64, pushGidHex.lowercased())
         for defaults in orderedRouteDefaults() {
             defaults.removeObject(forKey: key)
         }
     }
 
     /// Wipe every push-routing secret + reverse-index entry for
-    /// `accountIdB64`. Called from ``ChatRepository/forgetDevice()`` so a
+    /// `accountIdB64`. Called from ``AccountLocalDataWipe`` so a
     /// device wipe leaves no push-routing residue (mirror of the web
-    /// `clearAllGroupRouting`). Enumerates the secret + route keyspaces
-    /// and removes only the rows belonging to the account (routes are
-    /// keyed by `push_gid`, so the owning account is read from each row).
+    /// `clearAllGroupRouting`). Both keyspaces are keyed by account first,
+    /// so a prefix match removes exactly this account's rows.
     public func clear(accountIdB64: String) {
         // secrets — keyed `<prefix><account> <group>`, so a prefix match
         // is exact for this account.
@@ -420,12 +432,11 @@ public final class PushRoutingStore {
         where key.hasPrefix(secretAccountPrefix) {
             secretDefaults.removeObject(forKey: key)
         }
-        // routes — keyed by `push_gid`, so match on the stored account.
+        // routes — keyed `<prefix><account> <push_gid>`, same prefix match.
+        let routeAccountPrefix = Self.routeKeyPrefix + accountIdB64 + " "
         for defaults in orderedRouteDefaults() {
             for (key, _) in defaults.dictionaryRepresentation()
-            where key.hasPrefix(Self.routeKeyPrefix) {
-                guard let pair = defaults.stringArray(forKey: key),
-                      pair.first == accountIdB64 else { continue }
+            where key.hasPrefix(routeAccountPrefix) {
                 defaults.removeObject(forKey: key)
             }
         }
@@ -536,8 +547,10 @@ public final class PushRoutingStore {
         secretKeyPrefix + accountIdB64 + " " + groupIdHex
     }
 
-    private static func routeKey(_ pushGidHex: String) -> String {
-        routeKeyPrefix + pushGidHex
+    /// Composite route key, the same space-separated shape as
+    /// ``secretKey(_:_:)``: a base64 account id never contains a space.
+    private static func routeKey(_ accountIdB64: String, _ pushGidHex: String) -> String {
+        routeKeyPrefix + accountIdB64 + " " + pushGidHex
     }
 
     /// Ordered route read/clear locations: the shared suite first, then

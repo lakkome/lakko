@@ -35,16 +35,42 @@
 //! grants anything; a replayed third-party capability still only shows whose
 //! valid link was used.
 //!
-//! ## Wire format (manual codec, frozen at v2, all big-endian)
+//! ## The joiner's reply grant (ADR-0060 §6, C-69)
+//!
+//! A joiner is not a member, and since ADR-0060 its mailbox is closed, so
+//! the committer that sweeps the approved `Add` could not deliver the
+//! Welcome (C-69 puts it in the joiner's mailbox) without a key. The
+//! attribution therefore carries the joiner's **`reply` reach grant**
+//! ([`crate::reach::ReachGrant`], class `reply`) inside the signed part: the
+//! joiner derives it over a fresh random 16-byte reply id
+//! (`ReachGrant::derive(account_seed, Reply, reply_id, 0)`), registers its
+//! public key with the Delivery Service **with a 7-day expiry**, and
+//! **removes it once it has joined**. The committer signs the Welcome's
+//! mailbox write with it (`DsProofSigner::for_reach(grant.seed)`).
+//!
+//! **Residual (ADR-0060):** the attribution is posted where every member of
+//! the group reads it, so **every member can write to the joiner's mailbox**
+//! with this key until it expires or the joiner removes it. Bounded by the
+//! 7-day expiry and the removal on joining; it is the price of letting
+//! whichever committer is active deliver the Welcome, since the joiner
+//! cannot know in advance which member that will be. A grant of any class
+//! but `reply` is refused, so a joiner cannot hand the group a standing
+//! `contact` or `group` key by mistake.
+//!
+//! ## Wire format (manual codec, v3, all big-endian)
 //!
 //! ```text
-//! u8        schema version (= 2)
+//! u8        schema version (= 3)
 //! [32]      joiner_signature_key                 — Ed25519 leaf verifying key
 //! u16be     cap_len                              — bounded by MAX_CAPABILITY_LEN
 //! [cap_len] capability                           — a GroupInviteCapability blob
+//! [37]      reply_grant                          — ReachGrant, class `reply` (SECRET)
 //! [64]      signature                            — Ed25519 by the joiner over
 //!                                                   DOMAIN ‖ (everything above)
 //! ```
+//!
+//! v2 (no reply grant) and v1 (unsigned) are refused: a flag day, nothing is
+//! deployed.
 //!
 //! The DS stores this opaque (invariant #2). The decoder is attacker-touchable
 //! (a malicious poster / the zero-trust DS can craft arbitrary journal entries),
@@ -58,10 +84,11 @@ use lakko_crypto::signing::{
 
 use crate::error::{ContactError, Result};
 use crate::group_invite::{decode_and_verify as decode_group_invite, GroupInviteCapability};
+use crate::reach::{ReachClass, ReachGrant, REACH_GRANT_LEN};
 
-/// Envelope wire version. Bumped to 2 when the joiner self-signature landed —
-/// an unsigned v1 envelope is now refused (it carried no spoof resistance).
-const VERSION: u8 = 2;
+/// Envelope wire version. 2 added the joiner self-signature; 3 (ADR-0060)
+/// the joiner's reply grant. Anything else is refused.
+const VERSION: u8 = 3;
 
 /// Domain separator for the joiner's self-signature, so a signature minted for
 /// this purpose cannot be replayed as any other Lakko Ed25519 artefact.
@@ -85,6 +112,10 @@ pub struct GroupJoinAttribution {
     /// is the member who minted the link; `group_id` is the target the admin
     /// checks against its own group before trusting the attribution.
     pub capability: GroupInviteCapability,
+    /// The joiner's `reply` reach grant (ADR-0060 §6): the key the committer
+    /// delivers the sweep's Welcome to the joiner's mailbox with. SECRET, and
+    /// readable by every member (module docs). Always class `reply`.
+    pub reply_grant: ReachGrant,
 }
 
 /// Compose + sign the attribution envelope.
@@ -93,13 +124,24 @@ pub struct GroupJoinAttribution {
 /// same seed behind its MLS leaf signature key + the `joiner_signature_key` the
 /// admin sees in the proposal). The `capability_bytes` are NOT re-verified here
 /// — the joiner composes them from a link it already decoded + verified;
-/// [`decode_attribution`] re-verifies on the admin side.
+/// [`decode_attribution`] re-verifies on the admin side. `reply_grant` is the
+/// joiner's `reply` reach grant (module docs).
 ///
 /// # Errors
 ///
-/// [`ContactError::InvalidArgument`] when `joiner_signing_seed` is not 32 bytes
-/// or `capability_bytes` is empty / exceeds its bound.
-pub fn compose_attribution(joiner_signing_seed: &[u8], capability_bytes: &[u8]) -> Result<Vec<u8>> {
+/// [`ContactError::InvalidArgument`] when `joiner_signing_seed` is not 32 bytes,
+/// `capability_bytes` is empty / exceeds its bound, or `reply_grant` is not
+/// class `reply`.
+pub fn compose_attribution(
+    joiner_signing_seed: &[u8],
+    capability_bytes: &[u8],
+    reply_grant: &ReachGrant,
+) -> Result<Vec<u8>> {
+    if reply_grant.class != ReachClass::Reply {
+        return Err(ContactError::InvalidArgument(
+            "group-join attribution: the grant must be class `reply`".into(),
+        ));
+    }
     if joiner_signing_seed.len() != ED25519_PUB_LEN {
         return Err(ContactError::InvalidArgument(format!(
             "group-join attribution: joiner signing seed must be {ED25519_PUB_LEN} bytes",
@@ -118,12 +160,14 @@ pub fn compose_attribution(joiner_signing_seed: &[u8], capability_bytes: &[u8]) 
     // Cast is safe: bounded by MAX_CAPABILITY_LEN (908) above.
     #[allow(clippy::cast_possible_truncation)]
     let cap_len = capability_bytes.len() as u16;
-    let mut prefix =
-        Vec::with_capacity(1 + ED25519_PUB_LEN + 2 + capability_bytes.len() + SIGNATURE_LEN);
+    let mut prefix = Vec::with_capacity(
+        1 + ED25519_PUB_LEN + 2 + capability_bytes.len() + REACH_GRANT_LEN + SIGNATURE_LEN,
+    );
     prefix.push(VERSION);
     prefix.extend_from_slice(&joiner_signature_key);
     prefix.extend_from_slice(&cap_len.to_be_bytes());
     prefix.extend_from_slice(capability_bytes);
+    prefix.extend_from_slice(&reply_grant.encode());
 
     let signature = signing.sign(&signing_input(&prefix));
     let mut out = prefix;
@@ -139,8 +183,9 @@ pub fn compose_attribution(joiner_signing_seed: &[u8], capability_bytes: &[u8]) 
 /// # Errors
 ///
 /// [`ContactError::InvalidEncoding`] on a malformed envelope (bad version, EOF,
-/// out-of-bound length, trailing bytes), an invalid joiner self-signature, or a
-/// capability whose own signature does not verify.
+/// out-of-bound length, trailing bytes), an invalid joiner self-signature, a
+/// reply grant that does not decode or is not class `reply`, or a capability
+/// whose own signature does not verify.
 pub fn decode_attribution(bytes: &[u8]) -> Result<GroupJoinAttribution> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
@@ -157,6 +202,7 @@ pub fn decode_attribution(bytes: &[u8]) -> Result<GroupJoinAttribution> {
         ));
     }
     let capability_bytes = take_n(&mut cur, cap_len)?.to_vec();
+    let reply_grant_bytes = take_n(&mut cur, REACH_GRANT_LEN)?;
     let signature_bytes = take_n(&mut cur, SIGNATURE_LEN)?;
     if !cur.is_empty() {
         return Err(ContactError::InvalidEncoding(format!(
@@ -179,10 +225,19 @@ pub fn decode_attribution(bytes: &[u8]) -> Result<GroupJoinAttribution> {
             ContactError::InvalidEncoding("group-join attribution: signature invalid".into())
         })?;
 
+    let reply_grant = ReachGrant::decode(reply_grant_bytes).map_err(|e| {
+        ContactError::InvalidEncoding(format!("group-join attribution: reply grant: {}", e.code()))
+    })?;
+    if reply_grant.class != ReachClass::Reply {
+        return Err(ContactError::InvalidEncoding(
+            "group-join attribution: the grant is not class `reply`".into(),
+        ));
+    }
     let capability = decode_group_invite(&capability_bytes)?;
     Ok(GroupJoinAttribution {
         joiner_signature_key,
         capability,
+        reply_grant,
     })
 }
 
@@ -235,6 +290,70 @@ mod tests {
     use super::*;
     use crate::group_invite::compose as compose_group_invite;
 
+    fn reply() -> ReachGrant {
+        ReachGrant::derive(&[0xC0; 32], ReachClass::Reply, &[0x77; 16], 0).unwrap()
+    }
+
+    /// Re-sign `prefix` (everything before the signature) with the joiner
+    /// seed, as a hostile joiner could.
+    fn signed(mut prefix: Vec<u8>) -> Vec<u8> {
+        let sig = SigningKey::from_seed(&fixture_joiner_seed()).sign(&signing_input(&prefix));
+        prefix.extend_from_slice(&sig.to_bytes());
+        prefix
+    }
+
+    #[test]
+    fn the_reply_grant_round_trips_inside_the_signature() {
+        let (cap, _) = fixture_capability();
+        let wire = compose_attribution(&fixture_joiner_seed(), &cap, &reply()).unwrap();
+        let parsed = decode_attribution(&wire).unwrap();
+        assert_eq!(parsed.reply_grant, reply());
+        // The grant sits just before the signature; any change to it breaks
+        // the joiner signature, so a poster cannot swap it.
+        let at = wire.len() - SIGNATURE_LEN - REACH_GRANT_LEN + 3;
+        let mut bad = wire;
+        bad[at] ^= 0x01;
+        assert!(decode_attribution(&bad).is_err());
+    }
+
+    #[test]
+    fn a_grant_of_another_class_is_refused_by_compose_and_decode() {
+        let (cap, _) = fixture_capability();
+        let good = compose_attribution(&fixture_joiner_seed(), &cap, &reply()).unwrap();
+        let body = good.len() - SIGNATURE_LEN;
+        for class in ReachClass::ALL {
+            if class == ReachClass::Reply {
+                continue;
+            }
+            let scope: &[u8] = if class.is_account_wide() { b"" } else { b"s" };
+            let grant = ReachGrant::derive(&[1; 32], class, scope, 1).unwrap();
+            assert!(compose_attribution(&fixture_joiner_seed(), &cap, &grant).is_err());
+            let mut prefix = good[..body].to_vec();
+            prefix[body - REACH_GRANT_LEN..].copy_from_slice(&grant.encode());
+            match decode_attribution(&signed(prefix)) {
+                Err(ContactError::InvalidEncoding(msg)) => assert!(msg.contains("reply"), "{msg}"),
+                other => panic!("expected a class refusal, got {other:?}"),
+            }
+        }
+        // An unknown class byte, validly signed, is refused too.
+        let mut prefix = good[..body].to_vec();
+        prefix[body - REACH_GRANT_LEN] = 0;
+        assert!(decode_attribution(&signed(prefix)).is_err());
+    }
+
+    #[test]
+    fn a_v2_attribution_without_a_grant_is_refused() {
+        let (cap, _) = fixture_capability();
+        let good = compose_attribution(&fixture_joiner_seed(), &cap, &reply()).unwrap();
+        let body = good.len() - SIGNATURE_LEN;
+        let mut prefix = good[..body - REACH_GRANT_LEN].to_vec();
+        prefix[0] = 2;
+        match decode_attribution(&signed(prefix)) {
+            Err(ContactError::InvalidEncoding(msg)) => assert!(msg.contains("version 2"), "{msg}"),
+            other => panic!("expected unsupported-version, got {other:?}"),
+        }
+    }
+
     fn fixture_capability() -> (Vec<u8>, SigningKey) {
         let issuer = SigningKey::from_seed(&[0x42; 32]);
         let group_id = vec![0xABu8; 32];
@@ -257,7 +376,7 @@ mod tests {
     #[test]
     fn round_trips_and_self_signature_verifies() {
         let (cap, issuer) = fixture_capability();
-        let wire = compose_attribution(&fixture_joiner_seed(), &cap).unwrap();
+        let wire = compose_attribution(&fixture_joiner_seed(), &cap, &reply()).unwrap();
         let parsed = decode_attribution(&wire).unwrap();
         // The embedded joiner key is the seed's verifying key.
         assert_eq!(parsed.joiner_signature_key, fixture_joiner_pubkey());
@@ -271,7 +390,7 @@ mod tests {
     #[test]
     fn tampered_capability_rejected() {
         let (cap, _) = fixture_capability();
-        let mut wire = compose_attribution(&fixture_joiner_seed(), &cap).unwrap();
+        let mut wire = compose_attribution(&fixture_joiner_seed(), &cap, &reply()).unwrap();
         // Flip a byte inside the embedded capability (past version(1) +
         // joiner_key(32) + cap_len(2) = 35; offset 40 lands in its group_id).
         // This breaks the joiner self-signature, which is checked first.
@@ -291,7 +410,7 @@ mod tests {
         // key B — a stranger cannot post an attribution for a key they do not
         // hold the private half of.
         let (cap, _) = fixture_capability();
-        let mut wire = compose_attribution(&fixture_joiner_seed(), &cap).unwrap();
+        let mut wire = compose_attribution(&fixture_joiner_seed(), &cap, &reply()).unwrap();
         let other_pubkey = SigningKey::from_seed(&[0x0Bu8; 32])
             .verifying_key()
             .to_bytes();
@@ -305,7 +424,7 @@ mod tests {
     #[test]
     fn tampered_signature_rejected() {
         let (cap, _) = fixture_capability();
-        let mut wire = compose_attribution(&fixture_joiner_seed(), &cap).unwrap();
+        let mut wire = compose_attribution(&fixture_joiner_seed(), &cap, &reply()).unwrap();
         let last = wire.len() - 1;
         wire[last] ^= 0xFF;
         match decode_attribution(&wire) {
@@ -317,10 +436,10 @@ mod tests {
     #[test]
     fn unsupported_version_rejected() {
         let (cap, _) = fixture_capability();
-        let mut wire = compose_attribution(&fixture_joiner_seed(), &cap).unwrap();
-        wire[0] = 3;
+        let mut wire = compose_attribution(&fixture_joiner_seed(), &cap, &reply()).unwrap();
+        wire[0] = 4;
         match decode_attribution(&wire) {
-            Err(ContactError::InvalidEncoding(msg)) => assert!(msg.contains("version 3"), "{msg}"),
+            Err(ContactError::InvalidEncoding(msg)) => assert!(msg.contains("version 4"), "{msg}"),
             other => panic!("expected unsupported-version, got {other:?}"),
         }
     }
@@ -328,7 +447,7 @@ mod tests {
     #[test]
     fn truncated_rejected() {
         let (cap, _) = fixture_capability();
-        let wire = compose_attribution(&fixture_joiner_seed(), &cap).unwrap();
+        let wire = compose_attribution(&fixture_joiner_seed(), &cap, &reply()).unwrap();
         assert!(decode_attribution(&wire[..wire.len() - 1]).is_err());
         assert!(decode_attribution(&wire[..3]).is_err());
         assert!(decode_attribution(&[]).is_err());
@@ -337,7 +456,7 @@ mod tests {
     #[test]
     fn trailing_bytes_rejected() {
         let (cap, _) = fixture_capability();
-        let mut wire = compose_attribution(&fixture_joiner_seed(), &cap).unwrap();
+        let mut wire = compose_attribution(&fixture_joiner_seed(), &cap, &reply()).unwrap();
         wire.push(0x00);
         match decode_attribution(&wire) {
             Err(ContactError::InvalidEncoding(msg)) => assert!(msg.contains("trailing"), "{msg}"),
@@ -348,16 +467,16 @@ mod tests {
     #[test]
     fn wrong_seed_length_rejected_at_compose() {
         let (cap, _) = fixture_capability();
-        assert!(compose_attribution(&[], &cap).is_err());
-        assert!(compose_attribution(&[0u8; 31], &cap).is_err());
-        assert!(compose_attribution(&[0u8; 33], &cap).is_err());
+        assert!(compose_attribution(&[], &cap, &reply()).is_err());
+        assert!(compose_attribution(&[0u8; 31], &cap, &reply()).is_err());
+        assert!(compose_attribution(&[0u8; 33], &cap, &reply()).is_err());
     }
 
     #[test]
     fn empty_or_oversize_capability_rejected_at_compose() {
-        assert!(compose_attribution(&fixture_joiner_seed(), &[]).is_err());
+        assert!(compose_attribution(&fixture_joiner_seed(), &[], &reply()).is_err());
         let big_cap = vec![0u8; MAX_CAPABILITY_LEN + 1];
-        assert!(compose_attribution(&fixture_joiner_seed(), &big_cap).is_err());
+        assert!(compose_attribution(&fixture_joiner_seed(), &big_cap, &reply()).is_err());
     }
 
     #[test]

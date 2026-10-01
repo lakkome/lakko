@@ -60,10 +60,10 @@
 //!     fresh ephemeral per envelope (`crate::envelope::seal`),
 //!     so we don't need the owner-side prekey here.
 //!
-//! ## Wire format (manual codec, frozen at v1)
+//! ## Wire format (manual codec, v2 — ADR-0060 §6)
 //!
 //! ```text
-//! u8           schema version (= 1)
+//! u8           schema version (= 2)
 //! [32 bytes]   owner_signature_pubkey            — Ed25519 verifying key
 //! [16 bytes]   owner_account_id                  — UUIDv7 raw
 //! [32 bytes]   owner_x25519_pubkey               — long-term HPKE init key
@@ -72,13 +72,44 @@
 //! u8           bootstrap_referral                 — 0/1; flags signup deep-link
 //! u16be        label_len
 //! [label_len]  label_bytes (UTF-8, ≤ MAX_LABEL_LEN)
+//! [16 bytes]   link_id                            — random, the reach scope of this link
+//! [37 bytes]   link_grant                         — ReachGrant, class `link` (SECRET)
 //! [64 bytes]   signature                          — Ed25519 over the above
 //! ```
 //!
 //! Signature covers everything from the schema-version byte through
-//! `label_bytes` inclusive — i.e. the entire encoding except the
+//! `link_grant` inclusive — i.e. the entire encoding except the
 //! trailing 64-byte signature itself. Mirrors `request.rs`'s
 //! pattern exactly.
+//!
+//! v1 (no link grant) is refused: a flag day, since nothing is deployed
+//! (ADR-0060).
+//!
+//! ## The link grant (ADR-0060 §6)
+//!
+//! Since ADR-0060 the owner's mailbox is closed: knowing the owner's account
+//! id no longer lets anyone write the contact request a link exists to
+//! carry. So the capability hands the link holder a **`link` reach grant**
+//! ([`crate::reach::ReachGrant`], class [`crate::reach::ReachClass::Link`]),
+//! derived by the owner as
+//! `ReachGrant::derive(account_seed, Link, link_id, version)` over the
+//! capability's own random [`LINK_ID_LEN`]-byte `link_id`. The holder signs
+//! the contact request's mailbox write with it
+//! (`DsProofSigner::for_reach(grant.seed)`).
+//!
+//! * **Scoped to this link.** The owner registers the grant's public key
+//!   with the Delivery Service (expiring with the link) and, to revoke the
+//!   link, removes exactly that key: every other link of theirs keeps
+//!   working. The `link_id` is also what the owner's other devices need to
+//!   re-derive the key, so the owner keeps it with the link.
+//! * **Inside the signed and the sealed part.** The grant is covered by the
+//!   owner's signature and travels inside the link seal
+//!   ([`crate::link_seal`]), so neither the ledger nor a relay can read,
+//!   strip or swap it. Whoever holds the link (the URL with its fragment)
+//!   holds the grant; that is what a link is.
+//! * **A grant of another class is refused** by [`decode_and_verify`] (and
+//!   by [`compose`]): a capability that handed out a `contact` or `group`
+//!   key would give a link holder reach it was never meant to have.
 //!
 //! All multi-byte integers are big-endian to match the rest of
 //! Lakko's wire formats.
@@ -96,6 +127,8 @@
 //!     max_uses,
 //!     bootstrap_referral,
 //!     "Alice's home",
+//!     &link_id,    // generate_link_id(), kept with the link for revoke
+//!     &link_grant, // ReachGrant::derive(account_seed, Link, &link_id, 0)
 //! )?;
 //! let secret = lakko_contacts::link_seal::generate_link_secret();
 //! let sealed = lakko_contacts::invite::seal_link(&secret, &bytes)?;
@@ -120,10 +153,50 @@ use lakko_crypto::signing::{
 };
 
 use crate::error::{ContactError, Result};
+use crate::reach::{ReachClass, ReachGrant, REACH_GRANT_LEN};
 use crate::request::ACCOUNT_ID_LEN;
 
-/// Current schema version on the wire.
-const SCHEMA_VERSION: u8 = 1;
+/// Current schema version on the wire. v2 (ADR-0060) added the link id and
+/// the link reach grant; v1 is refused.
+const SCHEMA_VERSION: u8 = 2;
+
+/// Length of the random per-link id an `/i/` or `/c/` capability carries:
+/// the scope of the link's reach grant (ADR-0060 §6). The owner mints one
+/// per link ([`generate_link_id`]) and removes exactly that link's key on
+/// revoke.
+pub const LINK_ID_LEN: usize = 16;
+
+/// Mint a fresh random link id (see [`LINK_ID_LEN`]). One per link, never
+/// reused.
+#[must_use]
+pub fn generate_link_id() -> [u8; LINK_ID_LEN] {
+    let mut id = [0u8; LINK_ID_LEN];
+    lakko_crypto::random::fill(&mut id);
+    id
+}
+
+/// Refuse a link grant of any class but [`ReachClass::Link`]. Shared by the
+/// `/i/` and `/c/` codecs, compose and decode alike.
+pub(crate) fn check_link_grant(grant: &ReachGrant) -> Result<()> {
+    if grant.class == ReachClass::Link {
+        Ok(())
+    } else {
+        Err(ContactError::InvalidArgument(format!(
+            "a link capability carries a `link` reach grant, not class {:#04x}",
+            grant.class.to_byte(),
+        )))
+    }
+}
+
+/// Decode the link grant of a capability wire, fail-closed: a grant that
+/// does not parse, or is not class `link`, is an encoding error.
+pub(crate) fn decode_link_grant(bytes: &[u8]) -> Result<ReachGrant> {
+    let grant = ReachGrant::decode(bytes)
+        .map_err(|e| ContactError::InvalidEncoding(format!("link grant: {}", e.code())))?;
+    check_link_grant(&grant)
+        .map_err(|_| ContactError::InvalidEncoding("link grant is not class `link`".into()))?;
+    Ok(grant)
+}
 
 /// Hard cap on the human-visible label. 64 bytes UTF-8 is enough
 /// for "Alice — work account" without bloating the URL beyond a
@@ -187,7 +260,8 @@ pub const BLOB_ID_LEN: usize = 6;
 pub const BLOB_ID_B64URL_LEN: usize = 8;
 
 /// Longest capability wire [`compose`] can produce: the fixed fields plus a
-/// [`MAX_LABEL_LEN`]-byte label and the signature (224 bytes).
+/// [`MAX_LABEL_LEN`]-byte label, the link id, the link grant and the
+/// signature (277 bytes).
 pub const MAX_WIRE_LEN: usize = 1
     + ED25519_PUB_LEN
     + ACCOUNT_ID_LEN
@@ -197,6 +271,8 @@ pub const MAX_WIRE_LEN: usize = 1
     + 1
     + 2
     + MAX_LABEL_LEN
+    + LINK_ID_LEN
+    + REACH_GRANT_LEN
     + SIGNATURE_LEN;
 
 /// Longest sealed `/i/` link blob (what the discovery ledger stores).
@@ -513,6 +589,12 @@ pub struct InviteCapability {
     /// [`MAX_LABEL_LEN`] bytes. Empty string is allowed — the
     /// UI fills in a default from the inviter's display name.
     pub label: String,
+    /// Random per-link id: the scope of [`Self::link_grant`] (ADR-0060 §6).
+    pub link_id: [u8; LINK_ID_LEN],
+    /// The owner's `link` reach grant for this link (ADR-0060 §6). SECRET:
+    /// the holder signs the contact request's mailbox write with it. Always
+    /// class [`ReachClass::Link`].
+    pub link_grant: ReachGrant,
 }
 
 impl InviteCapability {
@@ -560,9 +642,16 @@ impl InviteCapability {
 /// the `label_too_long` path (we reject rather than truncate to
 /// keep the wire format predictable for the receiver).
 ///
+/// `link_id` and `link_grant` are the link's reach scope and grant
+/// (ADR-0060 §6; see the module docs): the owner derives the grant as
+/// `ReachGrant::derive(account_seed, ReachClass::Link, link_id, version)`
+/// and registers its public key before sharing the link.
+///
 /// # Errors
 ///
-/// - [`ContactError::InvalidArgument`] when `label.len() > MAX_LABEL_LEN`.
+/// - [`ContactError::InvalidArgument`] when `label.len() > MAX_LABEL_LEN`,
+///   or `link_grant` is not class [`ReachClass::Link`].
+#[allow(clippy::too_many_arguments)]
 pub fn compose(
     owner_signing: &SigningKey,
     owner_account_id: &[u8; ACCOUNT_ID_LEN],
@@ -571,6 +660,8 @@ pub fn compose(
     max_uses: u32,
     bootstrap_referral: bool,
     label: &str,
+    link_id: &[u8; LINK_ID_LEN],
+    link_grant: &ReachGrant,
 ) -> Result<Vec<u8>> {
     if label.len() > MAX_LABEL_LEN {
         return Err(ContactError::InvalidArgument(format!(
@@ -579,6 +670,7 @@ pub fn compose(
             MAX_LABEL_LEN,
         )));
     }
+    check_link_grant(link_grant)?;
     let owner_pubkey = owner_signing.verifying_key();
     let mut wire = encode_signing_prefix(
         &owner_pubkey,
@@ -588,6 +680,8 @@ pub fn compose(
         max_uses,
         bootstrap_referral,
         label,
+        link_id,
+        link_grant,
     );
     let signature = owner_signing.sign(&wire);
     wire.extend_from_slice(&signature.to_bytes());
@@ -607,7 +701,8 @@ pub fn compose(
 /// # Errors
 ///
 /// - [`ContactError::InvalidEncoding`] — wire format malformed,
-///   wrong schema version, oversized label, or trailing bytes.
+///   wrong schema version (v1 included), oversized label, a link grant
+///   that does not parse or is not class `link`, or trailing bytes.
 /// - [`ContactError::BadSignature`] — Ed25519 verification failed.
 /// - [`ContactError::Crypto`] — embedded pubkey bytes did not
 ///   parse as a valid Ed25519 / X25519 point.
@@ -660,6 +755,9 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<InviteCapability> {
     let label = std::str::from_utf8(label_bytes)
         .map_err(|e| ContactError::InvalidEncoding(format!("label is not valid UTF-8: {e}")))?
         .to_string();
+    let mut link_id = [0u8; LINK_ID_LEN];
+    link_id.copy_from_slice(take_n(&mut cur, LINK_ID_LEN)?);
+    let link_grant = decode_link_grant(take_n(&mut cur, REACH_GRANT_LEN)?)?;
     let signature_bytes = take_n(&mut cur, SIGNATURE_LEN)?;
     let signature = Signature::from_bytes(signature_bytes).map_err(ContactError::Crypto)?;
 
@@ -679,6 +777,8 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<InviteCapability> {
         max_uses,
         bootstrap_referral,
         &label,
+        &link_id,
+        &link_grant,
     );
     owner_signature_pubkey
         .verify(&signed_prefix, &signature)
@@ -692,6 +792,8 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<InviteCapability> {
         max_uses,
         bootstrap_referral,
         label,
+        link_id,
+        link_grant,
     })
 }
 
@@ -699,6 +801,7 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<InviteCapability> {
 // Codec helpers
 // ============================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn encode_signing_prefix(
     owner_signature_pubkey: &VerifyingKey,
     owner_account_id: &[u8; ACCOUNT_ID_LEN],
@@ -707,12 +810,12 @@ fn encode_signing_prefix(
     max_uses: u32,
     bootstrap_referral: bool,
     label: &str,
+    link_id: &[u8; LINK_ID_LEN],
+    link_grant: &ReachGrant,
 ) -> Vec<u8> {
     let label_len_u16 =
         u16::try_from(label.len()).expect("label fits in u16; caller checked MAX_LABEL_LEN");
-    let mut out = Vec::with_capacity(
-        1 + ED25519_PUB_LEN + ACCOUNT_ID_LEN + X25519_PUB_LEN + 8 + 4 + 1 + 2 + label.len(),
-    );
+    let mut out = Vec::with_capacity(MAX_WIRE_LEN);
     out.push(SCHEMA_VERSION);
     out.extend_from_slice(&owner_signature_pubkey.to_bytes());
     out.extend_from_slice(owner_account_id);
@@ -722,6 +825,8 @@ fn encode_signing_prefix(
     out.push(u8::from(bootstrap_referral));
     out.extend_from_slice(&label_len_u16.to_be_bytes());
     out.extend_from_slice(label.as_bytes());
+    out.extend_from_slice(link_id);
+    out.extend_from_slice(&link_grant.encode());
     out
 }
 
@@ -749,7 +854,149 @@ fn take_n<'a>(cur: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reach::ReachClass;
     use lakko_crypto::agreement::SecretKey as X25519SecretKey;
+
+    const TEST_LINK_ID: [u8; LINK_ID_LEN] = [0x1D; LINK_ID_LEN];
+
+    fn test_link_grant() -> ReachGrant {
+        ReachGrant::derive(&[0x5E; 32], ReachClass::Link, &TEST_LINK_ID, 0).unwrap()
+    }
+
+    /// The pre-ADR-0060 argument list, with the test link id and grant.
+    fn compose_t(
+        signing: &SigningKey,
+        account_id: &[u8; ACCOUNT_ID_LEN],
+        x25519_pub: &X25519PublicKey,
+        expiry_ms: u64,
+        max_uses: u32,
+        bootstrap_referral: bool,
+        label: &str,
+    ) -> Result<Vec<u8>> {
+        compose(
+            signing,
+            account_id,
+            x25519_pub,
+            expiry_ms,
+            max_uses,
+            bootstrap_referral,
+            label,
+            &TEST_LINK_ID,
+            &test_link_grant(),
+        )
+    }
+
+    /// Hand-sign a v2 wire whose link grant is `grant_bytes` verbatim,
+    /// bypassing compose's class check.
+    fn hand_signed_with_grant(signing: &SigningKey, version: u8, grant_bytes: &[u8]) -> Vec<u8> {
+        let mut prefix = vec![version];
+        prefix.extend_from_slice(&signing.verifying_key().to_bytes());
+        prefix.extend_from_slice(&[0xA1; ACCOUNT_ID_LEN]);
+        prefix.extend_from_slice(&X25519SecretKey::generate().public_key().to_bytes());
+        prefix.extend_from_slice(&0u64.to_be_bytes());
+        prefix.extend_from_slice(&0u32.to_be_bytes());
+        prefix.push(0);
+        prefix.extend_from_slice(&0u16.to_be_bytes());
+        prefix.extend_from_slice(&TEST_LINK_ID);
+        prefix.extend_from_slice(grant_bytes);
+        let sig = signing.sign(&prefix);
+        prefix.extend_from_slice(&sig.to_bytes());
+        prefix
+    }
+
+    #[test]
+    fn the_link_id_and_grant_round_trip_inside_the_signature() {
+        let (signing, account_id, x25519_pub) = fixture();
+        let link_id = generate_link_id();
+        let grant = ReachGrant::derive(&[7; 32], ReachClass::Link, &link_id, 3).unwrap();
+        let wire = compose(
+            &signing,
+            &account_id,
+            &x25519_pub,
+            0,
+            0,
+            false,
+            "",
+            &link_id,
+            &grant,
+        )
+        .unwrap();
+        let cap = decode_and_verify(&wire).unwrap();
+        assert_eq!(cap.link_id, link_id);
+        assert_eq!(cap.link_grant, grant);
+        assert_eq!(cap.link_grant.verifying_key(), grant.verifying_key());
+        // The id and the grant sit before the signature; flipping either is
+        // a signature failure, so a relay cannot swap the grant.
+        let grant_at = wire.len() - SIGNATURE_LEN - REACH_GRANT_LEN;
+        for at in [grant_at - 1, grant_at + 1, wire.len() - SIGNATURE_LEN - 1] {
+            let mut bad = wire.clone();
+            bad[at] ^= 0x01;
+            assert!(matches!(
+                decode_and_verify(&bad),
+                Err(ContactError::BadSignature)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_grant_of_another_class_is_refused_by_compose_and_decode() {
+        let (signing, account_id, x25519_pub) = fixture();
+        for class in ReachClass::ALL {
+            if class == ReachClass::Link {
+                continue;
+            }
+            let scope: &[u8] = if class.is_account_wide() { b"" } else { b"s" };
+            let grant = ReachGrant::derive(&[7; 32], class, scope, 1).unwrap();
+            assert!(matches!(
+                compose(
+                    &signing,
+                    &account_id,
+                    &x25519_pub,
+                    0,
+                    0,
+                    false,
+                    "",
+                    &TEST_LINK_ID,
+                    &grant,
+                ),
+                Err(ContactError::InvalidArgument(_))
+            ));
+            let wire = hand_signed_with_grant(&signing, SCHEMA_VERSION, &grant.encode());
+            assert!(matches!(
+                decode_and_verify(&wire),
+                Err(ContactError::InvalidEncoding(_))
+            ));
+        }
+        // An unknown class byte is refused the same way.
+        let mut unknown = test_link_grant().encode();
+        unknown[0] = 0;
+        let wire = hand_signed_with_grant(&signing, SCHEMA_VERSION, &unknown);
+        assert!(matches!(
+            decode_and_verify(&wire),
+            Err(ContactError::InvalidEncoding(_))
+        ));
+        // A well-formed hand-signed wire decodes (the helper is sound).
+        let good = hand_signed_with_grant(&signing, SCHEMA_VERSION, &test_link_grant().encode());
+        assert_eq!(
+            decode_and_verify(&good).unwrap().link_grant,
+            test_link_grant()
+        );
+    }
+
+    #[test]
+    fn a_v1_capability_is_refused() {
+        let (signing, _, _) = fixture();
+        let wire = hand_signed_with_grant(&signing, 1, &test_link_grant().encode());
+        assert!(matches!(
+            decode_and_verify(&wire),
+            Err(ContactError::InvalidEncoding(_))
+        ));
+    }
+
+    #[test]
+    fn link_ids_are_random() {
+        assert_ne!(generate_link_id(), generate_link_id());
+    }
 
     fn fixture() -> (SigningKey, [u8; ACCOUNT_ID_LEN], X25519PublicKey) {
         let signing = SigningKey::generate();
@@ -765,7 +1012,7 @@ mod tests {
     fn sealed_link_round_trips_and_refuses_a_wrong_secret() {
         let (signing, account_id, x25519_pub) = fixture();
         let label = "x".repeat(MAX_LABEL_LEN);
-        let wire = compose(&signing, &account_id, &x25519_pub, 0, 3, true, &label).unwrap();
+        let wire = compose_t(&signing, &account_id, &x25519_pub, 0, 3, true, &label).unwrap();
         assert_eq!(wire.len(), MAX_WIRE_LEN);
         let secret = crate::link_seal::generate_link_secret();
         let sealed = seal_link(&secret, &wire).unwrap();
@@ -792,7 +1039,7 @@ mod tests {
     fn a_substituted_capability_is_damaged() {
         let (signing, account_id, x25519_pub) = fixture();
         let secret = crate::link_seal::generate_link_secret();
-        let theirs = compose(
+        let theirs = compose_t(
             &SigningKey::generate(),
             &account_id,
             &x25519_pub,
@@ -808,7 +1055,7 @@ mod tests {
             Err(ContactError::LinkDamaged)
         ));
         // A capability that does not verify inside a well-sealed blob is damaged too.
-        let mut bad = compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
+        let mut bad = compose_t(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
         let n = bad.len();
         bad[n - 1] ^= 1;
         let sealed_bad = seal_link(&secret, &bad).unwrap();
@@ -821,7 +1068,7 @@ mod tests {
     #[test]
     fn compose_and_decode_roundtrip() {
         let (signing, account_id, x25519_pub) = fixture();
-        let wire = compose(
+        let wire = compose_t(
             &signing,
             &account_id,
             &x25519_pub,
@@ -848,7 +1095,7 @@ mod tests {
     #[test]
     fn empty_label_round_trips() {
         let (signing, account_id, x25519_pub) = fixture();
-        let wire = compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
+        let wire = compose_t(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
         let cap = decode_and_verify(&wire).unwrap();
         assert_eq!(cap.label, "");
     }
@@ -856,7 +1103,7 @@ mod tests {
     #[test]
     fn never_expires_means_always_valid() {
         let (signing, account_id, x25519_pub) = fixture();
-        let wire = compose(
+        let wire = compose_t(
             &signing,
             &account_id,
             &x25519_pub,
@@ -874,7 +1121,7 @@ mod tests {
     #[test]
     fn expiry_in_the_past_invalidates() {
         let (signing, account_id, x25519_pub) = fixture();
-        let wire = compose(
+        let wire = compose_t(
             &signing,
             &account_id,
             &x25519_pub,
@@ -893,7 +1140,7 @@ mod tests {
     #[test]
     fn bootstrap_referral_round_trips() {
         let (signing, account_id, x25519_pub) = fixture();
-        let wire = compose(&signing, &account_id, &x25519_pub, 0, 0, true, "").unwrap();
+        let wire = compose_t(&signing, &account_id, &x25519_pub, 0, 0, true, "").unwrap();
         let cap = decode_and_verify(&wire).unwrap();
         assert!(cap.bootstrap_referral);
     }
@@ -902,7 +1149,7 @@ mod tests {
     fn label_at_max_len_round_trips() {
         let (signing, account_id, x25519_pub) = fixture();
         let label = "x".repeat(MAX_LABEL_LEN);
-        let wire = compose(&signing, &account_id, &x25519_pub, 0, 0, false, &label).unwrap();
+        let wire = compose_t(&signing, &account_id, &x25519_pub, 0, 0, false, &label).unwrap();
         let cap = decode_and_verify(&wire).unwrap();
         assert_eq!(cap.label.len(), MAX_LABEL_LEN);
     }
@@ -911,14 +1158,14 @@ mod tests {
     fn label_over_max_len_rejected_at_compose() {
         let (signing, account_id, x25519_pub) = fixture();
         let label = "x".repeat(MAX_LABEL_LEN + 1);
-        let err = compose(&signing, &account_id, &x25519_pub, 0, 0, false, &label).unwrap_err();
+        let err = compose_t(&signing, &account_id, &x25519_pub, 0, 0, false, &label).unwrap_err();
         assert!(matches!(err, ContactError::InvalidArgument(_)));
     }
 
     #[test]
     fn tampered_signature_rejected() {
         let (signing, account_id, x25519_pub) = fixture();
-        let mut wire = compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
+        let mut wire = compose_t(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
         // Flip a bit in the trailing 64-byte signature.
         let len = wire.len();
         wire[len - 1] ^= 0x01;
@@ -929,7 +1176,7 @@ mod tests {
     #[test]
     fn tampered_label_rejected() {
         let (signing, account_id, x25519_pub) = fixture();
-        let mut wire = compose(&signing, &account_id, &x25519_pub, 0, 0, false, "alice").unwrap();
+        let mut wire = compose_t(&signing, &account_id, &x25519_pub, 0, 0, false, "alice").unwrap();
         // Find the label byte 'a' (after the fixed-position prefix) and flip
         // its high bit. The signature was over the original label, so this
         // must surface as BadSignature, not as a UTF-8 error.
@@ -949,7 +1196,7 @@ mod tests {
     #[test]
     fn truncated_wire_rejected() {
         let (signing, account_id, x25519_pub) = fixture();
-        let wire = compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
+        let wire = compose_t(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
         // Strip the trailing 64-byte signature.
         let truncated = &wire[..wire.len() - 1];
         let err = decode_and_verify(truncated).unwrap_err();
@@ -973,7 +1220,7 @@ mod tests {
     #[test]
     fn invalid_bootstrap_referral_byte_rejected() {
         let (signing, account_id, x25519_pub) = fixture();
-        let mut wire = compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
+        let mut wire = compose_t(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
         // bootstrap_referral byte sits at:
         //   1 + 32 + 16 + 32 + 8 + 4 = 93
         wire[93] = 0x42;
@@ -984,7 +1231,7 @@ mod tests {
     #[test]
     fn trailing_bytes_after_signature_rejected() {
         let (signing, account_id, x25519_pub) = fixture();
-        let mut wire = compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
+        let mut wire = compose_t(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
         wire.push(0xDE);
         let err = decode_and_verify(&wire).unwrap_err();
         assert!(matches!(err, ContactError::InvalidEncoding(_)));
@@ -993,7 +1240,7 @@ mod tests {
     #[test]
     fn wire_starts_with_schema_version_byte() {
         let (signing, account_id, x25519_pub) = fixture();
-        let wire = compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
+        let wire = compose_t(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
         assert_eq!(wire[0], SCHEMA_VERSION);
     }
 
@@ -1003,8 +1250,9 @@ mod tests {
         // same fingerprint. The contact only needs to
         // learn one fingerprint per identity.
         let (signing, account_id, x25519_pub) = fixture();
-        let wire_a = compose(&signing, &account_id, &x25519_pub, 1_000, 5, true, "Alice").unwrap();
-        let wire_b = compose(
+        let wire_a =
+            compose_t(&signing, &account_id, &x25519_pub, 1_000, 5, true, "Alice").unwrap();
+        let wire_b = compose_t(
             &signing,
             &account_id,
             &x25519_pub,
@@ -1029,11 +1277,11 @@ mod tests {
         let signing_a = SigningKey::from_seed(&[0xAAu8; 32]);
         let signing_b = SigningKey::from_seed(&[0xBBu8; 32]);
         let cap_a = decode_and_verify(
-            &compose(&signing_a, &account_id, &x25519_pub, 0, 0, false, "").unwrap(),
+            &compose_t(&signing_a, &account_id, &x25519_pub, 0, 0, false, "").unwrap(),
         )
         .unwrap();
         let cap_b = decode_and_verify(
-            &compose(&signing_b, &account_id, &x25519_pub, 0, 0, false, "").unwrap(),
+            &compose_t(&signing_b, &account_id, &x25519_pub, 0, 0, false, "").unwrap(),
         )
         .unwrap();
         assert_ne!(cap_a.owner_fingerprint(), cap_b.owner_fingerprint());
@@ -1043,7 +1291,7 @@ mod tests {
     fn owner_fingerprint_matches_safety_number_format() {
         let (signing, account_id, x25519_pub) = fixture();
         let cap = decode_and_verify(
-            &compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap(),
+            &compose_t(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap(),
         )
         .unwrap();
         let fingerprint = cap.owner_fingerprint();
@@ -1065,7 +1313,7 @@ mod tests {
         let (signing, account_id, x25519_pub) = fixture();
 
         let contact_cap = decode_and_verify(
-            &compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap(),
+            &compose_t(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap(),
         )
         .unwrap();
 
@@ -1079,6 +1327,8 @@ mod tests {
             crate::call_invite::CallInviteMedia::audio_only(),
             &[0x42; 256],
             "",
+            &TEST_LINK_ID,
+            &test_link_grant(),
         )
         .unwrap();
         let call_cap = crate::call_invite::decode_and_verify(&call_wire).unwrap();
@@ -1104,6 +1354,8 @@ mod tests {
             0,
             false,
             "",
+            &TEST_LINK_ID,
+            &test_link_grant(),
         );
         let bad_sig = signing_attacker.sign(&wire);
         wire.extend_from_slice(&bad_sig.to_bytes());
@@ -1133,6 +1385,8 @@ mod tests {
         prefix.push(0); // bootstrap_referral
         prefix.extend_from_slice(&label_len_u16.to_be_bytes());
         prefix.extend_from_slice(&label_bytes);
+        prefix.extend_from_slice(&TEST_LINK_ID);
+        prefix.extend_from_slice(&test_link_grant().encode());
 
         let sig = signing.sign(&prefix);
         let mut wire = prefix;
@@ -1461,7 +1715,7 @@ mod tests {
         let bob_from_pseudonym = [0xB2u8; PSEUDONYM_LEN];
 
         // ---- 1. Alice composes the InviteCapability ------
-        let cap_wire = compose(
+        let cap_wire = compose_t(
             &alice_signing,
             &alice_account_id,
             &alice_x25519_pub,
@@ -1499,6 +1753,7 @@ mod tests {
             1_700_000_000_000, // valid_after_ms
             b"",               // privacy_pass_token (empty for the test)
             None,              // profile (ADR-0048)
+            None,              // reply grant (ADR-0060)
             intro,
         )
         .expect("Bob's ContactRequest compose must succeed");
@@ -1514,8 +1769,9 @@ mod tests {
         assert_eq!(req.from_account_id, Some(bob_account_id));
 
         // ---- 6. Alice opens the HPKE envelope -----------
-        let (_, plaintext) =
-            open_envelope(&req, &alice_x25519_priv).expect("Alice's open must succeed");
+        let plaintext = open_envelope(&req, &alice_x25519_priv)
+            .expect("Alice's open must succeed")
+            .intro;
         assert_eq!(
             plaintext.as_slice(),
             intro.as_ref(),

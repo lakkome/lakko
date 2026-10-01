@@ -3,6 +3,8 @@
 
 package me.lakko.app.push
 
+import me.lakko.app.ds.PushBindingOutcome
+
 import android.content.Context
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
@@ -889,6 +891,80 @@ public object GroupPushRouting {
      * or push-gw error through — which is what makes this change introduce no
      * new state.
      */
+    /** ADR-0057 — [PushRoutingPorts.bindPushGid], bounded like every other
+     *  network call under the routing lock and never allowed to fail the
+     *  mint or rotation it belongs to: a throw or a timeout reads as
+     *  [PushBindingOutcome.FAILED]. */
+    private suspend fun bindBestEffort(pushGid: ByteArray, ports: PushRoutingPorts): PushBindingOutcome =
+        try {
+            boundedOrNull { ports.bindPushGid(pushGid) } ?: PushBindingOutcome.FAILED
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            PushBindingOutcome.FAILED
+        }
+
+    /** Groups whose last bind did not land (503 disabled, offline, timeout):
+     *  the next [ensure] binds again, whatever this device's rank (the port
+     *  sends nothing for a member). Session-scoped, keyed per row. */
+    private val bindRetry: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    private fun noteBindOutcome(accountIdB64: String, groupIdHex: String, outcome: PushBindingOutcome) {
+        val key = accountIdB64 + "|" + groupIdHex.lowercase()
+        if (outcome == PushBindingOutcome.DISABLED || outcome == PushBindingOutcome.FAILED) {
+            bindRetry.add(key)
+        } else {
+            bindRetry.remove(key)
+        }
+    }
+
+    /** android.util.Log is absent on the host JVM: a log line never fails a
+     *  routing decision. */
+    private fun logWarn(message: String) {
+        runCatching { android.util.Log.w("GroupPushRouting", message) }
+    }
+
+    private fun bindRetryDue(accountIdB64: String, groupIdHex: String): Boolean =
+        (accountIdB64 + "|" + groupIdHex.lowercase()) in bindRetry
+
+    /**
+     * ADR-0057, the second security pass (finding 5) — mint a fresh secret and
+     * bind the journal to its routing id BEFORE the caller persists and
+     * broadcasts it, so nobody who learns the id from the broadcast can bind
+     * it to another journal first:
+     *
+     *   * 204: bound; broadcast.
+     *   * 503 (binding disabled) or a failure: logged; broadcast anyway (wakes
+     *     are dropped until bound) and the bind is retried on the next
+     *     provisioning pass.
+     *   * 409 (the id is bound to another journal): mint a fresh secret ONCE
+     *     and bind again; if that also fails, broadcast it all the same.
+     *
+     * Only the owner (mint) or an owner / admin (rotation) gets here; the port
+     * binds nothing for a member.
+     */
+    private suspend fun mintAndBind(
+        accountIdB64: String,
+        groupIdHex: String,
+        ports: PushRoutingPorts,
+    ): Pair<ByteArray, ByteArray> {
+        var secret = ports.mintSecret()
+        var pushGid = ports.derivePushGid(secret)
+        var outcome = bindBestEffort(pushGid, ports)
+        if (outcome == PushBindingOutcome.CONFLICT) {
+            logWarn("push-routing: the minted routing id is bound elsewhere; minting another once")
+            secret.fill(0)
+            secret = ports.mintSecret()
+            pushGid = ports.derivePushGid(secret)
+            outcome = bindBestEffort(pushGid, ports)
+            if (outcome == PushBindingOutcome.CONFLICT) {
+                logWarn("push-routing: the second routing id is bound elsewhere too; broadcasting unbound")
+            }
+        }
+        noteBindOutcome(accountIdB64, groupIdHex, outcome)
+        return secret to pushGid
+    }
+
     private suspend fun bounded(what: String, call: suspend () -> Unit) {
         withTimeoutOrNull(NETWORK_CALL_TIMEOUT_MS) { call() } ?: throw NetworkCallTimedOut(what)
     }
@@ -1226,8 +1302,9 @@ public object GroupPushRouting {
                     // See [boundedOrNull].
                     val stamp = boundedOrNull { ports.freshMintStamp() }
                     if (stamp != null) {
-                        val secret = ports.mintSecret()
-                        val pushGid = ports.derivePushGid(secret)
+                        // ADR-0057 finding 5 — bind BEFORE the secret leaves
+                        // this device (one re-mint on a 409).
+                        val (secret, pushGid) = mintAndBind(accountIdB64, groupIdHex, ports)
                         // Persist BEFORE broadcasting, flagged NOT distributed.
                         // The order is deliberate: minting twice would diverge
                         // the group's push_gid, so a crash between the two must
@@ -1260,6 +1337,20 @@ public object GroupPushRouting {
                 }
 
                 EnsureAction.NONE -> Unit
+            }
+
+            // ADR-0057 obligation 8 — an owner that already holds a secret it
+            // did not mint in this call re-binds it (idempotent on the DS). This
+            // is what binds a group whose secret predates the binding, and
+            // what repairs a bind that failed after an earlier mint or an
+            // admin's rotation (finding 5: 503 or a failure retries here).
+            if (hasSecret && action != EnsureAction.MINT_AND_BROADCAST &&
+                (isOwner || bindRetryDue(accountIdB64, groupIdHex))
+            ) {
+                runCatching { ports.getRecord(groupIdHex) }.getOrNull()?.let { held ->
+                    val outcome = bindBestEffort(ports.derivePushGid(held.secret), ports)
+                    if (outcome != PushBindingOutcome.NOT_PERMITTED) noteBindOutcome(accountIdB64, groupIdHex, outcome)
+                }
             }
 
             // Subscribe (or defer) under push_gid. Owner just minted ->
@@ -1808,8 +1899,9 @@ public object GroupPushRouting {
                     // broadcasting for the same reason the mint path does: two
                     // divergent random secrets are worse than two identical
                     // envelopes.
-                    val next = ports.mintSecret()
-                    val pushGid = ports.derivePushGid(next)
+                    // ADR-0057 finding 5 — bind the new id BEFORE the secret
+                    // is broadcast (one re-mint on a 409).
+                    val (next, pushGid) = mintAndBind(accountIdB64, groupIdHex, ports)
                     ports.persist(groupIdHex, next, stamp.epoch, pushGid, distributed = false)
 
                     // (5) — redistribute at the POST-removal epoch. A failure
@@ -2082,13 +2174,16 @@ public interface PushRoutingPorts {
     public suspend fun unsubscribeFromPushGid(pushGid: ByteArray)
 
     /**
-     * ADR-0043 — delete the `pushGid -> (account, group)` reverse-index row
-     * for a SUPERSEDED id.
+     * ADR-0043 — delete THIS account's `(account, pushGid) -> group`
+     * reverse-index row for a SUPERSEDED id.
      *
      * The stores age asymmetrically: the secret row is keyed
      * `(account, group)` and is OVERWRITTEN in place by a rotation, while
-     * the reverse index is keyed by the `push_gid` itself and is only ever
-     * ADDED to — so without this every rotation leaks one dead entry.
+     * the reverse index is keyed by `(account, push_gid)` and is only ever
+     * ADDED to — so without this every rotation leaks one dead entry. The
+     * delete is scoped to the ports' account (ADR-0042, amended
+     * 2026-09-30): another account on the device that shares the group
+     * keeps its own row.
      */
     public fun deleteRoute(pushGid: ByteArray)
 
@@ -2099,6 +2194,17 @@ public interface PushRoutingPorts {
      *  [GroupPushRouting.redistribute]), which any HOLDER may run — the
      *  bytes are identical, so they need no rank. */
     public suspend fun broadcast(envelope: ByteArray)
+
+    /**
+     * ADR-0057 obligation 8 — bind the group's journal to [pushGid] on the
+     * Delivery Service, signed with this account's root (owner) or admin
+     * registrar key. Since the second security pass (finding 5) it is called
+     * BEFORE the minted or rotated secret is broadcast, and its outcome decides
+     * whether to mint once more ([PushBindingOutcome.CONFLICT]). Never throws
+     * by contract (a throw reads as [PushBindingOutcome.FAILED]); a member
+     * sends nothing ([PushBindingOutcome.NOT_PERMITTED]).
+     */
+    public suspend fun bindPushGid(pushGid: ByteArray): PushBindingOutcome = PushBindingOutcome.NOT_PERMITTED
 }
 
 /**
@@ -2116,6 +2222,7 @@ public class NativePushRoutingPorts(
     private val unsubscribeFn: suspend (ByteArray) -> Unit,
     private val broadcastFn: suspend (ByteArray) -> Unit,
     private val groupEpochFn: suspend () -> ULong?,
+    private val bindFn: suspend (ByteArray) -> PushBindingOutcome = { PushBindingOutcome.NOT_PERMITTED },
 ) : PushRoutingPorts {
 
     override fun mintSecret(): ByteArray =
@@ -2163,7 +2270,7 @@ public class NativePushRoutingPorts(
             distributed,
             mintEpoch,
         )
-        routeStore.put(PushClient.pseudonymHex(pushGid), accountIdB64, groupIdHex)
+        routeStore.put(accountIdB64, PushClient.pseudonymHex(pushGid), groupIdHex)
     }
 
     override fun markDistributed(groupIdHex: String) {
@@ -2183,10 +2290,12 @@ public class NativePushRoutingPorts(
     }
 
     override fun deleteRoute(pushGid: ByteArray) {
-        routeStore.remove(PushClient.pseudonymHex(pushGid))
+        routeStore.remove(accountIdB64, PushClient.pseudonymHex(pushGid))
     }
 
     override suspend fun broadcast(envelope: ByteArray) {
         broadcastFn(envelope)
     }
+
+    override suspend fun bindPushGid(pushGid: ByteArray): PushBindingOutcome = bindFn(pushGid)
 }

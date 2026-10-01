@@ -1021,7 +1021,7 @@ public class ChatViewModel(
      * reason, not about hiding every error.
      */
     private fun reportMembershipFailure(e: Throwable, op: String, fallbackKey: String) {
-        // ADR-0058 section 6: the reason, the token pool or the device clock
+        // ADR-0061 section 6: the reason, the token pool or the device clock
         // pick the sentence; anything else is the action's own key. The raw
         // message stays in the log, for the people it was written for.
         mutableMembershipError.value = me.lakko.app.chat.chatErrorText(
@@ -1034,7 +1034,7 @@ public class ChatViewModel(
         android.util.Log.w("ChatViewModel", "$op failed", e)
     }
 
-    /** ADR-0058 section 6 — a failed chat action's sentence, [fallbackKey] unless the error names itself. */
+    /** ADR-0061 section 6 — a failed chat action's sentence, [fallbackKey] unless the error names itself. */
     private fun chatError(err: Throwable, fallbackKey: String): UiText {
         // The raw message is for the log. A host JVM test has no
         // android.util.Log, and the sentence must not depend on one.
@@ -3324,7 +3324,7 @@ public class ChatViewModel(
 
         /** Finished takes waiting to be read by their upload (see
          *  [sendRecordedTake]). */
-        private const val MEDIA_OUTBOX_DIR: String = "chat-media-outbox"
+        internal const val MEDIA_OUTBOX_DIR: String = "chat-media-outbox"
     }
 
     /** VM-local composer + transient flags. Persistent timeline

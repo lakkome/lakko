@@ -86,6 +86,8 @@ public class BackupClient(
          *  holds them. The index the snapshot cannot supply: a restored
          *  provider holds every group and offers no way to enumerate them. */
         knownGroupIdsHex: List<String> = emptyList(),
+        /** ADR-0058 section 5.2 — the folded synced state's bytes, or `null`. */
+        syncedState: ByteArray? = null,
     ) {
         val createdAtMs = System.currentTimeMillis().toULong()
         val payload = buildBackupPayload(
@@ -98,6 +100,7 @@ public class BackupClient(
             // backup: one malformed local entry must not cost the whole
             // envelope.
             knownGroupIds = knownGroupIdsHex.mapNotNull(::groupIdBytesOrNull),
+            syncedState = syncedState?.takeIf { it.isNotEmpty() },
         )
         val envelope = sealBackup(phrase = phraseBytes, payloadBytes = payload)
         // ADR-0037: mint the auth-signed head, frame `TAG ‖ head ‖ envelope`,
@@ -156,6 +159,7 @@ public class BackupClient(
         contacts: List<BackupContactRecord> = emptyList(),
         wholeStorageSnapshot: ByteArray = ByteArray(0),
         knownGroupIdsHex: List<String> = emptyList(),
+        syncedState: ByteArray? = null,
     ): UploadResult {
         val cached = PhraseStore.getPhrase(context, accountIdB64)
             ?: return UploadResult.CacheMiss
@@ -170,6 +174,7 @@ public class BackupClient(
                 context = context,
                 accountIdB64 = accountIdB64,
                 knownGroupIdsHex = knownGroupIdsHex,
+                syncedState = syncedState,
             )
             return UploadResult.Uploaded
         } catch (cause: Throwable) {

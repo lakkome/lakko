@@ -187,7 +187,7 @@ public final class CallUiState: ObservableObject {
         /// Wall-clock timestamp.
         public let ts: Date
         /// A system event kept as the way to render it, so a line already in
-        /// the call chat follows a language switch (ADR-0058). `nil` for a
+        /// the call chat follows a language switch (ADR-0061). `nil` for a
         /// message a person typed, whose ``text`` is the whole of it.
         public let systemText: UiText?
 

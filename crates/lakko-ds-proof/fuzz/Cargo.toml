@@ -30,6 +30,19 @@ test = false
 doc = false
 bench = false
 
+# `Delegation::decode` / `parse_header_value` (ADR-0060 section 2) run on the
+# value of an `x-lakko-ds-delegation` header anyone can send with a mailbox
+# write, before any reach key is looked up. The fixed-length parser must stay
+# panic-free, a delegation that parses must re-encode to the identical bytes
+# and header text, and the verify that follows must never panic on a hostile
+# expiry.
+[[bin]]
+name = "delegation_parse"
+path = "fuzz_targets/delegation_parse.rs"
+test = false
+doc = false
+bench = false
+
 # ADR-0057: `SignedStatement::decode` is the first thing every ownership route
 # of services/ds (claim, reset, register epoch, registrars, root transfer, push
 # binding) runs on a request body anyone can send, before any root or

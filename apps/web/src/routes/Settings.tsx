@@ -2,11 +2,13 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `/settings/:section?` — Profile · Security · Appearance · Language · Media ·
- * About · Account (docs/ux/client-redesign.md section 5.5). A section list on the
+ * `/settings/:section?` — Profile · Privacy · Security · Chat folders · Appearance ·
+ * Language · Media · About · Account (docs/ux/client-redesign.md section 5.5; Privacy is
+ * docs/ux/who-can-find-me.md). A section list on the
  * left, the section on the right; a narrow screen shows one of the two.
  * `/settings` lands on Profile. `recovery` (authenticator, email or phone) is
- * a page under Security rather than a section of its own. Account is last:
+ * a page under Security rather than a section of its own, and
+ * `privacy-groups` (the chosen groups and channels) a page under Privacy. Account is last:
  * it holds the export and the danger zone.
  */
 import { Show, type JSX } from "solid-js";
@@ -24,16 +26,35 @@ import { Icon, type IconName } from "../ui/icons";
 import { setTheme, useTheme, type Theme } from "../ui/theme";
 import { currentLanguage, supportedLanguages, t } from "../l10n";
 import { LanguagePicker } from "../l10n/LanguagePicker";
+import { WhoCanFindMeList, WhoCanFindMeSection } from "../settings/WhoCanFindMe";
 import Profile from "./Profile";
+import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
 import { paths } from "./paths";
 
-type Section = "profile" | "security" | "appearance" | "language" | "media" | "about" | "account";
-type Page = Section | "recovery";
+type Section =
+  | "profile"
+  | "privacy"
+  | "security"
+  | "folders"
+  | "appearance"
+  | "language"
+  | "media"
+  | "about"
+  | "account";
+type Page = Section | "recovery" | "privacy-groups";
+
+/** A section's label: a catalog key, or (for the sections main added before
+ *  their keys exist) a literal. */
+type SectionLabel = { labelKey: string; label?: undefined } | { label: string; labelKey?: undefined };
 
 // Language sits after Appearance (`docs/ux/localization.md` section 1).
-const SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
+const SECTIONS: ReadonlyArray<{ id: Section; icon: IconName } & SectionLabel> = [
   { id: "profile", labelKey: "settings.section.profile", icon: "user" },
+  { id: "privacy", label: "Privacy", icon: "eye" },
   { id: "security", labelKey: "settings.section.security", icon: "shield" },
+  // docs/ux/chat-folders.md section 4 - between Notifications (which the web
+  // does not have) and Appearance.
+  { id: "folders", label: "Chat folders", icon: "folder" },
   { id: "appearance", labelKey: "settings.section.appearance", icon: "palette" },
   { id: "language", labelKey: "settings.language.title", icon: "globe" },
   { id: "media", labelKey: "settings.section.media", icon: "video" },
@@ -48,6 +69,7 @@ function currentLanguageOwnName(): string {
 
 function pageOf(s: string | undefined): Page | null {
   if (s === "recovery") return "recovery";
+  if (s === "privacy-groups") return "privacy-groups";
   // The former Data section: its export card now sits under Account.
   if (s === "data") return "account";
   return SECTIONS.some((x) => x.id === s) ? (s as Section) : null;
@@ -65,7 +87,8 @@ export default function Settings(): JSX.Element {
   // The list highlights the section a page belongs to.
   const highlighted = (): Section => {
     const p = shown();
-    return p === "recovery" ? "security" : p;
+    if (p === "recovery") return "security";
+    return p === "privacy-groups" ? "privacy" : p;
   };
 
   const username = (): string => {
@@ -101,7 +124,7 @@ export default function Settings(): JSX.Element {
             inactiveClass=""
           >
             <Icon name={s.icon} size={20} />
-            <span>{t(s.labelKey)}</span>
+            <span>{s.labelKey !== undefined ? t(s.labelKey) : s.label}</span>
             <Show when={s.id === "language"}>
               <span class="lk-settings-nav-trail">
                 <bdi lang={currentLanguage()}>{currentLanguageOwnName()}</bdi>
@@ -119,11 +142,20 @@ export default function Settings(): JSX.Element {
           <Show when={shown() === "profile"}>
             <Profile />
           </Show>
+          <Show when={shown() === "privacy"}>
+            <WhoCanFindMeSection />
+          </Show>
+          <Show when={shown() === "privacy-groups"}>
+            <WhoCanFindMeList />
+          </Show>
           <Show when={shown() === "security"}>
             <SecuritySection />
           </Show>
           <Show when={shown() === "recovery"}>
             <RecoverySection />
+          </Show>
+          <Show when={shown() === "folders"}>
+            <ChatFoldersSection />
           </Show>
           <Show when={shown() === "appearance"}>
             <AppearanceSection />

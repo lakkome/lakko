@@ -33,6 +33,27 @@ Lists the account's connected devices: this device / other, platform when
 known, added-on date (from the binding). Remove asks for confirmation and
 removes the device everywhere. Nothing about chats appears here.
 
+### 3.1 This device was removed
+
+When another device of the account removes this one, this device learns it
+from the DeviceGroup journal (its own removal commit leaves its DeviceGroup
+inactive). From then on nothing new reaches it, so it must not pretend to be
+synchronizing. It shows one full-screen state instead of the app:
+
+- Title: **This device was removed**
+- Body: "It was removed from your account on another device. New messages no
+  longer reach it. Sign out, then sign in again if you want to use it."
+- One button: **Sign out**. It does what "Forget this device" does: this
+  device's keys and local history go, the other devices keep theirs.
+
+No dismiss, no retry, no chat list behind it. Shown on web, iOS and Android
+alike, at launch too if the removal landed while the app was closed.
+
+A device cut off by a DeviceGroup reset (another device repaired a forked
+DeviceGroup, ADR-0057 2026-09-30) is not covered here: it reads `401` rather
+than its own removal, and a `401` is not proof of removal (a wrong clock
+gives the same answer). Unbuilt.
+
 ## 4. Chats with several devices per person
 
 - A 1x1 chat is a chat with exactly two people, whatever the device count.
@@ -58,3 +79,5 @@ not a screen.
   the account's known groups (one boolean drives "Synchronizing...").
 - Per member: the resolved account key (people, not leaves, in every list).
 - Per device in the DeviceGroup roster: binding `issued_at`, self flag.
+- Whether this device's own DeviceGroup is still active (`DeviceGroup.isActive`),
+  which drives section 3.1.

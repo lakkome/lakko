@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # Localization tails after batches 1-5
 
-ADR-0058 S5. The strings the five batches left in English, or held as text that did not follow a language switch.
+ADR-0061 S5. The strings the five batches left in English, or held as text that did not follow a language switch.
 
 ## Moved
 

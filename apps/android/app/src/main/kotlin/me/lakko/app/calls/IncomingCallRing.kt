@@ -102,7 +102,7 @@ public data class CallRingContent(val title: String, val body: String)
  * message preview. A caller this device cannot name falls back to the same word
  * the in-app banner has always used rather than to an account id, which would
  * be both meaningless and a leak onto a locked screen. The words are the
- * catalog's (ADR-0058), in the interface language.
+ * catalog's (ADR-0061), in the interface language.
  */
 public fun callRingContent(
     callerName: String?,

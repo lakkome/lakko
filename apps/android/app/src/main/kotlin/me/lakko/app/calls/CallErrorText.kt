@@ -6,7 +6,7 @@ package me.lakko.app.calls
 import me.lakko.app.l10n.UiText
 
 /*
- * ADR-0058 section 6 — what a call screen says about a failed start or join.
+ * ADR-0061 section 6 — what a call screen says about a failed start or join.
  *
  * The Kotlin twin of `apps/web/src/calls/call-errors.ts`. A failure renders
  * from its kind, never from core, SFU, server or transport prose: that prose

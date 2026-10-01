@@ -12,7 +12,7 @@ final class GroupInvitePageTests: XCTestCase {
     private let key = Data((0..<12).map { UInt8($0) })
     private let pointerLink = "https://lakko.me/g/" + String(repeating: "A", count: 8)
 
-    /// The catalog wraps a name argument in bidi isolates (ADR-0058); the
+    /// The catalog wraps a name argument in bidi isolates (ADR-0061); the
     /// headline assertions compare the words.
     private func plain(_ text: String?) -> String? {
         text?.unicodeScalars

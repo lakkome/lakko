@@ -111,7 +111,7 @@ export const apiError = { is: isChannelApiError };
  *  connection that never produced a JSON envelope. */
 export const CHANNELS_UNREACHABLE = "channels-unreachable";
 
-/** The catalog key of the sentence for a channels error code (ADR-0058
+/** The catalog key of the sentence for a channels error code (ADR-0061
  *  section 6: the server's `detail` prose is never shown). */
 const CHANNEL_ERROR_KEYS: Readonly<Record<string, string>> = {
   [CHANNELS_UNREACHABLE]: "channels.error.unreachable",
@@ -285,7 +285,7 @@ export async function fetchEpoch(
   return fetchJson<ChannelEpoch>(`${base}/v1/channels/${channelIdHex}/epoch`);
 }
 
-/** Register a subscriber's X25519 pubkey. */
+/** Register a subscriber's Ed25519 public key (ADR-0060). */
 export async function subscribe(
   channelIdHex: string,
   subscriberPubkeyHex: string,
@@ -557,4 +557,131 @@ export async function commitRotation(
     throw await parseError(resp);
   }
   return (await resp.json()) as ChannelEpoch;
+}
+
+// ---------------------------------------------------------
+// ADR-0060 section 3 — member cards
+// ---------------------------------------------------------
+
+/** The request header a member-card upload or delete carries its
+ *  subscriber signature in. Same value as the core's
+ *  `memberCardSigHeaderName()`; kept as a constant so this module stays free
+ *  of the wasm loader. */
+export const MEMBER_CARD_SIG_HEADER = "x-lakko-member-card-sig";
+
+/** One entry of `GET /v1/channels/:id/members`: the opaque sealed card
+ *  under the subscriber key it was uploaded for. */
+export interface MemberCardEntry {
+  /** The 32-byte subscriber key (Ed25519). */
+  readonly subscriberPk: Uint8Array;
+  /** The sealed member card. */
+  readonly card: Uint8Array;
+}
+
+/** One page of member cards. */
+export interface MemberCardPage {
+  readonly members: ReadonlyArray<MemberCardEntry>;
+  /** The `after` for the next page (base64url of the last key), `null`
+   *  when this page was the last. */
+  readonly nextAfter: string | null;
+}
+
+function octetBody(bytes: Uint8Array): Blob {
+  return new Blob(
+    [bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer],
+    { type: "application/octet-stream" },
+  );
+}
+
+/** `PUT /v1/channels/:id/members/:subscriber_pk_hex` — upload this
+ *  subscriber's sealed member card. `signature` is
+ *  `ChannelSubscriberKeypair.memberCardRequestSignature(channelId, card)`.
+ *
+ *  Throws `ChannelApiError`:
+ *  - `unknown-subscriber` (404) — the key is not registered on the channel
+ *  - `member-card-epoch-in-future` (409) — sealed past the current epoch
+ *  - `member-card-stale` (409) — older than the card already stored
+ *  - `bad-member-signature` (401), `bad-member-card` (400) */
+export async function putMemberCard(
+  channelIdHex: string,
+  subscriberPubkeyHex: string,
+  card: Uint8Array,
+  signature: string,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  const resp = await fetch(
+    `${base}/v1/channels/${channelIdHex}/members/${subscriberPubkeyHex}`,
+    {
+      method: "PUT",
+      headers: {
+        "content-type": "application/octet-stream",
+        [MEMBER_CARD_SIG_HEADER]: signature,
+      },
+      body: octetBody(card),
+    },
+  );
+  if (!resp.ok) throw await parseError(resp);
+}
+
+/** `DELETE /v1/channels/:id/members/:subscriber_pk_hex` — remove this
+ *  subscriber's card (unsubscribe). `signature` is the signature over the
+ *  EMPTY card. Idempotent. */
+export async function deleteMemberCard(
+  channelIdHex: string,
+  subscriberPubkeyHex: string,
+  signature: string,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  const resp = await fetch(
+    `${base}/v1/channels/${channelIdHex}/members/${subscriberPubkeyHex}`,
+    { method: "DELETE", headers: { [MEMBER_CARD_SIG_HEADER]: signature } },
+  );
+  if (!resp.ok) throw await parseError(resp);
+}
+
+/** `DELETE /v1/channels/:id/subscribers/:subscriber_pk_hex` — leave the
+ *  channel (ADR-0060 section 3): the server drops the subscriber row, its
+ *  seed envelopes and its member card. `signature` is the header the wasm
+ *  `ChannelSubscriberKeypair.unsubscribeRequestHeader` returns, sent under
+ *  the name `unsubscribeSigHeaderName()` returns. Idempotent `204`.
+ *
+ *  Throws `ChannelApiError` on a refusal (`bad-unsubscribe-signature` /
+ *  `stale-unsubscribe` 401, an unknown channel 404) and lets a network
+ *  failure (`fetch` rejecting) through as it came. */
+export async function unsubscribeSubscriber(
+  channelIdHex: string,
+  subscriberPubkeyHex: string,
+  signature: { readonly headerName: string; readonly value: string },
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  const resp = await fetch(
+    `${base}/v1/channels/${channelIdHex}/subscribers/${subscriberPubkeyHex}`,
+    { method: "DELETE", headers: { [signature.headerName]: signature.value } },
+  );
+  if (!resp.ok) throw await parseError(resp);
+}
+
+/** `GET /v1/channels/:id/members?after=&limit=` — one page of member cards,
+ *  ascending by subscriber key. `after` is the previous page's `nextAfter`. */
+export async function listMemberCards(
+  channelIdHex: string,
+  after: string | null,
+  limit?: number,
+  base: string = DEFAULT_BASE,
+): Promise<MemberCardPage> {
+  const q = new URLSearchParams();
+  if (after !== null) q.set("after", after);
+  if (limit !== undefined) q.set("limit", String(limit));
+  const qs = q.toString();
+  const body = await fetchJson<{
+    members: ReadonlyArray<{ subscriber_pk_b64: string; card_b64: string }>;
+    next_after: string | null;
+  }>(`${base}/v1/channels/${channelIdHex}/members${qs.length > 0 ? `?${qs}` : ""}`);
+  return {
+    members: body.members.map((m) => ({
+      subscriberPk: base64UrlDecode(m.subscriber_pk_b64),
+      card: base64UrlDecode(m.card_b64),
+    })),
+    nextAfter: body.next_after ?? null,
+  };
 }

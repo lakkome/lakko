@@ -110,7 +110,7 @@ extension RecoverViewModel.Mode {
     /// Row order on the method list (UX spec section 5.6).
     static let allCases: [RecoverViewModel.Mode] = [.phrase, .anotherDevice, .totp, .contact, .shares]
 
-    /// The catalog key of the row title (ADR-0058).
+    /// The catalog key of the row title (ADR-0061).
     var titleKey: String {
         switch self {
         case .phrase: return "recovery.method.phrase.title"

@@ -173,7 +173,7 @@ public sealed interface GroupCallStartOutcome {
     /** The call to join is no longer live. */
     public data object Ended : GroupCallStartOutcome
 
-    /** [message] renders from the kind of failure (ADR-0058); the diagnostic is in the log. */
+    /** [message] renders from the kind of failure (ADR-0061); the diagnostic is in the log. */
     public data class Failed(val message: UiText) : GroupCallStartOutcome
 }
 

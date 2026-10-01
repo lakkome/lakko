@@ -638,6 +638,16 @@ class MultiJoinerCall private constructor(
             // under the conversation's lock. A relay payload binds the pin to
             // no conversation and no member; dropped, never stored.
             FfiIncomingEnvelopeKind.PIN -> Unit
+            // ADR-0060 / ADR-0057 — the scoped-discovery envelopes and the
+            // registrar seed ride a conversation journal or the DeviceGroup,
+            // never the SFU signal-relay. Off-contract here — dropped.
+            FfiIncomingEnvelopeKind.INTRODUCTION_OFFER,
+            FfiIncomingEnvelopeKind.INTRODUCTIONS,
+            FfiIncomingEnvelopeKind.VISIBILITY,
+            FfiIncomingEnvelopeKind.REACH_STATE,
+            FfiIncomingEnvelopeKind.REGISTRAR_SEED,
+            FfiIncomingEnvelopeKind.COMMITTER_DELEGATION,
+            -> Unit
         }
     }
 

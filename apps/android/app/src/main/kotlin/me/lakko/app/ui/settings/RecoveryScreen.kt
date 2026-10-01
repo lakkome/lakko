@@ -681,7 +681,7 @@ private val TOTP_GENERIC = UiText("settings.recovery.totp.error.generic")
 private val CONTACT_GENERIC = UiText("settings.recovery.contact.error.generic")
 
 /**
- * What an enrolment failure reads as (ADR-0058: from its kind, never from
+ * What an enrolment failure reads as (ADR-0061: from its kind, never from
  * server prose): a limit says when to try again, a network failure says so,
  * anything else is the flow's generic sentence.
  */

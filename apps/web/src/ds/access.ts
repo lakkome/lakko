@@ -6,8 +6,11 @@
  * name. This module holds the client half of that contract that is not a
  * network call: which signer proves a request to which journal, the rules the
  * DS client follows when a proof is refused, and the pure decisions the call
- * sites share (register-before-publish, heal-on-apply, the clock-skew copy,
- * the knock sequence).
+ * sites share (register-before-publish, the clock-skew copy, the knock
+ * sequence), and, since ADR-0057, which AUTHORITY this device holds over a
+ * journal: its root (the owner), a registrar seed the owner appointed, or
+ * none. An epoch key opens a journal and registers nothing; only the root and
+ * registrars register epochs (`./ownership`).
  *
  * ## Where a signer comes from
  *
@@ -39,6 +42,9 @@
  */
 import { t } from "../l10n";
 
+import { OwnerClaimMemo } from "./owner-claim";
+import type { JournalAuthority } from "./ownership";
+
 /** The header a proof travels in (`dsProofHeaderName()` on the wasm surface;
  *  pinned against it by `access.test.ts`). */
 export const DS_PROOF_HEADER = "x-lakko-ds-proof";
@@ -57,7 +63,6 @@ export const CLOCK_SKEW_NOTICE = (): string => t("ds.clock_skew");
 export interface ProofSigner {
   readonly epoch: bigint;
   sign(method: string, path: string, query: string, body: Uint8Array): string;
-  groupClaimBodyJson(): string;
   mailboxClaimBodyJson(): string;
   verifyingKey(): Uint8Array;
   mailboxPseudonym(): Uint8Array;
@@ -68,6 +73,29 @@ export interface ProofSigner {
  *  source does not hold the group (or cannot derive: an evicted group). The
  *  returned signer is handed over: the registry frees it. */
 export type GroupSignerSource = (groupId: Uint8Array) => ProofSigner | null | undefined;
+
+/**
+ * ADR-0057 - does THIS account own the journal of `groupId` (hold its root)?
+ * `true` / `false` for a group this source holds, `null` for one it does not
+ * know. Chat groups answer from the live role table, the DeviceGroup source
+ * answers `true` for its own id, the channel owner's PublisherGroup `true`.
+ */
+export type JournalOwnerSource = (groupId: Uint8Array) => boolean | null | undefined;
+
+/** Builds the statement signers (wasm) for the registry, installed by the
+ *  account's session (`ds/journal-authority.ts`). */
+export interface JournalAuthorityFactory {
+  /** The root authority of the signed-in account over `groupId`, or `none`. */
+  root(groupId: Uint8Array): JournalAuthority;
+  /** The registrar authority from a seed the owner handed this account, or
+   *  `none`. */
+  registrar(groupId: Uint8Array): JournalAuthority;
+  /** ADR-0057 second security pass, finding 4 - is this account known to
+   *  hold the journal root (`root-held.ts`)? Absent = always. */
+  rootHeld?(groupId: Uint8Array): boolean;
+  /** Record that it does. */
+  markRootHeld?(groupId: Uint8Array): void;
+}
 
 /** Lowercase hex, the form every DS path names a journal by. */
 export function journalHex(bytes: Uint8Array): string {
@@ -104,7 +132,12 @@ export class DsAccessRegistry {
     { current: ProofSigner | null; previous: ProofSigner | null }
   >();
   private readonly mailboxes = new Map<string, ProofSigner>();
-  private readonly claimedGroups = new Set<string>();
+  private readonly ownerSources = new Set<JournalOwnerSource>();
+  private authorityFactory: JournalAuthorityFactory | null = null;
+  private readonly claimListeners = new Set<(groupId: Uint8Array) => void>();
+  /** ADR-0057 obligation 2 - which journals the owner claimed this session
+   *  (`./owner-claim`). Shared by every `DsClient`. */
+  readonly ownerClaims = new OwnerClaimMemo();
 
   /** Add a source; returns the function that removes it. */
   registerGroupSource(source: GroupSignerSource): () => void {
@@ -162,13 +195,119 @@ export class DsAccessRegistry {
     return { current: entry.current, previous: entry.previous };
   }
 
-  /** `true` the first time a group is seen in this session; the DS client
-   *  claims it then (contract point 2, claim on open). */
-  markClaimAttempt(groupId: Uint8Array): boolean {
-    const hex = journalHex(groupId);
-    if (this.claimedGroups.has(hex)) return false;
-    this.claimedGroups.add(hex);
-    return true;
+  /** ADR-0057 - add an owner source; returns the function that removes it. */
+  registerOwnerSource(source: JournalOwnerSource): () => void {
+    this.ownerSources.add(source);
+    return () => {
+      this.ownerSources.delete(source);
+    };
+  }
+
+  /** Install (or clear, with `null`) the signer factory of the signed-in
+   *  account. */
+  setAuthorityFactory(factory: JournalAuthorityFactory | null): void {
+    this.authorityFactory = factory;
+  }
+
+  /** `true` when a source says this account owns the journal. */
+  ownsJournal(groupId: Uint8Array): boolean {
+    for (const source of this.ownerSources) {
+      let answer: boolean | null | undefined;
+      try {
+        answer = source(groupId);
+      } catch {
+        answer = null;
+      }
+      if (answer === true) return true;
+      if (answer === false) return false;
+    }
+    return false;
+  }
+
+  /**
+   * ADR-0057 - what this device may sign for `groupId`: the root when this
+   * account owns the journal, else the registrar seed the owner handed it,
+   * else `none`. The returned signer is the CALLER's to free
+   * (`releaseAuthority`).
+   *
+   * An owner that is not yet known to hold the root (a transfer whose
+   * takeover has not landed, finding 4 of the second security pass) keeps
+   * signing with its registrar seed when it has one; with none it signs with
+   * the root (a group it founded, the DeviceGroup, a PublisherGroup).
+   */
+  journalAuthority(groupId: Uint8Array): JournalAuthority {
+    const factory = this.authorityFactory;
+    if (factory === null) return { kind: "none" };
+    try {
+      if (this.ownsJournal(groupId)) {
+        if (factory.rootHeld !== undefined && !factory.rootHeld(groupId)) {
+          const registrar = factory.registrar(groupId);
+          if (registrar.kind !== "none") return registrar;
+        }
+        return factory.root(groupId);
+      }
+      return factory.registrar(groupId);
+    } catch {
+      return { kind: "none" };
+    }
+  }
+
+  /** This account's root over `groupId` whatever the role table says (the
+   *  outgoing owner's probe), or `none`. The CALLER frees it. */
+  rootAuthority(groupId: Uint8Array): JournalAuthority {
+    const factory = this.authorityFactory;
+    if (factory === null) return { kind: "none" };
+    try {
+      return factory.root(groupId);
+    } catch {
+      return { kind: "none" };
+    }
+  }
+
+  /** `true` when this account is known to hold the root of `groupId`. */
+  rootHeld(groupId: Uint8Array): boolean {
+    const factory = this.authorityFactory;
+    if (factory?.rootHeld === undefined) return true;
+    try {
+      return factory.rootHeld(groupId);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Record that this account holds the root of `groupId`. Never throws. */
+  markRootHeld(groupId: Uint8Array): void {
+    try {
+      this.authorityFactory?.markRootHeld?.(groupId);
+    } catch {
+      /* best effort */
+    }
+  }
+
+  /**
+   * ADR-0057 obligation 2 - the owner's claim of `groupId` landed (`204`),
+   * lazily after a refused request or on opening the group: mark the root
+   * held, settle the session memo, and tell the listeners (the registrar
+   * reconcile, the sweep backoff). Never throws.
+   */
+  noteOwnerClaimed(groupId: Uint8Array): void {
+    this.markRootHeld(groupId);
+    this.ownerClaims.noteClaimed(groupId);
+    for (const listener of this.claimListeners) {
+      try {
+        listener(groupId);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+
+  /** Listen for {@link noteOwnerClaimed}; returns the function that stops. */
+  onOwnerClaimed(listener: (groupId: Uint8Array) => void): () => void {
+    this.claimListeners.add(listener);
+    return () => {
+      this.claimListeners.delete(listener);
+    };
   }
 
   /** Install the signer of one of this device's own mailboxes (the account
@@ -204,7 +343,8 @@ export class DsAccessRegistry {
     this.groups.clear();
     for (const signer of this.mailboxes.values()) freeQuietly(signer);
     this.mailboxes.clear();
-    this.claimedGroups.clear();
+    this.authorityFactory = null;
+    this.ownerClaims.clear();
   }
 }
 
@@ -259,16 +399,18 @@ export function dsClockSkewNotice(err: unknown): string | null {
 }
 
 // ----------------------------------------------------------------------------
-// Register before publish, heal on apply
+// Register before publish (ADR-0053 contract point 3, signed per ADR-0057)
 // ----------------------------------------------------------------------------
 
-/** The one network call the two rules below need, so they can be tested with
- *  a fake. `signedBy === null` sends the registration unsigned. */
+/** The one network call the rule below needs, so it can be tested with a
+ *  fake. The DS client implements it by signing with the journal's authority
+ *  (root or registrar) and throws `NoJournalAuthorityError` without one. */
 export interface EpochRegistrar {
   registerGroupEpoch(
     groupId: Uint8Array,
-    next: ProofSigner,
-    signedBy: ProofSigner | null,
+    epoch: bigint,
+    epochKey: Uint8Array,
+    revokeKeys?: readonly Uint8Array[],
   ): Promise<void>;
 }
 
@@ -285,10 +427,12 @@ export function takeSigner(derive: () => ProofSigner): ProofSigner | null {
 }
 
 /**
- * Contract point 3: register the key of the epoch a commit moves to, proven
- * under the key of the epoch it leaves, BEFORE the commit is published. Throws
- * when the registration is refused; the caller aborts exactly as it would for
- * a failed outbox write (no publish).
+ * Contract point 3 - register the key of the epoch a commit moves to BEFORE
+ * the commit is published, signed with this device's root or registrar key
+ * (ADR-0057 obligation 5), revoking `revokeKeys` in the same statement.
+ * Throws when the registration is refused, or when this device holds no
+ * authority; the caller aborts exactly as it would for a failed outbox write
+ * (no publish).
  *
  * `next === null` means the new epoch's signer could not be derived, which is
  * itself a reason to abort: a commit whose epoch the server will never know
@@ -297,37 +441,13 @@ export function takeSigner(derive: () => ProofSigner): ProofSigner | null {
 export async function registerBeforePublish(
   registrar: EpochRegistrar,
   groupId: Uint8Array,
-  signerN: ProofSigner | null,
-  signerN1: ProofSigner | null,
+  next: ProofSigner | null,
+  revokeKeys: readonly Uint8Array[] = [],
 ): Promise<void> {
-  if (signerN1 === null) {
+  if (next === null) {
     throw new Error("ds access: the next epoch's key could not be derived");
   }
-  await registrar.registerGroupEpoch(groupId, signerN1, signerN);
-}
-
-/**
- * Contract point 4: after a receive batch, when the epoch moved, register the
- * new epoch's key proven under the key captured BEFORE the batch. Best effort:
- * a refusal is expected (someone registered first, or this device was too far
- * behind) and ignored. Returns whether a registration was attempted.
- */
-export async function healAfterApply(
-  registrar: EpochRegistrar,
-  groupId: Uint8Array,
-  before: ProofSigner | null,
-  after: ProofSigner | null,
-): Promise<boolean> {
-  if (before === null || after === null) return false;
-  if (after.epoch === before.epoch && sameBytes(after.verifyingKey(), before.verifyingKey())) {
-    return false;
-  }
-  try {
-    await registrar.registerGroupEpoch(groupId, after, before);
-  } catch {
-    /* expected when another member registered first */
-  }
-  return true;
+  await registrar.registerGroupEpoch(groupId, next.epoch, next.verifyingKey(), revokeKeys);
 }
 
 // ----------------------------------------------------------------------------

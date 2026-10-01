@@ -5,7 +5,7 @@
  * A plain "how long ago" label for a status line ("Refreshed 3 hours ago").
  * Whole words, one unit, never a clock or a date: the reader wants a sense
  * of recency, not a timestamp. Pure: the clock is a parameter. The words
- * are catalog messages (`common.time.*`, ADR-0058); dates are formatted for
+ * are catalog messages (`common.time.*`, ADR-0061); dates are formatted for
  * the interface language unless a locale is given.
  */
 import { currentLanguage, t } from "../l10n";

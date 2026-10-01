@@ -13,6 +13,7 @@ import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
@@ -329,7 +330,7 @@ public class DiscoveryClient(
      *  `blob_id` back (Phase 3c3-server). Sibling of
      *  [inviteUpload]; wire shape is shared. The high-level
      *  [uploadCallInvite] wrapper is the session-gated write. */
-    public suspend fun callInviteUpload(req: InviteUploadRequest): InviteUploadResponse =
+    public suspend fun callInviteUpload(req: CallInviteUploadRequest): InviteUploadResponse =
         doPost("/discovery/call-invite") {
             contentType(ContentType.Application.Json)
             setBody(req)
@@ -559,13 +560,14 @@ public class DiscoveryClient(
 
             val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
-            val oprfHashBytes = blinder.finalize(oprfResp.evaluated)
-            val oprfHashB64 = base64Encode(oprfHashBytes)
+            // ADR-0060 §5: discovery receives the lookup key derived
+            // from the OPRF output, never the output itself.
+            val lookupKeyB64 = base64Encode(blinder.finalize(oprfResp.evaluated).lookupKey)
 
             val resp = register(
                 RegisterRequest(
                     account_id = base64Encode(accountId),
-                    oprf_hash = oprfHashB64,
+                    oprf_hash = lookupKeyB64,
                 ),
             )
             if (!resp.ok) {
@@ -593,10 +595,9 @@ public class DiscoveryClient(
 
             val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
-            val oprfHashBytes = blinder.finalize(oprfResp.evaluated)
-            val oprfHashB64 = base64Encode(oprfHashBytes)
+            val lookupKeyB64 = base64Encode(blinder.finalize(oprfResp.evaluated).lookupKey)
 
-            val resp = lookupRaw(LookupRequest(oprf_hash = oprfHashB64))
+            val resp = lookupRaw(LookupRequest(oprf_hash = lookupKeyB64))
             if (resp == null) {
                 LookupResult(normalisedUsername = normalisedUsername, account = null)
             } else {
@@ -605,6 +606,126 @@ public class DiscoveryClient(
                     account = base64Decode(resp.account_id),
                 )
             }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0060 §5 — username certificate, Everyone, name search
+    // -----------------------------------------------------------------
+
+    /**
+     * `GET /discovery/username-certificate` (session-gated): this account's
+     * certificate, signed now, or `null` when it has no username (404).
+     */
+    public suspend fun fetchUsernameCertificate(): ByteArray? {
+        val resp = getNullableOn404<UsernameCertificateResponse>("/discovery/username-certificate")
+            ?: return null
+        return base64Decode(resp.username_certificate_b64)
+    }
+
+    /** `GET /.well-known/lakko-username-cert-key`: the certificate verifying
+     *  key (32 bytes), for a build without a pinned one. */
+    public suspend fun fetchUsernameCertKey(): ByteArray? {
+        val resp = getNullableOn404<UsernameCertKeyResponse>("/.well-known/lakko-username-cert-key")
+            ?: return null
+        if (resp.alg != "Ed25519") return null
+        return try {
+            me.lakko.app.auth.base64UrlDecodeNoPad(resp.key_b64url).takeIf { it.size == PUBKEY_LEN }
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
+    /**
+     * `PUT /discovery/visibility` (session-gated): enter Everyone with the
+     * discovery lookup key of every name search term ([nameTermLookupKeys],
+     * 64 bytes each, `OprfResult.lookupKey` — never the OPRF output) and the
+     * [publicRecord] composed over the outputs (required by the server in
+     * Everyone), or leave it ([public] `false`, no terms, no record).
+     * Idempotent.
+     */
+    public suspend fun putVisibility(
+        public: Boolean,
+        nameTermLookupKeys: List<ByteArray>,
+        publicRecord: ByteArray? = null,
+    ) {
+        val endpoint = "/discovery/visibility"
+        val authHeader = sessionToken?.let { "Bearer $it" }
+        val response: HttpResponse = try {
+            client.put("$baseUrl$endpoint") {
+                if (authHeader != null) header(io.ktor.http.HttpHeaders.Authorization, authHeader)
+                contentType(ContentType.Application.Json)
+                setBody(visibilityRequest(public, nameTermLookupKeys, publicRecord))
+            }
+        } catch (cause: CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            throw DiscoveryNetworkError(endpoint, cause)
+        }
+        if (!response.status.isSuccess()) {
+            throw DiscoveryHttpError(response.status.value, endpoint, response.safeReadBody())
+        }
+    }
+
+    /**
+     * OPRF one name search term (one `discovery-lookup` token). ADR-0060 §5:
+     * [uniffi.lakko_ffi_uniffi.OprfResult.lookupKey] is what a name lookup and
+     * the Everyone registration send; [uniffi.lakko_ffi_uniffi.OprfResult.output]
+     * stays on the device (public-record and introduction key material).
+     */
+    public suspend fun oprfNameTerm(term: String): uniffi.lakko_ffi_uniffi.OprfResult =
+        uniffi.lakko_ffi_uniffi.OprfBlinder.blindNameTerm(term).use { blinder ->
+            val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
+            blinder.finalize(oprfResp.evaluated)
+        }
+
+    /**
+     * OPRF a username (one `discovery-lookup` token). The certificate binds
+     * [uniffi.lakko_ffi_uniffi.OprfResult.lookupKey]; the output never leaves
+     * the device.
+     */
+    public suspend fun oprfUsername(username: String): uniffi.lakko_ffi_uniffi.OprfResult =
+        uniffi.lakko_ffi_uniffi.OprfBlinder.blind(username).use { blinder ->
+            val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
+            blinder.finalize(oprfResp.evaluated)
+        }
+
+    /** `POST /discovery/name/lookup` (anonymous): the accounts in Everyone
+     *  that published the name term whose discovery lookup key is [lookupKey]
+     *  (`OprfResult.lookupKey`, never the OPRF output; at most 20). */
+    public suspend fun nameLookup(lookupKey: ByteArray): List<PublicAccountHit> {
+        val resp = doPostNullableOn404<NameLookupResponse>("/discovery/name/lookup", anonymous = true) {
+            contentType(ContentType.Application.Json)
+            setBody(NameLookupRequest(oprf_hash_b64 = base64Encode(lookupKey)))
+        } ?: return emptyList()
+        return resp.results.mapNotNull { r ->
+            val id = try {
+                base64Decode(r.account_id_b64).takeIf { id -> id.size == ACCOUNT_ID_LEN }
+            } catch (_: IllegalArgumentException) {
+                null
+            } ?: return@mapNotNull null
+            PublicAccountHit(accountId = id, publicRecord = decodeRecordOrNull(r.public_record_b64))
+        }
+    }
+
+    /**
+     * `POST /discovery/lookup` by a username's discovery LOOKUP KEY
+     * (`OprfResult.lookupKey`, never the OPRF output): the account in
+     * Everyone and its public record, or `null` (404 — unregistered and
+     * hidden answer alike). ADR-0060 §5.
+     */
+    public suspend fun lookupPublic(lookupKey: ByteArray): PublicAccountHit? {
+        val resp = lookupRaw(LookupRequest(oprf_hash = base64Encode(lookupKey))) ?: return null
+        val id = base64Decode(resp.account_id)
+        if (id.size != ACCOUNT_ID_LEN) return null
+        return PublicAccountHit(accountId = id, publicRecord = decodeRecordOrNull(resp.public_record_b64))
+    }
+
+    private fun decodeRecordOrNull(b64: String?): ByteArray? = b64?.let {
+        try {
+            base64Decode(it)
+        } catch (_: IllegalArgumentException) {
+            null
         }
     }
 
@@ -648,11 +769,11 @@ public class DiscoveryClient(
         return OprfBlinder.blindChannel(handle).use { blinder ->
             val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
-            val oprfHashB64 = base64Encode(blinder.finalize(oprfResp.evaluated))
+            val lookupKeyB64 = base64Encode(blinder.finalize(oprfResp.evaluated).lookupKey)
 
             val resp = channelRegister(
                 ChannelRegisterRequest(
-                    oprf_hash = oprfHashB64,
+                    oprf_hash = lookupKeyB64,
                     channel_id = base64Encode(channelId),
                 ),
             )
@@ -680,10 +801,10 @@ public class DiscoveryClient(
         return OprfBlinder.blindChannel(handle).use { blinder ->
             val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
-            val oprfHashB64 = base64Encode(blinder.finalize(oprfResp.evaluated))
+            val lookupKeyB64 = base64Encode(blinder.finalize(oprfResp.evaluated).lookupKey)
 
             val resp = channelLookupRaw(
-                ChannelLookupRequest(oprf_hash = oprfHashB64),
+                ChannelLookupRequest(oprf_hash = lookupKeyB64),
             ) ?: return@use null
             bytesToHexLower(base64Decode(resp.channel_id))
         }
@@ -808,21 +929,17 @@ public class DiscoveryClient(
      * `https://<host>/i/<slug>` pointer URL via
      * [base64UrlEncodeNoPad].
      */
-    public suspend fun uploadInvite(capabilityBytes: ByteArray): ByteArray {
-        if (capabilityBytes.isEmpty()) {
-            throw DiscoveryClientArgError("capabilityBytes must be non-empty")
-        }
-        if (capabilityBytes.size > MAX_CAPABILITY_BYTES) {
-            // Mirror the server-side ceiling so a misbehaving
-            // caller fails fast without a round-trip.
-            throw DiscoveryClientArgError(
-                "capabilityBytes exceeds the $MAX_CAPABILITY_BYTES-byte ceiling " +
-                    "(got ${capabilityBytes.size} bytes)",
-            )
-        }
-
+    public suspend fun uploadInvite(upload: SealedInviteUpload): ByteArray {
+        checkSealedUpload(upload, MAX_CAPABILITY_BYTES)
         val resp = inviteUpload(
-            InviteUploadRequest(capability = base64Encode(capabilityBytes)),
+            InviteUploadRequest(
+                sealed = base64Encode(upload.sealed),
+                issuer_pubkey = base64Encode(upload.issuerPubkey),
+                expiry_ms = upload.expiryMs,
+                max_uses = upload.maxUses,
+                label = upload.label,
+                bootstrap_referral = upload.bootstrapReferral,
+            ),
         )
         // Server returns the 8-character base64url id; decode it
         // back to the raw 6 bytes.
@@ -843,7 +960,7 @@ public class DiscoveryClient(
             throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = inviteFetch(blobId) ?: return null
-        return base64Decode(raw.capability)
+        return base64Decode(raw.sealed)
     }
 
     /**
@@ -981,19 +1098,15 @@ public class DiscoveryClient(
      * `https://<host>/c/<slug>` pointer URL via
      * [base64UrlEncodeNoPad].
      */
-    public suspend fun uploadCallInvite(capabilityBytes: ByteArray): ByteArray {
-        if (capabilityBytes.isEmpty()) {
-            throw DiscoveryClientArgError("capabilityBytes must be non-empty")
-        }
-        if (capabilityBytes.size > MAX_CALL_CAPABILITY_BYTES) {
-            throw DiscoveryClientArgError(
-                "capabilityBytes exceeds the $MAX_CALL_CAPABILITY_BYTES-byte ceiling " +
-                    "(got ${capabilityBytes.size} bytes)",
-            )
-        }
-
+    public suspend fun uploadCallInvite(upload: SealedInviteUpload): ByteArray {
+        checkSealedUpload(upload, MAX_CALL_CAPABILITY_BYTES)
         val resp = callInviteUpload(
-            InviteUploadRequest(capability = base64Encode(capabilityBytes)),
+            CallInviteUploadRequest(
+                sealed = base64Encode(upload.sealed),
+                issuer_pubkey = base64Encode(upload.issuerPubkey),
+                expiry_ms = upload.expiryMs,
+                max_uses = upload.maxUses,
+            ),
         )
         return uploadedBlobId(resp.blob_id, "/discovery/call-invite")
     }
@@ -1012,7 +1125,7 @@ public class DiscoveryClient(
             throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = callInviteFetch(blobId) ?: return null
-        return base64Decode(raw.capability)
+        return base64Decode(raw.sealed)
     }
 
     /**
@@ -1082,27 +1195,38 @@ public class DiscoveryClient(
      * Returns the 6-byte `blobId`, ready to substitute into a
      * `https://<host>/g/<slug>` pointer URL via [base64UrlEncodeNoPad].
      */
-    public suspend fun uploadGroupInvite(
-        capabilityBytes: ByteArray,
-        maxUses: Long,
-    ): ByteArray {
-        if (capabilityBytes.isEmpty()) {
-            throw DiscoveryClientArgError("capabilityBytes must be non-empty")
-        }
-        if (capabilityBytes.size > MAX_GROUP_CAPABILITY_BYTES) {
-            throw DiscoveryClientArgError(
-                "capabilityBytes exceeds the $MAX_GROUP_CAPABILITY_BYTES-byte ceiling " +
-                    "(got ${capabilityBytes.size} bytes)",
-            )
-        }
-
+    public suspend fun uploadGroupInvite(upload: SealedInviteUpload): ByteArray {
+        // No client ceiling: the sealed preview makes the width depend on
+        // the names; the server enforces the codec's exact bound.
+        checkSealedUpload(upload, capabilityCeiling = null)
         val resp = groupInviteUpload(
             GroupInviteUploadRequest(
-                capability = base64Encode(capabilityBytes),
-                max_uses = maxUses,
+                sealed = base64Encode(upload.sealed),
+                issuer_pubkey = base64Encode(upload.issuerPubkey),
+                expiry_ms = upload.expiryMs,
+                max_uses = upload.maxUses,
             ),
         )
         return uploadedBlobId(resp.blob_id, "/discovery/group-invite")
+    }
+
+    /** Fail fast before the network on an upload the server refuses anyway:
+     *  an empty sealed blob, one past the capability ceiling plus the seal's
+     *  overhead ([SEAL_OVERHEAD_MARGIN], a loose bound), or an issuer key
+     *  that is not 32 bytes. */
+    private fun checkSealedUpload(upload: SealedInviteUpload, capabilityCeiling: Int?) {
+        if (upload.sealed.isEmpty()) {
+            throw DiscoveryClientArgError("sealed must be non-empty")
+        }
+        val ceiling = capabilityCeiling?.let { it + SEAL_OVERHEAD_MARGIN }
+        if (ceiling != null && upload.sealed.size > ceiling) {
+            throw DiscoveryClientArgError(
+                "sealed exceeds the $ceiling-byte ceiling (got ${upload.sealed.size} bytes)",
+            )
+        }
+        if (upload.issuerPubkey.size != SIGNING_SEED_LEN) {
+            throw DiscoveryClientArgError("issuerPubkey must be $SIGNING_SEED_LEN bytes")
+        }
     }
 
     /**
@@ -1118,7 +1242,7 @@ public class DiscoveryClient(
             throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = groupInviteFetch(blobId) ?: return null
-        return base64Decode(raw.capability)
+        return base64Decode(raw.sealed)
     }
 
     /**
@@ -1616,12 +1740,10 @@ public class DiscoveryClient(
          *  `MAX_KEY_PACKAGE_LEN`). */
         private const val MAX_CALL_CAPABILITY_BYTES: Int = 8192
 
-        /** Mirror of `services/discovery`'s group-invite
-         *  `MAX_CAPABILITY_BYTES`. The ADR-0028 wire format tops
-         *  out around 363 bytes (a 256-byte group_id); the 512
-         *  ceiling has comfortable headroom and matches the
-         *  server's `VARBINARY(512)` column. */
-        private const val MAX_GROUP_CAPABILITY_BYTES: Int = 512
+        /** Room above a capability ceiling for the link seal (kind + version
+         *  bytes, nonce, tag). A loose client-side bound; the server enforces
+         *  its own exact ceiling. */
+        private const val SEAL_OVERHEAD_MARGIN: Int = 64
 
         /** Ed25519 signing seed length, mirrors
          *  `me.lakko.app.auth` constants. */
@@ -1768,6 +1890,16 @@ public sealed interface ListInvitesResult {
      *  status to deny status-code probing. */
     public data object NotFoundOrNotOwner : ListInvitesResult
 }
+
+/** ADR-0060 §5 — one account in Everyone a lookup answered with, and its
+ *  public record (`null` when discovery sent none). */
+public class PublicAccountHit(
+    /** Raw 16-byte account id. */
+    public val accountId: ByteArray,
+    /** The opaque public record, opened with the OPRF OUTPUT of the round
+     *  that found the hit (`openPublicRecord`). */
+    public val publicRecord: ByteArray?,
+)
 
 /** Result of [DiscoveryClient.lookup]. */
 public data class LookupResult(

@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0053: A journal on the Delivery Service is opened by a key, not by its name
 
-- **Status:** Accepted (2026-09-27, the maintainer's call; S1-S4 built the same day and host-tested; not yet deployed or walked live; S5 open)
+- **Status:** Accepted (2026-09-27, the maintainer's call; S1-S4 built the same day and host-tested; not yet deployed or walked live; S5 open; the registration rule of section 2 superseded by [ADR-0057](0057-journal-ownership.md), 2026-09-28)
 - **Date:** 2026-09-27
 - **Context:** Phase 3 (product hardening), closes G-42
 - **Supersedes:** the "no authentication" posture of `services/ds` (Phase 1.3), and
@@ -645,6 +645,15 @@ design decision.
 These three share one root - the server accepts registrations it cannot bind
 to the group's actual MLS state - and are recorded together rather than
 patched separately.
+
+**Decided and built: [ADR-0057](0057-journal-ownership.md)** (2026-09-28,
+option (a)). A journal is claimed under a root key derived per group from the
+owner's account; only the root and the registrars it appoints register epoch
+keys (an epoch key opens the journal and registers nothing), a higher rank
+replaces what a lower one registered and revokes it in the same transaction,
+and a same-root reset re-claims a re-founded group. `PUT .../access` of
+section 2 now takes an ADR-0057 statement; the ADR-0053 body is refused. The
+first-claim squat on a deterministic id remains a residual stated there.
 
 ## References
 

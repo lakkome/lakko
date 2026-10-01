@@ -25,7 +25,7 @@ import {
   PAIRING_WRONG_ACCOUNT,
 } from "../devices/pairing";
 
-// ADR-0058: every sentence below is a catalog key rendered when the error is
+// ADR-0061: every sentence below is a catalog key rendered when the error is
 // shown, so the language current at that moment is used.
 const offline = (): string => t("common.error.offline");
 const unavailable = (): string => t("common.error.unavailable");
@@ -47,6 +47,21 @@ export const recoveryCodeSendLimited = (): string => t("recovery.error.code_send
 export const deviceRequestLimited = (): string => t("device_link.error.request_limited");
 /** `signup-rate-limited`: signup start or its challenge. */
 export const signupRateLimited = (): string => t("auth.signup.error.rate_limited");
+
+/** `handle-bind-limited` (`PUT /auth/login-handle`, added 2026-09-28):
+ *  choosing or changing a username too often. In minutes, rounded up; over
+ *  an hour (or with no wait given) it says "later" instead of a number. */
+export function handleBindLimitedMessage(retryAfterSecs: number | null): string {
+  const lead = "You have changed your username too often.";
+  if (retryAfterSecs === null || retryAfterSecs > 3600) return `${lead} Try again later.`;
+  const minutes = Math.max(1, Math.ceil(retryAfterSecs / 60));
+  return `${lead} Try again in ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`;
+}
+
+/** `true` when `err` is auth's `429 handle-bind-limited`. */
+export function isHandleBindLimited(err: unknown): boolean {
+  return err instanceof AuthHttpError && err.status === 429 && err.errorCode === "handle-bind-limited";
+}
 
 /** The attempts copy, in minutes when the server asks for more than one. */
 export function tooManyAttemptsMessage(retryAfterSecs: number | null): string {
@@ -75,6 +90,8 @@ export function authLimitMessage(err: unknown): string | null {
       return deviceRequestLimited();
     case "signup-rate-limited":
       return signupRateLimited();
+    case "handle-bind-limited":
+      return handleBindLimitedMessage(err.retryAfter);
     default:
       return tooManyAttemptsMessage(err.retryAfter);
   }

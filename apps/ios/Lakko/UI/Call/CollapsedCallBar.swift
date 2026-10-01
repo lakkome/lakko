@@ -22,7 +22,7 @@ import SwiftUI
 /// in `lakko-ui-rules` answers with a sum type, and
 /// ``CallBarPresentation/line(_:)`` prints it.
 struct CollapsedCallBar: View {
-    /// Re-renders the bar's words on a language switch (ADR-0058).
+    /// Re-renders the bar's words on a language switch (ADR-0061).
     @ObservedObject var l10n = Localization.shared
     /// Who is on the call — ``CallPeerName/callLabel(profileName:groupCall:)``,
     /// the same label the call screen's status line carries.

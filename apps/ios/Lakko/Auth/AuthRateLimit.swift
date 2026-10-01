@@ -27,9 +27,12 @@ public enum AuthRateLimit {
     public static let recoveryCodeSendLimited = "recovery-code-send-limited"
     public static let deviceRequestLimited = "device-request-limited"
     public static let signupRateLimited = "signup-rate-limited"
+    /// `429` from `PUT /auth/login-handle` (`docs/ux/anti-abuse.md` section 2,
+    /// added 2026-09-28): the account changed its username too often.
+    public static let handleBindLimited = "handle-bind-limited"
     public static let limiterUnavailable = "rate-limiter-unavailable"
 
-    // ADR-0058: the copy is read from the catalog when an error is shown,
+    // ADR-0061: the copy is read from the catalog when an error is shown,
     // in the interface language of that moment.
 
     /// Login, recovery login, reset, TOTP, three words, device authorize.
@@ -61,9 +64,23 @@ public enum AuthRateLimit {
         return body.contains(limiterUnavailable)
     }
 
+    /// Choosing or changing a username, limit reached: `Try again in M
+    /// minutes.` with M = ceil(retry_after_secs / 60), `Try again later.` when
+    /// the wait is over an hour or unknown.
+    public static func handleBindLimitedCopy(retryAfterSecs: Int?) -> String {
+        let lead = "You have changed your username too often."
+        guard let secs = retryAfterSecs, secs > 0, secs <= 3600 else {
+            return lead + " Try again later."
+        }
+        let minutes = (secs + 59) / 60
+        return lead + " Try again in \(minutes) " + (minutes == 1 ? "minute." : "minutes.")
+    }
+
     /// The copy for one refusal.
     public static func copy(for refusal: Refusal) -> String {
         switch refusal.code {
+        case handleBindLimited:
+            return handleBindLimitedCopy(retryAfterSecs: refusal.retryAfterSecs)
         case recoveryCodeSendLimited:
             return recoveryCodeSendCopy
         case deviceRequestLimited:
@@ -102,7 +119,7 @@ public enum AuthRateLimit {
 }
 
 /// What the sign-in, sign-up and recovery screens say when something fails
-/// (ADR-0058: errors render from their code, never from a server or core
+/// (ADR-0061: errors render from their code, never from a server or core
 /// message). Mirror of the web `auth/auth-error-copy.ts`: an unknown
 /// username and a wrong password reach the user as the same sentence.
 enum AuthErrorCopy {

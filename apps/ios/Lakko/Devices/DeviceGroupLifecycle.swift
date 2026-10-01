@@ -85,6 +85,12 @@ public enum DeviceGroupLifecycle {
         )
         let fresh = try identity.snapshotStorage()
         snapshotStore.putSnapshot(accountIdB64: accountIdB64, blob: fresh)
+        // ADR-0057 obligation 7 — founded HERE: the next claim may reset the
+        // journal if the same root claimed this deterministic id before (a
+        // DeviceGroup lost with the local state and founded again).
+        if let groupId = try? group.groupId() {
+            JournalFoundingMarks.shared.mark(journalIdHex: DsClient.pseudonymHex(groupId))
+        }
         return Ensured(identity: identity, group: group, bootstrapped: true)
     }
 

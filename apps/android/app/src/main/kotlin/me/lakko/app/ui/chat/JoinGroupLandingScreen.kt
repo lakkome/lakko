@@ -92,8 +92,8 @@ import me.lakko.app.l10n.text
 public class JoinGroupLandingViewModel(
     private val repository: ChatRepository,
     private val slug: String,
-    /** The URL fragment: absent (no preview), the 12-byte link secret, or
-     *  malformed (the link is refused as damaged). */
+    /** The URL fragment: the 12-byte link secret, or absent / malformed (the
+     *  link is refused as damaged: sealed links open nothing without it). */
     private val fragment: me.lakko.app.chat.GroupInviteFragment,
 ) : ViewModel() {
 
@@ -104,7 +104,8 @@ public class JoinGroupLandingViewModel(
         public data object Loading : State
         /** The capability does not decode, verify, or has expired. */
         public data object Invalid : State
-        /** The link carries a fragment its preview does not open under. */
+        /** The link's fragment is missing or malformed, or the link or its
+         *  preview does not open under it. */
         public data object Damaged : State
         /** The ledger answered `429`; the link may be fine. */
         public data object RateLimited : State
@@ -129,8 +130,8 @@ public class JoinGroupLandingViewModel(
 
     private var started = false
 
-    /** The resolved capability wire + the ledger blob id (pointer form only),
-     *  kept so `Request again` does not re-resolve the slug. */
+    /** The OPENED capability's plaintext wire + the ledger blob id (pointer
+     *  form only), kept so `Request again` does not re-resolve the slug. */
     private var resolved: Pair<ByteArray, ByteArray?>? = null
 
     private val mutableRequesting: MutableStateFlow<Boolean> = MutableStateFlow(false)
@@ -147,9 +148,10 @@ public class JoinGroupLandingViewModel(
     public fun start() {
         if (started) return
         started = true
-        if (fragment == me.lakko.app.chat.GroupInviteFragment.Malformed) {
-            // Refused before any network: the old 43-character key, a
-            // truncated secret, anything that is not the 16-character secret.
+        if (fragment !is me.lakko.app.chat.GroupInviteFragment.Secret) {
+            // Refused before any network: no fragment at all (sealed links
+            // open nothing without it), the old 43-character key, a truncated
+            // secret, anything that is not the 16-character secret.
             mutableState.value = State.Damaged
             return
         }
@@ -165,15 +167,16 @@ public class JoinGroupLandingViewModel(
             val nowMs = System.currentTimeMillis().toULong()
             try {
                 // ADR-0028 OQ1 — resolve the slug (a 6-byte ledger-id
-                // pointer => fetch the capability from the ledger; an inline
-                // capability => pass through).
-                val wireAndBlob = repository.resolveGroupInviteSlug(slug)
-                val card = repository.inspectGroupInvite(wireAndBlob.first, fragment, nowMs)
+                // pointer => fetch the sealed link from the ledger; an inline
+                // sealed link => pass through), then open it under the
+                // fragment's secret.
+                val sealedAndBlob = repository.resolveGroupInviteSlug(slug)
+                val card = repository.inspectGroupInvite(sealedAndBlob.first, fragment, nowMs)
                 if (!card.valid) {
                     mutableState.value = State.Invalid
                     return@launch
                 }
-                resolved = wireAndBlob
+                resolved = Pair(card.capabilityWire, sealedAndBlob.second)
                 mutableCard.value = card
                 mutableState.value = State.Ready
             } catch (e: kotlinx.coroutines.CancellationException) {

@@ -122,6 +122,11 @@ public object DeviceGroupLifecycle {
 
         // Bootstrap. Local device becomes the founding leaf.
         val group = DeviceGroup.createFounder(identity, accountIdBytes)
+        // ADR-0057 second security pass, finding 3 — the founding is not
+        // claimed yet: record that BEFORE it is persisted, so no path adds a
+        // device (and sends a Welcome) until a claim lands. The marker is
+        // cleared by the first claim that answers 204.
+        DeviceGroupJournalAccess.markFoundingUnconfirmed(context, accountIdB64)
         val fresh = identity.snapshotStorage()
         try {
             DeviceGroupSnapshotStore.putSnapshot(context, accountIdB64, fresh)

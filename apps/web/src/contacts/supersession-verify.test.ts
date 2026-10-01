@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { ContactsClient, SupersessionRefused } from "./client";
-import { readPin } from "./local-store";
+import { bindContactsAccount, readPin } from "./local-store";
 import type { IdentityFetchResponse } from "../discovery/wire";
 
 /** In-memory `localStorage` shim (vitest `node` environment has
@@ -100,9 +100,12 @@ beforeAll(async () => {
 beforeEach(() => {
   (globalThis as unknown as { localStorage: Storage }).localStorage =
     new MemoryStorage() as unknown as Storage;
+  // Pins belong to the signed-in account.
+  bindContactsAccount("dmlld2VyLWFjY291bnQ=");
 });
 
 afterEach(() => {
+  bindContactsAccount(null);
   delete (globalThis as unknown as { localStorage?: Storage }).localStorage;
 });
 

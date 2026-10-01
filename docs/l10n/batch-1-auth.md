@@ -5,16 +5,16 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # Localization batch 1: sign-in, sign-up and recovery keys
 
-ADR-0058 S5, batch 1. Every user-visible string of the screens a person sees before and while getting into an account moved from web JSX literals into `l10n/catalog/en.json`. The iOS and Android clients map their own literals of the same screens onto these keys; names follow meaning, not the web component.
+ADR-0061 S5, batch 1. Every user-visible string of the screens a person sees before and while getting into an account moved from web JSX literals into `l10n/catalog/en.json`. The iOS and Android clients map their own literals of the same screens onto these keys; names follow meaning, not the web component.
 
 224 keys added, 66 of them `security_critical` (they render in English until a translation is `reviewed`, and a signed update can never change them).
 
 ## Conventions
 
 - Arguments: `{name}` is text; `{count, plural, ...}` is a number the platform formats for the locale.
-- Word positions, lists of positions (`{positions}`, `{position}`), HTTP statuses (`{status}`) and codes are passed as **text in Latin digits**, never through the number formatter (ADR-0058 open question 2). A list of positions is joined by the platform list formatter for non-English languages (web: `Intl.ListFormat`), keeping the digits Latin.
+- Word positions, lists of positions (`{positions}`, `{position}`), HTTP statuses (`{status}`) and codes are passed as **text in Latin digits**, never through the number formatter (ADR-0061 open question 2). A list of positions is joined by the platform list formatter for non-English languages (web: `Intl.ListFormat`), keeping the digits Latin.
 - `{link}`, and `{username}` / `{positions}` where the comment says "shown bold", are parts rendered as elements (a link, bold text) inside the sentence; web renders them with `tRich` (`apps/web/src/l10n/rich.tsx`). `{username}` is passed as `@name`.
-- Errors render from their code, never from the core or server message (ADR-0058 section 6). Each flow has a `*.error.generic` fallback key.
+- Errors render from their code, never from the core or server message (ADR-0061 section 6). Each flow has a `*.error.generic` fallback key.
 - The brand name `Lakko`, the example code `123456`, `you@example.com` and `+15551234567` placeholders stay literal.
 
 ## Web-only keys

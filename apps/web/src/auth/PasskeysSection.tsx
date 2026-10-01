@@ -90,7 +90,7 @@ export default function PasskeysSection(): JSX.Element {
   const [nickname, setNickname] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   // The message is a catalog key, rendered at display time so it follows a
-  // language switch (ADR-0058).
+  // language switch (ADR-0061).
   const [message, setMessage] = createSignal<
     { readonly kind: "ok" | "error"; readonly key: string; readonly args?: L10nArgs } | null
   >(null);
@@ -290,7 +290,7 @@ function formatTimestamp(ms: number | null): string {
   return d.toLocaleString(currentLanguage());
 }
 
-/** The catalog key for an error (ADR-0058 section 6: never the server's
+/** The catalog key for an error (ADR-0061 section 6: never the server's
  *  or the browser's prose, which goes to the log). */
 function explainError(err: unknown): string {
   if (err instanceof WebauthnUserCancelledError) {

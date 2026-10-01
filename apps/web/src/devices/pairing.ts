@@ -8,8 +8,8 @@
  * Two halves:
  *
  *   * [`buildPairingQrPayload`] — fresh-device side. Build the wire bytes
- *     that are shown as a QR code AND posted by `POST /device/request`
- *     (the same bytes on both carriers).
+ *     that are shown as a QR code OR sealed inside the device link
+ *     (`device-link.ts`; the same bytes on both carriers).
  *   * [`parsePairingQrPayload`] — confirming side. Take those bytes and
  *     produce the typed `{keyPackage, rendezvousPseudonym}` pair the rest of
  *     the add-device flow consumes.

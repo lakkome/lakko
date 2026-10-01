@@ -101,7 +101,7 @@ public enum SharedStorage {
         sharedDefaults()?.bool(forKey: antiCensorshipArmedKey) ?? false
     }
 
-    // MARK: - Notification words (ADR-0058)
+    // MARK: - Notification words (ADR-0061)
 
     /// The shared-suite key holding the few words the notification extension
     /// puts on a notification, rendered in the interface language by the app

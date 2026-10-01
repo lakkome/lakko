@@ -9,7 +9,7 @@ import androidx.compose.runtime.Composable
 import java.util.Locale
 
 /**
- * A user-visible sentence held as its catalog key and arguments (ADR-0058
+ * A user-visible sentence held as its catalog key and arguments (ADR-0061
  * section 6: errors render from their code, never from core prose).
  *
  * View models put a [UiText] into their state; the screen renders it with
@@ -63,7 +63,7 @@ public fun joinFacts(items: List<String>, strings: Strings): String =
 /**
  * A list of word positions ("3, 7 and 15") for the `{positions}` argument of
  * the recovery messages: the locale's list formatter for the language the
- * interface shows, digits kept Latin (ADR-0058 open question 2). English
+ * interface shows, digits kept Latin (ADR-0061 open question 2). English
  * uses the catalog's own form, without a serial comma, as web does.
  */
 public fun listPositions(positions: List<Int>, language: String): String {

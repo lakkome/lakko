@@ -5,7 +5,7 @@
 #![warn(missing_docs)]
 
 //! Interface localization, written once for the three clients
-//! ([ADR-0058](../../docs/adr/0058-interface-localization.md)).
+//! ([ADR-0061](../../docs/adr/0061-interface-localization.md)).
 //!
 //! What lives here is every rule the three clients must agree on about the
 //! words on the screen:

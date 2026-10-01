@@ -42,6 +42,15 @@ pub enum DiscoveryClientError {
     /// the input is a lookup target.
     #[error("invalid username: {0}")]
     InvalidUsername(#[from] crate::UsernameError),
+
+    /// A name query is not searchable (over 1024 bytes, or under 2
+    /// characters after [`crate::normalize_name_for_search`]), or a string
+    /// passed as a name term is not one ([`crate::is_name_term`]); ADR-0060
+    /// section 5. Raised by [`crate::OprfBlinder::blind_name`] and
+    /// [`crate::OprfBlinder::blind_name_term`] before any network round-trip.
+    /// Carries no part of the input.
+    #[error("display name is not searchable")]
+    InvalidName,
 }
 
 impl DiscoveryClientError {

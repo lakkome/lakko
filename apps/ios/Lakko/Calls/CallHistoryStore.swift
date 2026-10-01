@@ -141,6 +141,19 @@ public final class CallHistoryStore: ObservableObject {
         backfilled.remove(accountIdB64)
     }
 
+    /// Forget device / Delete account (``AccountLocalDataWipe``): erase
+    /// `accountIdB64`'s index and its backfill marker, whether or not it is
+    /// the bound account, and release it when it is.
+    public func forget(accountIdB64: String) {
+        if boundAccountIdB64 == accountIdB64 {
+            boundAccountIdB64 = nil
+            entries = []
+        }
+        backing.remove(accountIdB64: accountIdB64)
+        backing.remove(accountIdB64: Self.backfillMarkerKey(accountIdB64))
+        backfilled.remove(accountIdB64)
+    }
+
     /// Release the account without touching what is stored (logout).
     public func unbind() {
         boundAccountIdB64 = nil

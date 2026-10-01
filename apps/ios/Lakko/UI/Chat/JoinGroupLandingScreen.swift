@@ -88,7 +88,7 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     private let intake: InviteIntake
     private var didRun = false
     private var pollTask: Task<Void, Never>?
-    /// The verified capability bytes + the ledger pointer they came from, kept
+    /// The opened (plaintext) capability bytes + the ledger pointer they came from, kept
     /// from `run()` so `Request to join` and `Request again` post against the
     /// bytes the person was shown, not a second fetch.
     private var resolved: (capabilityWire: Data, blobId: Data?)?
@@ -121,20 +121,21 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         await load()
     }
 
-    /// Resolve the slug (a pointer fetches the capability from the ledger; an
-    /// inline link passes the bytes through), verify the signature + expiry,
-    /// and open the preview under the fragment's key. Nothing is posted here.
+    /// Resolve the slug (a pointer fetches the sealed blob from the ledger; an
+    /// inline link carries it), open it under the fragment's link secret
+    /// (ADR-0028 amendment 2026-09-28 — this also verifies the signature),
+    /// check the expiry and open the preview under the same secret. Nothing is
+    /// posted here.
     private func load() async {
-        // A malformed fragment (the retired 43-character key included) refuses
-        // the link before anything is fetched for it.
-        let fragment = GroupInviteLink.readFragment(linkKeyFragment)
-        if fragment == .malformed {
+        // A missing or malformed fragment is a damaged link on every kind,
+        // refused before anything is fetched for it.
+        guard let secret = InviteLinkSecret.read(linkKeyFragment) else {
             state = .damaged
             return
         }
+        let located: (sealed: Data, blobId: Data?)
         do {
-            let resolved = try await repository.resolveGroupInviteSlug(slug: slug)
-            self.resolved = resolved
+            located = try await repository.resolveGroupInviteSlug(slug: slug)
         } catch let error as GroupInviteLinkError {
             NSLog("group join: the invite link resolved to nothing: %@", String(describing: error))
             state = .invalid
@@ -144,12 +145,11 @@ public final class JoinGroupLandingViewModel: ObservableObject {
             state = .failed(JoinRequestFailure.classify(error))
             return
         }
-        guard let resolved else { return }
         let cap: GroupInviteCapability
         do {
-            cap = try GroupInviteCapability.decodeAndVerify(wire: resolved.capabilityWire)
+            cap = try GroupInviteCapability.openLink(sealed: located.sealed, linkSecret: secret)
         } catch {
-            state = .invalid
+            state = .damaged
             return
         }
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
@@ -157,7 +157,7 @@ public final class JoinGroupLandingViewModel: ObservableObject {
             state = .invalid
             return
         }
-        switch Self.previewOutcome(of: cap, fragment: linkKeyFragment) {
+        switch Self.previewOutcome(of: cap, secret: secret) {
         case .none:
             preview = nil
         case .opened(let facts):
@@ -166,40 +166,35 @@ public final class JoinGroupLandingViewModel: ObservableObject {
             state = .damaged
             return
         }
+        // The PLAINTEXT capability: what the consume's joiner tag and the join
+        // attribution are computed over.
+        resolved = (cap.wire(), located.blobId)
         fingerprint = cap.issuerFingerprint()
         state = .ready
     }
 
-    /// What the link's fragment does to the card.
+    /// What the link's secret does to the card.
     enum PreviewOutcome: Equatable {
-        /// No fragment: the card without a preview.
+        /// The capability carries no preview (a co-publisher link): the card
+        /// without one.
         case none
         /// The preview opened under the link secret.
         case opened(GroupInviteFacts)
-        /// A fragment is present and the preview does not open under it: a
-        /// malformed fragment, a capability minted without a preview, a wrong
-        /// secret, or a capability a server swapped in under a live id.
+        /// The capability carries a preview that does not open under the
+        /// secret the blob opened with.
         case damaged
     }
 
-    /// Decide the preview for a verified capability. Fail-closed: once the link
-    /// carries a fragment, anything short of an opened preview is `.damaged`.
+    /// Decide the preview for a capability the link secret already opened.
     static func previewOutcome(
-        of cap: GroupInviteCapability, fragment: String?
+        of cap: GroupInviteCapability, secret: Data
     ) -> PreviewOutcome {
-        switch GroupInviteLink.readFragment(fragment) {
-        case .absent:
-            return .none
-        case .malformed:
-            return .damaged
-        case .secret(let secret):
-            guard cap.hasPreview(),
-                  let opened = try? cap.openPreview(linkKey: secret) else { return .damaged }
-            return .opened(GroupInviteFacts(
-                groupName: opened.groupName,
-                inviterName: opened.inviterName,
-                memberCount: opened.memberCount))
-        }
+        guard cap.hasPreview() else { return .none }
+        guard let opened = try? cap.openPreview(linkKey: secret) else { return .damaged }
+        return .opened(GroupInviteFacts(
+            groupName: opened.groupName,
+            inviterName: opened.inviterName,
+            memberCount: opened.memberCount))
     }
 
     /// ADR-0045 S7 residual 1 — send the request. Reached from the card's
@@ -280,7 +275,7 @@ public struct JoinGroupLandingScreen: View {
     private let onDone: () -> Void
     /// Open the joined group (replaces this screen with the chat).
     private let onOpenChat: (String) -> Void
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
     public init(

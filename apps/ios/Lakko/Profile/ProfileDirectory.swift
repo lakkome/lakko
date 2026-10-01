@@ -10,7 +10,8 @@ import LakkoCore
 /// renames the resolver ranks first.
 ///
 /// One instance per process (``shared``), in the same posture as the other
-/// process-scoped stores the app reads statically (``AcceptedContactsStore``):
+/// process-scoped stores the app reads statically (``AcceptedContactsStore``,
+/// whose rows are per account like everything here):
 /// names appear on a dozen surfaces owned by different view models, and a
 /// single observable ``revision`` lets every one of them re-render in place
 /// when a profile or a verdict arrives. The decision logic lives in the pure,
@@ -39,6 +40,12 @@ public final class ProfileDirectory: ObservableObject {
     /// Whether a lookup may be started from a render. Off in tests that drive
     /// the directory without a network.
     var verifiesOnResolve = true
+    /// ADR-0048 section 4a — called with the own profile envelope when this
+    /// device saves or clears the own name, so the account's other devices
+    /// get it over the DeviceGroup `ServiceEnvelope` (set by the app shell to
+    /// the DeviceGroup sync runtime's own send). Never called for a profile
+    /// adopted from another device: that one is already on the journal.
+    var onOwnDeviceEnvelope: ((Data) -> Void)?
 
     init(
         received: ReceivedProfileStore? = nil,
@@ -52,6 +59,14 @@ public final class ProfileDirectory: ObservableObject {
         self.verifier = verifier ?? UsernameVerifier(resolve: ProfileDirectory.discoveryResolve)
         self.ownStore = ownStore
         self.verifier.onChange = { [weak self] in self?.bump() }
+        if verifier == nil {
+            self.verifier.verifyBinding = { [weak self] keyB64, username in
+                guard let self else { return false }
+                return try await self.verifyCertificate(signatureKeyB64: keyB64, username: username)
+            }
+        }
+        // The renames of whichever account is bound; empty before a session.
+        // ``activate(accountIdB64:username:)`` reloads them per account.
         setRenames(from: AcceptedContactsStore.load())
     }
 
@@ -66,6 +81,8 @@ public final class ProfileDirectory: ObservableObject {
         received.activate(accountIdB64: accountIdB64)
         verifier.activate(accountIdB64: accountIdB64)
         ownProfile = ownStore.load(accountIdB64: accountIdB64)
+        // This account's own names for its contacts, never the previous one's.
+        setRenames(from: AcceptedContactsStore.load(accountIdB64: accountIdB64))
         bump()
     }
 
@@ -74,6 +91,7 @@ public final class ProfileDirectory: ObservableObject {
         accountIdB64 = nil
         ownUsername = nil
         ownProfile = nil
+        setRenames(from: [])
         received.activate(accountIdB64: nil)
         verifier.activate(accountIdB64: nil)
         bump()
@@ -102,14 +120,117 @@ public final class ProfileDirectory: ObservableObject {
         if account == self.accountIdB64 {
             ownProfile = saved
             bump()
+            // The account's other devices learn the change too (ADR-0048
+            // section 4a). A save for an account not yet active (a signup
+            // name stored before the session activates the directory) has no
+            // other device to reach; a device added later is handed it by
+            // ``ownDeviceEnvelopes(accountIdB64:)``.
+            if let envelope = ownDeviceEnvelope() {
+                onOwnDeviceEnvelope?(envelope)
+            }
         }
         return saved
     }
 
-    /// The own profile as an envelope ready to publish, or `nil` without an
-    /// active account. A guest publishes a name with no username.
-    func ownProfileEnvelope() -> Data? {
-        guard let profile = ownProfileForRequest() else { return nil }
+    // MARK: - Own profile between the account's devices (ADR-0048 section 4a)
+
+    /// The own profile as the envelope the account's OTHER devices get over
+    /// the DeviceGroup, or `nil` without an active account or when the name
+    /// was never set (stamp 0: a receiver holds the same and would refuse it).
+    ///
+    /// Composed with the STORED stamp, never a fresh one (a re-send carries
+    /// its original stamp, the ADR-0044 lesson), with the display name (none
+    /// when cleared), this account's id so a receiver can refuse another
+    /// account's, and no username, certificate or grants: a receiver keeps
+    /// only the display name, the username stays its own session's.
+    func ownDeviceEnvelope() -> Data? {
+        guard let accountIdB64, let own = ownProfile, own.updatedAtMs > 0 else { return nil }
+        let profile = FfiProfile(
+            displayName: own.displayName,
+            username: nil,
+            updatedAtMs: own.updatedAtMs,
+            accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil },
+            usernameCertificate: nil,
+            grants: []
+        )
+        do {
+            return try composeProfileEnvelope(profile: profile)
+        } catch {
+            NSLog("ADR-0048 own profile device envelope refused: \(error)")
+            return nil
+        }
+    }
+
+    /// The own profile envelope for a device this one has just admitted to
+    /// the DeviceGroup: ``ownDeviceEnvelope()`` when `accountIdB64` is the
+    /// active account, else nothing.
+    func ownDeviceEnvelopes(accountIdB64: String) -> [Data] {
+        guard self.accountIdB64 == accountIdB64, let envelope = ownDeviceEnvelope() else {
+            return []
+        }
+        return [envelope]
+    }
+
+    /// What ``adoptOwnProfileFromDevice(envelope:)`` did.
+    enum OwnProfileAdoption: Equatable {
+        /// Strictly newer than the stored own profile: kept, stamp as received.
+        case adopted
+        /// Equal to or older than the stored one: nothing changed.
+        case notNewer
+        /// It names an account other than this one: dropped.
+        case foreignAccount
+        /// Not a profile envelope the core accepts: dropped.
+        case notAProfile
+        /// No account is active.
+        case inactive
+    }
+
+    /// Adopt the own profile another of this account's devices sent over the
+    /// DeviceGroup (ADR-0048 section 4a). Only the display name is kept, and
+    /// only when the received stamp is strictly greater than the stored one
+    /// (`profileIsNewer`); the stamp is kept as received. A profile that names
+    /// another account is dropped. Not republished to any group: the device
+    /// that made the change already did, and not handed back to
+    /// ``onOwnDeviceEnvelope``.
+    @discardableResult
+    func adoptOwnProfileFromDevice(envelope: Data) -> OwnProfileAdoption {
+        guard let accountIdB64 else { return .inactive }
+        guard let incoming = try? decodeProfileEnvelope(plaintext: envelope) else {
+            return .notAProfile
+        }
+        if let claimed = incoming.accountId, claimed != Data(base64Encoded: accountIdB64) {
+            return .foreignAccount
+        }
+        guard profileIsNewer(
+            incomingUpdatedAtMs: incoming.updatedAtMs,
+            storedUpdatedAtMs: ownProfile?.updatedAtMs ?? 0)
+        else { return .notNewer }
+        let adopted = OwnProfile(displayName: incoming.displayName, updatedAtMs: incoming.updatedAtMs)
+        ownStore.store(adopted, accountIdB64: accountIdB64)
+        ownProfile = adopted
+        bump()
+        return .adopted
+    }
+
+    /// The own profile as an envelope ready to publish into one conversation,
+    /// or `nil` without an active account. A guest publishes a name with no
+    /// username.
+    ///
+    /// ADR-0060 section 3 — profile v3 carries the grants of THIS
+    /// conversation: `contact` + `member` in a one-to-one, `member` (plus
+    /// `group` where the setting allows it) in a group; and the username
+    /// only where the setting lets this conversation's members find the
+    /// owner (UX section 6.2), always with its certificate.
+    func ownProfileEnvelope(groupId: Data? = nil, oneToOne: Bool = false) -> Data? {
+        guard var profile = ownProfileForRequest() else { return nil }
+        if let groupId {
+            let reach = ReachCenter.shared
+            profile.grants = reach.profileGrants(groupId: groupId, oneToOne: oneToOne)
+            if !oneToOne, !reach.allowsGroup(groupId) {
+                profile.username = nil
+                profile.usernameCertificate = nil
+            }
+        }
         do {
             return try composeProfileEnvelope(profile: profile)
         } catch {
@@ -130,13 +251,21 @@ public final class ProfileDirectory: ObservableObject {
     /// holds the identity bundle; here it only travels inside the E2EE
     /// envelope. An account id that is not exactly 16 bytes is sent as none —
     /// `composeProfileEnvelope` refuses any other length.
+    ///
+    /// ADR-0060 section 5 — the username travels with its certificate, and
+    /// only when this device holds one: a username without a certificate is
+    /// never shown by a v3 receiver, so it is not sent either.
     func ownProfileForRequest() -> FfiProfile? {
         guard let accountIdB64 else { return nil }
+        let cert = ReachCenter.shared.ownUsernameCertificate
+        let username = cert == nil ? nil : ownUsername
         return FfiProfile(
             displayName: ownProfile?.displayName,
-            username: ownUsername,
+            username: username,
             updatedAtMs: ownProfile?.updatedAtMs ?? 0,
-            accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil }
+            accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil },
+            usernameCertificate: username == nil ? nil : cert,
+            grants: []
         )
     }
 
@@ -146,7 +275,9 @@ public final class ProfileDirectory: ObservableObject {
     /// the carrier authenticated (C-68). Kept only when strictly newer.
     @discardableResult
     func acceptReceived(_ claim: ProfileClaim, signatureKeyB64: String?) -> ProfileAcceptance {
-        let outcome = received.accept(claim, signatureKeyB64: signatureKeyB64)
+        // Grants are scoped to the conversation they arrived in and handed to
+        // ``ReachCenter`` by the caller; the profile store never holds them.
+        let outcome = received.accept(claim.withoutGrants, signatureKeyB64: signatureKeyB64)
         if outcome == .stored {
             bump()
             if let key = signatureKeyB64, let username = claim.username {
@@ -154,6 +285,12 @@ public final class ProfileDirectory: ObservableObject {
             }
         }
         return outcome
+    }
+
+    /// Every received profile, by signature key (b64): what local people
+    /// search reads (ADR-0060 section 3).
+    func receivedProfiles() -> [String: ProfileClaim] {
+        received.all()
     }
 
     func storedProfile(signatureKeyB64: String) -> ProfileClaim? {
@@ -205,6 +342,13 @@ public final class ProfileDirectory: ObservableObject {
         )
     }
 
+    /// The account id a member's own profile claimed (profile envelope v2), or
+    /// `nil`. A claim: ADR-0057 uses it only to fetch an identity bundle whose
+    /// signature key must then match the member's.
+    public func accountId(signatureKeyB64: String) -> Data? {
+        received.profile(signatureKeyB64: signatureKeyB64)?.accountId
+    }
+
     /// ``resolve(signatureKey:)`` for a base64 key (a `MemberIdentity`).
     public func resolve(signatureKeyB64: String) -> ResolvedDisplayName? {
         guard let key = Data(base64Encoded: signatureKeyB64) else { return nil }
@@ -220,6 +364,70 @@ public final class ProfileDirectory: ObservableObject {
 
     private func bump() {
         revision &+= 1
+    }
+
+    // MARK: - ADR-0060 username certificate verification
+
+    /// The pinned (or, when no key is pinned at build time, fetched) username
+    /// certificate verifying key.
+    private var certKey: Data?
+
+    /// Verify the username a stored profile claims against the certificate it
+    /// carried: the certificate's signature under the discovery key, bound to
+    /// the lookup key of the claimed username (one evaluation) and to the
+    /// account id the profile arrived with. No certificate, or no account id,
+    /// is a refusal: the username is never shown (invariant #4).
+    func verifyCertificate(signatureKeyB64: String, username: String) async throws -> Bool {
+        guard let claim = received.profile(signatureKeyB64: signatureKeyB64),
+              claim.username == username,
+              let cert = claim.usernameCertificate,
+              let accountId = claim.accountId else { return false }
+        guard case .valid(let canonical) = checkUsername(username) else { return false }
+        let key = try await usernameCertKey()
+        // The certificate binds the LOOKUP KEY of the username (ADR-0060
+        // section 5), never the OPRF output.
+        let lookupKey = try await DiscoveryClient().usernameOprf(canonical).lookupKey
+        do {
+            _ = try verifyUsernameBinding(
+                certificate: cert, verifyingKey: key, expectedOprfHash: lookupKey,
+                expectedAccountId: accountId)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Verify one username certificate for an already-computed lookup key
+    /// (`OprfResult.lookupKey`, never the output) and account id (a search
+    /// result). `false` on any failure.
+    func verifyCertificate(certificate: Data, lookupKey: Data, accountId: Data) async -> Bool {
+        guard let key = try? await usernameCertKey() else { return false }
+        return (try? verifyUsernameBinding(
+            certificate: certificate, verifyingKey: key, expectedOprfHash: lookupKey,
+            expectedAccountId: accountId)) != nil
+    }
+
+    private func usernameCertKey() async throws -> Data {
+        if let certKey { return certKey }
+        if let pinned = Self.pinnedUsernameCertKey {
+            certKey = pinned
+            return pinned
+        }
+        guard let fetched = try await DiscoveryClient().fetchUsernameCertKey(), fetched.count == 32
+        else { throw DisplayNameRuleViolation(message: "username certificate key unavailable") }
+        certKey = fetched
+        return fetched
+    }
+
+    /// Info.plist `LakkoUsernameCertKey` — base64url (or base64) of the 32-byte
+    /// Ed25519 key discovery signs username certificates with, pinned at build
+    /// time (the ADR-0015 pattern). Empty -> fetched from
+    /// `/.well-known/lakko-username-cert-key`.
+    nonisolated static var pinnedUsernameCertKey: Data? {
+        guard let raw = Bundle.main.object(forInfoDictionaryKey: "LakkoUsernameCertKey") as? String,
+              !raw.isEmpty else { return nil }
+        let key = base64UrlDecodeNoPad(raw) ?? Data(base64Encoded: raw)
+        return key?.count == 32 ? key : nil
     }
 
     // MARK: - Production username resolution
@@ -263,7 +471,7 @@ func checkDisplayName(
         return try normalize(input)
     } catch let error as FfiError {
         switch error {
-        // ADR-0058: the copy is the catalog's, in the interface language.
+        // ADR-0061: the copy is the catalog's, in the interface language.
         case .DisplayNameLineBreak:
             throw DisplayNameRuleViolation(message: Localization.text("display_name.error.line_break"))
         case .DisplayNameControlOrFormatCharacter:

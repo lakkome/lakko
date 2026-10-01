@@ -56,7 +56,7 @@ import { t } from "../l10n";
 import { screenText } from "../auth/auth-error-copy";
 
 /**
- * The text a failure shows (ADR-0058 section 6): a sentence written for a
+ * The text a failure shows (ADR-0061 section 6): a sentence written for a
  * screen (a keyed error, a pairing sentence) in the current language,
  * otherwise the flow's generic key. The diagnostic goes to the log. Returned
  * as a function so it renders in the language current when it is shown.

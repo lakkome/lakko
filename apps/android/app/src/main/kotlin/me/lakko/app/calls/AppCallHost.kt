@@ -441,7 +441,7 @@ internal class ChatRepositoryGroupCallPort(
 
     /** The name on the user's own tile (`docs/ux/calls.md` section 4.4): the
      *  profile name, empty when none is set (the tile then draws
-     *  `call.participant.you`, ADR-0058). Read at call start. */
+     *  `call.participant.you`, ADR-0061). Read at call start. */
     private fun ownTileName(): String =
         repository.ownDisplayName()?.trim()?.takeIf { it.isNotEmpty() }.orEmpty()
 
@@ -632,6 +632,13 @@ internal class MultiJoinerLinkCallPort(
                     ownerAccountId = identity.accountId,
                     identity = own,
                     callId = callId,
+                    // ADR-0060 §6 — a cold-start joiner writes into this
+                    // account's closed mailbox with the link's key.
+                    linkGrantFor = { linkId, expiryMs ->
+                        val reach = me.lakko.app.reach.ReachManager.peek()
+                            ?: throw IllegalStateException("no session")
+                        reach.mintLink(linkId, expiryMs.takeIf { it != 0L })
+                    },
                 ).url
             }
         }

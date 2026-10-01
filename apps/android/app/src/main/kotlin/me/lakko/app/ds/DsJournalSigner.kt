@@ -34,6 +34,11 @@ import uniffi.lakko_ffi_uniffi.DsProofSignerInterface
  *  not need the native library). */
 public const val DS_PROOF_HEADER: String = "x-lakko-ds-proof"
 
+/** ADR-0060 §2 — the header a reach-key delegation travels in
+ *  (`lakko_ds_proof::DELEGATION_HEADER_NAME`, `delegationHeaderName()` on the
+ *  FFI), spelled here for the host tests. */
+public const val DS_DELEGATION_HEADER: String = "x-lakko-ds-delegation"
+
 /** Copy the user reads when a signed request is refused and the device clock
  *  is the likely cause (ADR-0053 client contract point 5). */
 public const val DS_CLOCK_SKEW_COPY: String = "Check this device's date and time."
@@ -52,8 +57,9 @@ public interface DsJournalSigner {
      *  raw query without `?`, the exact body bytes. */
     public fun sign(method: String, path: String, query: String, body: ByteArray): String
 
-    /** The JSON body of `PUT /ds/group/<hex>/access` for this epoch. */
-    public fun groupClaimBody(): String
+    /** The 32-byte verifying key the Delivery Service learns for this epoch
+     *  (ADR-0057: what a root or registrar statement registers). */
+    public val verifyingKey: ByteArray
 
     /** The JSON body of `PUT /ds/mailbox/<hex>/access`. */
     public fun mailboxClaimBody(): String
@@ -66,10 +72,15 @@ public class FfiDsJournalSigner(private val inner: DsProofSignerInterface) : DsJ
     override fun sign(method: String, path: String, query: String, body: ByteArray): String =
         inner.sign(method, path, query, body)
 
-    override fun groupClaimBody(): String = inner.groupClaimBodyJson()
+    override val verifyingKey: ByteArray by lazy { inner.verifyingKey() }
 
     override fun mailboxClaimBody(): String = inner.mailboxClaimBodyJson()
 }
+
+/** ADR-0060 §2 — the signer of a write authorised by a reach grant (or by a
+ *  delegate seed): `DsProofSigner.forReach(seed)`. */
+public fun reachSigner(seed: ByteArray): DsJournalSigner =
+    FfiDsJournalSigner(uniffi.lakko_ffi_uniffi.DsProofSigner.forReach(seed))
 
 /**
  * Where a journal's current signer comes from. [epoch] is read on every
@@ -87,6 +98,25 @@ public interface DsSignerSource {
     public fun derive(): DsJournalSigner?
 
     public val epochReadable: Boolean get() = true
+
+    /**
+     * ADR-0057 obligation 2 — the lazy claim, present only where this
+     * account OWNS the journal: claim it with the root at the current epoch
+     * and answer whether the claim landed. [DsClient] calls it once on a
+     * signed request's `401`, then retries. `null` (every non-owner) means a
+     * `401` is surfaced: a plain member never claims and never self-registers.
+     */
+    public val ownerClaim: (suspend () -> Boolean)? get() = null
+
+    /**
+     * ADR-0057, the second security pass (finding 1) — told when a signed
+     * request of this journal was refused (401) at [epoch], this device's
+     * current epoch, after every retry [DsClient] makes and not because of the
+     * device clock. The chat repository notes the group for the repair check
+     * (an owner or admin replaces a fake next epoch); `null` for every other
+     * journal. Must not block and must not throw.
+     */
+    public val onRefusedAtHead: ((epoch: ULong) -> Unit)? get() = null
 }
 
 /** A source that never changes — a mailbox signer. */
@@ -168,6 +198,20 @@ public class DsSignerRegistry {
         }
     }
 
+    /** ADR-0057 — the owner's lazy-claim hook of [key]'s source, or `null`
+     *  when this account does not own the journal (or it is unknown here). */
+    public fun ownerClaim(key: String): (suspend () -> Boolean)? = entries[key]?.source?.ownerClaim
+
+    /** Finding 1 — report a refusal at [epoch] to [key]'s source, if it
+     *  listens. Never throws. */
+    public fun refusedAtHead(key: String, epoch: ULong) {
+        try {
+            entries[key]?.source?.onRefusedAtHead?.invoke(epoch)
+        } catch (_: Throwable) {
+            // A listener that fails holds nothing up.
+        }
+    }
+
     /** The signer of the epoch before the current one, when this device saw
      *  it. Refreshed first, so it is never the current epoch. */
     public fun previous(key: String): DsJournalSigner? {
@@ -234,47 +278,3 @@ public fun dsClockSkewed(dateHeader: String?, nowMs: Long): Boolean {
 /** ADR-0053 — a commit cannot be registered with the Delivery Service, so it
  *  must not be published. */
 public class DsRegistrationUnavailable(message: String) : IllegalStateException(message)
-
-/**
- * ADR-0053 client contract point 3 — register the key of the epoch a commit
- * moves to ([after]) proven under the epoch it leaves ([before]), and hand
- * back [before]: the signer the commit POST itself is signed with.
- *
- * Refuses (throws, [register] never called) when either signer is missing or
- * the commit does not move the epoch by exactly one — a registration the
- * server would refuse anyway, and a commit that must then not be published.
- * The caller aborts the commit on ANY throw, exactly as it aborts on a failed
- * outbox write.
- */
-public suspend fun registerBeforePublish(
-    before: DsJournalSigner?,
-    after: DsJournalSigner?,
-    register: suspend (next: DsJournalSigner, current: DsJournalSigner) -> Unit,
-): DsJournalSigner {
-    val current = before
-        ?: throw DsRegistrationUnavailable("no access signer for the epoch the commit leaves")
-    val next = after
-        ?: throw DsRegistrationUnavailable("no access signer for the epoch the commit reaches")
-    if (next.epoch != current.epoch + 1uL) {
-        throw DsRegistrationUnavailable(
-            "the commit moves the epoch from ${current.epoch} to ${next.epoch}, not by one",
-        )
-    }
-    register(next, current)
-    return current
-}
-
-/**
- * ADR-0053 client contract point 4 — heal on apply: when a batch moved the
- * journal's epoch forward, the key of the epoch it reached, proven by the
- * pre-batch signer. `null` when there is nothing to register (no advance, or
- * a signer is missing).
- */
-public fun healRegistration(
-    before: DsJournalSigner?,
-    after: DsJournalSigner?,
-): Pair<DsJournalSigner, DsJournalSigner>? {
-    if (before == null || after == null) return null
-    if (after.epoch <= before.epoch) return null
-    return after to before
-}

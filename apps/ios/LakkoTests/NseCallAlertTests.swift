@@ -64,8 +64,11 @@ final class NseCallAlertTests: XCTestCase {
             self.muted = muted
         }
 
-        func lookupRoute(pushGidHex: String) -> (accountIdB64: String, groupIdHex: String)? { nil }
-        func resolveAccount(groupHex: String) -> NseResolvedAccount? { account }
+        func boundAccount(wakeDevicePseudonymHex: String?) -> String? { account.accountIdB64 }
+        func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? { nil }
+        func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool {
+            account.accountIdB64 == accountIdB64
+        }
         func loadIdentitySeed(accountIdB64: String) -> Data? { Data(repeating: 1, count: 64) }
         func loadSnapshot(accountIdB64: String) -> Data? { Data(repeating: 2, count: 8) }
         func openThrowawayGroup(
@@ -78,8 +81,8 @@ final class NseCallAlertTests: XCTestCase {
         ) async throws -> [NseFetchedRow] { rows }
         func startCursor(accountIdB64: String, groupHex: String) -> Int64? { nil }
         func isAntiCensorshipArmed() -> Bool { false }
-        func callerName(groupIdHex: String) -> String? { mirroredName }
-        func isMuted(groupIdHex: String) -> Bool { muted }
+        func callerName(accountIdB64: String, groupIdHex: String) -> String? { mirroredName }
+        func isMuted(accountIdB64: String, groupIdHex: String) -> Bool { muted }
     }
 
     /// A parser that answers from a canned table keyed on the row's first byte.

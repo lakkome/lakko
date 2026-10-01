@@ -19,7 +19,7 @@ import { currentLanguage, t } from "../l10n";
 
 /**
  * Word positions as a list ("5, 14 and 21"). Positions stay Latin digits in
- * every language (ADR-0058 open question 2); only the separators and the
+ * every language (ADR-0061 open question 2); only the separators and the
  * conjunction follow the language.
  */
 export function listPositions(positions: readonly number[]): string {
@@ -115,7 +115,7 @@ export function confirmationComplete(
 export function confirmationErrorMessage(mismatches: readonly number[]): string | null {
   const first = mismatches[0];
   if (first === undefined) return null;
-  // Positions stay Latin digits in every language (ADR-0058 open question
+  // Positions stay Latin digits in every language (ADR-0061 open question
   // 2), so they are passed as text, not as numbers.
   return mismatches.length === 1
     ? t("recovery_phrase.check.mismatch_one", { position: String(first) })

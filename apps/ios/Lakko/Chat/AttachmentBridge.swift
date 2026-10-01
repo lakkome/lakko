@@ -380,7 +380,7 @@ public enum AttachmentBridge {
     /// `1.2 kB`, `4.7 MB`. SI-decimal (matches the iOS Files
     /// app); base-2 conversion is too pedantic for chat UI.
     public static func formatSize(_ bytes: UInt64) -> String {
-        // ADR-0058 — the unit from the catalog, the number formatted for the
+        // ADR-0061 — the unit from the catalog, the number formatted for the
         // interface language (one decimal above bytes).
         let locale = Localization.currentLocale
         if bytes < 1_000 {
@@ -528,7 +528,7 @@ public enum AttachmentBridgeError: Error {
 }
 
 extension AttachmentBridgeError {
-    /// What the person is told (ADR-0058 section 6): rendered from the kind,
+    /// What the person is told (ADR-0061 section 6): rendered from the kind,
     /// never from ``errorDescription``, which carries the underlying error
     /// for the log. `fileName` names the file being sent, when there is one.
     public func userText(fileName: String?) -> UiText {

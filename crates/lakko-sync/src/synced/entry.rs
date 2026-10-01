@@ -1,0 +1,1057 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+//! The registers the account's devices keep in step (ADR-0058).
+//!
+//! Plain Rust types, owned here so the fold, its tests and the persistence
+//! codec need no protobuf. `lakko-mls` converts the DeviceGroup proto into
+//! these types at decode time and runs [`FolderChanges::validate`] /
+//! [`StateSnapshot::validate`] there, so the bounds are written once and a
+//! payload that breaks one is refused whole.
+//!
+//! Every entry has a **canonical encoding** ([`SyncEntry::canonical_bytes`]).
+//! It is what breaks an exact stamp tie in the fold (larger bytes win) and
+//! what the persistence codec stores. It is Lakko's own length-prefixed
+//! layout, not the protobuf encoding: the fold runs in Rust on every client,
+//! so one deterministic layout is all a tie-break needs, and owning it keeps
+//! this crate free of a protobuf dependency.
+
+use thiserror::Error;
+
+/// Length of a folder id: 16 random bytes minted once.
+pub const FOLDER_ID_LEN: usize = 16;
+/// A folder name's maximum length in Unicode scalar values.
+pub const FOLDER_NAME_MAX_CHARS: usize = 24;
+/// A folder name's maximum length in UTF-8 bytes.
+pub const FOLDER_NAME_MAX_BYTES: usize = 96;
+/// A conversation reference id's maximum length in bytes.
+pub const CONVERSATION_REF_ID_MAX_LEN: usize = 64;
+/// The most pins one folder's pin list may carry on the wire.
+pub const FOLDER_PINS_MAX: usize = 10;
+/// The most folder ids a folder order may carry on the wire.
+pub const FOLDER_ORDER_MAX: usize = 256;
+/// The most registers one [`FolderChanges`] may carry.
+pub const FOLDER_CHANGES_MAX_REGISTERS: usize = 1024;
+/// The most parts a [`StateSnapshot`] may be split into.
+pub const SNAPSHOT_MAX_PARTS: u32 = 64;
+
+/// `include_kinds` bit: one-to-one conversations.
+pub const INCLUDE_ONE_TO_ONE: u32 = 1 << 0;
+/// `include_kinds` bit: groups.
+pub const INCLUDE_GROUPS: u32 = 1 << 1;
+/// `include_kinds` bit: channels.
+pub const INCLUDE_CHANNELS: u32 = 1 << 2;
+/// `exclude_flags` bit: muted conversations.
+pub const EXCLUDE_MUTED: u32 = 1 << 0;
+/// `exclude_flags` bit: conversations with nothing unread.
+pub const EXCLUDE_READ: u32 = 1 << 1;
+/// `exclude_flags` bit: archived conversations.
+pub const EXCLUDE_ARCHIVED: u32 = 1 << 2;
+/// Every bit a v1 bitfield may carry. A set bit outside this mask is a
+/// toggle from a newer client this build cannot honour, and is refused
+/// rather than read as "off".
+pub const KNOWN_BITS: u32 = 0b111;
+
+/// A folder id.
+pub type FolderId = [u8; FOLDER_ID_LEN];
+
+/// Why an entry, a change set or a snapshot was refused (ADR-0058 section 4).
+///
+/// A reason, never the offending bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum BoundsError {
+    /// A folder id was not exactly 16 bytes.
+    #[error("folder id is not {FOLDER_ID_LEN} bytes")]
+    FolderIdLength,
+    /// A folder name was empty.
+    #[error("folder name is empty")]
+    NameEmpty,
+    /// A folder name was longer than 24 scalar values or 96 bytes.
+    #[error("folder name is too long")]
+    NameTooLong,
+    /// A folder name failed the display-name character rule.
+    #[error("folder name fails the display-name rule")]
+    NameCharacters,
+    /// A conversation reference named no kind.
+    #[error("conversation reference kind is unspecified")]
+    RefKindUnspecified,
+    /// A conversation reference id was empty or longer than 64 bytes.
+    #[error("conversation reference id length is out of bounds")]
+    RefIdLength,
+    /// A bit outside the three known ones was set in a bitfield.
+    #[error("unknown bit set in a folder bitfield")]
+    UnknownBits,
+    /// A member register named a state this build does not know.
+    #[error("unknown folder member state")]
+    UnknownMemberState,
+    /// A pin list was longer than 10.
+    #[error("folder pin list is longer than {FOLDER_PINS_MAX}")]
+    TooManyPins,
+    /// A folder order was longer than 256.
+    #[error("folder order is longer than {FOLDER_ORDER_MAX}")]
+    OrderTooLong,
+    /// A change set carried more than 1024 registers.
+    #[error("folder change set carries more than {FOLDER_CHANGES_MAX_REGISTERS} registers")]
+    TooManyRegisters,
+    /// A snapshot part index was not below its part count, or the count was
+    /// zero or above 64.
+    #[error("snapshot part index or count is out of bounds")]
+    SnapshotPart,
+    /// A required sub-message was absent.
+    #[error("a required field is missing")]
+    Missing,
+}
+
+/// Which kind of conversation a [`ConversationRef`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ConversationRefKind {
+    /// A one-to-one conversation, by MLS group id.
+    OneToOne,
+    /// A group, by MLS group id.
+    Group,
+    /// A channel, by channel id.
+    Channel,
+}
+
+impl ConversationRefKind {
+    /// The wire number (the proto enum value).
+    #[must_use]
+    pub const fn to_wire(self) -> u8 {
+        match self {
+            Self::OneToOne => 1,
+            Self::Group => 2,
+            Self::Channel => 3,
+        }
+    }
+
+    /// Read a wire number; `0` (unspecified) and anything unknown refused.
+    ///
+    /// # Errors
+    ///
+    /// [`BoundsError::RefKindUnspecified`].
+    pub const fn from_wire(v: i64) -> Result<Self, BoundsError> {
+        match v {
+            1 => Ok(Self::OneToOne),
+            2 => Ok(Self::Group),
+            3 => Ok(Self::Channel),
+            _ => Err(BoundsError::RefKindUnspecified),
+        }
+    }
+}
+
+/// A conversation a folder names.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConversationRef {
+    /// Which kind it is.
+    pub kind: ConversationRefKind,
+    /// The MLS group id, or the channel id. 1..=64 bytes.
+    pub id: Vec<u8>,
+}
+
+impl ConversationRef {
+    /// Check the id length.
+    ///
+    /// # Errors
+    ///
+    /// [`BoundsError::RefIdLength`].
+    pub fn validate(&self) -> Result<(), BoundsError> {
+        if self.id.is_empty() || self.id.len() > CONVERSATION_REF_ID_MAX_LEN {
+            return Err(BoundsError::RefIdLength);
+        }
+        Ok(())
+    }
+}
+
+/// A conversation's membership in one folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MemberState {
+    /// Neither added nor excluded by hand: the element tombstone.
+    None,
+    /// Added by hand.
+    Included,
+    /// Excluded by hand.
+    Excluded,
+}
+
+impl MemberState {
+    /// The wire number.
+    #[must_use]
+    pub const fn to_wire(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Included => 1,
+            Self::Excluded => 2,
+        }
+    }
+
+    /// Read a wire number.
+    ///
+    /// # Errors
+    ///
+    /// [`BoundsError::UnknownMemberState`].
+    pub const fn from_wire(v: i64) -> Result<Self, BoundsError> {
+        match v {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Included),
+            2 => Ok(Self::Excluded),
+            _ => Err(BoundsError::UnknownMemberState),
+        }
+    }
+}
+
+/// Turn a wire folder id into a [`FolderId`].
+///
+/// # Errors
+///
+/// [`BoundsError::FolderIdLength`].
+pub fn folder_id_from_slice(bytes: &[u8]) -> Result<FolderId, BoundsError> {
+    <FolderId>::try_from(bytes).map_err(|_| BoundsError::FolderIdLength)
+}
+
+/// A folder's name and rule toggles (the meta register).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderMeta {
+    /// The folder.
+    pub folder_id: FolderId,
+    /// The name.
+    pub name: String,
+    /// `INCLUDE_*` bits.
+    pub include_kinds: u32,
+    /// `EXCLUDE_*` bits.
+    pub exclude_flags: u32,
+}
+
+/// Check a folder name against ADR-0058 section 4.
+///
+/// # Errors
+///
+/// [`BoundsError::NameEmpty`], [`BoundsError::NameTooLong`] or
+/// [`BoundsError::NameCharacters`].
+pub fn check_folder_name(name: &str) -> Result<(), BoundsError> {
+    if name.is_empty() {
+        return Err(BoundsError::NameEmpty);
+    }
+    if name.len() > FOLDER_NAME_MAX_BYTES || name.chars().count() > FOLDER_NAME_MAX_CHARS {
+        return Err(BoundsError::NameTooLong);
+    }
+    lakko_contacts::profile::check_display_name(name).map_err(|_| BoundsError::NameCharacters)
+}
+
+impl FolderMeta {
+    /// Check the name and both bitfields.
+    ///
+    /// # Errors
+    ///
+    /// The first [`BoundsError`] that applies.
+    pub fn validate(&self) -> Result<(), BoundsError> {
+        check_folder_name(&self.name)?;
+        if self.include_kinds & !KNOWN_BITS != 0 || self.exclude_flags & !KNOWN_BITS != 0 {
+            return Err(BoundsError::UnknownBits);
+        }
+        Ok(())
+    }
+}
+
+/// One conversation's membership register in one folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderMember {
+    /// The folder.
+    pub folder_id: FolderId,
+    /// The conversation.
+    pub conversation: ConversationRef,
+    /// Its state.
+    pub state: MemberState,
+}
+
+/// A folder's ordered pin list, as one value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderPins {
+    /// The folder.
+    pub folder_id: FolderId,
+    /// Pinned conversations, top first.
+    pub pinned: Vec<ConversationRef>,
+}
+
+impl FolderPins {
+    /// Check the pin count and every reference.
+    ///
+    /// # Errors
+    ///
+    /// The first [`BoundsError`] that applies.
+    pub fn validate(&self) -> Result<(), BoundsError> {
+        if self.pinned.len() > FOLDER_PINS_MAX {
+            return Err(BoundsError::TooManyPins);
+        }
+        self.pinned.iter().try_for_each(ConversationRef::validate)
+    }
+}
+
+/// The account's folder order, as one value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderOrder {
+    /// Folder ids, first tab first.
+    pub folder_ids: Vec<FolderId>,
+}
+
+/// Per-conversation flags (the existing `ThreadFlags` payload).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct FlagsEntry {
+    /// The conversation's MLS group id.
+    pub group_id: Vec<u8>,
+    /// Pinned in the list.
+    pub pinned: bool,
+    /// Muted.
+    pub muted: bool,
+    /// Archived.
+    pub archived: bool,
+    /// Marked unread by hand.
+    pub unread_override: bool,
+}
+
+/// A read cursor (the existing `ReadCursor` payload).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadCursorEntry {
+    /// The conversation's MLS group id.
+    pub group_id: Vec<u8>,
+    /// Read up to this message id.
+    pub up_to_message_id: Vec<u8>,
+    /// Wall-clock millis of the read. Display only.
+    pub read_at_ms: u64,
+}
+
+/// A draft (the existing `DraftUpdate` payload). Empty `text` = cleared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftEntry {
+    /// The conversation's MLS group id.
+    pub group_id: Vec<u8>,
+    /// Composer text.
+    pub text: String,
+    /// Replying to this message id, or empty.
+    pub reply_to_id: Vec<u8>,
+}
+
+/// The explicit conversation order (the existing `ConversationOrder`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationOrderEntry {
+    /// Group ids, top first.
+    pub group_ids: Vec<Vec<u8>>,
+}
+
+/// One register value of any kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncEntry {
+    /// A folder's meta register.
+    FolderMeta(FolderMeta),
+    /// A folder member register.
+    FolderMember(FolderMember),
+    /// A folder's pin list.
+    FolderPins(FolderPins),
+    /// A folder deletion (tombstone).
+    FolderRemoved(FolderId),
+    /// The folder order.
+    FolderOrder(FolderOrder),
+    /// A conversation's flags.
+    Flags(FlagsEntry),
+    /// A conversation's read cursor.
+    ReadCursor(ReadCursorEntry),
+    /// A conversation's draft.
+    Draft(DraftEntry),
+    /// The explicit conversation order.
+    ConversationOrder(ConversationOrderEntry),
+}
+
+/// Which register an entry writes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RegisterKey {
+    /// `FolderMeta` of this folder.
+    FolderMeta(FolderId),
+    /// `FolderMember` of this folder and conversation.
+    FolderMember(FolderId, ConversationRef),
+    /// `FolderPins` of this folder.
+    FolderPins(FolderId),
+    /// The tombstone of this folder.
+    FolderRemoved(FolderId),
+    /// The folder order.
+    FolderOrder,
+    /// Flags of this group.
+    Flags(Vec<u8>),
+    /// Read cursor of this group.
+    ReadCursor(Vec<u8>),
+    /// Draft of this group.
+    Draft(Vec<u8>),
+    /// The explicit conversation order.
+    ConversationOrder,
+}
+
+impl RegisterKey {
+    /// The folder a folder-scoped register belongs to (not the tombstone,
+    /// not the order).
+    #[must_use]
+    pub const fn folder_scoped(&self) -> Option<&FolderId> {
+        match self {
+            Self::FolderMeta(f) | Self::FolderMember(f, _) | Self::FolderPins(f) => Some(f),
+            _ => None,
+        }
+    }
+}
+
+// Canonical-encoding tags. Frozen: they order equal-stamp ties and are what
+// a persisted state is read back from.
+const TAG_META: u8 = 1;
+const TAG_MEMBER: u8 = 2;
+const TAG_PINS: u8 = 3;
+const TAG_REMOVED: u8 = 4;
+const TAG_FOLDER_ORDER: u8 = 5;
+const TAG_FLAGS: u8 = 6;
+const TAG_CURSOR: u8 = 7;
+const TAG_DRAFT: u8 = 8;
+const TAG_CONV_ORDER: u8 = 9;
+
+impl SyncEntry {
+    /// The register this entry writes.
+    #[must_use]
+    pub fn key(&self) -> RegisterKey {
+        match self {
+            Self::FolderMeta(m) => RegisterKey::FolderMeta(m.folder_id),
+            Self::FolderMember(m) => RegisterKey::FolderMember(m.folder_id, m.conversation.clone()),
+            Self::FolderPins(p) => RegisterKey::FolderPins(p.folder_id),
+            Self::FolderRemoved(f) => RegisterKey::FolderRemoved(*f),
+            Self::FolderOrder(_) => RegisterKey::FolderOrder,
+            Self::Flags(f) => RegisterKey::Flags(f.group_id.clone()),
+            Self::ReadCursor(c) => RegisterKey::ReadCursor(c.group_id.clone()),
+            Self::Draft(d) => RegisterKey::Draft(d.group_id.clone()),
+            Self::ConversationOrder(_) => RegisterKey::ConversationOrder,
+        }
+    }
+
+    /// Check the ADR-0058 section 4 bounds that apply to this one entry.
+    /// The existing four kinds carry no bounds of their own.
+    ///
+    /// # Errors
+    ///
+    /// The first [`BoundsError`] that applies.
+    pub fn validate(&self) -> Result<(), BoundsError> {
+        match self {
+            Self::FolderMeta(m) => m.validate(),
+            Self::FolderMember(m) => m.conversation.validate(),
+            Self::FolderPins(p) => p.validate(),
+            Self::FolderOrder(o) => {
+                if o.folder_ids.len() > FOLDER_ORDER_MAX {
+                    Err(BoundsError::OrderTooLong)
+                } else {
+                    Ok(())
+                }
+            },
+            Self::FolderRemoved(_)
+            | Self::Flags(_)
+            | Self::ReadCursor(_)
+            | Self::Draft(_)
+            | Self::ConversationOrder(_) => Ok(()),
+        }
+    }
+
+    /// The canonical encoding: a tag byte then the fields, every
+    /// variable-length field prefixed by its length (u8 for a conversation
+    /// reference id, u32 big-endian otherwise; counts u32 big-endian).
+    ///
+    /// Deterministic and injective per register, so on an exact stamp tie
+    /// "larger bytes win" picks the same value on every device.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self {
+            Self::FolderMeta(m) => {
+                out.push(TAG_META);
+                out.extend_from_slice(&m.folder_id);
+                put_bytes32(&mut out, m.name.as_bytes());
+                out.extend_from_slice(&m.include_kinds.to_be_bytes());
+                out.extend_from_slice(&m.exclude_flags.to_be_bytes());
+            },
+            Self::FolderMember(m) => {
+                out.push(TAG_MEMBER);
+                out.extend_from_slice(&m.folder_id);
+                put_ref(&mut out, &m.conversation);
+                out.push(m.state.to_wire());
+            },
+            Self::FolderPins(p) => {
+                out.push(TAG_PINS);
+                out.extend_from_slice(&p.folder_id);
+                put_len(&mut out, p.pinned.len());
+                for r in &p.pinned {
+                    put_ref(&mut out, r);
+                }
+            },
+            Self::FolderRemoved(f) => {
+                out.push(TAG_REMOVED);
+                out.extend_from_slice(f);
+            },
+            Self::FolderOrder(o) => {
+                out.push(TAG_FOLDER_ORDER);
+                put_len(&mut out, o.folder_ids.len());
+                for f in &o.folder_ids {
+                    out.extend_from_slice(f);
+                }
+            },
+            Self::Flags(f) => {
+                out.push(TAG_FLAGS);
+                put_bytes32(&mut out, &f.group_id);
+                out.push(u8::from(f.pinned));
+                out.push(u8::from(f.muted));
+                out.push(u8::from(f.archived));
+                out.push(u8::from(f.unread_override));
+            },
+            Self::ReadCursor(c) => {
+                out.push(TAG_CURSOR);
+                put_bytes32(&mut out, &c.group_id);
+                put_bytes32(&mut out, &c.up_to_message_id);
+                out.extend_from_slice(&c.read_at_ms.to_be_bytes());
+            },
+            Self::Draft(d) => {
+                out.push(TAG_DRAFT);
+                put_bytes32(&mut out, &d.group_id);
+                put_bytes32(&mut out, d.text.as_bytes());
+                put_bytes32(&mut out, &d.reply_to_id);
+            },
+            Self::ConversationOrder(o) => {
+                out.push(TAG_CONV_ORDER);
+                put_len(&mut out, o.group_ids.len());
+                for g in &o.group_ids {
+                    put_bytes32(&mut out, g);
+                }
+            },
+        }
+        out
+    }
+
+    /// Read one canonical encoding back, then [`Self::validate`] it.
+    ///
+    /// # Errors
+    ///
+    /// [`CodecError`] on a malformed or out-of-bounds entry, or trailing
+    /// bytes.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, CodecError> {
+        let mut cur = bytes;
+        let entry = match take_u8(&mut cur)? {
+            TAG_META => {
+                let folder_id = take_fid(&mut cur)?;
+                let name = take_string(&mut cur)?;
+                let include_kinds = take_u32(&mut cur)?;
+                let exclude_flags = take_u32(&mut cur)?;
+                Self::FolderMeta(FolderMeta {
+                    folder_id,
+                    name,
+                    include_kinds,
+                    exclude_flags,
+                })
+            },
+            TAG_MEMBER => {
+                let folder_id = take_fid(&mut cur)?;
+                let conversation = take_ref(&mut cur)?;
+                let state = MemberState::from_wire(i64::from(take_u8(&mut cur)?))?;
+                Self::FolderMember(FolderMember {
+                    folder_id,
+                    conversation,
+                    state,
+                })
+            },
+            TAG_PINS => {
+                let folder_id = take_fid(&mut cur)?;
+                let n = take_u32(&mut cur)? as usize;
+                if n > FOLDER_PINS_MAX {
+                    return Err(BoundsError::TooManyPins.into());
+                }
+                let mut pinned = Vec::with_capacity(n);
+                for _ in 0..n {
+                    pinned.push(take_ref(&mut cur)?);
+                }
+                Self::FolderPins(FolderPins { folder_id, pinned })
+            },
+            TAG_REMOVED => Self::FolderRemoved(take_fid(&mut cur)?),
+            TAG_FOLDER_ORDER => {
+                let n = take_u32(&mut cur)? as usize;
+                if n > FOLDER_ORDER_MAX {
+                    return Err(BoundsError::OrderTooLong.into());
+                }
+                let mut folder_ids = Vec::with_capacity(n);
+                for _ in 0..n {
+                    folder_ids.push(take_fid(&mut cur)?);
+                }
+                Self::FolderOrder(FolderOrder { folder_ids })
+            },
+            TAG_FLAGS => {
+                let group_id = take_bytes32(&mut cur)?;
+                let pinned = take_bool(&mut cur)?;
+                let muted = take_bool(&mut cur)?;
+                let archived = take_bool(&mut cur)?;
+                let unread_override = take_bool(&mut cur)?;
+                Self::Flags(FlagsEntry {
+                    group_id,
+                    pinned,
+                    muted,
+                    archived,
+                    unread_override,
+                })
+            },
+            TAG_CURSOR => {
+                let group_id = take_bytes32(&mut cur)?;
+                let up_to_message_id = take_bytes32(&mut cur)?;
+                let read_at_ms = take_u64(&mut cur)?;
+                Self::ReadCursor(ReadCursorEntry {
+                    group_id,
+                    up_to_message_id,
+                    read_at_ms,
+                })
+            },
+            TAG_DRAFT => {
+                let group_id = take_bytes32(&mut cur)?;
+                let text = take_string(&mut cur)?;
+                let reply_to_id = take_bytes32(&mut cur)?;
+                Self::Draft(DraftEntry {
+                    group_id,
+                    text,
+                    reply_to_id,
+                })
+            },
+            TAG_CONV_ORDER => {
+                let n = take_u32(&mut cur)? as usize;
+                // Grown rather than pre-sized: the count is read off the
+                // bytes and a malformed state must not ask for a large
+                // allocation.
+                let mut group_ids = Vec::new();
+                for _ in 0..n {
+                    group_ids.push(take_bytes32(&mut cur)?);
+                }
+                Self::ConversationOrder(ConversationOrderEntry { group_ids })
+            },
+            _ => return Err(CodecError::UnknownTag),
+        };
+        if !cur.is_empty() {
+            return Err(CodecError::Trailing);
+        }
+        entry.validate()?;
+        Ok(entry)
+    }
+}
+
+/// Why persisted bytes were refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum CodecError {
+    /// The bytes ended early.
+    #[error("synced state bytes are truncated")]
+    Truncated,
+    /// An entry tag this build does not know.
+    #[error("unknown synced entry tag")]
+    UnknownTag,
+    /// The version byte is not the one this build writes.
+    #[error("unknown synced state version")]
+    UnknownVersion,
+    /// A text field is not UTF-8.
+    #[error("synced state text is not UTF-8")]
+    NotUtf8,
+    /// A boolean byte was neither 0 nor 1.
+    #[error("synced state boolean is not 0 or 1")]
+    BadBool,
+    /// Bytes remained after an entry or after the state.
+    #[error("trailing bytes in synced state")]
+    Trailing,
+    /// A length did not fit its field.
+    #[error("synced state field is too long to encode")]
+    TooLong,
+    /// An entry broke an ADR-0058 bound.
+    #[error("synced entry out of bounds: {0}")]
+    Bounds(#[from] BoundsError),
+}
+
+/// A live folder edit: only the registers that changed, each with its
+/// own stamp.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FolderChanges {
+    /// Meta registers.
+    pub metas: Vec<Stamped<FolderMeta>>,
+    /// Member registers.
+    pub members: Vec<Stamped<FolderMember>>,
+    /// Pin-list registers.
+    pub pins: Vec<Stamped<FolderPins>>,
+    /// Tombstones.
+    pub removed: Vec<Stamped<FolderId>>,
+    /// The folder order, when it changed.
+    pub order: Option<Stamped<FolderOrder>>,
+}
+
+/// A value with the hybrid-logical-clock stamp it was written at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stamped<T> {
+    /// The stamp.
+    pub hlc: u64,
+    /// The value.
+    pub value: T,
+}
+
+impl FolderChanges {
+    /// How many registers the change set carries.
+    #[must_use]
+    pub fn register_count(&self) -> usize {
+        self.metas.len()
+            + self.members.len()
+            + self.pins.len()
+            + self.removed.len()
+            + usize::from(self.order.is_some())
+    }
+
+    /// `true` when nothing is carried.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.register_count() == 0
+    }
+
+    /// Check the register cap and every register.
+    ///
+    /// # Errors
+    ///
+    /// The first [`BoundsError`] that applies.
+    pub fn validate(&self) -> Result<(), BoundsError> {
+        if self.register_count() > FOLDER_CHANGES_MAX_REGISTERS {
+            return Err(BoundsError::TooManyRegisters);
+        }
+        self.stamped_entries()
+            .iter()
+            .try_for_each(|(_, e)| e.validate())
+    }
+
+    /// Every register as a stamped [`SyncEntry`].
+    #[must_use]
+    pub fn stamped_entries(&self) -> Vec<(u64, SyncEntry)> {
+        let mut out = Vec::with_capacity(self.register_count());
+        out.extend(
+            self.metas
+                .iter()
+                .map(|s| (s.hlc, SyncEntry::FolderMeta(s.value.clone()))),
+        );
+        out.extend(
+            self.members
+                .iter()
+                .map(|s| (s.hlc, SyncEntry::FolderMember(s.value.clone()))),
+        );
+        out.extend(
+            self.pins
+                .iter()
+                .map(|s| (s.hlc, SyncEntry::FolderPins(s.value.clone()))),
+        );
+        out.extend(
+            self.removed
+                .iter()
+                .map(|s| (s.hlc, SyncEntry::FolderRemoved(s.value))),
+        );
+        if let Some(o) = &self.order {
+            out.push((o.hlc, SyncEntry::FolderOrder(o.value.clone())));
+        }
+        out
+    }
+
+    /// Add one stamped folder entry to the matching list. Returns `false`
+    /// (and adds nothing) for a non-folder entry, or for a second order.
+    pub fn push(&mut self, hlc: u64, entry: SyncEntry) -> bool {
+        match entry {
+            SyncEntry::FolderMeta(value) => self.metas.push(Stamped { hlc, value }),
+            SyncEntry::FolderMember(value) => self.members.push(Stamped { hlc, value }),
+            SyncEntry::FolderPins(value) => self.pins.push(Stamped { hlc, value }),
+            SyncEntry::FolderRemoved(value) => self.removed.push(Stamped { hlc, value }),
+            SyncEntry::FolderOrder(value) => {
+                if self.order.is_some() {
+                    return false;
+                }
+                self.order = Some(Stamped { hlc, value });
+            },
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// One entry of a snapshot's per-conversation list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationEntry {
+    /// Flags.
+    Flags(FlagsEntry),
+    /// A read cursor.
+    ReadCursor(ReadCursorEntry),
+    /// A draft.
+    Draft(DraftEntry),
+}
+
+impl From<ConversationEntry> for SyncEntry {
+    fn from(e: ConversationEntry) -> Self {
+        match e {
+            ConversationEntry::Flags(f) => Self::Flags(f),
+            ConversationEntry::ReadCursor(c) => Self::ReadCursor(c),
+            ConversationEntry::Draft(d) => Self::Draft(d),
+        }
+    }
+}
+
+/// One part of the catch-up re-send (ADR-0058 section 5): folded state,
+/// every entry with its ORIGINAL stamp.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateSnapshot {
+    /// Per-conversation flags, cursors and drafts.
+    pub entries: Vec<Stamped<ConversationEntry>>,
+    /// The explicit conversation order, when held (and in this part).
+    pub conversation_order: Option<Stamped<ConversationOrderEntry>>,
+    /// Folder registers.
+    pub folders: FolderChanges,
+    /// 0-based part index.
+    pub part: u32,
+    /// Number of parts, 1..=64.
+    pub parts: u32,
+}
+
+impl StateSnapshot {
+    /// Check the part index and count and the folder registers.
+    ///
+    /// # Errors
+    ///
+    /// The first [`BoundsError`] that applies.
+    pub fn validate(&self) -> Result<(), BoundsError> {
+        if self.parts == 0 || self.parts > SNAPSHOT_MAX_PARTS || self.part >= self.parts {
+            return Err(BoundsError::SnapshotPart);
+        }
+        self.folders.validate()
+    }
+
+    /// Every entry the part carries, stamped.
+    #[must_use]
+    pub fn stamped_entries(&self) -> Vec<(u64, SyncEntry)> {
+        let mut out: Vec<(u64, SyncEntry)> = self
+            .entries
+            .iter()
+            .map(|s| (s.hlc, s.value.clone().into()))
+            .collect();
+        if let Some(o) = &self.conversation_order {
+            out.push((o.hlc, SyncEntry::ConversationOrder(o.value.clone())));
+        }
+        out.extend(self.folders.stamped_entries());
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Codec helpers.
+// ---------------------------------------------------------------------------
+
+fn put_len(out: &mut Vec<u8>, n: usize) {
+    // Every in-memory collection this crate encodes is far below u32::MAX;
+    // saturating keeps the function total rather than panicking.
+    out.extend_from_slice(&u32::try_from(n).unwrap_or(u32::MAX).to_be_bytes());
+}
+
+fn put_bytes32(out: &mut Vec<u8>, b: &[u8]) {
+    put_len(out, b.len());
+    out.extend_from_slice(b);
+}
+
+fn put_ref(out: &mut Vec<u8>, r: &ConversationRef) {
+    out.push(r.kind.to_wire());
+    // A validated ref id is at most 64 bytes.
+    out.push(u8::try_from(r.id.len()).unwrap_or(u8::MAX));
+    out.extend_from_slice(&r.id);
+}
+
+pub(crate) fn take_u8(cur: &mut &[u8]) -> Result<u8, CodecError> {
+    let (&b, rest) = cur.split_first().ok_or(CodecError::Truncated)?;
+    *cur = rest;
+    Ok(b)
+}
+
+pub(crate) fn take_n<'a>(cur: &mut &'a [u8], n: usize) -> Result<&'a [u8], CodecError> {
+    if cur.len() < n {
+        return Err(CodecError::Truncated);
+    }
+    let (head, rest) = cur.split_at(n);
+    *cur = rest;
+    Ok(head)
+}
+
+pub(crate) fn take_u32(cur: &mut &[u8]) -> Result<u32, CodecError> {
+    let b = take_n(cur, 4)?;
+    let mut a = [0u8; 4];
+    a.copy_from_slice(b);
+    Ok(u32::from_be_bytes(a))
+}
+
+pub(crate) fn take_u64(cur: &mut &[u8]) -> Result<u64, CodecError> {
+    let b = take_n(cur, 8)?;
+    let mut a = [0u8; 8];
+    a.copy_from_slice(b);
+    Ok(u64::from_be_bytes(a))
+}
+
+fn take_bool(cur: &mut &[u8]) -> Result<bool, CodecError> {
+    match take_u8(cur)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(CodecError::BadBool),
+    }
+}
+
+fn take_fid(cur: &mut &[u8]) -> Result<FolderId, CodecError> {
+    Ok(folder_id_from_slice(take_n(cur, FOLDER_ID_LEN)?)?)
+}
+
+pub(crate) fn take_bytes32(cur: &mut &[u8]) -> Result<Vec<u8>, CodecError> {
+    let n = take_u32(cur)? as usize;
+    Ok(take_n(cur, n)?.to_vec())
+}
+
+fn take_string(cur: &mut &[u8]) -> Result<String, CodecError> {
+    String::from_utf8(take_bytes32(cur)?).map_err(|_| CodecError::NotUtf8)
+}
+
+fn take_ref(cur: &mut &[u8]) -> Result<ConversationRef, CodecError> {
+    let kind = ConversationRefKind::from_wire(i64::from(take_u8(cur)?))?;
+    let n = usize::from(take_u8(cur)?);
+    let id = take_n(cur, n)?.to_vec();
+    let r = ConversationRef { kind, id };
+    r.validate()?;
+    Ok(r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(name: &str) -> FolderMeta {
+        FolderMeta {
+            folder_id: [7; 16],
+            name: name.into(),
+            include_kinds: INCLUDE_GROUPS,
+            exclude_flags: EXCLUDE_ARCHIVED,
+        }
+    }
+
+    #[test]
+    fn a_folder_name_follows_the_bounds() {
+        assert!(check_folder_name("Work").is_ok());
+        assert!(check_folder_name("🏠 Home").is_ok());
+        assert_eq!(check_folder_name(""), Err(BoundsError::NameEmpty));
+        assert!(check_folder_name(&"a".repeat(24)).is_ok());
+        assert_eq!(
+            check_folder_name(&"a".repeat(25)),
+            Err(BoundsError::NameTooLong)
+        );
+        // 24 scalars of four bytes each is 96 bytes: at the limit.
+        assert!(check_folder_name(&"😀".repeat(24)).is_ok());
+        assert_eq!(check_folder_name("a\nb"), Err(BoundsError::NameCharacters));
+        assert_eq!(check_folder_name(" Work"), Err(BoundsError::NameCharacters));
+        assert_eq!(
+            check_folder_name("a\u{202E}b"),
+            Err(BoundsError::NameCharacters)
+        );
+    }
+
+    #[test]
+    fn unknown_bits_are_refused_not_read_as_off() {
+        let mut m = meta("Work");
+        m.include_kinds = 0b1000;
+        assert_eq!(m.validate(), Err(BoundsError::UnknownBits));
+        let mut m = meta("Work");
+        m.exclude_flags = 1 << 31;
+        assert_eq!(m.validate(), Err(BoundsError::UnknownBits));
+    }
+
+    #[test]
+    fn every_kind_round_trips_through_the_canonical_encoding() {
+        let r = ConversationRef {
+            kind: ConversationRefKind::Channel,
+            id: vec![1, 2, 3],
+        };
+        let entries = vec![
+            SyncEntry::FolderMeta(meta("Work")),
+            SyncEntry::FolderMember(FolderMember {
+                folder_id: [1; 16],
+                conversation: r.clone(),
+                state: MemberState::Excluded,
+            }),
+            SyncEntry::FolderPins(FolderPins {
+                folder_id: [1; 16],
+                pinned: vec![r],
+            }),
+            SyncEntry::FolderRemoved([3; 16]),
+            SyncEntry::FolderOrder(FolderOrder {
+                folder_ids: vec![[1; 16], [2; 16]],
+            }),
+            SyncEntry::Flags(FlagsEntry {
+                group_id: vec![9; 32],
+                pinned: true,
+                muted: false,
+                archived: true,
+                unread_override: false,
+            }),
+            SyncEntry::ReadCursor(ReadCursorEntry {
+                group_id: vec![9; 32],
+                up_to_message_id: vec![4, 5],
+                read_at_ms: 77,
+            }),
+            SyncEntry::Draft(DraftEntry {
+                group_id: vec![9; 32],
+                text: "hi".into(),
+                reply_to_id: vec![],
+            }),
+            SyncEntry::ConversationOrder(ConversationOrderEntry {
+                group_ids: vec![vec![1], vec![2, 2]],
+            }),
+        ];
+        for e in entries {
+            let bytes = e.canonical_bytes();
+            assert_eq!(SyncEntry::from_canonical_bytes(&bytes), Ok(e));
+        }
+    }
+
+    #[test]
+    fn a_malformed_canonical_entry_is_refused() {
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[]),
+            Err(CodecError::Truncated)
+        );
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&[99]),
+            Err(CodecError::UnknownTag)
+        );
+        let mut b = SyncEntry::FolderRemoved([1; 16]).canonical_bytes();
+        b.push(0);
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&b),
+            Err(CodecError::Trailing)
+        );
+    }
+
+    #[test]
+    fn change_set_register_cap() {
+        let mut c = FolderChanges::default();
+        for i in 0..=FOLDER_CHANGES_MAX_REGISTERS {
+            c.removed.push(Stamped {
+                hlc: i as u64,
+                value: [1; 16],
+            });
+        }
+        assert_eq!(c.validate(), Err(BoundsError::TooManyRegisters));
+        c.removed.pop();
+        assert_eq!(c.validate(), Ok(()));
+    }
+
+    #[test]
+    fn snapshot_part_bounds() {
+        let s = |part, parts| StateSnapshot {
+            entries: vec![],
+            conversation_order: None,
+            folders: FolderChanges::default(),
+            part,
+            parts,
+        };
+        assert!(s(0, 1).validate().is_ok());
+        assert!(s(63, 64).validate().is_ok());
+        assert_eq!(s(1, 1).validate(), Err(BoundsError::SnapshotPart));
+        assert_eq!(s(0, 0).validate(), Err(BoundsError::SnapshotPart));
+        assert_eq!(s(0, 65).validate(), Err(BoundsError::SnapshotPart));
+    }
+}

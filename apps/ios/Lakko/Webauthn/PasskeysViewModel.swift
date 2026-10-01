@@ -32,19 +32,25 @@ public final class PasskeysViewModel: ObservableObject {
     @Published public private(set) var exportFileUrl: URL?
 
     /// Kept as ``UiText`` so a message on screen follows a live language
-    /// switch (ADR-0058).
+    /// switch (ADR-0061).
     public enum StatusMessage: Equatable {
         case ok(UiText)
         case error(UiText)
     }
 
     private let authRepository: AuthRepository
+    /// After the server-side deletion: the local wipe + sign-out, which is
+    /// ``AppServices/wipeAccountLocalData(accountIdB64:)`` in the app, the
+    /// same path Forget device takes. Required, so no caller can end up with
+    /// a partial wipe of its own. The argument is the deleted account.
+    private let wipeAfterDeletion: (String) -> Void
     private let client: WebauthnClient
     private let registration: WebauthnRegistration
     private var refreshTask: Task<Void, Never>?
 
     public init(
         authRepository: AuthRepository,
+        wipeAfterDeletion: @escaping (String) -> Void,
         client: WebauthnClient? = nil,
         registration: WebauthnRegistration? = nil
     ) {
@@ -57,6 +63,7 @@ public final class PasskeysViewModel: ObservableObject {
         // nonisolated context the default-argument expression
         // compiles into.
         self.authRepository = authRepository
+        self.wipeAfterDeletion = wipeAfterDeletion
         self.client = client ?? WebauthnClient()
         self.registration = registration ?? WebauthnRegistration()
         rebindSession()
@@ -207,7 +214,8 @@ public final class PasskeysViewModel: ObservableObject {
     /// A3 (GDPR erasure) — delete the whole account across services + wipe this
     /// device. Auth `DELETE /account` (on a 403, the account has a passkey, so
     /// run the action ceremony bound to this account + retry once, fail-closed)
-    /// -> best-effort discovery purge -> local `forgetDevice` wipe + sign-out.
+    /// -> best-effort discovery purge -> the local wipe + sign-out Forget
+    /// device also runs (``wipeAfterDeletion``).
     public func deleteAccount() async {
         rebindSession()
         guard let secrets = authRepository.identitySecrets else {
@@ -239,8 +247,9 @@ public final class PasskeysViewModel: ObservableObject {
             } catch {
                 // best-effort
             }
-            // Local wipe + full sign-out on this device.
-            authRepository.forgetDevice()
+            // The local wipe + sign-out Forget device runs: every store of
+            // the account on this device, chats included.
+            wipeAfterDeletion(base64Encode(secrets.accountId))
         } catch let error as WebauthnAssertion.AssertionError {
             switch error {
             case .cancelled:
@@ -299,7 +308,7 @@ public final class PasskeysViewModel: ObservableObject {
 
     // MARK: - Helpers
 
-    /// The copy for a passkey-service failure (ADR-0058: never the server's
+    /// The copy for a passkey-service failure (ADR-0061: never the server's
     /// or the core's prose; that goes to the log).
     private static func explain(_ error: WebauthnClientError) -> UiText {
         switch error {

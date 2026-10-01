@@ -123,7 +123,7 @@ private fun StatusRow(state: AntiCensorshipState) {
                 me.lakko.app.ui.theme.LakkoLight.success,
             )
         // The failure's own message is diagnostic prose; it goes to the log
-        // (AntiCensorshipManager), never to the screen (ADR-0058).
+        // (AntiCensorshipManager), never to the screen (ADR-0061).
         is AntiCensorshipState.Unavailable ->
             Triple(
                 t("settings.anti_censorship.status.unavailable"),

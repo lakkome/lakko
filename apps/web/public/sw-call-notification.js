@@ -88,7 +88,7 @@ export function isCallNotificationTag(tag) {
 export const CALL_VIBRATION_PATTERN = [400, 200, 400, 200, 400];
 
 /**
- * The words a call notification carries, in English (ADR-0058).
+ * The words a call notification carries, in English (ADR-0061).
  *
  * The page renders them in the interface language and keeps them in Cache
  * Storage ({@link NOTIFICATION_STRINGS_CACHE} / {@link NOTIFICATION_STRINGS_URL},

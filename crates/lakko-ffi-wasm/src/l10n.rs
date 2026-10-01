@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Interface localization (ADR-0058) — wasm-bindgen surface.
+//! Interface localization (ADR-0061) — wasm-bindgen surface.
 //!
 //! Mirror of `lakko-ffi-uniffi/src/l10n.rs` over the same [`lakko_l10n`]
 //! core, minus the signed translation bundle: the web client's code already
 //! comes from the server, so a separate signed channel would add nothing
-//! (ADR-0058 section 5). A translation fix ships with the next web deploy.
+//! (ADR-0061 section 5). A translation fix ships with the next web deploy.
 //!
 //! Errors are thrown as `Error("l10n: <reason>")`; the client falls back to
 //! English and never shows the message to a person.

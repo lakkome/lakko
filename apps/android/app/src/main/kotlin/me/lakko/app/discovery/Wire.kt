@@ -43,7 +43,8 @@ data class OprfRequest(
 /** Response body of `POST /discovery/oprf`. */
 @Serializable
 data class OprfResponse(
-    /** base64(EvaluationElement). Feed to `blinder.finalize(evaluated)`. */
+    /** base64(EvaluationElement). Feed to `blinder.finalize(evaluated)`, which
+     *  returns an `OprfResult { output, lookupKey }`. */
     val evaluated: String,
 )
 
@@ -56,8 +57,10 @@ data class OprfResponse(
 data class RegisterRequest(
     /** base64(account_id) — raw 16 bytes. */
     val account_id: String,
-    /** base64(VOPRF output) — exactly 64 bytes, the OPRF hash the
-     *  client just computed via `blinder.finalize`. */
+    /** base64 of the 64-byte discovery lookup key,
+     *  `blinder.finalize(..).lookupKey`. ADR-0060 §5: never the OPRF
+     *  output itself, which keys public and introduction records and
+     *  stays on the device. The field name is the server's. */
     val oprf_hash: String,
 )
 
@@ -67,6 +70,80 @@ data class RegisterRequest(
 @Serializable
 data class RegisterResponse(
     val ok: Boolean,
+    /** ADR-0060 §5 — standard base64 of the 153-byte username certificate
+     *  binding the username's lookup key to the account. */
+    val username_certificate_b64: String? = null,
+)
+
+/** Response of `GET /discovery/username-certificate` (ADR-0060 §5). */
+@Serializable
+data class UsernameCertificateResponse(
+    val username_certificate_b64: String,
+)
+
+/** Response of `GET /.well-known/lakko-username-cert-key` (ADR-0060 §5). */
+@Serializable
+data class UsernameCertKeyResponse(
+    val alg: String,
+    val key_b64url: String,
+)
+
+/** Body of `PUT /discovery/visibility` (ADR-0060 §5): enter or leave
+ *  Everyone. */
+@Serializable
+data class VisibilityRequest(
+    val public: Boolean,
+    /** base64 of each name search term's 64-byte lookup key
+     *  (`OprfResult.lookupKey`), never an OPRF output. */
+    val name_terms_b64: List<String> = emptyList(),
+    /** Standard base64 of the public record (`composePublicRecord`, sealed
+     *  under the OPRF outputs of the terms). Required when [public], refused
+     *  otherwise, so it is omitted (`null`) outside Everyone. */
+    val public_record_b64: String? = null,
+)
+
+/**
+ * The body of `PUT /discovery/visibility`: in Everyone, the lookup keys and
+ * the public record; outside it, `public: false` alone (the server refuses
+ * terms or a record there). Pure, so the wire shape is host-testable.
+ */
+internal fun visibilityRequest(
+    public: Boolean,
+    nameTermLookupKeys: List<ByteArray>,
+    publicRecord: ByteArray?,
+): VisibilityRequest = if (public) {
+    VisibilityRequest(
+        public = true,
+        name_terms_b64 = nameTermLookupKeys.map { me.lakko.app.auth.base64Encode(it) },
+        public_record_b64 = publicRecord?.let { me.lakko.app.auth.base64Encode(it) },
+    )
+} else {
+    VisibilityRequest(public = false)
+}
+
+/** Body of `POST /discovery/name/lookup` (ADR-0060 §5). */
+@Serializable
+data class NameLookupRequest(
+    /** base64 of the term's 64-byte lookup key (`OprfResult.lookupKey`),
+     *  never an OPRF output. The field name is the server's. */
+    val oprf_hash_b64: String,
+)
+
+/** One person in Everyone found by a name term (`services/discovery/src/visibility.rs`
+ *  `NameLookupResult`). */
+@Serializable
+data class NameLookupResult(
+    /** Standard base64 of the 16-byte account id. */
+    val account_id_b64: String,
+    /** Standard base64 of their public record; the searcher opens it with
+     *  the OPRF OUTPUT of the term it looked up (`openPublicRecord`). */
+    val public_record_b64: String? = null,
+)
+
+/** Response of `POST /discovery/name/lookup` (at most 20 results). */
+@Serializable
+data class NameLookupResponse(
+    val results: List<NameLookupResult> = emptyList(),
 )
 
 // ----------------------------------------------------------------------------
@@ -86,6 +163,9 @@ data class LookupRequest(
 @Serializable
 data class LookupResponse(
     val account_id: String,
+    /** ADR-0060 §5 — standard base64 of the account's public record, opened
+     *  with the OPRF output of the username the lookup used. */
+    val public_record_b64: String? = null,
 )
 
 // ----------------------------------------------------------------------------
@@ -93,8 +173,8 @@ data class LookupResponse(
 //   (services/discovery/src/channel_names.rs — G4-5, ADR-0010)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/channel/register`. Binds an OPRF-
- *  hashed `@channelname` to a 16-byte `channel_id` pseudonym.
+/** Body of `POST /discovery/channel/register`. Binds the lookup key
+ *  of an OPRF'd `@channelname` to a 16-byte `channel_id` pseudonym.
  *  Same OPRF ciphersuite + wire shape as [RegisterRequest]
  *  (Ristretto255-SHA512, 64-byte hash) — the `/discovery/oprf`
  *  evaluate endpoint is namespace-agnostic, so the client reuses
@@ -103,8 +183,9 @@ data class LookupResponse(
  *  different channel id is 409 Conflict. */
 @Serializable
 data class ChannelRegisterRequest(
-    /** base64(VOPRF output) — exactly 64 bytes, from
-     *  `blinder.finalize`. */
+    /** base64 of the 64-byte discovery lookup key,
+     *  `blinder.finalize(..).lookupKey` (ADR-0060 §5, never the OPRF
+     *  output). */
     val oprf_hash: String,
     /** base64(channel_id) — raw 16 bytes (ADR-0010 §"Wire
      *  surfaces"). */
@@ -231,15 +312,33 @@ data class KeyPackageFetchResponse(
 // /discovery/invite   (services/discovery/src/invite.rs — Phase 1.18d1)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/invite`. */
+/** Body of `POST /discovery/invite` (sealed-link amendment of 2026-09-28):
+ *  the SEALED capability plus the fields the ledger needs in clear. */
 @Serializable
 data class InviteUploadRequest(
-    /** Standard-alphabet base64 of the
-     *  `composeInviteCapability(...)` output. Server caps
-     *  decoded size at 2048 bytes (mirrored client-side in
-     *  [DiscoveryClient.uploadInvite] so a misbehaving caller
-     *  fails fast). */
-    val capability: String,
+    /** Standard base64 of the sealed link (`InviteLinkMint.sealed`). Opaque
+     *  to the server. */
+    val sealed: String,
+    /** Standard base64 of the 32-byte key that signed the capability — the
+     *  key a later owner-signed revoke must verify against. */
+    val issuer_pubkey: String,
+    /** The capability's `expiry_ms` (`0` = never), for the fetch filter. */
+    val expiry_ms: Long,
+    /** The capability's `max_uses` sentinel, for the consume ceiling. */
+    val max_uses: Long,
+    /** The capability's label, for the owner's own list. */
+    val label: String = "",
+    /** The capability's `bootstrap_referral` flag, for the owner's list. */
+    val bootstrap_referral: Boolean = false,
+)
+
+/** Body of `POST /discovery/call-invite` (sealed-link amendment). */
+@Serializable
+data class CallInviteUploadRequest(
+    val sealed: String,
+    val issuer_pubkey: String,
+    val expiry_ms: Long,
+    val max_uses: Long,
 )
 
 /** Response body of `POST /discovery/invite`. */
@@ -259,7 +358,9 @@ data class InviteUploadResponse(
  *  status). */
 @Serializable
 data class InviteFetchResponse(
-    val capability: String,
+    /** Standard base64 of the sealed link; opened locally under the URL
+     *  fragment's secret. */
+    val sealed: String,
 )
 
 /** Body of `POST /discovery/invite/{blob_id_b64url}/consume`
@@ -296,18 +397,19 @@ data class InviteConsumeResponse(
 // /discovery/group-invite   (services/discovery/src/group_invite.rs — ADR-0028)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/group-invite` (ADR-0028, G-3). Unlike the
- *  contact-/call-invite uploads (which reuse [InviteUploadRequest]), the
- *  group-invite carries a separate `max_uses` field: the `GroupInviteCapability`
- *  wire format does NOT embed it, so the server reads it from the request. It is
+/** Body of `POST /discovery/group-invite` (ADR-0028, G-3; sealed since
+ *  2026-09-28). The `GroupInviteCapability` wire format does NOT embed
+ *  `max_uses`, so the server reads it from the request. It is
  *  a SOFT anti-spam throttle (`0` = single-use, `0xFFFFFFFF` = unlimited), NOT a
  *  security boundary — the admin approval gate (ADR-0027) is the boundary. */
 @Serializable
 data class GroupInviteUploadRequest(
-    /** Standard-alphabet base64 of the
-     *  `composeGroupInviteCapability(...)` output. The server decodes + verifies
-     *  the Ed25519 wire signature before storing. */
-    val capability: String,
+    /** Standard base64 of the sealed link (`InviteLinkMint.sealed`). */
+    val sealed: String,
+    /** Standard base64 of the 32-byte key that signed the capability. */
+    val issuer_pubkey: String,
+    /** The capability's `expiry_ms` (`0` = never). */
+    val expiry_ms: Long,
     /** Soft consume ceiling. Serialised as a JSON number the server reads as a
      *  `u32`; `0xFFFFFFFF` (= 4294967295) means unlimited. */
     val max_uses: Long,

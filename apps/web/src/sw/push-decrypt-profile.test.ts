@@ -75,6 +75,7 @@ function deps(messages: unknown[], overrides: Record<string, unknown> = {}) {
   return {
     forbidden,
     deps: {
+      readWakeBinding: async () => ({ devicePseudonymHex: "dd".repeat(32), accountId: "acct" }),
       resolveAccount: async () => ({ accountId: "acct", groupIdBytes: GROUP_BYTES }),
       getDeviceKey: async () => ({}),
       getIdentitySeed: async () => new Uint8Array(64),
@@ -87,7 +88,7 @@ function deps(messages: unknown[], overrides: Record<string, unknown> = {}) {
   };
 }
 
-const wake = { deviceHex: null, groupHex: GROUP_HEX, pointer: 42 };
+const wake = { deviceHex: "dd".repeat(32), groupHex: GROUP_HEX, pointer: 42 };
 const profile = (name = "Zed Unique Name") => realWasm.composeProfileEnvelope(name, "zed", 5n);
 
 describe("the background path never previews a profile", () => {

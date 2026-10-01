@@ -62,6 +62,13 @@ public data class ConversationListRow(
     val pinned: Boolean = false,
     val muted: Boolean = false,
     val archived: Boolean = false,
+    /** A manual "mark as unread" (the synced flag). With [unread] it is what
+     *  a folder's Read toggle reads (`docs/ux/chat-folders.md` 3.2). */
+    val unreadOverride: Boolean = false,
+    /** This device's membership has ended (left, or removed). Still listed in
+     *  All chats with its ended line; a folder matches nothing it cannot
+     *  open (`docs/ux/chat-folders.md` 3.2). */
+    val membershipEnded: Boolean = false,
 )
 
 /** The shared kind a chat-or-group row opens under. */
@@ -121,3 +128,16 @@ public fun conversationRowMatchesQuery(
     if (q.isEmpty()) return true
     return title.contains(q, ignoreCase = true) || preview.contains(q, ignoreCase = true)
 }
+
+/**
+ * Whether the conversation list shows its empty state (the sentence and the
+ * New button) rather than what a search finds.
+ *
+ * `docs/ux/navigation.md` section 4, "Also with an empty list": the search
+ * field is there before the first conversation exists, because finding the
+ * first person to talk to is what a new account needs it for. With nothing
+ * typed the empty state shows; once something is typed it gives way to the
+ * search, the people half included (`docs/ux/who-can-find-me.md` 6.1).
+ */
+public fun showsEmptyConversationState(listIsEmpty: Boolean, query: String): Boolean =
+    listIsEmpty && query.isBlank()

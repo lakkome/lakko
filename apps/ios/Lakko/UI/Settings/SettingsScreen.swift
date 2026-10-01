@@ -16,7 +16,7 @@ struct SettingsScreen: View {
 
     /// ADR-0048 — the own name in the header updates when saved.
     @ObservedObject private var profiles = ProfileDirectory.shared
-    /// ADR-0058 — the interface language; every catalog string here follows it.
+    /// ADR-0061 — the interface language; every catalog string here follows it.
     @ObservedObject private var l10n = Localization.shared
     /// The existing delete-account flow (auth `DELETE /account`, the passkey
     /// action ceremony on a 403, the discovery purge, then the local wipe)
@@ -29,14 +29,16 @@ struct SettingsScreen: View {
         authRepository: AuthRepository,
         onOpen: @escaping (TabRoute) -> Void,
         onLogout: @escaping () -> Void,
-        onForgetDevice: @escaping () -> Void
+        onForgetDevice: @escaping () -> Void,
+        onAccountDeleted: @escaping (String) -> Void
     ) {
         self.account = account
         self.onOpen = onOpen
         self.onLogout = onLogout
         self.onForgetDevice = onForgetDevice
         self._accountDeletion = StateObject(
-            wrappedValue: PasskeysViewModel(authRepository: authRepository))
+            wrappedValue: PasskeysViewModel(
+                authRepository: authRepository, wipeAfterDeletion: onAccountDeleted))
     }
     /// ADR-0047 / UX spec section 3 — "Autoplay video notes", default OFF:
     /// autoplay downloads media, so it is the user's choice, per device.
@@ -114,12 +116,25 @@ struct SettingsScreen: View {
                 row(l10n.t("settings.section.profile"), systemImage: "person.crop.circle") { onOpen(.profile) }
             }
 
+            // `docs/ux/who-can-find-me.md` section 2 — Privacy, after Profile.
+            Section("Privacy") {
+                row("Who can find me", systemImage: "person.2.badge.gearshape") {
+                    onOpen(.whoCanFindMe)
+                }
+            }
+
             Section(l10n.t("settings.section.security")) {
                 row(l10n.t("settings.passkeys.title"), systemImage: "person.badge.key") { onOpen(.passkeys) }
                 row(l10n.t("settings.devices.title"), systemImage: "laptopcomputer.and.iphone") {
                     onOpen(.devices)
                 }
                 row(l10n.t("settings.recovery.title"), systemImage: "lifepreserver") { onOpen(.recoveryFactors) }
+            }
+
+            // `docs/ux/chat-folders.md` section 4 — between Notifications
+            // (not a section on this client) and Appearance.
+            Section {
+                row("Chat folders", systemImage: "folder") { onOpen(.chatFolders(reorder: false)) }
             }
 
             Section(l10n.t("settings.section.appearance")) {

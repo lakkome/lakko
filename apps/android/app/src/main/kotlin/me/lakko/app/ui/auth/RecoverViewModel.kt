@@ -711,7 +711,7 @@ public data class RecoverUiState(
     val password: String = "",
     val confirm: String = "",
     val busy: Boolean = false,
-    /** The form's error sentence (ADR-0058: rendered from its key). */
+    /** The form's error sentence (ADR-0061: rendered from its key). */
     val error: UiText? = null,
     /** ADR-0018 — non-null once the AnotherDevice mode turned the
      *  username into the login handle its pairing code carries

@@ -109,6 +109,31 @@ class AccountDirectoryTest {
     }
 
     @Test
+    fun `a handle-bind limit stops the claim before discovery with its own copy`() = runTest {
+        // docs/ux/anti-abuse.md section 2 — `PUT /auth/login-handle` answered
+        // `429 handle-bind-limited`: nothing is asked of discovery and the
+        // error carries the limit sentence (the form keeps its contents).
+        val limited = AuthHttpError(
+            status = 429,
+            endpoint = "/auth/login-handle",
+            body = """{"error":"handle-bind-limited","retry_after_secs":300}""",
+            code = "handle-bind-limited",
+            retryAfterSecs = 300,
+        )
+        val binder = FakeBinder(onBind = { throw limited })
+        val directory = FakeDirectory()
+        try {
+            claimUsernameAtSignup(directory, binder, handles, "token", accountId, "alice")
+            fail("a limited bind must fail signup")
+        } catch (err: AuthHttpError) {
+            assertEquals("You have changed your username too often. Try again in 5 minutes.", authLimitCopy(err))
+        }
+        assertEquals(listOf("handle:alice", "bind"), calls)
+        assertTrue(directory.registrations.isEmpty())
+        assertEquals(0, binder.unbinds)
+    }
+
+    @Test
     fun `a name taken at discovery releases the handle and reads as taken`() = runTest {
         val binder = FakeBinder()
         val directory = FakeDirectory(onRegister = {

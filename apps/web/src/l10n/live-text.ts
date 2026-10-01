@@ -4,7 +4,7 @@
 /**
  * A message held in a signal as the way to render it rather than as rendered
  * text, so a notice or an error already on screen follows a language switch
- * (ADR-0058, `docs/ux/localization.md`).
+ * (ADR-0061, `docs/ux/localization.md`).
  *
  * The setter takes either a function (`() => t("key", args)`), which is
  * re-run on every read and so re-renders in the current language, or a plain

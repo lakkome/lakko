@@ -19,7 +19,7 @@ import me.lakko.app.l10n.joinList
  * which is what gave the digits somewhere else to live (section 5).
  *
  * Pure and Android-free, so the wording is unit-tested on the host JVM. The
- * words come from the catalog in [Strings] (ADR-0058); the running time is a
+ * words come from the catalog in [Strings] (ADR-0061); the running time is a
  * clock value (`12:04`) in every language.
  */
 

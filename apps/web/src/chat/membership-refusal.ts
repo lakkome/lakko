@@ -240,7 +240,7 @@ export const JOIN_REQUEST_NOT_KEPT = (): string => t("chat.refusal.join_not_kept
 // ---------------------------------------------------------------------------
 
 interface Copy {
-  /** The statement of fact. Always shown. Rendered on read (ADR-0058). */
+  /** The statement of fact. Always shown. Rendered on read (ADR-0061). */
   readonly fact: () => string;
   /** Appended after a space **only** when the core says a plain retry may
    *  succeed. Absent for every reason the core never calls retryable. */

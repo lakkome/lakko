@@ -396,6 +396,99 @@ public final class ChannelsClient {
         return view.epoch
     }
 
+    // MARK: - ADR-0060 member cards
+
+    /// `PUT /v1/channels/:id/members/:pubkey_hex` — upload this subscriber's
+    /// member card, signed by its subscriber key (`sigHeader` is
+    /// `memberCardRequestSignature(channelId:card:)`).
+    public func putMemberCard(
+        channelIdHex: String, subscriberPubHex: String, card: Data, sigHeader: String
+    ) async throws {
+        let url = try buildURL(endpoint: "/v1/channels/\(channelIdHex)/members/\(subscriberPubHex)")
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue(sigHeader, forHTTPHeaderField: Self.memberCardSigHeader)
+        request.httpBody = card
+        try await executeNoContent(request: request)
+    }
+
+    /// `DELETE /v1/channels/:id/members/:pubkey_hex` — remove the card on
+    /// unsubscribe, signed over the empty card. Idempotent.
+    public func deleteMemberCard(
+        channelIdHex: String, subscriberPubHex: String, sigHeader: String
+    ) async throws {
+        let url = try buildURL(endpoint: "/v1/channels/\(channelIdHex)/members/\(subscriberPubHex)")
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue(sigHeader, forHTTPHeaderField: Self.memberCardSigHeader)
+        try await executeNoContent(request: request)
+    }
+
+    /// `GET /v1/channels/:id/members` — one page of `(subscriber key, card)`,
+    /// and the `after` of the next page (`nil` on the last).
+    public func listMemberCards(
+        channelIdHex: String, after: String? = nil
+    ) async throws -> (members: [(subscriberPk: Data, card: Data)], nextAfter: String?) {
+        var endpoint = "/v1/channels/\(channelIdHex)/members"
+        if let after { endpoint += "?after=\(after)" }
+        let page: MemberCardsPage = try await getJson(endpoint: endpoint)
+        let members = page.members.compactMap { m -> (Data, Data)? in
+            guard let pk = base64UrlDecodeNoPad(m.subscriberPkB64),
+                  let card = base64UrlDecodeNoPad(m.cardB64) else { return nil }
+            return (pk, card)
+        }
+        return (members.map { (subscriberPk: $0.0, card: $0.1) }, page.nextAfter)
+    }
+
+    /// The member-card signature header (`x-lakko-member-card-sig`).
+    static let memberCardSigHeader = "x-lakko-member-card-sig"
+
+    /// The unsubscribe signature header (`x-lakko-unsubscribe-sig`), the
+    /// core's `unsubscribeSigHeaderName()`; a unit test pins the two equal.
+    static let unsubscribeSigHeader = "x-lakko-unsubscribe-sig"
+
+    /// The `DELETE /v1/channels/:id/subscribers/:pubkey_hex` request that
+    /// leaves a channel (ADR-0060 section 3): the server drops the subscriber
+    /// row, its seed envelopes and its member card. `sigHeader` is the
+    /// subscriber key's `unsubscribeRequestHeader(channelId:issuedAtMs:)`.
+    func unsubscribeRequest(
+        channelIdHex: String, subscriberPubHex: String, sigHeader: String
+    ) throws -> URLRequest {
+        let url = try buildURL(endpoint: "/v1/channels/\(channelIdHex)/subscribers/\(subscriberPubHex)")
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue(sigHeader, forHTTPHeaderField: Self.unsubscribeSigHeader)
+        return request
+    }
+
+    /// Leave a channel on the server. Idempotent: a `404` (the subscriber, or
+    /// the channel, is already gone) counts as done.
+    public func unsubscribe(
+        channelIdHex: String, subscriberPubHex: String, sigHeader: String
+    ) async throws {
+        let request = try unsubscribeRequest(
+            channelIdHex: channelIdHex, subscriberPubHex: subscriberPubHex, sigHeader: sigHeader)
+        do {
+            try await executeNoContent(request: request)
+        } catch let error as ChannelsApiError where error.status == 404 {
+            return
+        }
+    }
+
+    private func executeNoContent(request: URLRequest) async throws {
+        let (_, response) = try await AntiCensorshipTransport.perform(
+            request, session: session, config: .current)
+        guard let http = response as? HTTPURLResponse else {
+            throw ChannelsApiError(status: -1, code: "no-http-response", detail: "non-HTTP response")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw ChannelsApiError(
+                status: http.statusCode, code: "member-card",
+                detail: HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
+        }
+    }
+
     // MARK: - Internals
 
     private func postJson<Body: Encodable, R: Decodable>(
@@ -523,5 +616,22 @@ private extension Data {
         std.append(String(repeating: "=", count: pad))
         guard let data = Data(base64Encoded: std) else { return nil }
         self = data
+    }
+}
+
+private struct MemberCardsPage: Decodable {
+    struct Member: Decodable {
+        let subscriberPkB64: String
+        let cardB64: String
+        enum CodingKeys: String, CodingKey {
+            case subscriberPkB64 = "subscriber_pk_b64"
+            case cardB64 = "card_b64"
+        }
+    }
+    let members: [Member]
+    let nextAfter: String?
+    enum CodingKeys: String, CodingKey {
+        case members
+        case nextAfter = "next_after"
     }
 }

@@ -7,7 +7,7 @@
  *
  * ## What this store holds
  *
- * Two things, in ONE database (`lakko-push-routing`) so the background
+ * Three things, in ONE database (`lakko-push-routing`) so the background
  * service worker can open a single DB:
  *
  *   1. **`secrets`** — the per-`(account, group)` `push_routing_secret`
@@ -19,8 +19,11 @@
  *      — the SW never needs the raw secret. The row also carries a
  *      plaintext `distributed` flag recording whether the in-group
  *      distribution envelope was ever confirmed on the wire (see below).
- *   2. **`routes`** — the **`push_gid → (account, group_id)` reverse
- *      index**, keyed by the lowercase-hex `push_gid`. This is the map
+ *   2. **`account_routes`** — the **`(account, push_gid) → group_id` reverse
+ *      index**, keyed by the account AND the lowercase-hex `push_gid`
+ *      (ADR-0042, amended 2026-09-30: two accounts in one group derive the
+ *      same `push_gid`, so a `push_gid`-only key let the last writer take the
+ *      row, and a wake could be decrypted as the wrong account). This is the map
  *      the ADR-0041 silent-push decrypt path reverse-resolves in Sprint 4
  *      (`resolveAccount(pushGidHex)` → the real `group_id` for the DS
  *      fetch). It is stored **plaintext**: `push_gid` is a one-way
@@ -29,8 +32,15 @@
  *      rationale that keeps `knownGroupIds` unencrypted in the MLS
  *      snapshot store. Plaintext is REQUIRED so the SW can read it
  *      without the device key.
+ *   3. **`wake_binding`** — ONE row naming the device push pseudonym this
+ *      browser registered and the account it registered it for (ADR-0042,
+ *      "A wake is shown only for the signed-in account"). The service worker
+ *      handles a wake only when the wake's `d` equals that pseudonym, and
+ *      only as that account. Written after a successful registration,
+ *      cleared FIRST by Log out and Forget device. Plaintext: a random
+ *      pseudonym and an account id, no key material.
  *
- * The two stores age differently, which ADR-0043 makes load-bearing: a
+ * The first two stores age differently, which ADR-0043 makes load-bearing: a
  * rotation OVERWRITES the `secrets` row in place (same `(account, group)`
  * key) but only ADDS to `routes` (keyed by the freshly derived
  * `pushGidHex`). The superseded route entry is therefore retired explicitly,
@@ -101,7 +111,7 @@
  * converges.
  *
  * ```text
- *   db   "lakko-push-routing"  v1
+ *   db   "lakko-push-routing"  v2
  *   ├── store "secrets"  keyPath: "key"  (string = accountId "\0" groupIdB64)
  *   │     row {
  *   │       key:        <accountId "\0" groupIdB64>,
@@ -111,13 +121,24 @@
  *   │       distributed?: boolean,   // absent (legacy) === true
  *   │       mintEpoch?: bigint       // absent (legacy) === 0n  (ADR-0044)
  *   │     }
- *   └── store "routes"  keyPath: "pushGidHex"  (string, 64 lowercase hex)
+ *   ├── store "account_routes"  keyPath: "key"  (accountId "\0" pushGidHex)
+ *   │     row {
+ *   │       key:        <accountId "\0" 64-hex push_gid>,  (SW lookup key)
+ *   │       pushGidHex: <64 hex>,      // the opaque push_gid
+ *   │       accountId:  <b64-uuidv7>,
+ *   │       groupIdB64: <b64 group_id> // the REAL DS journal key (public)
+ *   │     }
+ *   └── store "wake_binding"  keyPath: "slot"  (always "current")
  *         row {
- *           pushGidHex: <64 hex>,      // the opaque push_gid (SW lookup key)
- *           accountId:  <b64-uuidv7>,
- *           groupIdB64: <b64 group_id> // the REAL DS journal key (public)
+ *           slot:               "current",
+ *           devicePseudonymHex: <64 lowercase hex>,
+ *           accountId:          <b64-uuidv7>
  *         }
  * ```
+ *
+ * v2 replaced the v1 `routes` store (keyed by `push_gid` alone); the upgrade
+ * drops it, so its rows simply stop being read (no production data, no
+ * migration) and a group re-indexes on its next persist.
  *
  * ## Invariants
  *
@@ -131,11 +152,17 @@
 import { getDeviceKey } from "../auth/key-store";
 
 const DB_NAME = "lakko-push-routing";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 /** Device-key-encrypted `push_routing_secret`, keyed per (account, group). */
 const SECRETS_STORE = "secrets";
-/** Plaintext `push_gid → (account, group_id)` reverse index (SW-readable). */
-const ROUTES_STORE = "routes";
+/** Plaintext `(account, push_gid) → group_id` reverse index (SW-readable). */
+const ROUTES_STORE = "account_routes";
+/** The v1 reverse index keyed by `push_gid` alone; dropped by the v2 upgrade. */
+const LEGACY_ROUTES_STORE = "routes";
+/** The one `(device pseudonym, account)` binding row (SW-readable). */
+const WAKE_BINDING_STORE = "wake_binding";
+/** The binding store's only key. */
+const WAKE_BINDING_SLOT = "current";
 
 /** AES-GCM IV length we prepend to each ciphertext. */
 const IV_LEN = 12;
@@ -144,6 +171,13 @@ const IV_LEN = 12;
  *  base64 (never contain a NUL), so a NUL separator is unambiguous. */
 function secretRowKey(accountIdB64: string, groupIdB64: string): string {
   return `${accountIdB64}\0${groupIdB64}`;
+}
+
+/** Composite `account_routes` row key — the same NUL-separated shape; the
+ *  service worker builds the identical string (`routeRowKey` in
+ *  `public/sw.js`), so the two must stay in step. */
+export function routeRowKey(accountIdB64: string, pushGidHex: string): string {
+  return `${accountIdB64}\0${pushGidHex.toLowerCase()}`;
 }
 
 /** On-disk `secrets` row. `ciphertext` = `[12-byte IV | AES-GCM+tag]`. */
@@ -193,9 +227,11 @@ export interface GroupRoutingRecord {
  */
 export type GroupRoutingState = "absent" | "pending" | "distributed";
 
-/** On-disk `routes` row — the plaintext reverse-index entry. */
+/** On-disk `account_routes` row — the plaintext reverse-index entry. */
 export interface RouteRow {
-  /** Lowercase-hex `push_gid` (64 chars). The SW's reverse-map key. */
+  /** {@link routeRowKey}(accountId, pushGidHex) — the SW's lookup key. */
+  key: string;
+  /** Lowercase-hex `push_gid` (64 chars). */
   pushGidHex: string;
   /** base64 account_id. */
   accountId: string;
@@ -220,8 +256,15 @@ export function openPushRoutingDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(SECRETS_STORE)) {
         db.createObjectStore(SECRETS_STORE, { keyPath: "key" });
       }
+      // v2: the `push_gid`-only index is dropped rather than migrated.
+      if (db.objectStoreNames.contains(LEGACY_ROUTES_STORE)) {
+        db.deleteObjectStore(LEGACY_ROUTES_STORE);
+      }
       if (!db.objectStoreNames.contains(ROUTES_STORE)) {
-        db.createObjectStore(ROUTES_STORE, { keyPath: "pushGidHex" });
+        db.createObjectStore(ROUTES_STORE, { keyPath: "key" });
+      }
+      if (!db.objectStoreNames.contains(WAKE_BINDING_STORE)) {
+        db.createObjectStore(WAKE_BINDING_STORE, { keyPath: "slot" });
       }
     };
     req.onsuccess = (): void => resolve(req.result);
@@ -314,7 +357,8 @@ export async function putGroupRouting(
     mintEpoch: args.mintEpoch,
   };
   const routeRow: RouteRow = {
-    pushGidHex: args.pushGidHex,
+    key: routeRowKey(args.accountId, args.pushGidHex),
+    pushGidHex: args.pushGidHex.toLowerCase(),
     accountId: args.accountId,
     groupIdB64: args.groupIdB64,
   };
@@ -501,23 +545,30 @@ export async function markGroupRoutingPending(
 }
 
 /**
- * Reverse-map a `push_gid` (lowercase hex) to its owning
- * `(account, group_id)`, or `null` when unknown. This is the read the
- * ADR-0041 silent-push decrypt path performs in Sprint 4 to turn an
- * opaque wake `g` back into the real DS `group_id`. Exposed here as the
- * canonical foreground reader; the SW hand-rolls its own read-only
- * mirror (it cannot import this module — same pattern as `sw.js`).
+ * Reverse-map `(account, push_gid)` (lowercase hex) to its row, or `null`
+ * when this account holds no such route. This is the read the ADR-0041
+ * silent-push decrypt path performs to turn an opaque wake `g` back into the
+ * real DS `group_id`, for the BOUND account only. Exposed here as the
+ * canonical foreground reader; the SW hand-rolls its own read-only mirror
+ * (it cannot import this module — same pattern as `sw.js`).
+ *
+ * A row naming another account is a miss, even if the key somehow matched.
  */
 export async function lookupPushRoute(
+  accountId: string,
   pushGidHex: string,
 ): Promise<RouteRow | null> {
   const db = await openPushRoutingDb();
   try {
     const tx = db.transaction(ROUTES_STORE, "readonly");
-    const req = tx.objectStore(ROUTES_STORE).get(pushGidHex);
+    const req = tx
+      .objectStore(ROUTES_STORE)
+      .get(routeRowKey(accountId, pushGidHex));
     return await new Promise<RouteRow | null>((resolve, reject) => {
-      req.onsuccess = (): void =>
-        resolve((req.result as RouteRow | undefined) ?? null);
+      req.onsuccess = (): void => {
+        const row = req.result as RouteRow | undefined;
+        resolve(row !== undefined && row.accountId === accountId ? row : null);
+      };
       req.onerror = (): void =>
         reject(req.error ?? new Error("idb get failed"));
     });
@@ -527,12 +578,15 @@ export async function lookupPushRoute(
 }
 
 /**
- * Delete ONE reverse-index entry, by its `push_gid` (lowercase hex).
+ * Delete ONE reverse-index entry, by `(account, push_gid)` (lowercase hex).
+ * Another account's row for the same `push_gid` (both in one group) is left
+ * alone.
  *
  * ADR-0043. The asymmetry this closes: the `secrets` store is keyed
  * `(account, group)` and is **overwritten in place** by a rotation, but the
- * `routes` store is keyed by `pushGidHex`, so a rotation only ever **adds** a
- * row — the superseded `push_gid → (account, group_id)` entry survives
+ * `account_routes` store is keyed by `(account, pushGidHex)`, so a rotation
+ * only ever **adds** a row — the superseded `(account, push_gid) → group_id`
+ * entry survives
  * forever. Left behind, each rotation grows the reverse map by one dead entry
  * whose `push_gid` nothing will ever notify again.
  *
@@ -543,11 +597,46 @@ export async function lookupPushRoute(
  * Scoped to the ONE key: never touches the `secrets` store, so it can never
  * strand a group by deleting the material a live `push_gid` is derived from.
  */
-export async function deleteRoute(pushGidHex: string): Promise<void> {
+export async function deleteRoute(
+  accountId: string,
+  pushGidHex: string,
+): Promise<void> {
   const db = await openPushRoutingDb();
   try {
     const tx = db.transaction(ROUTES_STORE, "readwrite");
-    tx.objectStore(ROUTES_STORE).delete(pushGidHex);
+    tx.objectStore(ROUTES_STORE).delete(routeRowKey(accountId, pushGidHex));
+    await awaitTx(tx);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Forget device: wipe `accountId`'s push-routing secrets and the reverse-index
+ * entries that name it, in one transaction. Another account's rows on this
+ * browser are left alone (2026-09-30 — Forget device used to call
+ * {@link clearAllGroupRouting}, which stopped every other account's wakes
+ * until each re-provisioned). Whole-row deletes of an account that is being
+ * wiped, so, like `clearAllGroupRouting`, it does not take the per-row lock.
+ */
+export async function clearGroupRoutingForAccount(accountId: string): Promise<void> {
+  const db = await openPushRoutingDb();
+  try {
+    const tx = db.transaction([SECRETS_STORE, ROUTES_STORE], "readwrite");
+    const secrets = tx.objectStore(SECRETS_STORE);
+    const secretRows = secrets.getAll();
+    secretRows.onsuccess = (): void => {
+      for (const row of (secretRows.result ?? []) as SecretRow[]) {
+        if (row.accountId === accountId) secrets.delete(row.key);
+      }
+    };
+    const routes = tx.objectStore(ROUTES_STORE);
+    const routeRows = routes.getAll();
+    routeRows.onsuccess = (): void => {
+      for (const row of (routeRows.result ?? []) as RouteRow[]) {
+        if (row.accountId === accountId) routes.delete(row.key);
+      }
+    };
     await awaitTx(tx);
   } finally {
     db.close();
@@ -556,8 +645,8 @@ export async function deleteRoute(pushGidHex: string): Promise<void> {
 
 /**
  * Wipe every push-routing secret + reverse-index entry, regardless of
- * account. Called from `AuthProvider.logout` / `forgetDevice` so a device
- * wipe leaves no push-routing residue (mirrors `clearAllMlsSnapshots`).
+ * account. Leaves the wake binding alone ({@link clearWakeBinding}). Not called by `AuthProvider.forgetDevice`, which clears only the
+ * forgotten account's rows ({@link clearGroupRoutingForAccount}).
  */
 export async function clearAllGroupRouting(): Promise<void> {
   const db = await openPushRoutingDb();
@@ -584,4 +673,83 @@ export async function getGroupRoutingSecretForAccount(
   const deviceKey = await getDeviceKey(accountId);
   if (deviceKey === null) return null;
   return getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
+}
+
+/**
+ * The `(device pseudonym, account)` pair this browser registered for push —
+ * ADR-0042, "A wake is shown only for the signed-in account".
+ */
+export interface WakeBinding {
+  /** 64 lowercase hex chars — the `d` every wake for this sign-in carries. */
+  devicePseudonymHex: string;
+  /** base64 account_id of the account that registered it. */
+  accountId: string;
+}
+
+/** On-disk `wake_binding` row. */
+interface WakeBindingRow extends WakeBinding {
+  slot: string;
+}
+
+/**
+ * Record that `devicePseudonymHex` is registered for `accountId`, replacing
+ * any earlier binding (a device has at most one active account). The service
+ * worker reads this row on every wake.
+ */
+export async function putWakeBinding(binding: WakeBinding): Promise<void> {
+  const row: WakeBindingRow = {
+    slot: WAKE_BINDING_SLOT,
+    devicePseudonymHex: binding.devicePseudonymHex.toLowerCase(),
+    accountId: binding.accountId,
+  };
+  const db = await openPushRoutingDb();
+  try {
+    const tx = db.transaction(WAKE_BINDING_STORE, "readwrite");
+    tx.objectStore(WAKE_BINDING_STORE).put(row);
+    await awaitTx(tx);
+  } finally {
+    db.close();
+  }
+}
+
+/** The current binding, or `null` when none is recorded (signed out). */
+export async function getWakeBinding(): Promise<WakeBinding | null> {
+  const db = await openPushRoutingDb();
+  try {
+    const tx = db.transaction(WAKE_BINDING_STORE, "readonly");
+    const req = tx.objectStore(WAKE_BINDING_STORE).get(WAKE_BINDING_SLOT);
+    const row = await new Promise<WakeBindingRow | undefined>(
+      (resolve, reject) => {
+        req.onsuccess = (): void =>
+          resolve(req.result as WakeBindingRow | undefined);
+        req.onerror = (): void =>
+          reject(req.error ?? new Error("idb get failed"));
+      },
+    );
+    if (
+      row === undefined ||
+      typeof row.devicePseudonymHex !== "string" ||
+      typeof row.accountId !== "string"
+    ) {
+      return null;
+    }
+    return { devicePseudonymHex: row.devicePseudonymHex, accountId: row.accountId };
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Drop the binding, so the service worker handles no further wake. Log out
+ * and Forget device call this before anything else they do.
+ */
+export async function clearWakeBinding(): Promise<void> {
+  const db = await openPushRoutingDb();
+  try {
+    const tx = db.transaction(WAKE_BINDING_STORE, "readwrite");
+    tx.objectStore(WAKE_BINDING_STORE).delete(WAKE_BINDING_SLOT);
+    await awaitTx(tx);
+  } finally {
+    db.close();
+  }
 }

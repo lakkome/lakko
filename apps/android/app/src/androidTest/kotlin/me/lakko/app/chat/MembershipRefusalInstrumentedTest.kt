@@ -37,7 +37,7 @@ import uniffi.lakko_ffi_uniffi.membershipRefusalRetryMaySucceed
 @RunWith(AndroidJUnit4::class)
 class MembershipRefusalInstrumentedTest {
     init {
-        // ADR-0058: the refusal is a catalog message; render it through the
+        // ADR-0061: the refusal is a catalog message; render it through the
         // real core. The English assertions below assume an English device,
         // as they always did.
         me.lakko.app.l10n.Localization.init(

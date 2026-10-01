@@ -5,7 +5,7 @@ import Foundation
 import LakkoCore
 import SwiftUI
 
-/// The interface language (ADR-0058, UX spec `docs/ux/localization.md`).
+/// The interface language (ADR-0061, UX spec `docs/ux/localization.md`).
 ///
 /// One observable for the whole app. It resolves the language with the
 /// shared `lakko-l10n` rule (the stored choice, else the first supported
@@ -293,7 +293,7 @@ final class Localization: ObservableObject {
     }
 
     /// A list of word positions for a `{positions}` argument: the numbers
-    /// stay in Latin digits (ADR-0058 open question 2) and are joined by the
+    /// stay in Latin digits (ADR-0061 open question 2) and are joined by the
     /// list formatter of the interface language.
     func positions(_ numbers: [Int]) -> String {
         let formatter = ListFormatter()

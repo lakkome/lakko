@@ -118,6 +118,18 @@ final class GatedPublishURLProtocol: URLProtocol {
     override func startLoading() {
         let path = request.url?.path ?? ""
         let body = Self.bodyBytes(of: request)
+        // Only journal PUBLISHES are measured. ADR-0057 ownership statements
+        // (`PUT .../push-binding`, `.../registrars`) are fire-and-forget work
+        // a repository from an EARLIER test can still have in flight, and they
+        // are not what the serialization cases are about.
+        guard path.hasSuffix("/messages") else {
+            let url = request.url ?? URL(fileURLWithPath: "/")
+            let response = HTTPURLResponse(
+                url: url, statusCode: 204, httpVersion: "HTTP/1.1", headerFields: [:])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         let id = Self.noteEnter(path: path, body: body)
         let url = request.url ?? URL(fileURLWithPath: "/")
         // Scheduled, never slept inline — see the type doc.

@@ -149,7 +149,7 @@ public class CallUiState(
         /** Unix milliseconds. */
         val tsMs: Long,
         /** A system event's words, rendered in the interface language
-         *  (ADR-0058); [text] is empty for one. */
+         *  (ADR-0061); [text] is empty for one. */
         val systemText: UiText? = null,
     ) {
         public enum class Kind { Text, System }
@@ -692,7 +692,7 @@ public class CallUiState(
         val roster = mutableListOf(
             Participant(
                 id = "local",
-                // Empty: the tile draws `call.participant.you` (ADR-0058).
+                // Empty: the tile draws `call.participant.you` (ADR-0061).
                 displayName = "",
                 isLocal = true,
                 micOn = session.micEnabled.value,

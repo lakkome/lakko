@@ -46,6 +46,17 @@ public struct RestoreViaDevicePanel: View {
     @State private var session: PairingOrchestrator.JoinSession?
     @State private var pollTask: Task<Void, Never>?
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0049 section 2 (amended 2026-09-28) — the camera-less route is the
+    /// default; the QR is one tap away.
+    @State private var mode: Mode = .code
+    @State private var link: DeviceLinkJoin?
+    @State private var typedCode = ""
+    @State private var linkTask: Task<Void, Never>?
+
+    private enum Mode {
+        case code
+        case qr
+    }
 
     private enum PanelState: Equatable {
         case idle
@@ -65,6 +76,103 @@ public struct RestoreViaDevicePanel: View {
     }
 
     public var body: some View {
+        Group {
+            switch mode {
+            case .code: codeBody
+            case .qr: qrBody
+            }
+        }
+        .onDisappear { cancel() }
+    }
+
+    // MARK: - Confirm on another device (code)
+
+    private var loginHandle: Data {
+        switch target {
+        case .account(_, _, let handle), .byName(let handle): return handle
+        }
+    }
+
+    @ViewBuilder
+    private var codeBody: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Confirm on another device")
+                .font(.headline)
+            Text(
+                "Open Lakko in a browser or on your phone, on a device that is " +
+                "already signed in. It will show a six-digit code. Enter it here."
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+
+            if let link {
+                DeviceLinkCodeEntry(
+                    link: link, typedCode: $typedCode,
+                    onContinue: submitCode, onStartAgain: startCode)
+            } else if case .error(let message) = ui {
+                Label(message.text, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .font(.footnote)
+            } else {
+                ProgressView()
+            }
+            if case .joining = ui {
+                ProgressView(DeviceLinkJoinCopy.restoring)
+            }
+            if case .done = ui {
+                Label(l10n.t("device_link.restored"), systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.footnote)
+            }
+            HStack {
+                Spacer()
+                Button(l10n.t("device_link.qr.show")) {
+                    cancel()
+                    mode = .qr
+                    ui = .idle
+                }
+            }
+            .font(.footnote)
+        }
+        .task { if link == nil { startCode() } }
+    }
+
+    /// Prepare the pairing material (the payload the QR would carry) and post
+    /// a request naming the account by its login handle.
+    private func startCode() {
+        cancel()
+        typedCode = ""
+        ui = .preparing
+        do {
+            let s = try prepareSession()
+            session = s
+            let flow = DeviceLinkJoin(
+                ports: .init(relay: DeviceLinkClient()),
+                handle: loginHandle,
+                pairingPayload: s.qrPayload)
+            link = flow
+            ui = .idle
+            linkTask = Task { @MainActor in await flow.start() }
+        } catch {
+            NSLog("[pairing] WARN device-link request not prepared: \(error)")
+            ui = .error(.key("device_link.error.generic"))
+        }
+    }
+
+    /// Continue: run the exchange; only a VERIFIED confirmation from the other
+    /// device lets this device wait for, and trust, the Welcome.
+    private func submitCode() {
+        guard let link, let s = session else { return }
+        let typed = typedCode
+        linkTask = Task { @MainActor in
+            guard await link.submit(code: typed) else { return }
+            await receiveWelcome(session: s)
+        }
+    }
+
+    // MARK: - QR
+
+    private var qrBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(l10n.t("device_link.qr.scan_hint"))
             .font(.footnote)
@@ -107,57 +215,70 @@ public struct RestoreViaDevicePanel: View {
                     Button(l10n.t("common.try_again"), action: { ui = .idle })
                 }
             }
+            Button("Confirm on another device instead") {
+                cancel()
+                ui = .idle
+                link = nil
+                mode = .code
+            }
+            .font(.footnote)
         }
-        .onDisappear { cancel() }
+    }
+
+    private func prepareSession() throws -> PairingOrchestrator.JoinSession {
+        switch target {
+        case .account(let accountIdBytes, let accountIdB64, let loginHandle):
+            return try PairingOrchestrator.prepareJoinFlow(
+                loginHandle: loginHandle,
+                accountIdBytes: accountIdBytes,
+                accountIdB64: accountIdB64
+            )
+        case .byName(let loginHandle):
+            return try PairingOrchestrator.prepareRestoreByNameFlow(loginHandle: loginHandle)
+        }
+    }
+
+    /// Wait for the Welcome on the session's rendezvous and finish the join
+    /// with the recovery payload. Shared by both routes.
+    private func receiveWelcome(session s: PairingOrchestrator.JoinSession) async {
+        do {
+            let outcome = try await s.awaitWelcome()
+            if Task.isCancelled { return }
+            switch outcome {
+            case .received(let welcome, let welcomeCursor):
+                ui = .joining
+                let recovery = try await s.accept(
+                    welcomeBytes: welcome,
+                    welcomeCursor: welcomeCursor,
+                    recovery: true
+                )
+                guard let recovery else {
+                    ui = .error(.key("device_link.error.no_identity"))
+                    return
+                }
+                try await onRecovered(recovery)
+                ui = .done
+            case .timeout:
+                ui = .error(.key("device_link.error.timeout"))
+            case .cancelled:
+                ui = .idle
+            }
+        } catch {
+            if Task.isCancelled { return }
+            NSLog("[pairing] WARN restore from another device failed: \(error)")
+            ui = .error(UiText { AuthErrorCopy.deviceRestore(error) })
+        }
     }
 
     private func start() {
         ui = .preparing
         do {
-            let s: PairingOrchestrator.JoinSession
-            switch target {
-            case .account(let accountIdBytes, let accountIdB64, let loginHandle):
-                s = try PairingOrchestrator.prepareJoinFlow(
-                    loginHandle: loginHandle,
-                    accountIdBytes: accountIdBytes,
-                    accountIdB64: accountIdB64
-                )
-            case .byName(let loginHandle):
-                s = try PairingOrchestrator.prepareRestoreByNameFlow(
-                    loginHandle: loginHandle
-                )
-            }
+            let s = try prepareSession()
             session = s
             ui = .waiting(qrPayload: s.qrPayload)
             pollTask = Task { @MainActor in
                 defer { session = nil }
-                do {
-                    let outcome = try await s.awaitWelcome()
-                    if Task.isCancelled { return }
-                    switch outcome {
-                    case .received(let welcome, let welcomeCursor):
-                        ui = .joining
-                        let recovery = try await s.accept(
-                            welcomeBytes: welcome,
-                            welcomeCursor: welcomeCursor,
-                            recovery: true
-                        )
-                        guard let recovery else {
-                            ui = .error(.key("device_link.error.no_identity"))
-                            return
-                        }
-                        try await onRecovered(recovery)
-                        ui = .done
-                    case .timeout:
-                        ui = .error(.key("device_link.error.timeout"))
-                    case .cancelled:
-                        ui = .idle
-                    }
-                } catch {
-                    if Task.isCancelled { return }
-                    NSLog("[pairing] WARN restore from another device failed: \(error)")
-                    ui = .error(UiText { AuthErrorCopy.deviceRestore(error) })
-                }
+                await receiveWelcome(session: s)
             }
         } catch {
             NSLog("[pairing] WARN pairing code not prepared: \(error)")
@@ -168,6 +289,8 @@ public struct RestoreViaDevicePanel: View {
     private func cancel() {
         pollTask?.cancel()
         pollTask = nil
+        linkTask?.cancel()
+        linkTask = nil
         session = nil
     }
 }

@@ -3609,7 +3609,7 @@ The heartbeat, variant 1. Four commits; the core carries no `lakko-mls` change, 
   `f53d11a`) — `decode_committer_beacon` + `committer_beacon_envelope_len` for the
   iOS NSE; compose, the fold, the throttle and the timing constants are
   **deliberately absent**. 8 tests including
-  `an_unfiltered_beacon_would_otherwise_render_as_chat_text` and
+  `an_unfiltered_beacon_is_never_chat_text` (renamed 2026-09-29, when `parse_body` began classifying every `lakko/` service envelope as never-rendered) and
   `golden_pins_the_swift_prefilter_shape`.
 - The client filter arms — background (`5d6af94`):
   `apps/web/public/sw-push-decrypt.js`,

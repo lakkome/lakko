@@ -18,7 +18,7 @@ final class ChannelsFormattingTests: XCTestCase {
     /// 2026-09-16 12:00:00 UTC.
     private let now: Int64 = 1_789_560_000_000
 
-    /// The catalog isolates a text argument (ADR-0058); these assertions
+    /// The catalog isolates a text argument (ADR-0061); these assertions
     /// compare the words.
     private func plain(_ text: String) -> String {
         text.unicodeScalars

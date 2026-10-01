@@ -3,11 +3,11 @@
 
 # Interface language
 
-Status: accepted with ADR-0058, 2026-09-28. Decisions taken by the maintainer on
+Status: accepted with ADR-0061, 2026-09-28. Decisions taken by the maintainer on
 2026-09-28: the first language set below, system language by default with
 English as the fallback, language packs built into the app plus signed
 updates, machine translation with human review of security-critical
-strings. The architecture is [ADR-0058](../adr/0058-interface-localization.md).
+strings. The architecture is [ADR-0061](../adr/0061-interface-localization.md).
 
 ## 1. User goal and entry points
 

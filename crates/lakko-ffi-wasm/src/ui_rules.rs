@@ -21,6 +21,11 @@ use lakko_ui_rules::conversation::{
     order_conversations as rust_order_conversations, ConversationKind as RustConversationKind,
     ConversationRow as RustConversationRow,
 };
+use lakko_ui_rules::folder::{
+    folder_matches as rust_folder_matches,
+    order_conversations_in_folder as rust_order_conversations_in_folder,
+    FolderRule as RustFolderRule,
+};
 use lakko_ui_rules::info::{
     channel_info_sections as rust_channel_info_sections,
     group_info_sections as rust_group_info_sections, info_target as rust_info_target,
@@ -36,7 +41,15 @@ use lakko_ui_rules::ring::{
     remaining_ring_ms as rust_remaining_ring_ms, ring_decision as rust_ring_decision,
     RingDecision as RustRingDecision, CALL_RING_WINDOW_MS,
 };
+use lakko_ui_rules::visibility::{
+    choose_mode as rust_choose_mode, exclude_scope_under_all as rust_exclude_scope_under_all,
+    set_contacts_of_contacts as rust_set_contacts_of_contacts, set_groups as rust_set_groups,
+    set_groups_form as rust_set_groups_form, set_scope_chosen as rust_set_scope_chosen,
+};
 use wasm_bindgen::prelude::*;
+
+use crate::scoped_discovery::{GroupsForm, Refusal, ScopeId, VisibilityMode, VisibilitySetting};
+use lakko_contacts::visibility::ScopeId as RustScopeId;
 
 /// Which screen a conversation row opens.
 ///
@@ -78,6 +91,7 @@ impl From<ConversationKind> for RustConversationKind {
 /// `undefined` already expresses.
 #[wasm_bindgen]
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ConversationRow {
     id: String,
     kind: ConversationKind,
@@ -85,6 +99,8 @@ pub struct ConversationRow {
     last_activity_ms: Option<i64>,
     pinned: bool,
     archived: bool,
+    muted: bool,
+    has_unread: bool,
 }
 
 #[wasm_bindgen]
@@ -96,8 +112,14 @@ impl ConversationRow {
     /// conversation nothing has happened in yet. A row that draws nothing does
     /// not move a conversation to the top: a signal nobody sees is not
     /// activity.
+    ///
+    /// `muted` and `hasUnread` (ADR-0058) are read only by the folder rule;
+    /// both are optional and default to `false`, so a six-argument call
+    /// stays valid. `hasUnread` means what the unread badge means: something
+    /// unread, or a manual "mark as unread".
     #[wasm_bindgen(constructor)]
     #[must_use]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     pub fn new(
         id: String,
         kind: ConversationKind,
@@ -105,6 +127,8 @@ impl ConversationRow {
         last_activity_ms: Option<i64>,
         pinned: bool,
         archived: bool,
+        muted: Option<bool>,
+        has_unread: Option<bool>,
     ) -> Self {
         Self {
             id,
@@ -113,7 +137,23 @@ impl ConversationRow {
             last_activity_ms,
             pinned,
             archived,
+            muted: muted.unwrap_or(false),
+            has_unread: has_unread.unwrap_or(false),
         }
+    }
+
+    /// Muted by this person.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
+    /// Something unread in it, or marked unread by hand.
+    #[wasm_bindgen(getter, js_name = hasUnread)]
+    #[must_use]
+    pub fn has_unread(&self) -> bool {
+        self.has_unread
     }
 
     /// Stable within a kind; `(kind, id)` is unique in the list.
@@ -168,6 +208,8 @@ impl From<ConversationRow> for RustConversationRow {
             last_activity_ms: r.last_activity_ms,
             pinned: r.pinned,
             archived: r.archived,
+            muted: r.muted,
+            has_unread: r.has_unread,
         }
     }
 }
@@ -191,6 +233,66 @@ impl From<ConversationRow> for RustConversationRow {
 pub fn order_conversations(rows: Vec<ConversationRow>) -> Vec<u32> {
     let rust: Vec<RustConversationRow> = rows.into_iter().map(Into::into).collect();
     rust_order_conversations(&rust)
+}
+
+/// A chat folder's rule in row terms (ADR-0058 section 6).
+///
+/// `includeKinds` / `excludeFlags` are the folder's bits as the synced
+/// state returns them (include: bit0 one-to-one, bit1 groups, bit2
+/// channels; exclude: bit0 muted, bit1 read, bit2 archived). `included` /
+/// `excluded` are the row ids the client maps the folder's hand-added and
+/// hand-excluded references to.
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderRule {
+    inner: RustFolderRule,
+}
+
+#[wasm_bindgen]
+impl FolderRule {
+    /// Build the rule.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(
+        include_kinds: u32,
+        exclude_flags: u32,
+        included: Vec<String>,
+        excluded: Vec<String>,
+    ) -> Self {
+        Self {
+            inner: RustFolderRule {
+                include_kinds,
+                exclude_flags,
+                included,
+                excluded,
+            },
+        }
+    }
+}
+
+/// Whether `row` is in the folder: excluded by hand beats everything; then
+/// included by kind toggle or by hand; then not muted / read / archived
+/// while the matching exclude toggle is on (`docs/ux/chat-folders.md` 3.2).
+/// Borrows both arguments; neither is consumed.
+#[wasm_bindgen(js_name = folderMatches)]
+#[must_use]
+pub fn folder_matches(folder: &FolderRule, row: &ConversationRow) -> bool {
+    rust_folder_matches(&folder.inner, &row.clone().into())
+}
+
+/// Order a folder's rows: the folder's own pins first in their stored
+/// order (`folderPins` are row ids; unknown ids skipped), then the
+/// `orderConversations` rule with the global pin ignored. Returns input
+/// indices, every row exactly once. Consumes the rows, like
+/// `orderConversations`.
+#[wasm_bindgen(js_name = orderConversationsInFolder)]
+#[must_use]
+pub fn order_conversations_in_folder(
+    rows: Vec<ConversationRow>,
+    folder_pins: Vec<String>,
+) -> Vec<u32> {
+    let rust: Vec<RustConversationRow> = rows.into_iter().map(Into::into).collect();
+    rust_order_conversations_in_folder(&rust, &folder_pins)
 }
 
 /// Strip the leading `@` people type and no namespace stores.
@@ -611,12 +713,154 @@ pub fn call_holds_capture(call_is_live: bool, unanswered_incoming_ring: bool) ->
     rust_call_holds_capture(call_is_live, unanswered_incoming_ring)
 }
 
+// ============================================================================
+// "Who can find me" — the Settings transitions (UX section 11, ADR-0060 §7)
+// ============================================================================
+//
+// Each takes the current setting and returns the next; none stamps
+// `updatedAtMs` (call `withUpdatedAtMs`, then compose the envelope). Every
+// result satisfies the setting's rule.
+
+/// Choose one of the three positions. Leaving Some people remembers its
+/// parts; coming back restores them (or the default parts).
+#[wasm_bindgen(js_name = chooseVisibilityMode)]
+#[must_use]
+pub fn choose_visibility_mode(
+    setting: &VisibilitySetting,
+    mode: VisibilityMode,
+) -> VisibilitySetting {
+    VisibilitySetting::from_rust(rust_choose_mode(setting.rust(), mode.into()))
+}
+
+/// Switch part 2.1 (contacts of my contacts). Turning the last part off
+/// moves to Nobody; turning a part on from Nobody or Everyone moves to Some
+/// people.
+#[wasm_bindgen(js_name = setContactsOfContacts)]
+#[must_use]
+pub fn set_contacts_of_contacts(setting: &VisibilitySetting, on: bool) -> VisibilitySetting {
+    VisibilitySetting::from_rust(rust_set_contacts_of_contacts(setting.rust(), on))
+}
+
+/// Switch part 2.2 (groups and channels), keeping its form.
+#[wasm_bindgen(js_name = setGroupsVisible)]
+#[must_use]
+pub fn set_groups_visible(setting: &VisibilitySetting, on: bool) -> VisibilitySetting {
+    VisibilitySetting::from_rust(rust_set_groups(setting.rust(), on))
+}
+
+/// All groups and channels, or only the chosen ones. No effect unless part
+/// 2.2 is on.
+#[wasm_bindgen(js_name = setGroupsForm)]
+#[must_use]
+pub fn set_groups_form(setting: &VisibilitySetting, form: GroupsForm) -> VisibilitySetting {
+    VisibilitySetting::from_rust(rust_set_groups_form(setting.rust(), form.into()))
+}
+
+fn exclude_scope_under_all_inner(
+    setting: &VisibilitySetting,
+    all_scopes: &[ScopeId],
+    excluded: &ScopeId,
+) -> Result<VisibilitySetting, Refusal> {
+    let all: Vec<RustScopeId> = all_scopes.iter().map(Into::into).collect();
+    Ok(VisibilitySetting::from_rust(rust_exclude_scope_under_all(
+        setting.rust(),
+        &all,
+        &excluded.into(),
+    )?))
+}
+
+/// Exclude one group or channel while "all" is on: the form becomes "only
+/// the ones I choose" with every other scope in `allScopes` chosen.
+///
+/// # Errors
+///
+/// Throws an `Error` with `visibilityError` `scopeIdLength` /
+/// `tooManyChosen`.
+#[wasm_bindgen(js_name = excludeScopeUnderAll)]
+pub fn exclude_scope_under_all(
+    setting: &VisibilitySetting,
+    all_scopes: Vec<ScopeId>,
+    excluded: &ScopeId,
+) -> Result<VisibilitySetting, JsValue> {
+    exclude_scope_under_all_inner(setting, &all_scopes, excluded).map_err(Refusal::into_js)
+}
+
+fn set_scope_chosen_inner(
+    setting: &VisibilitySetting,
+    scope: &ScopeId,
+    on: bool,
+) -> Result<VisibilitySetting, Refusal> {
+    Ok(VisibilitySetting::from_rust(rust_set_scope_chosen(
+        setting.rust(),
+        &scope.into(),
+        on,
+    )?))
+}
+
+/// Choose or unchoose one group or channel in the chosen list.
+///
+/// # Errors
+///
+/// Throws an `Error` with `visibilityError` `scopeIdLength` /
+/// `tooManyChosen`.
+#[wasm_bindgen(js_name = setScopeChosen)]
+pub fn set_scope_chosen(
+    setting: &VisibilitySetting,
+    scope: &ScopeId,
+    on: bool,
+) -> Result<VisibilitySetting, JsValue> {
+    set_scope_chosen_inner(setting, scope, on).map_err(Refusal::into_js)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn visibility_transitions_cross_the_boundary_intact() {
+        use crate::scoped_discovery::{default_visibility_setting, ScopeKind};
+        let s = default_visibility_setting();
+        let nobody = choose_visibility_mode(&s, VisibilityMode::Nobody);
+        assert_eq!(nobody.mode(), VisibilityMode::Nobody);
+        assert_eq!(choose_visibility_mode(&nobody, VisibilityMode::Some), s);
+        let off = set_contacts_of_contacts(&set_groups_visible(&s, false), false);
+        assert_eq!(off.mode(), VisibilityMode::Nobody);
+
+        let scope = |b: u8| ScopeId::new(ScopeKind::Group, vec![b; 8]);
+        let excluded = exclude_scope_under_all(&s, vec![scope(1), scope(2)], &scope(2)).unwrap();
+        assert_eq!(excluded.groups(), Some(GroupsForm::Chosen));
+        assert_eq!(excluded.chosen(), vec![scope(1)]);
+        let chosen = set_scope_chosen(&excluded, &scope(3), true).unwrap();
+        assert_eq!(chosen.chosen(), vec![scope(1), scope(3)]);
+        assert_eq!(
+            set_groups_form(&chosen, GroupsForm::All).groups(),
+            Some(GroupsForm::All)
+        );
+        let e = set_scope_chosen_inner(&s, &ScopeId::new(ScopeKind::Channel, vec![]), true)
+            .unwrap_err();
+        assert_eq!(
+            (e.property, e.code.as_str()),
+            ("visibilityError", "scopeIdLength")
+        );
+        assert!(exclude_scope_under_all_inner(
+            &s,
+            &[ScopeId::new(ScopeKind::Group, vec![])],
+            &scope(1)
+        )
+        .is_err());
+    }
+
     fn row(id: &str, kind: ConversationKind, at: Option<i64>) -> ConversationRow {
-        ConversationRow::new(id.to_string(), kind, "Same".to_string(), at, false, false)
+        ConversationRow::new(
+            id.to_string(),
+            kind,
+            "Same".to_string(),
+            at,
+            false,
+            false,
+            None,
+            None,
+        )
     }
 
     #[test]
@@ -636,6 +880,10 @@ mod tests {
         assert!(
             channel_info_sections(ChannelInfoCapabilities::new(false, true, false))
                 .contains(&"unsubscribe".to_string())
+        );
+        assert!(
+            channel_info_sections(ChannelInfoCapabilities::new(false, true, false))
+                .contains(&"channel-members".to_string())
         );
         assert_eq!(info_target(ConversationKind::Group), InfoTarget::Group);
     }

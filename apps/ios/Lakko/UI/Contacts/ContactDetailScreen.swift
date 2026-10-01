@@ -46,7 +46,7 @@ struct ContactDetailScreen: View {
     @State private var draftName = ""
     @State private var confirmingRemove = false
     @State private var confirmingDeleteChat = false
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {

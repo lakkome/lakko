@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The signed translation bundle (ADR-0058 section 5).
+//! The signed translation bundle (ADR-0061 section 5).
 //!
 //! A native client may receive translation fixes between releases. The
 //! bundle carries **every** language in one payload, so fetching it tells

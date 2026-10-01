@@ -60,6 +60,13 @@ public data class PeerProfile(
      * one id hide the tag for both.
      */
     val accountIdHex: String? = null,
+    /**
+     * ADR-0060 §5 — the discovery-signed certificate of [username] as
+     * lowercase hex, or `null`. A viewer shows the username only once the
+     * certificate verifies for the OPRF of the username and [accountIdHex],
+     * and that account's published key is the sender's.
+     */
+    val usernameCertificateHex: String? = null,
 )
 
 /** The auth account id length, bytes. */
@@ -74,7 +81,7 @@ public fun accountIdHexOrNull(accountId: ByteArray?): String? =
 /**
  * The roster / sender label for a person nothing is known about, in the
  * interface language at the moment it is read (`chat.members.unnamed`,
- * ADR-0058). Chat bubbles, member rows and call tiles show it.
+ * ADR-0061). Chat bubbles, member rows and call tiles show it.
  */
 public val PLACEHOLDER_MEMBER: String
     get() = me.lakko.app.l10n.Localization.strings.value["chat.members.unnamed"]

@@ -23,7 +23,7 @@ struct UpdateAvailableBanner: View {
     let onUpdate: () -> Void
     /// Dismiss the banner (session + persisted cadence handled by the checker).
     let onDismiss: () -> Void
-    /// Re-renders the banner on a language switch (ADR-0058).
+    /// Re-renders the banner on a language switch (ADR-0061).
     @ObservedObject var l10n = Localization.shared
 
     var body: some View {

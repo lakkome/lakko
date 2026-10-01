@@ -6,7 +6,7 @@
  * wire sentinels the server enforces: `expiry_ms == 0` never expires;
  * `max_uses == 0` is single-use and `0xFFFFFFFF` unlimited. Pure; tested in
  * `invite-describe.test.ts`. The words are catalog messages
- * (`invite.links.*`, ADR-0058).
+ * (`invite.links.*`, ADR-0061).
  */
 import { currentLanguage, t } from "../l10n";
 

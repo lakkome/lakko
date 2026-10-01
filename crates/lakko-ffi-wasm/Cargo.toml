@@ -36,7 +36,7 @@ lakko-contacts.workspace = true
 # conversation list and the gate in front of the discovery lookup
 # (docs/ux/navigation.md). One copy, reached from two FFI surfaces.
 lakko-ui-rules.workspace = true
-# ADR-0058 interface localization: one formatter and one language rule.
+# ADR-0061 interface localization: one formatter and one language rule.
 lakko-l10n.workspace = true
 # Phase 4 G4-2-crypto — channel post composer + decoder.
 # The web client uses this to produce signed encrypted

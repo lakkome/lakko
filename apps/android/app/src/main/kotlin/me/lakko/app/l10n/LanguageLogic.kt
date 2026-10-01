@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /*
- * ADR-0058 / docs/ux/localization.md — the Android side of the interface
+ * ADR-0061 / docs/ux/localization.md — the Android side of the interface
  * language, kept free of the FFI and of Android types so the host JVM suite
  * can run it. The resolution rule itself (`l10nResolveLanguage`) lives in
  * `lakko-l10n` and is injected here as a function; this file only decides

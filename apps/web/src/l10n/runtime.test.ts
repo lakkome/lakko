@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0058 web runtime: resolution order, the stored choice, `lang` / `dir`
+ * ADR-0061 web runtime: resolution order, the stored choice, `lang` / `dir`
  * switching and the English fallback — driven through the real wasm core and
  * the committed compiled catalogs.
  */

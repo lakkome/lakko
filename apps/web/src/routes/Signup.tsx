@@ -12,7 +12,7 @@
  * `auth.signupPhrase()` is unacknowledged (`auth/phrase-gate.ts`).
  */
 import { createSignal, onCleanup, Show, type JSX } from "solid-js";
-import { A } from "@solidjs/router";
+import { A, useSearchParams } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
 import { isSignupRateLimited, signupErrorMessage } from "../auth/auth-error-copy";
@@ -35,10 +35,21 @@ import {
 import { MIN_PASSWORD_LENGTH, newPasswordProblem } from "../auth/password-rules";
 import { AuthLayout } from "../ui/AuthLayout";
 import { PasswordField } from "../ui/PasswordField";
+import { COPY as FIND_ME } from "../settings/who-can-find-me";
 
 export default function Signup(): JSX.Element {
   const auth = useAuth();
   const profiles = useProfiles();
+  // docs/ux/who-can-find-me.md section 7: `Change` opens Settings > Privacy.
+  // The setting exists only once the account does, so the link asks for the
+  // screen to open as soon as signup (and the recovery phrase) is done,
+  // through the `?return=` the auth guards already honour.
+  const [search, setSearch] = useSearchParams<{ return?: string }>();
+  const privacyAfterSignup = (): boolean => search.return === paths.settingsSection("privacy");
+  // An invite landing's `?return=` is not overwritten: losing the invite the
+  // person came for would be worse than one link fewer.
+  const otherReturn = (): boolean =>
+    typeof search.return === "string" && search.return.length > 0 && !privacyAfterSignup();
 
   const [username, setUsername] = createSignal("");
   // ADR-0048: an optional profile name, saved once the account exists.
@@ -159,6 +170,30 @@ export default function Signup(): JSX.Element {
             {(reason) => <span class="form-error">{reason()}</span>}
           </Show>
         </div>
+        {/* docs/ux/who-can-find-me.md section 7: one line under the
+            username's success state. Outside the live region above so it is
+            not re-read on every keystroke. */}
+        <Show when={usernameReason(usernameCheck()) === null && normalised() !== null}>
+          <p class="form-info" style={{ margin: 0 }}>
+            {FIND_ME.signupLine}{" "}
+            <Show
+              when={!privacyAfterSignup()}
+              fallback={<span>It opens once your account is created.</span>}
+            >
+              <Show when={!otherReturn()}>
+                <a
+                  href={paths.settingsSection("privacy")}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setSearch({ return: paths.settingsSection("privacy") }, { replace: true });
+                  }}
+                >
+                  {FIND_ME.signupChange}
+                </a>
+              </Show>
+            </Show>
+          </p>
+        </Show>
         <label>
           {t("auth.signup.name.label")}
           <input

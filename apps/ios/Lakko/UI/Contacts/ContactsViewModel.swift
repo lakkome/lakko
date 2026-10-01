@@ -68,6 +68,9 @@ public final class ContactsViewModel: ObservableObject {
     // MARK: - Wiring
 
     private let repository: ContactsRepository
+
+    /// The key the per-account invite link secrets are read under.
+    var inviteAccountIdB64: String? { repository.inviteAccountIdB64 }
     /// Optional bridge to the chat surface. When non-nil,
     /// ``onAcceptClicked(messageId:)`` drives
     /// ``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:)``
@@ -258,27 +261,12 @@ public final class ContactsViewModel: ObservableObject {
         let pending = repository.state.pending.first { $0.messageId == messageId }
         guard let pending = pending else { return }
 
-        // 1.9b1: ship a ContactAck back to the original sender's
-        // mailbox so their UI can flip from "pending" to
-        // "accepted" without waiting on the Welcome arrival.
-        // Best-effort — a network failure here doesn't unwind the
-        // local accept (the user already trusted the peer); we
-        // log and move on. The signed ack is independent of MLS
-        // state, so the sender can light up their address book
-        // even if the group-creation step below stalls.
-        Task {
-            do {
-                _ = try await repository.sendContactAck(request: pending)
-            } catch {
-                // best-effort
-            }
-        }
-
         guard let chatRepository = chatRepository,
               let fromAccountId = pending.fromAccountId else {
             // No chat bridge wired OR v1 legacy envelope without a
             // sender account-id — fall back to the local-marker
             // semantics.
+            Task { await sendAckBestEffort(pending) }
             repository.acceptContactRequest(messageId: messageId)
             return
         }
@@ -299,6 +287,27 @@ public final class ContactsViewModel: ObservableObject {
                 messageId: messageId,
                 groupIdHex: groupIdHex
             )
+            // AFTER the chat's Welcome, never before it: see
+            // ``sendAckBestEffort(_:)``.
+            await sendAckBestEffort(pending)
+        }
+    }
+
+    /// 1.9b1: ship a ContactAck back to the original sender's mailbox so
+    /// their UI can flip from "pending" to "accepted". Best-effort — a
+    /// network failure here doesn't unwind the local accept.
+    ///
+    /// Sent once the 1:1 chat's Welcome has been written. Both are written
+    /// with the requester's `reply` grant (ADR-0060 section 6), and a
+    /// requester closes that key as soon as the ack arrives: an ack sent
+    /// first (or in parallel) let an online requester close the key before
+    /// the Welcome landed, and the Welcome was refused (seen live on web
+    /// 2026-09-30).
+    private func sendAckBestEffort(_ pending: IncomingContactRequest) async {
+        do {
+            _ = try await repository.sendContactAck(request: pending)
+        } catch {
+            // best-effort
         }
     }
 
@@ -511,7 +520,7 @@ public final class ContactsViewModel: ObservableObject {
 
     // MARK: - Error mapping
 
-    /// How to render a Contacts failure (ADR-0058 section 6; the web
+    /// How to render a Contacts failure (ADR-0061 section 6; the web
     /// `contactsErrorText`): from its kind, never from its description. A
     /// used-up allowance says so (`quotaKey`: the search copy for a lookup,
     /// the action copy for a link), an unknown username and a person who has
@@ -532,8 +541,15 @@ public final class ContactsViewModel: ObservableObject {
             return UiText { supersessionRefusedMessage(loggedReset: loggedReset, peerLabel: nil) }
         }
         switch error as? ContactsError {
-        case .usernameUnknown(let normalised)?:
-            return .key("chat.members.add.error.unknown_username", texts: ["name": "@\(normalised)"])
+        case .usernameUnknown?:
+            // `docs/ux/who-can-find-me.md` section 6.1, "Not found": the same
+            // answer whether the name is unregistered or its owner does not
+            // let this person find them (ADR-0060). Never claim which, and
+            // never echo the name back.
+            return UiText { "No one found. Check the spelling, or ask them for an invite link." }
+        case .requestRefused?:
+            // `docs/ux/who-can-find-me.md` section 6.1, "Request refused".
+            return UiText { "Couldn't send the request. They may have changed who can find them." }
         case .noIdentityBundle?:
             return .key("chat.members.add.error.no_bundle")
         case .wrapped(let cause)?:
@@ -551,6 +567,12 @@ public final class ContactsViewModel: ObservableObject {
 
     /// A discovery or DS request that never reached the server, directly or
     /// behind the contacts wrapper.
+    /// The copy for a contacts error as plain text, the form the unit
+    /// tests pin (ADR-0060 "Not found" wording among them).
+    nonisolated static func userFacing(_ err: ContactsError) -> String {
+        contactsErrorText(for: err, fallbackKey: "contacts.error.send").text
+    }
+
     nonisolated private static func isNetworkFailure(_ error: Error) -> Bool {
         if case .network? = error as? DiscoveryClientError { return true }
         if case .network? = error as? DsClientError { return true }
@@ -578,7 +600,7 @@ public final class ContactsViewModel: ObservableObject {
         peerLabel: String?
     ) -> String {
         // One catalog message per verdict, and an unnamed twin of each
-        // rather than "This contact" as an argument (ADR-0058 batch 4). All
+        // rather than "This contact" as an argument (ADR-0061 batch 4). All
         // `security_critical`.
         let verdict: String
         switch loggedReset {

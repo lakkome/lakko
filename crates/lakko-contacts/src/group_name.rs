@@ -634,6 +634,11 @@ mod tests {
             crate::profile::PROFILE_ENVELOPE_DOMAIN_V1,
             crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,
             crate::pin::PIN_ENVELOPE_DOMAIN_V1,
+            crate::introduction::INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1,
+            crate::introduction::INTRODUCTIONS_ENVELOPE_DOMAIN_V1,
+            crate::visibility::VISIBILITY_ENVELOPE_DOMAIN_V1,
+            crate::visibility::REACH_STATE_ENVELOPE_DOMAIN_V1,
+            crate::committer_delegation::COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1,
             crate::invite::REVOKE_DOMAIN_V1,
             crate::invite::OWNER_LIST_DOMAIN_V1,
             crate::invite::JOINER_TAG_SALT_DOMAIN_V1,
@@ -673,6 +678,8 @@ mod tests {
             username: Some("alice".to_string()),
             updated_at_ms: 1,
             account_id: None,
+            username_certificate: None,
+            grants: Vec::new(),
         };
         for sibling in [
             wrap_call_welcome(&[0xAB; 256]),

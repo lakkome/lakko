@@ -16,7 +16,7 @@ import SwiftUI
 /// line each, semantic colours only, so dark mode follows the tokens.
 struct ReplyStrip: View {
 
-    /// ADR-0058 — observed so a language switch re-renders the view.
+    /// ADR-0061 — observed so a language switch re-renders the view.
     @ObservedObject var l10n = Localization.shared
     let reply: ReplyRef
     let onClose: () -> Void

@@ -34,6 +34,15 @@ import UserNotifications
 ///     avoided by construction. Mirrors web (`sw-push-decrypt.js`) + Android
 ///     (`PushPreviewDecrypt.kt`) exactly.
 ///
+/// ## Only the signed-in account (ADR-0042, amended 2026-09-30)
+///
+/// The decrypt runs only when the wake's `d` equals the device pseudonym the
+/// app bound to the signed-in account (``PushAccountBinding``), and only as
+/// that account. A wake for no account (signed out) or for another sign-in
+/// session gets the generic line below with no content: this extension must
+/// display something for a mutable-content alert (it holds no filtering
+/// entitlement), so the generic line is the most it may show.
+///
 /// ## Fallback posture (invariant #4)
 ///
 /// Every failure path — a missing payload field, a non-member group, a DS or
@@ -76,7 +85,7 @@ public final class NotificationService: UNNotificationServiceExtension {
         self.bestAttemptContent =
             request.content.mutableCopy() as? UNMutableNotificationContent
         // The notification words in the interface language the app stored
-        // (ADR-0058); English per word when it has not.
+        // (ADR-0061); English per word when it has not.
         nseNotificationWordLookup = { SharedStorage.storedNotificationWord($0) }
 
         guard let best = bestAttemptContent else {
@@ -88,7 +97,7 @@ public final class NotificationService: UNNotificationServiceExtension {
         }
         // Every path that delivers without a decrypted preview shows the
         // server's generic placeholder: in the interface language, not the
-        // server's English (ADR-0058).
+        // server's English (ADR-0061).
         best.body = nseGenericBody(best.body)
 
         // Grouping FIRST — retained regardless of the decrypt outcome so
@@ -175,7 +184,7 @@ public final class NotificationService: UNNotificationServiceExtension {
         // anywhere supported: the gateway wakes every device the same way, and
         // nothing on this path had ever read the mute flag. A muted chat rang
         // a closed phone at full volume for as long as that sentence stood.
-        // The flag is now read (``NsePushDecryptDeps/isMuted(groupIdHex:)``,
+        // The flag is now read (``NsePushDecryptDeps/isMuted(accountIdB64:groupIdHex:)``,
         // through the App Group mirror) and a muted call lands in
         // ``deliverSilentCallAlert(_:into:)`` instead.
         best.interruptionLevel = .timeSensitive
@@ -293,8 +302,9 @@ public final class NotificationService: UNNotificationServiceExtension {
     }
 
     /// Decode a GroupMessage wake from the APNs `userInfo`. The push-gw APNs
-    /// provider (`services/push-gw/src/providers/apns.rs`) puts the group
-    /// pseudonym hex under `g` and the DS cursor under `p` (a JSON number).
+    /// provider (`services/push-gw/src/providers/apns.rs`) puts the device
+    /// pseudonym hex under `d`, the group pseudonym hex under `g` and the DS
+    /// cursor under `p` (a JSON number).
     /// Returns `nil` when either is absent — the wake is not a decryptable
     /// GroupMessage.
     private static func parseWake(_ userInfo: [AnyHashable: Any]) -> NsePushWake? {
@@ -312,6 +322,11 @@ public final class NotificationService: UNNotificationServiceExtension {
             pointer = nil
         }
         guard let pointer else { return nil }
-        return NsePushWake(groupHex: groupHex, pointer: pointer)
+        // `d` — the device pseudonym the wake was sent to. The decrypt core
+        // handles the wake only when it equals the pseudonym the app bound to
+        // the signed-in account (ADR-0042, amended 2026-09-30); a missing `d`
+        // is carried as `nil` and refused there.
+        let devicePseudonymHex = (userInfo["d"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return NsePushWake(groupHex: groupHex, pointer: pointer, devicePseudonymHex: devicePseudonymHex)
     }
 }

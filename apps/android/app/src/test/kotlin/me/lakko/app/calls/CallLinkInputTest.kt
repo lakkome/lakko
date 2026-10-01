@@ -26,9 +26,17 @@ class CallLinkInputTest {
     }
 
     @Test
-    fun `a query or a fragment a sharing app appended is dropped`() {
+    fun `a query a sharing app appended is dropped`() {
         assertEquals("abc123", callInviteSlugFromInput("https://lakko.me/c/abc123?utm=mail"))
-        assertEquals("abc123", callInviteSlugFromInput("https://lakko.me/c/abc123#top"))
+    }
+
+    @Test
+    fun `the fragment is the link secret and travels with the slug`() {
+        // Sealed links (2026-09-28): the landing opens the link with it.
+        assertEquals("abc123#SECRET", callInviteSlugFromInput("https://lakko.me/c/abc123#SECRET"))
+        assertEquals("abc123#SECRET", callInviteSlugFromInput("https://lakko.me/c/abc123/?utm=mail#SECRET"))
+        assertEquals("abc123#SECRET", callInviteSlugFromInput("abc123#SECRET"))
+        assertEquals("abc123", callInviteSlugFromInput("https://lakko.me/c/abc123#"))
     }
 
     @Test

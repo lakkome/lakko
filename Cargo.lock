@@ -2598,6 +2598,7 @@ dependencies = [
  "getrandom 0.2.17",
  "lakko-attest",
  "lakko-crypto",
+ "lakko-sync",
  "rand 0.8.6",
  "thiserror 1.0.69",
 ]
@@ -2692,6 +2693,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
  "lakko-contacts",
+ "lakko-crypto",
  "rand 0.8.6",
  "thiserror 1.0.69",
  "unicode-normalization",
@@ -2748,6 +2750,7 @@ dependencies = [
  "lakko-proto",
  "lakko-sfu-proto",
  "lakko-shamir",
+ "lakko-sync",
  "lakko-transparency",
  "lakko-transport",
  "lakko-ui-rules",
@@ -2827,6 +2830,7 @@ dependencies = [
  "lakko-attest",
  "lakko-crypto",
  "lakko-proto",
+ "lakko-sync",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
@@ -3010,6 +3014,7 @@ dependencies = [
  "dotenvy",
  "hex",
  "lakko-channels",
+ "lakko-crypto",
  "reqwest",
  "serde",
  "serde_json",
@@ -3035,9 +3040,11 @@ dependencies = [
  "http-body-util",
  "lakko-anon-token",
  "lakko-anon-token-server",
+ "lakko-attest",
  "lakko-auth-token",
  "lakko-contacts",
  "lakko-crypto",
+ "lakko-discovery-client",
  "lakko-mls",
  "lakko-transparency",
  "rand 0.8.6",
@@ -3281,7 +3288,10 @@ dependencies = [
 name = "lakko-sync"
 version = "0.0.0"
 dependencies = [
+ "lakko-contacts",
+ "proptest",
  "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3346,6 +3356,7 @@ name = "lakko-ui-rules"
 version = "0.0.0"
 dependencies = [
  "lakko-contacts",
+ "lakko-sync",
 ]
 
 [[package]]

@@ -13,9 +13,10 @@
  *   1. `parseCallInviteSlug(slug)` → pointer | inline | error
  *   2. (pointer branch) `DiscoveryClient.fetchCallInvite(blobId)`
  *      → bytes | null (404 → `notFound`)
- *   3. `CallInviteCapability.decodeAndVerify(bytes)` — local
- *      Ed25519 signature check (catches a malicious server
- *      serving substituted bytes)
+ *   3. `CallInviteCapability.openLink(sealed, secret)` — opens
+ *      the sealed blob with the fragment's secret and verifies
+ *      the capability inside (a missing / malformed fragment, a
+ *      substituted or tampered blob → `damaged`)
  *   4. `capability.isValidNow(nowMs)` — expiry filter
  *   5. (pointer branch) `DiscoveryClient.consumeCallInvite(
  *      blobId, capabilityBytes, joinerAccountId)` — atomic
@@ -41,8 +42,12 @@ import {
   DiscoveryHttpError,
   isDiscoveryRateLimited,
 } from "../discovery/client";
-import { inviteLinkWidths } from "../contacts/invite-link";
-import { parseCallInviteSlug } from "./invite";
+import {
+  inviteLinkWidths,
+  isInviteLinkDamaged,
+  openInviteLinkFromUrl,
+} from "../contacts/invite-link";
+import { CALL_INVITE_INLINE_MIN_LEN, parseCallInviteSlug } from "./invite";
 
 // Re-exported by `loadWasm()` — the wasm module surfaces
 // `CallInviteCapability` + `acceptCallInvite` + (joiner-side)
@@ -66,6 +71,10 @@ export interface AcceptCallInviteOptions {
    *  ≥ 400 bytes of inline capability (censored-region
    *  fallback). */
   readonly slug: string;
+  /** The URL fragment (`location.hash`): the link secret the capability is
+   *  sealed under (sealed-link amendment, 2026-09-28). Missing or malformed
+   *  is `damaged`. */
+  readonly hash: string | null | undefined;
   /** Joiner's 16-byte UUIDv7 account_id — folded into the
    *  per-joiner dedup tag locally before posting to consume.
    *  Never crosses the wire in plaintext. */
@@ -141,6 +150,9 @@ export type AcceptCallInviteResult =
    *  again later. Never folded into `notFound`. */
   | { readonly kind: "rateLimited" }
   | { readonly kind: "malformedSlug"; readonly reason: string }
+  /** The link does not open under its fragment: missing or malformed
+   *  fragment, wrong secret, tampered or substituted blob. */
+  | { readonly kind: "damaged" }
   | { readonly kind: "signatureFailure"; readonly reason: string }
   | { readonly kind: "failed"; readonly message: string };
 
@@ -166,60 +178,53 @@ export type AcceptCallInviteResult =
 export async function acceptCallInviteFromSlug(
   opts: AcceptCallInviteOptions,
 ): Promise<AcceptCallInviteResult> {
-  // ---- 1. Parse the slug -----------------------------------
+  // ---- 1-3. Parse, fetch, open under the fragment ----------
+  // A malformed slug or fragment is refused before any request; the sealed
+  // blob opens only under the fragment's secret, which also verifies the
+  // capability inside (catches a substituted or tampered blob).
   const wasm = await loadWasm();
-  let parsed: ReturnType<typeof parseCallInviteSlug>;
+  let widths: ReturnType<typeof inviteLinkWidths>;
   try {
-    parsed = parseCallInviteSlug(opts.slug, inviteLinkWidths(wasm));
+    widths = inviteLinkWidths(wasm);
+    parseCallInviteSlug(opts.slug, widths);
   } catch (err) {
     return {
       kind: "malformedSlug",
       reason: err instanceof Error ? err.message : String(err),
     };
   }
-
-  // ---- 2. Pointer branch: fetch bytes from server ----------
-  let capabilityBytes: Uint8Array;
-  let blobId: Uint8Array | null = null;
-  if (parsed.kind === "pointer") {
-    blobId = parsed.blobId;
-    try {
-      const fetched = await opts.discoveryClient.fetchCallInvite(blobId);
-      if (fetched === null) {
-        return { kind: "notFound" };
-      }
-      capabilityBytes = fetched;
-    } catch (err) {
-      if (err instanceof DiscoveryHttpError && err.status === 404) {
-        return { kind: "notFound" };
-      }
-      if (isDiscoveryRateLimited(err)) return { kind: "rateLimited" };
-      throw err; // bubble up network / non-404 HTTP errors
-    }
-  } else {
-    capabilityBytes = parsed.capabilityBytes;
-  }
-
-  // ---- 3. decodeAndVerify --- catches malicious-server
-  //          substitution + signature tamper ----------------
   let capability: {
     readonly callId: Uint8Array;
     readonly ownerAccountId: Uint8Array;
     readonly expiryMs: bigint;
     readonly ownerFingerprint: string;
+    readonly wire: Uint8Array;
     isValidNow(nowMs: bigint): boolean;
   };
+  let blobId: Uint8Array | null;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    capability = (wasm as any).CallInviteCapability.decodeAndVerify(
-      capabilityBytes,
-    );
+    const opened = await openInviteLinkFromUrl({
+      slug: opts.slug,
+      hash: opts.hash,
+      widths,
+      inlineMinLen: CALL_INVITE_INLINE_MIN_LEN,
+      what: "call-invite",
+      fetchPointer: (id) => opts.discoveryClient.fetchCallInvite(id),
+      open: (sealed, secret) => wasm.CallInviteCapability.openLink(sealed, secret),
+    });
+    if (opened.kind === "not-found") return { kind: "notFound" };
+    capability = opened.capability;
+    blobId = opened.blobId;
   } catch (err) {
-    return {
-      kind: "signatureFailure",
-      reason: err instanceof Error ? err.message : String(err),
-    };
+    if (isInviteLinkDamaged(err)) return { kind: "damaged" };
+    if (err instanceof DiscoveryHttpError && err.status === 404) {
+      return { kind: "notFound" };
+    }
+    if (isDiscoveryRateLimited(err)) return { kind: "rateLimited" };
+    throw err; // bubble up network / non-404 HTTP errors
   }
+  // The PLAINTEXT wire the joiner tag is computed over, never the sealed blob.
+  const capabilityBytes = capability.wire;
 
   // ---- 4. Expiry check ------------------------------------
   const nowMs = opts.nowMs ?? Date.now();
@@ -228,7 +233,7 @@ export async function acceptCallInviteFromSlug(
   }
 
   // ---- 5. Pointer branch: consume (counter bump + dedup) --
-  if (parsed.kind === "pointer" && blobId !== null) {
+  if (blobId !== null) {
     let consumeResult: Awaited<
       ReturnType<DiscoveryClient["consumeCallInvite"]>
     >;

@@ -13,7 +13,7 @@ import SwiftUI
 struct AddContactSheet: View {
     @ObservedObject var viewModel: ContactsViewModel
     let onDismiss: () -> Void
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
     @FocusState private var usernameFocused: Bool

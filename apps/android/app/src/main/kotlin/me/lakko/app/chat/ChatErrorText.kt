@@ -7,7 +7,7 @@ import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.FfiRefusalReason
 
 /*
- * ADR-0058 section 6 — what the chat screen says about a failed action.
+ * ADR-0061 section 6 — what the chat screen says about a failed action.
  *
  * Errors render from their kind, never from core, server or transport prose:
  * that prose goes to the log, and the screen reads the catalog. The kinds,

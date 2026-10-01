@@ -142,7 +142,9 @@ struct InviteLinkRow: Equatable, Identifiable {
     }
 
     let slug: String
-    let url: String
+    /// The whole link with its secret, or `nil` when the secret is not on this
+    /// device (ADR-0028 amendment 2026-09-28).
+    let url: String?
     /// The user-set label, or empty.
     let label: String
     let createdAt: Date?
@@ -166,14 +168,16 @@ enum InviteLinkRows {
     static func merge(
         active: [ActiveInvite],
         sessionGenerated: [GeneratedInvite],
-        now: Date
+        now: Date,
+        accountIdB64: String?,
+        secrets: InviteLinkSecretStore = .shared
     ) -> [InviteLinkRow] {
         let nowMs = UInt64(max(0, now.timeIntervalSince1970 * 1000))
         var rows: [InviteLinkRow] = active.compactMap { invite in
             guard !isExpired(expiryMs: invite.expiryMs, nowMs: nowMs) else { return nil }
             return InviteLinkRow(
                 slug: invite.blobIdSlug,
-                url: url(slug: invite.blobIdSlug),
+                url: url(slug: invite.blobIdSlug, accountIdB64: accountIdB64, secrets: secrets),
                 label: invite.label,
                 createdAt: parseCreatedAt(invite.createdAt),
                 expiryMs: invite.expiryMs,
@@ -203,15 +207,25 @@ enum InviteLinkRows {
         expiryMs != 0 && expiryMs <= nowMs
     }
 
-    /// `https://lakko.me/i/<slug>`.
-    static func url(slug: String) -> String {
-        ContactsRepository.inviteUrlPrefix + slug
+    /// `docs/ux/client-redesign.md` section 5.3 — what a row whose secret
+    /// this device does not hold shows in place of Copy and Share (Revoke
+    /// stays).
+    static let createdElsewhereCopy = "Created on another device. Copy it there, or revoke it here."
+
+    /// `https://lakko.me/i/<slug>#<secret>`, or `nil` when this device does
+    /// not hold the link's secret for the account.
+    static func url(
+        slug: String, accountIdB64: String?, secrets: InviteLinkSecretStore = .shared
+    ) -> String? {
+        guard let accountIdB64,
+              let secret = secrets.secret(accountIdB64: accountIdB64, slug: slug) else { return nil }
+        return InviteLinkSecret.link(base: ContactsRepository.inviteUrlPrefix + slug, secret: secret)
     }
 
     /// Sentinels as `lakko-contacts` defines them: 0 = single use,
     /// `UInt32.max` = unlimited, else N uses. `nil` for unlimited. Never
     /// below zero; a link with nothing left reads "Used up" (the web
-    /// `describeInviteUses`, ADR-0058 batch 4).
+    /// `describeInviteUses`, ADR-0061 batch 4).
     static func usesLeftCopy(maxUses: UInt32, usedCount: UInt32) -> String? {
         if maxUses == UInt32.max { return nil }
         let total = maxUses == 0 ? 1 : Int(maxUses)
@@ -261,7 +275,7 @@ enum InviteLinkRows {
 /// The row title of a device (docs/ux/client-redesign.md section 5.5): no
 /// platform, model or user-set name reaches the client yet, so a device is
 /// "This device" or "Device N" — never its key. Read from the catalog in the
-/// interface language of the call (ADR-0058); `N` stays in Latin digits.
+/// interface language of the call (ADR-0061); `N` stays in Latin digits.
 enum DeviceRowPresentation {
     static func title(isSelf: Bool, position: Int) -> String {
         isSelf

@@ -16,7 +16,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use http_body_util::BodyExt as _;
 use lakko_anon_token::TokenContext;
-use lakko_ds_proof::statement::{StatementBody, StatementSigner};
+use lakko_ds_proof::statement::{RegisterMode, StatementBody, StatementSigner};
 use lakko_ds_proof::{sign, RequestParts, SigningKey, PROOF_HEADER_NAME};
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use tower::ServiceExt as _;
@@ -272,11 +272,54 @@ pub(crate) async fn claim(
     .await
 }
 
-/// Register `epoch_key` at `epoch` as `signer`, revoking `revoke`.
+/// Append `epoch_key` at `epoch` as `signer`, revoking `revoke`.
 pub(crate) async fn register(
     app: &Router,
     gid: &[u8; PSEUDONYM_LEN],
     signer: &StatementSigner,
+    epoch: u64,
+    epoch_key: &SigningKey,
+    revoke: &[&StatementSigner],
+) -> StatusCode {
+    register_as(
+        app,
+        gid,
+        signer,
+        RegisterMode::Append,
+        epoch,
+        epoch_key,
+        revoke,
+    )
+    .await
+}
+
+/// Replace at `epoch` with `epoch_key` as `signer`, revoking `revoke`.
+pub(crate) async fn replace(
+    app: &Router,
+    gid: &[u8; PSEUDONYM_LEN],
+    signer: &StatementSigner,
+    epoch: u64,
+    epoch_key: &SigningKey,
+    revoke: &[&StatementSigner],
+) -> StatusCode {
+    register_as(
+        app,
+        gid,
+        signer,
+        RegisterMode::Replace,
+        epoch,
+        epoch_key,
+        revoke,
+    )
+    .await
+}
+
+/// A register-epoch statement in `mode`.
+pub(crate) async fn register_as(
+    app: &Router,
+    gid: &[u8; PSEUDONYM_LEN],
+    signer: &StatementSigner,
+    mode: RegisterMode,
     epoch: u64,
     epoch_key: &SigningKey,
     revoke: &[&StatementSigner],
@@ -288,6 +331,7 @@ pub(crate) async fn register(
         StatementBody::RegisterEpoch {
             epoch,
             epoch_key: epoch_key.verifying_key().to_bytes(),
+            mode,
             revoke: revoke.iter().map(|s| s.public_key()).collect(),
         },
     )

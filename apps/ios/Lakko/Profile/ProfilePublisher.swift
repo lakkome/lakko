@@ -41,9 +41,10 @@ final class ProfilePublisher {
     struct Ports {
         /// Seal and publish `bytes` as an MLS application message in the group.
         var send: @MainActor (_ groupIdHex: String, _ bytes: Data) async throws -> Void
-        /// The current own-profile envelope, or `nil` when there is nothing to
-        /// publish (no active account).
-        var envelope: @MainActor () -> Data?
+        /// The current own-profile envelope for one group, or `nil` when there
+        /// is nothing to publish (no active account). Per group because profile
+        /// v3 carries that conversation's reach grants (ADR-0060).
+        var envelope: @MainActor (_ groupIdHex: String) -> Data?
         /// Whether this device can still send into the group (not evicted).
         var canSend: @MainActor (_ groupIdHex: String) -> Bool
         var nowMs: @MainActor () -> Int64
@@ -69,7 +70,7 @@ final class ProfilePublisher {
     /// Publish into `groupIdHex` now (join / change). Best-effort: a failed
     /// send is logged and forgotten — the next trigger carries the profile.
     func publishNow(groupIdHex: String) async {
-        guard ports.canSend(groupIdHex), let bytes = ports.envelope() else { return }
+        guard ports.canSend(groupIdHex), let bytes = ports.envelope(groupIdHex) else { return }
         do {
             try await ports.send(groupIdHex, bytes)
             publishSequence &+= 1

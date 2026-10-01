@@ -32,6 +32,7 @@ import {
   registerDeviceGroupEpochOrThrow,
 } from "./lifecycle";
 import { takeSigner } from "../ds/access";
+import { announceDeviceGroupChangedHere } from "./sync/growth";
 import { encodeJournalEntry } from "./journal-envelope";
 import { DsClient } from "../ds/client";
 
@@ -115,12 +116,12 @@ export interface RemoveResult {
  *      exist for the local device to know about other leaves).
  *   2. Build the Remove commit. The local view advances
  *      atomically inside the wasm `removeDeviceAt` call.
- *   3. Broadcast the commit to the DeviceGroup DS journal so
+ *   3. Persist the resulting MLS provider snapshot to IDB and tell the
+ *      sync runtime to reload, BEFORE anything is published (G-7), so its
+ *      long-lived handle cannot write the pre-removal epoch back.
+ *   4. Broadcast the commit to the DeviceGroup DS journal so
  *      every other still-paired device advances to the new
  *      epoch on its next poll.
- *   4. Persist the resulting MLS provider snapshot to IDB so
- *      subsequent launches don't re-broadcast the same commit
- *      or attempt to remove an already-gone leaf.
  *
  * Errors are surfaced verbatim:
  *
@@ -173,15 +174,22 @@ export async function removeDeviceAt(args: {
     // bytes. G-13 (ADR-0015): wrap the commit + removal attestation in the
     // journal envelope so peers can verify the removal under the policy.
     const groupId = ensured.group.groupId();
-    await ds.publishGroup(groupId, encodeJournalEntry(commitBytes, args.attestation ?? null), {
-      signer: signerN,
-    });
-
+    // G-7 — the advanced state is on disk before anything is published, and
+    // the sync runtime, whose long-lived handle is now an epoch behind, is
+    // stopped and reloaded before it can see this commit. Without the
+    // announce it applied its own removal as a foreign row, failed, and
+    // persisted its stale epoch over this one: the next add from this device
+    // then registered an epoch the DS already had (409, found live
+    // 2026-09-29).
     await persistDeviceGroupSnapshot(
       ensured.identity,
       args.accountIdB64,
       args.deviceKey,
     );
+    announceDeviceGroupChangedHere({});
+    await ds.publishGroup(groupId, encodeJournalEntry(commitBytes, args.attestation ?? null), {
+      signer: signerN,
+    });
     return {
       remainingCount: ensured.group.devices().length,
     };

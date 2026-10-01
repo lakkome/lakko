@@ -77,8 +77,16 @@ vi.mock("../profile/ProfileContext", () => ({
     version: () => 0,
     resolve: (k: Uint8Array | string) => ({
       name: typeof k === "string" ? k : "Member",
-      username: undefined,
+      // `ResolvedName.username` is `string | null`; `undefined` is not a value
+      // the real resolver returns.
+      username: null,
     }),
+    // The people search (src/search) reads these for local candidates and
+    // for the Add contact action; nothing here holds an account id.
+    accountIdBindings: () => [],
+    accountIdHexOf: () => null,
+    learnUsername: () => {},
+    ownProfileEnvelope: async () => null,
   }),
 }));
 vi.mock("./GroupNameContext", () => ({
@@ -89,7 +97,10 @@ vi.mock("../devices/sync/DeviceGroupSyncContext", () => ({
   useDeviceGroupSync: () => ({
     flags: () => flags,
     readCursors: () => ({}),
+    folders: () => [],
+    pendingFolderSync: () => false,
     setFlags: () => Promise.resolve(),
+    applyFolderEdits: () => Promise.resolve(),
   }),
 }));
 vi.mock("../auth/AuthContext", () => ({

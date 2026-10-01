@@ -23,7 +23,7 @@ struct CoPublishersPanel: View {
     @State private var pending: [Data] = []
     @State private var busy = false
     @State private var error: UiText?
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
     @State private var copied = false
     @State private var pollTask: Task<Void, Never>?

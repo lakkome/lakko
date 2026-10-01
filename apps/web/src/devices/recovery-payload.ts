@@ -202,7 +202,7 @@ export async function publishRecoveryPayload(
   options: { ds?: DsClient } = {},
 ): Promise<void> {
   const ds = options.ds ?? new DsClient();
-  await ds.publishMailbox(rendezvousPseudonym, wrapRecoveryRow(sealedBlob));
+  await ds.publishRendezvous(rendezvousPseudonym, wrapRecoveryRow(sealedBlob));
 }
 
 /** Result of [`pollForRecoveryPayload`]. */
@@ -251,7 +251,7 @@ export async function pollForRecoveryPayload(
     );
     let result;
     try {
-      result = await ds.fetchMailbox(rendezvousPseudonym, {
+      result = await ds.fetchRendezvous(rendezvousPseudonym, {
         after: cursor,
         limit: 1,
         waitSecs,

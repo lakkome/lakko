@@ -43,7 +43,7 @@
 import { type ConfirmRequest } from "../ui/confirm-dialog";
 import { t } from "../l10n";
 
-// The copy lives in the catalog (ADR-0058) and is rendered when the dialog
+// The copy lives in the catalog (ADR-0061) and is rendered when the dialog
 // is requested, so it is in the language current at that moment.
 
 // ---------------------------------------------------------------------------

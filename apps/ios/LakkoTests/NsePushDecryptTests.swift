@@ -78,9 +78,13 @@ final class NsePushDecryptTests: XCTestCase {
         let group: FakeThrowawayGroup?
         let rows: [NseFetchedRow]
         let cursor: Int64?
-        /// ADR-0042 Sprint 4 — the canned reverse-index row (`nil` = miss,
-        /// the pre-ADR-0042 legacy shape every older test exercises).
+        /// ADR-0042 Sprint 4 — the canned reverse-index row and the account
+        /// it is filed under (`nil` = miss, the pre-ADR-0042 legacy shape
+        /// every older test exercises). A lookup for any other account misses.
         let route: (accountIdB64: String, groupIdHex: String)?
+        /// ADR-0042 (amended 2026-09-30) — what the binding gate answers:
+        /// the bound account, or `nil` for "no binding / wrong `d`".
+        let bound: String?
         let dsThrows: Bool
         let openThrows: Bool
         let armed: Bool
@@ -91,6 +95,10 @@ final class NsePushDecryptTests: XCTestCase {
         var lastAfterId: Int64?
         var lookupCount = 0
         var lastLookupPushGid: String?
+        var lastLookupAccount: String?
+        var lastKnowsGroupAccount: String?
+        var boundCount = 0
+        var lastWakeDevice: String?
         var lastFetchGroupIdBytes: Data?
         var lastCursorGroupHex: String?
         /// ADR-0053 — the group the fetch was handed to sign with.
@@ -106,8 +114,12 @@ final class NsePushDecryptTests: XCTestCase {
             route: (accountIdB64: String, groupIdHex: String)? = nil,
             dsThrows: Bool = false,
             openThrows: Bool = false,
-            armed: Bool = false
+            armed: Bool = false,
+            bound: String?? = .none
         ) {
+            // By default the gate passes for the test account, so the older
+            // tests exercise everything behind it unchanged.
+            self.bound = bound ?? "acct-b64=="
             self.account = account
             self.seed = seed
             self.snapshot = snapshot
@@ -120,20 +132,38 @@ final class NsePushDecryptTests: XCTestCase {
             self.armed = armed
         }
 
-        func lookupRoute(pushGidHex: String) -> (accountIdB64: String, groupIdHex: String)? {
+        func boundAccount(wakeDevicePseudonymHex: String?) -> String? {
+            boundCount += 1
+            lastWakeDevice = wakeDevicePseudonymHex
+            return bound
+        }
+
+        func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? {
             lookupCount += 1
             lastLookupPushGid = pushGidHex
-            return route
+            lastLookupAccount = accountIdB64
+            guard let route, route.accountIdB64 == accountIdB64 else { return nil }
+            return route.groupIdHex
         }
 
-        func resolveAccount(groupHex: String) -> NseResolvedAccount? {
+        func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool {
             resolveCount += 1
-            return account
+            lastKnowsGroupAccount = accountIdB64
+            return account?.accountIdB64 == accountIdB64
         }
 
-        func loadIdentitySeed(accountIdB64: String) -> Data? { seed }
+        /// Every account a per-account store was read for.
+        var readAccounts: [String] = []
 
-        func loadSnapshot(accountIdB64: String) -> Data? { snapshot }
+        func loadIdentitySeed(accountIdB64: String) -> Data? {
+            readAccounts.append(accountIdB64)
+            return seed
+        }
+
+        func loadSnapshot(accountIdB64: String) -> Data? {
+            readAccounts.append(accountIdB64)
+            return snapshot
+        }
 
         func openThrowawayGroup(
             seed: Data,
@@ -159,6 +189,7 @@ final class NsePushDecryptTests: XCTestCase {
         }
 
         func startCursor(accountIdB64: String, groupHex: String) -> Int64? {
+            readAccounts.append(accountIdB64)
             lastCursorGroupHex = groupHex
             return cursor
         }
@@ -254,7 +285,7 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(many, "Sent 2 attachments")
     }
 
-    /// ADR-0058 — the attachment line and the server's generic placeholder
+    /// ADR-0061 — the attachment line and the server's generic placeholder
     /// come from the words the app stored, English per word when it has not.
     func testNotificationWordsFollowTheStoredLanguage() {
         let saved = nseNotificationWordLookup
@@ -627,5 +658,113 @@ final class NsePushDecryptTests: XCTestCase {
         // The DS was read exactly once (no re-fetch that a cursor advance
         // would imply).
         XCTAssertEqual(deps.dsFetchCount, 1)
+    }
+
+    // MARK: - ADR-0042 (amended 2026-09-30) — only the signed-in account
+
+    private let otherAccount = "other-b64=="
+    private let wakeDevice = String(repeating: "d", count: 64)
+
+    func testNoBindingOrAMismatchedDShowsNothingAndReadsNothing() async {
+        // `bound: .some(nil)` is the gate refusing: no binding, no `d`, or a
+        // `d` that is not the bound pseudonym. Nothing behind it may run.
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("secret") })
+        let deps = FakeDeps(
+            account: okAccount(),
+            group: group,
+            rows: [row(10, 1)],
+            route: (accountIdB64: accountId, groupIdHex: groupHex),
+            bound: .some(nil)
+        )
+        let outcome = await decryptPushOutcome(
+            NsePushWake(groupHex: pushGidHex, pointer: 11, devicePseudonymHex: wakeDevice), deps)
+
+        XCTAssertEqual(outcome, .none, "a refused wake gets the generic line")
+        XCTAssertEqual(deps.boundCount, 1)
+        XCTAssertEqual(deps.lookupCount, 0, "no reverse-index read")
+        XCTAssertEqual(deps.resolveCount, 0, "no known-groups read")
+        XCTAssertTrue(deps.readAccounts.isEmpty, "no per-account store read")
+        XCTAssertEqual(deps.openCount, 0)
+        XCTAssertEqual(deps.dsFetchCount, 0)
+    }
+
+    func testTheGateIsHandedTheWakesDevicePseudonym() async {
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("hello") })
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+        _ = await decryptPushOutcome(
+            NsePushWake(groupHex: groupHex, pointer: 11, devicePseudonymHex: wakeDevice), deps)
+        XCTAssertEqual(deps.lastWakeDevice, wakeDevice)
+    }
+
+    func testEveryReadIsForTheBoundAccount() async {
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("routed") })
+        let deps = FakeDeps(
+            account: nil,
+            group: group,
+            rows: [row(10, 1)],
+            route: (accountIdB64: accountId, groupIdHex: groupHex)
+        )
+        let preview = await decryptPushPreview(
+            NsePushWake(groupHex: pushGidHex, pointer: 11, devicePseudonymHex: wakeDevice), deps)
+
+        XCTAssertEqual(preview?.body, "routed")
+        XCTAssertEqual(deps.lastLookupAccount, accountId)
+        XCTAssertEqual(Set(deps.readAccounts), [accountId], "seed, snapshot and cursor for the bound account")
+    }
+
+    func testARouteRowOfAnotherAccountIsAMiss() async {
+        // Two accounts in one group derive the same push_gid. The row here was
+        // written by the other account, and the bound account knows no group
+        // by the wake's `g`: nothing is shown.
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("not yours") })
+        let deps = FakeDeps(
+            account: nil,
+            group: group,
+            rows: [row(10, 1)],
+            route: (accountIdB64: otherAccount, groupIdHex: groupHex)
+        )
+        let outcome = await decryptPushOutcome(
+            NsePushWake(groupHex: pushGidHex, pointer: 11, devicePseudonymHex: wakeDevice), deps)
+
+        XCTAssertEqual(outcome, .none)
+        XCTAssertEqual(deps.lastLookupAccount, accountId, "looked up for the bound account")
+        XCTAssertEqual(deps.openCount, 0)
+        XCTAssertEqual(deps.dsFetchCount, 0)
+        XCTAssertFalse(deps.readAccounts.contains(otherAccount))
+    }
+
+    func testTheLegacyFallbackSearchesOnlyTheBoundAccount() async {
+        // Another account on this device knows the raw group id; the bound
+        // account does not. The legacy scan must not find it.
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("not yours") })
+        let deps = FakeDeps(
+            account: NseResolvedAccount(accountIdB64: otherAccount, groupIdBytes: groupIdBytes),
+            group: group,
+            rows: [row(10, 1)],
+            route: nil
+        )
+        let outcome = await decryptPushOutcome(
+            NsePushWake(groupHex: groupHex, pointer: 11, devicePseudonymHex: wakeDevice), deps)
+
+        XCTAssertEqual(outcome, .none)
+        XCTAssertEqual(deps.lastKnowsGroupAccount, accountId, "only the bound account was asked")
+        XCTAssertEqual(deps.openCount, 0)
+        XCTAssertFalse(deps.readAccounts.contains(otherAccount))
+    }
+
+    func testTheLegacyFallbackForTheBoundAccountStillPreviews() async {
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("legacy mine") })
+        let deps = FakeDeps(
+            account: okAccount(),
+            group: group,
+            rows: [row(10, 1)],
+            route: (accountIdB64: otherAccount, groupIdHex: String(repeating: "c", count: 64))
+        )
+        let preview = await decryptPushPreview(
+            NsePushWake(groupHex: groupHex, pointer: 11, devicePseudonymHex: wakeDevice), deps)
+
+        XCTAssertEqual(preview?.body, "legacy mine")
+        XCTAssertEqual(deps.lastFetchGroupIdBytes, groupIdBytes)
+        XCTAssertEqual(Set(deps.readAccounts), [accountId])
     }
 }

@@ -66,7 +66,7 @@ class AuthLimitCopyTest {
         assertEquals("Getting you into the call...", GUEST_JOIN_WORKING_COPY)
     }
 
-    /** ADR-0058: the same decision as a catalog message, so the screen
+    /** ADR-0061: the same decision as a catalog message, so the screen
      *  renders it in the language showing when the error is on screen. */
     @Test
     fun theLimitAsACatalogMessage() {

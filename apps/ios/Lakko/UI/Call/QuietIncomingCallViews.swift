@@ -30,7 +30,7 @@ import SwiftUI
 /// deliberately quieter than either — a muted conversation's call should read
 /// as a notice with buttons, not as an alarm.
 struct QuietIncomingCallPanel: View {
-    /// Re-renders the words on a language switch (ADR-0058).
+    /// Re-renders the words on a language switch (ADR-0061).
     @ObservedObject var l10n = Localization.shared
     let call: QuietIncomingCall
     let onAccept: () -> Void
@@ -103,7 +103,7 @@ struct QuietIncomingCallPanel: View {
 /// for a third choice and the chat's own panel is one tap away for anyone who
 /// wants it.
 struct QuietIncomingCallRowActions: View {
-    /// Re-renders the words on a language switch (ADR-0058).
+    /// Re-renders the words on a language switch (ADR-0061).
     @ObservedObject var l10n = Localization.shared
     let call: QuietIncomingCall
     let onAccept: () -> Void

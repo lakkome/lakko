@@ -5,7 +5,7 @@ import XCTest
 @testable import Lakko
 import LakkoCore
 
-// ADR-0058 S3 — the iOS interface-language runtime: the resolution order
+// ADR-0061 S3 — the iOS interface-language runtime: the resolution order
 // (stored choice, else the system preference, else English), the per-device
 // persistence of the choice, and the real compiled catalog the app bundles.
 
@@ -115,7 +115,7 @@ final class LocalizationTests: XCTestCase {
         }
     }
 
-    // MARK: - ADR-0058 S5 batch 1 (sign-in, sign-up, recovery)
+    // MARK: - ADR-0061 S5 batch 1 (sign-in, sign-up, recovery)
 
     func testALinkMessageSplitsAroundTheLink() {
         let l10n = make(system: ["en-US"])
@@ -254,7 +254,7 @@ final class LocalizationTests: XCTestCase {
 
 extension String {
     /// The text without the bidi isolates the catalog formatter puts around
-    /// text arguments (ADR-0058), for tests that compare rendered English.
+    /// text arguments (ADR-0061), for tests that compare rendered English.
     var withoutIsolates: String {
         let isolates = CharacterSet(charactersIn: "\u{2066}\u{2067}\u{2068}\u{2069}")
         return String(unicodeScalars.filter { !isolates.contains($0) })

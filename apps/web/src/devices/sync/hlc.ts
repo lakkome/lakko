@@ -53,3 +53,20 @@ export function mintHlc(): bigint {
   // worst-case is one millisecond of "now == next-message-ts".
   return lastWallMs * 1000n + counter;
 }
+
+/**
+ * Fold a stamp this device has SEEN into the clock, so the next local write
+ * is stamped above it (the HLC receive rule).
+ *
+ * The synced state folds last-write-wins by stamp. A device whose wall clock
+ * runs behind a sibling's would otherwise stamp its own later edit BELOW the
+ * sibling's earlier one, and the fold would keep the earlier edit on every
+ * device. Called with `SyncedState.maxHlc()` at restore and after every
+ * applied row. Never moves the clock backwards.
+ */
+export function observeHlc(seen: bigint): void {
+  const current = lastWallMs * 1000n + counter;
+  if (seen <= current) return;
+  lastWallMs = seen / 1000n;
+  counter = seen % 1000n;
+}

@@ -30,7 +30,7 @@ import SwiftUI
 /// darkened backdrop built from the caller's own colour, the same avatar, the
 /// same round control faces — so the two read as one surface across the answer.
 struct IncomingCallScreen: View {
-    /// Re-renders the screen's words on a language switch (ADR-0058).
+    /// Re-renders the screen's words on a language switch (ADR-0061).
     @ObservedObject var l10n = Localization.shared
     /// The caller, already resolved through ``CallPeerName`` by the call host.
     let callerName: String?

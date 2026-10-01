@@ -27,6 +27,10 @@ thiserror.workspace = true
 # one already link `lakko-contacts`.
 lakko-contacts.workspace = true
 
+# BLAKE3 for the discovery lookup key (ADR-0060 section 5). Already in the
+# graph through `lakko-contacts`; no third-party crate is added.
+lakko-crypto.workspace = true
+
 # VOPRF — must use the SAME version + ciphersuite as the server in
 # services/discovery (Ristretto255-SHA512). The server pins voprf 0.5
 # already; we mirror.

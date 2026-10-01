@@ -3,7 +3,7 @@
 
 /**
  * What a failed call says, from the kind of failure and never from its prose
- * (ADR-0058 section 6: errors render from their code).
+ * (ADR-0061 section 6: errors render from their code).
  *
  * A call can fail in the call-admission mint (`call-jwt-client.ts`), in media
  * capture, in the browser's lack of media encryption, or somewhere deeper in

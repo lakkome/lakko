@@ -44,7 +44,7 @@ import me.lakko.app.BuildConfig
 /**
  * Why a restore verdict was reached. [diagnostic] is what the log records;
  * [staleKey] is the catalog phrase the stale-backup dialog puts in its
- * `{reason}` (ADR-0058: a screen never shows the English diagnostic). Only
+ * `{reason}` (ADR-0061: a screen never shows the English diagnostic). Only
  * the reasons that can reach [RestoreVerdict.StaleOverride] carry one: a hard
  * refusal's dialog says no reason (`backup.rollback_refused.*`), and a
  * fail-open shows nothing.

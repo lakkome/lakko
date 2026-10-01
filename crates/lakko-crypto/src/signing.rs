@@ -7,12 +7,28 @@
 //! capabilities and Key Transparency log entries. P-384 ECDSA is reserved for
 //! the FIPS-friendly MLS ciphersuite and lives in a separate module if/when
 //! needed.
+//!
+//! # One key pair for signing and agreement
+//!
+//! [`SigningKey::to_x25519_secret`] and [`VerifyingKey::to_x25519_public`]
+//! convert an Ed25519 key pair into the X25519 key pair on the birationally
+//! equivalent Montgomery curve (the conversion libsodium names
+//! `crypto_sign_ed25519_{sk,pk}_to_curve25519`): the secret is the unclamped
+//! scalar half of `SHA-512(seed)`, which X25519 clamps on use exactly as
+//! Ed25519 does, and the public key is the Edwards point mapped to its
+//! Montgomery `u`-coordinate. So `x25519(to_x25519_secret(sk)) ==
+//! to_x25519_public(pk(sk))` (pinned by a test and a golden vector). Used
+//! where one registered key must both sign and receive sealed envelopes
+//! (the ADR-0060 channel subscriber key).
 
 use ed25519_dalek::{
     Signature as DalekSignature, Signer as _, SigningKey as DalekSigningKey, Verifier as _,
     VerifyingKey as DalekVerifyingKey,
 };
 
+use zeroize::Zeroize as _;
+
+use crate::agreement;
 use crate::error::{Error, Result};
 use crate::random;
 
@@ -67,6 +83,17 @@ impl SigningKey {
     pub fn sign(&self, message: &[u8]) -> Signature {
         Signature(self.0.sign(message))
     }
+
+    /// The X25519 secret of the same key pair (see the module docs): the
+    /// unclamped scalar half of `SHA-512(seed)`. Its public key is
+    /// [`VerifyingKey::to_x25519_public`] of [`Self::verifying_key`].
+    #[must_use]
+    pub fn to_x25519_secret(&self) -> agreement::SecretKey {
+        let mut scalar = self.0.to_scalar_bytes();
+        let secret = agreement::SecretKey::from_bytes(scalar);
+        scalar.zeroize();
+        secret
+    }
 }
 
 impl VerifyingKey {
@@ -89,6 +116,23 @@ impl VerifyingKey {
     #[must_use]
     pub fn to_bytes(&self) -> [u8; PUBLIC_KEY_LEN] {
         self.0.to_bytes()
+    }
+
+    /// The X25519 public key of the same key pair (see the module docs): the
+    /// Montgomery `u`-coordinate of this Edwards point.
+    #[must_use]
+    pub fn to_x25519_public(&self) -> agreement::PublicKey {
+        agreement::PublicKey::from_array(self.0.to_montgomery().to_bytes())
+    }
+
+    /// Whether this key is of small order (one of the eight torsion points).
+    ///
+    /// A signature under such a key can be forged for any message, and its
+    /// X25519 image yields an all-zero shared secret, so a caller that
+    /// registers a key for signing or for agreement refuses it.
+    #[must_use]
+    pub fn is_weak(&self) -> bool {
+        self.0.is_weak()
     }
 
     /// Verify `signature` against `message`.
@@ -195,6 +239,58 @@ mod tests {
                 actual: 16
             })
         ));
+    }
+
+    #[test]
+    fn the_x25519_conversion_is_one_key_pair() {
+        for _ in 0..16 {
+            let sk = SigningKey::generate();
+            let x_secret = sk.to_x25519_secret();
+            let x_public = sk.verifying_key().to_x25519_public();
+            assert_eq!(x_secret.public_key(), x_public);
+            // And agreement works across the conversion.
+            let peer = agreement::SecretKey::generate();
+            assert_eq!(
+                x_secret.diffie_hellman(&peer.public_key()),
+                peer.diffie_hellman(&x_public)
+            );
+        }
+    }
+
+    /// libsodium's own vector for `crypto_sign_ed25519_{pk,sk}_to_curve25519`
+    /// (`test/default/ed25519_convert.c`): an independent implementation of
+    /// the same mapping. libsodium returns the secret clamped; this crate
+    /// returns it unclamped (X25519 clamps on use), so the secret is compared
+    /// after clamping.
+    #[test]
+    fn the_x25519_conversion_matches_libsodium() {
+        let seed: [u8; 32] =
+            hex::decode("421151a459faeade3d247115f94aedae42318124095afabe4d1451a559faedee")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let sk = SigningKey::from_seed(&seed);
+        assert_eq!(
+            hex::encode(sk.verifying_key().to_x25519_public().to_bytes()),
+            "f1814f0e8ff1043d8a44d25babff3cedcae6c22c3edaa48f857ae70de2baae50"
+        );
+        let mut secret = sk.to_x25519_secret().to_bytes();
+        secret[0] &= 0xF8;
+        secret[31] &= 0x7F;
+        secret[31] |= 0x40;
+        assert_eq!(
+            hex::encode(secret),
+            "8052030376d47112be7f73ed7a019293dd12ad910b654455798b4667d73de166"
+        );
+    }
+
+    #[test]
+    fn small_order_keys_are_weak() {
+        // The identity point (y = 1) decodes but has order 1.
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        assert!(VerifyingKey::from_bytes(&identity).unwrap().is_weak());
+        assert!(!SigningKey::generate().verifying_key().is_weak());
     }
 
     #[test]

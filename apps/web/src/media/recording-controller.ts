@@ -55,7 +55,7 @@ const NOTICE_KEYS: Readonly<Record<RecorderNotice, string>> = {
   "start-failed": "chat.record.start_failed",
 };
 
-/** The notice's text in the current language (ADR-0058). */
+/** The notice's text in the current language (ADR-0061). */
 export const noticeCopy = (notice: RecorderNotice): string => t(NOTICE_KEYS[notice]);
 
 /** UX spec §6 — the denied card, web wording. */

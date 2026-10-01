@@ -41,4 +41,16 @@ enum UnreadCounting {
     static func displayed(local: Int, cursorDerived: Int?) -> Int {
         cursorDerived ?? local
     }
+
+    /// A read cursor's message id on the wire: 8 big-endian bytes, the shape
+    /// every platform writes.
+    static func cursorBytes(_ messageId: Int64) -> Data {
+        var out = Data(count: 8)
+        var v = UInt64(bitPattern: messageId)
+        for i in (0..<8).reversed() {
+            out[i] = UInt8(v & 0xff)
+            v >>= 8
+        }
+        return out
+    }
 }

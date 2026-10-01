@@ -132,7 +132,7 @@ class MediaBubbleActionMenuTest {
         compose.onNodeWithTag(BUBBLE).performTouchInput { longClick() }
 
         compose.onNodeWithContentDescription(MENU_SCRIM).assertExists()
-        // The label carries the duration since ADR-0058 (`chat.video_note.play`),
+        // The label carries the duration since ADR-0061 (`chat.video_note.play`),
         // so the stopped state is matched on its start.
         compose.onNode(
             androidx.compose.ui.test.SemanticsMatcher("click label starts with Play video message") {

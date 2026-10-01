@@ -43,7 +43,7 @@ export function callSlotOccupant(input: CallSlotInput): CallKind | null {
 /**
  * A sentence a call flow shows, held as the way to render it rather than as
  * text, so an error or refusal already on screen follows a language switch
- * (ADR-0058). Call it to get the text in the current language.
+ * (ADR-0061). Call it to get the text in the current language.
  */
 export type CallText = () => string;
 

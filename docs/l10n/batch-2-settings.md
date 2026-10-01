@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # Localization batch 2: Settings keys
 
-ADR-0058 S5, batch 2. Every user-visible string reached from web Settings moved from JSX literals into `l10n/catalog/en.json`: Profile, Security (passkeys, the Devices page and adding a device, the Recovery page with authenticator and email / phone enrolment), Appearance, Media, About, Account (data export, log out, forget this device, delete account and their confirmations), the stale-backup restore warning, and the rest of the web call-link guest page. The iOS and Android clients map their own literals of the same screens onto these keys; names follow meaning, not the web component.
+ADR-0061 S5, batch 2. Every user-visible string reached from web Settings moved from JSX literals into `l10n/catalog/en.json`: Profile, Security (passkeys, the Devices page and adding a device, the Recovery page with authenticator and email / phone enrolment), Appearance, Media, About, Account (data export, log out, forget this device, delete account and their confirmations), the stale-backup restore warning, and the rest of the web call-link guest page. The iOS and Android clients map their own literals of the same screens onto these keys; names follow meaning, not the web component.
 
 142 keys added, 34 of them `security_critical` (they render in English until a translation is `reviewed`, and a signed update can never change them).
 

@@ -54,6 +54,7 @@
  */
 
 import { OUTBOX_STORE, awaitTx, openMlsDb } from "./mls-store";
+import { boundContactsAccount } from "../contacts/local-store";
 
 /**
  * The re-publish destination of a DIRECT-path entry's second artifact.
@@ -93,6 +94,10 @@ export interface PendingCommitEntry {
   /** base64 of the recipient mailbox pseudonym — the `ds.publishMailbox`
    *  target for the second artifact. Absent when there is no second artifact. */
   secondArtifactMailboxB64?: string;
+  /** ADR-0060 — base64 of the ACCOUNT key the second artifact's mailbox is
+   *  named after, so a re-publish can sign the write with the key that
+   *  reaches that account (the mailbox pseudonym is one-way). */
+  secondArtifactAccountKeyB64?: string;
   /**
    * ADR-0045 — this entry belongs to a STAGED sweep, so its commit is on the
    * wire but the local epoch has NOT advanced and a journal verdict is still
@@ -173,13 +178,24 @@ export async function putEntryDurable(entry: PendingCommitEntry): Promise<void> 
 }
 
 /**
- * Load every un-acked entry, optionally filtered to one group's base64 id. The
- * store is tiny (one entry per in-flight commit), so a `getAll` + in-memory
- * filter is simplest and robust.
+ * Load every un-acked entry of `owner` (default: the signed-in account bound
+ * through `bindContactsAccount`), optionally filtered to one group's base64
+ * id. The store is tiny (one entry per in-flight commit), so a `getAll` +
+ * in-memory filter is simplest and robust.
+ *
+ * The store is shared by every account on this browser (each entry carries
+ * its `accountId`), so the read filters on the account: an entry is that
+ * account's MLS state, and two accounts that are members of one group must
+ * never re-publish, adjudicate or drop each other's commits (2026-09-30 —
+ * the read used to return every account's entries). With no account the
+ * result is empty.
  */
 export async function loadUnacked(
   groupIdB64?: string,
+  owner?: string,
 ): Promise<PendingCommitEntry[]> {
+  const account = owner ?? boundContactsAccount();
+  if (account === null || account.length === 0) return [];
   const db = await openMlsDb();
   try {
     const all = await new Promise<PendingCommitEntry[]>((resolve, reject) => {
@@ -193,6 +209,7 @@ export async function loadUnacked(
     return all.filter(
       (e) =>
         e.acked === false &&
+        e.accountId === account &&
         (groupIdB64 === undefined || e.groupId === groupIdB64),
     );
   } finally {

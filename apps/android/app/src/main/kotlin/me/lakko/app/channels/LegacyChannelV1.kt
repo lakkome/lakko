@@ -125,7 +125,7 @@ public object LegacyChannelV1 {
     }
 
     /**
-     * [describe] as a catalog message (ADR-0058): `channels.legacy.*` when the
+     * [describe] as a catalog message (ADR-0061): `channels.legacy.*` when the
      * retired-v1 copy applies, otherwise [fallback].
      */
     public fun describeText(
@@ -167,7 +167,7 @@ public class LegacyChannelException(
         LegacyChannelKind.INVITE_LINK -> LegacyChannelV1.CO_PUBLISHER_LINK_MESSAGE
     },
 ) {
-    /** What the screen shows for this refusal, in the interface language (ADR-0058). */
+    /** What the screen shows for this refusal, in the interface language (ADR-0061). */
     public val text: me.lakko.app.l10n.UiText
         get() = me.lakko.app.l10n.UiText(
             when (kind) {

@@ -22,8 +22,12 @@ import SwiftUI
 /// (``ChannelLogStore``, one sealed file per account), the publisher keys
 /// (content seed + signing seed, ``ChannelPublisherKeyStore``), the publish
 /// counters (``ChannelPublishCounterStore``) and the subscriber keypairs
-/// (``ChannelSubscriberKeyStore``). Posts, epochs and subscriber counts are
-/// server caches and are re-read.
+/// (``ChannelSubscriberKeyStore``) — each of the three Keychain blobs one item
+/// per account since 2026-09-30, so a second account signed in on the same
+/// phone never inherits the first one's channel keys (a reused subscriber key
+/// would link the two accounts at the channels server). Before a bind every
+/// map is empty and nothing is written. Posts, epochs and subscriber counts
+/// are server caches and are re-read.
 @MainActor
 public final class ChannelsUiState: ObservableObject {
 
@@ -115,30 +119,14 @@ public final class ChannelsUiState: ObservableObject {
     @Published public private(set)
     var subscribedSeedsByChannel: [String: [UInt32: Data]] = [:]
 
-    /// **Legacy** `UserDefaults` key — the pre-G-29 plaintext
-    /// storage location, now read only by ``loadSubscriberKeys()`` for
-    /// the one-time migration into ``ChannelSubscriberKeyStore`` (after
-    /// which the plaintext copy is scrubbed). New writes go to the
-    /// Keychain, never here.
-    public static let subscriberKeysStorageKey =
+    /// **Legacy** `UserDefaults` key — the pre-G-29 plaintext, device-wide
+    /// storage location of the subscriber keypairs. Never read; removed by
+    /// ``forget(accountIdB64:)``.
+    nonisolated public static let subscriberKeysStorageKey =
         "lakko.channels.subscriber-keys.v1"
 
-    public init() {
-        // Restore persisted subscriber keypairs so a fresh
-        // launch can poll for envelopes without the user
-        // re-subscribing manually.
-        self.subscriberKeysByChannel = Self.loadSubscriberKeys()
-        // Restore persisted publisher seeds (signing + content) so a
-        // relaunched publisher keeps signing its channels under the same
-        // Ed25519 key (G-29) and can rebuild its keys on bind.
-        let publisherSeeds = Self.loadPublisherKeys()
-        self.publisherSigningSeedByChannel = publisherSeeds.signing
-        self.publisherContentSeedByChannel = publisherSeeds.content
-        // Restore persisted per-channel publish counters so a relaunched
-        // publisher never restarts the AEAD counter at 0 under the stable
-        // content seed + epoch (nonce-reuse defence).
-        self.counterByChannel = Self.loadPublishCounters()
-    }
+    /// Unbound: every map empty. ``bind(accountIdB64:)`` loads one account's.
+    public init() {}
 
     /// Construct already bound to `accountIdB64` — the shape the root
     /// screen's `@StateObject` uses so the list is loaded before the first
@@ -155,11 +143,25 @@ public final class ChannelsUiState: ObservableObject {
     /// channel whose content + signing seeds the Keychain holds. From here on
     /// every mutation of the list or the seed map writes through.
     ///
-    /// Rebinding to a different account replaces the in-memory list; the
-    /// previous account's file is left as it is. The publish counters are
-    /// untouched — they are a forever-monotone floor, never reset here.
+    /// Rebinding to a different account replaces the in-memory list and the
+    /// three Keychain-backed maps with that account's; the previous account's
+    /// stores are left as they are. The publish counters are loaded, never
+    /// reset — each account's is a forever-monotone floor of its own.
     public func bind(accountIdB64: String) {
         boundAccountIdB64 = accountIdB64
+        // Restore the account's subscriber keypairs so a fresh launch can poll
+        // for envelopes without the user re-subscribing manually.
+        subscriberKeysByChannel = Self.loadSubscriberKeys(accountIdB64: accountIdB64)
+        // Restore the account's publisher seeds (signing + content) so a
+        // relaunched publisher keeps signing its channels under the same
+        // Ed25519 key (G-29) and can rebuild its keys below.
+        let publisherSeeds = Self.loadPublisherKeys(accountIdB64: accountIdB64)
+        publisherSigningSeedByChannel = publisherSeeds.signing
+        publisherContentSeedByChannel = publisherSeeds.content
+        // Restore the account's per-channel publish counters so a relaunched
+        // publisher never restarts the AEAD counter at 0 under the stable
+        // content seed + epoch (nonce-reuse defence).
+        counterByChannel = Self.loadPublishCounters(accountIdB64: accountIdB64)
         if let payload = logStore.get(accountIdB64: accountIdB64) {
             channels = payload.channelHandles
             subscribedSeedsByChannel = payload.subscribedSeedsByChannel
@@ -386,6 +388,25 @@ public final class ChannelsUiState: ObservableObject {
         }
     }
 
+    /// Forget-device: delete everything this device keeps for one account's
+    /// channels — the sealed channel log, the three Keychain blobs (publisher
+    /// seeds, publish counters, subscriber keypairs) and the rotation state —
+    /// plus the old device-wide items nothing reads any more. Other accounts'
+    /// channels are untouched. Dropping the publish counters with the signing
+    /// seeds is safe: the next publisher open of this account mints a fresh
+    /// signing key, so the counter restarts under a different sender key.
+    nonisolated public static func forget(accountIdB64: String) {
+        ChannelLogStore().delete(accountIdB64: accountIdB64)
+        ChannelPublisherKeyStore.delete(accountIdB64: accountIdB64)
+        ChannelPublishCounterStore.delete(accountIdB64: accountIdB64)
+        ChannelSubscriberKeyStore.delete(accountIdB64: accountIdB64)
+        ChannelRotationStateStore.clear(accountIdB64: accountIdB64)
+        ChannelPublisherKeyStore.deleteLegacy()
+        ChannelPublishCounterStore.deleteLegacy()
+        ChannelSubscriberKeyStore.deleteLegacy()
+        UserDefaults.standard.removeObject(forKey: subscriberKeysStorageKey)
+    }
+
     // MARK: - Channel-log persistence (list + subscribed seeds)
 
     /// Write the channel list and the subscribed seeds through to the bound
@@ -415,9 +436,10 @@ public final class ChannelsUiState: ObservableObject {
     private func persistSubscriberKeys() {
         // G-29 — the X25519 secret half is hardware-backed-Keychain material,
         // not `UserDefaults` plaintext (invariant #7). An empty set wipes the
-        // item (un-follow-all / reset / logout).
+        // item (un-follow-all / reset). Unbound: nothing is written.
+        guard let account = boundAccountIdB64 else { return }
         if subscriberKeysByChannel.isEmpty {
-            ChannelSubscriberKeyStore.delete()
+            ChannelSubscriberKeyStore.delete(accountIdB64: account)
             return
         }
         let rows: [PersistedSubscriberKey] =
@@ -429,27 +451,12 @@ public final class ChannelsUiState: ObservableObject {
                 )
             }
         guard let data = try? JSONEncoder().encode(rows) else { return }
-        ChannelSubscriberKeyStore.save(data)
+        ChannelSubscriberKeyStore.save(data, accountIdB64: account)
     }
 
-    private static func loadSubscriberKeys() -> [String: ChannelSubscriberKeys] {
-        var blob = ChannelSubscriberKeyStore.load()
-        if blob == nil {
-            // One-time migration: an install that persisted the keys to the
-            // legacy `UserDefaults` plaintext key before G-29 — move the blob
-            // into the Keychain and scrub the plaintext copy.
-            if let legacy = UserDefaults.standard.data(
-                forKey: subscriberKeysStorageKey
-            ) {
-                ChannelSubscriberKeyStore.save(legacy)
-                UserDefaults.standard.removeObject(
-                    forKey: subscriberKeysStorageKey
-                )
-                blob = legacy
-            }
-        }
+    private static func loadSubscriberKeys(accountIdB64: String) -> [String: ChannelSubscriberKeys] {
         guard
-            let data = blob,
+            let data = ChannelSubscriberKeyStore.load(accountIdB64: accountIdB64),
             let rows = try? JSONDecoder().decode(
                 [PersistedSubscriberKey].self,
                 from: data
@@ -462,6 +469,13 @@ public final class ChannelsUiState: ObservableObject {
             guard let secret = Data(hexString: row.secretHex),
                   let pub = Data(hexString: row.publicHex)
             else { continue }
+            // ADR-0060 section 3 — a subscriber key is Ed25519 now (it signs
+            // the member card). A row written before that holds an X25519
+            // pair, whose secret re-read as an Ed25519 seed names a different
+            // public key: drop it, so the channel is re-subscribed with a
+            // fresh Ed25519 key rather than read under one the server refuses.
+            guard let rebuilt = try? ChannelSubscriberKeypair.fromSecret(secret: secret),
+                  rebuilt.`public`() == pub else { continue }
             out[row.channelId] = ChannelSubscriberKeys(
                 secret: secret,
                 publicKey: pub
@@ -486,9 +500,10 @@ public final class ChannelsUiState: ObservableObject {
     private func persistPublisherKeys() {
         // G-29 — both seeds are hardware-backed-Keychain material, not
         // `UserDefaults` plaintext (invariant #7). An empty set wipes the item
-        // (remove-channel / reset / logout).
+        // (remove-channel / reset). Unbound: nothing is written.
+        guard let account = boundAccountIdB64 else { return }
         if publisherSigningSeedByChannel.isEmpty {
-            ChannelPublisherKeyStore.delete()
+            ChannelPublisherKeyStore.delete(accountIdB64: account)
             return
         }
         let rows: [PersistedPublisherKey] =
@@ -500,12 +515,14 @@ public final class ChannelsUiState: ObservableObject {
                 )
             }
         guard let data = try? JSONEncoder().encode(rows) else { return }
-        ChannelPublisherKeyStore.save(data)
+        ChannelPublisherKeyStore.save(data, accountIdB64: account)
     }
 
-    private static func loadPublisherKeys() -> (signing: [String: Data], content: [String: Data]) {
+    private static func loadPublisherKeys(
+        accountIdB64: String
+    ) -> (signing: [String: Data], content: [String: Data]) {
         guard
-            let data = ChannelPublisherKeyStore.load(),
+            let data = ChannelPublisherKeyStore.load(accountIdB64: accountIdB64),
             let rows = try? JSONDecoder().decode(
                 [PersistedPublisherKey].self,
                 from: data
@@ -543,9 +560,10 @@ public final class ChannelsUiState: ObservableObject {
         // hardware-backed Keychain as the publisher signing seed for a single
         // consistent store (the counter is not itself secret — it rides in the
         // clear post header on the wire). An empty set wipes the item
-        // (remove-all / reset / logout).
+        // (remove-all / reset). Unbound: nothing is written.
+        guard let account = boundAccountIdB64 else { return }
         if counterByChannel.isEmpty {
-            ChannelPublishCounterStore.delete()
+            ChannelPublishCounterStore.delete(accountIdB64: account)
             return
         }
         let rows: [PersistedPublishCounter] =
@@ -553,12 +571,12 @@ public final class ChannelsUiState: ObservableObject {
                 PersistedPublishCounter(channelId: channelId, counter: counter)
             }
         guard let data = try? JSONEncoder().encode(rows) else { return }
-        ChannelPublishCounterStore.save(data)
+        ChannelPublishCounterStore.save(data, accountIdB64: account)
     }
 
-    private static func loadPublishCounters() -> [String: UInt64] {
+    private static func loadPublishCounters(accountIdB64: String) -> [String: UInt64] {
         guard
-            let data = ChannelPublishCounterStore.load(),
+            let data = ChannelPublishCounterStore.load(accountIdB64: accountIdB64),
             let rows = try? JSONDecoder().decode(
                 [PersistedPublishCounter].self,
                 from: data

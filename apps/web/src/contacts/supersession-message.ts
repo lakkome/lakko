@@ -21,7 +21,7 @@
  * The refusal itself is NEVER changed by the log — gate 1 throws
  * regardless of `loggedReset`; this only colours the message.
  *
- * The copy is catalog text (ADR-0058, `contacts.identity_changed.*`, all
+ * The copy is catalog text (ADR-0061, `contacts.identity_changed.*`, all
  * `security_critical`); an unnamed peer has its own messages rather than a
  * "This contact" argument, so each language words the subject itself.
  */

@@ -14,11 +14,13 @@
  * offered from inside a call rather than built anywhere in the rail
  * (`docs/ux/call-links.md` section 3).
  */
-import type { JSX } from "solid-js";
+import { Show, type JSX } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { paths } from "../routes/paths";
 import { useAuth } from "../auth/AuthContext";
 import { DeviceRequestPrompt } from "../devices/DeviceRequestPrompt";
+import { RemovedDeviceScreen } from "../devices/RemovedDeviceScreen";
+import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { Avatar } from "./Avatar";
 import { Icon, type IconName } from "./icons";
 import { t } from "../l10n";
@@ -54,6 +56,7 @@ const ITEMS: ReadonlyArray<{ href: string; labelKey: string; icon: IconName; pre
  */
 export function AppShell(props: { children?: JSX.Element }): JSX.Element {
   const auth = useAuth();
+  const sync = useDeviceGroupSync();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -72,7 +75,10 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
     return p === item.href || p.startsWith(`${item.href}/`) || item.prefix.some((x) => p.startsWith(x));
   };
 
+  // docs/ux/second-device.md section 3.1: another device removed this one.
+  // The removed screen replaces the whole app, rail and prompts included.
   return (
+    <Show when={!sync.deviceRemoved()} fallback={<RemovedDeviceScreen />}>
     <div class="app-shell">
       <nav class="lk-rail" aria-label={t("nav.rail_a11y")}>
         <img class="lk-rail-logo" src="/icon-192.png" alt="Lakko" width="40" height="40" />
@@ -107,5 +113,6 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
           `App.tsx`, not here: a call from a `/c/` link runs on a public route
           outside this shell, and must show the same overlay there. */}
     </div>
+    </Show>
   );
 }

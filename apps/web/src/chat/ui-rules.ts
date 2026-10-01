@@ -65,6 +65,14 @@ export type UiRules = Pick<
   | "callBarVisible"
   | "callBarStatusKind"
   | "callBarElapsedMs"
+  // Chat folders (`docs/ux/chat-folders.md`, ADR-0058): which conversations
+  // a folder holds and in what order, and the name rule and id minting the
+  // editor needs. `chat/folders/folder-view.ts` is the adapter.
+  | "FolderRule"
+  | "folderMatches"
+  | "orderConversationsInFolder"
+  | "isValidFolderName"
+  | "mintFolderId"
 >;
 
 const [rules, setRules] = createSignal<UiRules | null>(null);

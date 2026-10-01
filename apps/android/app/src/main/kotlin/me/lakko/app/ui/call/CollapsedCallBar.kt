@@ -281,7 +281,7 @@ internal fun CollapsedCallBar(
 ) {
     val strings = LocalStrings.current
     val status = callBarStatusText(model.status, strings)
-    // What TalkBack reads for the return target (ADR-0058, the web's bar):
+    // What TalkBack reads for the return target (ADR-0061, the web's bar):
     // the return and who, then the state in words, then the lock and the
     // camera when they apply, joined as a list.
     val spokenState = when (val st = model.status) {

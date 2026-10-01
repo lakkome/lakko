@@ -13,7 +13,6 @@ import me.lakko.app.ds.DsClient
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
-import uniffi.lakko_ffi_uniffi.MessageBodyKind
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
 import uniffi.lakko_ffi_uniffi.committerBeaconEnvelopeLen
 import uniffi.lakko_ffi_uniffi.decodeCommitterBeacon
@@ -82,30 +81,42 @@ internal fun buildBackgroundDecryptDeps(
     val appContext = context.applicationContext
     val knownGroups = KnownGroupsStore(appContext)
     val pushRoutes = PushRouteStore(appContext)
-    // ADR-0048 — READ-ONLY names for the notification title: loaded once from
-    // what the app already stored. No write, no verification, no network
-    // (C-59). A load failure just means the generic title.
-    val names: me.lakko.app.profile.ProfileNameSnapshot? = try {
-        me.lakko.app.profile.ProfileNameSnapshot.load(appContext)
-    } catch (_: Throwable) {
-        null
-    }
-    return object : PushDecryptDeps {
-        override fun lookupRoute(pushGidHex: String): Pair<String, String>? =
+    // ADR-0048 — READ-ONLY names for the notification title: loaded from what
+    // the app already stored, for the account the wake belongs to (the
+    // contact renames are per account; this process may hold no session at
+    // all). No write, no verification, no network (C-59). A load failure just
+    // means the generic title.
+    var decryptAccountB64: String? = null
+    val namesByAccount = HashMap<String?, me.lakko.app.profile.ProfileNameSnapshot?>()
+    fun namesFor(accountIdB64: String?): me.lakko.app.profile.ProfileNameSnapshot? =
+        namesByAccount.getOrPut(accountIdB64) {
             try {
-                // ADR-0042 (Sprint 4): the plaintext reverse index
-                // Sprint 3 populates — a READ, deliberately without
-                // the device key (the FMS runs in the background).
-                pushRoutes.lookup(pushGidHex)?.let { it.accountIdB64 to it.groupIdHex }
+                me.lakko.app.profile.ProfileNameSnapshot.load(appContext, accountIdB64)
+            } catch (_: Throwable) {
+                null
+            }
+        }
+    return object : PushDecryptDeps {
+        override fun lookupRoute(accountIdB64: String, pushGidHex: String): String? =
+            try {
+                // ADR-0042: the plaintext reverse index, for the bound
+                // account only — a READ, deliberately without the device
+                // key (the FMS runs in the background).
+                pushRoutes.lookup(accountIdB64, pushGidHex)
             } catch (_: Throwable) {
                 null
             }
 
-        override fun resolveAccount(groupHex: String): ResolvedPushAccount? {
-            val accountIdB64 = knownGroups.findAccountForGroup(groupHex) ?: return null
-            val groupIdBytes = hexToBytes(groupHex) ?: return null
-            return ResolvedPushAccount(accountIdB64 = accountIdB64, groupIdBytes = groupIdBytes)
-        }
+        // Legacy fallback, searching only the bound account's groups (the
+        // first-match scan over every account is gone: ADR-0042, amended
+        // 2026-09-30).
+        override fun accountKnowsGroup(accountIdB64: String, groupHex: String): Boolean =
+            try {
+                val needle = groupHex.lowercase()
+                knownGroups.load(accountIdB64).any { it.lowercase() == needle }
+            } catch (_: Throwable) {
+                false
+            }
 
         // ADR-0050 — the MLS snapshot is written under this device's
         // conversation identity (the per-install DEVICE seed, bound to the
@@ -121,6 +132,8 @@ internal fun buildBackgroundDecryptDeps(
 
         override fun loadSnapshot(accountIdB64: String): ByteArray? =
             try {
+                // The account whose group [openThrowawayGroup] opens next.
+                decryptAccountB64 = accountIdB64
                 // A snapshot taken under another leaf identity would restore
                 // groups this identity cannot open; treat it as absent.
                 val recorded = IdentitySnapshotStore.getSnapshotLeafKey(appContext, accountIdB64)
@@ -161,7 +174,7 @@ internal fun buildBackgroundDecryptDeps(
                     identity.close()
                     null
                 } else {
-                    RealThrowawayGroup(identity, group, names)
+                    RealThrowawayGroup(identity, group, namesFor(decryptAccountB64))
                 }
             } catch (_: Throwable) {
                 try {
@@ -279,6 +292,8 @@ private class RealThrowawayGroup(
                 ::decodesAsRoutingSecret,
                 ::decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLenCached,
+                { bytes -> me.lakko.app.chat.decodesAsRegistrarSeed(bytes) },
+                registrarSeedEnvelopeLenCached,
             )
         ) {
             BackgroundPayloadKind.SERVICE_ENVELOPE -> return null
@@ -291,14 +306,10 @@ private class RealThrowawayGroup(
         } catch (_: Throwable) {
             return null
         }
-        val kind = when (body.kind) {
-            MessageBodyKind.CHAT -> ProcessedKind.CHAT
-            MessageBodyKind.EDIT -> ProcessedKind.EDIT
-            MessageBodyKind.DELETE -> ProcessedKind.DELETE
-            MessageBodyKind.REACTION -> ProcessedKind.REACTION
-            MessageBodyKind.TYPING -> ProcessedKind.TYPING
-            MessageBodyKind.READ_RECEIPT -> ProcessedKind.READ_RECEIPT
-        }
+        // A `lakko/` envelope the peeks above did not recognise (an unknown
+        // kind, or a newer version of a known one) comes back as
+        // SERVICE_ENVELOPE and is dropped like any other service envelope.
+        val kind = previewKindOf(body.kind) ?: return null
         return ProcessedRow(
             kind = kind,
             text = body.text,
@@ -435,24 +446,21 @@ private fun decodesAsCommitterBeacon(bytes: ByteArray): Boolean =
  * which no payload can match, so the beacon arm goes inert and beacons
  * merely render as before — never a swallowed real message.
  */
+/** ADR-0057 — the registrar-seed envelope length, read ONCE from the FFI
+ *  constant (never hand-copied); `-1` when the read fails, which matches
+ *  nothing, so the payload falls through to the chat parse (fail-closed). */
+private val registrarSeedEnvelopeLenCached: Int by lazy {
+    try {
+        uniffi.lakko_ffi_uniffi.registrarSeedEnvelopeLen().toInt()
+    } catch (_: Throwable) {
+        -1
+    }
+}
+
 private val committerBeaconEnvelopeLenCached: Int by lazy {
     try {
         committerBeaconEnvelopeLen().toInt()
     } catch (_: Throwable) {
         0
     }
-}
-
-/** Decode a lowercase hex string into bytes. Returns `null` on any
- *  malformed input (odd length, non-hex chars). */
-private fun hexToBytes(hex: String): ByteArray? {
-    if (hex.length % 2 != 0) return null
-    val out = ByteArray(hex.length / 2)
-    for (i in out.indices) {
-        val hi = Character.digit(hex[i * 2], 16)
-        val lo = Character.digit(hex[i * 2 + 1], 16)
-        if (hi < 0 || lo < 0) return null
-        out[i] = ((hi shl 4) or lo).toByte()
-    }
-    return out
 }

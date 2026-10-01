@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Interface localization runtime (ADR-0058, `docs/ux/localization.md`).
+ * Interface localization runtime (ADR-0061, `docs/ux/localization.md`).
  *
  * The rules live in `lakko-l10n` (Rust, over wasm): which language to show,
  * which translated string fits its English source, how a plural is chosen.

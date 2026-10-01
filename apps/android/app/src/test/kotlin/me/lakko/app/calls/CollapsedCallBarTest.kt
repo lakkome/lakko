@@ -35,7 +35,7 @@ import uniffi.lakko_ffi_uniffi.CallBarStatus
  */
 class CollapsedCallBarTest {
     init {
-        // ADR-0058: the words under test are the English catalog's.
+        // ADR-0061: the words under test are the English catalog's.
         EnglishForTests.install()
     }
 

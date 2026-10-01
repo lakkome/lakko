@@ -16,7 +16,7 @@ struct ChannelManageScreen: View {
     /// ADR-0028 OQ3 — the canonical AccountIdentity seed, so the co-publisher
     /// and rotation panels can open the channel's PublisherGroup + sign.
     let accountIdentitySeed: Data
-    /// ADR-0058 — every line follows the interface language.
+    /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {

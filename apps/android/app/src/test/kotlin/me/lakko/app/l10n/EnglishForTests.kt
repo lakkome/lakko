@@ -9,7 +9,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 
 /**
- * ADR-0058 — the English source catalog for host JVM tests, which have no
+ * ADR-0061 — the English source catalog for host JVM tests, which have no
  * native core: read from the compiled `assets/l10n/source.json`, rendered by
  * the core-less fallback (arguments and the English plural rule).
  *

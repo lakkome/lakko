@@ -19,7 +19,7 @@ import Foundation
 /// So the app WRITES a minimal `group -> display name` mirror into the App
 /// Group suite and the NSE only ever READS it. The same asymmetry, the same
 /// suite and the same plaintext posture as the ADR-0042 `push_gid` reverse
-/// index (``PushRoutingStore/lookupRoute(pushGidHex:)``), which is already read
+/// index (``PushRoutingStore/lookupRoute(accountIdB64:pushGidHex:)``), which is already read
 /// by the NSE from this suite.
 ///
 /// ## What it costs
@@ -52,30 +52,51 @@ public enum LakkoCallNotification {
     public static let callCategoryIdentifier = "LAKKO_CALL"
 }
 
+/// ## Per account (2026-09-30)
+///
+/// One row per `(account, group)`: `me.lakko.call-peer.v2.<account>.<group>`.
+/// The mirror used to be device-wide and was wiped on every logout; it is now
+/// keyed by the account the conversation belongs to, the same way
+/// ``AcceptedContactsStore`` keys the contact list, so one account's lock
+/// screen can never show another account's contact. Each reader names the
+/// account (the push route carries it). No account: no name, no write. Logout
+/// keeps the rows; forget-device removes that account's through
+/// ``clear(accountIdB64:defaults:)``.
 public enum CallPeerNameMirror {
 
-    /// Per-group key prefix in the App Group shared suite.
-    private static let keyPrefix = "me.lakko.call-peer.v1."
+    /// Key prefix in the App Group shared suite; the account and the group
+    /// follow.
+    private static let keyPrefix = "me.lakko.call-peer.v2."
+    /// The device-wide prefix this mirror used before it was per account.
+    /// Never read; removed by ``clear(accountIdB64:defaults:)``.
+    static let legacyKeyPrefix = "me.lakko.call-peer.v1."
 
-    private static func key(_ groupIdHex: String) -> String {
-        keyPrefix + groupIdHex.lowercased()
+    private static func accountPrefix(_ accountIdB64: String) -> String {
+        keyPrefix + accountIdB64 + "."
     }
 
-    /// The mirrored display name for a conversation, or `nil` when this device
-    /// has never mirrored one (a fresh install, an un-provisioned App Group, a
-    /// group whose name the app has not resolved yet).
+    private static func key(_ accountIdB64: String, _ groupIdHex: String) -> String {
+        accountPrefix(accountIdB64) + groupIdHex.lowercased()
+    }
+
+    /// The mirrored display name for one account's conversation, or `nil`
+    /// when this device has never mirrored one (a fresh install, an
+    /// un-provisioned App Group, a group whose name the app has not resolved
+    /// yet, no account).
     public static func name(
+        accountIdB64: String?,
         groupIdHex: String,
         defaults: UserDefaults? = SharedStorage.sharedDefaults()
     ) -> String? {
-        guard let defaults else { return nil }
-        let value = defaults.string(forKey: key(groupIdHex))?
+        guard let defaults, let accountIdB64 else { return nil }
+        let value = defaults.string(forKey: key(accountIdB64, groupIdHex))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard let value, !value.isEmpty else { return nil }
         return value
     }
 
-    /// Mirror one conversation's display name. App-side only.
+    /// Mirror one conversation's display name for `accountIdB64`. App-side
+    /// only.
     ///
     /// A no-op when the value has not changed, so the common case — the app
     /// re-resolving the same names on every sweep — costs a read and no write.
@@ -84,12 +105,13 @@ public enum CallPeerNameMirror {
     /// absent row makes the reader fall back to the unnamed wording it already
     /// handles.
     public static func mirror(
+        accountIdB64: String,
         groupIdHex: String,
         name: String?,
         defaults: UserDefaults? = SharedStorage.sharedDefaults()
     ) {
         guard let defaults else { return }
-        let storageKey = key(groupIdHex)
+        let storageKey = key(accountIdB64, groupIdHex)
         let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else {
             if defaults.object(forKey: storageKey) != nil {
@@ -101,13 +123,16 @@ public enum CallPeerNameMirror {
         defaults.set(trimmed, forKey: storageKey)
     }
 
-    /// Drop every mirrored name. Called on logout / forget-device, next to the
-    /// other per-device push state: a name left behind would let the next
-    /// account's lock screen show the previous one's contact.
-    public static func clearAll(defaults: UserDefaults? = SharedStorage.sharedDefaults()) {
+    /// Forget-device: drop one account's names, and the old device-wide rows
+    /// nothing reads any more. Other accounts' names stay.
+    public static func clear(
+        accountIdB64: String,
+        defaults: UserDefaults? = SharedStorage.sharedDefaults()
+    ) {
         guard let defaults else { return }
+        let prefix = accountPrefix(accountIdB64)
         for (storageKey, _) in defaults.dictionaryRepresentation()
-        where storageKey.hasPrefix(keyPrefix) {
+        where storageKey.hasPrefix(prefix) || storageKey.hasPrefix(legacyKeyPrefix) {
             defaults.removeObject(forKey: storageKey)
         }
     }
