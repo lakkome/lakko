@@ -17,6 +17,8 @@
 import { createMemo, createSignal, For, Show, type JSX } from "solid-js";
 
 import { useDeviceGroupSync } from "../../devices/sync/DeviceGroupSyncContext";
+import { t } from "../../l10n";
+import { createLiveText } from "../../l10n/live-text";
 import { requestConfirm } from "../../ui/confirm-dialog";
 import { Avatar } from "../../ui/Avatar";
 import { Icon } from "../../ui/icons";
@@ -68,15 +70,15 @@ export function FolderEditorHost(): JSX.Element {
   );
 }
 
-const KIND_TOGGLES: ReadonlyArray<{ bit: number; label: string }> = [
-  { bit: INCLUDE_ONE_TO_ONE, label: "One-to-one chats" },
-  { bit: INCLUDE_GROUPS, label: "Groups" },
-  { bit: INCLUDE_CHANNELS, label: "Channels" },
+const KIND_TOGGLES: ReadonlyArray<{ bit: number; labelKey: string }> = [
+  { bit: INCLUDE_ONE_TO_ONE, labelKey: "folders.editor.kind.one_to_one" },
+  { bit: INCLUDE_GROUPS, labelKey: "folders.editor.kind.groups" },
+  { bit: INCLUDE_CHANNELS, labelKey: "folders.editor.kind.channels" },
 ];
-const EXCLUDE_TOGGLES: ReadonlyArray<{ bit: number; label: string }> = [
-  { bit: EXCLUDE_MUTED, label: "Muted" },
-  { bit: EXCLUDE_READ, label: "Read" },
-  { bit: EXCLUDE_ARCHIVED, label: "Archived" },
+const EXCLUDE_TOGGLES: ReadonlyArray<{ bit: number; labelKey: string }> = [
+  { bit: EXCLUDE_MUTED, labelKey: "folders.editor.exclude.muted" },
+  { bit: EXCLUDE_READ, labelKey: "folders.editor.exclude.read" },
+  { bit: EXCLUDE_ARCHIVED, labelKey: "folders.editor.exclude.archived" },
 ];
 
 function FolderEditor(props: { request: EditorRequest }): JSX.Element {
@@ -99,7 +101,7 @@ function FolderEditor(props: { request: EditorRequest }): JSX.Element {
   const [draft, setDraft] = createSignal<FolderDraft>(initial);
   const [picker, setPicker] = createSignal<"include" | "exclude" | null>(null);
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
 
   const isValidName = (n: string): boolean => uiRules()?.isValidFolderName(n) ?? false;
   const canSave = (): boolean => !busy() && draftCanSave(draft(), isValidName);
@@ -140,10 +142,10 @@ function FolderEditor(props: { request: EditorRequest }): JSX.Element {
   async function close(): Promise<void> {
     if (dirty()) {
       const discard = await requestConfirm({
-        title: "Discard changes?",
+        title: t("folders.editor.discard.title"),
         body: null,
-        confirmLabel: "Discard",
-        cancelLabel: "Keep editing",
+        confirmLabel: t("folders.editor.discard.confirm"),
+        cancelLabel: t("folders.editor.discard.keep"),
         tone: "danger",
       });
       if (!discard) return;
@@ -170,7 +172,7 @@ function FolderEditor(props: { request: EditorRequest }): JSX.Element {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("folder save failed", err);
-      setError("The folder could not be saved. Try again.");
+      setError(() => t("folders.editor.error.save"));
     } finally {
       setBusy(false);
     }
@@ -198,8 +200,8 @@ function FolderEditor(props: { request: EditorRequest }): JSX.Element {
                 <button
                   type="button"
                   class="lk-icon-button"
-                  aria-label={`Remove ${r().title}`}
-                  title="Remove"
+                  aria-label={t("folders.editor.remove_chat_a11y", { name: r().title })}
+                  title={t("common.remove")}
                   onClick={() => removeRef(p.field, ref)}
                 >
                   <Icon name="close" size={16} />
@@ -231,12 +233,12 @@ function FolderEditor(props: { request: EditorRequest }): JSX.Element {
         aria-modal="true"
         aria-labelledby="lk-folder-editor-title"
       >
-        <h2 id="lk-folder-editor-title">{original === null ? "New folder" : "Edit folder"}</h2>
+        <h2 id="lk-folder-editor-title">{original === null ? t("folders.new") : t("folders.edit")}</h2>
         <label class="lk-folder-name">
           <input
             type="text"
-            placeholder="Folder name"
-            aria-label="Folder name"
+            placeholder={t("folders.editor.name_placeholder")}
+            aria-label={t("folders.editor.name_placeholder")}
             value={draft().name}
             // eslint-disable-next-line jsx-a11y/no-autofocus
             autofocus
@@ -249,47 +251,47 @@ function FolderEditor(props: { request: EditorRequest }): JSX.Element {
         </label>
 
         <section class="lk-folder-section" aria-labelledby="lk-folder-included">
-          <h3 id="lk-folder-included">Included</h3>
+          <h3 id="lk-folder-included">{t("folders.editor.included")}</h3>
           <Show when={matchCount() !== null}>
             <p class="lk-folder-count">{chatCountLabel(matchCount() ?? 0)}</p>
           </Show>
           <For each={KIND_TOGGLES}>
-            {(t) => (
+            {(toggle) => (
               <label class="lk-check lk-folder-toggle">
                 <input
                   type="checkbox"
-                  checked={(draft().includeKinds & t.bit) !== 0}
-                  onChange={() => toggleBit("includeKinds", t.bit)}
+                  checked={(draft().includeKinds & toggle.bit) !== 0}
+                  onChange={() => toggleBit("includeKinds", toggle.bit)}
                 />
-                {t.label}
+                {t(toggle.labelKey)}
               </label>
             )}
           </For>
           <HandList field="included" />
           <button type="button" class="ghost small lk-folder-add" onClick={() => setPicker("include")}>
             <Icon name="plus" size={16} />
-            Add chats
+            {t("folders.editor.add_chats")}
           </button>
         </section>
 
         <section class="lk-folder-section" aria-labelledby="lk-folder-excluded">
-          <h3 id="lk-folder-excluded">Excluded</h3>
+          <h3 id="lk-folder-excluded">{t("folders.editor.excluded")}</h3>
           <For each={EXCLUDE_TOGGLES}>
-            {(t) => (
+            {(toggle) => (
               <label class="lk-check lk-folder-toggle">
                 <input
                   type="checkbox"
-                  checked={(draft().excludeFlags & t.bit) !== 0}
-                  onChange={() => toggleBit("excludeFlags", t.bit)}
+                  checked={(draft().excludeFlags & toggle.bit) !== 0}
+                  onChange={() => toggleBit("excludeFlags", toggle.bit)}
                 />
-                {t.label}
+                {t(toggle.labelKey)}
               </label>
             )}
           </For>
           <HandList field="excluded" />
           <button type="button" class="ghost small lk-folder-add" onClick={() => setPicker("exclude")}>
             <Icon name="plus" size={16} />
-            Exclude chats
+            {t("folders.editor.exclude_chats")}
           </button>
         </section>
 
@@ -303,17 +305,17 @@ function FolderEditor(props: { request: EditorRequest }): JSX.Element {
 
         <div class="lk-folder-actions">
           <button type="button" class="ghost" onClick={() => void close()}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button type="button" class="primary" disabled={!canSave()} onClick={() => void save()}>
-            Save
+            {t("common.save")}
           </button>
         </div>
 
         <Show when={original !== null}>
           <div class="lk-folder-delete">
             <button type="button" class="ghost lk-folder-danger" onClick={() => void remove()}>
-              Delete folder
+              {t("folders.delete")}
             </button>
           </div>
         </Show>
@@ -393,20 +395,20 @@ function ChatPicker(props: {
       }}
     >
       <div class="lk-modal lk-folder-picker" role="dialog" aria-modal="true" aria-labelledby="lk-picker-title">
-        <h2 id="lk-picker-title">{props.which === "include" ? "Add chats" : "Exclude chats"}</h2>
+        <h2 id="lk-picker-title">{props.which === "include" ? t("folders.editor.add_chats") : t("folders.editor.exclude_chats")}</h2>
         <Show when={atLimit()}>
           <p class="lk-folder-count" role="status">
             {props.which === "include"
-              ? "A folder can hold up to 200 chats added one by one. Use the kind toggles for more."
-              : "A folder can hold up to 200 chats excluded one by one. Use the kind toggles for more."}
+              ? t("folders.picker.limit_include", { count: MAX_INCLUDED_BY_HAND })
+              : t("folders.picker.limit_exclude", { count: MAX_EXCLUDED_BY_HAND })}
           </p>
         </Show>
         <label class="lk-search">
           <Icon name="search" size={16} />
           <input
             type="search"
-            placeholder="Search"
-            aria-label="Search chats"
+            placeholder={t("chats.search.placeholder")}
+            aria-label={t("chats.search.label")}
             value={query()}
             onInput={(e) => setQuery(e.currentTarget.value)}
           />
@@ -435,7 +437,7 @@ function ChatPicker(props: {
         </div>
         <div class="lk-folder-actions">
           <button type="button" class="primary" onClick={() => props.onDone(picked())}>
-            Done
+            {t("common.done")}
           </button>
         </div>
       </div>

@@ -23,6 +23,7 @@ import { base64UrlEncodeNoPad, base64Decode } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { ContactsClient } from "../contacts/client";
 import { recordSentRequest } from "../contacts/sent-requests";
+import { t } from "../l10n";
 import { useProfiles } from "../profile/ProfileContext";
 import { reachSession } from "../reach/reach-service";
 import { paths } from "../routes/paths";
@@ -116,10 +117,10 @@ export function PeopleSearch(props: {
   return (
     <>
       <Show when={nothingLocal() && state().kind !== "found"}>
-        <p class="lk-pane-nomatch">No results</p>
+        <p class="lk-pane-nomatch">{t("chats.search.no_results")}</p>
       </Show>
       <Show when={people().length > 0}>
-        <div class="lk-section-label">People</div>
+        <div class="lk-section-label">{t("search.people.heading")}</div>
         <For each={people()}>{(p) => <PersonRow person={p} wasm={wasm} chats={chats} />}</For>
       </Show>
       <Show when={channel()}>
@@ -130,7 +131,7 @@ export function PeopleSearch(props: {
             onClick={() => props.onOpenChannel(c().idHex, c().handle)}
           >
             <Icon name="channels" size={16} />
-            {`Channel @${c().handle}`}
+            {t("search.people.channel_result", { handle: `@${c().handle}` })}
           </button>
         )}
       </Show>
@@ -143,12 +144,12 @@ export function PeopleSearch(props: {
           onClick={() => void search()}
         >
           <Icon name="search" size={16} />
-          <span style={{ flex: "1" }}>Search people</span>
+          <span style={{ flex: "1" }}>{t("search.people.search")}</span>
           <Show
             when={state().kind === "searching"}
             fallback={<Icon name="chevron" size={16} />}
           >
-            <span class="lakko-spinner" role="status" aria-label="Searching" />
+            <span class="lakko-spinner" role="status" aria-label={t("search.people.searching_a11y")} />
           </Show>
         </button>
       </Show>
@@ -173,7 +174,7 @@ function PersonRow(props: {
   const [adding, setAdding] = createSignal(false);
   const [intro, setIntro] = createSignal("");
   const [busy, setBusy] = createSignal(false);
-  const [note, setNote] = createSignal<{ readonly error: boolean; readonly text: string } | null>(null);
+  const [note, setNote] = createSignal<{ readonly error: boolean; readonly text: () => string } | null>(null);
   const [sent, setSent] = createSignal(false);
 
   const contactHref = (): string => paths.contact(base64UrlEncodeNoPad(base64Decode(props.person.keyB64)));
@@ -220,7 +221,8 @@ function PersonRow(props: {
           }
           setSent(true);
           setAdding(false);
-          setNote({ error: false, text: `Request sent to ${props.person.name}. It waits under Sent until they accept.` });
+          const name = props.person.name;
+          setNote({ error: false, text: () => t("contacts.send.done", { name }) });
           break;
         }
         case "refused":
@@ -255,7 +257,7 @@ function PersonRow(props: {
         </div>
         <Show when={props.person.reach === "contact"}>
           <A href={contactHref()} class="lk-pane-lookup" style={{ width: "auto" }}>
-            Open
+            {t("common.open")}
           </A>
         </Show>
         <Show when={canAddContact(props.person) && !sent()}>
@@ -266,14 +268,14 @@ function PersonRow(props: {
             aria-expanded={adding()}
             onClick={() => setAdding((v) => !v)}
           >
-            Add contact
+            {t("search.people.add_contact")}
           </button>
         </Show>
       </div>
       <Show when={adding()}>
         <form class="lk-stack" style={{ gap: "8px", padding: "4px 12px 12px" }} onSubmit={(e) => void send(e)}>
           <label>
-            Message (optional)
+            {t("contacts.add.intro_label")}
             <textarea
               rows={2}
               value={intro()}
@@ -283,11 +285,11 @@ function PersonRow(props: {
           </label>
           <div class="lk-actions">
             <button type="button" disabled={busy()} onClick={() => setAdding(false)}>
-              Cancel
+              {t("common.cancel")}
             </button>
             <button class="primary" type="submit" disabled={busy()}>
               <Icon name="send" size={18} />
-              {busy() ? "Sending..." : "Send request"}
+              {busy() ? t("common.sending") : t("search.people.send_request")}
             </button>
           </div>
         </form>
@@ -295,7 +297,7 @@ function PersonRow(props: {
       <Show when={note()}>
         {(n) => (
           <div class={n().error ? "form-error" : "form-info"} role="status" style={{ margin: "0 12px 8px" }}>
-            {n().text}
+            {n().text()}
           </div>
         )}
       </Show>

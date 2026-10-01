@@ -15,6 +15,7 @@
 import { createMemo, createSignal, For, Show, type JSX } from "solid-js";
 
 import { useDeviceGroupSync } from "../../devices/sync/DeviceGroupSyncContext";
+import { t } from "../../l10n";
 import { Icon } from "../../ui/icons";
 import { createConversationRows } from "../conversation-rows";
 import { uiRules } from "../ui-rules";
@@ -25,7 +26,7 @@ import {
   moveFolder,
   openFolderEditor,
 } from "./folder-actions";
-import { chatCountLabel, openSuggestions, type FolderModel } from "./folder-model";
+import { chatCountLabel, MAX_FOLDERS, openSuggestions, type FolderModel } from "./folder-model";
 import { rowsInFolder } from "./folder-view";
 
 export function ChatFoldersSection(): JSX.Element {
@@ -56,28 +57,28 @@ export function ChatFoldersSection(): JSX.Element {
   return (
     <>
       <div class="lk-page-head">
-        <h1>Chat folders</h1>
+        <h1>{t("settings.section.folders")}</h1>
       </div>
 
       <Show when={sync.pendingFolderSync()}>
         <p class="lk-folder-pending" role="status">
-          Changes will reach your other devices when this device is back online.
+          {t("folders.settings.pending_sync")}
         </p>
       </Show>
 
       <Show when={folders().length === 0}>
         <p class="lk-folder-intro">
-          Group your chats the way you think about them. Folders appear on all your devices.
+          {t("folders.settings.intro")}
         </p>
       </Show>
 
       <Show when={folders().length > 0}>
         <section class="lk-card">
-          <h2>Your folders</h2>
+          <h2>{t("folders.settings.yours")}</h2>
           <div class="lk-card-row lk-folder-row fixed">
             <span class="lk-folder-handle" aria-hidden="true" />
             <div class="lk-card-row-body">
-              <span class="lk-card-row-title">All chats</span>
+              <span class="lk-card-row-title">{t("folders.all_chats")}</span>
             </div>
           </div>
           <For each={folders()}>
@@ -113,7 +114,7 @@ export function ChatFoldersSection(): JSX.Element {
                   setRowMenu({ index: i(), x: e.clientX, y: e.clientY });
                 }}
               >
-                <span class="lk-folder-handle" title="Drag to reorder" aria-hidden="true">
+                <span class="lk-folder-handle" title={t("folders.settings.drag_hint")} aria-hidden="true">
                   <Icon name="grip" size={16} />
                 </span>
                 <button
@@ -129,7 +130,7 @@ export function ChatFoldersSection(): JSX.Element {
                 <button
                   type="button"
                   class="lk-icon-button"
-                  aria-label={`More for ${f.name}`}
+                  aria-label={t("folders.settings.more_a11y", { name: f.name })}
                   aria-haspopup="menu"
                   onClick={(e) => {
                     const r = e.currentTarget.getBoundingClientRect();
@@ -156,10 +157,10 @@ export function ChatFoldersSection(): JSX.Element {
               disabled={!canCreate()}
               onClick={() => openFolderEditor({ mode: "new" })}
             >
-              New folder
+              {t("folders.new")}
             </button>
             <Show when={!canCreate()}>
-              <span class="lk-card-row-sub">You can have up to 20 folders.</span>
+              <span class="lk-card-row-sub">{t("folders.limit", { count: MAX_FOLDERS })}</span>
             </Show>
           </div>
         </div>
@@ -167,7 +168,7 @@ export function ChatFoldersSection(): JSX.Element {
 
       <Show when={suggestions().length > 0}>
         <section class="lk-card">
-          <h2>Suggested</h2>
+          <h2>{t("folders.suggested.title")}</h2>
           <For each={suggestions()}>
             {(s) => (
               <div class="lk-card-row">
@@ -175,14 +176,14 @@ export function ChatFoldersSection(): JSX.Element {
                   <Icon name="folder" size={18} />
                 </span>
                 <div class="lk-card-row-body">
-                  <span class="lk-card-row-title">{s.name}</span>
-                  <span class="lk-card-row-sub">{s.description}</span>
+                  <span class="lk-card-row-title">{s.name()}</span>
+                  <span class="lk-card-row-sub">{s.description()}</span>
                 </div>
                 <button
                   type="button"
                   class="lk-card-row-action"
                   disabled={!canCreate()}
-                  aria-label={`Add ${s.name}`}
+                  aria-label={t("folders.suggested.add_a11y", { name: s.name() })}
                   onClick={() => {
                     const rules = uiRules();
                     if (rules === null) return;
@@ -192,7 +193,7 @@ export function ChatFoldersSection(): JSX.Element {
                     });
                   }}
                 >
-                  Add
+                  {t("folders.suggested.add")}
                 </button>
               </div>
             )}
@@ -225,7 +226,7 @@ export function ChatFoldersSection(): JSX.Element {
                     move(i, i - 1);
                   }}
                 >
-                  Move up
+                  {t("folders.settings.move_up")}
                 </button>
                 <button
                   type="button"
@@ -237,7 +238,7 @@ export function ChatFoldersSection(): JSX.Element {
                     move(i, i + 1);
                   }}
                 >
-                  Move down
+                  {t("folders.settings.move_down")}
                 </button>
                 <button
                   type="button"
@@ -250,7 +251,7 @@ export function ChatFoldersSection(): JSX.Element {
                     }
                   }}
                 >
-                  Edit folder
+                  {t("folders.edit")}
                 </button>
                 <button
                   type="button"
@@ -262,7 +263,7 @@ export function ChatFoldersSection(): JSX.Element {
                     if (folder !== undefined) void deleteFolder(sync, folder);
                   }}
                 >
-                  Delete folder
+                  {t("folders.delete")}
                 </button>
               </div>
             </>

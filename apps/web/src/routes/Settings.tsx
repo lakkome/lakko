@@ -43,18 +43,14 @@ type Section =
   | "account";
 type Page = Section | "recovery" | "privacy-groups";
 
-/** A section's label: a catalog key, or (for the sections main added before
- *  their keys exist) a literal. */
-type SectionLabel = { labelKey: string; label?: undefined } | { label: string; labelKey?: undefined };
-
 // Language sits after Appearance (`docs/ux/localization.md` section 1).
-const SECTIONS: ReadonlyArray<{ id: Section; icon: IconName } & SectionLabel> = [
+const SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
   { id: "profile", labelKey: "settings.section.profile", icon: "user" },
-  { id: "privacy", label: "Privacy", icon: "eye" },
+  { id: "privacy", labelKey: "settings.section.privacy", icon: "eye" },
   { id: "security", labelKey: "settings.section.security", icon: "shield" },
   // docs/ux/chat-folders.md section 4 - between Notifications (which the web
   // does not have) and Appearance.
-  { id: "folders", label: "Chat folders", icon: "folder" },
+  { id: "folders", labelKey: "settings.section.folders", icon: "folder" },
   { id: "appearance", labelKey: "settings.section.appearance", icon: "palette" },
   { id: "language", labelKey: "settings.language.title", icon: "globe" },
   { id: "media", labelKey: "settings.section.media", icon: "video" },
@@ -124,7 +120,7 @@ export default function Settings(): JSX.Element {
             inactiveClass=""
           >
             <Icon name={s.icon} size={20} />
-            <span>{s.labelKey !== undefined ? t(s.labelKey) : s.label}</span>
+            <span>{t(s.labelKey)}</span>
             <Show when={s.id === "language"}>
               <span class="lk-settings-nav-trail">
                 <bdi lang={currentLanguage()}>{currentLanguageOwnName()}</bdi>

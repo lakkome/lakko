@@ -73,7 +73,7 @@ export function contactsErrorText(
         // `docs/ux/who-can-find-me.md` section 6.1: the same answer whether
         // the account does not exist or does not let this person find it
         // (ADR-0060), so it never names the account as unregistered.
-        return () => SEARCH_NOT_FOUND;
+        return SEARCH_NOT_FOUND;
       case "no-identity-bundle":
         return () => t("chat.members.add.error.no_bundle");
       default:

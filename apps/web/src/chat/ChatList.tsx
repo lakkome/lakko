@@ -242,7 +242,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     const rules = uiRules();
     const all = orderedRows();
     return [
-      { id: ALL_CHATS, name: "All chats", count: 0 },
+      { id: ALL_CHATS, name: t("folders.all_chats"), count: 0 },
       ...folders().map((f) => ({
         id: f.idHex,
         name: f.name,
@@ -476,7 +476,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           {/* UX 2.4 - one sentence whatever the filter; the person made it. */}
           <Show when={visibleRows().length === 0 && !searching() && currentFolder() !== null}>
             <div class="lk-folder-empty">
-              <p>Nothing here right now</p>
+              <p>{t("folders.empty")}</p>
               <button
                 type="button"
                 class="secondary"
@@ -485,7 +485,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                   if (f !== null) openFolderEditor({ mode: "edit", folderIdHex: f.idHex });
                 }}
               >
-                Edit folder
+                {t("folders.edit")}
               </button>
             </div>
           </Show>
@@ -779,7 +779,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                     {pinnedHere(m().row) ? t("chats.action.unpin") : t("chats.action.pin")}
                   </button>
                   <Show when={pinBlocked(m().row)}>
-                    <p class="lk-menu-note">You can pin up to 10 chats in a folder.</p>
+                    <p class="lk-menu-note">{t("folders.pin_limit", { count: MAX_FOLDER_PINS })}</p>
                   </Show>
                 </Show>
                 <Show when={g() !== null}>
@@ -805,7 +805,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                 <Show when={currentFolder() !== null && ref() !== null}>
                   <button type="button" role="menuitem" onClick={removeFromFolder}>
                     <Icon name="close" size={18} />
-                    Remove from folder
+                    {t("folders.remove_from_folder")}
                   </button>
                 </Show>
               </div>
@@ -817,7 +817,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         {(tm) => {
           const folder = (): FolderModel | null =>
             folders().find((x) => x.idHex === tm().id) ?? null;
-          const count = (): number => tabs().find((t) => t.id === tm().id)?.count ?? 0;
+          const count = (): number => tabs().find((tab) => tab.id === tm().id)?.count ?? 0;
           const anyUnread = (): boolean => orderedRows().some((r) => rowHasUnread(r));
           const close = (): void => {
             setTabMenu(null);
@@ -835,7 +835,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               <div
                 class="lk-menu lk-menu-floating"
                 role="menu"
-                aria-label={folder()?.name ?? "All chats"}
+                aria-label={folder()?.name ?? t("folders.all_chats")}
                 style={{ left: `${tm().x}px`, top: `${tm().y}px` }}
               >
                 <Show
@@ -852,7 +852,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                           }}
                         >
                           <Icon name="dcheck" size={18} />
-                          Mark all as read
+                          {t("folders.mark_all_read")}
                         </button>
                       </Show>
                       <button
@@ -864,7 +864,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         }}
                       >
                         <Icon name="folder" size={18} />
-                        Edit folders
+                        {t("folders.edit_all")}
                       </button>
                     </>
                   }
@@ -881,7 +881,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         }}
                       >
                         <Icon name="pencil" size={18} />
-                        Edit folder
+                        {t("folders.edit")}
                       </button>
                       <Show when={count() > 0}>
                         <button
@@ -894,7 +894,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                           }}
                         >
                           <Icon name="dcheck" size={18} />
-                          Mark all as read
+                          {t("folders.mark_all_read")}
                         </button>
                       </Show>
                       <button
@@ -906,7 +906,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         }}
                       >
                         <Icon name="lines" size={18} />
-                        Reorder folders
+                        {t("folders.reorder")}
                       </button>
                       <button
                         type="button"
@@ -919,7 +919,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         }}
                       >
                         <Icon name="trash" size={18} />
-                        Delete folder
+                        {t("folders.delete")}
                       </button>
                     </>
                   )}

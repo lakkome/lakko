@@ -24,47 +24,47 @@
  */
 import { base64UrlDecodeNoPad } from "../auth/account-id";
 import { AuthHttpError, type DeviceRequestStatus, type PendingDeviceRequest } from "../auth/client";
+import { t } from "../l10n";
 import type { Wasm } from "../wasm";
 
 // ---------------------------------------------------------------------------
 // Copy (docs/ux/identity-recovery.md section 4)
 // ---------------------------------------------------------------------------
 
+/** A line held as the way to render it, so a line already on screen follows
+ *  a language switch (ADR-0061). */
+export type LinkText = () => string;
+
 /** Old device: another device of this account answered first. */
-export const LINK_HANDLED_ELSEWHERE = "This sign-in request was handled on another device.";
+export const LINK_HANDLED_ELSEWHERE: LinkText = () => t("device_link.request.handled_elsewhere");
 /** Old device: the new device typed a wrong code (or sent something that
  *  does not open). */
-export const LINK_OLD_WRONG_CODE = "The code did not match. Nothing was added.";
+export const LINK_OLD_WRONG_CODE: LinkText = () => t("device_link.request.wrong_code");
 /** Old device: "It is not me". */
-export const LINK_DECLINED_OLD = "Declined. If this keeps happening, change your password.";
+export const LINK_DECLINED_OLD: LinkText = () => t("device_link.request.declined");
 /** Old device: the pairing finished. */
-export const LINK_DEVICE_ADDED = "Device added.";
+export const LINK_DEVICE_ADDED: LinkText = () => t("device_link.request.added");
 /** Old device: the answer limit is reached; the request is declined. */
-export const LINK_TOO_MANY_REQUESTS =
-  "Too many sign-in requests today. Use a QR code, or try again tomorrow.";
+export const LINK_TOO_MANY_REQUESTS: LinkText = () => t("device_link.request.too_many");
 /** Old device: the outcome could not be recorded, so nothing was paired. */
-export const LINK_RESULT_NOT_RECORDED =
-  "Could not reach Lakko to finish adding the device. Nothing was added. Try again from the new device.";
+export const LINK_RESULT_NOT_RECORDED: LinkText = () => t("device_link.request.not_recorded");
 
 /** New device: the intro above the field (web divergence of section 10). */
-export const LINK_NEW_INTRO =
-  "Open Lakko in a browser or on your phone where you are already signed in. " +
-  "It will show a six-digit code. Enter it here.";
+export const LINK_NEW_INTRO: LinkText = () => t("device_link.code.intro");
 /** New device: the field before the old device has answered. */
-export const LINK_WAITING = "Waiting for your other device...";
+export const LINK_WAITING: LinkText = () => t("device_link.code.waiting");
 /** New device: a typed value that is not six digits. */
-export const LINK_ENTER_SIX_DIGITS = "Enter the six digits your other device shows.";
+export const LINK_ENTER_SIX_DIGITS: LinkText = () => t("device_link.code.enter_six_digits");
 /** New device: one try per request, and it was wrong. */
-export const LINK_NEW_WRONG_CODE =
-  "That code does not match. Start again and enter the code your other device shows.";
+export const LINK_NEW_WRONG_CODE: LinkText = () => t("device_link.code.wrong");
 /** New device: the old device confirmed; the Welcome is on its way. */
-export const LINK_RESTORING = "Restoring...";
+export const LINK_RESTORING: LinkText = () => t("device_link.code.restoring");
 /** New device: "It is not me" on the other device. */
-export const LINK_DECLINED_NEW = "Declined on another device.";
+export const LINK_DECLINED_NEW: LinkText = () => t("device_link.error.declined");
 /** New device: ten minutes passed. */
-export const LINK_EXPIRED = "This request expired. Start again.";
+export const LINK_EXPIRED: LinkText = () => t("device_link.code.expired");
 /** New device: the payload could not be posted. */
-export const LINK_UNREACHABLE = "Could not reach Lakko. Check your connection, then start again.";
+export const LINK_UNREACHABLE: LinkText = () => t("device_link.code.unreachable");
 
 // ---------------------------------------------------------------------------
 // The wasm surface, narrowed to what the flows use
@@ -249,9 +249,9 @@ export type ResponderView =
   /** The code was typed right; pairing runs. */
   | { readonly kind: "adding"; readonly requestId: string }
   /** Over the answer limit; the request was declined. A modal, with Close. */
-  | { readonly kind: "limited"; readonly message: string }
+  | { readonly kind: "limited"; readonly message: LinkText }
   /** The modal closed with a one-line result (a toast). */
-  | { readonly kind: "closed"; readonly message: string };
+  | { readonly kind: "closed"; readonly message: LinkText };
 
 export interface ResponderPorts {
   readonly core: DeviceLinkCore;
@@ -275,7 +275,7 @@ export interface ResponderPorts {
   /** The unchanged add-device flow over the opened payload. */
   pair(payload: Uint8Array): Promise<void>;
   /** The toast for a failed `checkPayload` or `pair`. */
-  failureMessage(err: unknown): string;
+  failureMessage(err: unknown): LinkText;
   readonly answers: AnswerLogStore;
   now(): number;
   onView(view: ResponderView): void;
@@ -592,7 +592,7 @@ export type InitiatorView =
   | { readonly kind: "waiting" }
   /** The field is enabled; `error` after a typed value that is not six
    *  digits. */
-  | { readonly kind: "ready"; readonly error: string | null }
+  | { readonly kind: "ready"; readonly error: LinkText | null }
   | { readonly kind: "checking" }
   /** The old device's confirmation verified: the Welcome may be trusted. */
   | { readonly kind: "confirmed" }
@@ -610,7 +610,7 @@ export function isTerminalInitiatorView(v: InitiatorView): boolean {
 }
 
 /** The one line a terminal view shows. `failed` is the caller's to word. */
-export function initiatorEndMessage(v: InitiatorView): string | null {
+export function initiatorEndMessage(v: InitiatorView): LinkText | null {
   switch (v.kind) {
     case "wrong-code":
       return LINK_NEW_WRONG_CODE;

@@ -23,6 +23,8 @@
  * No wasm and no Solid here, so vitest runs it in bare node.
  */
 
+import { t } from "../../l10n";
+
 // ---------- bits (the wire's, ADR-0058 section 2) --------------------------
 
 export const INCLUDE_ONE_TO_ONE = 1 << 0;
@@ -396,8 +398,10 @@ export function appendToOrderEdit(folders: readonly FolderModel[], newFolderIdHe
 
 export interface Suggestion {
   readonly key: "unread" | "personal" | "groups" | "channels";
-  readonly name: string;
-  readonly description: string;
+  /** The suggested name in the interface language at the time of the call;
+   *  adding the suggestion stores this text as the folder's own name. */
+  readonly name: () => string;
+  readonly description: () => string;
   readonly includeKinds: number;
   readonly excludeFlags: number;
 }
@@ -407,29 +411,29 @@ const ALL_KINDS = INCLUDE_ONE_TO_ONE | INCLUDE_GROUPS | INCLUDE_CHANNELS;
 export const SUGGESTIONS: readonly Suggestion[] = [
   {
     key: "unread",
-    name: "Unread",
-    description: "Chats with new messages",
+    name: () => t("folders.suggested.unread.name"),
+    description: () => t("folders.suggested.unread.description"),
     includeKinds: ALL_KINDS,
     excludeFlags: EXCLUDE_READ,
   },
   {
     key: "personal",
-    name: "Personal",
-    description: "One-to-one chats",
+    name: () => t("folders.suggested.personal.name"),
+    description: () => t("folders.suggested.personal.description"),
     includeKinds: INCLUDE_ONE_TO_ONE,
     excludeFlags: 0,
   },
   {
     key: "groups",
-    name: "Groups",
-    description: "Group chats",
+    name: () => t("folders.suggested.groups.name"),
+    description: () => t("folders.suggested.groups.description"),
     includeKinds: INCLUDE_GROUPS,
     excludeFlags: 0,
   },
   {
     key: "channels",
-    name: "Channels",
-    description: "Channels you follow",
+    name: () => t("folders.suggested.channels.name"),
+    description: () => t("folders.suggested.channels.description"),
     includeKinds: INCLUDE_CHANNELS,
     excludeFlags: 0,
   },
@@ -456,7 +460,7 @@ export function suggestionEdit(folderIdHex: string, s: Suggestion): RegisterEdit
   return {
     t: "meta",
     folderIdHex,
-    name: s.name,
+    name: s.name(),
     includeKinds: s.includeKinds,
     excludeFlags: s.excludeFlags,
   };
@@ -478,13 +482,13 @@ export function unreadConversationCount(rows: readonly CountRow[]): number {
 
 /** "12 chats" (and "1 chat"). */
 export function chatCountLabel(n: number): string {
-  return `${n} ${n === 1 ? "chat" : "chats"}`;
+  return t("folders.chat_count", { count: n });
 }
 
 /** The tab's accessible label (UX 9): "Work, 3 unread chats". */
 export function tabAriaLabel(name: string, count: number): string {
   if (count === 0) return name;
-  return `${name}, ${count} unread ${count === 1 ? "chat" : "chats"}`;
+  return t("folders.tab_a11y", { name, count });
 }
 
 /** Clip a typed name to the limit, by characters (code points) rather than

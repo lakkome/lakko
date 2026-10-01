@@ -15,6 +15,7 @@
 import { createEffect, For, Show, type JSX } from "solid-js";
 
 import { createLongPress } from "../../ui/long-press";
+import { t } from "../../l10n";
 import { tabAriaLabel } from "./folder-model";
 
 export interface FolderTab {
@@ -52,28 +53,28 @@ export function FolderBar(props: {
   };
 
   return (
-    <div class="lk-folder-bar" role="tablist" aria-label="Folders" ref={strip}>
+    <div class="lk-folder-bar" role="tablist" aria-label={t("folders.bar_a11y")} ref={strip}>
       <For each={props.tabs}>
-        {(t, i) => {
-          const press = createLongPress((x, y) => props.onMenu(t.id, x, y));
-          const selected = (): boolean => props.selected === t.id;
+        {(tab, i) => {
+          const press = createLongPress((x, y) => props.onMenu(tab.id, x, y));
+          const selected = (): boolean => props.selected === tab.id;
           return (
             <button
               type="button"
               role="tab"
               class="lk-folder-tab"
               classList={{ selected: selected() }}
-              data-tab={t.id}
+              data-tab={tab.id}
               aria-selected={selected()}
               tabIndex={selected() ? 0 : -1}
-              aria-label={tabAriaLabel(t.name, t.count)}
+              aria-label={tabAriaLabel(tab.name, tab.count)}
               onClick={(e) => {
                 if (press.swallowClick(e)) return;
-                props.onSelect(t.id);
+                props.onSelect(tab.id);
               }}
               onContextMenu={(e) => {
                 e.preventDefault();
-                props.onMenu(t.id, e.clientX, e.clientY);
+                props.onMenu(tab.id, e.clientX, e.clientY);
               }}
               onKeyDown={(e) => {
                 if (e.key === "ArrowRight") {
@@ -85,7 +86,7 @@ export function FolderBar(props: {
                 } else if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
                   e.preventDefault();
                   const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                  props.onMenu(t.id, r.left, r.bottom);
+                  props.onMenu(tab.id, r.left, r.bottom);
                 }
               }}
               onPointerDown={press.onPointerDown}
@@ -94,10 +95,10 @@ export function FolderBar(props: {
               onPointerCancel={press.onPointerCancel}
               onPointerLeave={press.onPointerLeave}
             >
-              <span class="lk-folder-tab-name">{t.name}</span>
-              <Show when={t.count > 0}>
+              <span class="lk-folder-tab-name">{tab.name}</span>
+              <Show when={tab.count > 0}>
                 <span class="lk-folder-tab-count" aria-hidden="true">
-                  {t.count}
+                  {tab.count}
                 </span>
               </Show>
             </button>

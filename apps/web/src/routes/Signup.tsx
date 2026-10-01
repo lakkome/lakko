@@ -175,10 +175,10 @@ export default function Signup(): JSX.Element {
             not re-read on every keystroke. */}
         <Show when={usernameReason(usernameCheck()) === null && normalised() !== null}>
           <p class="form-info" style={{ margin: 0 }}>
-            {FIND_ME.signupLine}{" "}
+            {FIND_ME.signupLine()}{" "}
             <Show
               when={!privacyAfterSignup()}
-              fallback={<span>It opens once your account is created.</span>}
+              fallback={<span>{t("who_can_find_me.signup_after_create")}</span>}
             >
               <Show when={!otherReturn()}>
                 <a
@@ -188,7 +188,7 @@ export default function Signup(): JSX.Element {
                     setSearch({ return: paths.settingsSection("privacy") }, { replace: true });
                   }}
                 >
-                  {FIND_ME.signupChange}
+                  {FIND_ME.signupChange()}
                 </a>
               </Show>
             </Show>

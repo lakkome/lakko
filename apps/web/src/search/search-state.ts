@@ -12,16 +12,17 @@
  * not search" - telling someone their friend does not exist because the
  * connection dropped is the worst thing this can do.
  */
+import { t } from "../l10n";
 import { anonTokenQuotaExhausted } from "../tokens/anon-token-pool";
 import { LOOKUP_ALLOWANCE_USED } from "../tokens/token-copy";
 
 /** Not found - identical whether the person does not exist or does not let
  *  the searcher find them. */
-export const SEARCH_NOT_FOUND = "No one found. Check the spelling, or ask them for an invite link.";
+export const SEARCH_NOT_FOUND = (): string => t("search.people.not_found");
 /** Network failure. Never "not found". */
-export const SEARCH_FAILED = "Couldn't search. Check your connection and try again.";
+export const SEARCH_FAILED = (): string => t("search.people.failed");
 /** The person changed their setting after they were found. */
-export const REQUEST_REFUSED = "Couldn't send the request. They may have changed who can find them.";
+export const REQUEST_REFUSED = (): string => t("search.people.request_refused");
 
 /** How one question of a search ended. */
 export type LegOutcome = "answered" | "failed" | "allowance-used";
@@ -57,9 +58,9 @@ export function foldSearch(foundCount: number, legs: readonly LegOutcome[]): Peo
 export function searchStateMessage(state: PeopleSearchState): string | null {
   switch (state.kind) {
     case "not-found":
-      return SEARCH_NOT_FOUND;
+      return SEARCH_NOT_FOUND();
     case "failed":
-      return SEARCH_FAILED;
+      return SEARCH_FAILED();
     case "allowance-used":
       return LOOKUP_ALLOWANCE_USED();
     default:

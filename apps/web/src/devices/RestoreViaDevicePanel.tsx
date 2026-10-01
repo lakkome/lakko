@@ -21,6 +21,7 @@
  */
 import { authLimitMessage, deviceRestoreErrorMessage } from "../auth/auth-error-copy";
 import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { createSignal, onCleanup, Show, Switch, Match, type JSX } from "solid-js";
 import QRCode from "qrcode";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
@@ -38,6 +39,7 @@ import {
   isTerminalInitiatorView,
   type DeviceLinkInitiatorFlow,
   type InitiatorView,
+  type LinkText,
 } from "./device-link";
 import type { JoinRecoveryOutcome } from "./orchestrator";
 import type { WelcomeOutcome } from "./welcome-courier";
@@ -97,7 +99,7 @@ export default function RestoreViaDevicePanel(props: {
     | { kind: "error"; messageKey?: string; error?: unknown }
     /** The device-link request ended (wrong code, declined, expired):
      *  Start again posts a new one. */
-    | { kind: "link-ended"; message: string };
+    | { kind: "link-ended"; message: LinkText };
   const [state, setState] = createSignal<State>({ kind: "idle" });
   const [canvasRef, setCanvasRef] = createSignal<HTMLCanvasElement | null>(
     null,
@@ -107,7 +109,7 @@ export default function RestoreViaDevicePanel(props: {
   const [linkView, setLinkView] = createSignal<InitiatorView | null>(null);
   const [typed, setTyped] = createSignal("");
   const [showQr, setShowQr] = createSignal(false);
-  const [requestNote, setRequestNote] = createSignal<string | null>(null);
+  const [requestNote, setRequestNote] = createLiveText();
   /** `true` while this attempt goes through the device link: the Welcome
    *  then needs the other device's verified confirmation. Cleared only by
    *  an explicit switch to the QR code (or a request that could not be
@@ -190,8 +192,8 @@ export default function RestoreViaDevicePanel(props: {
         err.errorCode === "login-by-name-disabled";
       // eslint-disable-next-line no-console
       if (limit === null && !byNameOff) console.warn("device request: create failed", err);
-      setRequestNote(
-        limit ??
+      setRequestNote(() =>
+        authLimitMessage(err) ??
           (byNameOff
             ? t("device_link.error.ask_unavailable")
             : t("device_link.error.ask_unreachable")),
@@ -366,12 +368,12 @@ export default function RestoreViaDevicePanel(props: {
                 const fieldOn = (): boolean => v().kind === "ready";
                 return (
                   <form onSubmit={submitCode}>
-                    <p style={{ "margin-top": 0 }}>{LINK_NEW_INTRO}</p>
+                    <p style={{ "margin-top": 0 }}>{LINK_NEW_INTRO()}</p>
                     <input
                       type="text"
                       inputmode="numeric"
                       autocomplete="one-time-code"
-                      aria-label="Code from your other device"
+                      aria-label={t("device_link.code.field_a11y")}
                       placeholder="47 19 03"
                       maxLength={8}
                       class="lk-sas-code"
@@ -380,19 +382,19 @@ export default function RestoreViaDevicePanel(props: {
                       onInput={(e) => setTyped(e.currentTarget.value)}
                     />
                     <Show when={v().kind === "requesting" || v().kind === "waiting"}>
-                      <p class="lk-muted">{LINK_WAITING}</p>
+                      <p class="lk-muted">{LINK_WAITING()}</p>
                     </Show>
-                    <Show when={v().kind === "ready" ? (v() as { error: string | null }).error : null}>
-                      {(err) => <p class="form-error">{err()}</p>}
+                    <Show when={v().kind === "ready" ? (v() as { error: LinkText | null }).error : null}>
+                      {(err) => <p class="form-error">{err()()}</p>}
                     </Show>
                     <Show when={v().kind === "checking"}>
-                      <p class="lk-muted">Checking...</p>
+                      <p class="lk-muted">{t("common.checking")}</p>
                     </Show>
                     <Show when={v().kind === "confirmed"}>
-                      <p class="lk-muted">{LINK_RESTORING}</p>
+                      <p class="lk-muted">{LINK_RESTORING()}</p>
                     </Show>
                     <Show when={v().kind === "failed"}>
-                      <p class="form-error">{LINK_UNREACHABLE}</p>
+                      <p class="form-error">{LINK_UNREACHABLE()}</p>
                     </Show>
                     <div class="lk-actions">
                       <button
@@ -400,7 +402,7 @@ export default function RestoreViaDevicePanel(props: {
                         type="submit"
                         disabled={!fieldOn() || typed().replace(/\D/g, "").length !== 6}
                       >
-                        Continue
+                        {t("common.continue")}
                       </button>
                       <Show when={v().kind === "requesting" || v().kind === "waiting" || v().kind === "ready"}>
                         <button type="button" onClick={switchToQr}>
@@ -433,12 +435,12 @@ export default function RestoreViaDevicePanel(props: {
         <Match when={state().kind === "link-ended"}>
           {(_) => {
             const s = state();
-            const message = s.kind === "link-ended" ? s.message : "";
+            const message = (): string => (s.kind === "link-ended" ? s.message() : "");
             return (
               <div>
-                <p class="form-error">{message}</p>
+                <p class="form-error">{message()}</p>
                 <button class="primary" type="button" onClick={() => void start()}>
-                  Start again
+                  {t("device_link.code.start_again")}
                 </button>
               </div>
             );

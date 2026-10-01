@@ -16,15 +16,15 @@ import {
 
 describe("the copy (docs/ux/who-can-find-me.md section 6.1, verbatim)", () => {
   it("says the same thing for a person who does not exist and one who is hidden", () => {
-    expect(SEARCH_NOT_FOUND).toBe("No one found. Check the spelling, or ask them for an invite link.");
+    expect(SEARCH_NOT_FOUND()).toBe("No one found. Check the spelling, or ask them for an invite link.");
   });
 
   it("blames the connection on a network failure", () => {
-    expect(SEARCH_FAILED).toBe("Couldn't search. Check your connection and try again.");
+    expect(SEARCH_FAILED()).toBe("Couldn't search. Check your connection and try again.");
   });
 
   it("says a request was refused without saying why", () => {
-    expect(REQUEST_REFUSED).toBe("Couldn't send the request. They may have changed who can find them.");
+    expect(REQUEST_REFUSED()).toBe("Couldn't send the request. They may have changed who can find them.");
   });
 });
 
@@ -56,8 +56,8 @@ describe("legOutcomeOf", () => {
 
 describe("searchStateMessage", () => {
   it("maps each state to its line", () => {
-    expect(searchStateMessage({ kind: "not-found" })).toBe(SEARCH_NOT_FOUND);
-    expect(searchStateMessage({ kind: "failed" })).toBe(SEARCH_FAILED);
+    expect(searchStateMessage({ kind: "not-found" })).toBe(SEARCH_NOT_FOUND());
+    expect(searchStateMessage({ kind: "failed" })).toBe(SEARCH_FAILED());
     expect(searchStateMessage({ kind: "allowance-used" })).toBe(LOOKUP_ALLOWANCE_USED());
   });
 

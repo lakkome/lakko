@@ -236,8 +236,8 @@ function ChannelInfoBody(props: {
               <Icon name="groups" size={18} />
             </span>
             <div class="lk-card-row-body">
-              <span class="lk-card-row-title">Members</span>
-              <span class="lk-card-row-sub">Who reads this channel and shared a card.</span>
+              <span class="lk-card-row-title">{t("channels.members.title")}</span>
+              <span class="lk-card-row-sub">{t("channels.members.info_sub")}</span>
             </div>
             <button
               type="button"
@@ -247,7 +247,7 @@ function ChannelInfoBody(props: {
                 setMembersOpen(true);
               }}
             >
-              Open
+              {t("common.open")}
             </button>
           </div>
         </section>

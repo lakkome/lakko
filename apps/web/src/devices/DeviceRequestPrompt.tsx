@@ -35,20 +35,23 @@ import {
   deviceLinkCoreOf,
   localStorageAnswerLog,
   type DeviceLinkResponderFlow,
+  type LinkText,
   type ResponderView,
 } from "./device-link";
 import { runScanFlow } from "./orchestrator";
 import { ownPairingHandle, parsePairingQrPayload } from "./pairing";
 
-/** The toast for a failed payload check or pairing. ADR-0061: the detail
- *  goes to the log, never to the screen. */
-function failureMessage(err: unknown): string {
+/** The toast for a failed payload check or pairing, held as the way to
+ *  render it. ADR-0061: the detail goes to the log, never to the screen. */
+function failureMessage(err: unknown): LinkText {
   // eslint-disable-next-line no-console
   console.error("device-request: confirm failed", err);
   // ADR-0054 S4: a server limit says when to try again, never "failed".
-  const limit = authLimitMessage(err);
-  const own = keyedErrorText(err) ?? (err instanceof Error ? pairingText(err.message) : null);
-  return limit ?? own ?? t("device_link.request.error.generic");
+  return () => {
+    const limit = authLimitMessage(err);
+    const own = keyedErrorText(err) ?? (err instanceof Error ? pairingText(err.message) : null);
+    return limit ?? own ?? t("device_link.request.error.generic");
+  };
 }
 
 export function DeviceRequestPrompt(): JSX.Element {
@@ -174,7 +177,7 @@ export function DeviceRequestPrompt(): JSX.Element {
   }
   const toast = (): string | null => {
     const v = view();
-    return v.kind === "closed" ? v.message : null;
+    return v.kind === "closed" ? v.message() : null;
   };
 
   return (
@@ -183,12 +186,12 @@ export function DeviceRequestPrompt(): JSX.Element {
         {(v) => (
           <div class="lk-modal-backdrop" role="presentation" onClick={onBackdrop}>
             <div class="lk-modal" role="dialog" aria-modal="true" aria-labelledby="lk-devreq-title">
-              <h2 id="lk-devreq-title">New sign-in request</h2>
+              <h2 id="lk-devreq-title">{t("device_link.request.heading")}</h2>
               <Show
                 when={v().kind !== "asking" && v().kind !== "answering"}
                 fallback={
                   <>
-                    <p>Someone is signing in to your account on a new device.</p>
+                    <p>{t("device_link.request.someone_signing_in")}</p>
                     <p>{t("device_link.request.title")}</p>
                     <div class="lk-actions">
                       <button
@@ -197,7 +200,7 @@ export function DeviceRequestPrompt(): JSX.Element {
                         disabled={v().kind === "answering"}
                         onClick={() => void flow?.flow.consent()}
                       >
-                        Yes, it's me
+                        {t("device_link.request.yes_its_me")}
                       </button>
                       <button type="button" onClick={() => void flow?.flow.decline()}>
                         {t("device_link.request.decline")}
@@ -210,7 +213,7 @@ export function DeviceRequestPrompt(): JSX.Element {
                 when={v().kind !== "limited"}
                 fallback={
                   <>
-                    <p>{(v() as { message: string }).message}</p>
+                    <p>{(v() as { message: LinkText }).message()}</p>
                     <div class="lk-actions">
                       <button class="primary" type="button" onClick={() => flow?.flow.dismiss()}>
                         {t("common.close")}
@@ -223,11 +226,11 @@ export function DeviceRequestPrompt(): JSX.Element {
                   when={v().kind === "showing"}
                   fallback={<p>{t("device_link.request.adding")}</p>}
                 >
-                  <p>Enter this code on the new device:</p>
-                  <div class="lk-sas-code" aria-label="Sign-in code">
+                  <p>{t("device_link.request.enter_code")}</p>
+                  <div class="lk-sas-code" aria-label={t("device_link.request.code_a11y")}>
                     {(v() as { code?: string }).code}
                   </div>
-                  <p>Never read this code to anyone. Lakko will never ask for it.</p>
+                  <p>{t("device_link.request.never_share")}</p>
                   <div class="lk-actions">
                     <button type="button" onClick={() => void flow?.flow.decline()}>
                       {t("device_link.request.decline")}

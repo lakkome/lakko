@@ -20,6 +20,8 @@
  * - whether a stored subscriber key predates the Ed25519 flag day.
  */
 
+import { t } from "../l10n";
+
 /** What the own card carries. */
 export interface CardContent {
   readonly displayName: string | null;
@@ -131,9 +133,9 @@ export function cardGrantDecision(input: {
 
 /** The label a member row shows. */
 export function memberRowName(displayName: string | null | undefined, isSelf: boolean): string {
-  if (isSelf) return "You";
+  if (isSelf) return t("channels.members.you");
   const name = displayName?.trim() ?? "";
-  return name.length > 0 ? name : "Member";
+  return name.length > 0 ? name : t("channels.members.unnamed");
 }
 
 /** Whether a stored subscriber key predates the Ed25519 flag day: its

@@ -30,6 +30,7 @@ import RestoreViaDevicePanel, {
   type DeviceRestoreFlowHandle,
 } from "../../devices/RestoreViaDevicePanel";
 import { UsernameField } from "./UsernameField";
+import { t } from "../../l10n";
 import { KeyedError } from "../../l10n/keyed-error";
 
 export function DeviceRecover(props: {
@@ -114,11 +115,7 @@ export function DeviceRecover(props: {
 
   return (
     <div class="lk-stack">
-      <p class="lk-muted">
-        Enter your username, then open Lakko on a device that is still logged in and type
-        the code it shows. Nothing is sent that Lakko's servers can read. No camera needed; a
-        QR code is there if you prefer.
-      </p>
+      <p class="lk-muted">{t("recovery.device.intro")}</p>
       <div>
         <UsernameField value={props.username} setValue={props.setUsername} />
       </div>

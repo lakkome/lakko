@@ -384,7 +384,7 @@ export default function JoinCall() {
           </Show>
           <Show when={!decoded.loading && decoded() === null && damaged()}>
             <p>{INVITE_LINK_DAMAGED()}</p>
-            <A href={paths.home}>Open Lakko</A>
+            <A href={paths.home}>{t("common.open_lakko")}</A>
           </Show>
           <Show
             when={

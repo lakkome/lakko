@@ -27,7 +27,8 @@ import { canAddContact, toHex, type PersonResult } from "./people";
 export type SendOutcome =
   | { readonly kind: "sent" }
   | { readonly kind: "refused" }
-  | { readonly kind: "failed"; readonly message: string };
+  /** `message` renders the failure in the current language. */
+  | { readonly kind: "failed"; readonly message: () => string };
 
 export interface SendDeps {
   /** The DS reach check of the person's account mailbox with a grant. */
@@ -47,8 +48,8 @@ export interface SendDeps {
   /** Whether a send failure means the person can no longer be reached this
    *  way (the username no longer resolves: they left Everyone). */
   isRefusal(err: unknown): boolean;
-  /** The sentence for any other failure. */
-  errorMessage(err: unknown): string;
+  /** How to render the sentence for any other failure. */
+  errorMessage(err: unknown): () => string;
 }
 
 function hexToBytes(hex: string): Uint8Array {

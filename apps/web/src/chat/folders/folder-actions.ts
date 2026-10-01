@@ -14,6 +14,7 @@
 import { createSignal } from "solid-js";
 
 import type { DeviceGroupSyncApi } from "../../devices/sync/DeviceGroupSyncContext";
+import { t } from "../../l10n";
 import { requestConfirm } from "../../ui/confirm-dialog";
 import {
   appendToOrderEdit,
@@ -85,10 +86,10 @@ export async function addSuggestion(
  *  it was deleted. */
 export async function deleteFolder(sync: FolderSync, folder: FolderModel): Promise<boolean> {
   const ok = await requestConfirm({
-    title: `Delete folder "${folder.name}"?`,
-    body: "The chats in it stay in All chats.",
-    confirmLabel: "Delete",
-    cancelLabel: "Cancel",
+    title: t("folders.delete_confirm.title", { name: folder.name }),
+    body: t("folders.delete_confirm.body"),
+    confirmLabel: t("common.delete"),
+    cancelLabel: t("common.cancel"),
     tone: "danger",
   });
   if (!ok) return false;
