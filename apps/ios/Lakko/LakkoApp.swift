@@ -1526,7 +1526,8 @@ private struct SessionRoot: View, Equatable {
                 })
         case .chatFolders(let reorder):
             ChatFoldersSettingsScreen(
-                startInReorder: reorder, viewModel: chatListVM, channels: channelsState)
+                startInReorder: reorder, viewModel: chatListVM, channels: channelsState,
+                feedReading: models.feedReading)
         case .whoCanFindMe:
             WhoCanFindMeScreen(
                 reach: ReachCenter.shared,
