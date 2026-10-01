@@ -1043,7 +1043,7 @@ public struct ChatScreen: View {
             actionsAvailable: viewModel.messageActionsAvailable,
             isSystemRow: message.direction == .system,
             hasId: message.messageId > 0,
-            deleted: message.deleted,
+            deleted: message.deleted || message.unsupportedVersion != nil,
             sendComplete: message.ack == .sent)
     }
 
@@ -1888,6 +1888,10 @@ struct MessageRow: View {
             && message.direction != .system
             && message.messageId > 0
             && !message.deleted
+            // ADR-0061 section 6 — a message from a newer wire version holds no
+            // content in this build: no reply, forward or reaction, like a
+            // tombstone (Android opens no menu on it either).
+            && message.unsupportedVersion == nil
     }
 
     /// ADR-0052 / section 3.1 — Reply is offered on any message with an id,
@@ -1913,7 +1917,7 @@ struct MessageRow: View {
             actionsAvailable: actionsAvailable,
             isSystemRow: message.direction == .system,
             hasId: message.messageId > 0,
-            deleted: message.deleted,
+            deleted: message.deleted || message.unsupportedVersion != nil,
             sendComplete: message.ack == .sent)
     }
 

@@ -386,6 +386,9 @@ function ChatBubbleBody(
     props.messageId !== undefined &&
     !isEditing() &&
     !isDeleted() &&
+    // ADR-0061 section 6 — a message from a newer wire version has no content
+    // here to reply to, forward, copy or react to; it behaves like a tombstone.
+    props.unsupported !== true &&
     // Section 8 "Entering": "The reaction row and the action card do not open
     // while selecting; a long press or right-click on a row toggles it".
     !props.selecting;
@@ -396,7 +399,7 @@ function ChatBubbleBody(
   const selectable = (): boolean =>
     canSelectRow({
       hasId: props.messageId !== undefined,
-      deleted: isDeleted(),
+      deleted: isDeleted() || props.unsupported === true,
       sendComplete: props.ack === "sent",
     });
   const rowSelectable = (): boolean => props.selecting && selectable();
