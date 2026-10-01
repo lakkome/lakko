@@ -92,16 +92,21 @@ public class ChannelPostSync(
     }
 
     /** One sync pass. Skipped (not queued) when one is already running: the
-     *  timer or the next resume brings the rest. */
-    public suspend fun syncOnce() {
-        val account = channels.boundAccount ?: return
-        if (!running.tryLock()) return
-        try {
+     *  timer or the next resume brings the rest. Reports how many channels it
+     *  tried and how many answered (`docs/ux/feed.md`, "refresh failed
+     *  (network)"); a skipped pass reports [SourceCheck.NONE], so it says
+     *  nothing, and a pass that fails as a whole reports every channel tried
+     *  and none answered. */
+    public suspend fun syncOnce(): SourceCheck {
+        val account = channels.boundAccount ?: return SourceCheck.NONE
+        if (!running.tryLock()) return SourceCheck.NONE
+        return try {
             withContext(Dispatchers.IO) { syncAll(account) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (e: Throwable) {
             Log.w(TAG, "channel post sync error", e)
+            SourceCheck(readableChannels().size, 0)
         } finally {
             running.unlock()
         }

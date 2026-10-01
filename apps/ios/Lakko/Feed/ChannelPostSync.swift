@@ -54,6 +54,11 @@ final class ChannelPostSync: ObservableObject {
     var onSlotSynced: ((_ channelIdHex: String, _ slot: ChannelPostSlot) -> Void)?
     /// How many channels the last finished sync tried and how many answered.
     private var lastSyncTally = FeedCheckTally()
+    /// Told each finished sync's tally, whichever path ran it (the timer, the
+    /// became-active and request triggers, pull to refresh): the Feed's
+    /// "Couldn't check for new messages." (``FeedRefreshCenter``). Set by the
+    /// session root.
+    var onSyncDone: ((FeedCheckTally) -> Void)?
 
     init(
         accountIdB64: String,
@@ -113,6 +118,7 @@ final class ChannelPostSync: ObservableObject {
             let tally = await self?.syncAll() ?? FeedCheckTally()
             guard let self else { return }
             self.lastSyncTally = tally
+            self.onSyncDone?(tally)
             self.running = false
             if self.again {
                 self.again = false
@@ -133,6 +139,7 @@ final class ChannelPostSync: ObservableObject {
         }
         running = true
         lastSyncTally = await syncAll()
+        onSyncDone?(lastSyncTally)
         running = false
         return lastSyncTally
     }

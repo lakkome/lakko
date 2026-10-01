@@ -181,10 +181,15 @@ struct LakkoApp: App {
         self._callHost = StateObject(wrappedValue: host)
         self._groupCallHost = StateObject(wrappedValue: groupHost)
         self._linkCallHost = StateObject(wrappedValue: linkHost)
+        // `docs/ux/feed.md` — the Feed's "Couldn't check for new messages."
+        // state, fed by every check (the group sweep below, the channel post
+        // sync and pull to refresh). In memory, per account.
+        let feedRefresh = FeedRefreshCenter()
         self._foregroundReceive = StateObject(
             wrappedValue: ForegroundReceiveHolder(
                 scheduler: ForegroundReceiveScheduler.live(
-                    repository: chat, callHost: host, groupCallHost: groupHost)
+                    repository: chat, callHost: host, groupCallHost: groupHost,
+                    feedRefresh: feedRefresh)
             )
         )
         let sync = DeviceGroupSyncRepository()
@@ -276,7 +281,8 @@ struct LakkoApp: App {
             groupCallHost: groupHost,
             linkCallHost: linkHost,
             deviceGroupSync: sync,
-            inviteIntake: intake
+            inviteIntake: intake,
+            feedRefresh: feedRefresh
         )
     }
 
@@ -568,6 +574,8 @@ struct AppRoot: View, Equatable {
                 // forgetDevice) tears down the cross-device sync
                 // runtime so the next login bootstraps fresh.
                 services.deviceGroupSync.clear()
+                // No account, no feed checks to report.
+                services.feedRefresh.reset()
                 // ADR-0048 — no account, no own profile to publish.
                 ProfileDirectory.shared.deactivate()
                 // ADR-0060 — no account, no reach keys to register.
@@ -800,6 +808,13 @@ private final class SessionModels: ObservableObject {
         // keys are loaded before the first body evaluation.
         channelsState = ChannelsUiState(accountIdB64: accountIdB64)
         channelPostSync = ChannelPostSync(accountIdB64: accountIdB64, channels: channelsState)
+        // `docs/ux/feed.md` — every channel sync reports into the app-wide
+        // refresh state; another account's results are forgotten here.
+        let feedRefresh = services.feedRefresh
+        feedRefresh.bind(accountIdB64: accountIdB64)
+        channelPostSync.onSyncDone = { [weak feedRefresh] tally in
+            feedRefresh?.record(.channels, tally)
+        }
         let reading = FeedReadingModel(accountIdB64: accountIdB64)
         feedReading = reading
         // A channel synced for the first time gets its read marker at the
@@ -856,7 +871,8 @@ private final class SessionModels: ObservableObject {
             deviceGroupSync: services.deviceGroupSync,
             contacts: services.contactsRepository,
             discover: discoverModel,
-            reading: reading)
+            reading: reading,
+            refreshCenter: feedRefresh)
         // A change of the followed listed set (a subscribe, an unsubscribe, a
         // channel becoming listed or unlisted): re-send to every group the
         // switch is on in whose last list differs. Debounced, so a burst

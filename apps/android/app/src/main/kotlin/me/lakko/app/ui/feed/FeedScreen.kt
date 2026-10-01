@@ -757,7 +757,11 @@ public fun FeedScreen(
     var refreshing by remember { mutableStateOf(false) }
     // The latest group check and channel check, kept apart (UX spec state
     // table, "refresh failed (network)"); the banner is derived from both.
-    var refreshState by remember { mutableStateOf(me.lakko.app.feed.FeedRefreshState()) }
+    // App-wide and per account: the session shell's receive loop and channel
+    // post sync report into the same state as this screen's pull to refresh
+    // and Retry.
+    val feedRefresh = chatRepository.feedRefresh
+    val refreshState by feedRefresh.state.collectAsStateWithLifecycle()
     val refreshFailed = me.lakko.app.feed.feedRefreshFailed(refreshState)
     // Shares the session shell's single-writer lock, so a refresh waits for a
     // sync already running instead of writing the log beside it.
@@ -770,16 +774,17 @@ public fun FeedScreen(
             try {
                 // Both checks run (Retry included); each folds into its own
                 // latest outcome. A failed poll counts as not answered.
+                val refreshAccount = chatRepository.currentAccountIdB64()
                 val groups = try {
                     chatRepository.pollAllGroupsReporting()
                 } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                     throw e
                 } catch (_: Throwable) {
-                    me.lakko.app.feed.SourceCheck(tried = 1, answered = 0)
+                    me.lakko.app.feed.FAILED_CHECK
                 }
-                refreshState = me.lakko.app.feed.recordCheck(refreshState, me.lakko.app.feed.CheckKind.GROUPS, groups)
+                feedRefresh.record(refreshAccount, me.lakko.app.feed.CheckKind.GROUPS, groups)
                 val channelCheck = refreshChannelSync.syncAndWait()
-                refreshState = me.lakko.app.feed.recordCheck(refreshState, me.lakko.app.feed.CheckKind.CHANNELS, channelCheck)
+                feedRefresh.record(refreshAccount, me.lakko.app.feed.CheckKind.CHANNELS, channelCheck)
             } finally {
                 refreshing = false
             }

@@ -668,6 +668,7 @@ public class ChatRepository(
             canonicalIdentity.set(identity)
             accountIdentity.getAndSet(account)?.close()
             currentAccountIdB64.set(newAccountIdB64)
+            feedRefresh.bind(newAccountIdB64)
             seedGroupCalls(persistedGroupCalls)
 
             // Eagerly rebuild `Group` handles for every previously-
@@ -4561,6 +4562,14 @@ public class ChatRepository(
      * publish ([broadcastControlToGroup]); the receive is launched from the
      * poll, never applied under the group lock.
      */
+    /**
+     * docs/ux/feed.md state table, "refresh failed (network)" — the feed's
+     * failure state, app-wide and per account: the session shell's receive
+     * loop and channel post sync report into it, and so do the feed's pull
+     * to refresh and Retry. Bound at [bootstrap], reset in [clear].
+     */
+    public val feedRefresh: me.lakko.app.feed.FeedRefreshStatus = me.lakko.app.feed.FeedRefreshStatus()
+
     public val sharedChannels: me.lakko.app.discover.SharedChannelsRepository by lazy {
         me.lakko.app.discover.SharedChannelsRepository(
             account = { currentAccountIdB64.get() },
@@ -6127,10 +6136,14 @@ public class ChatRepository(
      *   screen, [screenPolledGroups]). Polling one of them here would lose the
      *   per-group in-flight race and return at once, so a loop whose every
      *   group is excluded would spin instead of waiting.
+     * @return how many groups the pass polled and how many answered, which the
+     *   app-level receive loop reports into [feedRefresh] (`docs/ux/feed.md`).
      */
-    public suspend fun pollAllGroups(waitSecs: Int = 0, exclude: Set<String> = emptySet()): Unit {
+    public suspend fun pollAllGroups(
+        waitSecs: Int = 0,
+        exclude: Set<String> = emptySet(),
+    ): me.lakko.app.feed.SourceCheck =
         withContext(mlsDispatcher) { pollAllGroupsOnMlsThread(waitSecs = waitSecs, exclude = exclude) }
-    }
 
     /**
      * [pollAllGroups] for the feed's pull to refresh (`docs/ux/feed.md`
@@ -6204,6 +6217,7 @@ public class ChatRepository(
         // ADR-0059 section 6 — the in-memory shared-channels row (the sealed
         // file stays for the next sign-in unless forget-device deletes it).
         sharedChannels.clear()
+        feedRefresh.reset()
         mutableState.value = ChatRepositoryState()
     }
 

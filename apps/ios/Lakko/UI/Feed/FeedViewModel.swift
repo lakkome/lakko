@@ -100,10 +100,11 @@ final class FeedViewModel: ObservableObject {
     /// A shared feed the import sheet is showing (a link or a file).
     @Published var importing: FeedImportRequest?
     @Published private(set) var nowMs: Int64 = FeedViewModel.clockMs()
-    /// UX spec section 7 — pull to refresh could not reach the server.
+    /// UX spec section 7 — the latest checks could not reach the server.
+    /// Read from ``FeedRefreshCenter``, which every check reports to: the
+    /// background group sweep, the channel post sync, and pull to refresh.
     @Published private(set) var refreshFailed = false
-    /// The latest group and channel check, folded by ``FeedRefreshState``.
-    private var refreshState = FeedRefreshState()
+    private let refreshCenter: FeedRefreshCenter
     /// The conversation just hidden from feeds, while its toast shows.
     @Published private(set) var hiddenToast: String?
     /// The item whose "Forward to" picker is open.
@@ -158,6 +159,7 @@ final class FeedViewModel: ObservableObject {
         contacts: ContactsRepository,
         discover: DiscoverModel,
         reading: FeedReadingModel,
+        refreshCenter: FeedRefreshCenter,
         feedStore: FeedStore = FeedStore(),
         defaults: UserDefaults = .standard
     ) {
@@ -170,11 +172,16 @@ final class FeedViewModel: ObservableObject {
         self.contacts = contacts
         self.discover = discover
         self.reading = reading
+        self.refreshCenter = refreshCenter
         self.feedStore = feedStore
         self.defaults = defaults
         self.selection = FeedSelection(storageValue: defaults.string(forKey: Self.selectionKey))
         self.bannerDismissed = defaults.bool(forKey: Self.bannerKey)
         reloadSaved()
+        refreshFailed = refreshCenter.failed
+        refreshCenter.$failed.removeDuplicates()
+            .sink { [weak self] in self?.refreshFailed = $0 }
+            .store(in: &cancellables)
 
         // Every input change rebuilds, coalesced: a poll batch, a channel
         // sync, a contact accepted, a mute, a name arriving.
@@ -490,9 +497,9 @@ final class FeedViewModel: ObservableObject {
     /// top.
     func refresh() async {
         let groups = await chatRepository.pollAllGroupsReporting()
-        let channels = await postSync.syncAndWait()
-        refreshState = refreshState.recording(.groups, groups).recording(.channels, channels)
-        refreshFailed = refreshState.failed
+        // The channel sync reports its own tally (``ChannelPostSync/onSyncDone``).
+        await postSync.syncAndWait()
+        refreshCenter.record(.groups, groups)
         nowMs = Self.clockMs()
         rebuild()
         showPending()

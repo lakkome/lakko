@@ -79,6 +79,11 @@ final class ForegroundReceiveScheduler {
         /// `Double.random(in: 0..<1)`-shaped, for the jitter.
         var random: () -> Double
         var nowMs: () -> Int64
+        /// One sweep finished (not cancelled): how many polls it made and how
+        /// many answered. The Feed's "Couldn't check for new messages." reads
+        /// this (``FeedRefreshCenter``). The call loop's long poll does not
+        /// report.
+        var onSweepDone: @MainActor (_ tally: FeedCheckTally) -> Void = { _ in }
     }
 
     struct Config: Equatable {
@@ -184,6 +189,7 @@ final class ForegroundReceiveScheduler {
                 }
             }
         }
+        if !Task.isCancelled { ports.onSweepDone(queue.tally) }
     }
 
     private func worker(queue: SweepQueue) async {
@@ -196,8 +202,10 @@ final class ForegroundReceiveScheduler {
             if backoff.isBackedOff(id, nowMs: ports.nowMs()) { continue }
             queue.inFlight.insert(id)
             defer { queue.inFlight.remove(id) }
+            queue.tally.tried += 1
             do {
                 let yielded = try await ports.poll(id, 0)
+                queue.tally.answered += 1
                 backoff.succeeded(id)
                 let used = queue.repolls[id] ?? 0
                 if yielded, used < config.maxImmediateRepolls, !Task.isCancelled {
@@ -240,6 +248,8 @@ private final class SweepQueue {
     var pending: [String]
     var inFlight: Set<String> = []
     var repolls: [String: Int] = [:]
+    /// Polls made and polls answered, for ``ForegroundReceiveScheduler/Ports/onSweepDone``.
+    var tally = FeedCheckTally()
 
     init(groups: [String]) {
         pending = groups
@@ -285,7 +295,8 @@ extension ForegroundReceiveScheduler {
     static func live(
         repository: ChatRepository,
         callHost: CallHost,
-        groupCallHost: GroupCallHost
+        groupCallHost: GroupCallHost,
+        feedRefresh: FeedRefreshCenter
     ) -> ForegroundReceiveScheduler {
         ForegroundReceiveScheduler(ports: Ports(
             groups: { [weak repository] in repository?.receivableGroupIds() ?? [] },
@@ -310,7 +321,10 @@ extension ForegroundReceiveScheduler {
                 try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
             },
             random: { Double.random(in: 0..<1) },
-            nowMs: { ChatRepository.nowMs() }
+            nowMs: { ChatRepository.nowMs() },
+            onSweepDone: { [weak feedRefresh] tally in
+                feedRefresh?.record(.groups, tally)
+            }
         ))
     }
 }

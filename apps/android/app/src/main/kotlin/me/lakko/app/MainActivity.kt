@@ -76,6 +76,7 @@ import me.lakko.app.auth.SessionAccount
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.InviteIntake
+import me.lakko.app.feed.reporting
 import me.lakko.app.push.LakkoMessagingService
 import me.lakko.app.push.PushIntake
 import me.lakko.app.ui.auth.LoginScreen
@@ -1041,11 +1042,18 @@ private fun SessionRoot(
             try {
                 while (true) {
                     val startedAt = android.os.SystemClock.elapsedRealtime()
+                    // docs/ux/feed.md, "refresh failed (network)": every sweep
+                    // reports what it tried and what answered into the feed's
+                    // app-wide failure state, for the account it ran for. A
+                    // sweep that fails as a whole counts as not answered.
+                    val sweepAccount = chatRepository.currentAccountIdB64()
                     try {
-                        chatRepository.pollAllGroups(
-                            waitSecs = APP_LONG_POLL_SECS,
-                            exclude = chatRepository.screenPolledGroups.value,
-                        )
+                        chatRepository.feedRefresh.reporting(sweepAccount, me.lakko.app.feed.CheckKind.GROUPS) {
+                            chatRepository.pollAllGroups(
+                                waitSecs = APP_LONG_POLL_SECS,
+                                exclude = chatRepository.screenPolledGroups.value,
+                            )
+                        }
                     } catch (cancel: kotlinx.coroutines.CancellationException) {
                         throw cancel
                     } catch (_: Throwable) {
@@ -1213,7 +1221,13 @@ private fun SessionRoot(
         if (identitySecrets == null) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {
-                channelPostSync.syncOnce()
+                // docs/ux/feed.md, "refresh failed (network)": each pass reports
+                // into the feed's app-wide failure state; a skipped pass says
+                // nothing.
+                val syncAccount = chatRepository.currentAccountIdB64()
+                chatRepository.feedRefresh.reporting(syncAccount, me.lakko.app.feed.CheckKind.CHANNELS) {
+                    channelPostSync.syncOnce()
+                }
                 // The interval, or sooner when this device just published.
                 me.lakko.app.feed.awaitChannelPostSyncTick()
             }
