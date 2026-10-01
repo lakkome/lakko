@@ -5502,12 +5502,25 @@ public class ChatRepository(
      *   per-group in-flight race and return at once, so a loop whose every
      *   group is excluded would spin instead of waiting.
      */
-    public suspend fun pollAllGroups(waitSecs: Int = 0, exclude: Set<String> = emptySet()): Unit =
+    public suspend fun pollAllGroups(waitSecs: Int = 0, exclude: Set<String> = emptySet()): Unit {
         withContext(mlsDispatcher) { pollAllGroupsOnMlsThread(waitSecs = waitSecs, exclude = exclude) }
+    }
 
-    private suspend fun pollAllGroupsOnMlsThread(waitSecs: Int = 0, exclude: Set<String> = emptySet()): Unit {
-        if (!mutableState.value.bootstrapped) return
-        canonicalIdentity.get() ?: return
+    /**
+     * [pollAllGroups] for the feed's pull to refresh (`docs/ux/feed.md`
+     * section 5): the same best-effort pass, reporting how many groups it
+     * polled and how many answered, so the feed can tell "the network is not
+     * there" from one bad group.
+     */
+    public suspend fun pollAllGroupsReporting(): me.lakko.app.feed.SourceCheck =
+        withContext(mlsDispatcher) { pollAllGroupsOnMlsThread(waitSecs = 0) }
+
+    private suspend fun pollAllGroupsOnMlsThread(
+        waitSecs: Int = 0,
+        exclude: Set<String> = emptySet(),
+    ): me.lakko.app.feed.SourceCheck {
+        if (!mutableState.value.bootstrapped) return me.lakko.app.feed.SourceCheck.NONE
+        canonicalIdentity.get() ?: return me.lakko.app.feed.SourceCheck.NONE
         // Snapshot the keys under the map's own monitor — `groups` is a
         // `synchronizedMap`, whose iterators are NOT self-synchronising.
         val groupIds = synchronized(groups) { groups.keys.toList() }.filter { it !in exclude }
@@ -5521,7 +5534,7 @@ public class ChatRepository(
         val active = groupIds.filter { isGroupActive(it) != false }
         if (active.isEmpty()) {
             if (waitSecs > 0) delay(waitSecs.toLong() * MILLIS_PER_SECOND)
-            return
+            return me.lakko.app.feed.SourceCheck.NONE
         }
         // docs/ux/calls.md section 2.1 — the fan-out is bounded, so a set larger
         // than [POLL_ALL_CONCURRENCY] polls in WAVES and one sweep costs one
@@ -5535,12 +5548,13 @@ public class ChatRepository(
             concurrency = POLL_ALL_CONCURRENCY,
             maxWaitSecs = waitSecs,
         )
-        runPollAllGroups(
+        val answered = runPollAllGroups(
             groupIds = active,
             concurrency = POLL_ALL_CONCURRENCY,
         ) { groupIdHex ->
             pollGroup(groupIdHex, waitSecs = perGroupWait)
         }
+        return me.lakko.app.feed.SourceCheck(tried = active.size, answered = answered)
     }
 
     /**

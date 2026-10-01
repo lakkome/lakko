@@ -84,8 +84,11 @@ import {
   GroupBackoff,
   MAX_IMMEDIATE_REPOLLS,
   runBackgroundReceiveLoop,
+  runSweep,
   type GroupPollResult,
+  type SweepDeps,
 } from "./background-receive-scheduler";
+import { onGroupCheckRequested, reportGroupCheck, resetFeedRefresh } from "../feed/feed-refresh-store";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { ChatClient, type IncomingChatEvent } from "./client";
 import {
@@ -904,13 +907,15 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     await pollGroup(groupIdB64, 0, new AbortController().signal);
   }
 
+  let unregisterGroupCheck: (() => void) | null = null;
+
   function start(accountIdB64: string): void {
     if (activeAccount === accountIdB64 && loopAbort !== null) return;
     stop();
     activeAccount = accountIdB64;
     const controller = new AbortController();
     loopAbort = controller;
-    void runBackgroundReceiveLoop(controller.signal, {
+    const sweepDeps: SweepDeps = {
       groups: () => chats.groups().map((g) => g.groupIdB64),
       isExcluded,
       poll: (groupIdB64, signal) => pollGroup(groupIdB64, 0, signal),
@@ -927,6 +932,34 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         // eslint-disable-next-line no-console
         console.warn(`background receive: poll failed; group backed off ${delay} ms`, err);
       },
+      // docs/ux/feed.md — the feed's "Couldn't check for new messages."
+      onSweepDone: reportGroupCheck,
+    };
+    // The feed's Retry: one sweep now, past the per-group backoff (the person
+    // asked), outside the loop's pause. A race with the loop's own sweep is
+    // benign: the cursor re-read under the MLS lock drops the loser.
+    let retrying = false;
+    unregisterGroupCheck?.();
+    unregisterGroupCheck = onGroupCheckRequested(() => {
+      if (retrying || controller.signal.aborted) return;
+      retrying = true;
+      const { backoff: _skipBackoff, ...unbackedOff } = sweepDeps;
+      void runSweep(
+        {
+          ...unbackedOff,
+          poll: async (groupIdB64, signal) => {
+            const result = await pollGroup(groupIdB64, 0, signal);
+            backoff.succeeded(groupIdB64);
+            return result;
+          },
+        },
+        controller.signal,
+      ).finally(() => {
+        retrying = false;
+      });
+    });
+    void runBackgroundReceiveLoop(controller.signal, {
+      ...sweepDeps,
       isActive,
       waitUntilActive: (signal) => resume.wait(signal),
       sleep: sleepCancellable,
@@ -941,6 +974,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       loopAbort.abort();
       loopAbort = null;
     }
+    unregisterGroupCheck?.();
+    unregisterGroupCheck = null;
+    resetFeedRefresh();
     stopCallLane();
     activeAccount = null;
     logCursors = null;

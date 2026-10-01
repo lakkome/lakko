@@ -54,12 +54,16 @@ public suspend fun awaitChannelPostSyncTick() {
     withTimeoutOrNull(CHANNEL_POST_SYNC_INTERVAL_MS) { syncRequests.receive() }
 }
 
+/** One sync at a time across every [ChannelPostSync] (the session shell's
+ *  loop and the feed's pull to refresh), so the log keeps a single writer. */
+private val syncRunning = Mutex()
+
 public class ChannelPostSync(
     private val context: Context,
     private val channels: ChannelsUiState,
     private val client: ChannelsClient,
 ) {
-    private val running = Mutex()
+    private val running = syncRunning
 
     /** A channel this device can open posts of, and how. */
     private class Readable(
@@ -103,8 +107,30 @@ public class ChannelPostSync(
         }
     }
 
-    private suspend fun syncAll(account: String) {
+    /**
+     * A sync for the feed's pull to refresh (`docs/ux/feed.md` section 5):
+     * waits for a sync already running, then runs one, and reports how many
+     * channels it tried and how many answered. A pass that fails as a whole
+     * reports every channel tried and none answered.
+     */
+    public suspend fun syncAndWait(): SourceCheck {
+        val account = channels.boundAccount ?: return SourceCheck.NONE
+        return running.withLock {
+            try {
+                withContext(Dispatchers.IO) { syncAll(account) }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (e: Throwable) {
+                Log.w(TAG, "channel post sync error", e)
+                val tried = readableChannels().size
+                SourceCheck(tried, 0)
+            }
+        }
+    }
+
+    private suspend fun syncAll(account: String): SourceCheck {
         val readable = readableChannels()
+        var answered = 0
         val before = FeedSealedStore.loadChannelPostLog(context, account)
         var log = retainChannels(before, channels.channels.value.map { it.id }.toSet())
         var changed = log.channels.size != before.channels.size
@@ -128,9 +154,11 @@ public class ChannelPostSync(
                     log = log.copy(channels = log.channels + (channel.idHex to next))
                     changed = true
                 }
+                answered += 1
                 // docs/ux/feed.md section 5 — a channel's read marker starts
-                // at the newest post held when it is first synced.
-                val newest = next.posts.maxOfOrNull { it.cursor } ?: 0L
+                // at the newest post held when it is first synced: the slot's
+                // cursor, never below its newest post (as web and iOS).
+                val newest = channelReadSeed(next.cursor, next.posts.map { it.cursor })
                 FeedReadingStore.update(context, account) { seedChannelRead(it, channel.idHex, newest) }
             } catch (cancel: CancellationException) {
                 throw cancel
@@ -142,6 +170,7 @@ public class ChannelPostSync(
         }
 
         if (changed) FeedSealedStore.saveChannelPostLog(context, account, log)
+        return SourceCheck(readable.size, answered)
     }
 
     private fun decodePost(channel: Readable, payloadB64: String): PostOutcome {

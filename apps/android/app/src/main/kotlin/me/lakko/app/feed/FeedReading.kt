@@ -50,12 +50,14 @@ public enum class FeedIcon(public val label: String) {
 
 public const val FEED_READING_VERSION: Int = 1
 
-/** Most conversations kept hidden (chosen). */
+/** Most conversations kept hidden (chosen): hiding one more drops the
+ *  oldest hidden. */
 public const val MAX_HIDDEN_FROM_FEEDS: Int = 1_000
 
-/** Items remembered per feed for the "New" divider (chosen): the top of a
- *  feed, which is all a person compares against. */
-public const val LOOKED_KEYS_PER_FEED: Int = 300
+/** Items remembered per feed for the "New" divider (chosen, as web's
+ *  `MAX_LOOKED_KEYS`): well past a screenful, and an item further down the
+ *  list than this is old news anyway. */
+public const val LOOKED_KEYS_PER_FEED: Int = 2_000
 
 /** Feeds whose last look is kept: the presets plus every saved feed. */
 public const val MAX_LOOKED_FEEDS: Int = MAX_SAVED_FEEDS + 8
@@ -64,7 +66,8 @@ public const val MAX_LOOKED_FEEDS: Int = MAX_SAVED_FEEDS + 8
 public const val MAX_CHANNEL_READ: Int = 1_000
 
 public data class FeedReading(
-    /** Group id hex / channel id hex taken out of every feed on this device. */
+    /** Group id hex / channel id hex taken out of every feed on this device,
+     *  in the order they were hidden (oldest first). */
     val hidden: Set<String> = emptySet(),
     /** Per feed selection: hashes of the items it showed when last left. */
     val looked: Map<String, List<Long>> = emptyMap(),
@@ -105,10 +108,14 @@ internal fun encodeFeedReading(r: FeedReading): FeedReadingWire =
 
 // ----- Hide from feeds (UX spec section 5) --------------------------------
 
+/** Hide [idHex]; when [MAX_HIDDEN_FROM_FEEDS] are already hidden, the oldest
+ *  hidden is dropped to make room (UX spec section 5, as web). */
 public fun hideFromFeeds(r: FeedReading, idHex: String): FeedReading {
     if (!CONVERSATION_ID_RE.matches(idHex) || idHex in r.hidden) return r
-    if (r.hidden.size >= MAX_HIDDEN_FROM_FEEDS) return r
-    return r.copy(hidden = r.hidden + idHex)
+    val next = LinkedHashSet<String>(r.hidden)
+    next.add(idHex)
+    while (next.size > MAX_HIDDEN_FROM_FEEDS) next.remove(next.first())
+    return r.copy(hidden = next)
 }
 
 public fun showInFeedsAgain(r: FeedReading, idHex: String): FeedReading = r.copy(hidden = r.hidden - idHex)
@@ -121,10 +128,13 @@ public fun showInFeedsAgain(r: FeedReading, idHex: String): FeedReading = r.copy
 public fun withoutHidden(sources: List<FeedSource>, hidden: Set<String>): List<FeedSource> =
     if (hidden.isEmpty()) sources else sources.filter { it.idHex !in hidden }
 
-/** The hidden conversations this device still holds, in the order the
- *  sources list them (the "Hidden from feeds" list). */
-public fun hiddenSources(sources: List<FeedSource>, hidden: Set<String>): List<FeedSource> =
-    sources.filter { it.idHex in hidden }
+/** The hidden conversations this device still holds, the most recently
+ *  hidden first (the "Hidden from feeds" list). [hidden] iterates in the
+ *  order the conversations were hidden. */
+public fun hiddenSources(sources: List<FeedSource>, hidden: Set<String>): List<FeedSource> {
+    val byId = sources.associateBy { it.idHex }
+    return hidden.toList().asReversed().mapNotNull { byId[it] }
+}
 
 // ----- "New" divider (UX spec section 5) ----------------------------------
 
@@ -191,7 +201,8 @@ public fun advanceChannelRead(r: FeedReading, channelIdHex: String, cursor: Long
  * A channel with no marker yet (a fresh subscription, or one held before
  * markers existed) starts at the newest post this device holds at that
  * moment, so it opens with no count; only posts after it are new. A channel
- * that already has a marker is left alone.
+ * that already has a marker is left alone. [newestHeld] is
+ * [channelReadSeed] of the channel's slot.
  */
 public fun seedChannelRead(r: FeedReading, channelIdHex: String, newestHeld: Long): FeedReading {
     if (!CHANNEL_ID_RE.matches(channelIdHex) || channelIdHex in r.channelRead) return r
@@ -200,6 +211,12 @@ public fun seedChannelRead(r: FeedReading, channelIdHex: String, newestHeld: Lon
     while (next.size > MAX_CHANNEL_READ) next.remove(next.keys.first())
     return r.copy(channelRead = next)
 }
+
+/** Where a channel's marker starts (as web's `seedChannelReads`): its
+ *  slot's cursor, never below its newest post, never below zero. The slot
+ *  cursor also covers posts passed over unread, so they never count as new. */
+public fun channelReadSeed(slotCursor: Long, postCursors: List<Long>): Long =
+    maxOf(slotCursor, postCursors.maxOrNull() ?: 0L, 0L)
 
 /** `true` when the post at [cursor] is still new for the channel. */
 public fun isChannelPostUnread(r: FeedReading, channelIdHex: String, cursor: Long, own: Boolean): Boolean =
@@ -214,4 +231,54 @@ public fun isChannelPostUnread(r: FeedReading, channelIdHex: String, cursor: Lon
 public fun channelUnreadCount(postCursors: List<Long>, readThrough: Long?, own: Boolean): Int {
     if (own || readThrough == null) return 0
     return postCursors.count { it > readThrough }
+}
+
+// ----- Refresh failure (UX spec state table, "refresh failed (network)") ---
+
+/** What one check did with one kind of source: how many it tried and how
+ *  many answered (a group poll or a channel fetch that did not fail). */
+public data class SourceCheck(val tried: Int, val answered: Int) {
+    public companion object {
+        public val NONE: SourceCheck = SourceCheck(0, 0)
+    }
+}
+
+/** What one run of one check found; `null` (no outcome) when it tried
+ *  nothing, so it says nothing. */
+public enum class CheckOutcome { REACHED, NOTHING }
+
+public fun outcomeOf(check: SourceCheck): CheckOutcome? = when {
+    check.answered > 0 -> CheckOutcome.REACHED
+    check.tried > 0 -> CheckOutcome.NOTHING
+    else -> null
+}
+
+/** The kinds of source the feed checks. */
+public enum class CheckKind { GROUPS, CHANNELS }
+
+/** The latest outcome per kind (as web's `RefreshState`). */
+public data class FeedRefreshState(
+    val groups: CheckOutcome? = null,
+    val channels: CheckOutcome? = null,
+)
+
+/** Fold one run in. A run that tried nothing (no channels, every group held
+ *  back) leaves the kind as it was, so it neither raises nor clears the
+ *  banner. */
+public fun recordCheck(state: FeedRefreshState, kind: CheckKind, check: SourceCheck): FeedRefreshState {
+    val outcome = outcomeOf(check) ?: return state
+    return when (kind) {
+        CheckKind.GROUPS -> if (state.groups == outcome) state else state.copy(groups = outcome)
+        CheckKind.CHANNELS -> if (state.channels == outcome) state else state.copy(channels = outcome)
+    }
+}
+
+/**
+ * `true` when the "Couldn't check for new messages." banner shows: something
+ * was tried and no source of either kind answered in its latest check. The
+ * banner goes at the next check that reaches anything.
+ */
+public fun feedRefreshFailed(state: FeedRefreshState): Boolean {
+    if (state.groups == CheckOutcome.REACHED || state.channels == CheckOutcome.REACHED) return false
+    return state.groups == CheckOutcome.NOTHING || state.channels == CheckOutcome.NOTHING
 }

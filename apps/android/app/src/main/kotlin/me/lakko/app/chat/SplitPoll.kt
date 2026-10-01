@@ -363,20 +363,24 @@ internal class DrainNotifyingMutex(
  * @param groupIds the groups to poll — snapshot by the caller.
  * @param concurrency maximum polls in flight at once; must be >= 1.
  * @param pollOne polls ONE group. May throw; the throw is contained to that leg.
+ * @return how many legs answered (returned without throwing), for the feed's
+ *   refresh-failure banner (`docs/ux/feed.md` state table).
  */
 internal suspend fun runPollAllGroups(
     groupIds: List<String>,
     concurrency: Int,
     pollOne: suspend (String) -> Unit,
-) {
-    if (groupIds.isEmpty()) return
+): Int {
+    if (groupIds.isEmpty()) return 0
     val gate = Semaphore(concurrency.coerceAtLeast(1))
+    val answered = java.util.concurrent.atomic.AtomicInteger(0)
     supervisorScope {
         for (groupIdHex in groupIds) {
             launch {
                 gate.withPermit {
                     try {
                         pollOne(groupIdHex)
+                        answered.incrementAndGet()
                     } catch (cancel: CancellationException) {
                         // Structured concurrency — never swallowed.
                         throw cancel
@@ -387,4 +391,5 @@ internal suspend fun runPollAllGroups(
             }
         }
     }
+    return answered.get()
 }

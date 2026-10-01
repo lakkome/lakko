@@ -52,9 +52,8 @@ final class ChannelPostSync: ObservableObject {
     /// the newest post it holds (a fresh subscription shows no count). Set by
     /// the session root.
     var onSlotSynced: ((_ channelIdHex: String, _ slot: ChannelPostSlot) -> Void)?
-    /// Whether the last finished sync reached the server for at least one
-    /// channel it tried (`true` when it tried none).
-    private var lastSyncReached = true
+    /// How many channels the last finished sync tried and how many answered.
+    private var lastSyncTally = FeedCheckTally()
 
     init(
         accountIdB64: String,
@@ -111,9 +110,9 @@ final class ChannelPostSync: ObservableObject {
         }
         running = true
         Task { [weak self] in
-            let reached = await self?.syncAll() ?? true
+            let tally = await self?.syncAll() ?? FeedCheckTally()
             guard let self else { return }
-            self.lastSyncReached = reached
+            self.lastSyncTally = tally
             self.running = false
             if self.again {
                 self.again = false
@@ -122,20 +121,20 @@ final class ChannelPostSync: ObservableObject {
         }
     }
 
-    /// Wait for a sync to finish, for pull to refresh. Returns `false` when
-    /// it tried channels and reached the server for none of them (the
-    /// "Couldn't check for new messages." banner).
+    /// Wait for a sync to finish, for pull to refresh. Returns how many
+    /// channels it tried and how many answered (the "Couldn't check for new
+    /// messages." rule, ``FeedRefreshState``).
     @discardableResult
-    func syncAndWait() async -> Bool {
+    func syncAndWait() async -> FeedCheckTally {
         if running {
             again = true
             while running { try? await Task.sleep(nanoseconds: 100_000_000) }
-            return lastSyncReached
+            return lastSyncTally
         }
         running = true
-        lastSyncReached = await syncAll()
+        lastSyncTally = await syncAll()
         running = false
-        return lastSyncReached
+        return lastSyncTally
     }
 
     private struct Readable {
@@ -164,10 +163,10 @@ final class ChannelPostSync: ObservableObject {
         return out
     }
 
-    /// One pass over every readable channel. Returns `false` when it tried at
-    /// least one channel and every fetch failed.
+    /// One pass over every readable channel. Returns how many channels it
+    /// tried and how many the server answered for.
     @discardableResult
-    private func syncAll() async -> Bool {
+    private func syncAll() async -> FeedCheckTally {
         var tried = 0
         var failed = 0
         let before = store.get(accountIdB64: accountIdB64) ?? log
@@ -231,10 +230,10 @@ final class ChannelPostSync: ObservableObject {
             }
         }
 
-        let reached = tried == 0 || failed < tried
-        guard changed else { return reached }
+        let tally = FeedCheckTally(tried: tried, answered: tried - failed)
+        guard changed else { return tally }
         store.put(accountIdB64: accountIdB64, payload: next)
         log = next
-        return reached
+        return tally
     }
 }

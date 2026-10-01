@@ -115,6 +115,8 @@ import {
   type FeedMarks,
 } from "../feed/feed-marks";
 import { markChannelRead, readFeedMarks, subscribeFeedMarksChanged, updateFeedMarks } from "../feed/feed-marks-store";
+import { requestChannelPostSync } from "../feed/ChannelPostSync";
+import { feedRefreshFailed, requestGroupCheck } from "../feed/feed-refresh-store";
 import { mixSuggestions } from "../discover/cards";
 import { createDiscoverModel, DiscoverCardView, DiscoverView } from "../discover/Discover";
 import { useSharedChannels } from "../discover/SharedChannelsContext";
@@ -804,11 +806,13 @@ export default function Feed(): JSX.Element {
 
   const [feedMenuOpen, setFeedMenuOpen] = createSignal(false);
   const [hiddenOpen, setHiddenOpen] = createSignal(false);
-  /** The hidden list: conversations this device still holds, by name. */
+  /** The hidden list: conversations this device still holds, by name, the
+   *  most recently hidden first (`hidden` is kept in hide order). */
   const hiddenSources = createMemo((): FeedSource[] => {
     const all = allSources();
-    return marks()
-      .hidden.map((id) => all.find((s) => s.idHex === id))
+    return [...marks().hidden]
+      .reverse()
+      .map((id) => all.find((s) => s.idHex === id))
       .filter((s): s is FeedSource => s !== undefined);
   });
 
@@ -1125,6 +1129,23 @@ export default function Feed(): JSX.Element {
             }}
           >
             Got it
+          </button>
+        </div>
+      </Show>
+
+      <Show when={selection() !== "discover" && feedRefreshFailed()}>
+        <div class="lk-feed-banner" role="alert">
+          <Icon name="info" size={18} />
+          <span>Couldn't check for new messages.</span>
+          <button
+            type="button"
+            class="ghost"
+            onClick={() => {
+              requestGroupCheck();
+              requestChannelPostSync();
+            }}
+          >
+            Retry
           </button>
         </div>
       </Show>

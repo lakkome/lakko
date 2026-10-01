@@ -43,6 +43,8 @@ import {
 } from "./channel-post-log";
 import { seedChannelReads } from "./feed-marks";
 import { updateFeedMarks } from "./feed-marks-store";
+import type { CheckTally } from "./feed-refresh";
+import { reportChannelCheck } from "./feed-refresh-store";
 import {
   loadChannelPostLog,
   publishChannelPostLogChanged,
@@ -96,9 +98,11 @@ function readableChannels(): ReadableChannel[] {
   return out;
 }
 
-async function syncAll(accountIdB64: string): Promise<void> {
+/** Syncs every readable channel; returns how many were tried and how many
+ *  the server answered (`feed-refresh.ts`), or `null` when nothing ran. */
+async function syncAll(accountIdB64: string): Promise<CheckTally | null> {
   const deviceKey = await getDeviceKey(accountIdB64);
-  if (deviceKey === null) return;
+  if (deviceKey === null) return null;
   const wasm = await loadWasm();
   const channels = readableChannels();
   const before = (await loadChannelPostLog(accountIdB64, deviceKey)) ?? emptyChannelPostLog();
@@ -107,6 +111,7 @@ async function syncAll(accountIdB64: string): Promise<void> {
     new Set(channelsState.channels().map((c) => c.id)),
   );
   let changed = Object.keys(log.channels).length !== Object.keys(before.channels).length;
+  let answered = 0;
 
   for (const channel of channels) {
     const metas: PostDecode[] = [];
@@ -127,6 +132,7 @@ async function syncAll(accountIdB64: string): Promise<void> {
         { fetchPage: (id, after, limit) => fetchPosts(id, after, limit), decode },
         Date.now(),
       );
+      answered += 1;
       if (next.cursor !== slot?.cursor || next.posts.length !== slot.posts.length) {
         log = { version: log.version, channels: { ...log.channels, [channel.idHex]: next } };
         changed = true;
@@ -151,9 +157,11 @@ async function syncAll(accountIdB64: string): Promise<void> {
     console.warn("[feed] seeding channel read markers failed", err);
   });
 
-  if (!changed) return;
+  const tally: CheckTally = { tried: channels.length, answered };
+  if (!changed) return tally;
   await saveChannelPostLog(accountIdB64, deviceKey, log);
   publishChannelPostLogChanged(accountIdB64);
+  return tally;
 }
 
 export const ChannelPostSync: Component = () => {
@@ -175,6 +183,10 @@ export const ChannelPostSync: Component = () => {
       return;
     }
     running = syncAll(account)
+      .then((tally) => {
+        // docs/ux/feed.md — the feed's "Couldn't check for new messages."
+        if (tally !== null) reportChannelCheck(tally);
+      })
       .catch((err: unknown) => {
         // eslint-disable-next-line no-console
         console.warn("[feed] channel post sync error", err);

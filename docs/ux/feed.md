@@ -172,8 +172,11 @@ the same question as the rest of per-device state and is not in this spec.
   own feeds and the suggestions. It is not a chat mute: notifications,
   unread counts and the chat itself are unchanged. A toast "Hidden from
   feeds." with **Undo** follows. The feed menu gains **Hidden from feeds**,
-  a list of these conversations with **Show again** on each; empty state
-  "Nothing is hidden from your feeds." The list stays on this device.
+  a list of these conversations with **Show again** on each, the most
+  recently hidden first; empty state "Nothing is hidden from your feeds."
+  The list stays on this device and keeps the 1000 most recently hidden
+  (hiding one more drops the oldest). Search in Discover still finds a
+  hidden channel: the person asked for it by name.
 - **New since you last looked**: a thin divider "New" above the first item
   that was not in this feed the last time the person left the Feed screen
   (per feed, on this device). Nothing new, no divider; the first visit has
@@ -301,7 +304,7 @@ switch):
 | Feed | loading (first build after launch) | skeleton items, never a spinner over an empty screen |
 | Feed | new device / short history | a one-time banner: "Your feed shows messages this device has received." |
 | Feed | a feed whose filters match nothing | "No messages match this feed." + "Edit feed" |
-| Feed | refresh failed (network) | the existing items stay; a banner "Couldn't check for new messages." + Retry |
+| Feed | refresh failed (network): no group and no channel could be reached in one check (a check where some answered is not a failure) | the existing items stay; a banner "Couldn't check for new messages." + Retry; the banner goes at the next check that reaches anything |
 | Feed | a source can no longer be read (left the group, unsubscribed, removed) | its items leave the feed; no message |
 | Feed | caught up | at the end: "You're up to date." |
 | Editor | invalid rule (e.g. empty "only these words" with the filter on) | inline error under the field; Save disabled with the reason shown |

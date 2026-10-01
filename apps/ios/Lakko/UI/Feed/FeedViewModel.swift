@@ -102,6 +102,8 @@ final class FeedViewModel: ObservableObject {
     @Published private(set) var nowMs: Int64 = FeedViewModel.clockMs()
     /// UX spec section 7 — pull to refresh could not reach the server.
     @Published private(set) var refreshFailed = false
+    /// The latest group and channel check, folded by ``FeedRefreshState``.
+    private var refreshState = FeedRefreshState()
     /// The conversation just hidden from feeds, while its toast shows.
     @Published private(set) var hiddenToast: String?
     /// The item whose "Forward to" picker is open.
@@ -487,9 +489,10 @@ final class FeedViewModel: ObservableObject {
     /// sync the channels now, then show what is new. The screen lands at the
     /// top.
     func refresh() async {
-        let groupsReached = await chatRepository.pollAllGroupsReporting()
-        let channelsReached = await postSync.syncAndWait()
-        refreshFailed = !(groupsReached && channelsReached)
+        let groups = await chatRepository.pollAllGroupsReporting()
+        let channels = await postSync.syncAndWait()
+        refreshState = refreshState.recording(.groups, groups).recording(.channels, channels)
+        refreshFailed = refreshState.failed
         nowMs = Self.clockMs()
         rebuild()
         showPending()

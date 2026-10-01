@@ -88,6 +88,12 @@ export interface SweepDeps {
   readonly backoff?: GroupBackoff;
   readonly now?: () => number;
   readonly onPollFailed?: (groupId: string, err: unknown) => void;
+  /**
+   * One sweep finished (not aborted): how many polls it made and how many
+   * answered. The feed's "Couldn't check for new messages." reads this
+   * (`feed/feed-refresh.ts`).
+   */
+  readonly onSweepDone?: (tally: { readonly tried: number; readonly answered: number }) => void;
 }
 
 /**
@@ -129,6 +135,8 @@ export async function runSweep(deps: SweepDeps, signal: AbortSignal): Promise<vo
   const queue: string[] = [...deps.groups()];
   const repolls = new Map<string, number>();
   const inFlight = new Set<string>();
+  let tried = 0;
+  let answered = 0;
 
   const next = (): string | undefined => {
     for (let i = 0; i < queue.length; i += 1) {
@@ -150,8 +158,10 @@ export async function runSweep(deps: SweepDeps, signal: AbortSignal): Promise<vo
       if (deps.isExcluded(id)) continue;
       if (deps.backoff?.isBackedOff(id, now()) === true) continue;
       inFlight.add(id);
+      tried += 1;
       try {
         const result = await deps.poll(id, signal);
+        answered += 1;
         deps.backoff?.succeeded(id);
         const used = repolls.get(id) ?? 0;
         if (result.yieldedRows && used < deps.maxImmediateRepolls && !signal.aborted) {
@@ -171,6 +181,7 @@ export async function runSweep(deps: SweepDeps, signal: AbortSignal): Promise<vo
   const workers: Promise<void>[] = [];
   for (let i = 0; i < Math.max(1, deps.concurrency); i += 1) workers.push(worker());
   await Promise.all(workers);
+  if (!signal.aborted) deps.onSweepDone?.({ tried, answered });
 }
 
 export interface BackgroundLoopDeps extends SweepDeps {

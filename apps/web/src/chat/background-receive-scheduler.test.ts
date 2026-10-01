@@ -32,6 +32,22 @@ function sweepDeps(over: Partial<SweepDeps> & Pick<SweepDeps, "poll">): SweepDep
 }
 
 describe("runSweep", () => {
+  it("reports how many polls it made and how many answered", async () => {
+    const tallies: Array<{ tried: number; answered: number }> = [];
+    await runSweep(
+      sweepDeps({
+        isExcluded: (id) => id === "d",
+        poll: async (id) => {
+          if (id === "b") throw new Error("offline");
+          return { yieldedRows: false };
+        },
+        onSweepDone: (t) => tallies.push({ ...t }),
+      }),
+      new AbortController().signal,
+    );
+    expect(tallies).toEqual([{ tried: 3, answered: 2 }]);
+  });
+
   it("polls every group once, in round-robin order", async () => {
     const order: string[] = [];
     await runSweep(

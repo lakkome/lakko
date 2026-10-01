@@ -56,6 +56,29 @@ class FeedReadingTest {
     }
 
     @Test
+    fun aFullHiddenListDropsTheOldestAndTheListShowsTheNewestFirst() {
+        val ids = (0 until MAX_HIDDEN_FROM_FEEDS).map { "%04x".format(it) }
+        var r = FeedReading()
+        for (id in ids) r = hideFromFeeds(r, id)
+        assertEquals(MAX_HIDDEN_FROM_FEEDS, r.hidden.size)
+        // One more is kept; the oldest hidden goes.
+        r = hideFromFeeds(r, group)
+        assertEquals(MAX_HIDDEN_FROM_FEEDS, r.hidden.size)
+        assertTrue(group in r.hidden)
+        assertFalse(ids.first() in r.hidden)
+        assertTrue(ids[1] in r.hidden)
+        // The list draws the most recently hidden first, whatever the source order.
+        val sources = listOf(source(group), source(channel, FeedSourceKind.CHANNEL), source(otherChannel, FeedSourceKind.CHANNEL))
+        var h = hideFromFeeds(FeedReading(), otherChannel)
+        h = hideFromFeeds(h, group)
+        h = hideFromFeeds(h, channel)
+        assertEquals(listOf(channel, group, otherChannel), hiddenSources(sources, h.hidden).map { it.idHex })
+        // The order survives the sealed codec.
+        val back = decodeFeedReading(encodeFeedReading(h))
+        assertEquals(listOf(channel, group, otherChannel), hiddenSources(sources, back.hidden).map { it.idHex })
+    }
+
+    @Test
     fun hiddenFilteringKeepsTheBuiltInputFreeOfTheConversation() {
         val sources = withoutHidden(listOf(source(group), source(channel, FeedSourceKind.CHANNEL)), setOf(group))
         val input = buildFeedInput(
@@ -98,7 +121,7 @@ class FeedReadingTest {
 
     @Test
     fun lookedIsPerFeedBoundedAndPrunable() {
-        val many = (0 until 1_000).map { "k$it" }
+        val many = (0 until 3_000).map { "k$it" }
         var r = withLooked(FeedReading(), "LATEST", many)
         assertEquals(LOOKED_KEYS_PER_FEED, r.looked.getValue("LATEST").size)
         r = withLooked(r, "custom:abcdefgh", listOf("a"))
@@ -166,6 +189,45 @@ class FeedReadingTest {
         assertEquals(0L, empty.channelRead[otherChannel])
         assertEquals(2, channelUnreadCount(listOf(4L, 6L), empty.channelRead[otherChannel], own = false))
         assertEquals(empty, decodeFeedReading(encodeFeedReading(empty)))
+    }
+
+    @Test
+    fun aChannelSeedIsTheSlotCursorNeverBelowItsNewestPost() {
+        // Posts passed over unread moved the slot cursor past the newest kept post.
+        assertEquals(20L, channelReadSeed(20, listOf(3L, 8L, 13L)))
+        assertEquals(13L, channelReadSeed(5, listOf(3L, 8L, 13L)))
+        assertEquals(0L, channelReadSeed(0, emptyList()))
+        assertEquals(0L, channelReadSeed(-4, emptyList()))
+    }
+
+    // ----- Refresh failure -----
+
+    @Test
+    fun theBannerShowsOnlyWhenNoSourceOfEitherKindAnswered() {
+        val none = SourceCheck(3, 0)
+        val some = SourceCheck(3, 1)
+        // Nothing yet: no banner.
+        var st = FeedRefreshState()
+        assertFalse(feedRefreshFailed(st))
+        // Groups tried and reached nothing, no channels to try: banner.
+        st = recordCheck(st, CheckKind.GROUPS, none)
+        st = recordCheck(st, CheckKind.CHANNELS, SourceCheck.NONE)
+        assertTrue(feedRefreshFailed(st))
+        // A check that tried nothing leaves it as it was.
+        assertSame(st, recordCheck(st, CheckKind.GROUPS, SourceCheck.NONE))
+        assertTrue(feedRefreshFailed(recordCheck(st, CheckKind.GROUPS, SourceCheck.NONE)))
+        // One kind reaching anything clears it, even with the other failing.
+        st = recordCheck(st, CheckKind.CHANNELS, some)
+        assertFalse(feedRefreshFailed(st))
+        // Both kinds reaching nothing raises it again.
+        st = recordCheck(st, CheckKind.CHANNELS, SourceCheck(2, 0))
+        assertTrue(feedRefreshFailed(st))
+        // The next check that reaches anything takes it away.
+        st = recordCheck(st, CheckKind.GROUPS, some)
+        assertFalse(feedRefreshFailed(st))
+        assertEquals(CheckOutcome.REACHED, outcomeOf(some))
+        assertEquals(CheckOutcome.NOTHING, outcomeOf(none))
+        assertNull(outcomeOf(SourceCheck.NONE))
     }
 
     // ----- Codec -----

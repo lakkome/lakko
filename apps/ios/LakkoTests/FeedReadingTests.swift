@@ -84,7 +84,19 @@ final class FeedReadingTests: XCTestCase {
     func testHiddenListShowsOnlyConversationsStillHeld() {
         let r = FeedReading().hiding(groupB).hiding(groupA).hiding(channel2)
         let held = [source(groupA, title: "A"), source(groupB, title: "B")]
-        XCTAssertEqual(FeedReading.hiddenSources(held, hidden: r.hidden).map(\.title), ["B", "A"])
+        XCTAssertEqual(FeedReading.hiddenSources(held, hidden: r.hidden).map(\.title), ["A", "B"])
+    }
+
+    func testHidingPastTheCapDropsTheOldest() {
+        var r = FeedReading()
+        for i in 0..<FeedReading.maxHidden {
+            r = r.hiding(String(format: "%04x", i))
+        }
+        XCTAssertEqual(r.hidden.count, FeedReading.maxHidden)
+        r = r.hiding(groupA)
+        XCTAssertEqual(r.hidden.count, FeedReading.maxHidden)
+        XCTAssertEqual(r.hidden.first, "0001")
+        XCTAssertEqual(r.hidden.last, groupA)
     }
 
     // MARK: - Channel read state

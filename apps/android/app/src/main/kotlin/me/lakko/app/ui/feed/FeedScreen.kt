@@ -99,7 +99,6 @@ import me.lakko.app.feed.isChannelPostUnread
 import me.lakko.app.feed.newDividerIndex
 import me.lakko.app.feed.newItemCount
 import me.lakko.app.feed.pruneLooked
-import me.lakko.app.feed.requestChannelPostSync
 import me.lakko.app.feed.showInFeedsAgain
 import me.lakko.app.feed.withLooked
 import me.lakko.app.feed.withoutHidden
@@ -756,18 +755,31 @@ public fun FeedScreen(
     // ----- Refresh (UX spec section 5, "Show N new") --------------------------
 
     var refreshing by remember { mutableStateOf(false) }
-    var refreshFailed by remember { mutableStateOf(false) }
+    // The latest group check and channel check, kept apart (UX spec state
+    // table, "refresh failed (network)"); the banner is derived from both.
+    var refreshState by remember { mutableStateOf(me.lakko.app.feed.FeedRefreshState()) }
+    val refreshFailed = me.lakko.app.feed.feedRefreshFailed(refreshState)
+    // Shares the session shell's single-writer lock, so a refresh waits for a
+    // sync already running instead of writing the log beside it.
+    val refreshChannelSync = remember(channels, channelsClient) {
+        me.lakko.app.feed.ChannelPostSync(context.applicationContext, channels, channelsClient)
+    }
     fun refresh() {
         scope.launch {
             refreshing = true
             try {
-                chatRepository.pollAllGroups()
-                requestChannelPostSync()
-                refreshFailed = false
-            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-                throw e
-            } catch (_: Throwable) {
-                refreshFailed = true
+                // Both checks run (Retry included); each folds into its own
+                // latest outcome. A failed poll counts as not answered.
+                val groups = try {
+                    chatRepository.pollAllGroupsReporting()
+                } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    me.lakko.app.feed.SourceCheck(tried = 1, answered = 0)
+                }
+                refreshState = me.lakko.app.feed.recordCheck(refreshState, me.lakko.app.feed.CheckKind.GROUPS, groups)
+                val channelCheck = refreshChannelSync.syncAndWait()
+                refreshState = me.lakko.app.feed.recordCheck(refreshState, me.lakko.app.feed.CheckKind.CHANNELS, channelCheck)
             } finally {
                 refreshing = false
             }
