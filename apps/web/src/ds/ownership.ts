@@ -399,20 +399,40 @@ export interface RegistrarDerivation {
 }
 
 /**
- * The registrar public keys the owner revokes with a removal's registration:
- * one per evicted account, derived from the root seed. An admin (no root seed)
- * derives nothing and sends an empty list; the owner revokes on its next
- * reconcile (the ADR residual).
+ * The registrar public keys a removal's registration revokes (ADR-0057,
+ * amended 2026-10-01, item 1: whoever removes a person revokes their
+ * registrar key in the same registration):
+ *
+ *   - the ROOT derives one per evicted account from the root seed;
+ *   - a REGISTRAR (an admin committing a removal) takes the keys it collected
+ *     from the owner's registrar-seed envelopes (`registrar-list.ts`),
+ *     keeping only those of a STRICTLY lower rank than its own: the DS
+ *     refuses a statement that revokes an equal or higher rank, and one
+ *     refused statement would abort the whole commit. Removing an admin's
+ *     key stays the owner's, at its next `registrars-set`;
+ *   - with no authority, nothing.
  */
 export function revocationKeys(
   authority: JournalAuthority,
   evictees: readonly Uint8Array[],
   derive: RegistrarDerivation,
+  registrarList: ReadonlyMap<string, { readonly publicKey: Uint8Array; readonly rank: number }> = new Map(),
 ): Uint8Array[] {
-  if (authority.kind !== "root") return [];
-  return evictees.map((account) =>
-    derive.publicKeyOfSeed(derive.registrarSeed(authority.rootSeed, account)),
-  );
+  if (authority.kind === "root") {
+    return evictees.map((account) =>
+      derive.publicKeyOfSeed(derive.registrarSeed(authority.rootSeed, account)),
+    );
+  }
+  if (authority.kind === "none") return [];
+  const out: Uint8Array[] = [];
+  for (const account of evictees) {
+    const entry = registrarList.get(b64(account));
+    if (entry === undefined) continue;
+    // Equal or higher rank than the signer: the DS would refuse it.
+    if (entry.rank >= authority.rank) continue;
+    out.push(entry.publicKey);
+  }
+  return out;
 }
 
 // ----------------------------------------------------------------------------

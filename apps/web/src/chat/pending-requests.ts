@@ -202,18 +202,6 @@ export interface RequestObservation {
    * render `Waiting to make {name} the owner.` about somebody nobody proposed.
    */
   readonly transferToB64?: string;
-  /**
-   * ADR-0045 S7 residual 1 — `true` when OUR OWN `add` request was published by
-   * approving an external **join** rather than by adding a contact.
-   *
-   * It lives here for the same reason `transferToB64` does: this store is
-   * pruned against the core's live pending set, so the flag dies with the
-   * request it describes. It is knowable only on the device that made the
-   * request, because on the wire an approved add is indistinguishable from an
-   * admin adding a contact (ADR-0045 S7) — and that device is the one
-   * `chat/unapplied-requests.ts` shows the notice on.
-   */
-  readonly joinRequest?: boolean;
 }
 
 /**
@@ -431,10 +419,6 @@ export function loadObservations(
           ...(typeof v.transferToB64 === "string"
             ? { transferToB64: v.transferToB64 }
             : {}),
-          // Same validation shape, same degrade-rather-than-lose direction: an
-          // absent flag reads as an ordinary add, which is the copy that offers
-          // the weaker action rather than the stronger claim.
-          ...(v.joinRequest === true ? { joinRequest: true } : {}),
         });
       }
     }
@@ -487,21 +471,14 @@ export function recordObservation(
   atMs: number,
   own: boolean,
   transferToB64?: string,
-  joinRequest?: boolean,
 ): void {
   const observations = loadObservations(accountIdB64, groupIdB64);
   const existing = observations.get(key);
   const transferTo = existing?.transferToB64 ?? transferToB64;
-  // Sticky-true, for the same reason `own` is: the receive loop observes our
-  // own approval landing back off the journal and that observation knows
-  // nothing about where the request came from. Losing the flag to arrival order
-  // would silently downgrade the copy to the wrong action.
-  const fromJoin = (existing?.joinRequest ?? false) || joinRequest === true;
   observations.set(key, {
     atMs: existing?.atMs ?? atMs,
     own: (existing?.own ?? false) || own,
     ...(transferTo === undefined ? {} : { transferToB64: transferTo }),
-    ...(fromJoin ? { joinRequest: true } : {}),
   });
   saveObservations(accountIdB64, groupIdB64, observations);
 }

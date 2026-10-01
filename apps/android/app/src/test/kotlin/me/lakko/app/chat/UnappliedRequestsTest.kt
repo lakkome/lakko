@@ -26,9 +26,6 @@ class UnappliedRequestsTest {
     private val joiner = "am9pbmVyLWtleQ=="
     private val contact = "Y29udGFjdC1rZXk="
 
-    private fun own(joinRequest: Boolean = false) =
-        RequestObservation(atMs = 1_000L, own = true, joinRequest = joinRequest)
-
     /** In-memory [UnappliedRequestStore] — the same shape
      *  `PendingRequestsTest` uses for its own store. */
     private class MemoryStore : UnappliedRequestStore {
@@ -55,149 +52,32 @@ class UnappliedRequestsTest {
     }
 
     // -----------------------------------------------------------------------
-    // Detection
-    // -----------------------------------------------------------------------
-
-    /**
-     * The whole point. The approving admin's own `add:` observation is gone from
-     * the core's live pending set and the joiner is not in the roster, so the
-     * request died without a trace anywhere else.
-     *
-     * DISCRIMINATION (RUN, then reverted): with the roster check inverted
-     * (`roster.contains` -> `!roster.contains`) two tests went red, this one
-     * with:
-     *
-     *     java.lang.AssertionError: expected:<1> but was:<0>
-     */
-    @Test
-    fun `reports an own add that left the pending set without reaching the roster`() {
-        val out = unappliedAddRequests(
-            mapOf("add:$joiner" to own(joinRequest = true)),
-            emptyList(),
-            emptyList(),
-        )
-        assertEquals(1, out.size)
-        assertEquals(UnappliedAdd(joiner, viaJoinRequest = true), out[0])
-    }
-
-    /**
-     * The single most important false positive to exclude: the request WORKED.
-     *
-     * DISCRIMINATION (RUN, then reverted): with the same inversion, this side
-     * of the same pair went red:
-     *
-     *     java.lang.AssertionError: expected:<0> but was:<1>
-     */
-    @Test
-    fun `says nothing when the add landed`() {
-        assertEquals(
-            0,
-            unappliedAddRequests(
-                mapOf("add:$joiner" to own(joinRequest = true)),
-                emptyList(),
-                listOf(joiner),
-            ).size,
-        )
-    }
-
-    @Test
-    fun `says nothing while the request is still pending`() {
-        assertEquals(
-            0,
-            unappliedAddRequests(
-                mapOf("add:$joiner" to own()),
-                listOf("add:$joiner"),
-                emptyList(),
-            ).size,
-        )
-    }
-
-    /**
-     * UX §10 — a member is never told about someone else's request.
-     *
-     * DISCRIMINATION (RUN, then reverted): with the `own` guard removed:
-     *
-     *     java.lang.AssertionError: expected:<0> but was:<1>
-     */
-    @Test
-    fun `ignores a request this device did not make`() {
-        assertEquals(
-            0,
-            unappliedAddRequests(
-                mapOf("add:$joiner" to RequestObservation(atMs = 1_000L, own = false)),
-                emptyList(),
-                emptyList(),
-            ).size,
-        )
-    }
-
-    /**
-     * The deliberate scope limit, pinned so nobody widens it by accident.
-     *
-     * `remove:` and `leave:` name a LEAF and OpenMLS hands a vacated leaf to the
-     * next `Add`, so a roster test on one can be wrong in both directions; a
-     * `role-change` carries no payload at all. All three are also VISIBLE when
-     * they fail. The add is the only request whose failure leaves no trace.
-     */
-    @Test
-    fun `claims nothing about a remove a leave or a role change`() {
-        assertEquals(
-            0,
-            unappliedAddRequests(
-                mapOf(
-                    "remove:4" to own(),
-                    "leave:2" to own(),
-                    "role-change" to own(),
-                    "update:3" to own(),
-                ),
-                emptyList(),
-                emptyList(),
-            ).size,
-        )
-    }
-
-    /**
-     * A torn roster read is UNKNOWN, never "nobody is in the group".
-     *
-     * DISCRIMINATION (RUN, then reverted): with the `null` guard replaced by
-     * `rosterKeysB64 ?: emptyList()`:
-     *
-     *     java.lang.AssertionError: expected:<0> but was:<1>
-     */
-    @Test
-    fun `claims nothing when the roster could not be read`() {
-        assertEquals(
-            0,
-            unappliedAddRequests(
-                mapOf("add:$joiner" to own(joinRequest = true)),
-                emptyList(),
-                null,
-            ).size,
-        )
-    }
-
-    // -----------------------------------------------------------------------
     // Copy
     // -----------------------------------------------------------------------
 
+    private val joinItem = UnappliedRequest(joiner, UnappliedKind.JOIN_APPROVE)
+    private val addItem = UnappliedRequest(contact, UnappliedKind.ADD)
+
     /**
-     * DISCRIMINATION (RUN, then reverted): with the join line replaced by the UX
-     * spec §7 draft `This request expired before it could be applied. Ask them
-     * to request to join again.`:
-     *
-     *     org.junit.ComparisonFailure: expected:<[Not] applied. Ask them t...>
-     *     but was:<[This request expired before it could be] applied. Ask them
-     *     t...>
+     * ADR-0050 section 2.5a point 5 — every kind has a line, and only the join
+     * line names an action: the others are listed because the automatic
+     * re-request STOPPED, often because this device lost the role the request
+     * needs, so "you can do it again" would be untrue as often as not.
      */
     @Test
-    fun `is exactly these two strings`() {
+    fun `is exactly these strings`() {
+        assertEquals("Not applied. Ask them to request to join again.", unappliedLine(joinItem))
+        assertEquals("Not added.", unappliedLine(addItem))
+        assertEquals("Not removed.", unappliedLine(UnappliedRequest(contact, UnappliedKind.REMOVE)))
         assertEquals(
-            "Not applied. Ask them to request to join again.",
-            unappliedLine(UnappliedAdd(joiner, viaJoinRequest = true)),
+            "Not applied. You are still a member.",
+            unappliedLine(UnappliedRequest(contact, UnappliedKind.LEAVE)),
         )
+        assertEquals("Not made an admin.", unappliedLine(UnappliedRequest(contact, UnappliedKind.MAKE_ADMIN)))
+        assertEquals("Still an admin.", unappliedLine(UnappliedRequest(contact, UnappliedKind.REMOVE_ADMIN)))
         assertEquals(
-            "Not added. You can add them again.",
-            unappliedLine(UnappliedAdd(contact, viaJoinRequest = false)),
+            "Ownership was not transferred.",
+            unappliedLine(UnappliedRequest(contact, UnappliedKind.TRANSFER_OWNERSHIP)),
         )
     }
 
@@ -205,25 +85,17 @@ class UnappliedRequestsTest {
      * The rule the whole item turns on, asserted independently of the literals
      * so it survives a re-wording: state that it did not apply, never why. The
      * core reports no reason for an exclusion, so neither may the UI.
-     *
-     * DISCRIMINATION (RUN, then reverted): with the same §7 draft substitution
-     * this went red on the join line — which is the finding, because "expired"
-     * is a REASON this client cannot establish:
-     *
-     *     java.lang.AssertionError: states a reason: This request expired before
-     *     it could be applied. Ask them to request to join again.
      */
     @Test
     fun `never states a reason`() {
-        val banned = Regex("expired|refused|rejected|invalid|failed|error|because")
-        for (s in listOf(
-            unappliedLine(UnappliedAdd(joiner, viaJoinRequest = true)),
-            unappliedLine(UnappliedAdd(contact, viaJoinRequest = false)),
+        val banned = Regex("expired|refused|rejected|invalid|failed|error|because|permission|allowed")
+        val lines = UnappliedKind.values().map { unappliedLine(UnappliedRequest(contact, it)) } + listOf(
             UNAPPLIED_EXPLANATION,
             JOIN_WAIT_PRIMARY,
             JOIN_WAIT_SECONDARY,
             JOIN_REQUEST_AGAIN,
-        )) {
+        )
+        for (s in lines) {
             assertTrue("states a reason: $s", !banned.containsMatchIn(s.lowercase()))
         }
     }
@@ -264,10 +136,9 @@ class UnappliedRequestsTest {
     @Test
     fun `round-trips and is idempotent`() {
         val store = MemoryStore()
-        val item = UnappliedAdd(joiner, viaJoinRequest = true)
-        recordUnapplied(store, account, group, listOf(item))
-        recordUnapplied(store, account, group, listOf(item))
-        assertEquals(listOf(item), loadUnapplied(store, account, group))
+        recordUnapplied(store, account, group, listOf(joinItem))
+        recordUnapplied(store, account, group, listOf(joinItem))
+        assertEquals(listOf(joinItem), loadUnapplied(store, account, group))
     }
 
     /**
@@ -282,15 +153,12 @@ class UnappliedRequestsTest {
         val store = MemoryStore()
         recordUnapplied(
             store, account, group,
-            listOf(
-                UnappliedAdd(joiner, viaJoinRequest = true),
-                UnappliedAdd(contact, viaJoinRequest = false),
-            ),
+            listOf(joinItem, addItem),
         )
-        dismissUnapplied(store, account, group, joiner)
+        dismissUnapplied(store, account, group, joinItem.rowKey)
         val left = loadUnapplied(store, account, group)
         assertEquals(1, left.size)
-        assertEquals(contact, left[0].addSignatureKeyB64)
+        assertEquals(contact, left[0].subjectKeyB64)
     }
 
     /**
@@ -306,17 +174,16 @@ class UnappliedRequestsTest {
     @Test
     fun `does not resurrect a dismissed row`() {
         val store = MemoryStore()
-        val item = UnappliedAdd(joiner, viaJoinRequest = true)
-        recordUnapplied(store, account, group, listOf(item))
-        dismissUnapplied(store, account, group, joiner)
-        recordUnapplied(store, account, group, listOf(item))
+        recordUnapplied(store, account, group, listOf(joinItem))
+        dismissUnapplied(store, account, group, joinItem.rowKey)
+        recordUnapplied(store, account, group, listOf(joinItem))
         assertEquals(0, loadUnapplied(store, account, group).size)
     }
 
     @Test
     fun `is scoped per account and per group`() {
         val store = MemoryStore()
-        recordUnapplied(store, account, group, listOf(UnappliedAdd(joiner, true)))
+        recordUnapplied(store, account, group, listOf(joinItem))
         assertEquals(0, loadUnapplied(store, account, "other").size)
         assertEquals(0, loadUnapplied(store, "other", group).size)
     }
@@ -324,9 +191,9 @@ class UnappliedRequestsTest {
     @Test
     fun `clears one account and leaves the others alone`() {
         val store = MemoryStore()
-        recordUnapplied(store, account, group, listOf(UnappliedAdd(joiner, true)))
-        recordUnapplied(store, account, "g2", listOf(UnappliedAdd(contact, false)))
-        recordUnapplied(store, "other", group, listOf(UnappliedAdd(contact, false)))
+        recordUnapplied(store, account, group, listOf(joinItem))
+        recordUnapplied(store, account, "g2", listOf(addItem))
+        recordUnapplied(store, "other", group, listOf(addItem))
         store.clearForAccount(account)
         assertEquals(0, loadUnapplied(store, account, group).size)
         assertEquals(0, loadUnapplied(store, account, "g2").size)
@@ -337,11 +204,26 @@ class UnappliedRequestsTest {
     // The SharedPreferences row codec
     // -----------------------------------------------------------------------
 
+    /** Two kinds about ONE person are two rows: a stopped promote must not hide
+     *  a stopped removal of the same member. */
     @Test
-    fun `the row codec round-trips both flags`() {
+    fun `two kinds about one subject are two rows`() {
+        val store = MemoryStore()
+        recordUnapplied(
+            store, account, group,
+            listOf(
+                UnappliedRequest(contact, UnappliedKind.REMOVE),
+                UnappliedRequest(contact, UnappliedKind.MAKE_ADMIN),
+            ),
+        )
+        assertEquals(2, loadUnapplied(store, account, group).size)
+    }
+
+    @Test
+    fun `the row codec round-trips kind subject and tombstone`() {
         val rows = mapOf(
-            joiner to UnappliedRow(viaJoinRequest = true, dismissed = false),
-            contact to UnappliedRow(viaJoinRequest = false, dismissed = true),
+            joinItem.rowKey to UnappliedRow(UnappliedKind.JOIN_APPROVE, joiner, dismissed = false),
+            "remove:$contact" to UnappliedRow(UnappliedKind.REMOVE, contact, dismissed = true),
         )
         val encoded = SharedPrefsUnappliedRequestStore.encodeRow(rows)
         assertEquals(rows, SharedPrefsUnappliedRequestStore.decodeRow(encoded))
@@ -351,7 +233,7 @@ class UnappliedRequestsTest {
     fun `a corrupt row reads as empty rather than throwing`() {
         assertEquals(
             emptyMap<String, UnappliedRow>(),
-            SharedPrefsUnappliedRequestStore.decodeRow("garbage|only|two|many|fields"),
+            SharedPrefsUnappliedRequestStore.decodeRow("garbage|only|two|many|fields\nnot-a-kind|key|0"),
         )
         assertEquals(
             emptyMap<String, UnappliedRow>(),
@@ -370,7 +252,7 @@ class UnappliedRequestsTest {
     @Test
     fun `the row key separator is a NUL`() {
         val encoded = SharedPrefsUnappliedRequestStore.encodeRow(
-            mapOf(joiner to UnappliedRow(viaJoinRequest = true)),
+            mapOf(joinItem.rowKey to UnappliedRow(UnappliedKind.JOIN_APPROVE, joiner)),
         )
         assertTrue("the VALUE must not carry a NUL", !encoded.contains('\u0000'))
     }

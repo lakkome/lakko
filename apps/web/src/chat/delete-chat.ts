@@ -40,7 +40,7 @@
 import { getDeviceKey } from "../auth/key-store";
 import { forgetConversationKind } from "./conversation-kind-store";
 import { clearLeaveRequested } from "./membership-ended";
-import { clearArmedRetries, retryScopeKey } from "./membership-retry";
+import { clearArmedRetries, clearOwnRequestsForGroup, retryScopeKey } from "./membership-retry";
 import { deleteGroupFromMessageLog } from "./message-log-store";
 import { pruneObservations } from "./pending-requests";
 import { clearUnappliedForGroup } from "./unapplied-requests";
@@ -78,6 +78,7 @@ export async function deleteChat(input: DeleteChatInput): Promise<void> {
   forgetConversationKind(accountIdB64, groupIdB64);
   pruneObservations(accountIdB64, groupIdB64, []);
   clearUnappliedForGroup(accountIdB64, groupIdB64);
+  clearOwnRequestsForGroup(accountIdB64, groupIdB64);
   clearLeaveRequested(accountIdB64, groupIdB64);
   // ADR-0045 UX §7 — an armed re-send names a group that is gone from
   // here. The verdict would drop it anyway on `membershipEnded`, so this

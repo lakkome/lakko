@@ -20,13 +20,13 @@ import uniffi.lakko_ffi_uniffi.ProcessedMessage
  * `RegistrarSeed` event bound to the sender key resolved at receipt (never a
  * chat bubble), and the background push filter suppresses it.
  *
- * The envelope length is the core's `registrarSeedEnvelopeLen()` (173); the
+ * The envelope length is the core's `registrarSeedEnvelopeLen()` (205 since the v2 envelope carries the registrar public key); the
  * double below stands in for the native decode with the length and the first
  * byte, so the arm is not passing merely because the double says yes.
  */
 class RegistrarSeedClassificationTest {
 
-    private val len = 173
+    private val len = 205
 
     private fun seedEnvelope(): ByteArray = ByteArray(len) { if (it == 0) 0x6c else 0x11 }
 

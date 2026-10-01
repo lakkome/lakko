@@ -193,10 +193,20 @@ internal interface SweepGroupPort {
 
     /**
      * ADR-0045 committer rank: `0` for the owner, `k + 1` for the k-th admin,
-     * `null` for a plain member or a group with no role table.
+     * and, since ADR-0050 section 2.5a, `n + 1 + i` for a plain member's
+     * account ONLY while its pending store holds a device admission or its
+     * own account's self-service proposal it could sweep. Every leaf of a
+     * ranked account holds the account's rank (item 6): which of an
+     * account's devices acts is decided by the beacon fold, by signature key
+     * among the devices with a fresh beacon, never by "the lowest leaf".
+     * `null` otherwise (a plain member with nothing it may sweep, or a group
+     * with no role table). A rank therefore says "may sweep something now",
+     * never "is an owner or admin": a role test reads the role table (see
+     * [readsKnocks]).
      *
-     * `null` and `0` are NOT interchangeable — `0` is the owner, the one device
-     * that always sweeps.
+     * `null` and `0` are NOT interchangeable — `0` is the owner's rank, the
+     * best placed there is; its devices defer only to a lower-keyed device of
+     * the owner's own account.
      */
     fun ownCommitterRank(): UInt?
 
@@ -344,6 +354,10 @@ internal interface SweepOutboxPort {
      *  still owed, or `null`. */
     suspend fun findOwedWelcomes(): SweepDurableEntry?
 
+    /** Every entry [findOwedWelcomes] could return, so one Welcome that no
+     *  grant reaches yet does not hold back the others. Defaults to the one. */
+    suspend fun findAllOwedWelcomes(): List<SweepDurableEntry> = listOfNotNull(findOwedWelcomes())
+
     /** Mark the entry acked once every artifact is on the wire. */
     suspend fun ack(id: String, commitMessageId: Long?, welcomeMessageId: Long?)
 
@@ -438,13 +452,15 @@ internal class SweepPorts(
 
 /** What one sweep attempt did. */
 public sealed class SweepOutcome {
-    /** This device is not in the committer set at all (a plain member, or a
-     *  group with no role table). Nothing happened, and nothing ever will on
-     *  this device — distinct from [Deferred], which re-evaluates. */
+    /** This device is not in the committer set at all (a plain member holding
+     *  no device admission it could sweep, or a group with no role table).
+     *  Nothing happened — distinct from [Deferred], which re-evaluates. */
     data class NotCommitter(val rank: UInt?) : SweepOutcome()
 
-    /** This device IS a candidate, but a strictly better-placed one beaconed
-     *  inside the freshness window. Stood down without staging; the next poll
+    /** This device IS a candidate, but a better-placed one beaconed inside the
+     *  freshness window: a strictly lower rank, or the same rank with a lower
+     *  signature key (another device of this account, ADR-0050 section 2.5a
+     *  item 6). Stood down without staging; the next poll
      *  re-evaluates, and if that candidate goes quiet its beacon ages out of the
      *  window and this device takes over on its own. */
     data class Deferred(val rank: UInt, val toRank: UInt?) : SweepOutcome()
@@ -467,6 +483,11 @@ public sealed class SweepOutcome {
         val commitMessageId: Long,
         val welcomeMessageIds: List<Long>,
         val addedCount: Int,
+        /** ADR-0050 section 2.5a item 7 — the commit merged but a Welcome is
+         *  still owed ([WelcomeUndeliverable]): no grant reached that added
+         *  account's closed mailbox. The entry is NOT acked; the next attempt
+         *  and a new grant for that account retry it. */
+        val welcomesOwed: Boolean = false,
     ) : SweepOutcome()
 
     /** Lost the journal order: abandoned, no Welcome published, the proposals
@@ -748,14 +769,33 @@ internal suspend fun resolveOwedWelcomes(ports: SweepPorts): SweepOutcome {
         return SweepOutcome.NoWelcomesOwed
     }
 
-    val owed = ports.outbox.findOwedWelcomes() ?: return SweepOutcome.NoWelcomesOwed
+    val owedAll = ports.outbox.findAllOwedWelcomes()
+    if (owedAll.isEmpty()) return SweepOutcome.NoWelcomesOwed
 
-    val welcomeMessageIds = publishWelcomes(ports, owed)
-    ports.outbox.ack(owed.id, owed.commitMessageId, welcomeMessageIds.firstOrNull())
+    val ids = mutableListOf<Long>()
+    var added = 0
+    var delivered = false
+    for (owed in owedAll) {
+        val welcomeMessageIds = try {
+            publishWelcomes(ports, owed)
+        } catch (_: WelcomeUndeliverable) {
+            // ADR-0050 section 2.5a item 7 — still no grant for some added
+            // account: the entry stays owed (not acked) and is retried at the
+            // next attempt and when a grant for that account arrives. It does
+            // not block a new sweep of this group, so it is skipped rather
+            // than thrown.
+            continue
+        }
+        ports.outbox.ack(owed.id, owed.commitMessageId, welcomeMessageIds.firstOrNull())
+        ids.addAll(welcomeMessageIds)
+        added += owed.welcomeLeafKeysB64.size
+        delivered = true
+    }
+    if (!delivered) return SweepOutcome.NoWelcomesOwed
 
     return SweepOutcome.WelcomesRepublished(
-        welcomeMessageIds = welcomeMessageIds,
-        addedCount = owed.welcomeLeafKeysB64.size,
+        welcomeMessageIds = ids,
+        addedCount = added,
     )
 }
 
@@ -869,7 +909,21 @@ private suspend fun publishAndAdjudicate(
     // Publishing it before the verdict would let a joiner open into a state no
     // other member holds if the commit then lost: a three-party fork, strictly
     // worse than the two-party one this whole mechanism exists to close.
-    val welcomeMessageIds = publishWelcomes(ports, entry)
+    val welcomeMessageIds = try {
+        publishWelcomes(ports, entry)
+    } catch (_: WelcomeUndeliverable) {
+        // ADR-0050 section 2.5a item 7 — the commit merged; only a Welcome to
+        // an account no grant reaches is still owed. Reported as committed so
+        // the caller's post-commit work (appointments, push routing, profile)
+        // runs; the entry is not acked and the welcomes-owed marker written
+        // above retries it.
+        return SweepOutcome.Committed(
+            commitMessageId = commitMessageId,
+            welcomeMessageIds = emptyList(),
+            addedCount = entry.welcomeLeafKeysB64.size,
+            welcomesOwed = true,
+        )
+    }
     ports.outbox.ack(entry.id, commitMessageId, welcomeMessageIds.firstOrNull())
 
     return SweepOutcome.Committed(
@@ -979,18 +1033,80 @@ private suspend fun adjudicate(
  * skipped as our own, the epoch does not move, so it reports won) and retries
  * the fan-out — which is why this can be allowed to throw rather than being
  * swallowed.
+ *
+ * ADR-0050 section 2.5a item 7 — every target is attempted even when an earlier
+ * one fails, and the first failure is re-thrown at the end (a transport or DS
+ * failure ahead of a [WelcomeUndeliverable]): one added account this device
+ * holds no grant for must not hold back the Welcome of another. The entry stays owed until every target took it; the
+ * adapter skips a target that already took these bytes this session, so a
+ * retry does not pile copies into the mailboxes that were reached.
  */
 private suspend fun publishWelcomes(
     ports: SweepPorts,
     entry: SweepDurableEntry,
 ): List<Long> {
     val ids = mutableListOf<Long>()
+    var firstFailure: Throwable? = null
+    var firstUndeliverable: WelcomeUndeliverable? = null
     entry.welcomeEnvelopeB64?.let { envelopeB64 ->
         val bytes = ports.decodeB64(envelopeB64)
         val leaves = entry.welcomeLeafKeysB64.map(ports.decodeB64)
         for (mailbox in ports.welcomeTargets(leaves)) {
-            ids.add(ports.journal.publishMailbox(mailbox, bytes))
+            try {
+                ids.add(ports.journal.publishMailbox(mailbox, bytes))
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                throw cancellation
+            } catch (undeliverable: WelcomeUndeliverable) {
+                if (firstUndeliverable == null) firstUndeliverable = undeliverable
+            } catch (cause: Throwable) {
+                if (firstFailure == null) firstFailure = cause
+            }
         }
     }
+    firstFailure?.let { throw it }
+    firstUndeliverable?.let { throw it }
     return ids
+}
+
+/**
+ * ADR-0050 section 2.5a item 7 — a Welcome into a closed mailbox that this
+ * device holds no usable grant for (every grant it holds was refused with
+ * `401`, or it holds none). Nothing was written: an unsigned write to a closed
+ * mailbox is answered as stored and dropped, so writing one would count a lost
+ * Welcome as delivered. The sweep's Welcome stays owed and is retried at the
+ * next poll and when a grant for [accountKeyHex] arrives.
+ */
+public class WelcomeUndeliverable(public val accountKeyHex: String) :
+    IllegalStateException("no reach grant for the Welcome's mailbox")
+
+/**
+ * ADR-0050 section 2.5a item 7 — write one Welcome into another person's
+ * mailbox with the grants this device holds for them ([candidates], in the
+ * preferred order): a `401` ([isRefusal]) moves to the next grant, anything
+ * else propagates. [write] receives the authorisation, or `null` for an
+ * unsigned write.
+ *
+ * When no grant is accepted:
+ *   * [requireGrant] — nothing is written and [WelcomeUndeliverable] is thrown
+ *     (the sweep keeps the Welcome owed);
+ *   * otherwise — with no grant held at all the write goes unsigned (an open
+ *     mailbox takes it), and when every grant held was refused the last
+ *     refusal propagates, as a single signed write did before.
+ */
+internal suspend fun <A, T> writeWelcomeWithGrants(
+    candidates: List<() -> A?>,
+    write: suspend (A?) -> T,
+    isRefusal: (Throwable) -> Boolean,
+    requireGrant: Boolean,
+    accountKeyHex: String,
+): T {
+    val outcome = me.lakko.app.reach.firstAcceptedWrite(candidates, { auth: A -> write(auth) }, isRefusal)
+    return when (outcome) {
+        is me.lakko.app.reach.SignedWriteOutcome.Written -> outcome.result
+        is me.lakko.app.reach.SignedWriteOutcome.Exhausted -> {
+            if (requireGrant) throw WelcomeUndeliverable(accountKeyHex)
+            outcome.lastRefusal?.let { throw it }
+            write(null)
+        }
+    }
 }

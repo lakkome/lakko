@@ -1033,7 +1033,7 @@ public final class ChatClient {
     /// cannot read falls through to the chat parser like any other
     /// unrecognised plaintext rather than being swallowed here.
     /// ADR-0057 — the registrar-seed envelope's exact length, read from the
-    /// FFI (`registrarSeedEnvelopeLen()`, 173) rather than written as a local
+    /// FFI (`registrarSeedEnvelopeLen()`, 205) rather than written as a local
     /// literal: a stale number fails in the dangerous direction.
     private static let registrarSeedLen = Int(registrarSeedEnvelopeLen())
 

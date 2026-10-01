@@ -427,7 +427,7 @@ final class JournalOwnershipTests: XCTestCase {
             memberX25519PublicKey: member.x25519PublicKey(), rank: .admin, registrarSeed: seed)
 
         XCTAssertEqual(envelope.count, Int(registrarSeedEnvelopeLen()))
-        XCTAssertEqual(envelope.count, 173)
+        XCTAssertEqual(envelope.count, 205)
         XCTAssertEqual(envelope.first, 0x6C)
         XCTAssertTrue(ChatClient.looksLikeRegistrarSeed(envelope))
         XCTAssertEqual(try dispatchIncomingEnvelope(plaintext: envelope).kind, .registrarSeed)
@@ -713,5 +713,152 @@ final class JournalOwnershipTests: XCTestCase {
         } catch {
             XCTFail("\(error)")
         }
+    }
+}
+
+// MARK: - ADR-0057 amended 2026-10-01 / ADR-0050 2.5a item 8
+
+extension JournalOwnershipTests {
+
+    /// D(1) — every device of the addressed account opens and stores the seed
+    /// from the same envelope, whichever device read it first: the seed is
+    /// sealed to the ACCOUNT key both devices hold, and nothing in the gate is
+    /// per device.
+    func testASecondDeviceStoresTheSeedAnotherDeviceProcessed() throws {
+        let owner = try Identity.fromSeed(seed: Data(repeating: 0x31, count: 32))
+        let member = try Identity.fromSeed(seed: Data(repeating: 0x32, count: 32))
+        let rootSeed = try dsJournalRootSeed(accountIdentitySeed: owner.ed25519Seed(), journalId: gid)
+        let seed = try dsJournalRegistrarSeed(rootSeed: rootSeed, memberAccountKey: member.signaturePublicKey())
+        let envelope = try composeRegistrarSeedEnvelope(
+            journalId: gid, memberAccountKey: member.signaturePublicKey(),
+            memberX25519PublicKey: member.x25519PublicKey(), rank: .member, registrarSeed: seed)
+        let decoded = try decodeRegistrarSeedEnvelope(plaintext: envelope)
+        XCTAssertEqual(decoded.registrarPublicKey, try dsStatementSigner(seed: seed).publicKey(),
+                       "the clear header names the key the seed derives")
+
+        func deviceReceives() throws -> RegistrarSeedStore {
+            let store = RegistrarSeedStore(
+                defaults: try XCTUnwrap(UserDefaults(suiteName: "dev-\(UUID().uuidString)")))
+            let outcome = RootHandover.receiveSeedEnvelope(
+                rank: decoded.rank, envelopeJournal: decoded.journalId,
+                envelopeAddressee: decoded.memberAccountKey, groupId: gid,
+                ownAccountKey: member.signaturePublicKey(),
+                senderAccountKey: owner.signaturePublicKey(), owner: owner.signaturePublicKey(),
+                open: { try openRegistrarSeedEnvelope(plaintext: envelope, accountIdentity: member) },
+                storeRegistrarSeed: { store.put(accountIdB64: "acct", groupIdHex: "g", seed: $0, rank: $1) },
+                takeOver: { _ in XCTFail("not a handover") })
+            XCTAssertEqual(outcome, .registrarStored)
+            return store
+        }
+        let first = try deviceReceives()
+        let second = try deviceReceives()
+        XCTAssertEqual(first.get(accountIdB64: "acct", groupIdHex: "g")?.seed, seed)
+        XCTAssertEqual(second.get(accountIdB64: "acct", groupIdHex: "g")?.seed, seed,
+                       "the second device of the account holds the seed too")
+    }
+
+    /// D(2) — deliveries are recorded per DEVICE: a device of an account that
+    /// joined after its account's envelope was delivered is owed one, and the
+    /// owner re-sends the account's envelope at its next reconcile.
+    func testTheOwnerReSendsToANewDeviceOfTheSameAccount() async throws {
+        let root = FakeStatementSigner("root")
+        let h = ReconcileHarness()
+        let account = Data(repeating: 2, count: 32)
+        let phone = Data(repeating: 0x21, count: 32)
+        let laptop = Data(repeating: 0x22, count: 32)
+        var leaves: [Data: [Data]] = [account: [phone]]
+        h.authority = .root(root)
+        h.desired = [account: .member]
+        var ports = h.ports(gid: gid)
+        ports.memberLeaves = { leaves }
+
+        _ = try await JournalOwnership.reconcileRegistrars(ports)
+        XCTAssertEqual(h.envelopes.count, 1)
+        XCTAssertEqual(h.delivered, [phone: .member])
+        let unchanged = try await JournalOwnership.reconcileRegistrars(ports)
+        XCTAssertEqual(unchanged, .unchanged)
+
+        // The account's second device joined: one more envelope, for the
+        // account, and both devices are recorded.
+        leaves[account] = [phone, laptop]
+        let outcome = try await JournalOwnership.reconcileRegistrars(ports)
+        XCTAssertEqual(outcome, .reconciled(setSent: false, pending: 0))
+        XCTAssertEqual(h.envelopes.map(\.0), [account, account])
+        XCTAssertEqual(h.delivered, [phone: .member, laptop: .member])
+
+        // The phone is gone (removed device): the record drops it, nothing sent.
+        leaves[account] = [laptop]
+        _ = try await JournalOwnership.reconcileRegistrars(ports)
+        XCTAssertEqual(h.envelopes.count, 2)
+        XCTAssertEqual(h.delivered, [laptop: .member])
+    }
+
+    /// E — an ADMIN that removes a person revokes that person's registrar key,
+    /// read from the owner's envelopes; it skips an account the live table
+    /// ranks equal or higher (another admin, the owner) and a recorded admin
+    /// key: the DS refuses the whole registration over one of those.
+    func testAnAdminsRemovalRevokesTheRemovedRegistrarAndSkipsEqualRank() {
+        let member = Data(repeating: 4, count: 32)
+        let otherAdmin = Data(repeating: 5, count: 32)
+        let promoted = Data(repeating: 6, count: 32)
+        let unknown = Data(repeating: 7, count: 32)
+        let known: [Data: RegistrarSeedStore.KnownRegistrar] = [
+            member: .init(publicKey: Data(repeating: 0xE4, count: 32), rank: .member),
+            otherAdmin: .init(publicKey: Data(repeating: 0xE5, count: 32), rank: .admin),
+            promoted: .init(publicKey: Data(repeating: 0xE6, count: 32), rank: .member),
+        ]
+        let revoke = JournalOwnership.revokeList(
+            authority: .registrar(FakeStatementSigner("admin"), .admin),
+            evictedAccountKeys: [member, otherAdmin, promoted, unknown],
+            registrarPublicKey: { _ in XCTFail("an admin never derives"); return nil },
+            knownRegistrar: { known[$0] },
+            equalOrHigherAccounts: [promoted])
+        XCTAssertEqual(revoke, [Data(repeating: 0xE4, count: 32)],
+                       "only the member's key; the admin (recorded or live) and the unknown are skipped")
+
+        // A member registrar revokes nothing: nobody ranks below it.
+        XCTAssertEqual(JournalOwnership.revokeList(
+            authority: .registrar(FakeStatementSigner("member"), .member),
+            evictedAccountKeys: [member], registrarPublicKey: { _ in nil },
+            knownRegistrar: { known[$0] }), [])
+        // The root keeps deriving.
+        XCTAssertEqual(JournalOwnership.revokeList(
+            authority: .root(FakeStatementSigner("root")), evictedAccountKeys: [member],
+            registrarPublicKey: { _ in Data(repeating: 0xDD, count: 32) },
+            knownRegistrar: { known[$0] }), [Data(repeating: 0xDD, count: 32)])
+    }
+
+    /// The admin's revocation travels in its epoch registration.
+    func testAnAdminsRegistrationCarriesTheRevocation() async throws {
+        let admin = FakeStatementSigner("admin")
+        let ds = FakeStatementDs()
+        let evicted = Data(repeating: 4, count: 32)
+        let key = Data(repeating: 0xE4, count: 32)
+        let revoke = JournalOwnership.revokeList(
+            authority: .registrar(admin, .admin), evictedAccountKeys: [evicted],
+            registrarPublicKey: { _ in nil },
+            knownRegistrar: { $0 == evicted ? .init(publicKey: key, rank: .member) : nil })
+        try await JournalOwnership.registerEpoch(
+            authority: .registrar(admin, .admin), journalId: gid, epoch: 9,
+            epochKey: Data(repeating: 9, count: 32), revoke: revoke, ds: ds)
+        XCTAssertEqual(admin.lastRevoke, [key])
+        XCTAssertEqual(ds.segments, ["access"])
+    }
+
+    /// The known-registrar record: the newest envelope wins, scoped per
+    /// account and group, wiped with the account.
+    func testKnownRegistrarsAreKeptReplacedAndCleared() throws {
+        let store = RegistrarSeedStore(
+            defaults: try XCTUnwrap(UserDefaults(suiteName: "known-\(UUID().uuidString)")))
+        let account = Data(repeating: 4, count: 32)
+        store.noteRegistrar(accountIdB64: "acct", groupIdHex: "AB", accountKey: account,
+                            publicKey: Data(repeating: 1, count: 32), rank: .member)
+        store.noteRegistrar(accountIdB64: "acct", groupIdHex: "ab", accountKey: account,
+                            publicKey: Data(repeating: 2, count: 32), rank: .admin)
+        XCTAssertEqual(store.knownRegistrars(accountIdB64: "acct", groupIdHex: "ab"),
+                       [account: .init(publicKey: Data(repeating: 2, count: 32), rank: .admin)])
+        XCTAssertTrue(store.knownRegistrars(accountIdB64: "other", groupIdHex: "ab").isEmpty)
+        store.clear(accountIdB64: "acct")
+        XCTAssertTrue(store.knownRegistrars(accountIdB64: "acct", groupIdHex: "ab").isEmpty)
     }
 }

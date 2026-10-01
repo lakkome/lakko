@@ -88,6 +88,7 @@
 //! - `PUT    /ds/group/{group_id_hex}/push-binding` — root or admin binds one `push_gid`
 //! - `PUT    /ds/mailbox/{device_id_hex}/access`   — claim a mailbox under its identity key
 //! - `PUT    /ds/mailbox/{device_id_hex}/reach`    — register / remove reach keys, set open (ADR-0060)
+//! - `GET    /ds/mailbox/{device_id_hex}/reach`    — the owner reads its reach keys back (ADR-0060)
 //! - `POST   /ds/mailbox/{device_id_hex}/reach/check` — is this reach key registered? (ADR-0060)
 //! - `POST   /ds/group/{group_id_hex}/knock`       — a non-member's request to join (token)
 //! - `GET    /ds/group/{group_id_hex}/knocks`      — the members read the knocks
@@ -290,7 +291,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
         )
         .route(
             "/ds/mailbox/{device_hex}/reach",
-            put(reach::put_mailbox_reach),
+            put(reach::put_mailbox_reach).get(reach::get_mailbox_reach),
         )
         .route(
             "/ds/mailbox/{device_hex}/reach/check",

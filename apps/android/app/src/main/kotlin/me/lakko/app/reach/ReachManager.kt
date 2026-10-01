@@ -542,9 +542,14 @@ public class ReachManager internal constructor(
 
     private suspend fun syncLocked(b: Binding, nowMs: Long): Boolean {
         if (binding.get() !== b) return false
+        val recovery = ensureVersionRecoveryLocked(b)
+        if (binding.get() !== b) return false
         val setting = mutableVisibility.value ?: uniffi.lakko_ffi_uniffi.defaultVisibilitySetting()
         val inputs = inputsFor(doc, setting)
-        val desired = desiredReachKeys(inputs, nowMs).associateBy { key ->
+        val wanted = desiredReachKeys(inputs, nowMs).let {
+            if (recovery == null) it else registrableBeforeRecovery(it)
+        }
+        val desired = wanted.associateBy { key ->
             reachHex(publicKeyOf(derive(b, key.slot, key.version).seed))
         }
         val registered = doc.registered.mapNotNull { r ->
@@ -553,7 +558,9 @@ public class ReachManager internal constructor(
         }.toMap()
         val diff = diffReachKeys(desired, registered)
         val wantOpen = setting.mode == FfiVisibilityMode.EVERYONE
-        val openChange = if (doc.registeredOpen == wantOpen) null else wantOpen
+        // The Everyone flag waits for the recovery too: it is part of the
+        // setting the versions are reconciled with.
+        val openChange = if (recovery != null || doc.registeredOpen == wantOpen) null else wantOpen
         // Expired replies drop out of the document once the diff removed them.
         val liveReplies = doc.replies.filter { it.expiresAtMs > nowMs }
         if (diff.isEmpty && openChange == null) {
@@ -561,7 +568,10 @@ public class ReachManager internal constructor(
                 doc = doc.copy(replies = liveReplies)
                 store.save(b.accountIdB64, doc)
             }
-            mutableStatus.value = ReachApplyStatus.APPLIED
+            mutableStatus.value = recovery ?: ReachApplyStatus.APPLIED
+            // While the recovery is pending this reports the restricted set
+            // (`link` / `reply` keys only), so a link or reply mint proceeds;
+            // the status says the rest is not applied.
             return true
         }
         mutableStatus.value = ReachApplyStatus.APPLYING
@@ -579,11 +589,12 @@ public class ReachManager internal constructor(
                 registered = desired.map { (pk, key) ->
                     StoredRegistered(pk, key.slot.kind.name, key.slot.scopeHex, key.version, key.expiresAtMs)
                 },
-                registeredOpen = wantOpen,
+                registeredOpen = if (openChange == null) doc.registeredOpen else wantOpen,
                 replies = liveReplies,
             )
             store.save(b.accountIdB64, doc)
-            mutableStatus.value = ReachApplyStatus.APPLIED
+            mutableStatus.value = recovery ?: ReachApplyStatus.APPLIED
+            // Pending: only the restricted set went out (see above).
             true
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -595,6 +606,107 @@ public class ReachManager internal constructor(
             Log.w(LOG_TAG, "reach keys not registered: ${cause.javaClass.simpleName}")
             mutableStatus.value = ReachApplyStatus.FAILED
             false
+        }
+    }
+
+    /**
+     * ADR-0060 §1 ("Versions after a restore", amended 2026-10-01). Under [lock].
+     *
+     * A device that holds no version state ([holdsNoVersionState]: a fresh
+     * install, or a restore with no other device alive) must not start every
+     * class at version 0, or a key rotated away (a removed contact, an evicted
+     * member) would be registered again. So before it registers anything
+     * versioned it asks the DS which keys the mailbox holds (owner-only, the
+     * mailbox proof) and each slot resumes at the highest version whose key is
+     * listed ([recoverVersions]); a slot with none starts at 0.
+     *
+     * Returns `null` when versioned keys may be registered, or the status to
+     * show while the read has not succeeded. Fails CLOSED meanwhile: no
+     * versioned key and no Everyone flag go out (only `link` / `reply` keys,
+     * which carry no history); the keys the mailbox already holds stay as they
+     * are on the server, so whoever holds a current grant can still write. The
+     * read is retried after [VERSION_RECOVERY_RETRY_MS] and on every reconcile.
+     *
+     * Slots this device learns later (a group it is re-admitted to after the
+     * restore) are recovered from the same server snapshot the first time they
+     * appear without a version of their own.
+     */
+    private suspend fun ensureVersionRecoveryLocked(b: Binding): ReachApplyStatus? {
+        var state = doc.versionRecovery?.let { runCatching { VersionRecovery.valueOf(it) }.getOrNull() }
+        if (state == null) {
+            state = if (holdsNoVersionState(
+                    versionsEmpty = doc.versions.isEmpty(),
+                    registeredEmpty = doc.registered.isEmpty(),
+                    reachStateKnown = doc.reachStateHex != null,
+                )
+            ) {
+                VersionRecovery.PENDING
+            } else {
+                VersionRecovery.DONE
+            }
+            doc = doc.copy(versionRecovery = state.name)
+            store.save(b.accountIdB64, doc)
+        }
+        if (state == VersionRecovery.PENDING) {
+            val listed = try {
+                dsFactory().use { ds -> ds.fetchMailboxReach(b.mailbox, b.mailboxSigner) }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                Log.i(LOG_TAG, "reach versions not recovered yet (${cause.javaClass.simpleName}); retried later")
+                scheduleRecoveryRetry(b)
+                return if (cause is DsNetworkError) ReachApplyStatus.OFFLINE else ReachApplyStatus.FAILED
+            }
+            if (binding.get() !== b) return ReachApplyStatus.APPLYING
+            doc = doc.copy(
+                versionRecovery = VersionRecovery.DONE.name,
+                recoveryPkHex = listed.keys.map { reachHex(it.publicKey) }.distinct(),
+            )
+            store.save(b.accountIdB64, doc)
+            Log.i(LOG_TAG, "reach versions recovered from ${listed.keys.size} registered keys")
+        }
+        applyRecoveredSlotsLocked(b)
+        return null
+    }
+
+    /** Recover the version of every nameable slot that has none yet and was
+     *  not scanned before, from [ReachDoc.recoveryPkHex]. Under [lock]. */
+    private fun applyRecoveredSlotsLocked(b: Binding) {
+        if (doc.recoveryPkHex.isEmpty()) return
+        val scanned = doc.recoveredSlots.toHashSet()
+        val versioned = doc.versions.map { it.kind + ":" + it.scopeHex }.toHashSet()
+        val todo = recoverableSlots(doc.joinedGroups, doc.channels).filter {
+            val id = reachSlotId(it)
+            id !in scanned && id !in versioned
+        }
+        if (todo.isEmpty()) return
+        val found = recoverVersions(
+            slots = todo,
+            registered = doc.recoveryPkHex.toHashSet(),
+            publicKeyHexAt = { slot, version ->
+                runCatching { reachHex(publicKeyOf(derive(b, slot, version).seed)) }.getOrNull()
+            },
+        )
+        doc = doc.copy(
+            versions = doc.versions + found.filterValues { it > 0 }.map { (slot, v) ->
+                StoredVersion(slot.kind.name, slot.scopeHex, v)
+            },
+            recoveredSlots = doc.recoveredSlots + todo.map(::reachSlotId),
+        )
+        store.save(b.accountIdB64, doc)
+    }
+
+    private val recoveryRetryScheduled = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private fun scheduleRecoveryRetry(b: Binding) {
+        if (!recoveryRetryScheduled.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                kotlinx.coroutines.delay(VERSION_RECOVERY_RETRY_MS)
+            } finally {
+                recoveryRetryScheduled.set(false)
+            }
+            if (binding.get() === b) lock.withLock { syncLocked(b, System.currentTimeMillis()) }
         }
     }
 
@@ -787,17 +899,17 @@ public class ReachManager internal constructor(
         } catch (_: Throwable) {
             return
         }
-        lock.withLock {
-            if (binding.get() !== b) return@withLock
+        val changed = lock.withLock {
+            if (binding.get() !== b) return@withLock false
             val existing = doc.held.firstOrNull {
                 it.ownerKeyHex == ownerHex && it.kind == kind.name && it.scopeHex == scopeKey
             }
-            if (existing != null && existing.grantHex == reachHex(wire)) return@withLock
+            if (existing != null && existing.grantHex == reachHex(wire)) return@withLock false
             if (existing != null) {
                 val old = runCatching {
                     uniffi.lakko_ffi_uniffi.decodeReachGrant(reachUnhex(existing.grantHex)!!)
                 }.getOrNull()
-                if (old != null && old.version > grant.version) return@withLock
+                if (old != null && old.version > grant.version) return@withLock false
             }
             doc = doc.copy(
                 held = doc.held.filterNot {
@@ -805,7 +917,9 @@ public class ReachManager internal constructor(
                 } + StoredHeld(ownerHex, kind.name, scopeKey, reachHex(wire)),
             )
             store.save(b.accountIdB64, doc)
+            true
         }
+        if (changed) notifyGrantHeld(ownerKey)
     }
 
     /** Drop the grant of [kind] held for [ownerKey] at [scopeHex] (a member
@@ -883,23 +997,58 @@ public class ReachManager internal constructor(
         purpose: WritePurpose,
         groupHex: String? = null,
     ): DsReachAuth? {
-        val b = binding.get() ?: return null
-        if (ownerKey.contentEquals(b.accountKey)) {
-            val own = grant(ReachKind.CONTACT) ?: return null
-            return DsReachAuth(reachSigner(own.seed))
-        }
-        val held = heldFor(ownerKey)
-        val pick = pickWriteGrant(held.map { it.first }, purpose, groupHex?.lowercase())
-        if (pick != null) {
-            val grant = held.first { it.first == pick }.second
-            return DsReachAuth(reachSigner(grant.seed))
-        }
-        if (purpose == WritePurpose.WELCOME && groupHex != null) {
-            delegationFor(groupHex, ownerKey)?.let { header ->
-                return DsReachAuth(reachSigner(b.accountSeed.copyOf()), delegationHeader = header)
-            }
+        for (candidate in reachAuthCandidates(ownerKey, purpose, groupHex)) {
+            candidate()?.let { return it }
         }
         return null
+    }
+
+    /**
+     * Every authorisation this device holds for a write of [purpose] into
+     * [ownerKey]'s mailbox, in [reachAuthFor]'s order, each built only when
+     * asked for (a signer is a native object). ADR-0050 section 2.5a item 7:
+     * a Welcome writer tries them in turn and moves on after a `401`. This
+     * account's own mailbox yields its own `contact` key alone. Empty before a
+     * session binds or when nothing is held.
+     */
+    public fun reachAuthCandidates(
+        ownerKey: ByteArray,
+        purpose: WritePurpose,
+        groupHex: String? = null,
+    ): List<() -> DsReachAuth?> {
+        val b = binding.get() ?: return emptyList()
+        if (ownerKey.contentEquals(b.accountKey)) {
+            return listOf({ grant(ReachKind.CONTACT)?.let { DsReachAuth(reachSigner(it.seed)) } })
+        }
+        val held = heldFor(ownerKey)
+        val out = ArrayList<() -> DsReachAuth?>()
+        for (ref in orderedWriteGrants(held.map { it.first }, purpose, groupHex?.lowercase())) {
+            val grant = held.first { it.first == ref }.second
+            out += { DsReachAuth(reachSigner(grant.seed)) }
+        }
+        if (purpose == WritePurpose.WELCOME && groupHex != null) {
+            out += {
+                delegationFor(groupHex, ownerKey)?.let { header ->
+                    DsReachAuth(reachSigner(b.accountSeed.copyOf()), delegationHeader = header)
+                }
+            }
+        }
+        return out
+    }
+
+    /** ADR-0050 section 2.5a item 7 — told the owner key of a grant (or a
+     *  committer delegation naming its account) this device just kept, so a
+     *  Welcome owed to that person is retried at once. Installed by the chat
+     *  repository; must not block. */
+    @Volatile
+    public var onGrantHeld: ((ownerKey: ByteArray) -> Unit)? = null
+
+    private fun notifyGrantHeld(ownerKey: ByteArray) {
+        try {
+            onGrantHeld?.invoke(ownerKey.copyOf())
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "grant-held hook failed: ${cause.javaClass.simpleName}")
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1049,6 +1198,7 @@ public class ReachManager internal constructor(
                 )
                 store.save(b.accountIdB64, doc)
             }
+            notifyGrantHeld(decoded.addedAccountKey)
         }
     }
 
@@ -1127,6 +1277,10 @@ public class ReachManager internal constructor(
 
     public companion object {
         private const val LOG_TAG = "Reach"
+
+        /** How long after a failed version-recovery read it is tried again
+         *  (besides every reconcile). Chosen, not measured. */
+        public const val VERSION_RECOVERY_RETRY_MS: Long = 60_000L
 
         /** How long a committer delegation lives: the 24-hour maximum. */
         public const val DELEGATION_TTL_MS: Long = 24L * 60 * 60 * 1000

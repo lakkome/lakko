@@ -1032,7 +1032,8 @@ public func nseLooksLikePin(_ bytes: Data, envelopeLen: Int) -> Bool {
 /// beacon; the length arrives from the slim FFI (`pinEnvelopeLen()`).
 ///
 /// ADR-0057 adds an eighth, the registrar-seed envelope a journal root sends
-/// a member (173 bytes, sealed to the member's account key). Recognised and
+/// a member (205 bytes since v2: the clear header carries the registrar public
+/// key; the seed is sealed to the member's account key). Recognised and
 /// suppressed, never opened or stored: the NSE writes no durable state
 /// (C-59). Fixed-length; the length arrives from the slim FFI
 /// (`registrarSeedEnvelopeLen()`).
@@ -1090,7 +1091,7 @@ public func nseIsServiceEnvelope(
 private let registrarSeedEnvelopeFirstByte: UInt8 = 0x6C
 
 /// Cheap PRE-FILTER for an ADR-0057 registrar-seed envelope: the exact length
-/// (injected from the slim FFI's `registrarSeedEnvelopeLen()`, 173, never a
+/// (injected from the slim FFI's `registrarSeedEnvelopeLen()`, 205, never a
 /// hand-copied literal) plus the first domain byte. The peek decides nothing;
 /// `decodeRegistrarSeedEnvelope` is the verdict.
 public func nseLooksLikeRegistrarSeed(_ bytes: Data, envelopeLen: Int) -> Bool {

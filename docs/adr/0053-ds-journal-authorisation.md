@@ -669,3 +669,14 @@ first-claim squat on a deterministic id remains a residual stated there.
 - `services/ds/src/main.rs` (the Phase 1.3 posture), `crates/lakko-contacts/src/pseudonym.rs`,
   `crates/lakko-auth-token` (the shared-verifier crate shape this follows).
 - RFC 9420 section 8.5 (exporters); RFC 8032 (Ed25519).
+
+## Amendment 2026-10-01: the write tier reaches back to the newest owner or admin registration
+
+[ADR-0057](0057-journal-ownership.md) (amendment of 2026-10-01, item 3) removes
+the member-rank limit on registering epochs, so that any member can commit a
+device admission ([ADR-0050](0050-per-device-conversation-leaves.md) 2.5a) even
+twice in a row. To keep a member's bad registrations from freezing writes, the
+write tier is now every registered epoch from the newest root or admin
+registration onward, and never fewer than the two newest. Eviction still
+revokes write access at the removal, since a removal is an owner or admin
+registration.

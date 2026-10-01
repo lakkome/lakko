@@ -7,7 +7,9 @@
  * device's root or registrar key), and the OWNER's registration revokes the
  * registrar keys of every account the sweep evicts — derived from the root
  * seed with the REAL core — while an admin, who cannot derive them, revokes
- * none. A committer with neither root nor seed does not stage at all.
+ * the keys it collected from the owner's registrar-seed envelopes, lower
+ * ranks only (ADR-0057, amended 2026-10-01, item 1). A committer with
+ * neither root nor seed does not stage at all.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -22,6 +24,7 @@ vi.mock("../chat/commit-outbox", () => ({
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { ContactsClient } from "./client";
 import { dsAccess } from "../ds/access";
+import { bindRegistrarListAccount, recordRegistrarListEntry } from "../ds/registrar-list";
 import { fakeAccessSigner, fakeRegistrarAuthority, fakeStatementSigner } from "../ds/access-test-doubles";
 import type { DsClient } from "../ds/client";
 import type { DiscoveryClient } from "../discovery/client";
@@ -111,12 +114,36 @@ function client(registrations: Array<{ epoch: bigint; revoke: Uint8Array[] }>): 
   });
 }
 
+/** The `localStorage` shim the registrar list reads. */
+class MemoryStorage {
+  private readonly map = new Map<string, string>();
+  get length(): number {
+    return this.map.size;
+  }
+  key(i: number): string | null {
+    return [...this.map.keys()][i] ?? null;
+  }
+  getItem(k: string): string | null {
+    return this.map.get(k) ?? null;
+  }
+  setItem(k: string, v: string): void {
+    this.map.set(k, v);
+  }
+  removeItem(k: string): void {
+    this.map.delete(k);
+  }
+}
+
 let offOwner: (() => void) | null = null;
 afterEach(() => {
   offOwner?.();
   offOwner = null;
   dsAccess.setAuthorityFactory(null);
+  bindRegistrarListAccount(null);
+  delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
 });
+
+const b64 = (b: Uint8Array): string => Buffer.from(b).toString("base64");
 
 describe("ADR-0057 — the sweep's registration and its revocations", () => {
   it("the owner revokes the registrar key of each account the sweep evicts, and only those", async () => {
@@ -141,7 +168,46 @@ describe("ADR-0057 — the sweep's registration and its revocations", () => {
     owner.free();
   });
 
-  it("an admin registers with its registrar key and revokes nothing", async () => {
+  it("an admin revokes the collected registrar key of an evicted MEMBER-rank account", async () => {
+    (globalThis as unknown as { localStorage: unknown }).localStorage = new MemoryStorage();
+    const g = sweepingGroup();
+    bindRegistrarListAccount("acc");
+    const memberKey = new Uint8Array(32).fill(0x33);
+    recordRegistrarListEntry("acc", b64(g.group.groupId), b64(acct(3)), { publicKey: memberKey, rank: 1 });
+    // A collected key for an account the sweep does NOT evict is never sent.
+    recordRegistrarListEntry("acc", b64(g.group.groupId), b64(acct(2)), {
+      publicKey: new Uint8Array(32).fill(0x22),
+      rank: 1,
+    });
+    dsAccess.setAuthorityFactory({
+      root: () => ({ kind: "none" }),
+      registrar: () => fakeRegistrarAuthority("admin", 2),
+    });
+    const registrations: Array<{ epoch: bigint; revoke: Uint8Array[] }> = [];
+    const out = await client(registrations).sweepIfCommitter(null, g.group, CURSOR, () => {}, ACT, () => {});
+    expect(out.kind).toBe("committed");
+    expect(registrations).toEqual([{ epoch: 7n, revoke: [memberKey] }]);
+  });
+
+  it("an admin skips an evicted account of EQUAL rank (the DS would refuse it)", async () => {
+    (globalThis as unknown as { localStorage: unknown }).localStorage = new MemoryStorage();
+    const g = sweepingGroup();
+    bindRegistrarListAccount("acc");
+    recordRegistrarListEntry("acc", b64(g.group.groupId), b64(acct(3)), {
+      publicKey: new Uint8Array(32).fill(0x33),
+      rank: 2,
+    });
+    dsAccess.setAuthorityFactory({
+      root: () => ({ kind: "none" }),
+      registrar: () => fakeRegistrarAuthority("admin", 2),
+    });
+    const registrations: Array<{ epoch: bigint; revoke: Uint8Array[] }> = [];
+    const out = await client(registrations).sweepIfCommitter(null, g.group, CURSOR, () => {}, ACT, () => {});
+    expect(out.kind).toBe("committed");
+    expect(registrations).toEqual([{ epoch: 7n, revoke: [] }]);
+  });
+
+  it("an admin with no collected key for the evictee registers and revokes nothing", async () => {
     const g = sweepingGroup();
     dsAccess.setAuthorityFactory({
       root: () => ({ kind: "none" }),

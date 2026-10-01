@@ -122,6 +122,14 @@ pub struct FfiRegistrarSeedEnvelope {
     pub member_account_key: Vec<u8>,
     /// The rank the root registered the key at, or a root handover.
     pub rank: DsSeedEnvelopeRank,
+    /// The registrar's Ed25519 public key (32 bytes), readable without
+    /// opening: the key the Delivery Service knows the registrar by (for a
+    /// root handover, the root's). Every member records
+    /// `member_account_key -> registrar_public_key` from an envelope whose
+    /// MLS sender resolved to the owner, and revokes it when it commits that
+    /// account's removal. Bound to the seal; [`open_registrar_seed_envelope`]
+    /// refuses a seed that does not derive it.
+    pub registrar_public_key: Vec<u8>,
 }
 
 fn now_ms() -> u64 {
@@ -474,7 +482,8 @@ impl DsStatementSigner {
 /// group (an MLS application message): `registrar_seed` sealed to the
 /// member's account X25519 key (`member_x25519_public_key`, the
 /// `x25519_pubkey` of its identity bundle), addressed by its account
-/// Ed25519 key.
+/// Ed25519 key. The envelope's clear registrar public key is derived from
+/// `registrar_seed` inside, so it always matches.
 ///
 /// # Errors
 ///
@@ -543,6 +552,7 @@ pub fn decode_registrar_seed_envelope(
         journal_id: env.journal_id.to_vec(),
         member_account_key: env.member_account_key.to_vec(),
         rank: env.rank.into(),
+        registrar_public_key: env.registrar_public_key.to_vec(),
     })
 }
 
@@ -554,7 +564,8 @@ pub fn decode_registrar_seed_envelope(
 /// # Errors
 ///
 /// [`FfiError::Contacts`] when the envelope is malformed, is addressed to
-/// another account key, or does not open under this identity's X25519 key.
+/// another account key, does not open under this identity's X25519 key, or
+/// opens to a seed that does not derive the envelope's registrar public key.
 #[uniffi::export]
 pub fn open_registrar_seed_envelope(
     plaintext: Vec<u8>,
@@ -737,6 +748,11 @@ mod tests {
         assert_eq!(decoded.journal_id, journal);
         assert_eq!(decoded.member_account_key, member_key);
         assert_eq!(decoded.rank, DsSeedEnvelopeRank::Admin);
+        // The clear key is the one the DS knows the registrar by.
+        assert_eq!(
+            decoded.registrar_public_key,
+            ds_statement_signer(seed.clone()).unwrap().public_key()
+        );
         assert_eq!(
             open_registrar_seed_envelope(wire.clone(), &member).unwrap(),
             seed
@@ -765,6 +781,12 @@ mod tests {
         let decoded = decode_registrar_seed_envelope(wire.clone()).unwrap();
         assert_eq!(decoded.rank, DsSeedEnvelopeRank::Root);
         assert_eq!(decoded.member_account_key, new_owner_key);
+        assert_eq!(
+            decoded.registrar_public_key,
+            ds_journal_root_signer(&old_owner, journal.clone())
+                .unwrap()
+                .public_key()
+        );
         let opened = open_registrar_seed_envelope(wire.clone(), &new_owner).unwrap();
         assert_eq!(opened, old_root_seed);
         assert!(open_registrar_seed_envelope(wire, &old_owner).is_err());

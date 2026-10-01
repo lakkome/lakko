@@ -78,7 +78,7 @@
  * change that let the sweep reach a group whose core would refuse it.
  */
 
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fakeAccessSigner,
   fakeRegistrarAuthority,
@@ -743,5 +743,141 @@ describe("ADR-0045 S7 — approving an external join is a PROPOSAL", () => {
     expect(order).not.toContain("record");
     expect(order).not.toContain("rejectExternalJoin");
     expect(f.epoch()).toBe(6n);
+  });
+});
+
+describe("ADR-0050 2.5a point 4 — every own proposal records its intent", () => {
+  class MemoryStorage {
+    private readonly map = new Map<string, string>();
+    get length(): number {
+      return this.map.size;
+    }
+    key(i: number): string | null {
+      return [...this.map.keys()][i] ?? null;
+    }
+    getItem(k: string): string | null {
+      return this.map.get(k) ?? null;
+    }
+    setItem(k: string, v: string): void {
+      this.map.set(k, v);
+    }
+    removeItem(k: string): void {
+      this.map.delete(k);
+    }
+  }
+  const ACCOUNT_ID = new Uint8Array(16).fill(0x0a);
+  const SECRETS = { accountId: ACCOUNT_ID } as unknown as Parameters<
+    ContactsClient["removeMemberFromGroup"]
+  >[0];
+  const OWN_ACCOUNT = new Uint8Array(32).fill(0x11);
+  const OWN_LEAF = new Uint8Array(32).fill(0x12);
+  const BOB_ACCOUNT = new Uint8Array(32).fill(0x21);
+  const BOB_LEAF = new Uint8Array(32).fill(0x22);
+  const b64 = (u: Uint8Array): string => btoa(String.fromCharCode(...u));
+
+  beforeEach(() => {
+    (globalThis as unknown as { localStorage: unknown }).localStorage = new MemoryStorage();
+  });
+  afterEach(() => {
+    delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
+  });
+
+  /** A role-table group whose roster is us (leaf 0) and Bob (leaf 4). */
+  function rosterGroup(): Fake {
+    const f = fakeGroup({ gid: freshGid(), roleTable: true, rank: undefined });
+    Object.assign(f.group as unknown as Record<string, unknown>, {
+      members: () => [
+        { leafIndex: 0, signaturePublicKey: OWN_LEAF, accountKey: OWN_ACCOUNT },
+        { leafIndex: 4, signaturePublicKey: BOB_LEAF, accountKey: BOB_ACCOUNT },
+      ],
+    });
+    return f;
+  }
+
+  function ownClient(order: string[]): ContactsClient {
+    return new ContactsClient(
+      {} as unknown as DiscoveryClient,
+      ds(order) as unknown as DsClient,
+      {
+        identityProvider: () =>
+          ({ accountPublicKey: OWN_ACCOUNT, signaturePublicKey: OWN_LEAF }) as unknown as WasmIdentity,
+        onPersist: async () => {},
+        onPersistWithCommit: async () => {},
+      },
+    );
+  }
+
+  async function intents(f: Fake): Promise<unknown[]> {
+    const { loadOwnRequests } = await import("../chat/membership-retry");
+    return [
+      ...loadOwnRequests(b64(ACCOUNT_ID), b64(f.group.groupId)).values(),
+    ];
+  }
+
+  it("a removal of another person records `remove` keyed on their ACCOUNT key, at the current epoch", async () => {
+    const f = rosterGroup();
+    await ownClient(f.order).removeMemberFromGroup(SECRETS, f.group, 4);
+    expect(await intents(f)).toEqual([
+      { request: { kind: "remove", subjectKeyB64: b64(BOB_ACCOUNT) }, epoch: "6" },
+    ]);
+  });
+
+  it("naming our own leaf records `leave`", async () => {
+    const f = rosterGroup();
+    await ownClient(f.order).removeMemberFromGroup(SECRETS, f.group, 0);
+    expect(await intents(f)).toEqual([
+      { request: { kind: "leave", subjectKeyB64: b64(OWN_ACCOUNT) }, epoch: "6" },
+    ]);
+  });
+
+  it("an approve records `approve-join` keyed on the joiner's key", async () => {
+    const f = rosterGroup();
+    const ref = new Uint8Array(32).fill(0xd2);
+    await ownClient(f.order).approveExternalJoin(SECRETS, f.group, ref);
+    expect(await intents(f)).toEqual([
+      { request: { kind: "approve-join", subjectKeyB64: b64(ref) }, epoch: "6" },
+    ]);
+  });
+
+  /**
+   * A role-change re-request does not revert a change that landed meanwhile:
+   * the intent is the DELTA (promote Bob), re-issued through the real
+   * `setMemberAdmin`, which recomputes the table from the CURRENT one — here
+   * already holding Carol, promoted by someone else after our first request.
+   */
+  it("a role-change re-request keeps a change that landed meanwhile, and records the delta", async () => {
+    const { reissueOwnRequest } = await import("../chat/rerequest-membership");
+    const CAROL_ACCOUNT = new Uint8Array(32).fill(0x31);
+    const f = rosterGroup();
+    const proposeGroupRoles = vi.fn(
+      (_id: unknown, _owner: Uint8Array, _admins: Uint8Array) => new Uint8Array([0xad]),
+    );
+    Object.assign(f.group as unknown as Record<string, unknown>, {
+      roleTableAdmins: () => CAROL_ACCOUNT,
+      proposeGroupRoles,
+    });
+    const c = ownClient(f.order);
+    await reissueOwnRequest(
+      { contacts: c, identity: SECRETS as never, group: f.group, markOwnPublished: () => {} },
+      { kind: "set-admin", subjectKeyB64: b64(BOB_ACCOUNT), makeAdmin: true },
+    );
+    expect(proposeGroupRoles).toHaveBeenCalledTimes(1);
+    const admins = proposeGroupRoles.mock.calls[0]?.[2] as Uint8Array;
+    expect([...admins]).toEqual([...CAROL_ACCOUNT, ...BOB_ACCOUNT]);
+    expect(await intents(f)).toEqual([
+      {
+        request: { kind: "set-admin", subjectKeyB64: b64(BOB_ACCOUNT), makeAdmin: true },
+        epoch: "6",
+      },
+    ]);
+  });
+
+  it("a direct commit (no role table) records nothing — it landed or threw", async () => {
+    const f = fakeGroup({ gid: freshGid(), roleTable: false });
+    Object.assign(f.group as unknown as Record<string, unknown>, {
+      members: () => [{ leafIndex: 4, signaturePublicKey: BOB_LEAF, accountKey: BOB_ACCOUNT }],
+    });
+    await ownClient(f.order).removeMemberFromGroup(SECRETS, f.group, 4);
+    expect(await intents(f)).toEqual([]);
   });
 });

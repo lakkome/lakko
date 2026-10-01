@@ -212,7 +212,15 @@ final class CommitterSweepTests: XCTestCase {
                     outbox.owed = entry
                     outbox.owedWelcomes = entry
                 },
-                findOwedWelcomes: { outbox.owedWelcomes },
+                findOwedWelcomes: { outbox.owedWelcomes.map { [$0] } ?? [] },
+                keepOwedWelcomes: { id, commitMessageId, mailboxes in
+                    group.log.append("welcomes-kept:\(mailboxes.count)")
+                    guard var entry = outbox.owedWelcomes ?? outbox.owed, entry.id == id else { return }
+                    if let commitMessageId { entry.commitMessageId = commitMessageId }
+                    entry.welcomeMailboxesB64 = mailboxes
+                    outbox.owed = entry
+                    outbox.owedWelcomes = entry
+                },
                 ack: { id, _, _ in
                     group.log.append("ack")
                     outbox.acked.append(id)
@@ -489,7 +497,7 @@ final class CommitterSweepTests: XCTestCase {
     // MARK: - S4b: the acting-committer verdict gates the stage
 
     func testACandidateThatHearsABetterPlacedBeaconStandsDown() async throws {
-        let h = makeHarness(acting: { _ in .defer(toRank: 0) })
+        let h = makeHarness(acting: { _ in .defer(toRank: 0, toSignatureKey: Data(repeating: 1, count: 32)) })
         h.group.rank = 2
 
         let outcome = try await runCommitterSweep(h.ports)
@@ -1175,4 +1183,125 @@ final class CommitterSweepTests: XCTestCase {
         XCTAssertEqual(Array(h.log.prefix(2)), ["publish:commit", "fetch"])
     }
 
+}
+
+// MARK: - ADR-0050 2.5a item 7: a Welcome is never sent unsigned, never lost
+
+extension CommitterSweepTests {
+
+    /// A `401` on one key moves to the next; the first accepted key's write is
+    /// the delivery.
+    func testAWelcomeMovesToTheNextKeyOnA401() async throws {
+        var tried: [Int] = []
+        let id = try await deliverSweepWelcome(candidates: [1, 2, 3]) { key in
+            tried.append(key)
+            if key < 3 {
+                throw DsClientError.http(status: 401, endpoint: "/ds/mailbox/x/messages", body: "")
+            }
+            return 77
+        }
+        XCTAssertEqual(id, 77)
+        XCTAssertEqual(tried, [1, 2, 3])
+    }
+
+    /// No key held, or every key refused: nothing is written (never unsigned)
+    /// and the Welcome is reported undeliverable.
+    func testWithNoKeyLeftNothingIsWritten() async {
+        var writes = 0
+        do {
+            _ = try await deliverSweepWelcome(candidates: [Int]()) { _ in writes += 1; return 1 }
+            XCTFail("no key, no write")
+        } catch let error as SweepWelcomeUndeliverable {
+            XCTAssertEqual(error.triedKeys, 0)
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+        XCTAssertEqual(writes, 0, "never an unsigned write")
+        do {
+            _ = try await deliverSweepWelcome(candidates: [1, 2]) { _ in
+                throw DsClientError.http(status: 401, endpoint: "e", body: "")
+            }
+            XCTFail("every key refused")
+        } catch let error as SweepWelcomeUndeliverable {
+            XCTAssertEqual(error.triedKeys, 2)
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+    }
+
+    /// A failure that is not a key refusal is transient: rethrown as it came,
+    /// the next key is not tried.
+    func testATransientFailureIsRethrownNotSkipped() async {
+        var tried: [Int] = []
+        do {
+            _ = try await deliverSweepWelcome(candidates: [1, 2]) { key in
+                tried.append(key)
+                throw DsClientError.http(status: 503, endpoint: "e", body: "")
+            }
+            XCTFail("a 503 is rethrown")
+        } catch is SweepWelcomeUndeliverable {
+            XCTFail("a 503 is not a missing key")
+        } catch {}
+        XCTAssertEqual(tried, [1])
+    }
+
+    /// The sweep that merged keeps the Welcome OWED (not acked, the marker
+    /// set, the entry narrowed to the waiting mailbox) and still reports the
+    /// commit it won; nothing was written.
+    func testAnUndeliverableWelcomeStaysOwedAndTheCommitStands() async throws {
+        let h = makeHarness()
+        h.journal.welcomePublishThrows = SweepWelcomeUndeliverable(triedKeys: 0)
+
+        let outcome = try await runCommitterSweep(h.ports)
+
+        guard case .committed = outcome else {
+            return XCTFail("the commit won and merged; got \(outcome)")
+        }
+        XCTAssertEqual(h.journal.published.filter { $0.kind == "welcome" }.count, 0, "nothing written")
+        XCTAssertTrue(h.outbox.acked.isEmpty, "an undelivered Welcome is never acked")
+        XCTAssertNotNil(h.outbox.owedWelcomes, "kept owed")
+        XCTAssertEqual(h.outbox.owedWelcomes?.welcomeMailboxesB64.count, 1)
+        XCTAssertTrue(h.log.contains("welcomes-kept:1"))
+    }
+
+    /// The next poll retries it; while no key exists it stays owed WITHOUT
+    /// holding the group's next sweep back, and once a key works it is
+    /// delivered and acked.
+    func testAnOwedWelcomeIsRetriedAndNeverBlocksTheNextSweep() async throws {
+        let h = makeHarness()
+        h.journal.welcomePublishThrows = SweepWelcomeUndeliverable(triedKeys: 0)
+        _ = try await runCommitterSweep(h.ports)
+
+        // Still no key, and another request is pending: the retry fails quietly
+        // and the sweep goes on to stage.
+        h.group.pending = 1
+        let blocked = try await runCommitterSweep(h.ports)
+        guard case .committed = blocked else {
+            return XCTFail("a Welcome waiting for a key must not freeze the group, got \(blocked)")
+        }
+        XCTAssertTrue(h.outbox.acked.isEmpty)
+        XCTAssertNotNil(h.outbox.owedWelcomes)
+
+        // A grant arrived: the retry delivers and acks.
+        h.journal.welcomePublishThrows = nil
+        let outcome = try await resolveOwedWelcomes(h.ports)
+        guard case .welcomesRepublished(let ids, _) = outcome else {
+            return XCTFail("the owed Welcome is delivered once a key works, got \(outcome)")
+        }
+        XCTAssertEqual(ids.count, 1)
+        XCTAssertFalse(h.outbox.acked.isEmpty)
+    }
+
+    /// The restart seam reports a still-undeliverable Welcome without writing.
+    func testTheRetryReportsAWelcomeStillAwaitingAKey() async throws {
+        let h = makeHarness()
+        h.journal.welcomePublishThrows = SweepWelcomeUndeliverable(triedKeys: 0)
+        _ = try await runCommitterSweep(h.ports)
+
+        let outcome = try await resolveOwedWelcomes(h.ports)
+
+        XCTAssertEqual(outcome, .welcomesAwaitingGrant(undelivered: 1))
+        XCTAssertEqual(h.journal.published.filter { $0.kind == "welcome" }.count, 0)
+        XCTAssertTrue(h.outbox.acked.isEmpty)
+    }
 }

@@ -797,16 +797,18 @@ public class ChatViewModel(
     public val pendingRequests: StateFlow<List<me.lakko.app.chat.PendingRequest>> =
         mutablePendingRequests.asStateFlow()
 
-    private val mutableUnappliedAdds:
-        MutableStateFlow<List<me.lakko.app.chat.UnappliedAdd>> = MutableStateFlow(emptyList())
+    private val mutableNotApplied:
+        MutableStateFlow<List<me.lakko.app.chat.UnappliedRequest>> = MutableStateFlow(emptyList())
 
     /**
-     * ADR-0045 S7 residual 1 — own `add` requests that left the pending set
-     * without reaching the roster, and were therefore never carried. Emptied
-     * with the rest of the pending surface once the membership has ended.
+     * ADR-0045 S7 residual 1 / ADR-0050 section 2.5a point 5 — own requests a
+     * sweep dropped whose automatic re-request then stopped (the author lost
+     * the role it needs, the core refuses it, an approved join's KeyPackage is
+     * gone). A re-request in flight is shown nowhere. Emptied with the rest of
+     * the pending surface once the membership has ended.
      */
-    public val unappliedAdds: StateFlow<List<me.lakko.app.chat.UnappliedAdd>> =
-        mutableUnappliedAdds.asStateFlow()
+    public val notApplied: StateFlow<List<me.lakko.app.chat.UnappliedRequest>> =
+        mutableNotApplied.asStateFlow()
 
     private val mutablePendingNotice:
         MutableStateFlow<me.lakko.app.chat.PendingNotice?> = MutableStateFlow(null)
@@ -1416,10 +1418,10 @@ public class ChatViewModel(
         }
         mutablePendingRequests.value = visible
         mutablePendingNotice.value = me.lakko.app.chat.pendingNotice(visible)
-        // ADR-0045 S7 residual 1 — read AFTER `pendingMembershipRequests` above,
-        // which is what detects and records them: a row is created at the exact
-        // moment its observation is pruned.
-        mutableUnappliedAdds.value = if (ended) emptyList() else repo.unappliedAdds(groupIdHex)
+        // ADR-0045 S7 residual 1 / ADR-0050 section 2.5a — rows are written by
+        // the repository's superseded pass when a re-request stops; this only
+        // reads them.
+        mutableNotApplied.value = if (ended) emptyList() else repo.notAppliedRequests(groupIdHex)
         refreshJoinAttributions()
         // ADR-0045 UX §6.1.9 — decided from the roster + role table just read,
         // so a torn read says nothing rather than claiming a promotion.
@@ -2130,13 +2132,12 @@ public class ChatViewModel(
      * Fail-closed on error.
      */
     /**
-     * ADR-0045 S7 residual 1 — dismiss one `Not applied` row. It stays
-     * dismissed: the detection re-runs on every fold, so without the tombstone
-     * the notice could not be dismissed at all.
+     * ADR-0045 S7 residual 1 — dismiss one `Not applied` row, by
+     * [me.lakko.app.chat.UnappliedRequest.rowKey]. It stays dismissed.
      */
-    public fun onDismissUnapplied(addSignatureKeyB64: String) {
-        repo.dismissUnappliedAdd(groupIdHex, addSignatureKeyB64)
-        mutableUnappliedAdds.value = repo.unappliedAdds(groupIdHex)
+    public fun onDismissNotApplied(rowKey: String) {
+        repo.dismissNotApplied(groupIdHex, rowKey)
+        mutableNotApplied.value = repo.notAppliedRequests(groupIdHex)
     }
 
     public fun onRejectJoin(proposalRef: ByteArray) {

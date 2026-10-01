@@ -7,7 +7,7 @@
 //! signed binding in the leaf credential; every gate resolves a leaf to its
 //! account before asking who may do what. These tests drive the public API
 //! only and pin: the resolver, the two self-service arms, the owner's last
-//! leaf, the per-account cap, the acting-leaf committer rank, the self-service
+//! leaf, the per-account cap, the per-account committer rank, the self-service
 //! sweep, and per-account authorship.
 
 use lakko_mls::{
@@ -387,8 +387,12 @@ fn an_account_cannot_exceed_the_per_group_device_cap() {
 // Committer rank and the self-service sweep
 // ============================================================================
 
+/// ADR-0050 section 2.5a item 6: every leaf of a ranked account holds the
+/// account's rank, from its own view and from every peer's. Which device acts
+/// is the beacon fold's tie-break among the account's ACTIVE devices, not a
+/// rule over the roster, because a lost device stays in the roster.
 #[test]
-fn only_the_lowest_leaf_of_a_ranked_account_acts_and_peers_agree() {
+fn every_leaf_of_a_ranked_account_holds_its_rank_and_peers_agree() {
     let mut s = scene(0x08);
     let a2 = device(&s.a, 0xA2);
     let p = s
@@ -408,29 +412,20 @@ fn only_the_lowest_leaf_of_a_ranked_account_acts_and_peers_agree() {
     let a2_g =
         Group::join_from_welcome(&wire(sweep.welcome.expect("welcome")), &a2).expect("a2 joins");
 
-    let r1 = s.a1_g.own_committer_rank(&s.a1);
-    let r2 = a2_g.own_committer_rank(&a2);
-    assert!(
-        matches!((r1, r2), (Some(0), None) | (None, Some(0))),
-        "exactly one of the owner's devices acts, got {r1:?} / {r2:?}"
-    );
-    let acting = if r1.is_some() { &s.a1 } else { &a2 };
-    let idle = if r1.is_some() { &a2 } else { &s.a1 };
-    assert!(
-        acting.signature_public_key() < idle.signature_public_key(),
-        "the acting device is the lowest leaf key"
-    );
-    // Every peer ranks the same device. Since ADR-0050 section 2.5a a plain
-    // member account is ranked after the admins (here: none), in bytewise
-    // account-key order among the plain accounts {bob, charlie}.
+    assert_eq!(s.a1_g.own_committer_rank(&s.a1), Some(0));
+    assert_eq!(a2_g.own_committer_rank(&a2), Some(0));
+    // Every peer ranks both of the owner's devices the same. Since ADR-0050
+    // section 2.5a a plain member account is ranked after the admins (here:
+    // none), in bytewise account-key order among the plain accounts
+    // {bob, charlie}.
     let bob_rank = if account_key(&s.b) < account_key(&s.c) {
         1
     } else {
         2
     };
-    for g in [&s.b_g, &s.c1_g] {
-        assert_eq!(g.committer_rank_of(acting.signature_public_key()), Some(0));
-        assert_eq!(g.committer_rank_of(idle.signature_public_key()), None);
+    for g in [&s.a1_g, &a2_g, &s.b_g, &s.c1_g] {
+        assert_eq!(g.committer_rank_of(s.a1.signature_public_key()), Some(0));
+        assert_eq!(g.committer_rank_of(a2.signature_public_key()), Some(0));
         assert_eq!(
             g.committer_rank_of(s.b.signature_public_key()),
             Some(bob_rank)

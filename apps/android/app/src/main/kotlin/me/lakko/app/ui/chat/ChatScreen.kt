@@ -3366,7 +3366,7 @@ private fun MembersSheet(
     val pendingJoins by viewModel.pendingJoins.collectAsStateWithLifecycle()
     val unkeptJoinRequest by viewModel.unkeptJoinRequest.collectAsStateWithLifecycle()
     val pendingRequests by viewModel.pendingRequests.collectAsStateWithLifecycle()
-    val unappliedAdds by viewModel.unappliedAdds.collectAsStateWithLifecycle()
+    val notApplied by viewModel.notApplied.collectAsStateWithLifecycle()
     val pendingNotice by viewModel.pendingNotice.collectAsStateWithLifecycle()
     val joinAttributions by viewModel.joinAttributions.collectAsStateWithLifecycle()
     val inviteLink by viewModel.inviteLink.collectAsStateWithLifecycle()
@@ -3713,9 +3713,9 @@ private fun MembersSheet(
                 // does the copy. A TOP-LEVEL block rather than a child of the
                 // pending notice above, because a `Not applied` row is exactly
                 // the case where nothing is pending any more.
-                if (unappliedAdds.isNotEmpty()) {
+                if (notApplied.isNotEmpty()) {
                     Text(
-                        text = me.lakko.app.chat.unappliedHeading(unappliedAdds.size),
+                        text = me.lakko.app.chat.unappliedHeading(notApplied.size),
                         style = MaterialTheme.typography.titleSmall,
                     )
                     Text(
@@ -3724,7 +3724,7 @@ private fun MembersSheet(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(6.dp))
-                    unappliedAdds.forEach { item ->
+                    notApplied.forEach { item ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
@@ -3734,7 +3734,7 @@ private fun MembersSheet(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = viewModel.nameOfKeyB64(
-                                        item.addSignatureKeyB64,
+                                        item.subjectKeyB64,
                                     ),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
@@ -3746,7 +3746,7 @@ private fun MembersSheet(
                             }
                             TextButton(
                                 onClick = {
-                                    viewModel.onDismissUnapplied(item.addSignatureKeyB64)
+                                    viewModel.onDismissNotApplied(item.rowKey)
                                 },
                             ) { Text("Dismiss") }
                         }

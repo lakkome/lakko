@@ -35,6 +35,7 @@ import me.lakko.app.chat.SharedPrefsPendingRequestStore
 import me.lakko.app.chat.SharedPrefsUnappliedRequestStore
 import me.lakko.app.chat.StoredGroupName
 import me.lakko.app.chat.StoredPin
+import me.lakko.app.chat.UnappliedKind
 import me.lakko.app.chat.UnappliedRow
 import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.AcceptedContactsStore
@@ -239,7 +240,7 @@ class AccountLocalWipeTest {
         KnownGroupsStore(context).add(acct, group)
         SharedPrefsBeaconObservationStore(context).save(acct, group, mapOf("key" to 1L))
         SharedPrefsPendingRequestStore(context).save(acct, group, mapOf("ref" to RequestObservation(atMs = 1L, own = true)))
-        SharedPrefsUnappliedRequestStore(context).save(acct, group, mapOf("ref" to UnappliedRow(viaJoinRequest = true)))
+        SharedPrefsUnappliedRequestStore(context).save(acct, group, mapOf("join:ref" to UnappliedRow(UnappliedKind.JOIN_APPROVE, "ref")))
         SharedPrefsLastObservedOwnerStore(context).save(acct, group, "owner")
         SharedPrefsLeaveRecordStore(context).save(acct, group, 5L)
         GroupNameStore.save(context, acct, group, StoredGroupName("Family", 1uL))

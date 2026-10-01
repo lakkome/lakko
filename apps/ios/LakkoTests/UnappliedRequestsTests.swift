@@ -41,113 +41,69 @@ final class UnappliedRequestsTests: XCTestCase {
         super.tearDown()
     }
 
-    private func own(joinRequest: Bool = false) -> RequestObservation {
-        RequestObservation(atMs: 1_000, own: true, joinRequest: joinRequest)
+    // MARK: - ADR-0050 2.5a — rows from a stopped re-request
+
+    /// The add-only detector is gone: a row is now made from the INTENT whose
+    /// re-request stopped, and every intent kind maps to exactly one row kind
+    /// keyed on its subject's signature key.
+    func testEveryIntentKindMapsToOneRowAboutItsSubject() {
+        let cases: [(MembershipIntent.Request, UnappliedKind, Bool)] = [
+            (.add(personKeyB64: contact, accountIdB64: "YWNjdA==", leafKeysB64: []), .add, false),
+            (.approveJoin(joinerKeyB64: joiner), .add, true),
+            (.remove(personKeyB64: contact), .removal, false),
+            (.setAdmin(personKeyB64: contact, makeAdmin: true), .roleChange, false),
+            (.transferOwnership(toPersonKeyB64: contact, outgoing: .admin), .ownershipTransfer, false),
+            (.leave(ownPersonKeyB64: contact), .leave, false),
+            (.ownDeviceAdd(deviceKeyB64: contact), .deviceAdd, false),
+            (.ownDeviceRemove(deviceKeyB64: contact), .deviceRemoval, false),
+        ]
+        for (request, kind, viaJoin) in cases {
+            let row = unappliedRow(for: MembershipIntent(request: request, epoch: 3))
+            XCTAssertEqual(row.kind, kind)
+            XCTAssertEqual(row.viaJoinRequest, viaJoin)
+            XCTAssertEqual(row.addSignatureKeyB64, viaJoin ? joiner : contact)
+        }
     }
 
-    // MARK: - Detection
-
-    /// The whole point. The approving admin's own `add:` observation is gone
-    /// from the core's live pending set and the joiner is not in the roster, so
-    /// the request died without a trace anywhere else.
-    ///
-    /// DISCRIMINATION (RUN, then reverted): with the roster check inverted
-    /// (`roster.contains` -> `!roster.contains`) two tests went red, this one
-    /// with:
-    ///
-    ///     XCTAssertEqual failed: ("0") is not equal to ("1")
-    func testReportsAnOwnAddThatLeftThePendingSetWithoutReachingTheRoster() {
-        let out = unappliedAddRequests(
-            observations: ["add:\(joiner)": own(joinRequest: true)],
-            liveKeys: [],
-            rosterKeysB64: [])
-        XCTAssertEqual(out.count, 1)
+    /// A removal and a role change about the SAME person are two rows: the row
+    /// key carries the kind for every kind but the original add.
+    func testRowsOfDifferentKindsAboutOnePersonDoNotOverwriteEachOther() {
+        store.record(
+            accountIdB64: account, groupIdB64: group,
+            items: [
+                UnappliedAdd(addSignatureKeyB64: contact, viaJoinRequest: false, kind: .removal),
+                UnappliedAdd(addSignatureKeyB64: contact, viaJoinRequest: false, kind: .roleChange),
+                UnappliedAdd(addSignatureKeyB64: contact, viaJoinRequest: false),
+            ])
+        let rows = store.load(accountIdB64: account, groupIdB64: group)
+        XCTAssertEqual(Set(rows.map(\.kind)), [.add, .removal, .roleChange])
+        XCTAssertTrue(rows.allSatisfy { $0.addSignatureKeyB64 == contact })
         XCTAssertEqual(
-            out.first,
-            UnappliedAdd(addSignatureKeyB64: joiner, viaJoinRequest: true))
+            Set(rows.map(\.rowKey)), [contact, "removal:\(contact)", "role-change:\(contact)"])
+        store.dismiss(
+            accountIdB64: account, groupIdB64: group, addSignatureKeyB64: "removal:\(contact)")
+        XCTAssertEqual(
+            Set(store.load(accountIdB64: account, groupIdB64: group).map(\.kind)),
+            [.add, .roleChange])
     }
 
-    /// The single most important false positive to exclude: the request WORKED.
-    ///
-    /// DISCRIMINATION (RUN, then reverted): dropping the roster membership test
-    /// entirely made this red:
-    ///
-    ///     XCTAssertEqual failed: ("1") is not equal to ("0")
-    func testSaysNothingWhenTheAddLanded() {
-        XCTAssertEqual(
-            unappliedAddRequests(
-                observations: ["add:\(joiner)": own(joinRequest: true)],
-                liveKeys: [],
-                rosterKeysB64: [joiner]
-            ).count,
-            0)
-    }
-
-    func testSaysNothingWhileTheRequestIsStillPending() {
-        XCTAssertEqual(
-            unappliedAddRequests(
-                observations: ["add:\(joiner)": own()],
-                liveKeys: ["add:\(joiner)"],
-                rosterKeysB64: []
-            ).count,
-            0)
-    }
-
-    /// UX §10 — a member is never told about someone else's request.
-    ///
-    /// DISCRIMINATION (RUN, then reverted): with the `own` guard removed:
-    ///
-    ///     XCTAssertEqual failed: ("1") is not equal to ("0")
-    func testIgnoresARequestThisDeviceDidNotMake() {
-        XCTAssertEqual(
-            unappliedAddRequests(
-                observations: ["add:\(joiner)": RequestObservation(atMs: 1_000, own: false)],
-                liveKeys: [],
-                rosterKeysB64: []
-            ).count,
-            0)
-    }
-
-    /// The deliberate scope limit, pinned so nobody widens it by accident.
-    ///
-    /// `remove:` and `leave:` name a LEAF and OpenMLS hands a vacated leaf to
-    /// the next `Add`, so a roster test on one can be wrong in both directions;
-    /// a `role-change` carries no payload at all. All three are also VISIBLE
-    /// when they fail — the person you tried to remove is still in the roster,
-    /// and a group you failed to leave is still in your list. The add is the
-    /// only request whose failure leaves no trace, and the only one whose
-    /// effect test is keyed on a signature key rather than a leaf.
-    func testClaimsNothingAboutARemoveALeaveOrARoleChange() {
-        XCTAssertEqual(
-            unappliedAddRequests(
-                observations: [
-                    "remove:4": own(),
-                    "leave:2": own(),
-                    "role-change": own(),
-                    "update:3": own(),
-                ],
-                liveKeys: [],
-                rosterKeysB64: []
-            ).count,
-            0)
-    }
-
-    /// A torn roster read is UNKNOWN, never "nobody is in the group" — the same
-    /// fail-closed direction `membershipRotationDecision` takes with the
-    /// identical signal.
-    ///
-    /// DISCRIMINATION (RUN, then reverted): with the `nil` guard replaced by
-    /// `rosterKeysB64 ?? []`:
-    ///
-    ///     XCTAssertEqual failed: ("1") is not equal to ("0")
-    func testClaimsNothingWhenTheRosterCouldNotBeRead() {
-        XCTAssertEqual(
-            unappliedAddRequests(
-                observations: ["add:\(joiner)": own(joinRequest: true)],
-                liveKeys: [],
-                rosterKeysB64: nil
-            ).count,
-            0)
+    /// The new kinds state what did not happen and nothing more — no reason,
+    /// and no "you can do it again", which is false when the row exists
+    /// because the authority to do it is gone.
+    func testTheNewKindsStateNoReasonAndOfferNoRedo() {
+        let banned = ["expired", "refused", "rejected", "invalid", "failed", "error", "because",
+                      "again"]
+        let kinds: [UnappliedKind] = [
+            .removal, .roleChange, .ownershipTransfer, .leave, .deviceAdd, .deviceRemoval,
+        ]
+        for kind in kinds {
+            let line = unappliedLine(
+                UnappliedAdd(addSignatureKeyB64: contact, viaJoinRequest: false, kind: kind))
+            XCTAssertFalse(line.isEmpty)
+            for word in banned {
+                XCTAssertFalse(line.lowercased().contains(word), "\(kind): \(line)")
+            }
+        }
     }
 
     // MARK: - Copy

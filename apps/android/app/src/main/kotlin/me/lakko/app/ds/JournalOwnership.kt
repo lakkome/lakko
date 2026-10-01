@@ -279,11 +279,11 @@ public fun evictedBetween(before: List<ByteArray>, after: List<ByteArray>): List
 }
 
 /**
- * The revoke list of a commit: the registrar public key of each evictee, which
- * only the ROOT can derive (`dsJournalRegistrarSeed(rootSeed, accountKey)`).
- * An admin committer passes `null` for [deriveRegistrarKey] and sends an empty
- * list; the owner revokes on its next reconcile (the ADR residual). A key the
- * derivation fails for is skipped, never guessed.
+ * The revoke list of a ROOT committer: the registrar public key of each
+ * evictee, which only the root can derive
+ * (`dsJournalRegistrarSeed(rootSeed, accountKey)`). A key the derivation fails
+ * for is skipped, never guessed. An admin committer has no derivation and
+ * revokes from the registrar list instead ([revokeListFromRegistrarList]).
  */
 public fun revokeListFor(
     evictees: List<ByteArray>,
@@ -297,8 +297,115 @@ public fun revokeListFor(
 }
 
 // -----------------------------------------------------------------
+// The registrar list (ADR-0057, amended 2026-10-01)
+// -----------------------------------------------------------------
+
+/** One registrar the root appointed, as every member learns it from the
+ *  clear header of a registrar-seed envelope: its public key and rank. */
+public class ListedRegistrar(public val publicKey: ByteArray, public val rank: JournalRank)
+
+/**
+ * ADR-0057 "Who revokes" item 1 — whether a decoded registrar-seed envelope may
+ * enter this device's registrar list (addressee account -> registrar public
+ * key + rank), WHOEVER it is addressed to. Only a member / admin appointment
+ * ([SeedEnvelopeRank.ROOT] is a root handover, not a registrar), naming this
+ * journal, whose MLS sender resolved at receipt (C-68) to the live role
+ * table's owner. Everything unknown refuses.
+ *
+ * The public key is the clear header's; the core binds it to the sealed seed
+ * (the addressee's open refuses a seed that does not derive it), so a list
+ * entry can only name a key the owner really appointed with.
+ */
+public fun registrarListEntryAccepted(
+    header: SeedEnvelopeHeader,
+    groupId: ByteArray,
+    senderAccountKey: ByteArray?,
+    ownerAccountKey: ByteArray?,
+): Boolean {
+    if (header.rank == SeedEnvelopeRank.ROOT) return false
+    if (!header.journalId.contentEquals(groupId)) return false
+    if (senderAccountKey == null || ownerAccountKey == null) return false
+    return senderAccountKey.contentEquals(ownerAccountKey)
+}
+
+/** The [JournalRank] a member / admin seed-envelope rank appoints, or `null`
+ *  for a root handover. */
+public fun journalRankOf(rank: SeedEnvelopeRank): JournalRank? = when (rank) {
+    SeedEnvelopeRank.MEMBER -> JournalRank.MEMBER
+    SeedEnvelopeRank.ADMIN -> JournalRank.ADMIN
+    SeedEnvelopeRank.ROOT -> null
+}
+
+/**
+ * ADR-0057 "Who revokes" item 1 — the revoke list of a committer that is NOT
+ * the root: the listed registrar public key of each evictee ([listed], keyed
+ * by lowercase hex of the account key) whose rank [signerRank] strictly
+ * outranks. The DS lets a signer revoke only strictly lower ranks, so an
+ * equal or higher rank is skipped rather than sent: an admin cannot revoke
+ * another admin (removing an admin stays the root's), and a member-rank
+ * registrar revokes nothing. The owner's next `registrars-set` remains the
+ * backstop for anything skipped or never listed here. Never this account's
+ * own key; `null` [signerRank] (no registrar key at all) revokes nothing.
+ */
+public fun revokeListFromRegistrarList(
+    evictees: List<ByteArray>,
+    ownAccountKey: ByteArray?,
+    signerRank: JournalRank?,
+    listed: Map<String, ListedRegistrar>,
+): List<ByteArray> {
+    if (signerRank == null) return emptyList()
+    val seen = HashSet<String>()
+    return evictees
+        .filterNot { ownAccountKey != null && it.contentEquals(ownAccountKey) }
+        .mapNotNull { key ->
+            val hex = hexOf(key)
+            if (!seen.add(hex)) return@mapNotNull null
+            val entry = listed[hex] ?: return@mapNotNull null
+            if (outranks(signerRank, entry.rank)) entry.publicKey.copyOf() else null
+        }
+}
+
+private fun outranks(signer: JournalRank, target: JournalRank): Boolean =
+    signer == JournalRank.ADMIN && target == JournalRank.MEMBER
+
+// -----------------------------------------------------------------
 // Appointments (obligation 3)
 // -----------------------------------------------------------------
+
+/**
+ * The delivery-record key of one device ([deviceHex], the leaf's signature
+ * key) of one appointed account ([accountHex]). ADR-0057 "Who revokes" item 2:
+ * the owner tracks delivery per DEVICE, so a device that joined after the
+ * envelope was posted (and cannot decrypt rows of earlier epochs) gets its own
+ * copy at the next reconcile. An empty [deviceHex] is the per-account key
+ * used when no device list is known.
+ */
+public fun deliveryKey(accountHex: String, deviceHex: String): String =
+    if (deviceHex.isEmpty()) accountHex else accountHex + DELIVERY_KEY_SEPARATOR + deviceHex
+
+/** The account part of a [deliveryKey]. */
+public fun accountHexOfDeliveryKey(key: String): String = key.substringBefore(DELIVERY_KEY_SEPARATOR)
+
+private const val DELIVERY_KEY_SEPARATOR: Char = '/'
+
+/**
+ * The delivery record a fully served [desired] set amounts to: one entry per
+ * device of each desired account ([devicesOf], lowercase hex leaf keys; an
+ * account with no known device is recorded per account).
+ */
+public fun expectedDeliveries(
+    desired: Map<String, JournalRank>,
+    devicesOf: ((accountHex: String) -> Collection<String>)?,
+): Map<String, JournalRank> {
+    val out = LinkedHashMap<String, JournalRank>()
+    for ((hex, rank) in desired) {
+        for (device in devicesFor(hex, devicesOf)) out[deliveryKey(hex, device)] = rank
+    }
+    return out
+}
+
+private fun devicesFor(accountHex: String, devicesOf: ((String) -> Collection<String>)?): Collection<String> =
+    devicesOf?.invoke(accountHex)?.takeIf { it.isNotEmpty() } ?: listOf("")
 
 /**
  * The registrar set the owner wants: every member account other than its own,
@@ -359,7 +466,8 @@ public suspend fun sendRegistrarSet(
 
 /** What [reconcileAppointments] did. */
 public data class AppointmentResult(
-    /** Accounts that hold their seed envelope now, at which rank: store it as
+    /** The devices (or, with no device list, the accounts) that hold their
+     *  seed envelope now, at which rank, keyed by [deliveryKey]: store it as
      *  the new record. */
     val delivered: Map<String, JournalRank>,
     /** The fingerprint of the set this pass sent, or `null` when no
@@ -389,6 +497,11 @@ public data class AppointmentResult(
  * @param registrarSeedFor the root's derivation for one member account
  *   (`dsJournalRegistrarSeed(rootSeed, accountKey)`).
  * @param registrarPublicKeyOf the public key of a registrar seed.
+ * @param devicesOf the leaf signature keys (lowercase hex) of an account in
+ *   the live roster. When given, [delivered] is keyed per device
+ *   ([deliveryKey]) and an account with a device not yet served is sent its
+ *   envelope again (ADR-0057 "Who revokes" item 2); `null` keeps the record
+ *   per account.
  */
 public suspend fun reconcileAppointments(
     journalId: ByteArray,
@@ -401,11 +514,18 @@ public suspend fun reconcileAppointments(
     memberX25519: suspend (accountKey: ByteArray) -> ByteArray?,
     put: suspend (make: () -> DsStatement) -> Unit,
     sendEnvelope: suspend (accountKey: ByteArray, x25519: ByteArray, rank: JournalRank, seed: ByteArray) -> Unit,
+    devicesOf: ((accountHex: String) -> Collection<String>)? = null,
 ): AppointmentResult {
     val fingerprint = registrarSetFingerprint(desired)
     val setDue = lastSentSet != fingerprint
-    val owed = desired.filter { (hex, rank) -> delivered[hex] != rank }
-    val kept = delivered.filter { (hex, rank) -> desired[hex] == rank }
+    val expected = expectedDeliveries(desired, devicesOf)
+    // An account is owed an envelope while ANY of its current devices lacks a
+    // delivery at the desired rank: one envelope (sealed to the account key)
+    // serves every device that can read the epoch it is posted at.
+    val owed = desired.filter { (hex, rank) ->
+        devicesFor(hex, devicesOf).any { device -> delivered[deliveryKey(hex, device)] != rank }
+    }
+    val kept = delivered.filter { (key, rank) -> expected[key] == rank }
     if (!setDue && owed.isEmpty() && kept.size == delivered.size) {
         return AppointmentResult(delivered, sentSet = null, complete = true)
     }
@@ -449,7 +569,7 @@ public suspend fun reconcileAppointments(
         val seed = registrarSeedFor(accountKey)
         try {
             sendEnvelope(accountKey, x25519, rank, seed)
-            next[hex] = rank
+            for (device in devicesFor(hex, devicesOf)) next[deliveryKey(hex, device)] = rank
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             throw cancellation
         } catch (_: Throwable) {

@@ -237,34 +237,191 @@ public fun pickWriteGrant(
     held: Collection<HeldGrantRef>,
     purpose: WritePurpose,
     groupHex: String? = null,
-): HeldGrantRef? {
-    fun first(kind: ReachKind, scope: String? = null): HeldGrantRef? =
+): HeldGrantRef? = orderedWriteGrants(held, purpose, groupHex).firstOrNull()
+
+/**
+ * Every grant held for one person that may authorise a write of [purpose], in
+ * the order [pickWriteGrant] prefers them (within one class, by scope), each
+ * once. ADR-0050 section 2.5a item 7: a Welcome writer tries them in this
+ * order and moves to the next on a `401` (the person rotated that key away),
+ * so a stale grant never hides a live one held under another class or scope.
+ */
+public fun orderedWriteGrants(
+    held: Collection<HeldGrantRef>,
+    purpose: WritePurpose,
+    groupHex: String? = null,
+): List<HeldGrantRef> {
+    fun all(kind: ReachKind, scope: String? = null): List<HeldGrantRef> =
         held.filter { it.kind == kind && (scope == null || it.scopeHex == scope) }
-            .minByOrNull { it.scopeHex }
-    val order: List<() -> HeldGrantRef?> = when (purpose) {
+            .sortedBy { it.scopeHex }
+    val order: List<() -> List<HeldGrantRef>> = when (purpose) {
         WritePurpose.CONTACT_REQUEST -> listOf(
-            { first(ReachKind.CONTACT) },
-            { first(ReachKind.GROUP) },
-            { first(ReachKind.CHANNEL) },
-            { first(ReachKind.FOF) },
+            { all(ReachKind.CONTACT) },
+            { all(ReachKind.GROUP) },
+            { all(ReachKind.CHANNEL) },
+            { all(ReachKind.FOF) },
         )
         WritePurpose.REPLY -> listOf(
-            { first(ReachKind.REPLY) },
-            { first(ReachKind.CONTACT) },
+            { all(ReachKind.REPLY) },
+            { all(ReachKind.CONTACT) },
         )
         WritePurpose.WELCOME -> listOf(
-            { first(ReachKind.REPLY) },
-            { first(ReachKind.CONTACT) },
-            { groupHex?.let { first(ReachKind.MEMBER, it) } },
-            { groupHex?.let { first(ReachKind.GROUP, it) } },
-            { first(ReachKind.GROUP) },
-            { first(ReachKind.CHANNEL) },
-            { first(ReachKind.FOF) },
+            { all(ReachKind.REPLY) },
+            { all(ReachKind.CONTACT) },
+            { groupHex?.let { all(ReachKind.MEMBER, it) }.orEmpty() },
+            { groupHex?.let { all(ReachKind.GROUP, it) }.orEmpty() },
+            { all(ReachKind.GROUP) },
+            { all(ReachKind.CHANNEL) },
+            { all(ReachKind.FOF) },
         )
     }
-    for (candidate in order) candidate()?.let { return it }
-    return null
+    val out = LinkedHashSet<HeldGrantRef>()
+    for (candidate in order) out.addAll(candidate())
+    return out.toList()
 }
+
+/** What [firstAcceptedWrite] ended with. */
+public sealed class SignedWriteOutcome<out T> {
+    /** A candidate's write was stored. */
+    public data class Written<T>(val result: T) : SignedWriteOutcome<T>()
+
+    /** No candidate was accepted: none existed ([lastRefusal] `null`), or each
+     *  was refused with a `401`. Nothing was written. */
+    public data class Exhausted(val lastRefusal: Throwable?) : SignedWriteOutcome<Nothing>()
+}
+
+/**
+ * ADR-0050 section 2.5a item 7 — try each authorisation in [candidates] in
+ * order: a `401` ([isRefusal]) moves to the next one, anything else
+ * propagates. A candidate that yields `null` (its signer could not be built)
+ * is skipped. Never writes without a candidate: what to do when every
+ * candidate is spent is the caller's call.
+ */
+public suspend fun <A, T> firstAcceptedWrite(
+    candidates: List<() -> A?>,
+    write: suspend (A) -> T,
+    isRefusal: (Throwable) -> Boolean,
+): SignedWriteOutcome<T> {
+    var lastRefusal: Throwable? = null
+    for (candidate in candidates) {
+        val auth = try {
+            candidate()
+        } catch (_: Throwable) {
+            null
+        } ?: continue
+        try {
+            return SignedWriteOutcome.Written(write(auth))
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException || !isRefusal(cause)) throw cause
+            lastRefusal = cause
+        }
+    }
+    return SignedWriteOutcome.Exhausted(lastRefusal)
+}
+
+// -----------------------------------------------------------------
+// Versions after a restore (ADR-0060 §1, amended 2026-10-01)
+// -----------------------------------------------------------------
+
+/**
+ * The highest version a device with no version state tries per slot when it
+ * recovers versions from the keys its mailbox holds.
+ *
+ * Chosen, not measured. A slot's version moves by one per rotation: a removed
+ * contact (`contact`, `fof`), a group that shrank (`group`, `member` of that
+ * group), and for `channel` it follows the channel epoch. 256 rotations of one
+ * slot is far past what a person accumulates through removals, while the scan
+ * stays at 257 key derivations per slot, run once per slot per restore in the
+ * background. The residual: a slot rotated more than 256 times (in practice a
+ * long-lived channel's epoch) finds no registered key in range and starts at
+ * 0, which is what the ADR prescribes for a class with no registered key; a
+ * channel's slot is then raised to the channel epoch on the next member card.
+ */
+public const val MAX_RECOVERED_REACH_VERSION: Int = 256
+
+/** Where a document stands on recovering its versions from the server. */
+public enum class VersionRecovery {
+    /** The device held no version state: until the owner-only reach read
+     *  succeeds nothing versioned is registered. */
+    PENDING,
+
+    /** Not needed (the device held version state), or done. */
+    DONE,
+}
+
+/**
+ * Whether a document holds no version state at all — a fresh install or a
+ * restore with no other device alive: no slot was ever rotated, nothing was
+ * ever registered from here, and no ReachState arrived from a sibling. Only
+ * such a device recovers versions; any other trusts its own counters.
+ */
+public fun holdsNoVersionState(versionsEmpty: Boolean, registeredEmpty: Boolean, reachStateKnown: Boolean): Boolean =
+    versionsEmpty && registeredEmpty && !reachStateKnown
+
+/** A slot's stable spelling in the document (`KIND:scopeHex`). */
+public fun reachSlotId(slot: ReachSlot): String = slot.kind.name + ":" + slot.scopeHex
+
+/**
+ * The slots a restored device can name and recover: `contact` and `fof`
+ * (empty scope), `group` and `member` of each group it holds, `channel` of
+ * each channel it holds. `link` and `reply` are per capability or single use
+ * and are never recovered.
+ */
+public fun recoverableSlots(joinedGroups: Collection<String>, channels: Collection<String>): List<ReachSlot> {
+    val out = ArrayList<ReachSlot>()
+    out += ReachSlot(ReachKind.CONTACT, "")
+    out += ReachSlot(ReachKind.FOF, "")
+    for (group in joinedGroups.map { it.lowercase() }.distinct().sorted()) {
+        out += ReachSlot(ReachKind.MEMBER, group)
+        out += ReachSlot(ReachKind.GROUP, group)
+    }
+    for (channel in channels.map { it.lowercase() }.distinct().sorted()) out += ReachSlot(ReachKind.CHANNEL, channel)
+    return out
+}
+
+/**
+ * The version [slot] resumes at: the HIGHEST version in `0..bound` whose
+ * public key ([publicKeyHexAt], lowercase hex) is in [registered], or `null`
+ * when none is (the slot then starts at 0). Taking the highest means nothing
+ * lower is ever registered again, so a key rotated away (a removed contact,
+ * an evicted member) never comes back.
+ */
+public fun recoverSlotVersion(
+    slot: ReachSlot,
+    registered: Set<String>,
+    publicKeyHexAt: (ReachSlot, Int) -> String?,
+    bound: Int = MAX_RECOVERED_REACH_VERSION,
+): Int? {
+    if (registered.isEmpty()) return null
+    var found: Int? = null
+    for (version in 0..bound) {
+        val pk = publicKeyHexAt(slot, version) ?: continue
+        if (pk in registered) found = version
+    }
+    return found
+}
+
+/** [recoverSlotVersion] for each of [slots]; only the slots with a
+ *  registered key appear. */
+public fun recoverVersions(
+    slots: Collection<ReachSlot>,
+    registered: Set<String>,
+    publicKeyHexAt: (ReachSlot, Int) -> String?,
+    bound: Int = MAX_RECOVERED_REACH_VERSION,
+): Map<ReachSlot, Int> {
+    val out = LinkedHashMap<ReachSlot, Int>()
+    for (slot in slots) recoverSlotVersion(slot, registered, publicKeyHexAt, bound)?.let { out[slot] = it }
+    return out
+}
+
+/**
+ * What may be registered while a recovery is [VersionRecovery.PENDING]: only
+ * the keys that carry no version history (`link`, `reply`), so an invite link
+ * or an outgoing request still works. A versioned key could be one a rotation
+ * removed, so none goes out until the server read tells which is current.
+ */
+public fun registrableBeforeRecovery(desired: List<DesiredReachKey>): List<DesiredReachKey> =
+    desired.filter { it.slot.kind == ReachKind.LINK || it.slot.kind == ReachKind.REPLY }
 
 /** The reply scopes (hex) whose seven days have run out at [nowMs]. */
 public fun expiredReplies(replies: Map<String, Long>, nowMs: Long): Set<String> =

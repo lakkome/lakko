@@ -30,23 +30,22 @@ import android.content.SharedPreferences
  *
  * The core reports **no reason**: `CreateCommitError` carries no proposal
  * reference on any variant, so "why" does not exist at this layer and no copy
- * here may claim one. What exists is the observation:
+ * here may claim one.
  *
- * > **A request of mine left the core's pending set without its effect landing.**
+ * ## Re-requested first, listed only when that stops (ADR-0050 section 2.5a)
  *
- * That runs on **every** device rather than only on the sweeper — which matters,
- * because the device that swept is often not the device that asked — and it
- * needs no core change, no new wire artifact and no new FFI.
- *
- * ## Why only an `add`
- *
- * `remove:` and `leave:` keys name a **leaf index**, and OpenMLS hands a vacated
- * leaf to the next `Add`, so a roster test on a leaf can be wrong in both
- * directions. `role-change` carries no payload at all. And all three are already
- * **visible** when they fail — the member you tried to remove is still in the
- * roster, the group you failed to leave is still in your list. The `add` is the
- * only request whose failure leaves no trace anywhere, and the only one whose
- * effect test is keyed on a **signature key** rather than a leaf.
+ * This list used to be the whole answer for adds, and nothing at all for the
+ * other kinds: a dropped add was listed, a dropped remove, leave or role change
+ * was simply gone. Since ADR-0050 section 2.5a a plain member may sweep device
+ * admissions, and its sweep drops every other pending request by design, so a
+ * dropped request became an ordinary event. Every own request kind is now
+ * RE-REQUESTED, silently, from the intent recorded when it was published
+ * (`MembershipRetry.kt`, [supersededVerdict]); a request lands here only when
+ * that re-request STOPS for a reason other than its effect landing or its
+ * subject leaving — the author lost the role it needs, the core refuses it for
+ * the group's state, or an approved join's KeyPackage is gone. The intent is
+ * keyed on a **signature key**, never a leaf, which is what lets a removal or a
+ * leave be tested at all (OpenMLS hands a vacated leaf to the next `Add`).
  *
  * ## What the JOINER is told: nothing, and that is a finding rather than a gap
  *
@@ -62,80 +61,68 @@ import android.content.SharedPreferences
  * automatic, which re-mints a fresh KeyPackage.
  */
 
-/** One own `add` request that left the pending set without landing. */
-public data class UnappliedAdd(
-    /** base64 of the prospective member's 32-byte Ed25519 signature key. */
-    val addSignatureKeyB64: String,
-    /**
-     * `true` when this device published the request by approving an external
-     * **join** rather than by adding a contact.
-     *
-     * Knowable ONLY on the device that made the request: on the wire an approved
-     * add is indistinguishable from an admin adding a contact (ADR-0045 S7),
-     * which is the point rather than a limitation. That device is the one this
-     * notice is shown on.
-     */
-    val viaJoinRequest: Boolean,
-)
-
 /**
- * The own `add` requests that are dead: observed as ours, no longer in the
- * core's live pending set, and not in the roster.
- *
- * Pure. `liveKeys` and `rosterKeysB64` must be read in the SAME pass — the
- * pending set is emptied by the merge that also moves the roster.
- *
- * A `null` roster is a torn read, not an empty group, and claims NOTHING — the
- * same fail-closed direction [membershipRotationDecision]'s caller takes with
- * the identical signal.
+ * What kind of own request did not apply. ADR-0050 section 2.5a point 4 widened
+ * this from adds only: every own request kind is now re-requested when a sweep
+ * drops it, and is listed here only when the re-request STOPPED for a reason
+ * other than its effect landing or its subject leaving.
  */
-internal fun unappliedAddRequests(
-    observations: Map<String, RequestObservation>,
-    liveKeys: Collection<String>,
-    rosterKeysB64: Collection<String>?,
-): List<UnappliedAdd> {
-    if (rosterKeysB64 == null) return emptyList()
-    val live = liveKeys.toSet()
-    val roster = rosterKeysB64.toSet()
-    val out = mutableListOf<UnappliedAdd>()
-    for ((key, seen) in observations) {
-        // UX §10 — a member is never told about someone else's request.
-        if (!seen.own) continue
-        if (!key.startsWith("add:")) continue
-        val addKeyB64 = key.removePrefix("add:")
-        // `proposalKey` writes `add:` with an empty key when none was resolved.
-        // That names nobody, so there is nothing honest to say about it.
-        if (addKeyB64.isEmpty() || addKeyB64 == "?") continue
-        if (live.contains(key)) continue
-        if (roster.contains(addKeyB64)) continue
-        out.add(UnappliedAdd(addKeyB64, seen.joinRequest))
+public enum class UnappliedKind(internal val wire: String) {
+    ADD("add"),
+
+    /** An add this device published by approving an external join. Knowable
+     *  ONLY on the device that approved: on the wire an approved add is
+     *  indistinguishable from an admin adding a contact (ADR-0045 S7). */
+    JOIN_APPROVE("join"),
+    REMOVE("remove"),
+    LEAVE("leave"),
+    MAKE_ADMIN("make-admin"),
+    REMOVE_ADMIN("remove-admin"),
+    TRANSFER_OWNERSHIP("transfer"),
+    ;
+
+    internal companion object {
+        fun fromWire(wire: String): UnappliedKind? = values().firstOrNull { it.wire == wire }
     }
-    return out
+}
+
+/** One own request that did not apply and will not be re-requested. */
+public data class UnappliedRequest(
+    /** base64 of the subject's 32-byte Ed25519 signature key. */
+    val subjectKeyB64: String,
+    val kind: UnappliedKind,
+) {
+    /** The store key and the dismiss handle: one row per kind per subject. */
+    val rowKey: String get() = "${kind.wire}:$subjectKeyB64"
 }
 
 /**
  * The line under one row.
  *
- * States that it did not apply and what can be done, **never why** — the core
- * has no reason to give and inventing one would be the same class of lie as a
- * green E2EE pill over an unencrypted call. The UX spec §7 draft string
- * (`This request expired before it could be applied.`) asserts a cause this
- * client cannot establish; the divergence is deliberate.
+ * States that it did not apply, **never why** — the core reports no reason for
+ * an exclusion and a re-request's refusal reason is a developer's sentence, so
+ * inventing one would be the same class of lie as a green E2EE pill over an
+ * unencrypted call. It does not promise a repair either: a row is here because
+ * the re-request stopped, often because this device no longer holds the role
+ * the request needs, so "you can do it again" would be untrue as often as not.
  *
- * A join approval is **terminal on the admin side** — the approve consumed the
- * retained request and only the joiner holds the key material — so it directs
- * the action to them. An ordinary add is re-doable here.
+ * A join approval is the exception that names an action, because the action is
+ * the joiner's and is always available to them: the approve consumed the
+ * retained request and only the joiner holds the key material.
  */
-internal fun unappliedLine(item: UnappliedAdd): String =
-    if (item.viaJoinRequest) {
-        "Not applied. Ask them to request to join again."
-    } else {
-        "Not added. You can add them again."
-    }
+internal fun unappliedLine(item: UnappliedRequest): String = when (item.kind) {
+    UnappliedKind.ADD -> "Not added."
+    UnappliedKind.JOIN_APPROVE -> "Not applied. Ask them to request to join again."
+    UnappliedKind.REMOVE -> "Not removed."
+    UnappliedKind.LEAVE -> "Not applied. You are still a member."
+    UnappliedKind.MAKE_ADMIN -> "Not made an admin."
+    UnappliedKind.REMOVE_ADMIN -> "Still an admin."
+    UnappliedKind.TRANSFER_OWNERSHIP -> "Ownership was not transferred."
+}
 
-/** The one explanatory line under the section heading. True on both counts: the
- *  request left the pending set, so no sweep will carry it, and no client
- *  re-requests (UX §7's automatic re-request is designed and not built). */
+/** The one explanatory line under the section heading. True of every row: a
+ *  row is written only once the automatic re-request (ADR-0050 section 2.5a
+ *  point 4) has stopped, so nothing will send it again on its own. */
 internal const val UNAPPLIED_EXPLANATION: String =
     "These changes did not apply and will not be retried on their own."
 
@@ -183,14 +170,16 @@ internal const val JOIN_REQUEST_AGAIN: String = "Request again"
 // The store
 // ---------------------------------------------------------------------------
 
-/** One stored row. `dismissed` is a tombstone: the detection re-runs on every
- *  fold, so without it the notice could not be dismissed at all. */
+/** One stored row. `dismissed` is a tombstone: a stopped request is recorded
+ *  once, and without the tombstone a later stop of the same request would
+ *  bring back a row the user already dismissed. */
 internal data class UnappliedRow(
-    val viaJoinRequest: Boolean,
+    val kind: UnappliedKind,
+    val subjectKeyB64: String,
     val dismissed: Boolean = false,
 )
 
-/** Where the `Not applied` rows live: `addSignatureKeyB64 -> row`. */
+/** Where the `Not applied` rows live: [UnappliedRequest.rowKey] -> row. */
 internal interface UnappliedRequestStore {
     fun load(accountIdB64: String, groupIdHex: String): Map<String, UnappliedRow>
 
@@ -206,42 +195,43 @@ internal fun loadUnapplied(
     store: UnappliedRequestStore,
     accountIdB64: String,
     groupIdHex: String,
-): List<UnappliedAdd> =
+): List<UnappliedRequest> =
     store.load(accountIdB64, groupIdHex)
-        .filterValues { !it.dismissed }
-        .map { UnappliedAdd(it.key, it.value.viaJoinRequest) }
+        .values
+        .filter { !it.dismissed }
+        .map { UnappliedRequest(it.subjectKeyB64, it.kind) }
 
 /**
- * Record detected rows. Idempotent, and a **dismissed row is never
+ * Record stopped requests. Idempotent, and a **dismissed row is never
  * resurrected**.
  */
 internal fun recordUnapplied(
     store: UnappliedRequestStore,
     accountIdB64: String,
     groupIdHex: String,
-    items: List<UnappliedAdd>,
+    items: List<UnappliedRequest>,
 ) {
     if (items.isEmpty()) return
     val rows = store.load(accountIdB64, groupIdHex).toMutableMap()
     var changed = false
     for (item in items) {
-        if (rows.containsKey(item.addSignatureKeyB64)) continue
-        rows[item.addSignatureKeyB64] = UnappliedRow(item.viaJoinRequest)
+        if (rows.containsKey(item.rowKey)) continue
+        rows[item.rowKey] = UnappliedRow(item.kind, item.subjectKeyB64)
         changed = true
     }
     if (changed) store.save(accountIdB64, groupIdHex, rows)
 }
 
-/** Dismiss one row. It stays dismissed. */
+/** Dismiss one row, by [UnappliedRequest.rowKey]. It stays dismissed. */
 internal fun dismissUnapplied(
     store: UnappliedRequestStore,
     accountIdB64: String,
     groupIdHex: String,
-    addSignatureKeyB64: String,
+    rowKey: String,
 ) {
     val rows = store.load(accountIdB64, groupIdHex).toMutableMap()
-    val existing = rows[addSignatureKeyB64] ?: return
-    rows[addSignatureKeyB64] = existing.copy(dismissed = true)
+    val existing = rows[rowKey] ?: return
+    rows[rowKey] = existing.copy(dismissed = true)
     store.save(accountIdB64, groupIdHex, rows)
 }
 
@@ -252,8 +242,10 @@ internal fun dismissUnapplied(
  * written as the Kotlin escape `\u0000`; a RAW NUL in the source would make git
  * classify this file as binary — ADR-0042 MEDIUM-3).
  *
- * Row value: `keyB64|viaJoinRequest|dismissed` entries joined by newline.
- * Standard base64 contains neither `|` nor a newline.
+ * Row value: `kind|subjectKeyB64|dismissed` entries joined by newline; the map
+ * key is rebuilt from the first two. Standard base64 contains neither `|` nor
+ * a newline. A row in an earlier shape is dropped: there is no deployment to
+ * migrate, and a lost row loses a notice, never a request.
  *
  * Never throws: a corrupt or absent row reads as empty, which loses a notice
  * rather than a request — nothing here is load-bearing for correctness.
@@ -318,9 +310,8 @@ internal class SharedPrefsUnappliedRequestStore(context: Context) : UnappliedReq
             KEY_PREFIX + accountIdB64 + ROW_SEPARATOR + groupIdHex
 
         internal fun encodeRow(rows: Map<String, UnappliedRow>): String =
-            rows.entries.joinToString("\n") {
-                "${it.key}|${if (it.value.viaJoinRequest) 1 else 0}|" +
-                    "${if (it.value.dismissed) 1 else 0}"
+            rows.values.joinToString("\n") {
+                "${it.kind.wire}|${it.subjectKeyB64}|${if (it.dismissed) 1 else 0}"
             }
 
         internal fun decodeRow(raw: String?): Map<String, UnappliedRow> {
@@ -329,11 +320,10 @@ internal class SharedPrefsUnappliedRequestStore(context: Context) : UnappliedReq
             for (line in raw.split('\n')) {
                 val parts = line.split('|')
                 if (parts.size != 3) continue
-                if (parts[0].isEmpty()) continue
-                out[parts[0]] = UnappliedRow(
-                    viaJoinRequest = parts[1] == "1",
-                    dismissed = parts[2] == "1",
-                )
+                val kind = UnappliedKind.fromWire(parts[0]) ?: continue
+                if (parts[1].isEmpty()) continue
+                val row = UnappliedRow(kind, parts[1], dismissed = parts[2] == "1")
+                out[UnappliedRequest(row.subjectKeyB64, row.kind).rowKey] = row
             }
             return out
         }

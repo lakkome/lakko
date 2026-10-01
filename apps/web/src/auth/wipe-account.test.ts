@@ -36,6 +36,7 @@ import { writeKnockCursor } from "../chat/knock-cursor";
 import { saveKnownGroupIds } from "../devices/state-bundle";
 import { localStorageAnswerLog } from "../devices/device-link";
 import { saveAppointmentRecord } from "../ds/appointments";
+import { recordRegistrarListEntry } from "../ds/registrar-list";
 import { markHandoverOwed } from "../ds/root-handover";
 import { markRootHeld } from "../ds/root-held";
 import { selectTab } from "../chat/folders/selected-tab";
@@ -148,6 +149,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   markSignupPhraseOwed(local, acct);
   put(`lakko.pending-requests.v1.${acct}.${G}`, "{}");
   put(`lakko.unapplied-requests.v1.${acct}.${G}`, "[]");
+  put(`lakko.own-requests.v1.${acct}.${G}`, "{}");
   put(`lakko.committer-beacons.v1.${acct}.${G}`, "{}");
   put(`lakko.last-observed-owner.v1.${acct}.${G}`, "\"owner\"");
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
@@ -159,6 +161,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   recordGrantSignature(acct, G, "member:1|group:1");
   localStorageAnswerLog(acct).save([1234]);
   saveAppointmentRecord(acct, G, new Map([["registrar", 1]]));
+  recordRegistrarListEntry(acct, G, "YWNjb3VudA==", { publicKey: new Uint8Array(32).fill(9), rank: 1 });
   markHandoverOwed(acct, G);
   markRootHeld(acct, G);
   put(`lakko.backup.auto.${acct}`, JSON.stringify({ lastUploadAtMs: 1, dirtySinceMs: null, groupsKey: null }));
@@ -392,6 +395,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:signup-phrase-unacknowledged:": "account",
   "lakko.pending-requests.v1": "account",
   "lakko.unapplied-requests.v1": "account",
+  "lakko.own-requests.v1": "account",
   "lakko.committer-beacons.v1": "account",
   "lakko.last-observed-owner.v1": "account",
   "lakko.leave-requested.v1": "account",
@@ -402,7 +406,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.profile-requests.v1": "account",
   "lakko.reach.profile-grants.v1.": "account",
   "lakko/device-link/answers/v1/": "account",
-  "lakko/ds-appointments/v1/": "account",
+  "lakko/ds-appointments/v2/": "account",
+  "lakko/ds-registrar-list/v1/": "account",
   "lakko/ds-root-handover/v1/": "account",
   "lakko/ds-root-held/v1/": "account",
   "lakko.backup.auto.": "account",

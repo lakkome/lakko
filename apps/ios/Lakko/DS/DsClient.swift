@@ -199,6 +199,29 @@ public final class DsClient {
         )
     }
 
+    /// `GET /ds/mailbox/{hex}/reach` — the reach keys registered on this
+    /// account's own mailbox and its Everyone flag (ADR-0060 section 1,
+    /// "Versions after a restore"). Signed by the identity key the mailbox is
+    /// named after, exactly like the owner's message read; anything else is a
+    /// uniform `401`, which throws. Public keys only (invariant #2).
+    public func fetchReach(pseudonym: Data, signer: DsRequestSigner) async throws -> DsReachListing {
+        guard pseudonym.count == Self.pseudonymLength else {
+            throw DsClientError.argument("pseudonym must be \(Self.pseudonymLength) bytes")
+        }
+        let endpoint = "/ds/mailbox/\(Self.pseudonymHex(pseudonym))/reach"
+        let parsed: ReachListingWire = try await sendDecoding(
+            method: "GET", endpoint: endpoint, auth: DsAuth(signer: signer))
+        var keys: [DsReachKeyAdd] = []
+        for entry in parsed.keys {
+            guard let key = Data(base64Encoded: entry.reachPkB64), key.count == 32 else {
+                throw DsClientError.http(
+                    status: 200, endpoint: endpoint, body: "a reach key that is not 32 bytes")
+            }
+            keys.append(DsReachKeyAdd(publicKey: key, expiresAtMs: entry.expiresAtMs))
+        }
+        return DsReachListing(keys: keys, open: parsed.open)
+    }
+
     /// `POST /ds/mailbox/{hex}/reach/check` — is the key of `reachSeed` still
     /// registered, unexpired, on that mailbox? `true` on `204`, `false` on
     /// `401`; anything else throws (never read a network failure as "not
@@ -777,6 +800,21 @@ private struct ReachWireAdd: Encodable {
     }
 }
 
+private struct ReachListingWire: Decodable {
+    struct Key: Decodable {
+        let reachPkB64: String
+        let expiresAtMs: UInt64?
+
+        enum CodingKeys: String, CodingKey {
+            case reachPkB64 = "reach_pk_b64"
+            case expiresAtMs = "expires_at_ms"
+        }
+    }
+
+    let keys: [Key]
+    let open: Bool
+}
+
 private struct ReachWireRequest: Encodable {
     let add: [ReachWireAdd]
     let remove: [String]
@@ -807,6 +845,30 @@ public struct DsMailboxWriteAuth: Equatable {
         self.delegationHeader = delegationHeader
     }
 }
+
+/// What ``DsClient/fetchReach(pseudonym:signer:)`` returns: the reach public
+/// keys registered on the owner's mailbox (with their expiry) and whether it
+/// is open (Everyone).
+public struct DsReachListing: Equatable {
+    public let keys: [DsReachKeyAdd]
+    public let open: Bool
+
+    public init(keys: [DsReachKeyAdd], open: Bool) {
+        self.keys = keys
+        self.open = open
+    }
+}
+
+/// The two reach-key operations ``ReachCenter`` drives on the owner's mailbox,
+/// as a protocol so a host test supplies a fake DS.
+public protocol ReachDsTransport: AnyObject {
+    func updateReach(
+        pseudonym: Data, add: [DsReachKeyAdd], remove: [Data], open: Bool?, signer: DsRequestSigner
+    ) async throws
+    func fetchReach(pseudonym: Data, signer: DsRequestSigner) async throws -> DsReachListing
+}
+
+extension DsClient: ReachDsTransport {}
 
 /// One key to register in ``DsClient/updateReach(pseudonym:add:remove:open:signer:)``.
 public struct DsReachKeyAdd: Equatable, Hashable {

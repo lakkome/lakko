@@ -2976,12 +2976,18 @@ struct MembersSheet: View {
                 // exclusion (`CreateCommitError` names no proposal), so neither
                 // does the copy. Sits directly under `Waiting to be added`,
                 // because it is where those rows go when they stop waiting.
+                //
+                // ADR-0050 2.5a — a dropped own request is re-requested
+                // silently first; a row appears here only when that stops
+                // (the authority it needs is gone, or an approved join whose
+                // material only the joiner holds), and it may now be a
+                // removal, a role change or a leave as well as an add.
                 if !viewModel.unappliedAddRows.isEmpty {
                     Section(unappliedHeading(viewModel.unappliedAddRows.count)) {
                         Text(unappliedExplanation)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                        ForEach(viewModel.unappliedAddRows, id: \.addSignatureKeyB64) { item in
+                        ForEach(viewModel.unappliedAddRows, id: \.rowKey) { item in
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(Self.unappliedLabel(item))
@@ -2992,8 +2998,7 @@ struct MembersSheet: View {
                                 }
                                 Spacer()
                                 Button("Dismiss") {
-                                    viewModel.onDismissUnapplied(
-                                        addSignatureKeyB64: item.addSignatureKeyB64)
+                                    viewModel.onDismissUnapplied(rowKey: item.rowKey)
                                 }
                                 .buttonStyle(.borderless)
                             }

@@ -468,6 +468,59 @@ class DsClientProofTest {
         assertTrue(signer.calls.isEmpty())
     }
 
+    // ------------------------------------- the owner's reach read (ADR-0060 §1)
+
+    @Test
+    fun `the owner reads its reach keys signed with the mailbox key`() = runTest {
+        val seen = mutableListOf<Seen>()
+        val signer = FakeSigner(0uL, "id")
+        val pk = ByteArray(32) { 7 }
+        val body = """{"keys":[{"reach_pk_b64":"${java.util.Base64.getEncoder().encodeToString(pk)}",""" +
+            """"expires_at_ms":null}],"open":false}"""
+        val list = client(listOf(Reply(HttpStatusCode.OK, body)), seen).use { it.fetchMailboxReach(mailbox, signer) }
+        assertEquals(1, list.keys.size)
+        assertArrayEquals(pk, list.keys.single().publicKey)
+        assertNull(list.keys.single().expiresAtMs)
+        assertFalse(list.open)
+        val req = seen.single()
+        assertEquals(HttpMethod.Get, req.method)
+        assertEquals("/native/ds/ds/mailbox/${DsClient.pseudonymHex(mailbox)}/reach", req.encodedPath)
+        assertEquals("proof-id-1", req.proof)
+        assertEquals("/ds/mailbox/${DsClient.pseudonymHex(mailbox)}/reach", signer.calls.single().path)
+    }
+
+    @Test
+    fun `an unclaimed mailbox is claimed and read once more, a second refusal throws`() = runTest {
+        val seen = mutableListOf<Seen>()
+        val signer = FakeSigner(0uL, "id")
+        val list = client(
+            listOf(
+                Reply(HttpStatusCode.Unauthorized),
+                Reply(HttpStatusCode.NoContent),
+                Reply(HttpStatusCode.OK, """{"keys":[],"open":false}"""),
+            ),
+            seen,
+        ).use { it.fetchMailboxReach(mailbox, signer) }
+        assertTrue(list.keys.isEmpty())
+        assertEquals(3, seen.size)
+        assertTrue(seen[1].encodedPath.endsWith("/access"))
+
+        // Refused again: the read fails, and the caller registers nothing.
+        val again = mutableListOf<Seen>()
+        assertThrows(DsHttpError::class.java) {
+            kotlinx.coroutines.runBlocking {
+                client(
+                    listOf(
+                        Reply(HttpStatusCode.Unauthorized),
+                        Reply(HttpStatusCode.NoContent),
+                        Reply(HttpStatusCode.Unauthorized),
+                    ),
+                    again,
+                ).use { it.fetchMailboxReach(mailbox, signer) }
+            }
+        }
+    }
+
     // ------------------------------------------------------------ knock
 
     @Test

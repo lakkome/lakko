@@ -331,17 +331,19 @@ final class NseServiceEnvelopeTests: XCTestCase {
         return d
     }()
 
-    /// Stand-in for the slim FFI's `registrarSeedEnvelopeLen()` (173 — domain
-    /// 27 + version 1 + journal 32 + addressee 32 + rank 1 + sealed 80).
-    fileprivate static let registrarSeedEnvelopeLen = 173
+    /// Stand-in for the slim FFI's `registrarSeedEnvelopeLen()` (205 — domain
+    /// 27 + version 1 + journal 32 + addressee 32 + rank 1 + registrar public
+    /// key 32 + sealed 80; v2, ADR-0057 amended 2026-10-01).
+    fileprivate static let registrarSeedEnvelopeLen = 205
 
     /// A well-formed registrar-seed envelope (the sealed part is opaque here).
-    private func registrarSeedEnvelope(version: UInt8 = 0x01, rank: UInt8 = 0x01) -> Data {
+    private func registrarSeedEnvelope(version: UInt8 = 0x02, rank: UInt8 = 0x01) -> Data {
         var out = Self.registrarSeedDomain
         out.append(version)
         out.append(Data(repeating: 0x11, count: 32))
         out.append(Data(repeating: 0x22, count: 32))
         out.append(rank)
+        out.append(Data(repeating: 0x44, count: 32))
         out.append(Data(repeating: 0x33, count: 80))
         return out
     }
@@ -357,7 +359,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
         guard bytes.count == Self.registrarSeedEnvelopeLen,
               bytes.prefix(domain.count) == domain else { return false }
         let payload = Array(bytes.dropFirst(domain.count))
-        return payload[0] == 0x01 && (payload[65] == 0x01 || payload[65] == 0x02)
+        return payload[0] == 0x02 && (payload[65] == 0x01 || payload[65] == 0x02)
     }
 
     // MARK: - Kind 8: registrar seed (ADR-0057)
@@ -388,8 +390,10 @@ final class NseServiceEnvelopeTests: XCTestCase {
             ),
             "a registrar seed must never be rendered"
         )
-        // One byte short, or an unknown version, is not the envelope.
-        for wrong in [registrarSeedEnvelope().dropLast(), registrarSeedEnvelope(version: 0x02)] {
+        // One byte short, or an unknown version (the retired v1 included), is
+        // not the envelope.
+        for wrong in [registrarSeedEnvelope().dropLast(), registrarSeedEnvelope(version: 0x01),
+                      registrarSeedEnvelope(version: 0x03)] {
             XCTAssertFalse(
                 nseIsServiceEnvelope(
                     Data(wrong),

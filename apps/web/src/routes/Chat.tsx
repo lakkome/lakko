@@ -123,7 +123,7 @@ import {
 } from "../auth/account-id";
 import { ChatClient, type PollMessagesResult } from "../chat/client";
 import { isDsNetworkFailure } from "../ds/client";
-import { dsClockSkewNotice } from "../ds/access";
+import { dsAccess, dsClockSkewNotice } from "../ds/access";
 import {
   createWakeLatch,
   LONG_POLL_WAIT_SECS,
@@ -276,6 +276,7 @@ import {
   retryKey,
   retryScopeKey,
   retryVerdict,
+  runSupersededRerequests,
   type GroupSnapshot,
   type RetryableRequest,
   type RosterMemberView,
@@ -285,13 +286,17 @@ import {
 import {
   dismissUnapplied,
   loadUnapplied,
-  recordUnapplied,
-  unappliedAddRequests,
   unappliedHeading,
   unappliedLine,
   UNAPPLIED_EXPLANATION,
-  type UnappliedAdd,
+  type UnappliedRequest,
 } from "../chat/unapplied-requests";
+// ADR-0050 section 2.5a point 4 — re-requesting a superseded own request.
+import {
+  readIntentSnapshot,
+  readRosterViews,
+  reissueOwnRequest,
+} from "../chat/rerequest-membership";
 // ADR-0045 UX §6.1 — ownership transfer, the owner's way out. Same split and
 // the same reason: every rule and every string lives in the plain module, this
 // file only renders what it decides.
@@ -322,6 +327,8 @@ import {
   BEACON_TICK_MS,
   beaconEmitVerdict,
   decideActingCommitter,
+  deviceCommitterRank,
+  wasmActingCommitterFold,
   recordBeaconObservation,
   type ActingCommitter,
 } from "../chat/committer-beacon";
@@ -2006,7 +2013,10 @@ function ChatView(props: {
    * Deferring costs a sweep attempt; acting on a view of who else is running
    * that this device could not actually read is the hazard.
    */
-  async function actingCommitterNow(ownRank: number): Promise<ActingCommitter> {
+  async function actingCommitterNow(
+    ownRank: number,
+    ownSignatureKey: Uint8Array,
+  ): Promise<ActingCommitter> {
     const s = auth.state();
     if (s.kind !== "session") return { kind: "defer", toRank: undefined };
     const wasm = await loadWasmForCalls();
@@ -2014,6 +2024,7 @@ function ChatView(props: {
       accountIdB64: s.account.accountId,
       groupIdB64: base64Encode(props.entry.group.groupId),
       ownRank,
+      ownSignatureKey,
       rankOf: (senderKeyB64) => {
         try {
           return props.entry.group.committerRank(base64Decode(senderKeyB64));
@@ -2026,27 +2037,7 @@ function ChatView(props: {
       // two halves of one budget and a local literal is the drift class
       // ADR-0044 exists about.
       freshnessWindowMs: wasm.committerBeaconFreshnessWindowMs(),
-      fold: (rank, observed, windowMs) => {
-        const verdict = wasm.actingCommitterVerdict(
-          rank,
-          // wasm-bindgen CONSUMES each observation, which is why they are
-          // built fresh here on every evaluation rather than cached — and
-          // which is also what ranking-at-verdict-time requires anyway.
-          observed.map((o) => new wasm.BeaconObservation(o.rank, o.ageMs)),
-          windowMs,
-        );
-        try {
-          if (verdict.kind === "act") return { kind: "act" };
-          if (verdict.kind === "defer") {
-            return { kind: "defer", toRank: verdict.deferToRank };
-          }
-          return { kind: "not-a-candidate" };
-        } finally {
-          // The verdict is a wasm-owned object; this runs on every poll of
-          // every open group, so leaking one per tick is not academic.
-          verdict.free();
-        }
-      },
+      fold: wasmActingCommitterFold(wasm),
     });
   }
 
@@ -2062,6 +2053,11 @@ function ChatView(props: {
    * therefore be a lie that costs the group a takeover: every
    * other candidate would defer to a device that is not going to sweep, and
    * would keep deferring for as long as the hidden tab kept beaconing.
+   *
+   * The same goes for a device with no root and no registrar seed for the
+   * group (ADR-0050 section 2.5a item 8): it could not register the epoch a
+   * sweep moves to, so the sweep never stages, and its beacon would make
+   * others defer to it for nothing.
    *
    * Everything else — only-candidates-emit, first-of-session-immediate, one
    * per interval — is the core's `shouldEmitBeacon`, called through the gate.
@@ -2094,13 +2090,12 @@ function ChatView(props: {
     const wasm = await loadWasmForCalls();
     let ownRank: number | undefined;
     try {
-      const secrets = props.requireIdentity();
-      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
-      try {
-        ownRank = props.entry.group.ownCommitterRank(identity);
-      } finally {
-        identity.free();
-      }
+      // ADR-0050 section 2.5a item 8 — the rank of the identity the GROUP runs
+      // on (this device's leaf, the one sweeps use), never one rebuilt from
+      // the account seed: on a bound device the account key holds no leaf, so
+      // the account identity has no rank and this device never beaconed. The
+      // context owns the instance; it is not freed here.
+      ownRank = deviceCommitterRank(props.entry.group, chats.identity());
     } catch {
       // No identity / torn group — this device cannot establish that it is a
       // candidate, so it must not claim to be one.
@@ -2108,6 +2103,10 @@ function ChatView(props: {
     }
     const verdict = beaconEmitVerdict({
       ownRank,
+      // ADR-0050 section 2.5a item 8 — the sweep's own pre-stage check: a
+      // device with no root and no registrar seed cannot complete a sweep, so
+      // it must not announce that it can.
+      mayRegister: ownRank !== undefined && dsAccess.mayRegister(props.entry.group.groupId),
       foreground: isForeground(),
       lastEmittedAtMs: lastBeaconAtMs,
       nowMs: Date.now(),
@@ -2330,11 +2329,7 @@ function ChatView(props: {
    *  §6.1.10): a role change carries no payload, so the successor's key on our
    *  own record is the only thing that later tells a transfer from a promote,
    *  and it is what names the person in `Waiting to make {name} the owner.` */
-  function noteOwnRequest(
-    key: string,
-    transferToB64?: string,
-    joinRequest?: boolean,
-  ): void {
+  function noteOwnRequest(key: string, transferToB64?: string): void {
     const s = auth.state();
     if (s.kind !== "session") return;
     recordObservation(
@@ -2344,7 +2339,6 @@ function ChatView(props: {
       Date.now(),
       true,
       transferToB64,
-      joinRequest,
     );
     setPendingVersion(pendingVersion() + 1);
   }
@@ -2401,20 +2395,9 @@ function ChatView(props: {
   /** The group as the retry verdict reads it, captured in ONE pass — the
    *  roster and the pending set must come from the same moment. */
   function retrySnapshot(): GroupSnapshot {
-    let roster: RosterMemberView[] | null;
-    try {
-      roster = (
-        props.entry.group.members() as Array<{
-          leafIndex: number;
-          signaturePublicKey: Uint8Array;
-        }>
-      ).map((m) => ({
-        leafIndex: m.leafIndex,
-        signatureKeyB64: base64Encode(m.signaturePublicKey),
-      }));
-    } catch {
-      roster = null;
-    }
+    // With each leaf's ADR-0050 account key: an add or a removal names the
+    // PERSON, so the roster test must match the account key too.
+    const roster: RosterMemberView[] | null = readRosterViews(props.entry.group);
     let pendingKeys: string[] = [];
     let pendingCount = 0;
     try {
@@ -2544,98 +2527,72 @@ function ChatView(props: {
    * stored one would eventually remove the wrong person.
    */
   async function reissueMembershipRequest(request: RetryableRequest): Promise<void> {
-    const identity = props.requireIdentity();
-    const group = props.entry.group;
-    switch (request.kind) {
-      case "add": {
-        const out = await contacts.addMemberToGroup(
-          identity,
-          group,
-          base64Decode(request.subjectAccountIdB64),
-          base64Decode(request.subjectKeyB64),
-        );
-        chat.markOwnPublishedCommit(
-          props.entry.groupIdB64,
-          out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
-        );
-        if (out.kind === "proposed") noteOwnRequest(`add:${request.subjectKeyB64}`);
-        return;
-      }
-      case "remove":
-      case "leave": {
-        const leaf = rosterViews().find(
-          (m) => m.signatureKeyB64 === request.subjectKeyB64,
-        )?.leafIndex;
-        // The verdict already dropped a request whose subject has left, so an
-        // unresolvable leaf here is a torn read between the verdict and now.
-        // Refusing to guess is the only safe answer: any fallback leaf names
-        // somebody, and for a removal that somebody is a real person.
-        if (leaf === undefined) return;
-        const out = await contacts.removeMemberFromGroup(identity, group, leaf);
-        chat.markOwnPublishedCommit(
-          props.entry.groupIdB64,
-          out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
-        );
-        if (out.kind === "proposed") {
-          noteOwnRequest(`${request.kind === "leave" ? "leave" : "remove"}:${leaf}`);
-        }
-        return;
-      }
-      case "approve-join": {
-        // The joiner's signature key IS the `proposal_ref` handle, so the
-        // descriptor reconstructs the call whole. The KeyPackage it needs is
-        // the one the core retained — which is also why the verdict refuses
-        // to fire once that request has left the quarantine.
-        const out = await contacts.approveExternalJoin(
-          identity,
-          group,
-          base64Decode(request.subjectKeyB64),
-        );
-        chat.markOwnPublishedCommit(props.entry.groupIdB64, out.proposalMessageId);
-        // Identical bookkeeping to the manual `onApproveJoin`, third argument
-        // included: only this device can know the add came from a JOIN
-        // request, and that flag is what later says `Ask them to request to
-        // join again` instead of offering a retry nobody can perform.
-        noteOwnRequest(`add:${request.subjectKeyB64}`, undefined, true);
-        // `unkeptJoinRequest` is deliberately NOT cleared here. The manual
-        // handler clears it as feedback for something the user just did; a
-        // background re-send is not that, and the notice's action item — ask
-        // that person to send their request again — stays true regardless,
-        // because a request the quarantine never kept is not recoverable by
-        // approving a different one.
-        return;
-      }
-      case "set-admin": {
-        const out = await contacts.setMemberAdmin(
-          identity,
-          group,
-          base64Decode(request.subjectKeyB64),
-          request.makeAdmin,
-        );
-        chat.markOwnPublishedCommit(
-          props.entry.groupIdB64,
-          out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
-        );
-        if (out.kind === "proposed") noteOwnRequest("role-change");
-        return;
-      }
-      default: {
-        const out = await contacts.transferGroupOwnership(
-          identity,
-          group,
-          base64Decode(request.subjectKeyB64),
-          request.outgoing,
-        );
-        chat.markOwnPublishedCommit(
-          props.entry.groupIdB64,
-          out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
-        );
-        if (out.kind === "proposed") {
-          noteOwnRequest("role-change", request.subjectKeyB64);
-        }
-      }
-    }
+    await reissueOwnRequest(reissueHost(), request);
   }
+
+  /** The chat view as a re-issue host: the user path's `contacts` and
+   *  identity, echo suppression on this view's `chat`, and the quiet-window
+   *  observation so a re-sent request shows as ours in the panel. Shared with
+   *  the background receive loop through `chat/rerequest-membership.ts`, so
+   *  the two re-derive a request identically. */
+  function reissueHost() {
+    return {
+      contacts,
+      identity: props.requireIdentity(),
+      group: props.entry.group,
+      markOwnPublished: (id: number) => chat.markOwnPublishedCommit(props.entry.groupIdB64, id),
+      noteOwnProposal: (key: string, transferToB64?: string) => noteOwnRequest(key, transferToB64),
+    };
+  }
+
+  /**
+   * ADR-0050 section 2.5a point 4 — re-request an own membership request a
+   * merged commit dropped (`chat/membership-retry.ts`).
+   *
+   * **Driven by an observed merged commit, never by a timer.** It reads the
+   * same version signals the queue-full driver above reads, which move on
+   * every poll tail and every sweep; the pass itself decides nothing unless the
+   * group's epoch has moved past a record's, which only a merged commit does.
+   * So a quiet group costs one store read per bump and re-requests nothing.
+   *
+   * Silent: a re-request in flight shows nowhere. A request that stops for a
+   * reason other than "landed" / "subject left" lands in `Not applied`.
+   */
+  createEffect(() => {
+    membersVersion();
+    pendingVersion();
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    // Stand down while a manual membership operation is in flight, for the
+    // same reason the queue-full driver does.
+    if (busy()) return;
+    const ended = membershipEnded();
+    let host: ReturnType<typeof reissueHost>;
+    try {
+      host = reissueHost();
+    } catch {
+      return;
+    }
+    void runSupersededRerequests({
+      accountIdB64: s.account.accountId,
+      groupIdB64: base64Encode(props.entry.group.groupId),
+      snapshot: () => readIntentSnapshot(props.entry.group, ended),
+      rerequest: (request) => reissueOwnRequest(host, request),
+      retryMaySucceed: membershipRetryMaySucceed,
+    })
+      .then(async (summary) => {
+        if (summary.stopped > 0) setPendingVersion(pendingVersion() + 1);
+        if (summary.rerequested > 0) {
+          setMembersVersion(membersVersion() + 1);
+          await sweepNow();
+          void refresh();
+        }
+      })
+      .catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("superseded re-request pass failed", err);
+      });
+  });
 
   /**
    * The driver: evaluate every armed request against the group as it is now.
@@ -2824,34 +2781,19 @@ function ChatView(props: {
     }
     const observations = loadObservations(s.account.accountId, groupIdB64);
     const { requests, liveKeys } = foldPendingRequests(records, observations, now);
-    // ADR-0045 S7 residual 1 — an own `add` that has left the pending set
-    // without reaching the roster was not carried by whatever commit emptied
-    // the set, and nothing will ever carry it. Detected HERE, in the same pass
-    // that prunes, because the observation about to be dropped is the only
-    // record that the request existed at all. The roster is read in this same
-    // pass for the same reason: the merge that empties the pending set is the
-    // merge that moves the roster.
-    let rosterKeysB64: string[] | null;
-    try {
-      rosterKeysB64 = (
-        props.entry.group.members() as Array<{ signaturePublicKey: Uint8Array }>
-      ).map((m) => base64Encode(m.signaturePublicKey));
-    } catch {
-      rosterKeysB64 = null;
-    }
-    recordUnapplied(
-      s.account.accountId,
-      groupIdB64,
-      unappliedAddRequests(observations, liveKeys, rosterKeysB64),
-    );
+    // An own request that left the pending set without landing is no longer
+    // detected here: since ADR-0050 2.5a it is RE-REQUESTED from its durable
+    // intent record (`runSupersededRerequests`, above), and listed in `Not
+    // applied` only if that re-request stops. The observation is pruned as
+    // before — it carries only the quiet window, never the request.
     pruneObservations(s.account.accountId, groupIdB64, liveKeys);
     return visibleRequests(requests, canManageMembers());
   });
 
-  /** ADR-0045 S7 residual 1 — the rows the user has not dismissed. Read through
-   *  the same `pendingVersion` the detection writes under, so a newly detected
-   *  row appears without a second trigger. */
-  const unappliedAdds = createMemo<UnappliedAdd[]>(() => {
+  /** ADR-0045 S7 residual 1, widened by ADR-0050 2.5a — the `Not applied`
+   *  rows the user has not dismissed. A row is written when a re-request
+   *  stops; the pass bumps `pendingVersion` when it writes one. */
+  const unappliedAdds = createMemo<UnappliedRequest[]>(() => {
     // Reading `pendingRequests()` FIRST is the dependency that orders these two
     // memos: that one is where the detection runs and the row is written, and a
     // Solid memo has no guaranteed evaluation order relative to a sibling. Read
@@ -2875,13 +2817,13 @@ function ChatView(props: {
   });
 
   /** Dismiss one `Not applied` row. It stays dismissed. */
-  function onDismissUnapplied(addSignatureKeyB64: string): void {
+  function onDismissUnapplied(key: string): void {
     const s = auth.state();
     if (s.kind !== "session") return;
     dismissUnapplied(
       s.account.accountId,
       base64Encode(props.entry.group.groupId),
-      addSignatureKeyB64,
+      key,
     );
     setPendingVersion(pendingVersion() + 1);
   }
@@ -5417,7 +5359,7 @@ function ChatView(props: {
       // never carries it, that flag is what makes the notice say `Ask them to
       // request to join again` rather than offering a retry this side cannot
       // perform — a successful approve consumed the retained request.
-      noteOwnRequest(`add:${base64Encode(proposalRef)}`, undefined, true);
+      noteOwnRequest(`add:${base64Encode(proposalRef)}`);
       // If this device is the acting committer the sweep runs now, so the
       // common single-admin case still reads as "tap, done".
       const swept = await sweepNow();
@@ -6963,7 +6905,7 @@ function ChatView(props: {
                           style={{ display: "flex", "flex-direction": "column", gap: "0.1rem" }}
                         >
                           <span style={{ "font-size": "0.85rem" }}>
-                            {labelForSignatureKey(item.addSignatureKeyB64)}
+                            {labelForSignatureKey(item.subjectKeyB64)}
                           </span>
                           <span
                             style={{ "font-size": "0.7rem", color: "var(--surface-muted)" }}
@@ -6973,7 +6915,7 @@ function ChatView(props: {
                         </span>
                         <button
                           type="button"
-                          onClick={() => onDismissUnapplied(item.addSignatureKeyB64)}
+                          onClick={() => onDismissUnapplied(item.key)}
                           style={{ "font-size": "0.7rem" }}
                         >
                           Dismiss

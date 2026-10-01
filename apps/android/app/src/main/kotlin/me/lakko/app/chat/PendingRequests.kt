@@ -209,7 +209,37 @@ internal data class RequestObservation(
      * `UnappliedRequests.kt` shows the notice on.
      */
     val joinRequest: Boolean = false,
+    /**
+     * ADR-0050 section 2.5a point 4 — what THIS device asked for, recorded so a
+     * request a sweep dropped can be re-requested from the intent rather than
+     * from old bytes. Set only on an entry stored under [intentObservationKey],
+     * never on a proposal-keyed entry: a proposal key names a LEAF for a
+     * removal, and OpenMLS reuses a vacated leaf, so the intent is keyed on
+     * the subject's signature key instead (see [RetryableRequest.key]).
+     */
+    val intent: RetryableRequest? = null,
 )
+
+/**
+ * ADR-0050 section 2.5a point 4 — the namespace an own request's INTENT lives
+ * under in the same per-`(account, group)` observation row.
+ *
+ * It shares the row with the proposal observations rather than taking a store
+ * of its own, but not their lifetime: [prunePendingRequestObservations] drops a
+ * proposal observation the moment the core stops holding the request, and that
+ * moment is exactly when the superseded detector needs the intent. So an entry
+ * under this prefix survives the prune and is removed only by the detector
+ * (effect landed, subject left, membership ended, stopped) or with the group.
+ *
+ * No proposal key starts with it ([proposalKey] writes `add:` / `remove:` /
+ * `leave:` / `role-change` / `update:` / `unsupported:`), so the fold never
+ * joins an intent to a live record and the panel never renders one.
+ */
+internal const val INTENT_KEY_PREFIX: String = "intent:"
+
+/** The row key an own request's intent is stored under. */
+internal fun intentObservationKey(intent: RetryableRequest): String =
+    INTENT_KEY_PREFIX + intent.key
 
 /** What [foldPendingRequests] produced. */
 internal data class FoldedRequests(
@@ -410,7 +440,9 @@ internal fun waitingToBeAdded(requests: List<PendingRequest>): List<PendingReque
  *
  * Not encrypted: a request key names a proposal already retained in the core's
  * own pending set and a server-assigned timestamp — no key material. Same
- * posture as [BeaconObservationStore].
+ * posture as [BeaconObservationStore]. An own request intent adds a
+ * signature key and, for an add, the subject's account id: both are already
+ * known to every member of the group, and neither is key material.
  */
 internal interface PendingRequestStore {
     fun load(accountIdB64: String, groupIdHex: String): Map<String, RequestObservation>
@@ -533,8 +565,15 @@ internal fun recordReceivedProposalObservation(
     return true
 }
 
-/** Drop every observation whose request is no longer in the core's pending set —
- *  swept, superseded, or the group moved. */
+/**
+ * Drop every observation whose request is no longer in the core's pending set —
+ * swept, superseded, or the group moved.
+ *
+ * An own request's INTENT ([INTENT_KEY_PREFIX]) is kept: it is the only record
+ * that the request existed once the core has dropped it, and only the
+ * superseded detector, which runs on an observed merged commit, may decide
+ * whether it landed, must be re-requested, or stopped.
+ */
 internal fun prunePendingRequestObservations(
     store: PendingRequestStore,
     accountIdB64: String,
@@ -543,8 +582,61 @@ internal fun prunePendingRequestObservations(
 ) {
     val observations = store.load(accountIdB64, groupIdHex)
     val live = liveKeys.toSet()
-    val kept = observations.filterKeys { it in live }
+    val kept = observations.filterKeys { it in live || it.startsWith(INTENT_KEY_PREFIX) }
     if (kept.size != observations.size) store.save(accountIdB64, groupIdHex, kept)
+}
+
+/**
+ * ADR-0050 section 2.5a point 4 — record what THIS device asked for, at the
+ * moment its proposal is published.
+ *
+ * The NEWEST intent for a key wins, the opposite of the first-wins proposal
+ * observation: an intent is not an age but a description of the request now
+ * on the wire, and a later request for the same subject (a re-request, a
+ * user's second tap, a promote replaced by a demote in the one role-change
+ * slot) is the one a superseded check must re-derive.
+ */
+internal fun recordOwnRequestIntent(
+    store: PendingRequestStore,
+    accountIdB64: String,
+    groupIdHex: String,
+    intent: RetryableRequest,
+    atMs: Long,
+) {
+    val observations = store.load(accountIdB64, groupIdHex)
+    store.save(
+        accountIdB64,
+        groupIdHex,
+        observations + (
+            intentObservationKey(intent) to RequestObservation(atMs = atMs, own = true, intent = intent)
+            ),
+    )
+}
+
+/** Every own request intent recorded for one group. */
+internal fun loadOwnRequestIntents(
+    store: PendingRequestStore,
+    accountIdB64: String,
+    groupIdHex: String,
+): List<RetryableRequest> =
+    store.load(accountIdB64, groupIdHex)
+        .filterKeys { it.startsWith(INTENT_KEY_PREFIX) }
+        .values
+        .mapNotNull { it.intent }
+
+/** Forget one own request intent — its effect landed, or it stopped. */
+internal fun forgetOwnRequestIntent(
+    store: PendingRequestStore,
+    accountIdB64: String,
+    groupIdHex: String,
+    intent: RetryableRequest,
+) {
+    val observations = store.load(accountIdB64, groupIdHex)
+    val key = intentObservationKey(intent)
+    // Only the exact intent read: a newer request recorded under the same key
+    // between the read and this write (a manual tap) must survive.
+    if (observations[key]?.intent != intent) return
+    store.save(accountIdB64, groupIdHex, observations - key)
 }
 
 /**
@@ -554,7 +646,8 @@ internal fun prunePendingRequestObservations(
  * written as the Kotlin escape `\u0000`; a RAW NUL in the source would make git
  * classify this file as binary — ADR-0042 MEDIUM-3).
  *
- * Row value: `key|atMs|own|transferToB64|joinRequest` entries joined by newline. A request
+ * Row value: `key|atMs|own|transferToB64|joinRequest|intent` entries joined by
+ * newline, the sixth field being [encodeRequestIntent] or empty. A request
  * key is built from base64 / decimal / fixed literals, none of which contain `|`
  * or a newline, and the standard-base64 successor key contains neither either.
  *
@@ -631,7 +724,8 @@ internal class SharedPrefsPendingRequestStore(context: Context) : PendingRequest
             observations.entries.joinToString("\n") {
                 "${it.key}|${it.value.atMs}|${if (it.value.own) 1 else 0}|" +
                     (it.value.transferToB64 ?: "") +
-                    "|${if (it.value.joinRequest) 1 else 0}"
+                    "|${if (it.value.joinRequest) 1 else 0}" +
+                    "|" + (it.value.intent?.let(::encodeRequestIntent) ?: "")
             }
 
         internal fun decodeRow(raw: String?): Map<String, RequestObservation> {
@@ -639,8 +733,16 @@ internal class SharedPrefsPendingRequestStore(context: Context) : PendingRequest
             val out = mutableMapOf<String, RequestObservation>()
             for (line in raw.split('\n')) {
                 val parts = line.split('|')
-                if (parts.size != 5) continue
+                if (parts.size != 6) continue
                 val at = parts[1].toLongOrNull() ?: continue
+                // An intent field that does not decode drops the whole entry
+                // rather than keeping it without one: an intent-keyed entry
+                // with no intent would be a request nobody can re-derive.
+                val intent = if (parts[5].isEmpty()) {
+                    null
+                } else {
+                    decodeRequestIntent(parts[5]) ?: continue
+                }
                 out[parts[0]] = RequestObservation(
                     atMs = at,
                     own = parts[2] == "1",
@@ -652,6 +754,7 @@ internal class SharedPrefsPendingRequestStore(context: Context) : PendingRequest
                     // which is the copy that offers the weaker action rather
                     // than the stronger claim.
                     joinRequest = parts[4] == "1",
+                    intent = intent,
                 )
             }
             return out

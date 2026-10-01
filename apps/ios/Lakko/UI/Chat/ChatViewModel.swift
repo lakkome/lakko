@@ -1261,9 +1261,8 @@ public final class ChatViewModel: ObservableObject {
             repository.pendingRequests(groupIdHex: groupIdHex),
             canManageMembers: canManageMembers
         )
-        // ADR-0045 S7 residual 1 — read AFTER the fold above, which is what
-        // detects and records them: a row is created at the exact moment its
-        // observation is pruned.
+        // ADR-0045 S7 residual 1 / ADR-0050 2.5a — the rows the repository's
+        // superseded re-request recorded when it stopped re-requesting.
         unappliedAddRows = repository.unappliedAdds(groupIdHex: groupIdHex)
         // ADR-0045 UX §7 — and the last thing, against the state just read: a
         // queue that drained since a refusal is exactly what this pass would
@@ -1274,9 +1273,8 @@ public final class ChatViewModel: ObservableObject {
     /// ADR-0045 S7 residual 1 — dismiss one `Not applied` row. It stays
     /// dismissed: the detection re-runs on every fold, so without the tombstone
     /// the notice could not be dismissed at all.
-    func onDismissUnapplied(addSignatureKeyB64: String) {
-        repository.dismissUnapplied(
-            groupIdHex: groupIdHex, addSignatureKeyB64: addSignatureKeyB64)
+    func onDismissUnapplied(rowKey: String) {
+        repository.dismissUnapplied(groupIdHex: groupIdHex, rowKey: rowKey)
         unappliedAddRows = repository.unappliedAdds(groupIdHex: groupIdHex)
     }
 
@@ -1805,7 +1803,9 @@ public final class ChatViewModel: ObservableObject {
     /// §6.1.7 names the transferor's own new role only when the change actually
     /// landed, and a request that has not landed must not claim it has. The
     /// owner is rank 0, so the sweep is this same device and in practice the
-    /// change is immediate.
+    /// change is immediate — unless another device of the owner's account with
+    /// a lower signature key beaconed recently (ADR-0050 2.5a item 6), in which
+    /// case that device sweeps it on its next poll.
     func onTransferOwnership() {
         guard let successor = transferSelected else { return }
         guard !membershipBusy else { return }

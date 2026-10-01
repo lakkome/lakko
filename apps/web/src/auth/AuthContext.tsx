@@ -126,6 +126,7 @@ import { clearObservationsForAccount } from "../chat/pending-requests";
 // ADR-0045 S7 residual 1 — the `Not applied` rows follow the same hygiene:
 // they name a signature key from a session that is being discarded.
 import { clearUnappliedForAccount } from "../chat/unapplied-requests";
+import { clearOwnRequestsForAccount } from "../chat/membership-retry";
 // ADR-0045 UX §6.1.10 — the per-group last-observed-owner memory the
 // new-owner notice compares against. Same recover / forgetDevice hygiene as
 // the commit outbox and the two observation stores beside it: a stale entry
@@ -2747,6 +2748,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           await deleteOutboxForAccount(accountIdB64);
           clearObservationsForAccount(accountIdB64);
           clearUnappliedForAccount(accountIdB64);
+          clearOwnRequestsForAccount(accountIdB64);
           clearBeaconObservationsForAccount(accountIdB64);
           clearLastObservedOwnerForAccount(accountIdB64);
           // ADR-0045 UX §6.2.3 — the durable `leaveRequestedAt` record follows

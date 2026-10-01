@@ -746,7 +746,7 @@ class OwnershipTransferTest {
         // zero-length base64 key names nobody, and letting it through would make
         // `ownTransfer` true for a promote.
         assertNull(
-            SharedPrefsPendingRequestStore.decodeRow("role-change|1|1|")["role-change"]
+            SharedPrefsPendingRequestStore.decodeRow("role-change|1|1||0|")["role-change"]
                 ?.transferToB64,
         )
     }

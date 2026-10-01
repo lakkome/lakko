@@ -123,7 +123,14 @@ export interface SweepGroupPort {
   readonly epoch: bigint;
   /**
    * ADR-0045 committer rank: `0` for the owner, `k + 1` for the k-th admin,
-   * `undefined` for a plain member or a group with no role table.
+   * and — since ADR-0050 section 2.5a — `n + 1 + i` for a plain member while
+   * its pending store holds a device admission (or its own account's
+   * self-service proposal) it could sweep. Every device (leaf) of a ranked
+   * account holds the account's rank (ADR-0050 section 2.5a item 6); which of
+   * an account's devices acts is the beacon fold's tie-break on signature key,
+   * not this rank. `undefined` for a plain member with nothing it could sweep,
+   * and for a group with no role table. A rank therefore no longer implies
+   * owner or admin; ask the role table for that.
    *
    * `undefined` and `0` are NOT interchangeable and `if (rank)` is wrong in
    * both directions — `0` is the owner, the one device that always sweeps.
@@ -195,8 +202,14 @@ export interface SweepJournalPort {
   fetch(after: number): Promise<SweepJournalRow[]>;
   /** Publish to this group's journal; resolves to the DS-assigned id. */
   publishGroup(bytes: Uint8Array): Promise<number>;
-  /** Publish to a member's mailbox pseudonym; resolves to the DS id. */
-  publishMailbox(pseudonym: Uint8Array, bytes: Uint8Array): Promise<number>;
+  /**
+   * Publish to a member's mailbox pseudonym; resolves to the DS id, or to
+   * `null` when nothing was written because no authorisation this device
+   * holds reaches that mailbox (ADR-0050 section 2.5a item 7: never written
+   * unsigned). A `null` keeps the Welcome OWED: the entry is not acked, and
+   * the fan-out is retried at the next sweep attempt.
+   */
+  publishMailbox(pseudonym: Uint8Array, bytes: Uint8Array): Promise<number | null>;
 }
 
 /** What the sweep durably records, per ADR-0040. */
@@ -255,8 +268,9 @@ export interface SweepOutboxPort {
    */
   markWelcomesOwed(id: string, commitMessageId: number): Promise<void>;
   /** The un-acked entry whose verdict settled but whose Welcome fan-out is
-   *  still owed, or `null`. */
-  findOwedWelcomes(): Promise<SweepDurableEntry | null>;
+   *  still owed, or `null`; an entry whose id is in `skip` is passed over (a
+   *  fan-out still waiting for a grant must not hide the ones behind it). */
+  findOwedWelcomes(skip?: ReadonlySet<string>): Promise<SweepDurableEntry | null>;
   /** Mark the entry acked once every artifact is on the wire. */
   ack(
     id: string,
@@ -282,7 +296,10 @@ export interface SweepPorts {
    *
    * Called with this device's CURRENT rank (never `undefined` — the caller has
    * already established it is a candidate) and answered by the core's
-   * `actingCommitterVerdict` fold over the beacons this device has observed.
+   * `actingCommitterVerdict` fold over the beacons this device has observed,
+   * keyed with this device's own leaf signature key so a fresh beacon from a
+   * lower-keyed device of the same rank (a sibling device of the same
+   * account, the normal case since ADR-0050 section 2.5a item 6) defers it.
    * Asynchronous because the fold needs wasm and the observation store; it is
    * awaited before anything is staged, so a slow answer costs one attempt and
    * nothing else.
@@ -380,8 +397,9 @@ export type SweepOutcome =
    *  journal's root nor a registrar seed, so the server would refuse its
    *  epoch. Nothing staged; an admin or the owner sweeps. */
   | { readonly kind: "no-journal-authority"; readonly rank: number }
-  /** ADR-0045 S4b — this device IS a candidate, but a strictly better-placed
-   *  one beaconed inside the freshness window. Stood down without staging;
+  /** ADR-0045 S4b — this device IS a candidate, but a better-placed one (a
+   *  lower rank, or the same rank with a lower signature key) beaconed inside
+   *  the freshness window. Stood down without staging;
    *  the next poll re-evaluates, and if that candidate goes quiet its beacon
    *  ages out of the window and this device takes over on its own. */
   | {
@@ -405,6 +423,9 @@ export type SweepOutcome =
       readonly commitMessageId: number;
       readonly welcomeMessageIds: readonly number[];
       readonly addedCount: number;
+      /** `true` when at least one added member's mailbox could not be
+       *  reached (no grant opens it): its Welcome is kept owed and retried. */
+      readonly welcomesOwed?: boolean;
     }
   /** Lost the journal order: abandoned, no Welcome published, the proposals
    *  survive for the winner's next sweep. */
@@ -416,6 +437,10 @@ export type SweepOutcome =
       readonly welcomeMessageIds: readonly number[];
       readonly addedCount: number;
     }
+  /** The owed fan-out was retried and a mailbox still could not be reached
+   *  (no grant opens it): nothing unsigned was written, the entry stays owed
+   *  for the next attempt or a grant's arrival. */
+  | { readonly kind: "welcomes-still-owed"; readonly unreachable: number }
   /** No settled-verdict entry was waiting on its Welcome fan-out. The common
    *  case, and what a staged sweep also reports — that one owes a VERDICT. */
   | { readonly kind: "no-welcomes-owed" }
@@ -524,11 +549,17 @@ export async function runCommitterSweep(ports: SweepPorts): Promise<SweepOutcome
   // the alternative is a repair that only runs when the user happens to reopen
   // the chat.
   const owedWelcomes = await resolveOwedWelcomes(ports);
-  if (owedWelcomes.kind !== "no-welcomes-owed") return owedWelcomes;
+  // A fan-out still waiting for a grant does not stop the sweep: the commit it
+  // belongs to is settled, and the group's other membership changes must not
+  // wait on one person's unreachable mailbox.
+  if (owedWelcomes.kind !== "no-welcomes-owed" && owedWelcomes.kind !== "welcomes-still-owed") {
+    return owedWelcomes;
+  }
 
-  // `undefined` is "not in the committer set at all" — a plain member or a
-  // group with no role table. `0` is the OWNER, so `if (rank)` would be wrong
-  // in both directions.
+  // `undefined` is "not in the committer set at all" — a plain member with no
+  // device admission to sweep (ADR-0050 2.5a), or a group
+  // with no role table. `0` is the OWNER, so `if (rank)` would be wrong in
+  // both directions.
   const rank = group.ownCommitterRank();
   if (rank === undefined) return { kind: "not-committer", rank };
 
@@ -679,17 +710,31 @@ export async function resolveOwedVerdict(ports: SweepPorts): Promise<SweepOutcom
 export async function resolveOwedWelcomes(ports: SweepPorts): Promise<SweepOutcome> {
   if (ports.group.hasStagedSweep()) return { kind: "no-welcomes-owed" };
 
-  const owed = await ports.outbox.findOwedWelcomes();
-  if (owed === null) return { kind: "no-welcomes-owed" };
+  // ADR-0050 section 2.5a item 7 — an entry whose addressee no grant reaches
+  // stays owed and is passed over, so it never hides an entry behind it.
+  const skip = new Set<string>();
+  let unreachableTotal = 0;
+  for (;;) {
+    const owed = await ports.outbox.findOwedWelcomes(skip);
+    if (owed === null || skip.has(owed.id)) break;
 
-  const welcomeMessageIds = await publishWelcomes(ports, owed);
-  await ports.outbox.ack(owed.id, owed.commitMessageId, welcomeMessageIds[0]);
+    const { ids: welcomeMessageIds, unreachable } = await publishWelcomes(ports, owed);
+    if (unreachable > 0) {
+      skip.add(owed.id);
+      unreachableTotal += unreachable;
+      continue;
+    }
+    await ports.outbox.ack(owed.id, owed.commitMessageId, welcomeMessageIds[0]);
 
-  return {
-    kind: "welcomes-republished",
-    welcomeMessageIds,
-    addedCount: owed.welcomeMailboxesB64.length,
-  };
+    return {
+      kind: "welcomes-republished",
+      welcomeMessageIds,
+      addedCount: owed.welcomeMailboxesB64.length,
+    };
+  }
+  return unreachableTotal > 0
+    ? { kind: "welcomes-still-owed", unreachable: unreachableTotal }
+    : { kind: "no-welcomes-owed" };
 }
 
 /**
@@ -812,14 +857,20 @@ async function publishAndAdjudicate(
   // it before the verdict would let a joiner open into a state no other member
   // holds if the commit then lost: a three-party fork, strictly worse than the
   // two-party one this whole mechanism exists to close.
-  const welcomeMessageIds = await publishWelcomes(ports, entry);
-  await ports.outbox.ack(entry.id, commitMessageId, welcomeMessageIds[0]);
+  const { ids: welcomeMessageIds, unreachable } = await publishWelcomes(ports, entry);
+  // A mailbox no grant reaches keeps the entry owed (not acked); the commit
+  // itself is settled, so the caller still gets `committed` and runs every
+  // post-commit step.
+  if (unreachable === 0) {
+    await ports.outbox.ack(entry.id, commitMessageId, welcomeMessageIds[0]);
+  }
 
   return {
     kind: "committed",
     commitMessageId,
     welcomeMessageIds,
     addedCount: entry.welcomeMailboxesB64.length,
+    ...(unreachable > 0 ? { welcomesOwed: true } : {}),
   };
 }
 
@@ -912,16 +963,19 @@ async function adjudicate(
 async function publishWelcomes(
   ports: SweepPorts,
   entry: SweepDurableEntry,
-): Promise<number[]> {
+): Promise<{ ids: number[]; unreachable: number }> {
   const ids: number[] = [];
+  let unreachable = 0;
   if (entry.welcomeEnvelopeB64 !== undefined) {
     const bytes = ports.decodeB64(entry.welcomeEnvelopeB64);
     for (const mailboxB64 of entry.welcomeMailboxesB64) {
-      ids.push(await ports.journal.publishMailbox(ports.decodeB64(mailboxB64), bytes));
+      const id = await ports.journal.publishMailbox(ports.decodeB64(mailboxB64), bytes);
+      if (id === null) unreachable += 1;
+      else ids.push(id);
     }
   }
   // ADR-0053 contract point 8 — no `WelcomeRendezvous` is written to the
   // group journal any more: the `/g/` joiner's Welcome is the mailbox copy
   // above, like every other added member's.
-  return ids;
+  return { ids, unreachable };
 }

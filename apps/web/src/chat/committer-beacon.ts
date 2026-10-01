@@ -5,6 +5,18 @@
  * ADR-0045 S4b — the committer liveness beacon: emit it, observe it, and let
  * the lowest-ranked *active* candidate take the sweep.
  *
+ * ## Same rank, lower key (ADR-0050 section 2.5a item 6)
+ *
+ * Every device (leaf) of a ranked account holds the account's rank, so two
+ * devices of one person rank equal. The core breaks that tie by signature
+ * key: a device defers to a fresh observation of a LOWER rank, or of the SAME
+ * rank with a LOWER key, and ignores observations of its own key. The acting
+ * device of an account is therefore its lowest-keyed device whose beacon is
+ * fresh, not its lowest leaf in the roster: a lost device stays in the roster
+ * but stops beaconing, and its account's live device acts in its place. This
+ * module hands the core both keys (this device's own, and each observation's
+ * sender) and never decides the tie itself.
+ *
  * ## What this closes
  *
  * S4a made admins propose and the **owner** sweep. Rank 0 acts without
@@ -15,7 +27,8 @@
  *
  * This slice supplies the missing fact. A candidate announces itself on the
  * group journal; every other candidate hears it, ranks its sender, and stands
- * down only for someone **strictly** better placed. Hearing nothing means
+ * down only for someone better placed (a strictly lower rank, or the same
+ * rank and a lower signature key). Hearing nothing means
  * *act* — silence is the answer that nobody better placed is running, not a
  * failure to elect.
  *
@@ -79,17 +92,29 @@
  */
 export type ActingCommitter =
   | { readonly kind: "act" }
-  | { readonly kind: "defer"; readonly toRank: number | undefined }
+  | {
+      readonly kind: "defer";
+      readonly toRank: number | undefined;
+      /** The deferred-to device's 32-byte signature key, for the log line;
+       *  absent on the fail-closed defers that name nobody. */
+      readonly toSignatureKey?: Uint8Array;
+    }
   | { readonly kind: "not-a-candidate" };
 
 /** Why this device did or did not emit a beacon on this tick. */
 export type BeaconEmitVerdict =
   /** Emit — this device is a candidate, foregrounded, and past its throttle. */
   | "emit"
-  /** Not an owner or admin. A plain member's beacon can never make it the
-   *  acting committer (every receiver's fold drops it), so emitting one is
-   *  pure journal litter and a pure activity leak. */
+  /** No committer rank: a plain member with no device admission to sweep, or
+   *  a group with no role table. Its beacon could never make it the acting
+   *  committer (every receiver's fold drops it), so emitting one is pure
+   *  journal litter and a pure activity leak. */
   | "not-a-candidate"
+  /** This device holds neither the root nor a registrar seed for the group
+   *  (ADR-0050 section 2.5a item 8): it could not register the epoch a sweep
+   *  moves to, so it never sweeps, and a beacon from it would make every
+   *  other candidate defer to a device that is not going to sweep. */
+  | "no-journal-authority"
   /** The tab is not visible. See {@link beaconEmitVerdict}. */
   | "not-foreground"
   /** A beacon went out less than one interval ago. */
@@ -102,11 +127,16 @@ export type BeaconEmitVerdict =
  */
 export interface ProjectedObservation {
   /** The rank re-derived for this beacon's sender AT VERDICT TIME, or
-   *  `undefined` when that sender is not a candidate (a plain member, a
-   *  demoted admin, or a key that no longer resolves). */
+   *  `undefined` when that sender is not a candidate (a key that no longer
+   *  resolves, or a group with no role table). Since ADR-0050 section 2.5a a
+   *  plain member is ranked too, after the owner and admins, and beacons only
+   *  while it holds a device admission it could sweep. */
   readonly rank: number | undefined;
   /** `now - created_at` on the DS row, in milliseconds. Never negative. */
   readonly ageMs: bigint;
+  /** The sender's 32-byte leaf signature key — the tie-break between devices
+   *  of one account (ADR-0050 section 2.5a item 6). */
+  readonly signatureKey: Uint8Array;
 }
 
 /**
@@ -143,6 +173,9 @@ export function beaconEmitVerdict(input: {
   readonly ownRank: number | undefined;
   /** `document.visibilityState === "visible"`, or the platform equivalent. */
   readonly foreground: boolean;
+  /** Whether this device holds the root or a registrar seed for the group
+   *  (`dsAccess.mayRegister`, the same check the sweep makes before staging). */
+  readonly mayRegister: boolean;
   /** When this device last emitted, from its OWN local clock — legitimate
    *  here and nowhere else in the beacon design, because it governs only this
    *  device's send cadence and feeds no judgement about anybody else. */
@@ -156,6 +189,9 @@ export function beaconEmitVerdict(input: {
   ) => boolean;
 }): BeaconEmitVerdict {
   if (!input.foreground) return "not-foreground";
+  // Checked before the throttle, so the throttle's first-of-session beacon is
+  // not spent by a device that may not announce itself at all.
+  if (input.ownRank !== undefined && !input.mayRegister) return "no-journal-authority";
   const allowed = input.throttle(
     input.ownRank,
     input.lastEmittedAtMs === undefined
@@ -165,6 +201,23 @@ export function beaconEmitVerdict(input: {
   );
   if (allowed) return "emit";
   return input.ownRank === undefined ? "not-a-candidate" : "throttled";
+}
+
+/**
+ * This device's committer rank for the beacon emitter (ADR-0050 section 2.5a
+ * item 8): asked with the identity the GROUP runs on — this device's leaf, the
+ * one the sweep uses — never with an identity rebuilt from the account seed.
+ * On a bound device the account key holds no leaf, so the account identity
+ * has no rank at all and the device would never beacon. `undefined` when no
+ * device identity is loaded (fail closed: a device that cannot establish it
+ * is a candidate must not claim to be one).
+ */
+export function deviceCommitterRank<I>(
+  group: { ownCommitterRank(identity: I): number | undefined },
+  deviceIdentity: I | null,
+): number | undefined {
+  if (deviceIdentity === null) return undefined;
+  return group.ownCommitterRank(deviceIdentity);
 }
 
 /**
@@ -193,11 +246,27 @@ export function projectObservations(
     // RULE 1: ranked HERE, at verdict time, never at receipt.
     const rank = rankOf(senderKeyB64);
     if (rank === undefined) continue;
+    const signatureKey = decodeKey(senderKeyB64);
+    // A stored key that is not 32 bytes names nobody the core can compare
+    // against; it is pruned like a sender that no longer ranks.
+    if (signatureKey === null) continue;
     liveKeys.push(senderKeyB64);
     const age = Math.trunc(nowMs) - Math.trunc(atMs);
-    projected.push({ rank, ageMs: BigInt(age < 0 ? 0 : age) });
+    projected.push({ rank, ageMs: BigInt(age < 0 ? 0 : age), signatureKey });
   }
   return { projected, liveKeys };
+}
+
+function decodeKey(b64: string): Uint8Array | null {
+  try {
+    const bin = atob(b64);
+    if (bin.length !== 32) return null;
+    const out = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,14 +412,14 @@ export function decideActingCommitter(input: {
   readonly accountIdB64: string;
   readonly groupIdB64: string;
   readonly ownRank: number | undefined;
+  /** This device's own leaf signature key: the key of the identity the group
+   *  runs on (the one `ownCommitterRank` and the sweep use). The core ignores
+   *  observations of it, so a device's own echoed beacon never defers it. */
+  readonly ownSignatureKey: Uint8Array;
   readonly rankOf: (senderKeyB64: string) => number | undefined;
   readonly nowMs: number;
   readonly freshnessWindowMs: bigint;
-  readonly fold: (
-    ownRank: number | undefined,
-    observed: readonly ProjectedObservation[],
-    freshnessWindowMs: bigint,
-  ) => ActingCommitter;
+  readonly fold: ActingCommitterFold;
 }): ActingCommitter {
   const observations = loadBeaconObservations(input.accountIdB64, input.groupIdB64);
   const { projected, liveKeys } = projectObservations(
@@ -359,5 +428,70 @@ export function decideActingCommitter(input: {
     input.nowMs,
   );
   pruneBeaconObservations(input.accountIdB64, input.groupIdB64, liveKeys);
-  return input.fold(input.ownRank, projected, input.freshnessWindowMs);
+  return input.fold(input.ownRank, input.ownSignatureKey, projected, input.freshnessWindowMs);
+}
+
+/** The fold port: the FFI `actingCommitterVerdict` behind an adapter. */
+export type ActingCommitterFold = (
+  ownRank: number | undefined,
+  ownSignatureKey: Uint8Array,
+  observed: readonly ProjectedObservation[],
+  freshnessWindowMs: bigint,
+) => ActingCommitter;
+
+/** The part of the wasm namespace {@link wasmActingCommitterFold} calls. */
+export interface ActingCommitterWasm {
+  actingCommitterVerdict(
+    ownRank: number | null | undefined,
+    ownSignatureKey: Uint8Array,
+    observed: unknown[],
+    freshnessWindowMs: bigint,
+  ): {
+    readonly kind: string;
+    readonly deferToRank: number | undefined;
+    readonly deferToSignatureKey: Uint8Array | undefined;
+    free(): void;
+  };
+  BeaconObservation: new (
+    rank: number | null | undefined,
+    ageMs: bigint,
+    signatureKey: Uint8Array,
+  ) => unknown;
+}
+
+/**
+ * The FFI fold behind the {@link ActingCommitterFold} port, shared by the
+ * chat view and the background sweeper so the two cannot drift.
+ *
+ * wasm-bindgen CONSUMES each observation, which is why they are built fresh on
+ * every evaluation rather than cached — and which is also what
+ * ranking-at-verdict-time requires anyway. The verdict is a wasm-owned object
+ * freed here: this runs on every poll of every open group.
+ *
+ * The FFI throws on a malformed key (own or observed); that surfaces as a
+ * throw, which every caller reads as a defer (fail closed).
+ */
+export function wasmActingCommitterFold(wasm: ActingCommitterWasm): ActingCommitterFold {
+  return (rank, ownSignatureKey, observed, windowMs) => {
+    const verdict = wasm.actingCommitterVerdict(
+      rank,
+      ownSignatureKey,
+      observed.map((o) => new wasm.BeaconObservation(o.rank, o.ageMs, o.signatureKey)),
+      windowMs,
+    );
+    try {
+      if (verdict.kind === "act") return { kind: "act" };
+      if (verdict.kind === "defer") {
+        const key = verdict.deferToSignatureKey;
+        return {
+          kind: "defer",
+          toRank: verdict.deferToRank,
+          ...(key === undefined ? {} : { toSignatureKey: key }),
+        };
+      }
+      return { kind: "not-a-candidate" };
+    } finally {
+      verdict.free();
+    }
+  };
 }

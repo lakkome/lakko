@@ -82,9 +82,10 @@ import { readKnockCursor, takeKnockReadSlot, writeKnockCursor } from "./knock-cu
 import { boundContactsAccount } from "../contacts/local-store";
 import { PUSH_GID_LEN, type DsWake } from "../ds/wake";
 import { loadWasm } from "../wasm";
-import type {
-  Group as WasmGroup,
-  Identity as WasmIdentity,
+import {
+  Role,
+  type Group as WasmGroup,
+  type Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import {
@@ -1322,13 +1323,19 @@ export class ChatClient {
 
 /**
  * ADR-0053 contract point 7 — does this device read the group's knock queue?
- * An owner or admin (the ADR-0045 committer set, the same set ADR-0027 lets
- * approve an external join). A plain member never acts on a join request, so
- * reading strangers' rows would only cost it bandwidth. A torn read is `false`.
+ * An owner or admin: the set ADR-0027 lets approve an external join. A plain
+ * member never acts on a join request, so reading strangers' rows would only
+ * cost it bandwidth. A torn read, or a group with no role table, is `false`.
+ *
+ * Gated on the ROLE TABLE, never on `ownCommitterRank`: since ADR-0050
+ * section 2.5a a plain member holds a committer rank while its pending store
+ * holds a device admission it could sweep, so "has a rank" no longer means
+ * "may approve a join".
  */
 export function readsKnocks(group: WasmGroup, identity: WasmIdentity): boolean {
   try {
-    return group.ownCommitterRank(identity) !== undefined;
+    const role = group.ownRole(identity);
+    return role === Role.Owner || role === Role.Admin;
   } catch {
     return false;
   }

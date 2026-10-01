@@ -44,7 +44,9 @@ import {
   addLink,
   addReply,
   applyAcceptedDiff,
+  applyVersionChecks,
   adoptReachState,
+  bookHoldsNoVersionState,
   bumpVersion,
   decodeReachBook,
   desiredReachKeys,
@@ -61,6 +63,7 @@ import {
   raiseVersion,
   reachDiff,
   rotateFof,
+  versionChecksDue,
   versionOf,
   type ReachBook,
   type ReachStateEntryModel,
@@ -402,6 +405,7 @@ export class ReachSession {
     if (next === this.grants) return;
     this.grants = next;
     await saveReachRow(this.accountIdB64, "grants", encodeReceivedGrants(next));
+    notifyReceivedGrantsChanged();
   }
 
   /** Decode a kept grant wire. The caller frees it. */
@@ -458,17 +462,78 @@ export class ReachSession {
     }
   }
 
+  /**
+   * ADR-0060 section 1, "Versions after a restore": before a recovering
+   * device registers any key without a known version, it reads the keys its
+   * mailbox holds (owner proof) and continues each `(class, scope)` from the
+   * highest version registered there, so a key rotated away (a removed
+   * contact's, an evicted member's) is never registered again. A failed read
+   * throws: the sync registers NOTHING this time and is retried at the next
+   * sync (a setting change, a scope change, coming back online, the next
+   * reply or link). Meanwhile the keys already on the DS keep working for
+   * whoever holds the current ones, and this device adds none.
+   */
+  private async recoverVersions(
+    book: ReachBook,
+    scopes: ReachScopes,
+  ): Promise<{ book: ReachBook; raised: boolean }> {
+    let next = book;
+    if (next.recovery === null && bookHoldsNoVersionState(next)) {
+      next = { ...next, recovery: { checked: {} } };
+    }
+    const checks = versionChecksDue(next, scopes);
+    if (checks.length === 0) return { book: next, raised: false };
+    const state = await this.ds.getMailboxReach(this.accountMailbox);
+    const dsKeys = new Map<string, number | null>();
+    for (const k of state.keys) dsKeys.set(journalHex(k.publicKey), k.expiresAtMs);
+    // One check at a time, yielding between them: each derives up to 1025
+    // keys, and a restored account with many groups must not freeze the page.
+    let raised = false;
+    for (const check of checks) {
+      const one = applyVersionChecks(next, [check], dsKeys, (cls, scopeHex, version) =>
+        this.publicKeyHex(cls, scopeHex, version),
+      );
+      next = one.book;
+      raised = raised || one.raised;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (this.stopped) throw new Error("reach session stopped");
+    }
+    const applied = { book: next, raised };
+    if (applied.raised) {
+      // eslint-disable-next-line no-console
+      console.info("[reach] resumed reach key versions from the keys the mailbox holds");
+      return { book: this.restamp(applied.book), raised: true };
+    }
+    return { book: applied.book, raised: false };
+  }
+
   private async runSync(): Promise<void> {
     if (this.stopped) return;
     const now = this.now();
+    const scopes = this.scopes();
     let book = pruneExpired(this.book, now);
+    // Before anything is rotated or registered (a due `fof` rotation would
+    // otherwise establish a version without looking at the DS).
+    let recovered = false;
+    try {
+      const r = await this.recoverVersions(book, scopes);
+      book = r.book;
+      recovered = r.raised;
+    } catch (err) {
+      setApplyStatus(err instanceof DsNetworkError ? "offline" : "failed");
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[reach] reading the registered reach keys failed; nothing registered",
+        err instanceof DsHttpError ? err.status : "network",
+      );
+      throw err;
+    }
     let rotated = false;
     if (fofRotationDue(book, now)) {
       book = this.restamp(rotateFof(book, now));
       rotated = true;
     }
     const setting = this.setting();
-    const scopes = this.scopes();
     const everyone =
       setting !== null && setting.mode === this.wasm.VisibilityMode.Everyone;
     const wanted = desiredReachKeys(book, {
@@ -490,7 +555,7 @@ export class ReachSession {
       this.book = book;
       await this.persistBook();
     }
-    if (rotated) this.versionsChanged(true);
+    if (rotated || recovered) this.versionsChanged(true);
     if (isEmptyDiff(diff)) {
       setApplyStatus("applied");
       return;
@@ -647,6 +712,35 @@ export class ReachSession {
 
   /** For diagnostics and tests: the class byte table. */
   static readonly classBytes = REACH_CLASS_BYTE;
+}
+
+// ----------------------------------------------------------------------------
+// Received-grant changes (ADR-0050 section 2.5a item 7)
+// ----------------------------------------------------------------------------
+
+const grantListeners = new Set<() => void>();
+
+/**
+ * Subscribe to changes of the grants this account received (a grant arrived,
+ * was replaced or withdrawn). A Welcome kept owed because no grant reached its
+ * addressee's mailbox is retried on this, not only on the next poll. Returns
+ * the unsubscriber.
+ */
+export function onReceivedGrantsChanged(listener: () => void): () => void {
+  grantListeners.add(listener);
+  return () => {
+    grantListeners.delete(listener);
+  };
+}
+
+function notifyReceivedGrantsChanged(): void {
+  for (const listener of [...grantListeners]) {
+    try {
+      listener();
+    } catch {
+      /* a listener's failure is its own */
+    }
+  }
 }
 
 // ----------------------------------------------------------------------------

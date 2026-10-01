@@ -83,11 +83,12 @@ mod tests {
     /// as LITERALS so a wire change fails a Rust test.
     #[test]
     fn golden_pins_the_swift_prefilter_shape() {
-        assert_eq!(registrar_seed_envelope_len(), 173);
+        assert_eq!(registrar_seed_envelope_len(), 205);
         let w = wire();
-        assert_eq!(w.len(), 173);
+        assert_eq!(w.len(), 205);
         assert_eq!(w[0], 0x6c);
         assert_eq!(&w[..27], b"lakko/ds-registrar-seed/v1\x00");
+        assert_eq!(w[27], 0x02, "v2: the version byte after the separator");
     }
 
     #[test]

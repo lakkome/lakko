@@ -260,6 +260,10 @@ public class SeedEnvelopeHeader(
     public val journalId: ByteArray,
     public val addresseeAccountKey: ByteArray,
     public val rank: SeedEnvelopeRank,
+    /** v2 (ADR-0057, amended 2026-10-01): the registrar's public key, public
+     *  and readable without opening; the open refuses a seed that does not
+     *  derive it. Empty when the caller has none to give. */
+    public val registrarPublicKey: ByteArray = ByteArray(0),
 )
 
 /** Why a rank-root envelope was dropped, or [ACCEPT]. */

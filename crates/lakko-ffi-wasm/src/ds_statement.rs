@@ -454,6 +454,7 @@ pub struct RegistrarSeedEnvelope {
     journal_id: Vec<u8>,
     member_account_key: Vec<u8>,
     rank: u8,
+    registrar_public_key: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -475,6 +476,18 @@ impl RegistrarSeedEnvelope {
     pub fn rank(&self) -> u8 {
         self.rank
     }
+
+    /// The registrar's Ed25519 public key (32 bytes), readable without
+    /// opening: the key the Delivery Service knows the registrar by (for a
+    /// root handover, the root's). Every member records
+    /// `memberAccountKey -> registrarPublicKey` from an envelope whose MLS
+    /// sender resolved to the owner, and revokes it when it commits that
+    /// account's removal. Bound to the seal; `openRegistrarSeedEnvelope`
+    /// refuses a seed that does not derive it.
+    #[wasm_bindgen(getter, js_name = registrarPublicKey)]
+    pub fn registrar_public_key(&self) -> Vec<u8> {
+        self.registrar_public_key.clone()
+    }
 }
 
 const fn seed_rank_byte(rank: RegistrarSeedRank) -> u8 {
@@ -488,7 +501,8 @@ const fn seed_rank_byte(rank: RegistrarSeedRank) -> u8 {
 /// Compose the registrar-seed envelope a root sends one member inside the
 /// group: `registrarSeed` sealed to `memberX25519PublicKey` (the member
 /// account's identity-bundle `x25519_pubkey`), addressed by its account key.
-/// `rank`: `1` member, `2` admin.
+/// `rank`: `1` member, `2` admin. The envelope's clear registrar public key
+/// is derived from `registrarSeed` inside, so it always matches.
 ///
 /// # Errors
 ///
@@ -556,6 +570,7 @@ pub fn decode_registrar_seed_envelope(plaintext: &[u8]) -> Result<RegistrarSeedE
         journal_id: env.journal_id.to_vec(),
         member_account_key: env.member_account_key.to_vec(),
         rank: seed_rank_byte(env.rank),
+        registrar_public_key: env.registrar_public_key.to_vec(),
     })
 }
 
@@ -564,8 +579,9 @@ pub fn decode_registrar_seed_envelope(plaintext: &[u8]) -> Result<RegistrarSeedE
 ///
 /// # Errors
 ///
-/// When the envelope is malformed, addressed to another account key, or
-/// does not open under this identity's X25519 key.
+/// When the envelope is malformed, addressed to another account key, does
+/// not open under this identity's X25519 key, or opens to a seed that does
+/// not derive the envelope's registrar public key.
 #[wasm_bindgen(js_name = openRegistrarSeedEnvelope)]
 pub fn open_registrar_seed_envelope(
     plaintext: &[u8],
@@ -694,6 +710,31 @@ mod tests {
         assert_eq!(
             statement_of(&empty).body,
             StatementBody::RegistrarsSet { registrars: vec![] }
+        );
+    }
+
+    #[test]
+    fn a_decoded_registrar_seed_envelope_exposes_the_registrar_public_key() {
+        let member_x25519 = X25519SecretKey::from_bytes([0x31; 32]).public_key();
+        let seed = [0x32u8; 32];
+        let wire = compose_registrar_seed_envelope(
+            &[0x47; 32],
+            &[0x48; 32],
+            &member_x25519.to_bytes(),
+            2,
+            &seed,
+        )
+        .unwrap();
+        assert_eq!(
+            u32::try_from(wire.len()).unwrap(),
+            registrar_seed_envelope_len()
+        );
+        assert_eq!(registrar_seed_envelope_len(), 205);
+        let decoded = decode_registrar_seed_envelope(&wire).unwrap();
+        assert_eq!(decoded.rank(), 2);
+        assert_eq!(
+            decoded.registrar_public_key(),
+            ds_statement_signer(&seed).unwrap().public_key()
         );
     }
 }

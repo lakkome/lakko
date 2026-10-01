@@ -10,6 +10,18 @@ import android.content.SharedPreferences
  * ADR-0045 S4b — the committer liveness beacon: emit it, observe it, and let the
  * lowest-ranked *active* candidate take the sweep.
  *
+ * ## ADR-0050 section 2.5a item 6: devices of one account share a rank
+ *
+ * Every leaf of a ranked account holds the account's rank, so two devices of
+ * one person beacon at the SAME rank. The core's fold breaks that tie by
+ * signature key: a device defers to a fresh observation of a strictly lower
+ * rank, or of the same rank with a bytewise lower key, and ignores
+ * observations of its own key. The acting device of an account is therefore
+ * its lowest-keyed ACTIVE one (a lost device that stays in the roster stops
+ * beaconing and stops being deferred to). That is why each projected
+ * observation carries its sender's key and the fold is handed this device's
+ * own leaf key.
+ *
  * Android mirror of `apps/web/src/chat/committer-beacon.ts`.
  *
  * ## What this closes
@@ -91,8 +103,21 @@ import android.content.SharedPreferences
 internal sealed class ActingCommitter {
     object Act : ActingCommitter()
 
-    /** @param toRank the lowest rank observed active — informational only. */
-    data class Defer(val toRank: UInt?) : ActingCommitter()
+    /**
+     * @param toRank the rank of the best-placed fresh observation (equal to
+     *   this device's own when it defers to a lower-keyed device of its own
+     *   account) — informational only.
+     * @param toSignatureKey that observation's 32-byte signature key, for a log
+     *   line; `null` when the defer is this client's own fail-closed answer
+     *   (nothing was observed, the verdict was unreadable).
+     */
+    data class Defer(val toRank: UInt?, val toSignatureKey: ByteArray? = null) : ActingCommitter() {
+        override fun equals(other: Any?): Boolean =
+            other is Defer && other.toRank == toRank &&
+                (other.toSignatureKey?.contentEquals(toSignatureKey) ?: (toSignatureKey == null))
+
+        override fun hashCode(): Int = 31 * (toRank?.hashCode() ?: 0) + (toSignatureKey?.contentHashCode() ?: 0)
+    }
 
     object NotACandidate : ActingCommitter()
 }
@@ -102,10 +127,23 @@ internal enum class BeaconEmitVerdict {
     /** Emit — this device is a candidate, foregrounded, and past its throttle. */
     EMIT,
 
-    /** Not an owner or admin. A plain member's beacon can never make it the
-     *  acting committer (every receiver's fold drops it), so emitting one is
-     *  pure journal litter and a pure activity leak. */
+    /** No committer rank: not an owner or admin, and (ADR-0050 section 2.5a)
+     *  not a member holding a device admission it could sweep. A beacon from
+     *  it could never make it the acting committer (every receiver's fold
+     *  drops it), so emitting one is pure journal litter and a pure activity
+     *  leak. A plain member WITH such an admission has a rank (every device of
+     *  its account does) and beacons for as long as it holds one. */
     NOT_A_CANDIDATE,
+
+    /**
+     * ADR-0050 section 2.5a item 8 — this device holds neither the journal root
+     * nor a registrar seed for the group, so it could not register the epoch a
+     * sweep reaches and never stages one. A beacon from it would make every
+     * other candidate (a sibling device of its own account included) defer to
+     * a device that cannot complete a sweep. The same check the sweep makes
+     * before staging.
+     */
+    CANNOT_REGISTER,
 
     /** The app is not foregrounded. See [beaconEmitVerdict]. */
     NOT_FOREGROUND,
@@ -127,13 +165,19 @@ internal enum class BeaconEmitVerdict {
  * constructor takes. Both fields are the OBSERVER's own re-derivation — nothing
  * in the beacon payload contributes to either.
  */
-internal data class ProjectedObservation(
+internal class ProjectedObservation(
     /** The rank re-derived for this beacon's sender AT VERDICT TIME, or `null`
-     *  when that sender is not a candidate (a plain member, a demoted admin, or
-     *  a key that no longer resolves). */
+     *  when that sender is not a candidate (a demoted admin with no rank, a
+     *  member with nothing to sweep, or a key that no longer resolves). Since
+     *  ADR-0050 section 2.5a every leaf of a ranked account holds the
+     *  account's rank, a plain member's included while it holds a device
+     *  admission. */
     val rank: UInt?,
     /** `now - created_at` on the DS row, in milliseconds. Never negative. */
     val ageMs: ULong,
+    /** The sender's 32-byte leaf signature key, resolved at receipt — the
+     *  tie-break between devices of one account (section 2.5a item 6). */
+    val signatureKey: ByteArray,
 )
 
 /**
@@ -173,6 +217,9 @@ internal const val BEACON_TICK_MS: Long = 15_000L
  * @param membershipEnded ADR-0045 UX §6.2.8 item 2 — this device's own
  *   membership has ended. Checked FIRST, before the foreground gate; see the
  *   body.
+ * @param canRegister ADR-0050 section 2.5a item 8 — this device holds the
+ *   journal root or a registrar seed for the group (the sweep's own pre-stage
+ *   check). `false` emits nothing ([BeaconEmitVerdict.CANNOT_REGISTER]).
  */
 internal fun beaconEmitVerdict(
     ownRank: UInt?,
@@ -181,6 +228,7 @@ internal fun beaconEmitVerdict(
     nowMs: Long,
     throttle: (UInt?, ULong?, ULong) -> Boolean,
     membershipEnded: Boolean = false,
+    canRegister: Boolean = true,
 ): BeaconEmitVerdict {
     // ADR-0045 UX §6.2.8 item 2 — AHEAD of the foreground gate, because it is
     // the permanent condition of the two and because the role table a `Remove`
@@ -192,6 +240,12 @@ internal fun beaconEmitVerdict(
     // forever, for a group that will never accept one.
     if (membershipEnded) return BeaconEmitVerdict.MEMBERSHIP_ENDED
     if (!foreground) return BeaconEmitVerdict.NOT_FOREGROUND
+    // ADR-0050 section 2.5a item 8 — ahead of the throttle: a device that
+    // cannot register an epoch would only make better-keyed siblings defer to
+    // it, and it never stages. Only a ranked device gets here meaningfully; a
+    // device with no rank reports NOT_A_CANDIDATE, which is the stronger
+    // statement.
+    if (!canRegister && ownRank != null) return BeaconEmitVerdict.CANNOT_REGISTER
     val allowed = throttle(
         ownRank,
         lastEmittedAtMs?.takeIf { it >= 0L }?.toULong(),
@@ -227,10 +281,15 @@ internal fun projectObservations(
     observations: Map<String, Long>,
     rankOf: (String) -> UInt?,
     nowMs: Long,
+    decodeKey: (String) -> ByteArray? = ::decodeBeaconKey,
 ): ProjectedBeacons {
     val projected = mutableListOf<ProjectedObservation>()
     val liveKeys = mutableListOf<String>()
     for ((senderKeyB64, atMs) in observations) {
+        // A stored key that is not a 32-byte signature key can name nobody,
+        // and the core refuses the WHOLE fold over one such observation, so it
+        // is dropped (and pruned) rather than passed on.
+        val key = decodeKey(senderKeyB64)?.takeIf { it.size == BEACON_SIGNATURE_KEY_LEN } ?: continue
         // RULE 1: ranked HERE, at verdict time, never at receipt.
         val rank = rankOf(senderKeyB64) ?: continue
         liveKeys.add(senderKeyB64)
@@ -239,11 +298,24 @@ internal fun projectObservations(
             ProjectedObservation(
                 rank = rank,
                 ageMs = (if (age < 0L) 0L else age).toULong(),
+                signatureKey = key,
             ),
         )
     }
     return ProjectedBeacons(projected, liveKeys)
 }
+
+/** A leaf signature key's width; the core's fold refuses any other. */
+internal const val BEACON_SIGNATURE_KEY_LEN: Int = 32
+
+/** The store's key spelling (standard base64, [outboxB64]) back to bytes, or
+ *  `null` for a malformed entry. */
+internal fun decodeBeaconKey(senderKeyB64: String): ByteArray? =
+    try {
+        java.util.Base64.getDecoder().decode(senderKeyB64)
+    } catch (_: IllegalArgumentException) {
+        null
+    }
 
 // ---------------------------------------------------------------------------
 // The observation store
@@ -306,6 +378,9 @@ internal fun recordBeaconObservation(
  * against the CURRENT role table, prune what no longer ranks, and hand the
  * projection to the core's fold.
  *
+ * @param ownSignatureKey this device's own 32-byte leaf signature key (the
+ *   key the group runs on), so the core can break a same-rank tie between
+ *   devices of one account and ignore this device's own echoed beacon.
  * @param fold the FFI `actingCommitterVerdict` behind a thin adapter, so the
  *   rule stays the core's and this function stays host-testable.
  */
@@ -314,17 +389,22 @@ internal fun decideActingCommitter(
     accountIdB64: String,
     groupIdHex: String,
     ownRank: UInt?,
+    ownSignatureKey: ByteArray,
     rankOf: (String) -> UInt?,
     nowMs: Long,
     freshnessWindowMs: ULong,
-    fold: (UInt?, List<ProjectedObservation>, ULong) -> ActingCommitter,
+    fold: (UInt?, ByteArray, List<ProjectedObservation>, ULong) -> ActingCommitter,
+    decodeKey: (String) -> ByteArray? = ::decodeBeaconKey,
 ): ActingCommitter {
     val observations = store.load(accountIdB64, groupIdHex)
-    val (projected, liveKeys) = projectObservations(observations, rankOf, nowMs)
+    val (projected, liveKeys) = projectObservations(observations, rankOf, nowMs, decodeKey)
     if (liveKeys.size != observations.size) {
         store.save(accountIdB64, groupIdHex, observations.filterKeys { it in liveKeys.toSet() })
     }
-    return fold(ownRank, projected, freshnessWindowMs)
+    // This device's own echoed beacon stays in the projection: the core
+    // ignores an observation of the observer's own key, so the client does
+    // not restate that rule.
+    return fold(ownRank, ownSignatureKey, projected, freshnessWindowMs)
 }
 
 /**

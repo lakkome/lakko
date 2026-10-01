@@ -21,40 +21,25 @@
  * (`drop_pending_external_join`, once the proposal is on its way), so the
  * quarantine entry is gone too and the admin cannot even re-approve.
  *
- * ## What is actually knowable — and what is not
+ * ## What this module lists now (ADR-0050 section 2.5a point 4)
  *
- * The core reports **no reason**: `CreateCommitError` carries no proposal
- * reference on any variant, so "why" does not exist at this layer and no copy
- * here may claim one. What exists is the **observation**, and this module takes
- * the one that reaches the person who can act:
+ * The add-only detector that used to live here (an own `add` observation
+ * that left the pending set without reaching the roster) was the S7 residual's
+ * first answer: report the loss, because nothing would repair it. Since
+ * section 2.5a a plain member may sweep device admissions, its commit drops
+ * every other pending proposal, and **the author re-requests it** —
+ * `chat/membership-retry.ts` keeps a durable record of every own request and
+ * re-derives it after each merged commit that did not carry it. So a
+ * superseded request is no longer a loss and is no longer listed.
  *
- * > **A request of mine left the core's pending set without its effect landing.**
- *
- * That test runs on **every** device rather than only on the sweeper — which
- * matters, because the device that swept is often not the device that asked —
- * and it needs no core change, no new wire artifact and no new FFI. It is also
- * *exactly* as strong as the truth: the pending set is empty, so no sweep will
- * ever carry the request again.
- *
- * ## Why only an `add`
- *
- * `remove:` and `leave:` keys name a **leaf index**, and OpenMLS hands a
- * vacated leaf to the next `Add`, so a roster test on a leaf can be wrong in
- * both directions. `role-change` carries no payload at all. And all three are
- * already **visible** when they fail — the member you tried to remove is still
- * in the roster, the group you failed to leave is still in your list. The
- * `add` is the only request whose failure leaves no trace anywhere, and the
- * only one whose effect test is keyed on a **signature key** rather than a
- * leaf. So the scope is not a shortcut: it is the exact set where the test is
- * sound and the silence is real.
- *
- * ## The one accepted false positive
- *
- * A member added by our sweep and removed again before the next render reads as
- * "not added". It needs two commits between two folds and its cost is one
- * dismissible line offering an action that is harmless to take. Narrowing it
- * would need the core to say which commit emptied the set, which is the reason
- * this layer does not have.
+ * What is listed is a request whose re-request **stopped** for a reason other
+ * than "it landed" or "its subject left": this device no longer holds the
+ * authority it needs (the core's typed refusal says `NotPermitted` or
+ * `DoNotRetry`), its own membership ended, or an approved join's retained
+ * request is gone. The core still reports **no reason** for an exclusion, so
+ * no copy here claims one; every kind of request is now covered, because the
+ * record names its subject by **key**, never by leaf index, and that was the
+ * only reason the old detector was limited to `add`.
  *
  * ## What the JOINER is told: nothing, and that is a finding rather than a gap
  *
@@ -71,84 +56,111 @@
  * fresh KeyPackage — the one thing that actually fixes the commonest cause.
  */
 
-import type { RequestObservation } from "./pending-requests";
-
-/** One own `add` request that left the pending set without landing. */
-export interface UnappliedAdd {
-  /** base64 of the prospective member's 32-byte Ed25519 signature key. */
-  readonly addSignatureKeyB64: string;
-  /**
-   * `true` when this device published the request by approving an external
-   * **join** rather than by adding a contact.
-   *
-   * It changes the copy and nothing else, and it is knowable *only* on the
-   * device that made the request — which is the same device this notice is
-   * shown on. A sweeping third party genuinely cannot tell the two apart: on
-   * the wire an approved add is indistinguishable from an admin adding a
-   * contact, which is ADR-0045 S7's point rather than a limitation.
-   */
-  readonly viaJoinRequest: boolean;
-}
+import type { OwnRequest } from "./membership-retry";
 
 /**
- * The own `add` requests that are dead: observed as ours, no longer in the
- * core's live pending set, and not in the roster.
+ * What a `Not applied` row is about.
  *
- * Pure. `liveKeys` and `rosterKeysB64` must be read in the SAME pass — the
- * pending set is emptied by the merge that also moves the roster, so reading
- * one before and one after a commit would compare two different moments.
+ * ADR-0050 section 2.5a point 4 widened this from `add` only to every own
+ * membership request, because a superseded request is now **re-requested**
+ * rather than listed (`chat/membership-retry.ts`, `runSupersededRerequests`).
+ * A row is written only when that re-request STOPS for a reason other than
+ * "the effect landed" or "the subject left the group": this device no longer
+ * holds the authority the request needs (a typed refusal whose disposition is
+ * `NotPermitted` or `DoNotRetry`), its own membership ended, or — for an
+ * approved join — the retained request it would re-approve from is gone.
  *
- * A `null` roster is a torn read, not an empty group, and claims NOTHING —
- * the same fail-closed direction `membershipRotationDecision` takes with the
- * identical signal. Treating an unreadable roster as "nobody is in it" would
- * report every own add as unapplied at once.
+ * The earlier add-only detector this replaced (an own `add` observation that
+ * left the pending set without reaching the roster) is gone: that exact
+ * situation is the one the re-request now repairs, so listing it would show
+ * as failed a request that is about to be sent again.
  */
-export function unappliedAddRequests(
-  observations: ReadonlyMap<string, RequestObservation>,
-  liveKeys: readonly string[],
-  rosterKeysB64: readonly string[] | null,
-): UnappliedAdd[] {
-  if (rosterKeysB64 === null) return [];
-  const live = new Set(liveKeys);
-  const roster = new Set(rosterKeysB64);
-  const out: UnappliedAdd[] = [];
-  for (const [key, seen] of observations) {
-    // UX §10 — a member is never told about someone else's request.
-    if (!seen.own) continue;
-    if (!key.startsWith("add:")) continue;
-    const addKeyB64 = key.slice("add:".length);
-    // `proposalKey` writes `add:?` when the record carried no signature key.
-    // That names nobody, so there is nothing honest to say about it.
-    if (addKeyB64.length === 0 || addKeyB64 === "?") continue;
-    if (live.has(key)) continue;
-    if (roster.has(addKeyB64)) continue;
-    out.push({ addSignatureKeyB64: addKeyB64, viaJoinRequest: seen.joinRequest === true });
+export type UnappliedKind =
+  | "add"
+  | "approve-join"
+  | "remove"
+  | "leave"
+  | "make-admin"
+  | "remove-admin"
+  | "transfer-ownership"
+  | "admit-device"
+  | "retire-device";
+
+const UNAPPLIED_KINDS: ReadonlySet<string> = new Set<UnappliedKind>([
+  "add",
+  "approve-join",
+  "remove",
+  "leave",
+  "make-admin",
+  "remove-admin",
+  "transfer-ownership",
+  "admit-device",
+  "retire-device",
+]);
+
+/** One own request that will not apply and is no longer being re-requested. */
+export interface UnappliedRequest {
+  /** `${kind}:${subjectKeyB64}` — the store key and the dismiss handle. */
+  readonly key: string;
+  readonly kind: UnappliedKind;
+  /** base64 of the 32-byte key that names the subject: the person's account
+   *  (or legacy leaf) key, the joiner's leaf key for an approved join, the
+   *  device's leaf key for a device row. Never a leaf index. */
+  readonly subjectKeyB64: string;
+}
+
+/** The row for an own request whose re-request stopped. */
+export function unappliedFromRequest(request: OwnRequest): UnappliedRequest {
+  let kind: UnappliedKind;
+  switch (request.kind) {
+    case "set-admin":
+      kind = request.makeAdmin ? "make-admin" : "remove-admin";
+      break;
+    default:
+      kind = request.kind;
   }
-  return out;
+  return { key: `${kind}:${request.subjectKeyB64}`, kind, subjectKeyB64: request.subjectKeyB64 };
 }
 
 /**
  * The line under one row.
  *
- * States that it did not apply and what can be done, **never why** — the core
- * has no reason to give and inventing one would be the same class of lie as a
- * green E2EE pill over an unencrypted call. The UX spec §7 draft string
- * (`This request expired before it could be applied.`) asserts a cause this
- * client cannot establish; the divergence is deliberate.
+ * States that it did not apply, **never why**, and offers no "you can do it
+ * again": a row exists because the re-request stopped, which is usually
+ * because this device no longer holds the authority the request needs, so
+ * the offer would be false as often as true. The one exception keeps its
+ * action because it is directed at somebody else: an approved join is
+ * terminal on the admin side (the core consumed the retained request and only
+ * the joiner holds the key material), so the action is theirs.
  *
- * A join approval is **terminal on the admin side** — the approve consumed the
- * retained request and only the joiner holds the key material — so it directs
- * the action to them. An ordinary add is re-doable here.
+ * The strings match the Android client's for the same kinds.
  */
-export function unappliedLine(item: UnappliedAdd): string {
-  return item.viaJoinRequest
-    ? "Not applied. Ask them to request to join again."
-    : "Not added. You can add them again.";
+export function unappliedLine(item: UnappliedRequest): string {
+  switch (item.kind) {
+    case "add":
+      return "Not added.";
+    case "approve-join":
+      return "Not applied. Ask them to request to join again.";
+    case "remove":
+      return "Not removed.";
+    case "leave":
+      return "Not applied. You are still a member.";
+    case "make-admin":
+      return "Not made an admin.";
+    case "remove-admin":
+      return "Still an admin.";
+    case "transfer-ownership":
+      return "Ownership was not transferred.";
+    case "admit-device":
+      return "Device not added to this group.";
+    case "retire-device":
+      return "Device not removed from this group.";
+  }
 }
 
 /** The one explanatory line under the section heading. True on both counts:
- *  the request left the pending set, so no sweep will carry it, and no client
- *  re-requests (UX §7's automatic re-request is designed and not built). */
+ *  a listed request is one whose automatic re-request has stopped, so nothing
+ *  will send it again on its own. */
 export const UNAPPLIED_EXPLANATION =
   "These changes did not apply and will not be retried on their own.";
 
@@ -199,9 +211,11 @@ export const JOIN_REQUEST_AGAIN = "Request again";
 
 const STORE_PREFIX = "lakko.unapplied-requests.v1";
 
-/** A dismissed row, remembered so the detection pass cannot resurrect it. */
+/** A stored row; a dismissed one is remembered so a later stop of the same
+ *  request does not resurrect it. */
 interface StoredRow {
-  readonly viaJoinRequest: boolean;
+  readonly kind: UnappliedKind;
+  readonly subjectKeyB64: string;
   readonly dismissed?: boolean;
 }
 
@@ -216,9 +230,15 @@ function readRaw(accountIdB64: string, groupIdB64: string): Record<string, Store
     const parsed = JSON.parse(raw) as Record<string, StoredRow>;
     const out: Record<string, StoredRow> = {};
     for (const [k, v] of Object.entries(parsed)) {
-      if (typeof v?.viaJoinRequest === "boolean") {
+      if (
+        typeof v?.kind === "string" &&
+        UNAPPLIED_KINDS.has(v.kind) &&
+        typeof v.subjectKeyB64 === "string" &&
+        k === `${v.kind}:${v.subjectKeyB64}`
+      ) {
         out[k] = {
-          viaJoinRequest: v.viaJoinRequest,
+          kind: v.kind,
+          subjectKeyB64: v.subjectKeyB64,
           ...(v.dismissed === true ? { dismissed: true } : {}),
         };
       }
@@ -244,58 +264,55 @@ function writeRaw(
   }
 }
 
-/** The rows still worth showing, keyed on the signature key.
+/** The rows still worth showing, keyed on {@link UnappliedRequest.key}.
  *
- *  Sorted by key, matching the iOS store: `Map` order would otherwise follow
- *  whatever order the JSON happened to carry, and the three clients should not
- *  render the same two rows in two different orders. */
+ *  Sorted by key so the same rows always render in the same order. */
 export function loadUnapplied(
   accountIdB64: string,
   groupIdB64: string,
-): Map<string, UnappliedAdd> {
-  const out = new Map<string, UnappliedAdd>();
+): Map<string, UnappliedRequest> {
+  const out = new Map<string, UnappliedRequest>();
   const rows = Object.entries(readRaw(accountIdB64, groupIdB64)).sort(([a], [b]) =>
     a < b ? -1 : a > b ? 1 : 0,
   );
   for (const [k, v] of rows) {
     if (v.dismissed === true) continue;
-    out.set(k, { addSignatureKeyB64: k, viaJoinRequest: v.viaJoinRequest });
+    out.set(k, { key: k, kind: v.kind, subjectKeyB64: v.subjectKeyB64 });
   }
   return out;
 }
 
 /**
- * Record detected rows. Idempotent, and a **dismissed row is never
- * resurrected** — the detection re-runs on every fold, so without the tombstone
- * the notice could not be dismissed at all.
+ * Record rows. Idempotent, and a **dismissed row is never resurrected** — the
+ * same request can stop again after a later re-request, and without the
+ * tombstone the notice could not be dismissed for good.
  */
 export function recordUnapplied(
   accountIdB64: string,
   groupIdB64: string,
-  items: readonly UnappliedAdd[],
+  items: readonly UnappliedRequest[],
 ): void {
   if (items.length === 0) return;
   const rows = readRaw(accountIdB64, groupIdB64);
   let changed = false;
   for (const item of items) {
-    const existing = rows[item.addSignatureKeyB64];
-    if (existing !== undefined) continue;
-    rows[item.addSignatureKeyB64] = { viaJoinRequest: item.viaJoinRequest };
+    if (rows[item.key] !== undefined) continue;
+    rows[item.key] = { kind: item.kind, subjectKeyB64: item.subjectKeyB64 };
     changed = true;
   }
   if (changed) writeRaw(accountIdB64, groupIdB64, rows);
 }
 
-/** Dismiss one row. It stays dismissed. */
+/** Dismiss one row by its key. It stays dismissed. */
 export function dismissUnapplied(
   accountIdB64: string,
   groupIdB64: string,
-  addSignatureKeyB64: string,
+  key: string,
 ): void {
   const rows = readRaw(accountIdB64, groupIdB64);
-  const existing = rows[addSignatureKeyB64];
+  const existing = rows[key];
   if (existing === undefined) return;
-  rows[addSignatureKeyB64] = { viaJoinRequest: existing.viaJoinRequest, dismissed: true };
+  rows[key] = { ...existing, dismissed: true };
   writeRaw(accountIdB64, groupIdB64, rows);
 }
 

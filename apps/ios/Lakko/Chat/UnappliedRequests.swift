@@ -26,23 +26,28 @@ import Foundation
 ///
 /// The core reports **no reason**: `CreateCommitError` carries no proposal
 /// reference on any variant, so "why" does not exist at this layer and no copy
-/// here may claim one. What exists is the observation:
+/// here may claim one.
 ///
-/// > **A request of mine left the core's pending set without its effect landing.**
+/// ## Since ADR-0050 section 2.5a: re-requested first, listed only when that stops
 ///
-/// That runs on **every** device rather than only on the sweeper — which
-/// matters, because the device that swept is often not the device that asked —
-/// and it needs no core change, no new wire artifact and no new FFI.
+/// The add-only detector that used to live here (an own `add` observation gone
+/// from the pending set and absent from the roster) is GONE. A plain member
+/// may now sweep device admissions, and its commit drops every other pending
+/// proposal by construction, so a dropped request stopped being an edge case.
+/// Every own request now records its INTENT when it is proposed
+/// (``MembershipIntent``, in `PendingRequests.swift`), and after each merged
+/// commit the repository re-requests whatever that commit superseded —
+/// silently, re-derived against the current epoch (`MembershipRetry.swift`,
+/// ``supersededVerdict(_:_:)``). A request reaches this list only when the
+/// re-request STOPS for a reason other than *landed* or *its subject left*:
+/// the authority it needs is gone (a typed refusal with disposition
+/// `NotPermitted` or `DoNotRetry`), this device's membership ended, or an
+/// approved join whose material only the joiner holds.
 ///
-/// ## Why only an `add`
-///
-/// `remove:` and `leave:` keys name a **leaf index**, and OpenMLS hands a
-/// vacated leaf to the next `Add`, so a roster test on a leaf can be wrong in
-/// both directions. `role-change` carries no payload at all. And all three are
-/// already **visible** when they fail — the member you tried to remove is still
-/// in the roster, the group you failed to leave is still in your list. The
-/// `add` is the only request whose failure leaves no trace anywhere, and the
-/// only one whose effect test is keyed on a **signature key** rather than a leaf.
+/// Because an intent names its subject by a signature key rather than a leaf,
+/// a removal, a role change and a leave can be listed too, which the old
+/// detector could not do honestly (a `remove:` observation names a leaf, and a
+/// role-change observation names nothing).
 ///
 /// ## What the JOINER is told: nothing, and that is a finding rather than a gap
 ///
@@ -57,9 +62,32 @@ import Foundation
 /// ``joinRequestAgain`` on the `/g/` landing screen, user-driven and never
 /// automatic, which re-mints a fresh KeyPackage.
 
-/// One own `add` request that left the pending set without landing.
+/// What kind of own request a `Not applied` row is about.
+///
+/// `add` is the original (ADR-0045 S7 residual 1) row; the rest arrived with
+/// ADR-0050 section 2.5a, whose superseded re-request lists a request here
+/// when it STOPS for a reason other than *its effect landed* or *its subject
+/// left*: this device no longer holds the authority the request needs, its
+/// own membership ended, or (for an approved join) the material to re-approve
+/// is gone.
+public enum UnappliedKind: String, Equatable {
+    case add
+    case removal
+    case roleChange = "role-change"
+    case ownershipTransfer = "transfer"
+    case leave
+    case deviceAdd = "device-add"
+    case deviceRemoval = "device-remove"
+}
+
+/// One own request that will not apply.
+///
+/// The name is historical (the row was add-only until ADR-0050 2.5a);
+/// ``kind`` says what it is about.
 public struct UnappliedAdd: Equatable {
-    /// base64 of the prospective member's 32-byte Ed25519 signature key.
+    /// base64 of the 32-byte Ed25519 key the request is ABOUT: the person's
+    /// account key for an add / removal / role change / leave, the joiner's
+    /// leaf key for an approved join, the device's leaf key for a device row.
     public let addSignatureKeyB64: String
     /// `true` when this device published the request by approving an external
     /// **join** rather than by adding a contact.
@@ -69,45 +97,45 @@ public struct UnappliedAdd: Equatable {
     /// (ADR-0045 S7), which is the point rather than a limitation. That device
     /// is the one this notice is shown on.
     public let viaJoinRequest: Bool
+    public let kind: UnappliedKind
 
-    public init(addSignatureKeyB64: String, viaJoinRequest: Bool) {
+    public init(addSignatureKeyB64: String, viaJoinRequest: Bool, kind: UnappliedKind = .add) {
         self.addSignatureKeyB64 = addSignatureKeyB64
         self.viaJoinRequest = viaJoinRequest
+        self.kind = kind
+    }
+
+    /// The store key and the list identity. An add row keeps the bare key it
+    /// always had; every other kind is prefixed, so a removal and a role change
+    /// about the same person are two rows rather than one overwriting the
+    /// other.
+    public var rowKey: String {
+        kind == .add ? addSignatureKeyB64 : "\(kind.rawValue):\(addSignatureKeyB64)"
     }
 }
 
-/// The own `add` requests that are dead: observed as ours, no longer in the
-/// core's live pending set, and not in the roster.
-///
-/// Pure. `liveKeys` and `rosterKeysB64` must be read in the SAME pass — the
-/// pending set is emptied by the merge that also moves the roster.
-///
-/// A `nil` roster is a torn read, not an empty group, and claims NOTHING — the
-/// same fail-closed direction ``membershipRotationDecision`` takes with the
-/// identical signal.
-public func unappliedAddRequests(
-    observations: [String: RequestObservation],
-    liveKeys: [String],
-    rosterKeysB64: [String]?
-) -> [UnappliedAdd] {
-    guard let rosterKeysB64 else { return [] }
-    let live = Set(liveKeys)
-    let roster = Set(rosterKeysB64)
-    var out: [UnappliedAdd] = []
-    for (key, seen) in observations {
-        // UX §10 — a member is never told about someone else's request.
-        guard seen.own else { continue }
-        guard key.hasPrefix("add:") else { continue }
-        let addKeyB64 = String(key.dropFirst("add:".count))
-        // `proposalKey` writes `add:` with an empty key when none was resolved.
-        // That names nobody, so there is nothing honest to say about it.
-        if addKeyB64.isEmpty || addKeyB64 == "?" { continue }
-        if live.contains(key) { continue }
-        if roster.contains(addKeyB64) { continue }
-        out.append(UnappliedAdd(addSignatureKeyB64: addKeyB64, viaJoinRequest: seen.joinRequest))
+/// The `Not applied` row for an own request whose re-request stopped. Every
+/// intent kind maps to exactly one row kind.
+public func unappliedRow(for intent: MembershipIntent) -> UnappliedAdd {
+    switch intent.request {
+    case .add(let person, _, _):
+        return UnappliedAdd(addSignatureKeyB64: person, viaJoinRequest: false, kind: .add)
+    case .approveJoin(let joiner):
+        return UnappliedAdd(addSignatureKeyB64: joiner, viaJoinRequest: true, kind: .add)
+    case .remove(let person):
+        return UnappliedAdd(addSignatureKeyB64: person, viaJoinRequest: false, kind: .removal)
+    case .setAdmin(let person, _):
+        return UnappliedAdd(addSignatureKeyB64: person, viaJoinRequest: false, kind: .roleChange)
+    case .transferOwnership(let to, _):
+        return UnappliedAdd(
+            addSignatureKeyB64: to, viaJoinRequest: false, kind: .ownershipTransfer)
+    case .leave(let own):
+        return UnappliedAdd(addSignatureKeyB64: own, viaJoinRequest: false, kind: .leave)
+    case .ownDeviceAdd(let key):
+        return UnappliedAdd(addSignatureKeyB64: key, viaJoinRequest: false, kind: .deviceAdd)
+    case .ownDeviceRemove(let key):
+        return UnappliedAdd(addSignatureKeyB64: key, viaJoinRequest: false, kind: .deviceRemoval)
     }
-    // Dictionary iteration order is unspecified, so sort for a stable render.
-    return out.sorted { $0.addSignatureKeyB64 < $1.addSignatureKeyB64 }
 }
 
 /// The line under one row.
@@ -120,16 +148,34 @@ public func unappliedAddRequests(
 ///
 /// A join approval is **terminal on the admin side** — the approve consumed the
 /// retained request and only the joiner holds the key material — so it directs
-/// the action to them. An ordinary add is re-doable here.
+/// the action to them. An add is re-doable here when this device may add.
+///
+/// The kinds ADR-0050 2.5a added carry no advice at all: such a row exists
+/// because a re-request STOPPED, usually because this device no longer holds
+/// the authority the request needs, so "you can do it again" would be false
+/// in the common case. They say what did not happen and nothing more.
+/// (Copy chosen here; `docs/ux/proposal-based-membership.md` §7.1 specifies
+/// only the add rows.)
 public func unappliedLine(_ item: UnappliedAdd) -> String {
-    item.viaJoinRequest
-        ? "Not applied. Ask them to request to join again."
-        : "Not added. You can add them again."
+    switch item.kind {
+    case .add:
+        return item.viaJoinRequest
+            ? "Not applied. Ask them to request to join again."
+            : "Not added. You can add them again."
+    case .removal: return "Not removed."
+    case .roleChange: return "Role change not applied."
+    case .ownershipTransfer: return "Ownership not transferred."
+    case .leave: return "Leaving the group did not apply."
+    case .deviceAdd: return "Device not added to this group."
+    case .deviceRemoval: return "Device not removed from this group."
+    }
 }
 
-/// The one explanatory line under the section heading. True on both counts: the
-/// request left the pending set, so no sweep will carry it, and no client
-/// re-requests (UX §7's automatic re-request is designed and not built).
+/// The one explanatory line under the section heading. True of every row: a
+/// row is listed only once nothing will send the request again — the ADR-0050
+/// 2.5a re-request stopped for it (UX §7's automatic re-request of a
+/// superseded request runs silently and lists nothing while it is still
+/// trying).
 public let unappliedExplanation =
     "These changes did not apply and will not be retried on their own."
 
@@ -169,24 +215,34 @@ public let joinRequestAgain = "Request again"
 
 // MARK: - The store
 
-/// One stored row. `dismissed` is a tombstone: the detection re-runs on every
-/// fold, so without it the notice could not be dismissed at all.
+/// One stored row. `dismissed` is a tombstone: without it a dismissed row
+/// that is detected again (a re-request that stops again) would reappear, and
+/// the notice could not be dismissed at all.
 public struct UnappliedRow: Equatable {
     public let viaJoinRequest: Bool
     public let dismissed: Bool
+    /// The subject key and the kind. Absent in a row written before ADR-0050
+    /// 2.5a, which is an add row keyed on its bare subject.
+    public let subjectKeyB64: String?
+    public let kind: UnappliedKind
 
-    public init(viaJoinRequest: Bool, dismissed: Bool = false) {
+    public init(
+        viaJoinRequest: Bool, dismissed: Bool = false,
+        subjectKeyB64: String? = nil, kind: UnappliedKind = .add
+    ) {
         self.viaJoinRequest = viaJoinRequest
         self.dismissed = dismissed
+        self.subjectKeyB64 = subjectKeyB64
+        self.kind = kind
     }
 }
 
-/// Per-`(account, group)` record of `addSignatureKeyB64 -> UnappliedRow`.
+/// Per-`(account, group)` record of ``UnappliedAdd/rowKey`` -> ``UnappliedRow``.
 ///
 /// `UserDefaults`-backed for the same reason as ``PendingRequestStore``: it
 /// holds a signature key that already rides the journal in plaintext-to-members
-/// form plus two booleans — no key material — and losing it costs a notice
-/// rather than a request.
+/// form plus two booleans and a kind — no key material — and losing it costs a
+/// notice rather than a request.
 public final class UnappliedRequestStore {
 
     private static let prefix = "lakko.unapplied-requests.v1"
@@ -211,7 +267,9 @@ public final class UnappliedRequestStore {
                   let via = (pair["join"] as? NSNumber)?.boolValue else { continue }
             out[key] = UnappliedRow(
                 viaJoinRequest: via,
-                dismissed: (pair["dismissed"] as? NSNumber)?.boolValue ?? false)
+                dismissed: (pair["dismissed"] as? NSNumber)?.boolValue ?? false,
+                subjectKeyB64: pair["subject"] as? String,
+                kind: (pair["kind"] as? String).flatMap(UnappliedKind.init(rawValue:)) ?? .add)
         }
         return out
     }
@@ -223,6 +281,8 @@ public final class UnappliedRequestStore {
         for (key, row) in rows {
             var entry: [String: Any] = ["join": NSNumber(value: row.viaJoinRequest)]
             if row.dismissed { entry["dismissed"] = NSNumber(value: true) }
+            if let subject = row.subjectKeyB64 { entry["subject"] = subject }
+            if row.kind != .add { entry["kind"] = row.kind.rawValue }
             raw[key] = entry
         }
         defaults.set(raw, forKey: storeKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64))
@@ -232,8 +292,13 @@ public final class UnappliedRequestStore {
     public func load(accountIdB64: String, groupIdB64: String) -> [UnappliedAdd] {
         loadRows(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
             .filter { !$0.value.dismissed }
-            .map { UnappliedAdd(addSignatureKeyB64: $0.key, viaJoinRequest: $0.value.viaJoinRequest) }
-            .sorted { $0.addSignatureKeyB64 < $1.addSignatureKeyB64 }
+            .map {
+                UnappliedAdd(
+                    addSignatureKeyB64: $0.value.subjectKeyB64 ?? $0.key,
+                    viaJoinRequest: $0.value.viaJoinRequest,
+                    kind: $0.value.kind)
+            }
+            .sorted { $0.rowKey < $1.rowKey }
     }
 
     /// Record detected rows. Idempotent, and a **dismissed row is never
@@ -242,19 +307,25 @@ public final class UnappliedRequestStore {
         guard !items.isEmpty else { return }
         var rows = loadRows(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         var changed = false
-        for item in items where rows[item.addSignatureKeyB64] == nil {
-            rows[item.addSignatureKeyB64] = UnappliedRow(viaJoinRequest: item.viaJoinRequest)
+        for item in items where rows[item.rowKey] == nil {
+            rows[item.rowKey] = UnappliedRow(
+                viaJoinRequest: item.viaJoinRequest,
+                subjectKeyB64: item.kind == .add ? nil : item.addSignatureKeyB64,
+                kind: item.kind)
             changed = true
         }
         if changed { saveRows(accountIdB64: accountIdB64, groupIdB64: groupIdB64, rows) }
     }
 
-    /// Dismiss one row. It stays dismissed.
+    /// Dismiss one row by its ``UnappliedAdd/rowKey`` (for an add row, its bare
+    /// subject key — hence the parameter's historical name). It stays
+    /// dismissed.
     public func dismiss(accountIdB64: String, groupIdB64: String, addSignatureKeyB64: String) {
         var rows = loadRows(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         guard let existing = rows[addSignatureKeyB64] else { return }
         rows[addSignatureKeyB64] = UnappliedRow(
-            viaJoinRequest: existing.viaJoinRequest, dismissed: true)
+            viaJoinRequest: existing.viaJoinRequest, dismissed: true,
+            subjectKeyB64: existing.subjectKeyB64, kind: existing.kind)
         saveRows(accountIdB64: accountIdB64, groupIdB64: groupIdB64, rows)
     }
 

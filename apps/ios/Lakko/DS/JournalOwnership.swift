@@ -199,14 +199,29 @@ public enum JournalOwnership {
         return out
     }
 
-    /// The accounts whose seed envelope is owed: every desired account whose
-    /// recorded (delivered) rank differs. Sorted by account key.
+    /// The keys a delivered seed envelope is recorded under for `account`
+    /// (ADR-0057, amended 2026-10-01: per DEVICE): the leaf signature keys the
+    /// roster holds for that account, or the account key itself when none is
+    /// known. One envelope (sealed to the ACCOUNT key) serves every device of
+    /// the account; recording it per device is what lets a device that joined
+    /// after the envelope was posted get its own copy at the next reconcile.
+    public static func deliveryKeys(account: Data, leaves: [Data: [Data]]) -> [Data] {
+        let known = leaves[account] ?? []
+        return known.isEmpty ? [account] : known
+    }
+
+    /// The accounts whose seed envelope is owed: every desired account one of
+    /// whose devices (``deliveryKeys(account:leaves:)``) has no delivered
+    /// record at the desired rank. Sorted by account key.
     public static func envelopesOwed(
         desired: [Data: DsRegistrarRank],
+        leaves: [Data: [Data]] = [:],
         delivered: [Data: DsRegistrarRank]
     ) -> [(accountKey: Data, rank: DsRegistrarRank)] {
         desired
-            .filter { delivered[$0.key] != $0.value }
+            .filter { account, rank in
+                deliveryKeys(account: account, leaves: leaves).contains { delivered[$0] != rank }
+            }
             .map { (accountKey: $0.key, rank: $0.value) }
             .sorted { $0.accountKey.lexicographicallyPrecedes($1.accountKey) }
     }
@@ -224,7 +239,11 @@ public enum JournalOwnership {
         /// The fingerprint this session last sent for the group, if any.
         public var lastSentSet: () -> String?
         public var noteSentSet: (String) -> Void
-        /// Which accounts hold their seed envelope, at which rank.
+        /// Each desired account's leaf signature keys in the live roster: a
+        /// delivery is recorded per device (``deliveryKeys(account:leaves:)``).
+        public var memberLeaves: () -> [Data: [Data]]
+        /// Which devices (leaf keys; an account key where no leaf was known)
+        /// hold their account's seed envelope, at which rank.
         public var loadDelivered: () -> [Data: DsRegistrarRank]
         public var saveDelivered: ([Data: DsRegistrarRank]) -> Void
         /// Seal and publish one member's seed envelope; `false` when its
@@ -242,11 +261,13 @@ public enum JournalOwnership {
             registrarPublicKey: @escaping (Data) -> Data?,
             lastSentSet: @escaping () -> String?,
             noteSentSet: @escaping (String) -> Void,
+            memberLeaves: @escaping () -> [Data: [Data]] = { [:] },
             loadDelivered: @escaping () -> [Data: DsRegistrarRank],
             saveDelivered: @escaping ([Data: DsRegistrarRank]) -> Void,
             sendEnvelope: @escaping (Data, DsRegistrarRank) async throws -> Bool
         ) {
             self.journalId = journalId
+            self.memberLeaves = memberLeaves
             self.ds = ds
             self.desired = desired
             self.authority = authority
@@ -285,8 +306,16 @@ public enum JournalOwnership {
         let fingerprint = registrarSetFingerprint(desired)
         let setDue = ports.lastSentSet() != fingerprint
         let delivered = ports.loadDelivered()
-        let owed = envelopesOwed(desired: desired, delivered: delivered)
-        let departed = delivered.keys.contains { desired[$0] == nil }
+        let leaves = ports.memberLeaves()
+        let owed = envelopesOwed(desired: desired, leaves: leaves, delivered: delivered)
+        // The delivery record the roster still calls for: every device of every
+        // desired account, at that account's rank. Anything else (a departed
+        // device or account, an old rank) is dropped from the record.
+        var live: [Data: DsRegistrarRank] = [:]
+        for (account, rank) in desired {
+            for key in deliveryKeys(account: account, leaves: leaves) { live[key] = rank }
+        }
+        let departed = delivered.contains { live[$0.key] != $0.value }
         if !setDue && owed.isEmpty && !departed { return .unchanged }
         if setDue {
             guard let entries = registrarSetEntries(
@@ -298,12 +327,14 @@ public enum JournalOwnership {
             ports.noteSentSet(fingerprint)
             NSLog("ADR-0057: registrar set sent (%d entries)", entries.count)
         }
-        var next = delivered.filter { desired[$0.key] == $0.value }
+        var next = delivered.filter { live[$0.key] == $0.value }
         var pending = 0
         for entry in owed {
             do {
                 if try await ports.sendEnvelope(entry.accountKey, entry.rank) {
-                    next[entry.accountKey] = entry.rank
+                    for key in deliveryKeys(account: entry.accountKey, leaves: leaves) {
+                        next[key] = entry.rank
+                    }
                 } else {
                     pending += 1
                 }
@@ -364,17 +395,50 @@ public enum JournalOwnership {
             .sorted { $0.lexicographicallyPrecedes($1) }
     }
 
-    /// The revoke list of a registration: the registrar keys of the evicted
-    /// accounts when the signer is the root (it derives them), empty otherwise
-    /// — an admin cannot derive another member's registrar key, and the owner
-    /// revokes on its next reconcile (the ADR residual).
+    /// The revoke list of a registration (ADR-0057, amended 2026-10-01:
+    /// whoever removes a person revokes every registrar key of that person in
+    /// the same registration).
+    ///
+    /// - The root derives the evicted accounts' registrar keys itself.
+    /// - A registrar (an admin) cannot derive them; it revokes the keys it
+    ///   learned from the registrar-seed envelopes the owner posted
+    ///   (`knownRegistrar`, account -> registrar public key and rank). Only
+    ///   keys of a STRICTLY lower rank than the signer's are listed: the DS
+    ///   refuses the whole registration (`403`) when one revocation names an
+    ///   equal or higher rank, so an admin never lists another admin (removing
+    ///   an admin stays the root's, as before, and the owner's next
+    ///   `registrars-set` remains the backstop). `equalOrHigherAccounts` are
+    ///   the accounts the LIVE role table ranks at or above the signer (the
+    ///   owner and, for an admin, the admins): skipped even when the recorded
+    ///   rank is older and lower, since a member promoted since its envelope
+    ///   keeps the same registrar key at the higher rank.
+    /// - A member registrar revokes nothing (nobody ranks below it).
     public static func revokeList(
         authority: JournalAuthority,
         evictedAccountKeys: [Data],
-        registrarPublicKey: (Data) -> Data?
+        registrarPublicKey: (Data) -> Data?,
+        knownRegistrar: (Data) -> RegistrarSeedStore.KnownRegistrar? = { _ in nil },
+        equalOrHigherAccounts: Set<Data> = []
     ) -> [Data] {
-        guard authority.isRoot else { return [] }
-        return evictedAccountKeys.compactMap(registrarPublicKey)
+        switch authority {
+        case .root:
+            return evictedAccountKeys.compactMap(registrarPublicKey)
+        case .registrar(_, let signerRank):
+            return evictedAccountKeys.compactMap { account in
+                guard !equalOrHigherAccounts.contains(account),
+                      let known = knownRegistrar(account),
+                      rankOrder(known.rank) < rankOrder(signerRank) else { return nil }
+                return known.publicKey
+            }
+        }
+    }
+
+    /// The DS order of the registrar ranks (member below admin).
+    static func rankOrder(_ rank: DsRegistrarRank) -> Int {
+        switch rank {
+        case .member: return 1
+        case .admin: return 2
+        }
     }
 
     /// Register `epochKey` at `epoch` with the device's authority, revoking
@@ -693,6 +757,7 @@ public final class RegistrarSeedStore {
     private static let owedPrefix = "me.lakko.ds-root-handover-owed.v1."
     private static let rootHeldPrefix = "me.lakko.ds-root-held.v1."
     private static let pendingRootPrefix = "me.lakko.ds-pending-root-seed.v1."
+    private static let knownPrefix = "me.lakko.ds-registrar-known.v1."
     private static let seedLen = 32
 
     public init(defaults: UserDefaults = .standard) {
@@ -729,8 +794,10 @@ public final class RegistrarSeedStore {
 
     // MARK: Delivered seed envelopes (owner side)
 
-    /// Which accounts the owner has sent their seed envelope to, account key
-    /// -> rank. Since the second security pass (finding 2) this record decides
+    /// Which devices the owner has sent their account's seed envelope to,
+    /// leaf signature key (an account key where no leaf was known) -> rank
+    /// (ADR-0057 amended 2026-10-01: per device, so a device that joined after
+    /// the envelope was posted gets one too). Since the second security pass (finding 2) this record decides
     /// nothing about the DS: the owner converges the DS with a whole
     /// `registrars-set` from the live roster, and this only tracks which
     /// members still need an envelope.
@@ -757,6 +824,52 @@ public final class RegistrarSeedStore {
     /// (every registrar seed changes with it).
     public func forgetDelivered(accountIdB64: String, groupIdHex: String) {
         defaults.removeObject(forKey: Self.ledgerPrefix + accountIdB64 + " " + groupIdHex)
+    }
+
+    // MARK: Known registrar keys (every member, ADR-0057 amended 2026-10-01)
+
+    /// A registrar public key the owner appointed for one account, read from
+    /// the clear header of a registrar-seed envelope (any addressee).
+    public struct KnownRegistrar: Equatable {
+        public let publicKey: Data
+        public let rank: DsRegistrarRank
+
+        public init(publicKey: Data, rank: DsRegistrarRank) {
+            self.publicKey = publicKey
+            self.rank = rank
+        }
+    }
+
+    /// Account key -> the registrar key and rank the owner last appointed it
+    /// at, on this journal: what an admin revokes when it commits that
+    /// account's removal. Public keys and ranks only: plain `UserDefaults`.
+    public func knownRegistrars(accountIdB64: String, groupIdHex: String) -> [Data: KnownRegistrar] {
+        let raw = defaults.dictionary(
+            forKey: Self.knownPrefix + accountIdB64 + " " + groupIdHex.lowercased())
+            as? [String: String] ?? [:]
+        var out: [Data: KnownRegistrar] = [:]
+        for (accountB64, value) in raw {
+            let parts = value.split(separator: ":", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let account = Data(base64Encoded: accountB64),
+                  let key = Data(base64Encoded: parts[1]), key.count == Self.seedLen else { continue }
+            out[account] = KnownRegistrar(
+                publicKey: key, rank: parts[0] == "admin" ? .admin : .member)
+        }
+        return out
+    }
+
+    /// Record (or replace: the newest envelope wins, a re-appointment or a new
+    /// root changes the key) the registrar key appointed for `accountKey`.
+    public func noteRegistrar(
+        accountIdB64: String, groupIdHex: String, accountKey: Data, publicKey: Data,
+        rank: DsRegistrarRank
+    ) {
+        guard publicKey.count == Self.seedLen else { return }
+        let storeKey = Self.knownPrefix + accountIdB64 + " " + groupIdHex.lowercased()
+        var raw = defaults.dictionary(forKey: storeKey) as? [String: String] ?? [:]
+        raw[accountKey.base64EncodedString()] =
+            (rank == .admin ? "admin" : "member") + ":" + publicKey.base64EncodedString()
+        defaults.set(raw, forKey: storeKey)
     }
 
     // MARK: Root held (second security pass, finding 4)
@@ -843,13 +956,15 @@ public final class RegistrarSeedStore {
         }
     }
 
-    /// Wipe every seed, delivered record, owed handover, root-held marker and
-    /// pending root seed of `accountIdB64` (forget device).
+    /// Wipe every seed, delivered record, known registrar key, owed handover,
+    /// root-held marker and pending root seed of `accountIdB64` (forget
+    /// device).
     public func clear(accountIdB64: String) {
         for (key, _) in defaults.dictionaryRepresentation()
         where key.hasPrefix(Self.seedPrefix + accountIdB64 + " ")
             || key.hasPrefix(Self.ledgerPrefix + accountIdB64 + " ")
-            || key.hasPrefix(Self.pendingRootPrefix + accountIdB64 + " ") {
+            || key.hasPrefix(Self.pendingRootPrefix + accountIdB64 + " ")
+            || key.hasPrefix(Self.knownPrefix + accountIdB64 + " ") {
             defaults.removeObject(forKey: key)
         }
         defaults.removeObject(forKey: Self.owedPrefix + accountIdB64)

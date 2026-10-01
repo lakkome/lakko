@@ -168,9 +168,27 @@ export function bestGrantFor(
   accountHex: string,
   options: { readonly scopeHex?: string; readonly allowMember?: boolean } = {},
 ): HeldGrant | null {
+  return grantsInOrder(store, accountHex, options)[0] ?? null;
+}
+
+/**
+ * Every kept grant that may authorise a write to `accountHex`, in the order of
+ * {@link bestGrantFor} (which is its first element): the contact grant, then
+ * each scope's `group` grant (the given scope first), then each scope's
+ * `channel` grant, then - only when `allowMember` - the given scope's
+ * `member` grant. A writer refused (`401`) under one moves to the next
+ * (ADR-0050 section 2.5a item 7): a key the person rotated away answers 401,
+ * another key they handed out may still work.
+ */
+export function grantsInOrder(
+  store: ReceivedGrants,
+  accountHex: string,
+  options: { readonly scopeHex?: string; readonly allowMember?: boolean } = {},
+): HeldGrant[] {
   const person = store.people[accountHex];
-  if (person === undefined) return null;
-  if (person.contact !== undefined) return person.contact;
+  if (person === undefined) return [];
+  const out: HeldGrant[] = [];
+  if (person.contact !== undefined) out.push(person.contact);
   const scopeIds = Object.keys(person.scopes);
   const ordered =
     options.scopeHex !== undefined
@@ -178,16 +196,17 @@ export function bestGrantFor(
       : scopeIds;
   for (const s of ordered) {
     const scope = person.scopes[s];
-    if (scope?.group !== undefined) return scope.group;
+    if (scope?.group !== undefined) out.push(scope.group);
   }
   for (const s of ordered) {
     const scope = person.scopes[s];
-    if (scope?.channel !== undefined) return scope.channel;
+    if (scope?.channel !== undefined) out.push(scope.channel);
   }
   if (options.allowMember === true && options.scopeHex !== undefined) {
-    return person.scopes[options.scopeHex]?.member ?? null;
+    const member = person.scopes[options.scopeHex]?.member;
+    if (member !== undefined) out.push(member);
   }
-  return null;
+  return out;
 }
 
 /** Whether this account can find (and so offer "Add contact" for) a person:

@@ -547,6 +547,55 @@ public class DsClient(
     }
 
     /**
+     * `GET /ds/mailbox/{hex}/reach` — the reach keys the owner registered on
+     * its own mailbox (ADR-0060 section 1, "Versions after a restore"), signed
+     * by the identity key the mailbox is named after ([signer], the mailbox
+     * signer), exactly like the owner's own message read. Public keys only;
+     * an expired key is not listed.
+     *
+     * Every refusal is the uniform `401`. A mailbox that was never claimed
+     * answers that too, so on a `401` the mailbox is claimed (idempotent for
+     * its own key) and the read sent once more; a second refusal throws, as
+     * does any other non-2xx. A network failure is [DsNetworkError]. The
+     * caller treats every throw as "unknown" and registers nothing it could
+     * not prove current.
+     */
+    public suspend fun fetchMailboxReach(pseudonym: ByteArray, signer: DsJournalSigner): MailboxReachList {
+        if (pseudonym.size != PSEUDONYM_LEN) {
+            throw DsClientArgError("pseudonym must be $PSEUDONYM_LEN bytes")
+        }
+        val endpoint = "/ds/mailbox/${pseudonymHex(pseudonym)}/reach"
+        suspend fun attempt(): HttpResponse = send(
+            method = HttpMethod.Get,
+            endpoint = endpoint,
+            query = "",
+            body = ByteArray(0),
+            contentType = null,
+            waitSecs = null,
+            signer = signer,
+        )
+        var response = attempt()
+        if (response.status.value == HTTP_UNAUTHORIZED) {
+            try {
+                claimMailbox(pseudonym, signer)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                // The retry below reports the outcome.
+            }
+            response = attempt()
+        }
+        if (!response.status.isSuccess()) {
+            throw proofOrHttpError(response, endpoint)
+        }
+        val parsed: ReachListWireResponse = response.body()
+        return MailboxReachList(
+            keys = parsed.keys.map { MailboxReachKey(base64Decode(it.reach_pk_b64), it.expires_at_ms) },
+            open = parsed.open,
+        )
+    }
+
+    /**
      * `POST /ds/mailbox/{hex}/reach/check` — whether the reach key [reach]
      * signs with is registered and unexpired on [pseudonym]'s mailbox:
      * `true` on `204`, `false` on `401`. A searcher asks before showing a
@@ -941,6 +990,26 @@ private data class ReachWireRequest(
     val remove: List<String>,
     val open: Boolean? = null,
 )
+
+@Serializable
+@Suppress("ConstructorParameterNaming")
+private data class ReachListWireEntry(
+    val reach_pk_b64: String,
+    val expires_at_ms: Long? = null,
+)
+
+@Serializable
+private data class ReachListWireResponse(
+    val keys: List<ReachListWireEntry> = emptyList(),
+    val open: Boolean = false,
+)
+
+/** One reach key registered on the owner's mailbox, as `GET .../reach` lists
+ *  it. */
+public class MailboxReachKey(public val publicKey: ByteArray, public val expiresAtMs: Long?)
+
+/** What `GET /ds/mailbox/{hex}/reach` answered. */
+public class MailboxReachList(public val keys: List<MailboxReachKey>, public val open: Boolean)
 
 @Serializable
 private data class KnockWireResponse(

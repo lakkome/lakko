@@ -66,7 +66,7 @@ public final class ReachCenter: ObservableObject {
     private var mailboxPseudonym: Data?
     private var record = ReachRecord()
     private var reachState = FfiReachState(entries: [], updatedAtMs: 0)
-    private let ds: DsClient
+    private let ds: ReachDsTransport
     /// The ids of every group this account is in (set by the chat layer).
     public var groupIdsProvider: () -> [Data] = { [] }
     /// Every channel this account subscribes to, with its current seed epoch
@@ -87,6 +87,11 @@ public final class ReachCenter: ObservableObject {
     /// Called after a setting change or a rotation so profiles are republished
     /// with the new grants (set by the chat layer).
     public var onGrantsChanged: (() -> Void)?
+    /// ADR-0050 2.5a item 7 — called with the account key (base64) of a person
+    /// a grant or a committer delegation was just kept for, so a Welcome owed
+    /// to their mailbox for lack of a key is retried at once (set by the chat
+    /// layer).
+    public var onGrantKept: ((String) -> Void)?
     /// ADR-0060 section 7 — called with the Visibility or ReachState envelope
     /// a LOCAL change produced, so the account's other devices get it over
     /// the DeviceGroup (set by the app shell). Never called for an envelope
@@ -101,7 +106,7 @@ public final class ReachCenter: ObservableObject {
     private var syncTask: Task<Void, Never>?
     private var syncAgain = false
 
-    init(persistence: ReachPersistence = KeychainReachPersistence(), ds: DsClient = DsClient()) {
+    init(persistence: ReachPersistence = KeychainReachPersistence(), ds: ReachDsTransport = DsClient()) {
         self.persistence = persistence
         self.ds = ds
     }
@@ -202,12 +207,29 @@ public final class ReachCenter: ObservableObject {
               let accountIdB64 else { return false }
         status = .applying
         let now = Self.nowMs()
-        let specs = ReachRules.desiredKeys(
-            setting: setting, state: reachState, groupIds: groupIdsProvider(),
-            links: record.links, replies: record.replies,
-            channels: channelEpochsProvider(), nowMs: now,
-            allowsScope: { allowsScope(setting: $0, scope: $1) },
-            allowsFof: { allowsContactsOfContacts(setting: $0) })
+        func desiredSpecs() -> [ReachKeySpec] {
+            ReachRules.desiredKeys(
+                setting: setting, state: reachState, groupIds: groupIdsProvider(),
+                links: record.links, replies: record.replies,
+                channels: channelEpochsProvider(), nowMs: now,
+                allowsScope: { allowsScope(setting: $0, scope: $1) },
+                allowsFof: { allowsContactsOfContacts(setting: $0) })
+        }
+        // ADR-0060 section 1, "Versions after a restore" — a counter slot this
+        // device holds no version for (a fresh install or a restore, where the
+        // book is empty; a group it was re-admitted to) is first looked up
+        // among the keys the DS holds on the mailbox, and continues from the
+        // highest one registered. Until that read succeeds NOTHING is
+        // registered: a guessed version could be one the owner rotated away.
+        let unchecked = ReachRules.uncheckedSlots(
+            specs: desiredSpecs(), state: reachState,
+            checked: Set(record.versionCheckedSlots ?? []))
+        if !unchecked.isEmpty {
+            guard await recoverVersions(
+                slots: unchecked, seed: seed, signer: signer, pseudonym: pseudonym,
+                accountIdB64: accountIdB64) else { return false }
+        }
+        let specs = desiredSpecs()
         var desired: [(publicKey: Data, expiresAtMs: UInt64?)] = []
         for spec in specs {
             guard let pk = try? Self.publicKey(accountSeed: seed, spec: spec) else { continue }
@@ -236,7 +258,58 @@ public final class ReachCenter: ObservableObject {
         return true
     }
 
-    static func publicKey(accountSeed: Data, spec: ReachKeySpec) throws -> Data {
+    /// Recover the versions of `slots` from the keys the DS holds on this
+    /// account's mailbox (`GET /ds/mailbox/{hex}/reach`, signed by the identity
+    /// key), then mark them checked. Returns `false` when the read failed or
+    /// the account changed meanwhile: the caller registers nothing then, the
+    /// keys already on the DS (registered by the account's earlier devices)
+    /// stay as they are, and the next sync retries.
+    private func recoverVersions(
+        slots: [ReachRules.VersionSlot], seed: Data, signer: DsProofSigner, pseudonym: Data,
+        accountIdB64: String
+    ) async -> Bool {
+        let listing: DsReachListing
+        do {
+            listing = try await ds.fetchReach(pseudonym: pseudonym, signer: signer)
+        } catch {
+            guard self.accountIdB64 == accountIdB64 else { return false }
+            NSLog("ADR-0060: registered reach keys not read; nothing registered until they are: \(error)")
+            status = Self.isOffline(error) ? .pendingOffline : .failed
+            return false
+        }
+        let registered = Set(listing.keys.map(\.publicKey))
+        // Up to 257 derivations per slot: off the main actor.
+        let found = await Task.detached(priority: .utility) {
+            ReachRules.recoveredVersions(slots: slots, registered: registered) { slot, version in
+                try? Self.publicKey(accountSeed: seed, spec: ReachKeySpec(
+                    reachClass: slot.reachClass, scopeId: slot.scopeId, version: version,
+                    expiresAtMs: nil))
+            }
+        }.value
+        guard self.accountIdB64 == accountIdB64 else { return false }
+        let next = ReachRules.applying(recovered: found, to: reachState, nowMs: Self.nowMs())
+        let changed = next != reachState
+        if changed {
+            reachState = next
+            record.reachStateEnvelopeB64 = (try? composeReachStateEnvelope(state: next))?
+                .base64EncodedString()
+        }
+        var checked = Set(record.versionCheckedSlots ?? [])
+        for slot in slots { checked.insert(slot.storageKey) }
+        record.versionCheckedSlots = checked.sorted()
+        persist()
+        NSLog("ADR-0060: reach versions checked for %d slot(s), %d resumed above 0",
+              slots.count, found.values.filter { $0 > 0 }.count)
+        if changed {
+            // The grants handed out so far named the starting version: hand
+            // out the recovered ones.
+            grantRevision &+= 1
+            onGrantsChanged?()
+        }
+        return true
+    }
+
+    nonisolated static func publicKey(accountSeed: Data, spec: ReachKeySpec) throws -> Data {
         let seed = try reachSeed(
             accountSeed: accountSeed, class: spec.reachClass, scopeId: spec.scopeId,
             version: spec.version)
@@ -627,6 +700,7 @@ public final class ReachCenter: ObservableObject {
         let held = ReachRules.HeldGrant(grant: grant, scopeHex: scope, storedAtMs: Self.nowMs())
         record.held[key] = ReachRules.merging(held, into: record.held[key] ?? [])
         persist()
+        onGrantKept?(key)
         return true
     }
 
@@ -694,6 +768,27 @@ public final class ReachCenter: ObservableObject {
         return delegatedAuth(toMailbox: pseudonym)
     }
 
+    /// ADR-0050 2.5a item 7 — every way this device can sign a write to the
+    /// mailbox `pseudonym`, in the order a sweep's Welcome tries them, moving
+    /// to the next on a `401`: this account's own `contact` key alone for its
+    /// own mailbox (unchanged); otherwise every distinct grant held for the
+    /// person whose mailbox it is (``ReachRules/writeSeeds(from:groupIdHex:)``),
+    /// then a committer delegation naming this account. Empty when nothing is
+    /// held: the caller then keeps the Welcome owed and never writes unsigned.
+    public func writeAuthCandidates(toMailbox pseudonym: Data, groupIdHex: String? = nil) -> [DsMailboxWriteAuth] {
+        if let own = ownAccountKey, Self.mailbox(of: own) == pseudonym {
+            return ownContactSeed().map { [DsMailboxWriteAuth(reachSeed: $0)] } ?? []
+        }
+        var out: [DsMailboxWriteAuth] = []
+        for (keyB64, held) in record.held.sorted(by: { $0.key < $1.key }) {
+            guard let key = Data(base64Encoded: keyB64), Self.mailbox(of: key) == pseudonym else { continue }
+            out += ReachRules.writeSeeds(from: held, groupIdHex: groupIdHex)
+                .map { DsMailboxWriteAuth(reachSeed: $0) }
+        }
+        if let delegated = delegatedAuth(toMailbox: pseudonym) { out.append(delegated) }
+        return out
+    }
+
     static func mailbox(of accountKey: Data) -> Data? {
         try? IdentityPseudonym.fromIdentity(pubkey: accountKey).asBytes()
     }
@@ -712,6 +807,7 @@ public final class ReachCenter: ObservableObject {
         guard let sender = fromAccountKeyB64,
               (try? checkCommitterDelegations(envelope: envelope)) != nil else { return }
         delegations[sender + "|" + envelope.addedAccountKey.base64EncodedString()] = envelope
+        onGrantKept?(envelope.addedAccountKey.base64EncodedString())
     }
 
     /// The delegated write authorisation for a Welcome to `pseudonym`: a kept

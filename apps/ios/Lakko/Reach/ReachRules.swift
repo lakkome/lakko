@@ -79,8 +79,116 @@ public enum ReplyPurpose {
 
 public enum ReachRules {
 
-    /// The version a `(class, scope)` starts at before any rotation.
-    public static let initialVersion: UInt32 = 1
+    /// The version a `(class, scope)` starts at before any rotation: `0`, as
+    /// on web and Android (ADR-0060 section 1, "A class with no registered key
+    /// starts at 0"). It was `1` here, so one account's iOS and web devices
+    /// registered different keys for the same unrotated class, and after one
+    /// rotation on web the key web registered was the one iOS had used before.
+    public static let initialVersion: UInt32 = 0
+
+    /// ADR-0060 section 1, "Versions after a restore" — how many versions of
+    /// one `(class, scope)` a device with no version state for it derives and
+    /// looks for among the keys its mailbox holds (versions `0...limit`).
+    ///
+    /// A version advances once per rotation of that one `(class, scope)`: the
+    /// `contact` / `fof` keys on each removed contact, a group's `group` /
+    /// `member` keys on each shrink of that group. 256 rotations of one scope
+    /// is the bound this client recovers; chosen, not measured. Above it a
+    /// restored device finds no registered key and starts the class at 0 like
+    /// one that never had any (the stated residual). The cost is up to 257 key
+    /// derivations per unknown `(class, scope)`, paid once (the slot is then
+    /// known), off the main actor.
+    public static let versionRecoveryProbeLimit: UInt32 = 256
+
+    /// A `(class, scope)` whose version is a counter the account's devices
+    /// keep, i.e. one ``recoveredVersions(slots:registered:limit:publicKey:)``
+    /// can recover: `contact`, `fof` (empty scope), `group`, `member` (a group
+    /// id). Not `link` / `reply` (one random scope per capability, never
+    /// rotated) and not `channel` (its version is the channel's seed epoch,
+    /// which this device reads from the channel itself).
+    public struct VersionSlot: Hashable {
+        public let reachClass: FfiReachClass
+        public let scopeId: Data
+
+        public init(reachClass: FfiReachClass, scopeId: Data) {
+            self.reachClass = reachClass
+            self.scopeId = scopeId
+        }
+
+        /// The stable text form kept in ``ReachRecord/versionCheckedSlots``.
+        public var storageKey: String { ReachRules.className(reachClass) + ":" + scopeId.base64EncodedString() }
+    }
+
+    /// Whether `reachClass` carries a recoverable version counter.
+    public static func isCounterClass(_ reachClass: FfiReachClass) -> Bool {
+        switch reachClass {
+        case .contact, .fof, .group, .member: return true
+        case .link, .reply, .channel: return false
+        }
+    }
+
+    /// The counter slots among `specs` that `state` holds no version for and
+    /// that were not checked against the DS yet (`checked`): what must be
+    /// recovered before anything is registered.
+    public static func uncheckedSlots(
+        specs: [ReachKeySpec], state: FfiReachState, checked: Set<String>
+    ) -> [VersionSlot] {
+        var seen = Set<VersionSlot>()
+        var out: [VersionSlot] = []
+        for spec in specs where isCounterClass(spec.reachClass) {
+            let slot = VersionSlot(reachClass: spec.reachClass, scopeId: spec.scopeId)
+            let known = state.entries.contains { $0.class == spec.reachClass && $0.scopeId == spec.scopeId }
+            guard !known, !checked.contains(slot.storageKey), seen.insert(slot).inserted else { continue }
+            out.append(slot)
+        }
+        return out
+    }
+
+    /// ADR-0060 section 1, "Versions after a restore" — per slot, the HIGHEST
+    /// version in `0...limit` whose public key is among `registered` (the keys
+    /// the DS holds on this account's mailbox). A slot none of whose versions
+    /// is registered is absent from the result: it starts at
+    /// ``initialVersion``. Nothing lower than a found version is ever
+    /// returned, so a version the owner rotated away is never registered
+    /// again.
+    public static func recoveredVersions(
+        slots: [VersionSlot],
+        registered: Set<Data>,
+        limit: UInt32 = versionRecoveryProbeLimit,
+        publicKey: (VersionSlot, UInt32) -> Data?
+    ) -> [VersionSlot: UInt32] {
+        var out: [VersionSlot: UInt32] = [:]
+        guard !registered.isEmpty else { return out }
+        for slot in slots {
+            var version: UInt32 = 0
+            while true {
+                if let pk = publicKey(slot, version), registered.contains(pk) { out[slot] = version }
+                if version >= limit { break }
+                version += 1
+            }
+        }
+        return out
+    }
+
+    /// `state` with each recovered version set (never lowered), stamped
+    /// `nowMs` (strictly after the stored stamp) when anything changed.
+    public static func applying(
+        recovered: [VersionSlot: UInt32], to state: FfiReachState, nowMs: UInt64
+    ) -> FfiReachState {
+        var entries = state.entries
+        var changed = false
+        for (slot, version) in recovered.sorted(by: { $0.key.storageKey < $1.key.storageKey }) {
+            if let i = entries.firstIndex(where: { $0.class == slot.reachClass && $0.scopeId == slot.scopeId }) {
+                guard entries[i].version < version else { continue }
+                entries[i] = FfiReachStateEntry(class: slot.reachClass, scopeId: slot.scopeId, version: version)
+            } else {
+                entries.append(FfiReachStateEntry(class: slot.reachClass, scopeId: slot.scopeId, version: version))
+            }
+            changed = true
+        }
+        guard changed else { return state }
+        return FfiReachState(entries: entries, updatedAtMs: max(nowMs, state.updatedAtMs &+ 1))
+    }
 
     /// ADR-0060 section 6 — a `reply` key lives 7 days (chosen, not measured).
     public static let replyLifetimeMs: UInt64 = 7 * 24 * 60 * 60 * 1000
@@ -281,18 +389,29 @@ public enum ReachRules {
     /// `nil` when nothing is held — the write then goes unsigned, which only an
     /// open (Everyone) mailbox stores.
     public static func writeSeed(from held: [HeldGrant], groupIdHex: String?) -> Data? {
-        func first(_ cls: FfiReachClass, scope: String?? = nil) -> Data? {
+        writeSeeds(from: held, groupIdHex: groupIdHex).first
+    }
+
+    /// Every distinct seed held for one person, in the order ``writeSeed(from:groupIdHex:)``
+    /// prefers them: `contact`, then `member` of the group the write concerns,
+    /// then any `member`, `group`, `channel`, `reply` — newest first within a
+    /// class. A Welcome writer tries them in this order and moves to the next
+    /// on a `401` (ADR-0050 2.5a item 7): one key the owner rotated away must
+    /// not cost a Welcome another key still opens.
+    public static func writeSeeds(from held: [HeldGrant], groupIdHex: String?) -> [Data] {
+        func all(_ cls: FfiReachClass, scope: String?? = nil) -> [Data] {
             held.filter { $0.reachClass == cls && (scope == nil || $0.scopeHex == scope!) }
-                .max { $0.storedAtMs < $1.storedAtMs }?
-                .seed
+                .sorted { $0.storedAtMs > $1.storedAtMs }
+                .compactMap(\.seed)
         }
-        if let seed = first(.contact) { return seed }
-        if let groupIdHex, let seed = first(.member, scope: .some(groupIdHex)) { return seed }
-        if let seed = first(.member) { return seed }
-        if let seed = first(.group) { return seed }
-        if let seed = first(.channel) { return seed }
-        if let seed = first(.reply) { return seed }
-        return nil
+        var ordered: [Data] = all(.contact)
+        if let groupIdHex { ordered += all(.member, scope: .some(groupIdHex)) }
+        ordered += all(.member)
+        ordered += all(.group)
+        ordered += all(.channel)
+        ordered += all(.reply)
+        var seen = Set<Data>()
+        return ordered.filter { $0.count == 32 && seen.insert($0).inserted }
     }
 
     /// Replace the grants held for one person with `incoming` of the same

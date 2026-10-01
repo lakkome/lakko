@@ -454,7 +454,7 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     }
 
     /// The exact length of an ADR-0057 registrar-seed envelope, from the slim
-    /// FFI's `registrarSeedEnvelopeLen()` (173).
+    /// FFI's `registrarSeedEnvelopeLen()` (205).
     private static var registrarSeedEnvelopeLength: Int {
         Int(registrarSeedEnvelopeLen())
     }

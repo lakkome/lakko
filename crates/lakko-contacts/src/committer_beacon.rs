@@ -275,13 +275,14 @@ pub const COMMITTER_BEACON_FRESHNESS_WINDOW_MS: u64 =
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CommitterBeacon;
 
-/// One observed beacon, reduced to the only two things the fold reads.
+/// One observed beacon, reduced to the three things the fold reads.
 ///
 /// The caller builds this from a journal row it has already decrypted and
 /// dispatched: the MLS sender leaf resolves to a signature key through
-/// `Group::members()`, that key goes through
-/// `lakko_mls::group_roles::committer_rank`, and the row's
-/// server-assigned `created_at` gives the age.
+/// `Group::members()`, that key goes through `Group::committer_rank_of`
+/// (the account's rank, held by every leaf of the account, ADR-0050
+/// section 2.5a item 6), and the row's server-assigned `created_at` gives
+/// the age.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BeaconObservation {
     /// The committer rank the **observer re-derived** for this beacon's
@@ -310,6 +311,17 @@ pub struct BeaconObservation {
     /// device defer and the request wait a little longer, while an age
     /// that reads *too stale* makes it act and risks a double sweep.
     pub age_ms: u64,
+    /// The sender's 32-byte leaf **signature key**, the one the MLS
+    /// sender leaf resolved to at receipt — the same key the caller ranks
+    /// to fill [`Self::rank`], and never a leaf index (OpenMLS reuses a
+    /// vacated leaf).
+    ///
+    /// It breaks the tie between leaves of one rank (ADR-0050 section
+    /// 2.5a item 6): every device of a ranked account holds the account's
+    /// rank, so the account's devices order themselves by this key. Like
+    /// the rank it comes from authenticated state, never from the
+    /// field-less payload.
+    pub signature_key: [u8; 32],
 }
 
 /// The fold's answer to *am I the acting committer right now?*
@@ -321,7 +333,8 @@ pub struct BeaconObservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActingCommitter {
     /// This device is the acting committer: it is a candidate and has
-    /// heard no fresh beacon from any lower-ranked candidate.
+    /// heard no fresh beacon from any better-placed candidate — a lower
+    /// rank, or the same rank with a lower signature key.
     ///
     /// **Including when it has heard nothing at all.** Silence means
     /// nobody better placed is running, which makes this device the
@@ -330,13 +343,22 @@ pub enum ActingCommitter {
     /// It is still only a licence to *attempt* the sweep. The stand-down
     /// journal re-read and the staged-commit rollback both still run.
     Act,
-    /// A lower-ranked candidate beaconed inside the freshness window, so
-    /// this device stands down and re-evaluates on its next poll.
+    /// A better-placed candidate beaconed inside the freshness window,
+    /// so this device stands down and re-evaluates on its next poll.
+    ///
+    /// Better placed means a strictly lower rank, or the same rank and a
+    /// bytewise lower signature key (another device of the same account,
+    /// ADR-0050 section 2.5a item 6).
     Defer {
-        /// The lowest rank observed active. Purely informational — the
-        /// decision is already made — but it is what makes a log line
-        /// answer *deferring to whom*.
+        /// The rank of the best-placed fresh observation. Equal to this
+        /// device's own rank when it defers to a lower-keyed device of
+        /// the same rank. Purely informational — the decision is already
+        /// made.
         to_rank: u32,
+        /// The signature key of that observation, so a log line answers
+        /// *deferring to whom* even between two devices of one account.
+        /// Never this device's own key.
+        to_signature_key: [u8; 32],
     },
     /// This device is not an owner or admin, so it can never sweep.
     /// Distinct from [`ActingCommitter::Defer`]: there is nothing to
@@ -370,25 +392,39 @@ impl ActingCommitter {
 /// 1. **A non-candidate never sweeps.** `own_rank == None` is
 ///    [`ActingCommitter::NotACandidate`], evaluated first and without
 ///    looking at a single beacon.
-/// 2. **The owner never waits its turn.** Rank 0 is
-///    [`ActingCommitter::Act`] immediately: no rank is lower, so no
-///    beacon could outrank it and none is consulted. With the owner
-///    running the app, nothing else in this function ever executes.
-/// 3. **Beacons from non-candidates are ignored**, by re-derived rank —
+/// 2. **Beacons from non-candidates are ignored**, by re-derived rank —
 ///    an observation whose `rank` is `None` is dropped. Nothing in the
 ///    payload could have influenced that, because the payload carries no
 ///    identity and no rank.
-/// 4. **Stale beacons are ignored.** `age_ms > freshness_window_ms` is
+/// 3. **Stale beacons are ignored.** `age_ms > freshness_window_ms` is
 ///    dropped. Ages come from the DS row, never a sender's clock.
-/// 5. **Only *strictly* lower ranks defer this device.** Equal rank never
-///    defers, which is what makes a device's own echoed-back beacon
-///    harmless, and is also why two devices sharing one signature key
-///    both act — ADR-0045's known residual, repaired by the rollback
-///    rather than prevented here.
+/// 4. **This device's own beacon is ignored**: an observation whose
+///    signature key equals `own_signature_key` is dropped whatever its
+///    rank, so a device's own echoed-back beacon can never make it stand
+///    down for itself.
+/// 5. **Only a better-placed candidate defers this device**: a strictly
+///    lower rank, or the **same** rank with a **strictly lower**
+///    signature key, compared bytewise. Since ADR-0050 section 2.5a item
+///    6 every device of a ranked account holds the account's rank (a lost
+///    device stays in the roster, so "the lowest leaf key in the roster"
+///    could name a device nobody holds any more); the account's acting
+///    device is therefore its lowest-keyed device that is **active**,
+///    i.e. whose beacon is fresh. The owner is no exception: rank 0 never
+///    waits for anyone of a higher rank, but a rank-0 device does defer
+///    to a fresh, lower-keyed device of the owner's own account.
 /// 6. **Hearing nothing means acting.** A candidate that survives rules
-///    3-5 with an empty set is the acting committer. That is the correct
+///    2-5 with an empty set is the acting committer. That is the correct
 ///    answer when nobody better placed is running, and reading it as a
 ///    failure to elect is the single most likely way to get this wrong.
+///
+/// When several observations are better placed, [`ActingCommitter::Defer`]
+/// names the best of them: the lowest `(rank, signature_key)` pair.
+///
+/// Two devices sharing one signature key both act (rule 4 makes each
+/// ignore the other) — ADR-0045's known residual, repaired by the
+/// rollback rather than prevented here. Two devices of one account that
+/// do not yet hear each other both act too: that is the ADR-0045 race,
+/// resolved by the staged sweep.
 ///
 /// # This does not close the race
 ///
@@ -399,6 +435,7 @@ impl ActingCommitter {
 #[must_use]
 pub fn acting_committer_verdict(
     own_rank: Option<u32>,
+    own_signature_key: &[u8; 32],
     observed: &[BeaconObservation],
     freshness_window_ms: u64,
 ) -> ActingCommitter {
@@ -407,26 +444,23 @@ pub fn acting_committer_verdict(
         return ActingCommitter::NotACandidate;
     };
 
-    // Rule 2 — the owner outranks every possible beacon, so the scan
-    // below could only ever come up empty. Short-circuit, so that "rank 0
-    // never waits its turn" is a property of the code and not an
-    // emergent one.
-    if own == 0 {
-        return ActingCommitter::Act;
-    }
-
-    // Rules 3, 4 and 5, in one pass: fresh beacons, from re-derived
-    // candidates, strictly better placed than this device.
-    let lowest_active = observed
+    // Rules 2-5, in one pass: fresh beacons, from re-derived candidates,
+    // not this device's own, better placed than this device. Tuples
+    // compare rank first and the key second, which is exactly the order.
+    let best_active = observed
         .iter()
         .filter(|obs| obs.age_ms <= freshness_window_ms)
-        .filter_map(|obs| obs.rank)
-        .filter(|&rank| rank < own)
+        .filter(|obs| obs.signature_key != *own_signature_key)
+        .filter_map(|obs| obs.rank.map(|rank| (rank, obs.signature_key)))
+        .filter(|candidate| *candidate < (own, *own_signature_key))
         .min();
 
     // Rule 6 — nothing better placed is running, so this device is it.
-    lowest_active.map_or(ActingCommitter::Act, |to_rank| ActingCommitter::Defer {
-        to_rank,
+    best_active.map_or(ActingCommitter::Act, |(to_rank, to_signature_key)| {
+        ActingCommitter::Defer {
+            to_rank,
+            to_signature_key,
+        }
     })
 }
 
@@ -601,18 +635,53 @@ pub enum CommitterBeaconError {
 mod tests {
     use super::*;
 
+    /// This device's own signature key in every fold test.
+    const OWN: [u8; 32] = [0x80; 32];
+    /// A key that sorts above [`OWN`], so an equal-rank observation under
+    /// it never defers this device.
+    const HIGHER: [u8; 32] = [0xEE; 32];
+    /// A key that sorts below [`OWN`].
+    const LOWER: [u8; 32] = [0x10; 32];
+
     /// Shorthand for a beacon observed `age_ms` ago from a candidate at
-    /// `rank`.
+    /// `rank`, under a key that sorts above [`OWN`].
     const fn obs(rank: u32, age_ms: u64) -> BeaconObservation {
+        obs_k(rank, age_ms, HIGHER)
+    }
+
+    /// A beacon observed from a candidate at `rank` under `key`.
+    const fn obs_k(rank: u32, age_ms: u64, key: [u8; 32]) -> BeaconObservation {
         BeaconObservation {
             rank: Some(rank),
             age_ms,
+            signature_key: key,
         }
     }
 
     /// Shorthand for a beacon observed from a **non**-candidate.
     const fn non_candidate(age_ms: u64) -> BeaconObservation {
-        BeaconObservation { rank: None, age_ms }
+        BeaconObservation {
+            rank: None,
+            age_ms,
+            signature_key: LOWER,
+        }
+    }
+
+    /// The fold as this device ([`OWN`]) takes it.
+    fn verdict(
+        own_rank: Option<u32>,
+        observed: &[BeaconObservation],
+        window: u64,
+    ) -> ActingCommitter {
+        acting_committer_verdict(own_rank, &OWN, observed, window)
+    }
+
+    /// A deferral to the [`obs`] key at `to_rank`.
+    const fn defer(to_rank: u32) -> ActingCommitter {
+        ActingCommitter::Defer {
+            to_rank,
+            to_signature_key: HIGHER,
+        }
     }
 
     const WINDOW: u64 = COMMITTER_BEACON_FRESHNESS_WINDOW_MS;
@@ -837,8 +906,8 @@ mod tests {
         }
         let healthy_but_lost_one = 2 * COMMITTER_BEACON_INTERVAL_MS;
         assert_eq!(
-            acting_committer_verdict(Some(2), &[obs(1, healthy_but_lost_one)], WINDOW),
-            ActingCommitter::Defer { to_rank: 1 },
+            verdict(Some(2), &[obs(1, healthy_but_lost_one)], WINDOW),
+            defer(1),
             "one lost beacon must not evict a live candidate",
         );
     }
@@ -851,32 +920,38 @@ mod tests {
     fn a_plain_member_is_never_a_candidate() {
         // Even with a wide-open field: no beacons at all, which for a
         // candidate would mean Act.
+        assert_eq!(verdict(None, &[], WINDOW), ActingCommitter::NotACandidate,);
         assert_eq!(
-            acting_committer_verdict(None, &[], WINDOW),
-            ActingCommitter::NotACandidate,
-        );
-        assert_eq!(
-            acting_committer_verdict(None, &[obs(0, 0), obs(1, 0)], WINDOW),
+            verdict(None, &[obs(0, 0), obs(1, 0)], WINDOW),
             ActingCommitter::NotACandidate,
         );
     }
 
     // -------------------------------------------------------------------
-    // The fold — rule 2: the owner never waits its turn
+    // The fold — the owner never waits for a higher rank
     // -------------------------------------------------------------------
 
     #[test]
-    fn the_owner_acts_without_consulting_any_beacon() {
-        // Rank 0 against a field stuffed with fresh rank-0 beacons — an
-        // echo of its own, or a second device on the same key. No rank
-        // is lower than 0, so the verdict cannot be anything but Act.
+    fn the_owner_never_waits_for_a_higher_rank() {
+        // Rank 0 against a field of fresh admins and fresh higher-keyed
+        // rank-0 devices: nothing is better placed, so Act.
+        assert_eq!(verdict(Some(0), &[], WINDOW), ActingCommitter::Act);
         assert_eq!(
-            acting_committer_verdict(Some(0), &[], WINDOW),
+            verdict(Some(0), &[obs(0, 0), obs(1, 0), obs(2, 0)], WINDOW),
             ActingCommitter::Act,
         );
+    }
+
+    #[test]
+    fn an_owner_device_defers_to_a_lower_keyed_device_of_the_owner() {
+        // ADR-0050 section 2.5a item 6: every device of the owner's
+        // account holds rank 0; the lowest-keyed active one acts.
         assert_eq!(
-            acting_committer_verdict(Some(0), &[obs(0, 0), obs(0, 0), obs(1, 0)], WINDOW),
-            ActingCommitter::Act,
+            verdict(Some(0), &[obs_k(0, 0, LOWER)], WINDOW),
+            ActingCommitter::Defer {
+                to_rank: 0,
+                to_signature_key: LOWER,
+            },
         );
     }
 
@@ -888,10 +963,7 @@ mod tests {
     fn a_candidate_that_hears_nothing_is_the_acting_committer() {
         // The single most misreadable rule in the module: silence is an
         // answer, not a failure to elect.
-        assert_eq!(
-            acting_committer_verdict(Some(3), &[], WINDOW),
-            ActingCommitter::Act,
-        );
+        assert_eq!(verdict(Some(3), &[], WINDOW), ActingCommitter::Act,);
     }
 
     #[test]
@@ -900,7 +972,7 @@ mod tests {
         // is the takeover case, and it must land on Act.
         let stale = WINDOW + 1;
         assert_eq!(
-            acting_committer_verdict(
+            verdict(
                 Some(3),
                 &[obs(0, stale), obs(1, stale), obs(2, stale)],
                 WINDOW
@@ -910,29 +982,23 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // The fold — rules 4 and 5: freshness and strict rank
+    // The fold — freshness and strict ordering
     // -------------------------------------------------------------------
 
     #[test]
     fn a_fresh_lower_ranked_beacon_defers_this_device() {
-        assert_eq!(
-            acting_committer_verdict(Some(2), &[obs(0, 0)], WINDOW),
-            ActingCommitter::Defer { to_rank: 0 },
-        );
+        assert_eq!(verdict(Some(2), &[obs(0, 0)], WINDOW), defer(0),);
     }
 
     #[test]
     fn the_freshness_boundary_is_inclusive_and_discriminates() {
         // Exactly at the window: still fresh, so defer.
-        assert_eq!(
-            acting_committer_verdict(Some(2), &[obs(1, WINDOW)], WINDOW),
-            ActingCommitter::Defer { to_rank: 1 },
-        );
+        assert_eq!(verdict(Some(2), &[obs(1, WINDOW)], WINDOW), defer(1),);
         // One millisecond past: stale, so act. The pair is what makes
         // this a boundary test rather than two independent assertions —
         // an off-by-one in the comparison flips exactly one of them.
         assert_eq!(
-            acting_committer_verdict(Some(2), &[obs(1, WINDOW + 1)], WINDOW),
+            verdict(Some(2), &[obs(1, WINDOW + 1)], WINDOW),
             ActingCommitter::Act,
         );
     }
@@ -942,23 +1008,88 @@ mod tests {
         // An admin below us in the order is running. We still outrank it,
         // so we act and it defers to us.
         assert_eq!(
-            acting_committer_verdict(Some(1), &[obs(2, 0), obs(5, 0)], WINDOW),
+            verdict(Some(1), &[obs(2, 0), obs(5, 0)], WINDOW),
             ActingCommitter::Act,
         );
     }
 
     #[test]
-    fn an_equal_ranked_beacon_never_defers_this_device() {
-        // Two readings of this matter. First: a device observing its OWN
-        // beacon echoed back off the journal must not stand down for
-        // itself, or a lone candidate would deadlock the group forever.
-        // Second: two devices sharing one signature key both act — the
-        // ADR-0045 residual, repaired by the rollback, not prevented
-        // here. A `<=` in the rank filter breaks the first and hides the
-        // second.
+    fn an_equal_ranked_beacon_with_a_higher_key_never_defers_this_device() {
+        // Another device of this account (or of an account sharing the
+        // rank — impossible today, ranks are a permutation over accounts)
+        // with a higher key: this device is the better placed of the two.
+        assert_eq!(verdict(Some(2), &[obs(2, 0)], WINDOW), ActingCommitter::Act);
+    }
+
+    #[test]
+    fn an_equal_ranked_beacon_with_a_lower_key_defers_this_device() {
+        // The new tie-break: the account's lowest-keyed ACTIVE device acts.
         assert_eq!(
-            acting_committer_verdict(Some(2), &[obs(2, 0)], WINDOW),
+            verdict(Some(2), &[obs_k(2, 0, LOWER)], WINDOW),
+            ActingCommitter::Defer {
+                to_rank: 2,
+                to_signature_key: LOWER,
+            },
+        );
+    }
+
+    #[test]
+    fn a_stale_equal_ranked_beacon_with_a_lower_key_is_ignored() {
+        // The lost device: still in the roster, sorts lower, but silent.
+        // Its last beacon ages out and this device takes over — the whole
+        // point of choosing among ACTIVE devices.
+        assert_eq!(
+            verdict(Some(2), &[obs_k(2, WINDOW + 1, LOWER)], WINDOW),
             ActingCommitter::Act,
+        );
+        // At the window edge it is still fresh.
+        assert_eq!(
+            verdict(Some(2), &[obs_k(2, WINDOW, LOWER)], WINDOW),
+            ActingCommitter::Defer {
+                to_rank: 2,
+                to_signature_key: LOWER,
+            },
+        );
+    }
+
+    #[test]
+    fn this_devices_own_beacon_is_ignored_whatever_its_rank() {
+        // A device observing its OWN beacon echoed back off the journal
+        // must not stand down for itself, or a lone candidate would
+        // deadlock the group forever. Ignored even under a lower rank
+        // (a rank taken under a stale table cannot defer it to itself).
+        assert_eq!(
+            verdict(Some(2), &[obs_k(2, 0, OWN)], WINDOW),
+            ActingCommitter::Act
+        );
+        assert_eq!(
+            verdict(Some(2), &[obs_k(0, 0, OWN)], WINDOW),
+            ActingCommitter::Act
+        );
+        assert_eq!(
+            verdict(Some(0), &[obs_k(0, 0, OWN)], WINDOW),
+            ActingCommitter::Act
+        );
+    }
+
+    #[test]
+    fn defer_names_the_best_placed_observation_by_rank_then_key() {
+        // A lower rank beats a lower key; among equal ranks the lower key
+        // is named.
+        assert_eq!(
+            verdict(
+                Some(3),
+                &[
+                    obs_k(3, 0, LOWER),
+                    obs_k(1, 0, HIGHER),
+                    obs_k(1, 0, [0x50; 32])
+                ],
+                WINDOW
+            ),
+            ActingCommitter::Defer {
+                to_rank: 1,
+                to_signature_key: [0x50; 32],
+            },
         );
     }
 
@@ -968,8 +1099,8 @@ mod tests {
         // the best of them, not merely the first seen. Deliberately
         // supplied out of order.
         assert_eq!(
-            acting_committer_verdict(Some(9), &[obs(4, 0), obs(1, 10), obs(7, 0)], WINDOW),
-            ActingCommitter::Defer { to_rank: 1 },
+            verdict(Some(9), &[obs(4, 0), obs(1, 10), obs(7, 0)], WINDOW),
+            defer(1),
         );
     }
 
@@ -979,13 +1110,13 @@ mod tests {
         // defer — but to 1, not to 0. This discriminates a filter that
         // computes the minimum BEFORE applying freshness.
         assert_eq!(
-            acting_committer_verdict(Some(5), &[obs(0, WINDOW + 1), obs(1, 0)], WINDOW),
-            ActingCommitter::Defer { to_rank: 1 },
+            verdict(Some(5), &[obs(0, WINDOW + 1), obs(1, 0)], WINDOW),
+            defer(1),
         );
     }
 
     // -------------------------------------------------------------------
-    // The fold — rule 3: non-candidate beacons are ignored
+    // The fold — rule 2: non-candidate beacons are ignored
     // -------------------------------------------------------------------
 
     #[test]
@@ -996,11 +1127,11 @@ mod tests {
         // implementation defaulting an absent rank to 0 — which would
         // hand a plain member a veto over every sweep in the group.
         assert_eq!(
-            acting_committer_verdict(Some(3), &[non_candidate(0)], WINDOW),
+            verdict(Some(3), &[non_candidate(0)], WINDOW),
             ActingCommitter::Act,
         );
         assert_eq!(
-            acting_committer_verdict(
+            verdict(
                 Some(3),
                 &[non_candidate(0), non_candidate(0), obs(4, 0)],
                 WINDOW,
@@ -1018,17 +1149,17 @@ mod tests {
         // No panic, no overflow, no surprise: u32::MAX ranks, u64::MAX
         // ages and a zero-width window are all ordinary inputs.
         assert_eq!(
-            acting_committer_verdict(Some(u32::MAX), &[obs(0, u64::MAX)], u64::MAX),
-            ActingCommitter::Defer { to_rank: 0 },
+            verdict(Some(u32::MAX), &[obs(0, u64::MAX)], u64::MAX),
+            defer(0),
         );
         assert_eq!(
-            acting_committer_verdict(Some(u32::MAX), &[obs(0, 1)], 0),
+            verdict(Some(u32::MAX), &[obs(0, 1)], 0),
             ActingCommitter::Act,
             "a zero window makes every beacon but an age-0 one stale",
         );
         assert_eq!(
-            acting_committer_verdict(Some(1), &[obs(0, 0)], 0),
-            ActingCommitter::Defer { to_rank: 0 },
+            verdict(Some(1), &[obs(0, 0)], 0),
+            defer(0),
             "an age-0 beacon is fresh even in a zero-width window",
         );
     }
@@ -1036,7 +1167,7 @@ mod tests {
     #[test]
     fn is_act_agrees_with_the_variant() {
         assert!(ActingCommitter::Act.is_act());
-        assert!(!ActingCommitter::Defer { to_rank: 0 }.is_act());
+        assert!(!defer(0).is_act());
         assert!(!ActingCommitter::NotACandidate.is_act());
     }
 

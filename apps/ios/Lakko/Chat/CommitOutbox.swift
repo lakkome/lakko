@@ -394,6 +394,35 @@ public final class CommitOutboxStore {
         try encoded.write(to: url, options: .atomic)
     }
 
+    /// ADR-0050 2.5a item 7 — keep a sweep entry Welcome-owed to only the
+    /// mailboxes no key could reach yet: set the welcomes-owed marker (and the
+    /// commit's DS id when known) and narrow ``PendingCommitEntry/welcomeMailboxesB64``
+    /// to `mailboxesB64`, in one durable write, so a restart re-sends nothing
+    /// to a mailbox that already has the Welcome. No-op when the entry is gone.
+    public func keepWelcomesOwed(
+        accountIdB64: String,
+        id: String,
+        commitMessageId: Int64?,
+        mailboxesB64: [String]
+    ) throws {
+        guard let dir = accountDir(accountIdB64) else {
+            throw CommitOutboxStoreError.unavailable(
+                "no application-support directory to record the owed Welcome fan-out"
+            )
+        }
+        let url = dir.appendingPathComponent("\(id).json")
+        guard let data = try? Data(contentsOf: url),
+              var entry = try? JSONDecoder().decode(PendingCommitEntry.self, from: data)
+        else {
+            return
+        }
+        entry.sweepWelcomesOwed = true
+        if let commitMessageId { entry.commitMessageId = commitMessageId }
+        entry.welcomeMailboxesB64 = mailboxesB64
+        let encoded = try JSONEncoder().encode(entry)
+        try encoded.write(to: url, options: .atomic)
+    }
+
     /// Delete an entry by id. Best-effort, no-op when absent.
     public func deleteEntryBestEffort(accountIdB64: String, id: String) {
         guard let dir = accountDir(accountIdB64) else { return }

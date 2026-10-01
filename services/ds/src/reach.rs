@@ -29,6 +29,11 @@
 //! key the mailbox is named after, at `MAILBOX_EPOCH` (ADR-0053's mailbox
 //! proof), and applied in one transaction behind the mailbox row's lock.
 //!
+//! The owner reads its registered keys back (`GET /ds/mailbox/{hex}/reach`,
+//! the same identity proof, every failure the uniform `401`) so a device
+//! restored with no version state can resume each class at the version the
+//! server still honours (ADR-0060 section 1, "Versions after a restore").
+//!
 //! The reach check (`POST /ds/mailbox/{hex}/reach/check`) answers `204` when
 //! the proof's key is registered and unexpired, `401` otherwise; a searcher
 //! calls it before showing a result so a narrowed setting takes effect at the
@@ -47,14 +52,14 @@
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Json, Response};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use lakko_ds_proof::{
     verify_delegated_proof, verify_delegation, Delegation, Proof, RequestParts, VerifyingKey,
     DELEGATION_HEADER_NAME, MAILBOX_EPOCH, NONCE_LEN, PROOF_HEADER_NAME, REACH_EPOCH,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::mysql::{MySql, MySqlPool};
 use sqlx::QueryBuilder;
 
@@ -479,6 +484,76 @@ pub(crate) async fn post_reach_check(
     let req = parts(&method, &uri, &body);
     check_direct(&state.db, &mailbox, &proof, &req, now_ms()).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// One registered key in the `GET /ds/mailbox/{hex}/reach` answer.
+#[derive(Serialize)]
+pub(crate) struct ReachKeyEntry {
+    /// Standard base64 of the 32-byte Ed25519 verifying key (the encoding
+    /// and name of the `PUT` body's field).
+    pub(crate) reach_pk_b64: String,
+    /// The expiry the owner registered it with, unix milliseconds; `None`
+    /// (JSON `null`) for a key that lives until removed.
+    pub(crate) expires_at_ms: Option<u64>,
+}
+
+/// Body of the `GET /ds/mailbox/{hex}/reach` answer.
+#[derive(Serialize)]
+pub(crate) struct ReachList {
+    /// Every unexpired reach key of the mailbox, ordered by key bytes. At
+    /// most [`MAX_REACH_KEYS`]: the registration route refuses an update
+    /// that would leave more.
+    pub(crate) keys: Vec<ReachKeyEntry>,
+    /// The Everyone flag as the owner last set it.
+    pub(crate) open: bool,
+}
+
+/// `GET /ds/mailbox/{hex}/reach` - the mailbox owner reads back the reach
+/// keys it registered (ADR-0060 section 1, "Versions after a restore"): a
+/// device that holds no version state derives each class's keys for
+/// versions 0, 1, 2, ... and resumes at the highest one listed here.
+///
+/// Authenticated exactly like the owner's mailbox read (ADR-0053's mailbox
+/// proof: the identity key the pseudonym derives from, at `MAILBOX_EPOCH`,
+/// nonce consumed). Every failure - no proof, a proof by any other key
+/// (a reach key included), a replay, an unclaimed mailbox - is the uniform
+/// `401`, so the route tells a non-owner nothing. Public keys only
+/// (invariant #2); an expired key is not listed, since it is no longer
+/// honoured and the pruner deletes it. No anonymous token.
+pub(crate) async fn get_mailbox_reach(
+    State(state): State<AppState>,
+    AxumPath(device_hex): AxumPath<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Result<Json<ReachList>, HandlerError> {
+    let mailbox = journal::decode_pseudonym(&device_hex)?;
+    crate::access::gate_mailbox_read(&state, &mailbox, &method, &uri, &headers).await?;
+    let now = now_ms();
+    // The gate passed, so the mailbox is claimed; a row gone since (account
+    // deletion) reads as the uniform refusal rather than an empty list.
+    let open = mailbox_open(&state.db, &mailbox)
+        .await?
+        .ok_or_else(refused)?;
+    let rows: Vec<(Vec<u8>, Option<u64>)> = sqlx::query_as(
+        "SELECT reach_pk, expires_at_ms FROM ds_mailbox_reach \
+         WHERE mailbox = ? AND (expires_at_ms IS NULL OR expires_at_ms > ?) \
+         ORDER BY reach_pk LIMIT ?",
+    )
+    .bind(&mailbox[..])
+    .bind(now)
+    .bind(u64::try_from(MAX_REACH_KEYS).unwrap_or(u64::MAX))
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_error("list reach keys"))?;
+    let keys = rows
+        .into_iter()
+        .map(|(pk, expires_at_ms)| ReachKeyEntry {
+            reach_pk_b64: B64.encode(pk),
+            expires_at_ms,
+        })
+        .collect();
+    Ok(Json(ReachList { keys, open }))
 }
 
 /// Delete expired reach keys and the nonces of expired delegations. Runs on
@@ -1262,5 +1337,156 @@ mod tests {
             .await,
             StatusCode::PAYLOAD_TOO_LARGE
         );
+    }
+
+    /// `GET /ds/mailbox/{hex}/reach` as `signer` (or with no proof).
+    async fn list_reach(
+        app: &Router,
+        mailbox: &[u8; PSEUDONYM_LEN],
+        signer: Option<(&SigningKey, u64)>,
+    ) -> (StatusCode, Vec<u8>) {
+        send(
+            app,
+            Req {
+                method: "GET",
+                uri: &reach_uri(mailbox),
+                body: vec![],
+                proof: signer,
+            },
+        )
+        .await
+    }
+
+    /// The listed keys as `(base64, expires_at_ms)` pairs.
+    fn listed(body: &[u8]) -> Vec<(String, Option<u64>)> {
+        let v: serde_json::Value = serde_json::from_slice(body).unwrap();
+        v["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| {
+                (
+                    k["reach_pk_b64"].as_str().unwrap().to_owned(),
+                    k["expires_at_ms"].as_u64(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_owner_reads_back_its_reach_keys() {
+        let Some((app, _pool)) = app().await else {
+            return;
+        };
+        let (identity, mailbox) = claimed_mailbox(&app, 80).await;
+
+        // Claimed, nothing registered yet: an empty list, closed.
+        let (status, body) = list_reach(&app, &mailbox, Some((&identity, MAILBOX_EPOCH))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(listed(&body).is_empty());
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["open"], serde_json::Value::Bool(false));
+
+        let forever = key(81);
+        let later = key(82);
+        let gone = key(83);
+        let expired = key(84);
+        let expiry = now_ms() + 3_600_000;
+        add_reach(&app, &identity, &mailbox, &forever, None).await;
+        add_reach(&app, &identity, &mailbox, &later, Some(expiry)).await;
+        add_reach(&app, &identity, &mailbox, &gone, None).await;
+        add_reach(&app, &identity, &mailbox, &expired, Some(now_ms() - 1)).await;
+        let body = serde_json::json!({ "remove": [pk_b64(&gone)], "open": true });
+        assert_eq!(
+            put_reach(&app, &mailbox, Some((&identity, MAILBOX_EPOCH)), &body).await,
+            StatusCode::NO_CONTENT
+        );
+
+        let (status, body) = list_reach(&app, &mailbox, Some((&identity, MAILBOX_EPOCH))).await;
+        assert_eq!(status, StatusCode::OK);
+        let mut want = vec![(pk_b64(&forever), None), (pk_b64(&later), Some(expiry))];
+        let mut got = listed(&body);
+        want.sort();
+        got.sort();
+        // The removed key and the expired one are absent.
+        assert_eq!(got, want);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["open"], serde_json::Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn only_the_owner_reads_the_reach_keys() {
+        let Some((app, _pool)) = app().await else {
+            return;
+        };
+        let (identity, mailbox) = claimed_mailbox(&app, 85).await;
+        let reach = key(86);
+        add_reach(&app, &identity, &mailbox, &reach, None).await;
+        let (other_identity, _) = claimed_mailbox(&app, 87).await;
+
+        let refusals = [
+            list_reach(&app, &mailbox, None).await,
+            // A registered reach key, at either epoch label.
+            list_reach(&app, &mailbox, Some((&reach, REACH_EPOCH))).await,
+            list_reach(&app, &mailbox, Some((&reach, MAILBOX_EPOCH))).await,
+            // Another mailbox's owner.
+            list_reach(&app, &mailbox, Some((&other_identity, MAILBOX_EPOCH))).await,
+            // The owner's key at another epoch label.
+            list_reach(&app, &mailbox, Some((&identity, 1))).await,
+            // An unclaimed mailbox, whoever asks - even the identity it
+            // would be named after.
+            list_reach(&app, &fresh_name(88), Some((&identity, MAILBOX_EPOCH))).await,
+        ];
+        let (_, uniform) = refused();
+        for (status, body) in refusals {
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(body, uniform.as_bytes());
+        }
+        let unborn = SigningKey::from_seed(&fresh_name(89));
+        let unclaimed = lakko_ds_proof::mailbox_pseudonym(&unborn.verifying_key());
+        let (status, body) = list_reach(&app, &unclaimed, Some((&unborn, MAILBOX_EPOCH))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, uniform.as_bytes());
+
+        // A proof signed for the list does not open the mailbox's messages,
+        // and a replayed one is refused.
+        let uri = reach_uri(&mailbox);
+        let header = sign(
+            &identity,
+            &RequestParts {
+                method: "GET",
+                canonical_path: &uri,
+                query: "",
+                body: b"",
+            },
+            MAILBOX_EPOCH,
+            now_ms(),
+            fresh_nonce(),
+        )
+        .encode();
+        let replay = |target: String| {
+            let app = app.clone();
+            let header = header.clone();
+            async move {
+                send_with(
+                    &app,
+                    Req {
+                        method: "GET",
+                        uri: &target,
+                        body: vec![],
+                        proof: None,
+                    },
+                    &[(PROOF_HEADER_NAME, &header)],
+                )
+                .await
+                .0
+            }
+        };
+        assert_eq!(
+            replay(format!("{}?after=0", messages_uri("mailbox", &mailbox))).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(replay(uri.clone()).await, StatusCode::OK);
+        assert_eq!(replay(uri).await, StatusCode::UNAUTHORIZED);
     }
 }

@@ -76,20 +76,47 @@ class CommitterBeaconTest {
             }
         }
 
-    /** The core's `acting_committer_verdict` fold, restated. */
-    private fun coreFold(): (UInt?, List<ProjectedObservation>, ULong) -> ActingCommitter =
-        { ownRank, observed, windowMs ->
-            when {
-                ownRank == null -> ActingCommitter.NotACandidate
-                ownRank == 0u -> ActingCommitter.Act
-                else -> {
-                    val better = observed
-                        .filter { it.rank != null && it.ageMs <= windowMs && it.rank!! < ownRank }
-                        .minByOrNull { it.rank!! }
-                    if (better == null) ActingCommitter.Act else ActingCommitter.Defer(better.rank)
-                }
+    /**
+     * The core's `acting_committer_verdict` fold, restated (ADR-0050 section
+     * 2.5a item 6): drop stale beacons, non-candidates and this device's own
+     * key; defer to the smallest `(rank, key)` pair strictly below this
+     * device's own, the key compared bytewise unsigned; hear nothing, act.
+     */
+    private fun coreFold(): (UInt?, ByteArray, List<ProjectedObservation>, ULong) -> ActingCommitter =
+        { ownRank, ownKey, observed, windowMs ->
+            if (ownRank == null) {
+                ActingCommitter.NotACandidate
+            } else {
+                val better = observed
+                    .filter { it.ageMs <= windowMs && it.rank != null && !it.signatureKey.contentEquals(ownKey) }
+                    .filter { lessThan(it.rank!!, it.signatureKey, ownRank, ownKey) }
+                    .sortedWith { a, b -> if (lessThan(a.rank!!, a.signatureKey, b.rank!!, b.signatureKey)) -1 else 1 }
+                    .firstOrNull()
+                if (better == null) ActingCommitter.Act else ActingCommitter.Defer(better.rank, better.signatureKey)
             }
         }
+
+    private fun lessThan(rankA: UInt, keyA: ByteArray, rankB: UInt, keyB: ByteArray): Boolean {
+        if (rankA != rankB) return rankA < rankB
+        for (i in keyA.indices) {
+            val x = keyA[i].toInt() and 0xFF
+            val y = keyB[i].toInt() and 0xFF
+            if (x != y) return x < y
+        }
+        return false
+    }
+
+    /** A 32-byte signature key named in a test: [first] leads, the rest is
+     *  filled from the name so two names never share a key. */
+    private fun keyOf(name: String, first: Int = name.hashCode() and 0x7F): ByteArray =
+        ByteArray(32) { i -> if (i == 0) first.toByte() else (name.hashCode() + i).toByte() }
+
+    /** The store spells keys as names here; this is their decoder. */
+    private val names = mutableMapOf<String, ByteArray>()
+
+    private fun nameKey(name: String): ByteArray = names.getOrPut(name) { keyOf(name) }
+
+    private val ownKey: ByteArray get() = nameKey("self")
 
     // ------------------------------------------------------------- emit rules
 
@@ -200,6 +227,7 @@ class CommitterBeaconTest {
             observations = store.load("acct", "grp"),
             rankOf = { key -> if (key == "senderA") 2u else null },
             nowMs = 1_200,
+            decodeKey = ::nameKey,
         )
         assertEquals(listOf(2u), atReceipt.projected.map { it.rank })
 
@@ -211,6 +239,7 @@ class CommitterBeaconTest {
             observations = store.load("acct", "grp"),
             rankOf = { key -> if (key == "senderA") 7u else null },
             nowMs = 1_500,
+            decodeKey = ::nameKey,
         )
         assertEquals(listOf(7u), laterVerdict.projected.map { it.rank })
         assertEquals(listOf(500uL), laterVerdict.projected.map { it.ageMs })
@@ -230,13 +259,15 @@ class CommitterBeaconTest {
             accountIdB64 = "acct",
             groupIdHex = "grp",
             ownRank = 5u,
+            ownSignatureKey = ownKey,
             rankOf = { key -> if (key == "stillAdmin") 1u else null },
             nowMs = 1_100,
             freshnessWindowMs = 150_000uL,
             fold = coreFold(),
+            decodeKey = ::nameKey,
         )
 
-        assertEquals(ActingCommitter.Defer(1u), verdict)
+        assertEquals(ActingCommitter.Defer(1u, nameKey("stillAdmin")), verdict)
         assertEquals(setOf("stillAdmin"), store.load("acct", "grp").keys)
     }
 
@@ -255,20 +286,24 @@ class CommitterBeaconTest {
         val fresh = decideActingCommitter(
             store, "acct", "grp",
             ownRank = 4u,
+            ownSignatureKey = ownKey,
             rankOf = { 1u },
             nowMs = 1_000 + 100_000,
             freshnessWindowMs = 150_000uL,
             fold = coreFold(),
+            decodeKey = ::nameKey,
         )
-        assertEquals("inside the window, this device stands down", ActingCommitter.Defer(1u), fresh)
+        assertEquals("inside the window, this device stands down", ActingCommitter.Defer(1u, nameKey("sleepyOwner")), fresh)
 
         val stale = decideActingCommitter(
             store, "acct", "grp",
             ownRank = 4u,
+            ownSignatureKey = ownKey,
             rankOf = { 1u },
             nowMs = 1_000 + 200_000,
             freshnessWindowMs = 150_000uL,
             fold = coreFold(),
+            decodeKey = ::nameKey,
         )
         assertEquals("past the window, this device takes over", ActingCommitter.Act, stale)
     }
@@ -280,29 +315,192 @@ class CommitterBeaconTest {
         val verdict = decideActingCommitter(
             MemStore(), "acct", "grp",
             ownRank = 9u,
+            ownSignatureKey = ownKey,
             rankOf = { null },
             nowMs = 1_000,
             freshnessWindowMs = 150_000uL,
             fold = coreFold(),
+            decodeKey = ::nameKey,
         )
         assertEquals(ActingCommitter.Act, verdict)
     }
 
-    /** RULE: only a STRICTLY lower rank defers this device — so its own beacon,
-     *  echoed back on its next poll, is harmless. */
+    /** RULE: this device's own beacon, echoed back on its next poll, is
+     *  ignored — it never defers to itself. */
     @Test
-    fun `an equal rank never defers`() {
+    fun `its own echoed beacon never defers this device`() {
         val store = MemStore()
         recordBeaconObservation(store, "acct", "grp", "self", atMs = 1_000)
         val verdict = decideActingCommitter(
             store, "acct", "grp",
             ownRank = 3u,
+            ownSignatureKey = ownKey,
             rankOf = { 3u },
             nowMs = 1_100,
             freshnessWindowMs = 150_000uL,
             fold = coreFold(),
+            decodeKey = ::nameKey,
         )
         assertEquals(ActingCommitter.Act, verdict)
+    }
+
+    // ------------------------------- ADR-0050 section 2.5a item 6: same rank
+
+    /** Two devices of one account share its rank; the lower-keyed one with a
+     *  fresh beacon acts, so the higher-keyed sibling defers to it. */
+    @Test
+    fun `a sibling device with a lower key defers this device`() {
+        names["self"] = keyOf("self", first = 0x50)
+        names["sibling"] = keyOf("sibling", first = 0x10)
+        val store = MemStore()
+        recordBeaconObservation(store, "acct", "grp", "sibling", atMs = 1_000)
+        recordBeaconObservation(store, "acct", "grp", "self", atMs = 1_000)
+        val verdict = decideActingCommitter(
+            store, "acct", "grp",
+            ownRank = 4u,
+            ownSignatureKey = ownKey,
+            rankOf = { 4u },
+            nowMs = 1_100,
+            freshnessWindowMs = 150_000uL,
+            fold = coreFold(),
+            decodeKey = ::nameKey,
+        )
+        assertEquals(ActingCommitter.Defer(4u, nameKey("sibling")), verdict)
+    }
+
+    /** The higher-keyed sibling's beacon does not stand the lower-keyed device
+     *  down: it is the account's acting device. */
+    @Test
+    fun `a sibling device with a higher key does not defer this device`() {
+        names["self"] = keyOf("self", first = 0x10)
+        names["sibling"] = keyOf("sibling", first = 0x50)
+        val store = MemStore()
+        recordBeaconObservation(store, "acct", "grp", "sibling", atMs = 1_000)
+        val verdict = decideActingCommitter(
+            store, "acct", "grp",
+            ownRank = 4u,
+            ownSignatureKey = ownKey,
+            rankOf = { 4u },
+            nowMs = 1_100,
+            freshnessWindowMs = 150_000uL,
+            fold = coreFold(),
+            decodeKey = ::nameKey,
+        )
+        assertEquals(ActingCommitter.Act, verdict)
+    }
+
+    /** A lost sibling stops beaconing; once its beacon ages out the next
+     *  device of the account acts (the acting device is chosen among ACTIVE
+     *  devices, not by roster position). */
+    @Test
+    fun `a silent lower keyed sibling stops deferring this device`() {
+        names["self"] = keyOf("self", first = 0x50)
+        names["lost"] = keyOf("lost", first = 0x01)
+        val store = MemStore()
+        recordBeaconObservation(store, "acct", "grp", "lost", atMs = 1_000)
+        val verdict = decideActingCommitter(
+            store, "acct", "grp",
+            ownRank = 0u,
+            ownSignatureKey = ownKey,
+            rankOf = { 0u },
+            nowMs = 1_000 + 200_000,
+            freshnessWindowMs = 150_000uL,
+            fold = coreFold(),
+            decodeKey = ::nameKey,
+        )
+        assertEquals(ActingCommitter.Act, verdict)
+    }
+
+    /** The adapter contract: the fold is handed THIS device's key and every
+     *  live observation's key, its own included (the core drops that one). */
+    @Test
+    fun `the fold receives the device key and every observation key`() {
+        val store = MemStore()
+        recordBeaconObservation(store, "acct", "grp", "self", atMs = 1_000)
+        recordBeaconObservation(store, "acct", "grp", "admin", atMs = 1_000)
+        var seenOwn: ByteArray? = null
+        var seenKeys: List<ByteArray> = emptyList()
+        decideActingCommitter(
+            store, "acct", "grp",
+            ownRank = 2u,
+            ownSignatureKey = ownKey,
+            rankOf = { 2u },
+            nowMs = 1_100,
+            freshnessWindowMs = 150_000uL,
+            fold = { _, own, observed, _ ->
+                seenOwn = own
+                seenKeys = observed.map { it.signatureKey }
+                ActingCommitter.Act
+            },
+            decodeKey = ::nameKey,
+        )
+        assertTrue(ownKey.contentEquals(seenOwn))
+        assertEquals(2, seenKeys.size)
+        assertTrue(seenKeys.any { it.contentEquals(nameKey("admin")) })
+        assertTrue(seenKeys.any { it.contentEquals(ownKey) })
+    }
+
+    /** A stored key that is not a 32-byte signature key would make the core
+     *  refuse the whole fold; it is dropped and pruned instead. */
+    @Test
+    fun `a malformed stored key is dropped and pruned`() {
+        val store = MemStore()
+        recordBeaconObservation(store, "acct", "grp", "not base64!", atMs = 1_000)
+        val good = java.util.Base64.getEncoder().encodeToString(ByteArray(32) { 9 })
+        recordBeaconObservation(store, "acct", "grp", good, atMs = 1_000)
+        val verdict = decideActingCommitter(
+            store, "acct", "grp",
+            ownRank = 5u,
+            ownSignatureKey = ByteArray(32) { 1 },
+            rankOf = { 1u },
+            nowMs = 1_100,
+            freshnessWindowMs = 150_000uL,
+            fold = coreFold(),
+        )
+        assertEquals(ActingCommitter.Defer(1u, ByteArray(32) { 9 }), verdict)
+        assertEquals(setOf(good), store.load("acct", "grp").keys)
+    }
+
+    // ----------------------------- ADR-0050 section 2.5a item 8: registration
+
+    /** A ranked device holding neither the root nor a registrar seed emits no
+     *  beacon: it never stages a sweep, and a beacon would make others defer. */
+    @Test
+    fun `a device that cannot register emits no beacon`() {
+        assertEquals(
+            BeaconEmitVerdict.CANNOT_REGISTER,
+            beaconEmitVerdict(
+                ownRank = 3u,
+                foreground = true,
+                lastEmittedAtMs = null,
+                nowMs = 1_000,
+                throttle = coreThrottle(),
+                canRegister = false,
+            ),
+        )
+        assertEquals(
+            BeaconEmitVerdict.EMIT,
+            beaconEmitVerdict(
+                ownRank = 3u,
+                foreground = true,
+                lastEmittedAtMs = null,
+                nowMs = 1_000,
+                throttle = coreThrottle(),
+                canRegister = true,
+            ),
+        )
+        // No rank at all stays the stronger answer.
+        assertEquals(
+            BeaconEmitVerdict.NOT_A_CANDIDATE,
+            beaconEmitVerdict(
+                ownRank = null,
+                foreground = true,
+                lastEmittedAtMs = null,
+                nowMs = 1_000,
+                throttle = coreThrottle(),
+                canRegister = false,
+            ),
+        )
     }
 
     // ------------------------------------------------------------- the store
@@ -336,6 +534,7 @@ class CommitterBeaconTest {
             observations = mapOf("sender" to 1_100L),
             rankOf = { 1u },
             nowMs = 1_000,
+            decodeKey = ::nameKey,
         )
         assertEquals(listOf(0uL), projected.projected.map { it.ageMs })
     }

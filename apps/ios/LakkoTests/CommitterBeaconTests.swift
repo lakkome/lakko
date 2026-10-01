@@ -54,6 +54,13 @@ final class CommitterBeaconTests: XCTestCase {
     private let account = "acct-1"
     private let group = "group-1"
 
+    /// A 32-byte signature key whose every byte is `byte` — the store keys
+    /// observations on its base64, and the fold breaks a same-rank tie on it.
+    private static func key(_ byte: UInt8) -> Data { Data(repeating: byte, count: 32) }
+    private static func keyB64(_ byte: UInt8) -> String { key(byte).base64EncodedString() }
+    /// This device's own leaf key in the fold cases below.
+    private static let ownKey = key(0x50)
+
     private func makeStore() -> BeaconObservationStore {
         BeaconObservationStore(
             defaults: UserDefaults(suiteName: "beacon-\(UUID().uuidString)")!
@@ -188,13 +195,15 @@ final class CommitterBeaconTests: XCTestCase {
     func testARankIsDerivedAtVerdictTimeNotAtReceipt() {
         // The observation stores only the KEY and the row time. The rank comes
         // from the CURRENT table, which has renumbered since the beacon landed.
-        let observations: [String: Int64] = ["peer": 4_000]
+        let peer = Self.keyB64(0x70)
+        let observations: [String: Int64] = [peer: 4_000]
         let (projected, _) = projectObservations(
             observations,
-            rankOf: { key in key == "peer" ? 3 : nil },  // its rank TODAY
+            rankOf: { key in key == peer ? 3 : nil },  // its rank TODAY
             nowMs: 5_000
         )
-        XCTAssertEqual(projected, [ProjectedObservation(rank: 3, ageMs: 1_000)])
+        XCTAssertEqual(
+            projected, [ProjectedObservation(rank: 3, ageMs: 1_000, signatureKey: Self.key(0x70))])
     }
 
     /// A demoted / removed sender contributes nothing and must not linger: the
@@ -202,16 +211,18 @@ final class CommitterBeaconTests: XCTestCase {
     /// prunes what no longer ranks.
     func testASenderThatNoLongerRanksIsDroppedAndPruned() {
         let store = makeStore()
-        store.record(accountIdB64: account, groupIdB64: group, senderKeyB64: "gone", atMs: 1_000)
-        store.record(accountIdB64: account, groupIdB64: group, senderKeyB64: "live", atMs: 2_000)
+        let gone = Self.keyB64(0x01), live = Self.keyB64(0x02)
+        store.record(accountIdB64: account, groupIdB64: group, senderKeyB64: gone, atMs: 1_000)
+        store.record(accountIdB64: account, groupIdB64: group, senderKeyB64: live, atMs: 2_000)
 
         let (projected, liveKeys) = projectObservations(
             store.load(accountIdB64: account, groupIdB64: group),
-            rankOf: { $0 == "live" ? 1 : nil },
+            rankOf: { $0 == live ? 1 : nil },
             nowMs: 3_000
         )
-        XCTAssertEqual(projected, [ProjectedObservation(rank: 1, ageMs: 1_000)])
-        XCTAssertEqual(liveKeys, ["live"])
+        XCTAssertEqual(
+            projected, [ProjectedObservation(rank: 1, ageMs: 1_000, signatureKey: Self.key(0x02))])
+        XCTAssertEqual(liveKeys, [live])
 
         store.prune(accountIdB64: account, groupIdB64: group, liveKeys: liveKeys)
         XCTAssertEqual(
@@ -226,8 +237,20 @@ final class CommitterBeaconTests: XCTestCase {
     /// silently read as infinitely stale.
     func testAFutureRowIsClampedToZeroRatherThanWrapped() {
         let (projected, _) = projectObservations(
-            ["k": 9_000], rankOf: { _ in 1 }, nowMs: 5_000)
-        XCTAssertEqual(projected, [ProjectedObservation(rank: 1, ageMs: 0)])
+            [Self.keyB64(0x03): 9_000], rankOf: { _ in 1 }, nowMs: 5_000)
+        XCTAssertEqual(
+            projected, [ProjectedObservation(rank: 1, ageMs: 0, signatureKey: Self.key(0x03))])
+    }
+
+    /// A stored key that is not a 32-byte signature key is no evidence of
+    /// anyone's liveness: the fold would refuse the whole verdict over it, so
+    /// it is dropped (and pruned) rather than passed on.
+    func testAKeyThatIsNotThirtyTwoBytesIsDropped() {
+        let (projected, liveKeys) = projectObservations(
+            ["k": 9_000, Self.keyB64(0x04): 9_000], rankOf: { _ in 1 }, nowMs: 10_000)
+        XCTAssertEqual(
+            projected, [ProjectedObservation(rank: 1, ageMs: 1_000, signatureKey: Self.key(0x04))])
+        XCTAssertEqual(liveKeys, [Self.keyB64(0x04)])
     }
 
     // MARK: - The composed decision, over the core's REAL fold
@@ -237,11 +260,12 @@ final class CommitterBeaconTests: XCTestCase {
     /// likely thing to get wrong.
     func testHearingNothingMeansAct() {
         let store = makeStore()
-        let verdict = decideActingCommitter(
+        let verdict = try? decideActingCommitter(
             store: store,
             accountIdB64: account,
             groupIdB64: group,
             ownRank: 2,
+            ownSignatureKey: Self.ownKey,
             rankOf: { _ in nil },
             nowMs: 1_000,
             freshnessWindowMs: committerBeaconFreshnessWindowMs(),
@@ -260,15 +284,16 @@ final class CommitterBeaconTests: XCTestCase {
 
         // Rank 0 (the owner) beaconed one second ago: strictly better placed and
         // inside the window.
+        let owner = Self.keyB64(0x60)
         store.record(
             accountIdB64: account, groupIdB64: group,
-            senderKeyB64: "owner", atMs: now - 1_000)
+            senderKeyB64: owner, atMs: now - 1_000)
         XCTAssertEqual(
-            decideActingCommitter(
+            try decideActingCommitter(
                 store: store, accountIdB64: account, groupIdB64: group,
-                ownRank: 1, rankOf: { $0 == "owner" ? 0 : nil }, nowMs: now,
+                ownRank: 1, ownSignatureKey: Self.ownKey, rankOf: { $0 == owner ? 0 : nil }, nowMs: now,
                 freshnessWindowMs: window, fold: coreActingCommitterFold),
-            .defer(toRank: 0)
+            .defer(toRank: 0, toSignatureKey: Self.key(0x60))
         )
 
         // The same candidate, now silent for longer than the window: its beacon
@@ -277,30 +302,123 @@ final class CommitterBeaconTests: XCTestCase {
         let stale = makeStore()
         stale.record(
             accountIdB64: account, groupIdB64: group,
-            senderKeyB64: "owner", atMs: now - Int64(window) - 1)
+            senderKeyB64: owner, atMs: now - Int64(window) - 1)
         XCTAssertEqual(
-            decideActingCommitter(
+            try decideActingCommitter(
                 store: stale, accountIdB64: account, groupIdB64: group,
-                ownRank: 1, rankOf: { $0 == "owner" ? 0 : nil }, nowMs: now,
+                ownRank: 1, ownSignatureKey: Self.ownKey, rankOf: { $0 == owner ? 0 : nil }, nowMs: now,
                 freshnessWindowMs: window, fold: coreActingCommitterFold),
             .act
         )
     }
 
-    /// A device's own echoed-back beacon must not deadlock it: only a STRICTLY
-    /// lower rank defers.
-    func testAnEqualRankDoesNotDefer() {
+    /// A device's own echoed-back beacon must not deadlock it: the fold ignores
+    /// an observation of this device's own key, whatever its rank.
+    func testOwnEchoedBeaconIsIgnored() throws {
         let store = makeStore()
+        let own = Self.ownKey.base64EncodedString()
         store.record(
-            accountIdB64: account, groupIdB64: group, senderKeyB64: "self", atMs: 9_999_000)
+            accountIdB64: account, groupIdB64: group, senderKeyB64: own, atMs: 9_999_000)
         XCTAssertEqual(
-            decideActingCommitter(
+            try decideActingCommitter(
                 store: store, accountIdB64: account, groupIdB64: group,
-                ownRank: 1, rankOf: { $0 == "self" ? 1 : nil }, nowMs: 10_000_000,
+                ownRank: 1, ownSignatureKey: Self.ownKey, rankOf: { $0 == own ? 1 : nil },
+                nowMs: 10_000_000,
                 freshnessWindowMs: committerBeaconFreshnessWindowMs(),
                 fold: coreActingCommitterFold),
             .act
         )
+    }
+
+    // MARK: - ADR-0050 2.5a item 6: devices of one account tie on rank
+
+    /// Every leaf of a ranked account holds the account's rank, so two devices
+    /// of one account tie on rank; the one with the LOWER signature key acts.
+    /// A fresh beacon from a sibling with a lower key defers this device.
+    func testASiblingWithALowerKeyDefersUs() throws {
+        let store = makeStore()
+        let sibling = Self.keyB64(0x10)  // below ownKey (0x50)
+        store.record(accountIdB64: account, groupIdB64: group, senderKeyB64: sibling, atMs: 9_999_000)
+        XCTAssertEqual(
+            try decideActingCommitter(
+                store: store, accountIdB64: account, groupIdB64: group,
+                ownRank: 0, ownSignatureKey: Self.ownKey, rankOf: { $0 == sibling ? 0 : nil },
+                nowMs: 10_000_000, freshnessWindowMs: committerBeaconFreshnessWindowMs(),
+                fold: coreActingCommitterFold),
+            .defer(toRank: 0, toSignatureKey: Self.key(0x10)),
+            "the owner's lower-keyed live device sweeps; this one stands down"
+        )
+    }
+
+    /// The same sibling with a HIGHER key does not defer us: this device is the
+    /// account's lowest-keyed active device.
+    func testASiblingWithAHigherKeyDoesNotDeferUs() throws {
+        let store = makeStore()
+        let sibling = Self.keyB64(0x90)  // above ownKey (0x50)
+        store.record(accountIdB64: account, groupIdB64: group, senderKeyB64: sibling, atMs: 9_999_000)
+        XCTAssertEqual(
+            try decideActingCommitter(
+                store: store, accountIdB64: account, groupIdB64: group,
+                ownRank: 0, ownSignatureKey: Self.ownKey, rankOf: { $0 == sibling ? 0 : nil },
+                nowMs: 10_000_000, freshnessWindowMs: committerBeaconFreshnessWindowMs(),
+                fold: coreActingCommitterFold),
+            .act
+        )
+    }
+
+    /// A LOST lower-keyed device stops beaconing; once its last beacon ages out
+    /// of the window the live device acts (the case 2.5a item 6 exists for).
+    func testALostLowerKeyedSiblingAgesOut() throws {
+        let store = makeStore()
+        let lost = Self.keyB64(0x10)
+        let window = committerBeaconFreshnessWindowMs()
+        store.record(
+            accountIdB64: account, groupIdB64: group, senderKeyB64: lost,
+            atMs: 10_000_000 - Int64(window) - 1)
+        XCTAssertEqual(
+            try decideActingCommitter(
+                store: store, accountIdB64: account, groupIdB64: group,
+                ownRank: 0, ownSignatureKey: Self.ownKey, rankOf: { $0 == lost ? 0 : nil },
+                nowMs: 10_000_000, freshnessWindowMs: window, fold: coreActingCommitterFold),
+            .act
+        )
+    }
+
+    /// The core refuses an own key that is not 32 bytes; the composition
+    /// throws, which the sweep reads as a stand-down.
+    func testAMalformedOwnKeyThrows() {
+        XCTAssertThrowsError(
+            try decideActingCommitter(
+                store: makeStore(), accountIdB64: account, groupIdB64: group,
+                ownRank: 0, ownSignatureKey: Data([1, 2, 3]), rankOf: { _ in nil },
+                nowMs: 1, freshnessWindowMs: committerBeaconFreshnessWindowMs(),
+                fold: coreActingCommitterFold))
+    }
+
+    // MARK: - ADR-0050 2.5a item 8: no beacon without a registration key
+
+    /// A ranked device that holds neither the journal root nor a registrar
+    /// seed could never complete a sweep, so it does not beacon (others would
+    /// defer to it for nothing). An unranked device is still `notACandidate`.
+    func testARankedDeviceThatCannotRegisterDoesNotEmit() {
+        let throttle: (UInt32?, UInt64?, UInt64) -> Bool = { rank, last, now in
+            shouldEmitBeacon(ownRank: rank, lastEmittedAtMs: last, nowMs: now)
+        }
+        XCTAssertEqual(
+            beaconEmitVerdict(
+                ownRank: 1, foreground: true, canRegister: false,
+                lastEmittedAtMs: nil, nowMs: 1_000_000, throttle: throttle),
+            .cannotRegister)
+        XCTAssertEqual(
+            beaconEmitVerdict(
+                ownRank: 1, foreground: true, canRegister: true,
+                lastEmittedAtMs: nil, nowMs: 1_000_000, throttle: throttle),
+            .emit)
+        XCTAssertEqual(
+            beaconEmitVerdict(
+                ownRank: nil, foreground: true, canRegister: false,
+                lastEmittedAtMs: nil, nowMs: 1_000_000, throttle: throttle),
+            .notACandidate)
     }
 
     /// The freshness window is the interval plus one lost beacon plus the worst

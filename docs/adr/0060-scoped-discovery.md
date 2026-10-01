@@ -85,6 +85,19 @@ tell the server how many contacts a person has.
 owner's new device (ADR-0050 re-admission) in groups the owner hides from;
 the Residuals section records what it costs.
 
+**Versions after a restore (amended 2026-10-01).** The version counters lived
+only on the devices (the local book and the DeviceGroup reach state); a device
+restored with no other device alive started every class at version 0 and
+registered it again, so a contact or co-member whose key had been rotated away
+(a removed contact, an evicted member) regained write access to the mailbox.
+The version must not be a counter that dies with the devices. The DS gains an
+owner-only read of the reach keys registered on a mailbox (signed by the
+mailbox's identity key, like the claim); a device that holds no version
+state derives each class's keys for versions 0, 1, 2, ... and takes, per class
+and scope, the highest version whose key is registered as the current one,
+registering nothing lower. A class with no registered key starts at 0. The
+read returns public keys only (invariant #2) and only to the mailbox owner.
+
 ### 2. The mailbox gate (`services/ds`)
 
 - `PUT /ds/mailbox/{hex}/reach`, signed by the identity key (ADR-0053's

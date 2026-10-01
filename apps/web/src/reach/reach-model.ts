@@ -94,6 +94,18 @@ export interface ReachBook {
    *  of a version, adopted from a newer state another device of the account
    *  sent. `0` = never changed. */
   readonly stateUpdatedAtMs: number;
+  /**
+   * ADR-0060 section 1, "Versions after a restore". `null` on a device that
+   * started with version state. Set on a device whose first sync found the
+   * book EMPTY (a fresh install or a restore): from then on, every versioned
+   * `(class, scope)` this device is about to register a key for without a
+   * known version is first checked against the keys the DS holds for the
+   * mailbox, and continues from the highest version registered there.
+   * `checked` lists the `${class}:${scopeHex}` pairs already established that
+   * way. A group the device joins later (a re-admission after a restore) is
+   * checked when it appears, not only the scopes known at the first sync.
+   */
+  readonly recovery: { readonly checked: Readonly<Record<string, true>> } | null;
 }
 
 export const EMPTY_REACH_BOOK: ReachBook = {
@@ -104,6 +116,7 @@ export const EMPTY_REACH_BOOK: ReachBook = {
   open: null,
   fofRotatedAtMs: 0,
   stateUpdatedAtMs: 0,
+  recovery: null,
 };
 
 function versionKey(cls: ReachClassName, scopeHex: string): string {
@@ -367,6 +380,136 @@ export function adoptReachState(
 }
 
 // ----------------------------------------------------------------------------
+// Versions after a restore (ADR-0060 section 1, amended 2026-10-01)
+// ----------------------------------------------------------------------------
+
+/**
+ * How many versions of an account-wide key (`contact`, `fof`) a restored
+ * device derives when it looks for the one registered on the DS: 0..=1024.
+ * `fof` rotates on a 7-day schedule ({@link FOF_ROTATION_MS}), so 1024
+ * versions cover about 19 years of weekly rotations; `contact` moves only on
+ * a contact removal. One derivation cost about 0.4 ms in the debug wasm build
+ * under node (measured once, 5000 derivations, this repo on 2026-10-01), so
+ * the two account-wide scans together cost under a second, once per restore.
+ * A version above the bound is not found and the class starts at 0, which
+ * could re-register a removed version: the bound is the stated limit.
+ */
+export const REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS = 1024;
+
+/**
+ * How many versions of a per-group key (`group`, `member`) are derived, and
+ * how far past a channel's known epoch a `channel` key is looked for: 256.
+ * A group's keys move only when that group shrinks (one bump per removal), so
+ * 256 removals from one group; the cost is two scans per group, about 0.2 s
+ * each in the same measurement, paid once per group on a restored device.
+ */
+export const REACH_RECOVERY_SCOPED_VERSIONS = 256;
+
+/** `true` when this device holds no version state at all: nothing bumped,
+ *  nothing adopted, nothing ever registered. */
+export function bookHoldsNoVersionState(book: ReachBook): boolean {
+  return (
+    Object.keys(book.versions).length === 0 &&
+    Object.keys(book.registered).length === 0 &&
+    book.stateUpdatedAtMs === 0
+  );
+}
+
+/** One `(class, scope)` to look up, with the versions to derive. */
+export interface VersionCheck {
+  readonly cls: ReachClassName;
+  readonly scopeHex: string;
+  /** First version derived (inclusive). */
+  readonly from: number;
+  /** Last version derived (inclusive). */
+  readonly to: number;
+}
+
+/**
+ * The `(class, scope)` pairs a recovering device must check before it
+ * registers anything: every versioned class it could register for its scopes
+ * (contact and fof with the empty scope, group and member per group, channel
+ * per channel), minus the ones whose version is already established (in
+ * `versions`, or checked). Empty when the book is not recovering.
+ */
+export function versionChecksDue(
+  book: ReachBook,
+  scopes: { readonly groupIdsHex: readonly string[]; readonly channels: readonly { readonly idHex: string; readonly epoch: number }[] },
+): VersionCheck[] {
+  const recovery = book.recovery;
+  if (recovery === null) return [];
+  const out: VersionCheck[] = [];
+  const due = (cls: ReachClassName, scopeHex: string, from: number, to: number): void => {
+    const key = versionKey(cls, scopeHex);
+    if (key in book.versions || recovery.checked[key] === true) return;
+    out.push({ cls, scopeHex, from, to });
+  };
+  due("contact", "", 0, REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS);
+  due("fof", "", 0, REACH_RECOVERY_ACCOUNT_WIDE_VERSIONS);
+  for (const g of scopes.groupIdsHex) {
+    due("group", g, 0, REACH_RECOVERY_SCOPED_VERSIONS);
+    due("member", g, 0, REACH_RECOVERY_SCOPED_VERSIONS);
+  }
+  for (const c of scopes.channels) {
+    // A channel key's version is the channel epoch it was registered at, and
+    // the wanted version is never below the known epoch, so a version below
+    // it can never be re-registered; only the window above it is looked at.
+    const from = Math.max(0, Math.trunc(c.epoch));
+    due("channel", c.idHex, from, from + REACH_RECOVERY_SCOPED_VERSIONS);
+  }
+  return out;
+}
+
+/**
+ * Apply what the DS holds to the due checks: for each, the HIGHEST version
+ * whose public key is registered becomes the current version, and every
+ * version found registered is recorded as registered (with the DS's expiry),
+ * so the next diff keeps the current key and removes any lower one still
+ * there. A pair with no registered key starts at 0. Every check is marked
+ * checked. Nothing lower than a registered version is ever wanted again.
+ */
+export function applyVersionChecks(
+  book: ReachBook,
+  checks: readonly VersionCheck[],
+  dsKeys: ReadonlyMap<string, number | null>,
+  publicKeyHex: (cls: ReachClassName, scopeHex: string, version: number) => string,
+): { readonly book: ReachBook; readonly raised: boolean } {
+  if (book.recovery === null || checks.length === 0) return { book, raised: false };
+  const versions: Record<string, number> = { ...book.versions };
+  const registered: Record<string, number | null> = { ...book.registered };
+  const checked: Record<string, true> = { ...book.recovery.checked };
+  let raised = false;
+  for (const c of checks) {
+    let highest: number | null = null;
+    for (let v = c.from; v <= c.to; v++) {
+      const pk = publicKeyHex(c.cls, c.scopeHex, v);
+      if (!dsKeys.has(pk)) continue;
+      registered[pk] = dsKeys.get(pk) ?? null;
+      highest = v;
+    }
+    const key = versionKey(c.cls, c.scopeHex);
+    if (highest !== null && highest > 0) {
+      versions[key] = highest;
+      raised = true;
+    }
+    checked[key] = true;
+  }
+  return { book: { ...book, versions, registered, recovery: { checked } }, raised };
+}
+
+function decodeRecovery(raw: unknown): ReachBook["recovery"] {
+  if (raw === null || typeof raw !== "object") return null;
+  const checkedRaw = (raw as { checked?: unknown }).checked;
+  const checked: Record<string, true> = {};
+  if (checkedRaw !== null && typeof checkedRaw === "object") {
+    for (const [k, v] of Object.entries(checkedRaw as Record<string, unknown>)) {
+      if (v === true) checked[k] = true;
+    }
+  }
+  return { checked };
+}
+
+// ----------------------------------------------------------------------------
 // Persistence form
 // ----------------------------------------------------------------------------
 
@@ -390,6 +533,7 @@ export function decodeReachBook(json: string | null | undefined): ReachBook {
       open: typeof raw.open === "boolean" ? raw.open : null,
       fofRotatedAtMs: typeof raw.fofRotatedAtMs === "number" ? raw.fofRotatedAtMs : 0,
       stateUpdatedAtMs: typeof raw.stateUpdatedAtMs === "number" ? raw.stateUpdatedAtMs : 0,
+      recovery: decodeRecovery(raw.recovery),
     };
   } catch {
     return EMPTY_REACH_BOOK;

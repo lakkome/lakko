@@ -9,20 +9,21 @@
  * `unapplied-requests.ts` and is pinned here — the same split
  * `pending-requests.ts` already uses.
  *
- * ## Which of these discriminate (MEASURED — each probe was RUN and reverted)
- *
- * Recorded beside each test.
+ * Since ADR-0050 section 2.5a a row is written only when the automatic
+ * re-request of an own request STOPS (`chat/membership-retry.ts`); the
+ * detection of a superseded request lives there and is tested in
+ * `membership-retry.test.ts`. This file pins the rows, their copy and the store.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { RequestObservation } from "./pending-requests";
 import {
   clearUnappliedForAccount,
   dismissUnapplied,
   loadUnapplied,
   recordUnapplied,
-  unappliedAddRequests,
+  unappliedFromRequest,
   unappliedLine,
+  type UnappliedRequest,
   JOIN_REQUEST_AGAIN,
   JOIN_WAIT_PRIMARY,
   JOIN_WAIT_SECONDARY,
@@ -67,189 +68,115 @@ const GROUP = "grp";
 const JOINER = "am9pbmVyLWtleQ=="; // arbitrary base64
 const CONTACT = "Y29udGFjdC1rZXk=";
 
-function own(extra?: Partial<RequestObservation>): RequestObservation {
-  return { atMs: 1_000, own: true, ...extra };
-}
+const joinRow: UnappliedRequest = unappliedFromRequest({
+  kind: "approve-join",
+  subjectKeyB64: JOINER,
+});
+const addRow: UnappliedRequest = unappliedFromRequest({
+  kind: "add",
+  subjectKeyB64: CONTACT,
+  subjectAccountIdB64: "YWNjdA==",
+});
 
-describe("detecting a request that was not carried", () => {
+describe("a row per own request kind (ADR-0050 2.5a point 4)", () => {
   /**
-   * The whole point. The approving admin's own `add:` observation is gone from
-   * the core's live pending set — the sweep emptied it — and the joiner is not
-   * in the roster, so the request died without a trace anywhere else.
-   *
-   * DISCRIMINATION (RUN, then reverted): with the roster check inverted
-   * (`roster.has` -> `!roster.has`) two tests went red:
-   *
-   *     AssertionError: expected [] to have a length of 1 but got +0
-   *     AssertionError: expected [ { …(2) } ] to deeply equal []
+   * The row is keyed on `kind:subject`, so an add and an approve of the same
+   * person, or a promote and a demote, are separate rows rather than one
+   * overwriting the other; the subject is always a KEY, never a leaf index.
    */
-  it("reports an own add whose key left the pending set without reaching the roster", () => {
-    const out = unappliedAddRequests(
-      new Map([[`add:${JOINER}`, own({ joinRequest: true })]]),
-      [],
-      [],
+  it("maps every own request kind to its row", () => {
+    const S = CONTACT;
+    expect(unappliedFromRequest({ kind: "remove", subjectKeyB64: S })).toEqual({
+      key: `remove:${S}`,
+      kind: "remove",
+      subjectKeyB64: S,
+    });
+    expect(unappliedFromRequest({ kind: "leave", subjectKeyB64: S }).kind).toBe("leave");
+    expect(
+      unappliedFromRequest({ kind: "set-admin", subjectKeyB64: S, makeAdmin: true }).kind,
+    ).toBe("make-admin");
+    expect(
+      unappliedFromRequest({ kind: "set-admin", subjectKeyB64: S, makeAdmin: false }).kind,
+    ).toBe("remove-admin");
+    expect(
+      unappliedFromRequest({ kind: "transfer-ownership", subjectKeyB64: S, outgoing: "admin" })
+        .kind,
+    ).toBe("transfer-ownership");
+    expect(
+      unappliedFromRequest({ kind: "admit-device", subjectKeyB64: S, subjectAccountIdB64: "eA==" })
+        .key,
+    ).toBe(`admit-device:${S}`);
+    expect(unappliedFromRequest({ kind: "retire-device", subjectKeyB64: S }).kind).toBe(
+      "retire-device",
     );
-    expect(out).toHaveLength(1);
-    expect(out[0]).toEqual({ addSignatureKeyB64: JOINER, viaJoinRequest: true });
-  });
-
-  /**
-   * The single most important false positive to exclude: the request WORKED.
-   *
-   * DISCRIMINATION (RUN, then reverted): dropping the roster membership test
-   * entirely made this red:
-   *
-   *     AssertionError: expected [ { …(2) } ] to deeply equal []
-   */
-  it("says nothing when the add landed — the key is in the roster", () => {
-    expect(
-      unappliedAddRequests(
-        new Map([[`add:${JOINER}`, own({ joinRequest: true })]]),
-        [],
-        [JOINER],
-      ),
-    ).toEqual([]);
-  });
-
-  /** Still pending is not "not carried" — the sweep has not run yet. */
-  it("says nothing while the request is still in the core's pending set", () => {
-    expect(
-      unappliedAddRequests(
-        new Map([[`add:${JOINER}`, own()]]),
-        [`add:${JOINER}`],
-        [],
-      ),
-    ).toEqual([]);
-  });
-
-  /**
-   * UX §10 — a member is never told about someone else's request. A foreign
-   * proposal is observed with `own: false` (the receive loop records it for the
-   * quiet window), and its disappearance is not this device's business.
-   *
-   * DISCRIMINATION (RUN, then reverted): with the `own` guard removed:
-   *
-   *     AssertionError: expected [ { …(2) } ] to deeply equal []
-   */
-  it("ignores a request this device did not make", () => {
-    expect(
-      unappliedAddRequests(
-        new Map([[`add:${JOINER}`, { atMs: 1_000, own: false }]]),
-        [],
-        [],
-      ),
-    ).toEqual([]);
-  });
-
-  /**
-   * The deliberate scope limit, pinned so nobody widens it by accident.
-   *
-   * `remove:` and `leave:` keys name a LEAF, and OpenMLS hands a vacated leaf to
-   * the next `Add` — so a roster test on a leaf can be wrong in both directions.
-   * A `role-change` key carries no payload at all, so there is nothing to test.
-   * All three are also VISIBLE when they fail: the person you tried to remove is
-   * still in the roster, and a group you failed to leave is still in your list.
-   * The add is the only request whose failure leaves no trace, and the only one
-   * whose effect test is keyed on a signature key rather than a leaf.
-   */
-  it("claims nothing about a remove, a leave or a role change", () => {
-    expect(
-      unappliedAddRequests(
-        new Map([
-          ["remove:4", own()],
-          ["leave:2", own()],
-          ["role-change", own()],
-          ["update:3", own()],
-        ]),
-        [],
-        [],
-      ),
-    ).toEqual([]);
-  });
-
-  /** A key with no signature key behind it (`add:?`) names nobody, so there is
-   *  nothing honest to say about it. */
-  it("skips an add whose signature key was never resolved", () => {
-    expect(unappliedAddRequests(new Map([["add:?", own()]]), [], [])).toEqual([]);
-  });
-
-  /**
-   * A torn roster read is UNKNOWN, never "nobody is in the group" — the same
-   * fail-closed direction `membershipRotationDecision` takes with the identical
-   * signal.
-   *
-   * DISCRIMINATION (RUN, then reverted): with the `null` guard removed and
-   * `null` coerced to `[]`:
-   *
-   *     AssertionError: expected [ { …(2) } ] to deeply equal []
-   */
-  it("claims nothing when the roster could not be read", () => {
-    expect(
-      unappliedAddRequests(
-        new Map([[`add:${JOINER}`, own({ joinRequest: true })]]),
-        [],
-        null,
-      ),
-    ).toEqual([]);
+    expect(joinRow.key).toBe(`approve-join:${JOINER}`);
+    expect(addRow.key).toBe(`add:${CONTACT}`);
   });
 });
 
 describe("the copy", () => {
   /**
-   * A literal pin on the two strings, so a re-wording is a deliberate edit
-   * rather than a drift.
-   *
-   * DISCRIMINATION (RUN, then reverted): with the join line replaced by the UX
-   * spec §7 draft:
-   *
-   *     AssertionError: expected 'This request expired before it could …' to be
-   *     'Not applied. Ask them to request to j…' // Object.is equality
+   * A literal pin on every string, so a re-wording is a deliberate edit rather
+   * than a drift. The strings match the Android client's.
    */
-  it("is exactly these two strings", () => {
-    expect(unappliedLine({ addSignatureKeyB64: JOINER, viaJoinRequest: true })).toBe(
-      "Not applied. Ask them to request to join again.",
+  it("is exactly these strings", () => {
+    const line = (r: Parameters<typeof unappliedFromRequest>[0]): string =>
+      unappliedLine(unappliedFromRequest(r));
+    expect(unappliedLine(joinRow)).toBe("Not applied. Ask them to request to join again.");
+    expect(unappliedLine(addRow)).toBe("Not added.");
+    expect(line({ kind: "remove", subjectKeyB64: CONTACT })).toBe("Not removed.");
+    expect(line({ kind: "leave", subjectKeyB64: CONTACT })).toBe(
+      "Not applied. You are still a member.",
     );
-    expect(unappliedLine({ addSignatureKeyB64: CONTACT, viaJoinRequest: false })).toBe(
-      "Not added. You can add them again.",
+    expect(line({ kind: "set-admin", subjectKeyB64: CONTACT, makeAdmin: true })).toBe(
+      "Not made an admin.",
+    );
+    expect(line({ kind: "set-admin", subjectKeyB64: CONTACT, makeAdmin: false })).toBe(
+      "Still an admin.",
+    );
+    expect(
+      line({ kind: "transfer-ownership", subjectKeyB64: CONTACT, outgoing: "member" }),
+    ).toBe("Ownership was not transferred.");
+    expect(
+      line({ kind: "admit-device", subjectKeyB64: CONTACT, subjectAccountIdB64: "eA==" }),
+    ).toBe("Device not added to this group.");
+    expect(line({ kind: "retire-device", subjectKeyB64: CONTACT })).toBe(
+      "Device not removed from this group.",
     );
   });
 
   /**
    * The rule, asserted independently of the literals above so it survives a
    * re-wording. The core reports no reason for an exclusion, so no string here
-   * may claim one.
-   *
-   * DISCRIMINATION (RUN, then reverted): with the join line replaced by the UX
-   * spec §7 draft `This request expired before it could be applied. Ask them to
-   * request to join again.` this went red — which is the finding, because
-   * "expired" is a REASON this client cannot establish:
-   *
-   *     AssertionError: expected 'this request expired before it could …' not to
-   *     match /expired|refused|rejected|invalid|fail…/
+   * may claim one — and a row exists because a re-request STOPPED, usually for
+   * lost authority, so no string may offer "you can do it again" either
+   * (except the join row, whose action belongs to the joiner).
    */
-  it("never states a reason", () => {
-    for (const s of [
-      unappliedLine({ addSignatureKeyB64: JOINER, viaJoinRequest: true }),
-      unappliedLine({ addSignatureKeyB64: CONTACT, viaJoinRequest: false }),
-      UNAPPLIED_EXPLANATION,
-    ]) {
+  it("never states a reason and never promises a retry", () => {
+    const rows: UnappliedRequest[] = [
+      joinRow,
+      addRow,
+      unappliedFromRequest({ kind: "remove", subjectKeyB64: CONTACT }),
+      unappliedFromRequest({ kind: "leave", subjectKeyB64: CONTACT }),
+      unappliedFromRequest({ kind: "set-admin", subjectKeyB64: CONTACT, makeAdmin: true }),
+      unappliedFromRequest({ kind: "transfer-ownership", subjectKeyB64: CONTACT, outgoing: "admin" }),
+      unappliedFromRequest({ kind: "retire-device", subjectKeyB64: CONTACT }),
+    ];
+    for (const s of [...rows.map(unappliedLine), UNAPPLIED_EXPLANATION]) {
       expect(s.toLowerCase()).not.toMatch(
         /expired|refused|rejected|invalid|failed|error|because/,
       );
     }
+    for (const r of rows.filter((r) => r.kind !== "approve-join")) {
+      expect(unappliedLine(r)).not.toMatch(/again/);
+    }
   });
 
   /** A join approval is terminal on the admin side: a successful approve
-   *  consumes the retained request (`Group::approve_external_join` drops it once
-   *  the proposal is on its way), and only the joiner holds the key material. So
-   *  the copy asks THEM to request again rather than offering a retry. */
-  it("directs a join approval back to the joiner, and an ordinary add to us", () => {
-    expect(unappliedLine({ addSignatureKeyB64: JOINER, viaJoinRequest: true })).toContain(
-      "request to join again",
-    );
-    expect(unappliedLine({ addSignatureKeyB64: CONTACT, viaJoinRequest: false })).toContain(
-      "You can add them again",
-    );
+   *  consumes the retained request, and only the joiner holds the key
+   *  material. So the copy asks THEM to request again. */
+  it("directs a join approval back to the joiner", () => {
+    expect(unappliedLine(joinRow)).toContain("request to join again");
   });
 });
 
@@ -289,61 +216,34 @@ describe("the joiner's half", () => {
 
 describe("the store", () => {
   it("round-trips, is idempotent, and survives a re-record", () => {
-    recordUnapplied(ACCOUNT, GROUP, [
-      { addSignatureKeyB64: JOINER, viaJoinRequest: true },
-    ]);
-    recordUnapplied(ACCOUNT, GROUP, [
-      { addSignatureKeyB64: JOINER, viaJoinRequest: true },
-    ]);
+    recordUnapplied(ACCOUNT, GROUP, [joinRow]);
+    recordUnapplied(ACCOUNT, GROUP, [joinRow]);
     const loaded = loadUnapplied(ACCOUNT, GROUP);
-    expect([...loaded.values()]).toEqual([
-      { addSignatureKeyB64: JOINER, viaJoinRequest: true },
-    ]);
+    expect([...loaded.values()]).toEqual([joinRow]);
   });
 
-  /**
-   * DISCRIMINATION (RUN, then reverted): with `dismissUnapplied` a no-op, this
-   * and the resurrection test both went red:
-   *
-   *     AssertionError: expected 2 to be 1 // Object.is equality
-   *     AssertionError: expected 1 to be +0 // Object.is equality
-   */
   it("dismisses one row without touching the other", () => {
-    recordUnapplied(ACCOUNT, GROUP, [
-      { addSignatureKeyB64: JOINER, viaJoinRequest: true },
-      { addSignatureKeyB64: CONTACT, viaJoinRequest: false },
-    ]);
-    dismissUnapplied(ACCOUNT, GROUP, JOINER);
+    recordUnapplied(ACCOUNT, GROUP, [joinRow, addRow]);
+    dismissUnapplied(ACCOUNT, GROUP, joinRow.key);
     const loaded = loadUnapplied(ACCOUNT, GROUP);
     expect(loaded.size).toBe(1);
-    expect(loaded.get(CONTACT)).toBeDefined();
+    expect(loaded.get(addRow.key)).toEqual(addRow);
   });
 
   /**
-   * A dismissed row must STAY dismissed: the detection re-runs on every fold,
-   * and re-recording what the user has already read would make the notice
-   * un-dismissable.
-   *
-   * DISCRIMINATION (RUN, then reverted): with `recordUnapplied` overwriting a
-   * dismissed row instead of honouring the tombstone:
-   *
-   *     AssertionError: expected 1 to be +0 // Object.is equality
+   * A dismissed row must STAY dismissed: the same request can stop again after
+   * a later re-request, and re-recording what the user has already read would
+   * make the notice un-dismissable.
    */
-  it("does not resurrect a dismissed row on the next detection pass", () => {
-    recordUnapplied(ACCOUNT, GROUP, [
-      { addSignatureKeyB64: JOINER, viaJoinRequest: true },
-    ]);
-    dismissUnapplied(ACCOUNT, GROUP, JOINER);
-    recordUnapplied(ACCOUNT, GROUP, [
-      { addSignatureKeyB64: JOINER, viaJoinRequest: true },
-    ]);
+  it("does not resurrect a dismissed row when the same request stops again", () => {
+    recordUnapplied(ACCOUNT, GROUP, [joinRow]);
+    dismissUnapplied(ACCOUNT, GROUP, joinRow.key);
+    recordUnapplied(ACCOUNT, GROUP, [joinRow]);
     expect(loadUnapplied(ACCOUNT, GROUP).size).toBe(0);
   });
 
   it("is scoped per account and per group", () => {
-    recordUnapplied(ACCOUNT, GROUP, [
-      { addSignatureKeyB64: JOINER, viaJoinRequest: true },
-    ]);
+    recordUnapplied(ACCOUNT, GROUP, [joinRow]);
     expect(loadUnapplied(ACCOUNT, "other").size).toBe(0);
     expect(loadUnapplied("other", GROUP).size).toBe(0);
   });
@@ -351,15 +251,9 @@ describe("the store", () => {
   /** `recover` / `forgetDevice` hygiene — the same discipline the observation
    *  store and the commit outbox follow. */
   it("clears every group for one account and leaves other accounts alone", () => {
-    recordUnapplied(ACCOUNT, GROUP, [
-      { addSignatureKeyB64: JOINER, viaJoinRequest: true },
-    ]);
-    recordUnapplied(ACCOUNT, "g2", [
-      { addSignatureKeyB64: CONTACT, viaJoinRequest: false },
-    ]);
-    recordUnapplied("other", GROUP, [
-      { addSignatureKeyB64: CONTACT, viaJoinRequest: false },
-    ]);
+    recordUnapplied(ACCOUNT, GROUP, [joinRow]);
+    recordUnapplied(ACCOUNT, "g2", [addRow]);
+    recordUnapplied("other", GROUP, [addRow]);
     clearUnappliedForAccount(ACCOUNT);
     expect(loadUnapplied(ACCOUNT, GROUP).size).toBe(0);
     expect(loadUnapplied(ACCOUNT, "g2").size).toBe(0);
@@ -370,6 +264,16 @@ describe("the store", () => {
     globalThis.localStorage.setItem(
       `lakko.unapplied-requests.v1.${ACCOUNT}.${GROUP}`,
       "{not json",
+    );
+    expect(loadUnapplied(ACCOUNT, GROUP).size).toBe(0);
+  });
+
+  /** A row whose key does not name its own kind and subject is a forged or
+   *  stale row and is dropped rather than rendered against the wrong person. */
+  it("drops a row whose key disagrees with its content", () => {
+    globalThis.localStorage.setItem(
+      `lakko.unapplied-requests.v1.${ACCOUNT}.${GROUP}`,
+      JSON.stringify({ [`remove:${JOINER}`]: { kind: "remove", subjectKeyB64: CONTACT } }),
     );
     expect(loadUnapplied(ACCOUNT, GROUP).size).toBe(0);
   });

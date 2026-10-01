@@ -12,9 +12,9 @@
 //! (an unclaimed one has no key and always answers the uniform `401`); the
 //! proofless meeting points moved to their own `/ds/rendezvous/` namespace.
 //!
-//! What is gated: a claimed group's `GET`/`POST messages` and `GET knocks`
-//! (write tier); every mailbox's `GET messages` (the identity proof, whether
-//! or not the mailbox is claimed, ADR-0060).
+//! What is gated: a claimed group's `GET messages` (read tier), `POST
+//! messages` and `GET knocks` (write tier); every mailbox's `GET messages`
+//! (the identity proof, whether or not the mailbox is claimed, ADR-0060).
 //! A mailbox `POST` is gated by reach keys, not here (ADR-0060,
 //! `src/reach.rs`): ADR-0053 left it the open cold inbox, and a claimed
 //! mailbox is now closed to a stranger.
@@ -34,10 +34,23 @@
 //! The server holds public keys only: one Ed25519 verifying key per registered
 //! epoch of a group, and the identity key a mailbox's pseudonym is the hash of.
 //!
-//! **Two tiers of epoch key** (ADR-0053 open question 1, resolved in S3):
-//! the two newest registered epochs may write (publish, read knocks); every
-//! retained older epoch may still **read** the
-//! messages. Without the read
+//! **Two tiers of epoch key** (ADR-0053 open question 1, resolved in S3;
+//! the write tier widened by the ADR-0053 amendment of 2026-10-01):
+//!
+//! - **Write tier** (publish, read knocks): every registered epoch from `H`
+//!   onward, `H` the newest epoch registered by the root or an admin (a claim
+//!   and a reset register as the root), and always the two newest registered
+//!   epochs. Since ADR-0057's amendment of 2026-10-01 a member may register
+//!   epochs past `H` without limit (two device admissions in a row with no
+//!   owner or admin online); a member's bad registrations can then block
+//!   commits until an owner or admin replaces them, but never chat, because
+//!   the real epoch - registered at or after `H` - stays in this tier. An
+//!   evicted person loses it at the removal: a removal is always an owner or
+//!   admin registration, so it moves `H` to the removal's epoch, and only
+//!   that epoch and the one before it (the two newest) still write.
+//! - **Read tier**: every retained epoch may still **read** the messages.
+//!
+//! Without the read
 //! tier a device offline across two commits would hold only a key the server
 //! had dropped, could not fetch the commits that would bring it forward, and
 //! would be stranded for good. Old keys are kept for the journal's own
@@ -54,7 +67,7 @@ use axum::response::{IntoResponse, Json, Response};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use lakko_anon_token::TokenContext;
-use lakko_ds_proof::{Proof, RequestParts, VerifyingKey, MAILBOX_EPOCH, PROOF_HEADER_NAME};
+use lakko_ds_proof::{Proof, Rank, RequestParts, VerifyingKey, MAILBOX_EPOCH, PROOF_HEADER_NAME};
 use serde::{Deserialize, Serialize};
 use sqlx::mysql::{MySql, MySqlConnection, MySqlDatabaseError, MySqlPool};
 
@@ -75,10 +88,13 @@ pub(crate) const NONCE_RETENTION_SECS: i64 = {
     let secs = 2 * window_secs as i64;
     secs
 };
-/// The most epoch keys a group keeps (the two write-capable newest plus the
-/// read-only tail). A bound on the rows one group can hold, not a policy
-/// knob: the retention window prunes first in any group that commits less
-/// than this many times a month.
+/// The most epoch keys a group keeps (the write tier plus the read-only
+/// tail). A bound on the rows one group can hold, not a policy knob: the
+/// retention window prunes first in any group that commits less than this
+/// many times a month. It also bounds the write tier: a member may register
+/// at most this many epochs from `H` onward (`src/ownership.rs`), so every
+/// epoch `>= H` is always among the newest [`MAX_RETAINED_EPOCHS`] and is
+/// never cut by the register-time bound.
 pub(crate) const MAX_RETAINED_EPOCHS: u64 = 64;
 /// The highest epoch a group may register. An MLS epoch advances by one per
 /// commit, so a real group stays many orders of magnitude below 2^48; the cap
@@ -86,7 +102,8 @@ pub(crate) const MAX_RETAINED_EPOCHS: u64 = 64;
 /// arithmetic would overflow. Refused with `400` (ADR-0053, *What the
 /// security pass found*).
 pub(crate) const MAX_ACCESS_EPOCH: u64 = (1 << 48) - 1;
-/// The two newest registered epochs are the write tier.
+/// The two newest registered epochs are always in the write tier, whatever
+/// `H` is (see [`in_write_tier`]).
 const WRITE_EPOCHS: usize = 2;
 /// At most this many payloads in one knock (the attribution and the proposal
 /// fit in two; the rest is headroom).
@@ -97,7 +114,8 @@ pub(crate) const MAX_KNOCK_PAYLOADS: usize = 4;
 pub(crate) enum Access {
     /// A read: any retained epoch key opens it.
     Read,
-    /// A write: only the two newest epochs.
+    /// A write: only the write tier - an epoch from `H` onward, or one of
+    /// the two newest ([`in_write_tier`]).
     Write,
 }
 
@@ -129,25 +147,66 @@ pub(crate) fn now_ms() -> u64 {
 // Registrations
 // ============================================================================
 
+/// One registered epoch key of a group.
+#[derive(Clone, Copy, Debug)]
+struct EpochKey {
+    epoch: u64,
+    key: VerifyingKey,
+    /// The rank that registered it (member 1, admin 2, root 3).
+    rank: u8,
+}
+
 /// The rows of a group's registered access keys, newest epoch first, as the
 /// query returns them. A row that does not parse is skipped rather than
 /// trusted (this server wrote every row from a validated key).
-fn parse_key_rows(rows: Vec<(u64, Vec<u8>)>) -> Vec<(u64, VerifyingKey)> {
+fn parse_key_rows(rows: Vec<(u64, Vec<u8>, u8)>) -> Vec<EpochKey> {
     rows.into_iter()
-        .filter_map(|(epoch, pk)| VerifyingKey::from_bytes(&pk).ok().map(|key| (epoch, key)))
+        .filter_map(|(epoch, pk, rank)| {
+            VerifyingKey::from_bytes(&pk)
+                .ok()
+                .map(|key| EpochKey { epoch, key, rank })
+        })
         .collect()
 }
 
+/// `H`: the newest epoch among `keys` registered by an admin or the root (a
+/// claim and a reset register as the root). `keys` holds the newest
+/// [`MAX_RETAINED_EPOCHS`] epochs, and a member never registers more than
+/// that many epochs from `H` onward, so the maximum over `keys` is the
+/// journal's `H`. `None` only for a journal with no such registration in
+/// reach, which then has the two-newest write tier alone.
+fn admin_floor(keys: &[EpochKey]) -> Option<u64> {
+    keys.iter()
+        .filter(|k| k.rank >= Rank::Admin.to_byte())
+        .map(|k| k.epoch)
+        .max()
+}
+
+/// Whether the key at `index` in a newest-first list, of `epoch`, is in the
+/// write tier under `admin_floor` (`H`): one of the two newest, or at or
+/// after `H`.
+pub(crate) const fn in_write_tier(index: usize, epoch: u64, admin_floor: Option<u64>) -> bool {
+    if index < WRITE_EPOCHS {
+        return true;
+    }
+    match admin_floor {
+        Some(h) => epoch >= h,
+        None => false,
+    }
+}
+
 /// The registered access keys of a group, newest epoch first. Empty means
-/// unclaimed. The first [`WRITE_EPOCHS`] are the write tier.
+/// unclaimed. The write tier is the subset [`in_write_tier`] admits.
 async fn group_keys(
     pool: &MySqlPool,
     group_id: &[u8; PSEUDONYM_LEN],
-) -> Result<Vec<(u64, VerifyingKey)>, HandlerError> {
-    let rows: Vec<(u64, Vec<u8>)> = sqlx::query_as(
-        "SELECT epoch, access_pk FROM ds_group_access WHERE group_id = ? ORDER BY epoch DESC LIMIT 64",
+) -> Result<Vec<EpochKey>, HandlerError> {
+    let rows: Vec<(u64, Vec<u8>, u8)> = sqlx::query_as(
+        "SELECT epoch, access_pk, registered_rank FROM ds_group_access WHERE group_id = ? \
+         ORDER BY epoch DESC LIMIT ?",
     )
     .bind(&group_id[..])
+    .bind(MAX_RETAINED_EPOCHS)
     .fetch_all(pool)
     .await
     .map_err(db_error("load group access keys"))?;
@@ -293,7 +352,7 @@ pub(crate) enum Gated {
 
 /// Gate a group-journal request: open when the group is unclaimed, else a
 /// valid proof under a registered epoch of the tier `access` allows - any
-/// retained epoch for a read, one of the two newest for a write.
+/// retained epoch for a read, the write tier ([`in_write_tier`]) for a write.
 pub(crate) async fn gate_group(
     state: &AppState,
     group_id: &[u8; PSEUDONYM_LEN],
@@ -313,16 +372,19 @@ pub(crate) async fn gate_group(
             Ok(Gated::Unclaimed)
         };
     }
-    let tier = match access {
-        Access::Read => keys.len(),
-        Access::Write => WRITE_EPOCHS.min(keys.len()),
-    };
     // `group_keys` orders newest first.
-    let latest_epoch = keys[0].0;
-    let usable = &keys[..tier];
+    let latest_epoch = keys[0].epoch;
+    let floor = admin_floor(&keys);
     let req = parts(method, uri, body);
     check_proof(&state.db, group_id, headers, &req, |epoch| {
-        usable.iter().find(|(e, _)| *e == epoch).map(|(_, k)| *k)
+        keys.iter()
+            .enumerate()
+            .find(|(_, k)| k.epoch == epoch)
+            .filter(|(index, k)| match access {
+                Access::Read => true,
+                Access::Write => in_write_tier(*index, k.epoch, floor),
+            })
+            .map(|(_, k)| k.key)
     })
     .await?;
     Ok(Gated::Proven { latest_epoch })
@@ -510,7 +572,7 @@ pub(crate) async fn post_knock(
     let epoch = group_keys(&state.db, &group_id)
         .await?
         .first()
-        .map(|(e, _)| *e);
+        .map(|k| k.epoch);
     Ok((StatusCode::CREATED, Json(KnockResponse { ids, epoch })).into_response())
 }
 
@@ -557,8 +619,10 @@ pub(crate) async fn get_knocks(
 }
 
 /// Age out read-tier epoch keys older than the journal's retention window,
-/// never touching a group's two newest epochs (a quiet group that has not
-/// committed in a month must stay openable). Runs on the journal pruner's tick.
+/// never touching the write tier: a group's two newest epochs (a quiet group
+/// that has not committed in a month must stay openable) and every epoch from
+/// `H` onward (the real epoch behind a member's bad registrations must stay
+/// writable). Runs on the journal pruner's tick.
 pub(crate) async fn prune_group_access(pool: &MySqlPool, retention_secs: i64) {
     match prune_group_access_rows(pool, retention_secs).await {
         Ok(rows) if rows > 0 => {
@@ -577,7 +641,9 @@ pub(crate) async fn prune_group_access(pool: &MySqlPool, retention_secs: i64) {
 /// `u64::MAX` and failed the whole statement, for every group, on every
 /// tick). "Not one of the two newest" is expressed as "below the group's
 /// second-newest epoch", computed by comparison alone. A group with a single
-/// registered epoch has no second-newest row and loses nothing.
+/// registered epoch has no second-newest row and loses nothing. "Not at or
+/// after `H`" is "below the group's newest root or admin epoch", again by
+/// comparison; a group with no such row keeps only the two-newest rule.
 async fn prune_group_access_rows(
     pool: &MySqlPool,
     retention_secs: i64,
@@ -593,8 +659,14 @@ async fn prune_group_access_rows(
                       WHERE b.epoch < n.newest \
                       GROUP BY b.group_id) s \
                  ON s.group_id = a.group_id \
-               WHERE a.created_at < NOW(3) - INTERVAL ? SECOND AND a.epoch < s.second_newest";
+               LEFT JOIN (SELECT group_id, MAX(epoch) AS admin_floor \
+                            FROM ds_group_access WHERE registered_rank >= ? \
+                           GROUP BY group_id) h \
+                 ON h.group_id = a.group_id \
+               WHERE a.created_at < NOW(3) - INTERVAL ? SECOND AND a.epoch < s.second_newest \
+                 AND (h.admin_floor IS NULL OR a.epoch < h.admin_floor)";
     Ok(sqlx::query(sql)
+        .bind(Rank::Admin.to_byte())
         .bind(retention_secs)
         .execute(pool)
         .await?
@@ -1262,6 +1334,87 @@ pub(crate) mod tests {
         );
         assert_eq!(epochs(beyond).await, vec![u64::MAX - 1, u64::MAX]);
         assert_eq!(epochs(fresh).await, vec![1, 2, 3, 4]);
+    }
+
+    /// The write tier of the ADR-0053 amendment of 2026-10-01: the two
+    /// newest always, plus every epoch at or after `H`; nothing below `H`
+    /// past the second-newest, and only the two newest when no `H` is known.
+    #[test]
+    fn the_write_tier_is_the_two_newest_and_everything_from_h() {
+        // Newest first: 5 (member), 4 (member), 3 (member, the real one),
+        // 2 (root: H), 1 (root).
+        let tier = |index, epoch| in_write_tier(index, epoch, Some(2));
+        assert!(tier(0, 5) && tier(1, 4));
+        assert!(tier(2, 3) && tier(3, 2), "every epoch from H writes");
+        assert!(!tier(4, 1), "below H, past the two newest");
+        // H at the newest (a removal just registered): its predecessor
+        // writes as the second-newest, nothing older does.
+        assert!(in_write_tier(1, 9, Some(10)));
+        assert!(!in_write_tier(2, 8, Some(10)));
+        assert!(!in_write_tier(2, 8, None));
+        assert!(in_write_tier(1, 0, None));
+    }
+
+    /// The pruner keeps every epoch at or after `H`, however old, besides
+    /// the two newest; it still ages out what lies below both.
+    #[tokio::test]
+    async fn the_pruner_keeps_every_epoch_from_h() {
+        let Some((_app, pool)) = app().await else {
+            return;
+        };
+        let pk = key(67).verifying_key().to_bytes();
+        let insert = |gid: [u8; PSEUDONYM_LEN], epoch: u64, rank: u8| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO ds_group_access \
+                       (group_id, epoch, access_pk, registered_by, registered_rank, created_at) \
+                     VALUES (?, ?, ?, ?, ?, '2000-01-01 00:00:00')",
+                )
+                .bind(&gid[..])
+                .bind(epoch)
+                .bind(&pk[..])
+                .bind(&pk[..])
+                .bind(rank)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+        let epochs = |gid: [u8; PSEUDONYM_LEN]| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, (u64,)>(
+                    "SELECT epoch FROM ds_group_access WHERE group_id = ? ORDER BY epoch",
+                )
+                .bind(&gid[..])
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(e,)| e)
+                .collect::<Vec<_>>()
+            }
+        };
+        // H = 1 (the claim), then three member epochs: all kept.
+        let at_claim = fresh_name(35);
+        insert(at_claim, 1, 3).await;
+        for e in 2..=4 {
+            insert(at_claim, e, 1).await;
+        }
+        // H = 2 (an admin), members above: 1 goes, 2..=4 stay (before the
+        // amendment 2 went too, being below the second-newest).
+        let at_admin = fresh_name(36);
+        insert(at_admin, 1, 3).await;
+        insert(at_admin, 2, 2).await;
+        for e in 3..=4 {
+            insert(at_admin, e, 1).await;
+        }
+        prune_group_access_rows(&pool, 10 * 365 * 24 * 60 * 60)
+            .await
+            .unwrap();
+        assert_eq!(epochs(at_claim).await, vec![1, 2, 3, 4]);
+        assert_eq!(epochs(at_admin).await, vec![2, 3, 4]);
     }
 
     /// Security pass, finding 2: an evicted member keeps the read-only tail

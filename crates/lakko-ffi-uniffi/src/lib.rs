@@ -1863,8 +1863,11 @@ impl Group {
     /// and for any other member (ADR-0050 section 2.5a) its account rank
     /// `Some(n + 1 + i)` **only while its pending store holds a device
     /// admission or its own account's self-service proposal** it could sweep
-    /// — otherwise **`None`**. `None` too for a device that is not its
-    /// account's acting (lowest-key) leaf, and for a group with no role table.
+    /// — otherwise **`None`**. `None` too for a device that holds no leaf in
+    /// the roster, and for a group with no role table. Every device of a
+    /// ranked account holds the account's rank (ADR-0050 section 2.5a item 6);
+    /// `actingCommitterVerdict` breaks the tie among the account's devices by
+    /// signature key, among those whose beacon is fresh.
     ///
     /// `None` and `Some(0)` are **not** the same thing and must never be
     /// conflated: `Some(0)` is the owner, who acts as committer immediately,
@@ -1881,8 +1884,8 @@ impl Group {
     /// `k`-th admin in the role table's canonical order, `Some(n + 1 + i)` for
     /// any other member account (ADR-0050 section 2.5a: `n` admins, `i` the
     /// account's position among the non-admin member accounts sorted bytewise
-    /// by account key), held only by the account's acting (lowest-key) leaf;
-    /// `None` for a non-acting leaf, a non-member, a wrong-length key, or a
+    /// by account key), held by every leaf of the account (ADR-0050 section
+    /// 2.5a item 6); `None` for a non-member, a wrong-length key, or a
     /// group with no role table.
     ///
     /// The peer-facing twin of [`Self::own_committer_rank`], and the input

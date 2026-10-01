@@ -206,6 +206,7 @@ import {
   refusalReasonOf,
   type RetryPort,
 } from "./membership-refusal";
+import { recordUnapplied, unappliedFromRequest } from "./unapplied-requests";
 
 // ---------------------------------------------------------------------------
 // What a retryable request is
@@ -378,6 +379,28 @@ export interface RosterMemberView {
   readonly leafIndex: number;
   /** Standard base64 of the member's 32-byte Ed25519 signature key. */
   readonly signatureKeyB64: string;
+  /**
+   * Standard base64 of the ADR-0050 **account** key the leaf belongs to, when
+   * the core resolved one. A person is named by this key (one person, several
+   * device leaves), and every request that names a person — an add, a
+   * removal, a role change — is keyed on it, so a roster test must match it as
+   * well as the leaf key. Absent for a leaf whose binding did not resolve.
+   */
+  readonly accountKeyB64?: string;
+}
+
+/** Is the person or device named by `keyB64` in the roster? Matches the leaf
+ *  key AND the account key, because a request may name either (a device row
+ *  names a leaf, a person row names an account). */
+function inRosterByKey(roster: readonly RosterMemberView[], keyB64: string): boolean {
+  return roster.some((m) => m.signatureKeyB64 === keyB64 || m.accountKeyB64 === keyB64);
+}
+
+/** Every current leaf of the person or device named by `keyB64`. */
+function leavesOfKey(roster: readonly RosterMemberView[], keyB64: string): number[] {
+  return roster
+    .filter((m) => m.signatureKeyB64 === keyB64 || m.accountKeyB64 === keyB64)
+    .map((m) => m.leafIndex);
 }
 
 /**
@@ -481,8 +504,7 @@ export function retryVerdict(armed: ArmedRetry, snapshot: GroupSnapshot): RetryV
 /** Is the effect the request asked for already true of the group? */
 function alreadyApplied(request: RetryableRequest, snapshot: GroupSnapshot): boolean {
   const roster = snapshot.roster ?? [];
-  const inRoster = (keyB64: string): boolean =>
-    roster.some((m) => m.signatureKeyB64 === keyB64);
+  const inRoster = (keyB64: string): boolean => inRosterByKey(roster, keyB64);
 
   switch (request.kind) {
     case "add":
@@ -551,13 +573,12 @@ function alreadyWaiting(request: RetryableRequest, snapshot: GroupSnapshot): boo
     case "approve-join":
       return pending.has(`add:${request.subjectKeyB64}`);
     case "remove":
-    case "leave": {
-      const leaf = (snapshot.roster ?? []).find(
-        (m) => m.signatureKeyB64 === request.subjectKeyB64,
-      )?.leafIndex;
-      if (leaf === undefined) return false;
-      return pending.has(`${request.kind}:${leaf}`) || pending.has(`remove:${leaf}`);
-    }
+    case "leave":
+      // ADR-0050 — a person may hold several leaves and a removal of the
+      // person proposes one Remove per leaf, so any of them pending counts.
+      return leavesOfKey(snapshot.roster ?? [], request.subjectKeyB64).some(
+        (leaf) => pending.has(`leave:${leaf}`) || pending.has(`remove:${leaf}`),
+      );
     default:
       return pending.has("role-change");
   }
@@ -626,4 +647,533 @@ export function armedRetries(scope: string): ArmedRetry[] {
  *  `forgetDevice`. */
 export function clearArmedRetries(scope: string): void {
   armedByScope.delete(scope);
+}
+
+// ===========================================================================
+// ADR-0050 section 2.5a point 4 — re-requesting a SUPERSEDED own request
+// ===========================================================================
+//
+// ## What changed, and why the queue-full retry above does not cover it
+//
+// Since section 2.5a a plain member may sweep **device admissions**, and its
+// sweep commits only those plus its own account's self-service proposals.
+// OpenMLS empties the whole proposal store on every merged commit, so every
+// other pending proposal — an admin's add of a new member, a removal of
+// another person, a role change — is **dropped** by that merge. Nothing
+// refused it, so no `RefusalReason` exists and the queue-full retry above
+// never arms. The UX spec (`proposal-based-membership.md` section 7,
+// "Superseded") had designed the answer and nobody built it: the author
+// re-requests, silently, with no attempt cap.
+//
+// ## The record: the INTENT, never the bytes
+//
+// Every own membership request that went out as a proposal is recorded
+// durably, per `(account, group)`, as what was asked rather than what was
+// sent: a subject KEY (never a leaf index — OpenMLS reuses a vacated leaf), a
+// role change as its DELTA (promote / demote X, transfer to X — never the
+// full table, which a stale copy would use to revert somebody else's change),
+// an add with the account id it needs to fetch fresh KeyPackages. The record
+// is written by `contacts/client.ts` on every proposal it publishes, so the
+// user path, the queue-full retry, the device re-admission arm and this
+// re-request itself all record through one place.
+//
+// ## The trigger: an OBSERVED merged commit, never a timer
+//
+// The record carries the epoch it was last proposed at. A proposal advances
+// no epoch, so the group's epoch moving past it means a commit merged — and
+// that merge emptied the proposal store. That is the only trigger: a quiet
+// group never re-evaluates anything, so the loop is driven by group activity
+// and cannot spin (the section 7 mitigation, adopted by ADR-0050 2.5a as the
+// answer to that spec's open question 5). There is no attempt cap.
+//
+// ## Stopping is a state
+//
+// After a merged commit each record is: LANDED (its effect is true) -> clear;
+// its SUBJECT LEFT (a removal / role change about someone no longer here) ->
+// clear; STILL PENDING (someone, possibly us, proposed it again at the new
+// epoch) -> keep; otherwise SUPERSEDED -> re-request. A re-request that the
+// core refuses with a typed reason whose disposition is not `RetryLater`
+// (`NotPermitted`, `DoNotRetry`, or a reason this build does not know) STOPS,
+// and is listed in `Not applied` so the user sees it. A `RetryLater` refusal
+// (a full queue, a role change already pending) keeps the record: its next
+// trigger is the next merged commit, which is exactly the event the queue-full
+// retry waits for, so it is not armed a second time there. A failure that is
+// not a refusal at all (a network error) keeps the record for the same reason.
+
+/** A self-service device request (ADR-0050 sections 2.5 / 2.10). */
+export type DeviceRequest =
+  | {
+      readonly kind: "admit-device";
+      /** The device's 32-byte leaf signature key. */
+      readonly subjectKeyB64: string;
+      /** Base64 `account_id` the device belongs to — what discovery keys its
+       *  KeyPackage on, so a re-request can fetch a fresh one. */
+      readonly subjectAccountIdB64: string;
+    }
+  | {
+      readonly kind: "retire-device";
+      /** The device's 32-byte leaf signature key. */
+      readonly subjectKeyB64: string;
+    };
+
+/** Every own membership request this device may have to re-derive. */
+export type OwnRequest = RetryableRequest | DeviceRequest;
+
+/** The record key — one record per request. A role change collapses to one
+ *  key, as in {@link retryKey}: one `GroupContextExtensions` proposal per
+ *  commit means the newer intent replaces the older one. */
+export function ownRequestKey(request: OwnRequest): string {
+  switch (request.kind) {
+    case "admit-device":
+    case "retire-device":
+      return `${request.kind}:${request.subjectKeyB64}`;
+    default:
+      return retryKey(request);
+  }
+}
+
+/** One recorded own request. */
+export interface OwnRequestRecord {
+  readonly request: OwnRequest;
+  /** The group epoch the request was last proposed at, as a decimal string
+   *  (a `bigint` does not survive JSON). */
+  readonly epoch: string;
+  /**
+   * `add` only — the leaf signature keys of the devices the Add proposals
+   * carried (ADR-0050: one proposal per device KeyPackage). The pending set
+   * keys an add on the PROPOSED leaf, not on the person, so this is what lets
+   * "is it still pending?" be answered for a person add.
+   */
+  readonly deviceKeysB64?: readonly string[];
+}
+
+const OWN_REQUESTS_PREFIX = "lakko.own-requests.v1";
+
+function ownRequestsStoreKey(accountIdB64: string, groupIdB64: string): string {
+  return `${OWN_REQUESTS_PREFIX}.${accountIdB64}.${groupIdB64}`;
+}
+
+function isString(v: unknown): v is string {
+  return typeof v === "string" && v.length > 0;
+}
+
+/** Validate one stored request. Anything malformed reads as absent, which
+ *  costs a re-request rather than risking one aimed at the wrong subject. */
+function parseOwnRequest(v: unknown): OwnRequest | null {
+  if (typeof v !== "object" || v === null) return null;
+  const r = v as Record<string, unknown>;
+  if (!isString(r.subjectKeyB64)) return null;
+  const subjectKeyB64 = r.subjectKeyB64;
+  switch (r.kind) {
+    case "add":
+      return isString(r.subjectAccountIdB64)
+        ? { kind: "add", subjectKeyB64, subjectAccountIdB64: r.subjectAccountIdB64 }
+        : null;
+    case "admit-device":
+      return isString(r.subjectAccountIdB64)
+        ? { kind: "admit-device", subjectKeyB64, subjectAccountIdB64: r.subjectAccountIdB64 }
+        : null;
+    case "remove":
+    case "leave":
+    case "approve-join":
+    case "retire-device":
+      return { kind: r.kind, subjectKeyB64 };
+    case "set-admin":
+      return typeof r.makeAdmin === "boolean"
+        ? { kind: "set-admin", subjectKeyB64, makeAdmin: r.makeAdmin }
+        : null;
+    case "transfer-ownership":
+      return r.outgoing === "admin" || r.outgoing === "member"
+        ? { kind: "transfer-ownership", subjectKeyB64, outgoing: r.outgoing }
+        : null;
+    default:
+      return null;
+  }
+}
+
+/** Read every recorded own request for one group. Never throws. */
+export function loadOwnRequests(
+  accountIdB64: string,
+  groupIdB64: string,
+): Map<string, OwnRequestRecord> {
+  const out = new Map<string, OwnRequestRecord>();
+  try {
+    const raw = globalThis.localStorage?.getItem(ownRequestsStoreKey(accountIdB64, groupIdB64));
+    if (raw === null || raw === undefined) return out;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    for (const value of Object.values(parsed)) {
+      if (typeof value !== "object" || value === null) continue;
+      const rec = value as Record<string, unknown>;
+      const request = parseOwnRequest(rec.request);
+      if (request === null) continue;
+      if (typeof rec.epoch !== "string" || !/^[0-9]+$/.test(rec.epoch)) continue;
+      const deviceKeys = Array.isArray(rec.deviceKeysB64)
+        ? rec.deviceKeysB64.filter(isString)
+        : undefined;
+      out.set(ownRequestKey(request), {
+        request,
+        epoch: rec.epoch,
+        ...(deviceKeys === undefined ? {} : { deviceKeysB64: deviceKeys }),
+      });
+    }
+  } catch {
+    /* a corrupt row reads as empty */
+  }
+  return out;
+}
+
+function saveOwnRequests(
+  accountIdB64: string,
+  groupIdB64: string,
+  records: ReadonlyMap<string, OwnRequestRecord>,
+): void {
+  try {
+    const store = globalThis.localStorage;
+    if (store === undefined || store === null) return;
+    const key = ownRequestsStoreKey(accountIdB64, groupIdB64);
+    if (records.size === 0) {
+      store.removeItem(key);
+      return;
+    }
+    const obj: Record<string, OwnRequestRecord> = {};
+    for (const [k, v] of records) obj[k] = v;
+    store.setItem(key, JSON.stringify(obj));
+  } catch {
+    /* best-effort: losing a record costs the automatic re-request only */
+  }
+}
+
+/**
+ * Record (or re-record) one own request, proposed at `epoch`.
+ *
+ * Called by `contacts/client.ts` after every proposal it publishes. A later
+ * record for the same {@link ownRequestKey} replaces the earlier one, which is
+ * what re-stamps the epoch after a re-request and what lets a newer role-change
+ * intent supersede an older one.
+ */
+export function recordOwnRequest(
+  accountIdB64: string,
+  groupIdB64: string,
+  request: OwnRequest,
+  epoch: bigint,
+  deviceKeysB64?: readonly string[],
+): void {
+  const records = loadOwnRequests(accountIdB64, groupIdB64);
+  records.set(ownRequestKey(request), {
+    request,
+    epoch: epoch.toString(),
+    ...(deviceKeysB64 === undefined || deviceKeysB64.length === 0
+      ? {}
+      : { deviceKeysB64: [...deviceKeysB64] }),
+  });
+  saveOwnRequests(accountIdB64, groupIdB64, records);
+}
+
+/** Forget one record. */
+export function forgetOwnRequest(accountIdB64: string, groupIdB64: string, key: string): void {
+  const records = loadOwnRequests(accountIdB64, groupIdB64);
+  if (records.delete(key)) saveOwnRequests(accountIdB64, groupIdB64, records);
+}
+
+/** Move one record's epoch forward without touching anything else — the
+ *  synchronous claim a re-request takes before it awaits anything. */
+function stampOwnRequest(
+  accountIdB64: string,
+  groupIdB64: string,
+  key: string,
+  epoch: bigint,
+): void {
+  const records = loadOwnRequests(accountIdB64, groupIdB64);
+  const existing = records.get(key);
+  if (existing === undefined) return;
+  records.set(key, { ...existing, epoch: epoch.toString() });
+  saveOwnRequests(accountIdB64, groupIdB64, records);
+}
+
+/** Drop every record for one account — `recover` / `forgetDevice` hygiene. */
+export function clearOwnRequestsForAccount(accountIdB64: string): void {
+  try {
+    const store = globalThis.localStorage;
+    if (store === undefined || store === null) return;
+    const victims: string[] = [];
+    for (let i = 0; i < store.length; i++) {
+      const k = store.key(i);
+      if (k !== null && k.startsWith(`${OWN_REQUESTS_PREFIX}.${accountIdB64}.`)) victims.push(k);
+    }
+    for (const k of victims) store.removeItem(k);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Drop every record for one group — `Delete this chat` hygiene. */
+export function clearOwnRequestsForGroup(accountIdB64: string, groupIdB64: string): void {
+  try {
+    globalThis.localStorage?.removeItem(ownRequestsStoreKey(accountIdB64, groupIdB64));
+  } catch {
+    /* best-effort */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The superseded verdict
+// ---------------------------------------------------------------------------
+
+/** The group as the superseded verdict reads it: {@link GroupSnapshot} plus
+ *  the epoch, captured in the same pass. */
+export interface IntentSnapshot extends GroupSnapshot {
+  readonly epoch: bigint;
+}
+
+/** Why a record stopped without its effect landing — each one is listed in
+ *  `Not applied`. */
+export type IntentStopReason =
+  | "membership-ended"
+  | "no-role-table"
+  | "join-request-gone"
+  | "refused";
+
+export type SupersededVerdict =
+  /** No merged commit since the record was written (or a torn read): nothing
+   *  to decide. */
+  | { readonly kind: "no-commit" }
+  /** The effect is true. Cleared silently. */
+  | { readonly kind: "landed" }
+  /** A removal / role change about someone no longer in the group. Cleared
+   *  silently. */
+  | { readonly kind: "subject-left" }
+  /** Proposed again at the current epoch (by us or anyone). Kept, re-stamped. */
+  | { readonly kind: "still-pending" }
+  /** A commit merged without carrying it. Re-request from the intent. */
+  | { readonly kind: "rerequest" }
+  /** It cannot be re-requested. Cleared and listed in `Not applied`. */
+  | { readonly kind: "stop"; readonly why: IntentStopReason };
+
+function requestNeedsRoleTable(request: OwnRequest): boolean {
+  return (
+    request.kind === "set-admin" ||
+    request.kind === "transfer-ownership" ||
+    request.kind === "approve-join"
+  );
+}
+
+/** Is the effect the request asked for true of the group? */
+function intentLanded(record: OwnRequestRecord, snapshot: IntentSnapshot): boolean {
+  const roster = snapshot.roster ?? [];
+  const request = record.request;
+  switch (request.kind) {
+    case "add":
+      return (
+        inRosterByKey(roster, request.subjectKeyB64) ||
+        (record.deviceKeysB64 ?? []).some((k) => roster.some((m) => m.signatureKeyB64 === k))
+      );
+    case "approve-join":
+    case "admit-device":
+      return inRosterByKey(roster, request.subjectKeyB64);
+    case "remove":
+    case "leave":
+    case "retire-device":
+      return !inRosterByKey(roster, request.subjectKeyB64);
+    default:
+      // A role change: the predicate the user asked for, read off the live
+      // table — shared with the queue-full retry so the two cannot disagree.
+      return alreadyApplied(request, snapshot);
+  }
+}
+
+/** A role change about somebody who is no longer in the group. */
+function intentSubjectLeft(request: OwnRequest, snapshot: IntentSnapshot): boolean {
+  if (request.kind !== "set-admin" && request.kind !== "transfer-ownership") return false;
+  return !inRosterByKey(snapshot.roster ?? [], request.subjectKeyB64);
+}
+
+/** Is this request (by anyone) in the live pending set? */
+function intentPending(record: OwnRequestRecord, snapshot: IntentSnapshot): boolean {
+  const pending = new Set(snapshot.pendingKeys);
+  const request = record.request;
+  switch (request.kind) {
+    case "add":
+      return [request.subjectKeyB64, ...(record.deviceKeysB64 ?? [])].some((k) =>
+        pending.has(`add:${k}`),
+      );
+    case "admit-device":
+      return pending.has(`add:${request.subjectKeyB64}`);
+    case "retire-device":
+      return leavesOfKey(snapshot.roster ?? [], request.subjectKeyB64).some(
+        (leaf) => pending.has(`remove:${leaf}`) || pending.has(`leave:${leaf}`),
+      );
+    default:
+      return alreadyWaiting(request, snapshot);
+  }
+}
+
+/**
+ * What to do with one recorded own request, given the group as it is now.
+ *
+ * Pure and total. The epoch gate comes first after the two state checks that
+ * need no commit to be meaningful: without a merged commit since the record
+ * was written there is nothing to decide, which is what keeps this from ever
+ * firing on anything but an observed commit.
+ */
+export function supersededVerdict(
+  record: OwnRequestRecord,
+  snapshot: IntentSnapshot,
+): SupersededVerdict {
+  const request = record.request;
+  if (snapshot.membershipEnded) {
+    // Our own leave landing IS our membership ending.
+    return request.kind === "leave"
+      ? { kind: "landed" }
+      : { kind: "stop", why: "membership-ended" };
+  }
+  // A torn read claims nothing — the same rule the queue-full verdict follows.
+  if (snapshot.roster === null) return { kind: "no-commit" };
+  let recordedAt: bigint;
+  try {
+    recordedAt = BigInt(record.epoch);
+  } catch {
+    return { kind: "no-commit" };
+  }
+  if (snapshot.epoch <= recordedAt) return { kind: "no-commit" };
+
+  if (intentLanded(record, snapshot)) return { kind: "landed" };
+  if (intentSubjectLeft(request, snapshot)) return { kind: "subject-left" };
+  if (intentPending(record, snapshot)) return { kind: "still-pending" };
+  if (requestNeedsRoleTable(request) && snapshot.roleTable === null) {
+    return { kind: "stop", why: "no-role-table" };
+  }
+  if (request.kind === "approve-join") {
+    // The core consumes the retained KeyPackage when it approves, so a
+    // re-approve is possible only while the joiner's request is retained
+    // again (it asked again). Without it there is nothing to approve from.
+    if (snapshot.retainedJoinKeys === null) return { kind: "no-commit" };
+    if (!snapshot.retainedJoinKeys.includes(request.subjectKeyB64)) {
+      return { kind: "stop", why: "join-request-gone" };
+    }
+  }
+  return { kind: "rerequest" };
+}
+
+/**
+ * Does a failed re-request stop, or wait for the next merged commit?
+ *
+ * Asks the core, never a list here: a typed refusal the core classifies
+ * `RetryLater` keeps the record (its next trigger is the next merged commit,
+ * the same event the queue-full retry waits for), any other typed refusal —
+ * `NotPermitted`, `DoNotRetry`, or a reason this build does not know — stops
+ * it. An error that is not a refusal at all (a network failure, a missing
+ * KeyPackage) keeps it: nothing says the next attempt will fail, and the next
+ * attempt is paid for by a real commit.
+ */
+export function rerequestFailureStops(err: unknown, retryMaySucceed: RetryPort): boolean {
+  const reason = refusalReasonOf(err);
+  if (reason === undefined) return false;
+  return !retryMaySucceed(reason);
+}
+
+// ---------------------------------------------------------------------------
+// The driver
+// ---------------------------------------------------------------------------
+
+/** Everything the driver needs from its host (the chat view or the background
+ *  receive loop). */
+export interface RerequestPorts {
+  readonly accountIdB64: string;
+  readonly groupIdB64: string;
+  /** The group now, in one pass. */
+  snapshot(): IntentSnapshot;
+  /**
+   * Re-issue one request through the SAME propose path the user path uses
+   * (same locks, same ADR-0040 / ADR-0057 steps). The proposal path records
+   * the request again itself, at the epoch it was proposed at.
+   */
+  rerequest(request: OwnRequest): Promise<void>;
+  /** The core's `RetryLater` test (`membershipRefusalRetryMaySucceed`). */
+  readonly retryMaySucceed: RetryPort;
+}
+
+/** What one pass did, for logs and tests. */
+export interface RerequestPassSummary {
+  readonly rerequested: number;
+  readonly cleared: number;
+  readonly stopped: number;
+}
+
+/** One pass at a time per `(account, group)` in this realm. */
+const rerequestInFlight = new Set<string>();
+
+/**
+ * Evaluate every recorded own request of one group and re-request the
+ * superseded ones.
+ *
+ * Cheap and side-effect-free when nothing was recorded or no commit has merged
+ * since: it reads the store, compares epochs and returns. Exactly-once within
+ * this realm: a record is re-stamped to the current epoch **synchronously**
+ * before any await, so a second pass started meanwhile sees no new commit for
+ * it. Silent: nothing it does reaches the UI except a stopped request, which
+ * goes to `Not applied`.
+ */
+export async function runSupersededRerequests(
+  ports: RerequestPorts,
+): Promise<RerequestPassSummary> {
+  const scope = retryScopeKey(ports.accountIdB64, ports.groupIdB64);
+  const empty = { rerequested: 0, cleared: 0, stopped: 0 };
+  if (rerequestInFlight.has(scope)) return empty;
+  const records = loadOwnRequests(ports.accountIdB64, ports.groupIdB64);
+  if (records.size === 0) return empty;
+  const snapshot = ports.snapshot();
+  let cleared = 0;
+  let stopped = 0;
+  const due: OwnRequestRecord[] = [];
+  for (const [key, record] of records) {
+    const verdict = supersededVerdict(record, snapshot);
+    switch (verdict.kind) {
+      case "no-commit":
+        break;
+      case "landed":
+      case "subject-left":
+        forgetOwnRequest(ports.accountIdB64, ports.groupIdB64, key);
+        cleared += 1;
+        break;
+      case "still-pending":
+        stampOwnRequest(ports.accountIdB64, ports.groupIdB64, key, snapshot.epoch);
+        break;
+      case "stop":
+        forgetOwnRequest(ports.accountIdB64, ports.groupIdB64, key);
+        recordUnapplied(ports.accountIdB64, ports.groupIdB64, [
+          unappliedFromRequest(record.request),
+        ]);
+        stopped += 1;
+        break;
+      case "rerequest":
+        // The claim: from here on this record waits for the NEXT commit.
+        stampOwnRequest(ports.accountIdB64, ports.groupIdB64, key, snapshot.epoch);
+        due.push(record);
+        break;
+    }
+  }
+  if (due.length === 0) return { rerequested: 0, cleared, stopped };
+  rerequestInFlight.add(scope);
+  let rerequested = 0;
+  try {
+    for (const record of due) {
+      try {
+        await ports.rerequest(record.request);
+        rerequested += 1;
+      } catch (err) {
+        if (rerequestFailureStops(err, ports.retryMaySucceed)) {
+          forgetOwnRequest(ports.accountIdB64, ports.groupIdB64, ownRequestKey(record.request));
+          recordUnapplied(ports.accountIdB64, ports.groupIdB64, [
+            unappliedFromRequest(record.request),
+          ]);
+          stopped += 1;
+        }
+        // Otherwise the record stays, stamped at this epoch, and the next
+        // merged commit re-evaluates it.
+      }
+    }
+  } finally {
+    rerequestInFlight.delete(scope);
+  }
+  return { rerequested, cleared, stopped };
 }

@@ -42,7 +42,7 @@
  */
 
 import { OwnerClaimMemo } from "./owner-claim";
-import type { JournalAuthority } from "./ownership";
+import { releaseAuthority, type JournalAuthority } from "./ownership";
 
 /** The header a proof travels in (`dsProofHeaderName()` on the wasm surface;
  *  pinned against it by `access.test.ts`). */
@@ -248,6 +248,23 @@ export class DsAccessRegistry {
       return factory.registrar(groupId);
     } catch {
       return { kind: "none" };
+    }
+  }
+
+  /**
+   * ADR-0057 obligation 5 / ADR-0050 section 2.5a item 8 - whether this
+   * device holds the root or a registrar seed for `groupId`, i.e. whether it
+   * could register the epoch a sweep moves to. The one check both the sweep
+   * (before staging) and the beacon emitter (before announcing itself) ask:
+   * a device that cannot register must neither commit nor make others defer
+   * to it.
+   */
+  mayRegister(groupId: Uint8Array): boolean {
+    const authority = this.journalAuthority(groupId);
+    try {
+      return authority.kind !== "none";
+    } finally {
+      releaseAuthority(authority);
     }
   }
 

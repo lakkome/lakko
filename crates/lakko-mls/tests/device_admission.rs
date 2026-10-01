@@ -5,8 +5,9 @@
 //!
 //! A **device admission** is an `Add` whose leaf binding resolves to an
 //! account that already holds a leaf in the group. Any member may propose one
-//! (section 2.4); since 2.5a any member's acting leaf may also **sweep** it,
-//! ranked after the owner and the admins in bytewise account-key order. A
+//! (section 2.4); since 2.5a any member's device may also **sweep** it, the
+//! member's account ranked after the owner and the admins in bytewise
+//! account-key order (every leaf of an account holds its rank, item 6). A
 //! non-admin sweeper carries only device admissions and its own account's
 //! self-service proposals; everything else is left for an owner or admin and is
 //! dropped by the merge. Peers judge every by-reference proposal against its
@@ -14,12 +15,14 @@
 //!
 //! These tests drive the public API only and pin: the restored-owner 1x1, the
 //! member scope of a mixed set, the refusal with nothing in scope, rank
-//! agreement across every view (and its independence from leaf indices), and
-//! an admin still sweeping the whole set.
+//! agreement across every view (and its independence from leaf indices), an
+//! admin still sweeping the whole set, a new device of the owner sweeping
+//! while a lost lower-keyed leaf remains (item 6), and an owner on a bound
+//! device changing roles (item 10).
 
 use lakko_mls::{
     account_committer_rank, group, key_package, Group, Identity, Incoming, LeafNodeIndex,
-    ProposalKind, RefusalReason, Role, RoleTable,
+    OutgoingOwner, ProposalKind, RefusalReason, Role, RoleTable,
 };
 
 fn wire(msg: openmls::framing::MlsMessageOut) -> Vec<u8> {
@@ -227,15 +230,13 @@ struct Mixed {
 }
 
 fn mixed(tag: u8) -> Mixed {
-    // The owner and the admin are unbound Phase 1 leaves (the leaf key is the
-    // account key): the role-table change paths still compare the table to the
-    // device's leaf key, so a bound owner device cannot promote anyone yet.
-    // `alice` / `xavier` are second handles on the same seeds, used only to
-    // bind new devices and read the account key.
+    // Every member is a bound device of its own account, the owner and the
+    // admin included (ADR-0050 section 2.5a item 10: the role-table paths
+    // compare the device's ACCOUNT with the table).
     let alice = account(0x20 ^ tag);
-    let a1 = account(0x20 ^ tag);
+    let a1 = device(&alice, 0x21 ^ tag);
     let xavier = account(0x22 ^ tag);
-    let x1 = account(0x22 ^ tag);
+    let x1 = device(&xavier, 0x23 ^ tag);
     let bob = account(0x24 ^ tag);
     let b1 = device(&bob, 0x25 ^ tag);
     let carol = account(0x26 ^ tag);
@@ -632,4 +633,310 @@ fn ranks_do_not_move_when_a_leaf_is_vacated_and_reused() {
             assert_eq!(v.committer_rank_of(id.signature_public_key()), Some(r));
         }
     }
+}
+
+// ============================================================================
+// 6. Item 6 — every leaf of a ranked account holds the rank
+// ============================================================================
+
+/// Two devices of `owner` whose leaf keys sort `(lower, higher)`.
+fn two_devices_sorted(owner: &Identity, t1: u8, t2: u8) -> (Identity, Identity) {
+    let d1 = device(owner, t1);
+    let d2 = device(owner, t2);
+    if d1.signature_public_key() < d2.signature_public_key() {
+        (d1, d2)
+    } else {
+        (d2, d1)
+    }
+}
+
+/// ADR-0050 section 2.5a item 6. The owner of a 1x1 loses its device, whose
+/// leaf stays in the roster and whose key sorts LOWER than the account's new
+/// device. Before item 6 the new device never ranked (only the account's
+/// lowest leaf did) and so could never sweep. Now it holds the owner's rank 0
+/// from every view, stages and sweeps a later proposal, and every peer merges.
+#[test]
+fn a_new_device_of_the_owner_sweeps_although_a_lost_lower_keyed_leaf_remains() {
+    let a = account(0x41);
+    let (a_lost, a_new) = two_devices_sorted(&a, 0x42, 0x43);
+    assert!(a_lost.signature_public_key() < a_new.signature_public_key());
+    let b = account(0x44);
+    let b1 = device(&b, 0x45);
+    let (mut lost_g, mut joined) = found(&a_lost, &[&b1]);
+    let mut b1_g = joined.remove(0);
+
+    // Bob re-admits alice's new device (a device admission, swept by bob).
+    let p = b1_g
+        .propose_add_member_from_wire(&b1, &kp_wire(&a_new))
+        .expect("bob proposes alice's new device");
+    deliver_stored(&p, &mut [(&a_lost, &mut lost_g)]);
+    let sweep = b1_g
+        .stage_pending_proposals(&b1)
+        .expect("bob sweeps")
+        .expect("carried");
+    deliver(&wire(sweep.commit), &mut [(&a_lost, &mut lost_g)]);
+    assert!(b1_g.merge_staged_sweep(&b1).expect("merge"));
+    let mut new_g = Group::join_from_welcome(&wire(sweep.welcome.expect("welcome")), &a_new)
+        .expect("alice's new device joins");
+    assert!(
+        is_member(&new_g, &a_lost),
+        "the lost leaf stays in the roster"
+    );
+
+    // Both of alice's leaves hold rank 0 from every view; bob holds 1.
+    assert_eq!(new_g.own_committer_rank(&a_new), Some(0));
+    assert_eq!(lost_g.own_committer_rank(&a_lost), Some(0));
+    for v in [&lost_g, &new_g, &b1_g] {
+        assert_eq!(v.committer_rank_of(a_lost.signature_public_key()), Some(0));
+        assert_eq!(v.committer_rank_of(a_new.signature_public_key()), Some(0));
+        assert_eq!(v.committer_rank_of(b1.signature_public_key()), Some(1));
+    }
+
+    // Bob adds his own second device; alice's NEW device sweeps it as owner.
+    let b2 = device(&b, 0x46);
+    let p = b1_g
+        .propose_add_member_from_wire(&b1, &kp_wire(&b2))
+        .expect("bob proposes his own device");
+    deliver_stored(&p, &mut [(&a_lost, &mut lost_g), (&a_new, &mut new_g)]);
+    let sweep = new_g
+        .stage_pending_proposals(&a_new)
+        .expect("alice's new device may sweep")
+        .expect("carried");
+    assert_eq!(sweep.swept.len(), 1);
+    let commit = wire(sweep.commit);
+    deliver(&commit, &mut [(&a_lost, &mut lost_g), (&b1, &mut b1_g)]);
+    assert!(new_g.merge_staged_sweep(&a_new).expect("merge"));
+    let b2_g =
+        Group::join_from_welcome(&wire(sweep.welcome.expect("welcome")), &b2).expect("b2 joins");
+    for g in [&lost_g, &new_g, &b1_g, &b2_g] {
+        assert_eq!(g.epoch(), new_g.epoch());
+        assert!(g.pending_proposals().is_empty());
+        assert!(is_member(g, &b2));
+        // Ranks of all leaves of one account are equal from every view.
+        assert_eq!(g.committer_rank_of(a_lost.signature_public_key()), Some(0));
+        assert_eq!(g.committer_rank_of(a_new.signature_public_key()), Some(0));
+        assert_eq!(g.committer_rank_of(b1.signature_public_key()), Some(1));
+        assert_eq!(g.committer_rank_of(b2.signature_public_key()), Some(1));
+    }
+}
+
+/// Two devices of one plain member both hold the member's rank while each
+/// holds a device admission, and every view ranks them the same.
+#[test]
+fn both_devices_of_a_plain_member_hold_its_rank() {
+    let a = account(0x51);
+    let a1 = device(&a, 0x52);
+    let b = account(0x53);
+    let (b_low, b_high) = two_devices_sorted(&b, 0x54, 0x55);
+    let (mut a1_g, mut joined) = found(&a1, &[&b_low, &b_high]);
+    let mut high_g = joined.pop().expect("b_high");
+    let mut low_g = joined.pop().expect("b_low");
+    // Nothing pending: a plain member has no rank on either device.
+    assert_eq!(low_g.own_committer_rank(&b_low), None);
+    assert_eq!(high_g.own_committer_rank(&b_high), None);
+    let b3 = device(&b, 0x56);
+    let p = high_g
+        .propose_add_member_from_wire(&b_high, &kp_wire(&b3))
+        .expect("own device");
+    deliver_stored(&p, &mut [(&a1, &mut a1_g), (&b_low, &mut low_g)]);
+    assert_eq!(low_g.own_committer_rank(&b_low), Some(1));
+    assert_eq!(high_g.own_committer_rank(&b_high), Some(1));
+    for v in [&a1_g, &low_g, &high_g] {
+        assert_eq!(v.committer_rank_of(b_low.signature_public_key()), Some(1));
+        assert_eq!(v.committer_rank_of(b_high.signature_public_key()), Some(1));
+    }
+    // The higher-keyed device may sweep it (the lower one may be lost).
+    let sweep = high_g
+        .stage_pending_proposals(&b_high)
+        .expect("the higher-keyed device sweeps")
+        .expect("carried");
+    deliver(
+        &wire(sweep.commit),
+        &mut [(&a1, &mut a1_g), (&b_low, &mut low_g)],
+    );
+    assert!(high_g.merge_staged_sweep(&b_high).expect("merge"));
+    assert_eq!(a1_g.epoch(), high_g.epoch());
+    assert!(is_member(&a1_g, &b3));
+}
+
+// ============================================================================
+// 7. Item 10 — an owner on a bound device changes roles
+// ============================================================================
+
+/// Owner `a1` (a bound device of account `a`), members `b1`, `c1` (bound
+/// devices of accounts `b`, `c`).
+struct Bound {
+    a1: Identity,
+    b: Identity,
+    b1: Identity,
+    c: Identity,
+    c1: Identity,
+    a1_g: Group,
+    b1_g: Group,
+    c1_g: Group,
+}
+
+fn bound(tag: u8) -> Bound {
+    let a = account(0x60 ^ tag);
+    let a1 = device(&a, 0x61 ^ tag);
+    let b = account(0x62 ^ tag);
+    let b1 = device(&b, 0x63 ^ tag);
+    let c = account(0x64 ^ tag);
+    let c1 = device(&c, 0x65 ^ tag);
+    let (a1_g, mut joined) = found(&a1, &[&b1, &c1]);
+    let c1_g = joined.pop().expect("c1");
+    let b1_g = joined.pop().expect("b1");
+    assert_ne!(
+        a1.signature_public_key(),
+        account_key(&a).as_slice(),
+        "the owner device is bound: its leaf key is not the account key"
+    );
+    Bound {
+        a1,
+        b,
+        b1,
+        c,
+        c1,
+        a1_g,
+        b1_g,
+        c1_g,
+    }
+}
+
+#[test]
+fn an_owner_on_a_bound_device_sets_an_admin_directly_and_by_proposal() {
+    // Direct commit.
+    let mut s = bound(0x01);
+    let owner = s.a1_g.group_roles().expect("table").owner().to_owned();
+    let table = RoleTable::new(owner, vec![account_key(&s.b)]);
+    let commit = s
+        .a1_g
+        .set_group_roles(&s.a1, &table)
+        .expect("a bound owner device promotes bob");
+    deliver(&commit, &mut [(&s.b1, &mut s.b1_g), (&s.c1, &mut s.c1_g)]);
+    for g in [&s.a1_g, &s.b1_g, &s.c1_g] {
+        assert_eq!(g.group_roles(), Some(table.clone()));
+    }
+    assert_eq!(s.b1_g.own_role(&s.b1), Some(Role::Admin));
+
+    // Proposal path.
+    let mut s = bound(0x02);
+    let owner = s.a1_g.group_roles().expect("table").owner().to_owned();
+    let table = RoleTable::new(owner, vec![account_key(&s.c)]);
+    let p = s
+        .a1_g
+        .propose_group_roles(&s.a1, &table)
+        .expect("a bound owner device proposes promoting carol");
+    deliver_stored(&p, &mut [(&s.b1, &mut s.b1_g), (&s.c1, &mut s.c1_g)]);
+    let sweep = wire(
+        s.a1_g
+            .commit_pending_proposals(&s.a1)
+            .expect("sweep")
+            .expect("carried")
+            .commit,
+    );
+    deliver(&sweep, &mut [(&s.b1, &mut s.b1_g), (&s.c1, &mut s.c1_g)]);
+    for g in [&s.a1_g, &s.b1_g, &s.c1_g] {
+        assert_eq!(g.group_roles(), Some(table.clone()));
+    }
+}
+
+#[test]
+fn an_owner_on_a_bound_device_transfers_ownership_directly_and_by_proposal() {
+    // Direct commit.
+    let mut s = bound(0x03);
+    let b_account = account_key(&s.b);
+    let commit = s
+        .a1_g
+        .transfer_ownership(&s.a1, &b_account, OutgoingOwner::Admin)
+        .expect("a bound owner device transfers to bob");
+    deliver(&commit, &mut [(&s.b1, &mut s.b1_g), (&s.c1, &mut s.c1_g)]);
+    for g in [&s.a1_g, &s.b1_g, &s.c1_g] {
+        assert_eq!(g.group_roles().expect("table").owner(), &b_account);
+    }
+    assert_eq!(s.b1_g.own_role(&s.b1), Some(Role::Owner));
+    assert_eq!(s.a1_g.own_role(&s.a1), Some(Role::Admin));
+
+    // Proposal path.
+    let mut s = bound(0x04);
+    let c_account = account_key(&s.c);
+    let p = s
+        .a1_g
+        .propose_ownership_transfer(&s.a1, &c_account, OutgoingOwner::Member)
+        .expect("a bound owner device proposes a transfer to carol");
+    deliver_stored(&p, &mut [(&s.b1, &mut s.b1_g), (&s.c1, &mut s.c1_g)]);
+    let sweep = wire(
+        s.a1_g
+            .commit_pending_proposals(&s.a1)
+            .expect("sweep")
+            .expect("carried")
+            .commit,
+    );
+    deliver(&sweep, &mut [(&s.b1, &mut s.b1_g), (&s.c1, &mut s.c1_g)]);
+    for g in [&s.a1_g, &s.b1_g, &s.c1_g] {
+        assert_eq!(g.group_roles().expect("table").owner(), &c_account);
+    }
+    assert_eq!(s.c1_g.own_role(&s.c1), Some(Role::Owner));
+    assert_eq!(s.a1_g.own_role(&s.a1), Some(Role::Member));
+}
+
+#[test]
+fn the_role_table_refusals_still_fire_for_bound_devices() {
+    let mut s = bound(0x05);
+    let owner = s.a1_g.group_roles().expect("table").owner().to_owned();
+    let epoch = s.a1_g.epoch();
+
+    // A non-owner bound device: refused NotOwner on every path.
+    let table = RoleTable::new(owner, vec![account_key(&s.b)]);
+    for err in [
+        s.b1_g
+            .set_group_roles(&s.b1, &table)
+            .expect_err("not owner"),
+        s.b1_g
+            .propose_group_roles(&s.b1, &table)
+            .expect_err("not owner"),
+        s.b1_g
+            .transfer_ownership(&s.b1, &account_key(&s.c), OutgoingOwner::Admin)
+            .expect_err("not owner"),
+        s.b1_g
+            .propose_ownership_transfer(&s.b1, &account_key(&s.c), OutgoingOwner::Admin)
+            .expect_err("not owner"),
+    ] {
+        assert_eq!(err.refusal_reason(), Some(RefusalReason::NotOwner));
+    }
+
+    // A named owner with no leaf in the roster: refused OwnerNotAMember.
+    let stranger = account(0x7E);
+    let stranger_key = account_key(&stranger);
+    let foreign = RoleTable::new(stranger_key, vec![]);
+    for err in [
+        s.a1_g
+            .set_group_roles(&s.a1, &foreign)
+            .expect_err("owner not a member"),
+        s.a1_g
+            .propose_group_roles(&s.a1, &foreign)
+            .expect_err("owner not a member"),
+        s.a1_g
+            .transfer_ownership(&s.a1, &stranger_key, OutgoingOwner::Admin)
+            .expect_err("owner not a member"),
+        s.a1_g
+            .propose_ownership_transfer(&s.a1, &stranger_key, OutgoingOwner::Admin)
+            .expect_err("owner not a member"),
+    ] {
+        assert_eq!(err.refusal_reason(), Some(RefusalReason::OwnerNotAMember));
+    }
+
+    // A device leaf key (not an account key) named as owner is not a member
+    // account either — the check reads resolved account keys.
+    let leaf_named: [u8; 32] = s.b1.signature_public_key().try_into().expect("32 bytes");
+    let err = s
+        .a1_g
+        .set_group_roles(&s.a1, &RoleTable::new(leaf_named, vec![]))
+        .expect_err("a leaf key is not an account");
+    assert_eq!(err.refusal_reason(), Some(RefusalReason::OwnerNotAMember));
+
+    // Nothing moved.
+    assert_eq!(s.a1_g.epoch(), epoch);
+    assert!(s.a1_g.pending_proposals().is_empty());
+    assert!(s.b1_g.pending_proposals().is_empty());
 }

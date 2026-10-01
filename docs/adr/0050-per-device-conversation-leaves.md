@@ -285,6 +285,57 @@ own account).
    table, the direct-commit paths of table-less groups, and every rule for a
    new member.
 
+**Follow-ups decided the same day (maintainer, 2026-10-01).** A recon of the
+rule above against the rest of the stack found five things that would stop
+it working in practice. Each is decided here; the DS half is in
+[ADR-0057](0057-journal-ownership.md) (amendment of 2026-10-01).
+
+6. **The acting device is chosen among active devices.** Until now an
+   account's acting leaf was its lowest leaf signature key in the roster
+   (`is_accounts_acting_leaf`). A lost device stays in the roster (nobody can
+   tell, at any moment, whether a device is still in its owner's hands), so
+   whenever its key sorted lower the account's new device never acted. A
+   device is **active** while it is in the group and its beacon is fresh;
+   the acting device of an account is the lowest-keyed **active** one. In
+   the core every leaf of a ranked account holds the account's rank
+   (`own_committer_rank`, `committer_rank_of`); the beacon fold breaks a tie
+   between leaves of one rank by signature key, deferring to a fresh
+   observation of the same rank with a lower key
+   (`acting_committer_verdict` gains the observer's own key and each
+   observation's key). A device that hears no lower-keyed fresh beacon of
+   its own account acts. Two devices of one account acting at once is the
+   ADR-0045 race, resolved by the staged sweep.
+7. **The Welcome is never sent unsigned, and an undelivered one is kept.**
+   The Welcome of a sweep goes to the added account's mailbox, closed since
+   [ADR-0060](0060-scoped-discovery.md); a write needs a reach key the
+   account handed out. Today a sweeper with no key writes unsigned, the DS
+   answers 201 and drops it, and the sweeper counts it delivered. Now the
+   sweeper tries every grant it holds for that account (contact, member of
+   this group, any group, channel), moving to the next on a `401`; with no
+   grant left it does not write, keeps the Welcome owed and retries it on
+   the next poll and whenever a new grant for that account arrives.
+8. **Every device of every registrar holds its registrar seed.** The owner
+   sends the ADR-0057 registrar seed once per account and only the device
+   that processed it stores it, so a device that joined later cannot
+   register. Each device that opens the envelope stores it (the seed is
+   sealed to the account key every device of the account holds), and a
+   device that finds none asks again through the same in-group request the
+   owner already answers. A device that cannot register emits no beacon (it
+   could not complete a sweep, and its beacon would make others defer to
+   it). Web computes its rank with the device identity, not the account
+   identity, so it beacons like iOS and Android (it never did on a bound
+   device).
+9. **Reach-key versions are not a device counter.** See ADR-0060 (amendment
+   of 2026-10-01): a restored device learns which reach keys its mailbox
+   holds from the DS and continues from there, so a key that was removed
+   never comes back.
+10. **Bug, not a decision:** `refuse_unenforceable_role_table` (and the
+    ownership-transfer refusal) compared the requesting **device's** leaf key
+    with the role table's owner, which since 2.3 is an **account** key, so an
+    owner on a bound device could never change roles. They compare the
+    account the device is bound to, and "the named owner is a member" checks
+    the resolved account keys of the roster.
+
 **Tests (invariant #3).** Property tests in `lakko-mls`: the owner of a 1x1
 loses its only device, the other member proposes and sweeps the owner's new
 bound device, every peer merges and the device joins from the Welcome; a

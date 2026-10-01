@@ -48,6 +48,20 @@ internal object SweepRegistrationBackoff {
      *  repair check, and a network failure is not a refusal. */
     fun isBackoffStatus(status: Int): Boolean = status == 400 || status == 401 || status == 403
 
+    /**
+     * Whether a failed registration starts or extends a hold: a DS refusal per
+     * [isBackoffStatus], or (ADR-0050 section 2.5a item 8) a registration this
+     * device could not sign at all ([me.lakko.app.ds.DsRegistrationUnavailable]:
+     * no root or registrar seed, or no access signer). Neither changes until
+     * a seed arrives or the group changes, so neither is retried at poll
+     * cadence. A `409`, a network failure and a cancellation are not refusals.
+     */
+    fun isBackoffRefusal(cause: Throwable): Boolean = when (cause) {
+        is me.lakko.app.ds.DsRegistrationUnavailable -> true
+        is me.lakko.app.ds.DsHttpError -> isBackoffStatus(cause.status)
+        else -> false
+    }
+
     /** The hold after a refusal at [epoch], given the [previous] one. */
     fun afterRefusal(previous: State?, nowMs: Long, epoch: ULong?): State {
         val delay = if (previous == null || previous.epoch != epoch) {

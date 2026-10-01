@@ -372,3 +372,54 @@ publish leaves the same wedge (N+1 registered, no commit), and after the
 grace every device reads it as forked. Every reset replaces the chain, so
 the last one wins. The others then read `401` and wait to be added again:
 a recovery, not a loss, and recorded as such.
+
+## Who revokes, and who holds a registrar seed (amended 2026-10-01)
+
+Decided by the maintainer together with
+[ADR-0050](0050-per-device-conversation-leaves.md) section 2.5a, which lets
+any member commit the admission of a device of an account already in the
+group.
+
+1. **Whoever removes a person revokes every registrar key of that person, in
+   the same registration.** Until now only the root could: the revocation
+   list is derived from the root seed (`revocationKeys`, web
+   `ds/ownership.ts`), so an admin's removal left the evictee's registrar key
+   valid at the DS until the owner's next reconcile, and the evictee could
+   still register epochs. The root now sends, in-group alongside the seeds,
+   the **registrar list**: each appointed account and its registrar public
+   key and rank. Built as: the registrar-seed envelope carries the
+   registrar **public** key in its clear header (public anyway, the DS holds
+   it), and every member collects account -> registrar key from the envelopes
+   it reads; the receiver of a seed checks that the sealed seed derives that
+   key. An admin that commits a removal revokes the listed keys of
+   every removed account in its `access` statement (the DS already lets a
+   signer revoke strictly lower ranks); removing another admin stays the
+   root's, as before (an admin may not revoke an equal rank), and the owner's
+   next `registrars-set` remains the backstop.
+2. **Every device of a registrar holds the seed.** The seed is sealed to the
+   account key, which every device of the account holds, so each device that
+   opens the envelope stores it, and the owner's delivery record is kept per
+   device rather than per account, so a device that joined after the
+   envelope was posted gets its own copy at the owner's next reconcile. Residual, stated: a removed device of an account still in
+   the group keeps the account's seed until that account's registrar key is
+   rotated; rotation per device is unbuilt.
+3. **The member limit (`e <= H + 1`, second security pass finding 1) is
+   removed, and the write tier widened in the same change (decided
+   2026-10-01).** The limit blocked two device admissions in a row with no
+   owner or admin online. Removing it alone would reopen finding 1 (a member
+   pushing the real epoch key out of the two-epoch write tier, freezing every
+   write), so the write tier changes with it: a journal accepts a write, and
+   a group's knock read, signed by the key of **any registered epoch from the
+   newest root or admin registration `H` onward**, and always at least the
+   two newest (the ADR-0053 tier). A member's bad registrations can still
+   block commits until an owner or admin replaces them (the existing repair),
+   but never chat: the real epoch, registered at or after `H`, stays in the
+   tier. An evicted person loses write access at its removal, because a
+   removal is always an owner or admin registration and moves `H` to it.
+   The read tail (ADR-0053, the journal retention window) is unchanged.
+   **Storage bound (decided 2026-10-01):** a member may append only while
+   fewer than `MAX_RETAINED_EPOCHS` (64) epochs sit at or after `H`; the 65th
+   member registration in a row with no root or admin registration is
+   refused `403`, and any root or admin registration lifts it. Without it a
+   member could grow a journal's registrations without limit, and every epoch
+   from `H` on must now be kept and loaded on each gated request.
