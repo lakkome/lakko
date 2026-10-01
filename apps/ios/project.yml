@@ -206,6 +206,13 @@ targets:
         LakkoAppStoreUrl: ""
         LakkoCurrentRelease: "1"
         LakkoReleaseCheckDevOverride: "false"
+        # ADR-0061 section 5 — signed translation updates. LakkoTranslationKey is
+        # base64url of the 32-byte Ed25519 key of the dedicated translation
+        # publisher (`just gen-translation-key`, not the release key). EMPTY →
+        # dormant: no fetch, and a bundle kept by an earlier build is deleted.
+        # The release floor is LakkoCurrentRelease above.
+        LakkoTranslationKey: ""
+        LakkoTranslationBundleUrl: "https://lakko.me/.well-known/lakko-translations"
         # ADR-0047 §4 — the GIF proxy base URL (`services/gif-proxy`, whose
         # routes start with `/gifs/`). A per-feature OVERRIDE: EMPTY → the
         # API base URL's `/gifs` (`LakkoApiBaseUrl`), else

@@ -38,6 +38,10 @@ final class Localization: ObservableObject {
     @Published private(set) var language: String
     /// Whether ``language`` is written right to left.
     @Published private(set) var isRightToLeft: Bool
+    /// When the active signed translation update was signed (Unix millis),
+    /// `nil` while the built-in translations are in use. Settings > About
+    /// shows it (ADR-0061 section 5, UX spec section 7).
+    @Published private(set) var translationsSignedAtMillis: Int64?
 
     /// Every supported language, English first (the `lakko-l10n` table).
     let languages: [LanguageInfo]
@@ -47,6 +51,8 @@ final class Localization: ObservableObject {
     private let systemPreferred: () -> [String]
     private let source: L10nSource?
     private var catalog: L10nCatalog?
+    /// The accepted signed translation update, if any (``TranslationUpdater``).
+    private(set) var translationBundle: L10nBundle?
     private var strings: [String: String] = [:]
     private var localeObserver: NSObjectProtocol?
     private let publishesSnapshot: Bool
@@ -142,6 +148,25 @@ final class Localization: ObservableObject {
         return name == key ? info.englishName : name
     }
 
+    // MARK: - Signed translation update
+
+    /// The version of the built-in source catalog, the floor a signed update
+    /// must exceed. `nil` when the source catalog did not load.
+    var builtInVersion: UInt64? { source?.version() }
+
+    /// Use `bundle` (already accepted by `l10nAcceptBundle`) on top of the
+    /// built-in translations, or drop it with `nil`. Rebuilds the catalog of
+    /// the current language at once, so the running UI re-renders and the
+    /// notification extension's words are rewritten.
+    func applyTranslationBundle(_ bundle: L10nBundle?) {
+        translationBundle = bundle
+        translationsSignedAtMillis = bundle?.signedAtMillis()
+        load(language)
+        // The language did not change, so nothing above re-publishes the
+        // strings; the views that read them must re-render all the same.
+        objectWillChange.send()
+    }
+
     // MARK: - Choice
 
     /// Store `code` (`nil` = "Same as system") and switch the interface.
@@ -192,7 +217,12 @@ final class Localization: ObservableObject {
             strings = [:]
             return
         }
-        let built = Localization.buildCatalog(source: source, bundle: bundle, code: code)
+        let built = Localization.buildCatalog(
+            source: source,
+            bundle: bundle,
+            code: code,
+            translations: translationBundle
+        )
         catalog = built
         strings = built?.plainStrings() ?? [:]
         if publishesSnapshot {
@@ -219,11 +249,17 @@ final class Localization: ObservableObject {
     nonisolated fileprivate static func buildCatalog(
         source: L10nSource,
         bundle: Bundle,
-        code: String
+        code: String,
+        translations: L10nBundle? = nil
     ) -> L10nCatalog? {
         let builtIn: Data? = code == "en" ? nil : bundle
             .url(forResource: code, withExtension: "json", subdirectory: "L10n")
             .flatMap { try? Data(contentsOf: $0) }
+        if let translations,
+           let catalog = try? L10nCatalog(
+               source: source, language: code, builtIn: builtIn, bundle: translations) {
+            return catalog
+        }
         return (try? L10nCatalog(source: source, language: code, builtIn: builtIn, bundle: nil))
             ?? (try? L10nCatalog(source: source, language: "en", builtIn: nil, bundle: nil))
     }

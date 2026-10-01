@@ -247,6 +247,11 @@ class MainActivity : ComponentActivity() {
         val releaseChecker = ReleaseUpdateChecker(applicationContext, lifecycleScope)
         releaseChecker.checkOnLaunch()
 
+        // ADR-0061 S6 — signed translation updates on the same cadence (once
+        // per 24h at launch, through the tunnel when armed). Dormant without a
+        // pinned translation key; an accepted bundle switches the live strings.
+        me.lakko.app.l10n.TranslationUpdater(applicationContext, lifecycleScope).checkOnLaunch()
+
         // Read the launching Intent — a cold-start tap on
         // `https://lakko.me/i/<slug>` carries the URL in
         // `intent.data`; a cold-start tap on a Lakko push

@@ -356,6 +356,14 @@ struct LakkoApp: App {
             .task {
                 AntiCensorshipManager.shared.armFromSettings()
             }
+            // ADR-0061 section 5 — signed translation updates: use the bundle
+            // kept from an earlier run if it still verifies, then fetch a
+            // newer one on the release-notice cadence (once a day, through
+            // the tunnel when armed). Dormant without a pinned key; any
+            // failure keeps the current translations. Never blocks launch.
+            .task {
+                await TranslationUpdater.shared.check()
+            }
             // ADR-0041 Phase 1 — one-time, idempotent App Group
             // storage migration for the rehydrated session account, so
             // the notification-service extension can read the five
@@ -383,6 +391,9 @@ struct LakkoApp: App {
                 // arrived while backgrounded rings if it is still fresh.
                 foregroundReceive.scheduler.setForeground(phase == .active)
                 if phase == .active {
+                    // ADR-0061 section 5 — the same throttled check on return
+                    // to the foreground; a no-op until a day has passed.
+                    Task { await TranslationUpdater.shared.check() }
                     // `docs/ux/calls.md` section 2.1 — refresh the names the
                     // notification extension may have to put on a ringing
                     // lock screen while this app is not running.

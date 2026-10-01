@@ -890,6 +890,30 @@ mint-release-manifest latest min_supported:
         mint --latest {{latest}} --min-supported {{min_supported}} \
         --key release-signing-key.seed --out release-manifest.bin
 
+# ADR-0061 S6 — generate the dedicated translation-publisher keypair. Writes
+# translation-signing-key.seed (mode 0600; keep OFFLINE, never commit) and
+# prints the base64url public key to pin in the native builds (Info.plist
+# LakkoTranslationKey / BuildConfig.LAKKO_TRANSLATION_KEY). Not the release key.
+gen-translation-key:
+    cargo run -q -p lakko-l10n-tool -- keygen
+
+# ADR-0061 S6 — sign the current l10n/catalog as a translation bundle (every
+# language in one payload; security-critical strings are left out, a client
+# ignores them anyway) and write translation-bundle.bin. `version` must be
+# greater than the catalog version compiled into every build that should take
+# it; `min_release` is the oldest CURRENT_RELEASE whose keys match. Publish
+# with scp, see infra/README.md :: "Translation bundle".
+# Example: just sign-translations 2 1
+sign-translations version min_release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="$(mktemp -d)"
+    cargo run -q -p lakko-l10n-tool -- compile --out "$out" >/dev/null
+    cargo run -q -p lakko-l10n-tool -- sign --payload "$out/bundle-payload.json" \
+        --version {{version}} --min-release {{min_release}} \
+        --key translation-signing-key.seed --out translation-bundle.bin
+    rm -rf "$out"
+
 # Restart all Lakko services via the systemd target.
 restart:
     ssh {{vps_user}}@{{vps_host}} 'sudo systemctl restart lakko.target'

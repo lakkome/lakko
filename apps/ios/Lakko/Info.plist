@@ -48,6 +48,10 @@
 	<string>https://lakko.me/.well-known/lakko-release</string>
 	<key>LakkoSfuUrl</key>
 	<string>$(LAKKO_SFU_URL)</string>
+	<key>LakkoTranslationBundleUrl</key>
+	<string>https://lakko.me/.well-known/lakko-translations</string>
+	<key>LakkoTranslationKey</key>
+	<string></string>
 	<key>LakkoTransparencyOperatorKey</key>
 	<string></string>
 	<key>LakkoTransparencyUrl</key>

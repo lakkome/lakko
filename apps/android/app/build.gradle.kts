@@ -278,6 +278,26 @@ android {
             "${(project.findProperty("lakko.release.check.dev.override") as String?)?.toBoolean() ?: false}",
         )
 
+        // ADR-0061 (S6) — signed translation updates.
+        //
+        // `LAKKO_TRANSLATION_KEY` — base64url (no-pad) of the 32-byte Ed25519
+        // translation-publisher verifying key (a dedicated offline key, not the
+        // release key). Empty when unset → the feature is DORMANT: no fetch, the
+        // built-in translations only.
+        buildConfigField(
+            "String",
+            "LAKKO_TRANSLATION_KEY",
+            "\"${project.findProperty("lakko.translation.key") as String? ?: ""}\"",
+        )
+        // `LAKKO_TRANSLATION_BUNDLE_URL` — the signed bundle carrying every
+        // language (the same bytes for every device, so the fetch reveals no
+        // language). The signature, not the URL, is the security boundary.
+        buildConfigField(
+            "String",
+            "LAKKO_TRANSLATION_BUNDLE_URL",
+            "\"${project.findProperty("lakko.translation.url") as String? ?: "https://lakko.me/.well-known/lakko-translations"}\"",
+        )
+
         // G3-4-mobile — wire androidx.test runner for the
         // `app/src/androidTest/` instrumented test source set.
         // `./gradlew :app:connectedDebugAndroidTest` boots a

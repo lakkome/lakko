@@ -256,6 +256,7 @@ public fun SettingsScreen(
                 value = "${me.lakko.app.BuildConfig.VERSION_NAME} (${me.lakko.app.BuildConfig.VERSION_CODE})",
                 icon = Icons.Filled.Info,
             )
+            TranslationsUpdatedRow()
             InfoRow(
                 title = t("settings.about.licence"),
                 value = t("settings.about.licence_body", mapOf("licence" to "AGPL-3.0-or-later")),
@@ -335,6 +336,29 @@ private fun SectionLabel(text: String, danger: Boolean = false) {
 }
 
 /** A read-only row (About): title on the left, value as the supporting line. */
+/**
+ * ADR-0061 S6 / UX localization section 7 — "Translations updated <date>" when
+ * a signed translation update is active; nothing otherwise. The date is
+ * formatted for the interface language, not the system one.
+ */
+@Composable
+private fun TranslationsUpdatedRow() {
+    val signedAt by me.lakko.app.l10n.Localization.translationsUpdatedAt.collectAsStateWithLifecycle()
+    val millis = signedAt ?: return
+    val language = me.lakko.app.l10n.LocalStrings.current.language
+    val date = remember(millis, language) {
+        java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.forLanguageTag(language))
+            .format(java.util.Date(millis))
+    }
+    ListItem(
+        headlineContent = { Text(t("settings.about.translations_updated", mapOf("date" to date))) },
+        leadingContent = {
+            Icon(Icons.Filled.Info, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        },
+        colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
+    )
+}
+
 @Composable
 private fun InfoRow(title: String, value: String, icon: ImageVector) {
     ListItem(

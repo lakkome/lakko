@@ -52,6 +52,13 @@ struct SettingsScreen: View {
 
     /// "1.2 (34)" from the bundle; the catalog's "unknown" when the bundle
     /// carries none.
+    /// The signing date of the active translation update, in the
+    /// interface locale.
+    static func translationsDate(_ millis: Int64, locale: Locale) -> String {
+        Date(timeIntervalSince1970: TimeInterval(millis) / 1000)
+            .formatted(.dateTime.year().month(.abbreviated).day().locale(locale))
+    }
+
     private var versionLabel: String {
         let info = Bundle.main.infoDictionary ?? [:]
         let short = (info["CFBundleShortVersionString"] as? String)?
@@ -196,6 +203,15 @@ struct SettingsScreen: View {
                     Spacer()
                     Text("AGPL-3.0-or-later")
                         .foregroundStyle(Color.lakkoTextMuted)
+                }
+                // ADR-0061 section 5 — only while a signed translation
+                // update is active (UX spec section 7).
+                if let signedAt = l10n.translationsSignedAtMillis {
+                    Text(l10n.t(
+                        "settings.about.translations_updated",
+                        texts: ["date": Self.translationsDate(signedAt, locale: l10n.locale)]
+                    ))
+                    .foregroundStyle(Color.lakkoTextMuted)
                 }
             }
 

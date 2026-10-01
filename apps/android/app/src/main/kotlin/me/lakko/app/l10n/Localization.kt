@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
+import uniffi.lakko_ffi_uniffi.L10nBundle
 import uniffi.lakko_ffi_uniffi.L10nCatalog
 import uniffi.lakko_ffi_uniffi.L10nSource
 import uniffi.lakko_ffi_uniffi.TextDirection
@@ -189,6 +190,14 @@ public object Localization {
     private var sourceTexts: Map<String, String> = emptyMap()
     private var appContext: Context? = null
 
+    /** ADR-0061 S6: the accepted signed translation bundle, if any. */
+    @Volatile private var bundle: AcceptedBundle<L10nBundle>? = null
+    @Volatile private var storage: TranslationBundleStorage? = null
+    private val bundleSignedAtFlow = MutableStateFlow<Long?>(null)
+
+    /** When the active translation update was signed (Settings > About), `null` when none. */
+    public val translationsUpdatedAt: StateFlow<Long?> = bundleSignedAtFlow.asStateFlow()
+
     private val stateFlow = MutableStateFlow(LanguageState(null, "en", "en"))
     private val stringsFlow = MutableStateFlow(Strings("en", false, emptyMap(), null))
 
@@ -217,6 +226,7 @@ public object Localization {
             Log.w(TAG, "WARN source catalog failed to load: ${e.javaClass.simpleName}")
             null
         }
+        loadStoredBundle(FileTranslationBundleStorage(java.io.File(ctx.noBackupFilesDir, "l10n")))
         val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val c = LanguageController(
             store = PrefsChoiceStore(prefs, KEY),
@@ -241,6 +251,52 @@ public object Localization {
     /** Configuration changed: the system language or the per-app one may have. */
     public fun refresh() {
         controller?.refresh()?.let(::apply)
+    }
+
+    /** The built-in catalog version a bundle must exceed; `null` when the core did not load. */
+    internal fun builtInCatalogVersion(): ULong? = try {
+        source?.version()
+    } catch (e: Throwable) {
+        null
+    }
+
+    /** The version of the bundle in effect (the rollback floor for a download). */
+    internal fun activeBundleVersion(): ULong? = bundle?.version
+
+    internal fun bundleStorage(): TranslationBundleStorage? = storage
+
+    /** Switch the live strings to an accepted bundle (call on the main thread). */
+    internal fun installBundle(accepted: AcceptedBundle<L10nBundle>) {
+        bundle = accepted
+        bundleSignedAtFlow.value = accepted.signedAtMillis
+        stringsFlow.value = buildStrings(stateFlow.value.resolved)
+    }
+
+    /**
+     * At launch: re-verify the stored bundle with no rollback floor and keep
+     * it only if the core still accepts it at the recorded version; delete it
+     * otherwise (an app update raised the built-in version or the release).
+     * A file read and a signature check, no network.
+     */
+    private fun loadStoredBundle(store: TranslationBundleStorage) {
+        storage = store
+        val key = TranslationPin.verifyingKey ?: return
+        val version = builtInCatalogVersion() ?: return
+        try {
+            when (val outcome = decideOnLaunch(store.read(), coreBundleVerifier(key, version))) {
+                is LaunchOutcome.Use -> {
+                    bundle = outcome.accepted
+                    bundleSignedAtFlow.value = outcome.accepted.signedAtMillis
+                }
+                LaunchOutcome.Discard -> {
+                    Log.i(TAG, "stored translation bundle no longer applies; deleted")
+                    store.delete()
+                }
+                LaunchOutcome.None -> Unit
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "WARN stored translation bundle unreadable: ${e.javaClass.simpleName}")
+        }
     }
 
     /**
@@ -268,17 +324,22 @@ public object Localization {
         val ctx = appContext
         val src = source
         if (ctx != null && src != null) {
-            try {
-                val builtIn = if (code == "en") null else readAsset(ctx, "$code.json")
-                val catalog = L10nCatalog(src, code, builtIn, null)
-                return Strings(
-                    language = catalog.language(),
-                    rtl = catalog.direction() == TextDirection.RTL,
-                    plain = catalog.plainStrings(),
-                    catalog = catalog,
-                )
-            } catch (e: Throwable) {
-                Log.w(TAG, "WARN catalog for $code failed to load: ${e.javaClass.simpleName}")
+            val builtIn = if (code == "en") null else readAsset(ctx, "$code.json")
+            // With the accepted bundle first; if that fails, the built-in
+            // catalog alone (a bundle must never cost the user their language).
+            val bundles: List<L10nBundle?> = listOf(bundle?.bundle, null).distinct()
+            for (b in bundles) {
+                try {
+                    val catalog = L10nCatalog(src, code, builtIn, b)
+                    return Strings(
+                        language = catalog.language(),
+                        rtl = catalog.direction() == TextDirection.RTL,
+                        plain = catalog.plainStrings(),
+                        catalog = catalog,
+                    )
+                } catch (e: Throwable) {
+                    Log.w(TAG, "WARN catalog for $code failed to load: ${e.javaClass.simpleName}")
+                }
             }
         }
         return Strings("en", false, sourceTexts, null)

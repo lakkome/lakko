@@ -252,6 +252,12 @@ signed artifact and a pinned verifier, as ADR-0038).
 - **S6** signed bundle: `tools/l10n sign`, hosting, native fetch + apply,
   Settings > About line.
 
+S1-S6 built by 2026-10-01 (S6: `just gen-translation-key` / `just
+sign-translations`, nginx `/.well-known/lakko-translations`, iOS and Android
+fetch on the release-notice cadence with any 2xx starting the 24-hour window,
+re-verify at launch, Settings > About line). Not walked live; dormant until a
+publisher key is pinned.
+
 ## Open questions
 
 1. ~~The CLDR plural crate.~~ Resolved in S1: `icu_plurals`. Still open:
